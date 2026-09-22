@@ -979,6 +979,21 @@ pre-existing locked-json default), now with compact JSON in both host caches.
 Only these callers opt into `locked_json_rmw(compact=True)`; other caches
 retain indented JSON. Both encodings remain readable without migration.
 
+**Track 66A probe (2026-09-21, HEAD a975feb, device 889e42c0).** The real
+`_capture_host_usage` → both readers ran against the real corpus (841 Codex
+rollouts, 213 Grok ledgers), using copies of both caches; the originals were
+unchanged. At a 43 ms budget, reader 0 produced 40 consecutive incomplete
+`deadline` passes: after the first, **0 cache writes in 39 steady passes**,
+with allowance fixed at 43 ms. Over 2,000 entry-latency samples, p50 was
+0.5 µs, p99 0.67 µs, max 8.17 µs; none reached the ≥500 µs needed to flip
+integer-ms rounding. The claim that entry jitter prevents convergence was
+not reproduced. Complete passes wrote 9/9 after the first, as intended:
+completed scans prune deleted files and record `last_complete_*`, including
+complete-but-late scans. No reader or cache-write code changed for 66A.
+Evidence: `~/.gstack/projects/kbitz-mind-meld/66a-probes/probe_failed_write.py`
+and `probe-889e42c0-a975feb.json`; the measurements above are retained here
+so the conclusion survives workspace and machine changes.
+
 **Optional cache timing fields (Track 63A, no CACHE_VERSION bump).**
 `last_complete_ms` is the reader-entry-to-result-ready time, before cache
 serialization; `last_complete_at` is UTC ISO seconds. Every completed scan
@@ -988,6 +1003,14 @@ when a written root carries `deadline` from this pass, carries while that
 reason remains, and is removed when the reason clears. Millisecond fields
 accept only ints in 0–86,400,000. Date validation matches `last_reason_since`;
 invalid or absent values are unknown, never inferred from counts.
+A later reader's allowance is the sweep time remaining after earlier readers,
+floored at `HOST_READER_GRACE_MS` (50 ms); it varies with earlier read times,
+not merely entry-latency rounding. That variation could defeat the exact
+write-skip comparison if the later reader remains `deadline`-incomplete with
+no newly learned file and an unchanged blocker pair. No Mac has shown that
+case: Grok warm reads measured about 20 ms (Track 57A E16), below the 50 ms
+floor. `host_read_budgets` describes configured sweep budgets, not each
+reader's allowance. Complete passes still rewrite by design.
 Diag exposes them for both readers and a top-level `host_read_budgets` map.
 Its sweep sums the last complete reads of `_default_host_readers` for the
 resolved, consented source set only when config state is `ok`. This same set
@@ -1905,7 +1928,7 @@ The retro-fleet output has two artifacts with different production paths:
 
 **Render states.** Section renders only when `window_days < 14` (`_render_weekly` owns ≥14d). Below `## Code shipped`. Unavailable (coverage proof unmet **or** unreadable event records) renders the heading with the reason inline — a vanished section never encodes a data-availability state. Current-window-empty suppresses the section entirely (never itemize a week off). `0` is known-zero; `—` is unavailable. No arrow glyphs. Both windows use today's author-email union; `--no-author-filter` is consistent across both. Fleet composition change (`prior.devices_with_pushes != current`) is a `## Notes` line. No card row.
 
-**`--no-save` is a hidden no-op.** Removing it is a silent truncation of `mm retro-fleet 30d --no-save > /tmp/retro.md` (exit 2, 0-byte file) and breaks the `/retro-fleet` skill's Step 4 exactly once per upgrade, because SKILL.md is copied into the skill store and refreshes on `mm init` / non-quiet `mm push` / `mm install-skills`, not on `pipx upgrade`. Keep the flag (`hidden=True` in typer, `help=argparse.SUPPRESS` in argparse), ignore the value, emit one `mm: notice:` to stderr only when actually passed. Named removal release: v0.12.39.
+**`--no-save` is a hidden no-op.** Removing it is a silent truncation of `mm retro-fleet 30d --no-save > /tmp/retro.md` (exit 2, 0-byte file) and breaks the `/retro-fleet` skill's Step 4 exactly once per upgrade, because SKILL.md is copied into the skill store and refreshes on `mm init` / non-quiet `mm push` / `mm install-skills`, not on `pipx upgrade`. Keep the flag (`hidden=True` in typer, `help=argparse.SUPPRESS` in argparse), ignore the value, emit one `mm: notice:` to stderr only when actually passed. Snapshot saving was removed in v0.12.39; the notice names **2.0** for removal of the flag. The current SKILL.md Step 4 no longer passes it; stale stores remain supported until 2.0.
 
 **Orphan dir.** `mm gc` runs `retention._gc_orphan_retros_dir`: unlinks only `_SNAPSHOT_FILENAME_RE`-matching files, then `rmdir` if empty. Never `rm -rf`. Dry-runnable, best-effort.
 

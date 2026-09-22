@@ -6,6 +6,8 @@ Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud
 
 ## Install
 
+Prerequisites: macOS with iCloud Drive, Python 3.11+, and pipx.
+
 ```bash
 pipx install git+https://github.com/kbitz/mind-meld.git@latest
 ```
@@ -13,6 +15,14 @@ pipx install git+https://github.com/kbitz/mind-meld.git@latest
 Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the release workflow force-advances to each tagged release, so you always get the newest *released* version (never untagged work-in-progress off `main`) **and** plain `pipx upgrade` keeps working (see below).
 
 ## Upgrading
+
+**v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
+interoperate with no wire or storage migration. The
+[Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x)
+now defines the stable surfaces. `b` / `both` still leave both conflict files
+on disk, without the retired alias notice. Newer-format storage refuses with
+an upgrade remedy. Once v1.0.0 is tagged, a regression ships as 1.0.1: the
+upgrade nudge never downgrades.
 
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
 The first push needing that refresh prints `mm: notice: refreshing identity cache (one-off)`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
@@ -33,16 +43,39 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 (This is exactly the command mm's auto-upgrade nudge prints.)
 
-**Need to roll back?** Install a specific older release by tag:
+**Need to roll back?** Pin the last 0.x release, then replace the skill store
+with the running package's copy. If the store exists, move it aside first:
+`mm install-skills` never overwrites a newer stored skill with an older one.
 
 ```bash
-pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.12.20
+pipx install --force git+https://github.com/kbitz/mind-meld.git@v0.14.18
+mv "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" "$HOME/.local/share/mind-meld/agent-skills/retro-fleet.pre-rollback-$(date +%Y%m%d-%H%M%S)"
+mm install-skills
 ```
 
-Nothing on disk needs migrating — config, manifests, blobs, and the events log
-are unchanged across the 0.12.x line, so a rollback is just a reinstall. Note
-the caveat above applies: a pinned tag stops tracking `latest`, so re-run the
-`@latest` command when you want to resume upgrades.
+1.0.0 and 0.14.18 use the same storage and wire formats. Rollback within 1.x
+is a reinstall unless an intervening MINOR's Upgrade notes say otherwise.
+Keep the moved store as a backup. Re-run the `@latest` reinstall above to
+resume upgrades; the nudge never downgrades a pinned install for you.
+
+## Versioning and compatibility
+
+The [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x) defines stable formats, CLI and machine-readable surfaces, release classifications, and downgrade rules.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Completed successfully. Valid `autopull`/`autopush` invocations also exit 0 on refusal or degradation; inspect stderr and `mm status`. Interactive pull keeps exit 0 when individual files fail. |
+| 1 | Stopped or aborted, including EOF/Ctrl-C at a prompt, config/crypto/lock failures, required maintenance failure, and argument values rejected after parsing (`mm log --since bad`, `mm log --format xml`, `mm recapture 999d`). A push may already have published before required GC stops. |
+| 2 | Usage error from Typer/Click or retro-fleet's argparse, including unknown options on autorun commands. |
+| 3 | `pull --conflict-mode fail` preflight predicts a conflict or local failure, including with `--dry-run`; no files applied. |
+| 4 | `recapture` completed only partially (`RECAPTURE_EXIT_PARTIAL`). |
+
+Each outcome maps to a behavioral test in
+[`EXIT_EVIDENCE`](tests/test_compat_contract.py); the [Previews](#previews)
+table lists the applicable codes per command. Exit 0 from content sync does
+not prove host usage was captured or published.
 
 ## Quick Start
 
@@ -518,13 +551,36 @@ Sidecars stay local-only. A canonical or promoted file syncs only when the sourc
 Managing conflicts:
 
 - `mm conflicts` — list every `.sync-conflict-*` file across your sources, with conflict age (when mm wrote the copy), peer-edit age (when the other Mac last saved the file), and canonical sibling.
-- `mm resolve` — walk each conflict interactively. Shows color LOCAL/REMOTE banners (with peer-name attribution when the conflict file's device prefix matches a registered peer), created/modified timestamps for each side plus a `-> SIDE is newer by N` recency verdict, a 3-number divergence summary, the unified diff, and prompts: `(m)erge` (accept LCS-merged result) / `(l)ocal` (keep your edits) / `(r)emote` (overwrite with peer's bytes) / `(n)ewer` (keep whichever was modified more recently) / `(p)romote` (keep BOTH — give the conflict file its own first-class filename) / `(s)kip` (leave both files) / `(a)bort` (stop the walk). The default key is always `(s)kip` — Enter never auto-accepts a merge or a recency guess. The merge uses LCS(local, remote) as a synthetic ancestor so additive edits on either side land cleanly; same-region edits show as `<<<<<<<` markers and (m) stays available. Binary content suppresses (m); `(n)ewer` is offered only when both sides' mtimes are readable and re-prompts on an exact tie (it never guesses). The remote side's "created" is shown as `pulled` — it is the local sync time, not the peer's real creation (the manifest carries only modified time). Acquires the mm lockfile so autopull can't race your decision. Pre-1.0 letters `b` / `both` are aliased to `(s)kip` with a one-time stderr notice.
+- `mm resolve` — walk each conflict interactively. Shows color LOCAL/REMOTE banners (with peer-name attribution when the conflict file's device prefix matches a registered peer), created/modified timestamps for each side plus a `-> SIDE is newer by N` recency verdict, a 3-number divergence summary, the unified diff, and prompts: `(m)erge` (accept LCS-merged result) / `(l)ocal` (keep your edits) / `(r)emote` (overwrite with peer's bytes) / `(n)ewer` (keep whichever was modified more recently) / `(p)romote` (keep BOTH — give the conflict file its own first-class filename) / `(s)kip` (leave both files) / `(a)bort` (stop the walk). The default key is always `(s)kip` — Enter never auto-accepts a merge or a recency guess. The merge uses LCS(local, remote) as a synthetic ancestor so additive edits on either side land cleanly; same-region edits show as `<<<<<<<` markers and (m) stays available. Binary content suppresses (m); `(n)ewer` is offered only when both sides' mtimes are readable and re-prompts on an exact tie (it never guesses). The remote side's "created" is shown as `pulled` — it is the local sync time, not the peer's real creation (the manifest carries only modified time). Acquires the mm lockfile so autopull can't race your decision. `c` / `f` are rejected with exit 1; other unrecognized input, including `b` / `both` (alias removed in 1.0.0), skips silently.
 - `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both. Shows the same per-side timestamps + recency verdict (display only — no `(n)ewer` shortcut here, since pull already keeps your file when it is the newer one).
 - `mm pull --conflict-mode fail` — preflight and exit 3 before applying any file if conflicts or local failures are predicted. For a write-free CI check use `mm pull --dry-run --conflict-mode fail`: 0 no conflicts predicted, 1 stopped, 3 conflicts/failures predicted (2 remains usage error). Two peers changing a mergeable file do not by themselves cause a conflict.
 - `mm gc --conflicts` — reap redundant conflict copies older than 30 days. A sidecar is only reapable once the conflict has converged (canonical exists and its bytes are identical); a live conflict, a missing canonical, or a file mm cannot hash is preserved at any age.
 - `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
+
+### Newer or damaged storage format
+
+If mm reports a newer format, leave every `mm-crypto-init` copy in place and
+upgrade this Mac with:
+
+```bash
+pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
+```
+
+`mm diag --json` reports the detected byte as `crypto_init.newer_version`;
+null means no newer version was observed. Any newer canonical or conflict copy
+blocks crypto sessions and repair. A newer blob that arrives first is skipped
+with an upgrade warning; an unreadable peer manifest is skipped by pull and
+blocks GC.
+
+If this Mac is already on the latest release and no newer mm exists, the file
+may be damaged. Wait for iCloud to finish syncing and locate a known-valid
+crypto-init copy from another Mac or backup. Move the damaged copy aside to a
+backup outside the storage folder, then let `mm pull` verify and reconcile the
+valid copy. Keep the backup; never delete crypto-init or bootstrap a fresh salt
+over existing encrypted data. If no valid copy is available, stop and recover
+one before continuing.
 
 **On mm older than v0.14.5, `mm pull` died with `TypeError: '<' not supported between instances of 'str' and 'int'` (or `bool` / `list` / `dict`), or an unattended `mm autopull` reported an unexpected error and a later file never arrived.** A `.jsonl` file mixed a string `ts` with a non-string value. Current `mm` keeps every unique normalized line and continues the pull. On **each** Mac: confirm with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. If `pipx upgrade` leaves you on an old version, the install is pinned to a frozen tag — see [Upgrading](#upgrading). `mm devices` shows the version at last push, not a live probe of the installed binary; after a successful `mm push` it can corroborate the fleet. Numeric-only timestamps now sort as whole-line text rather than numbers; until every active Mac is upgraded, old and new clients can keep rewriting that order. `mm log --action merged --limit 20` can show repeated merges, but a merged outcome alone does not prove timestamp oscillation.
 

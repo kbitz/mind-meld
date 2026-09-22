@@ -16,6 +16,7 @@ GIT_WALK_FAILURES_URL = (
     "https://github.com/kbitz/mind-meld#dropped-repositories-and-ignored-git-environment-variables"
 )
 HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture-codex-and-grok"
+NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
 
 
 class MindMeldError(Exception):
@@ -24,6 +25,18 @@ class MindMeldError(Exception):
 
 class CryptoError(MindMeldError):
     """Encryption or decryption failure."""
+
+
+class NewerFormatError(CryptoError):
+    """An envelope uses a reserved future version; never repair it as garbage."""
+
+    def __init__(self, version: int, subject: str = "blob") -> None:
+        self.version = version
+        self.subject = subject
+        super().__init__(
+            f"crypto: {subject}: unsupported format version 0x{version:02x}; "
+            "written by a newer mm or damaged."
+        )
 
 
 class StorageError(MindMeldError):

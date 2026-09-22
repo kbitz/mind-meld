@@ -39,6 +39,7 @@ from mind_meld.manifest import (
     normalize_manifest,
     serialize_manifest,
 )
+from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.local import LocalBackend
 from mind_meld.synclog import write_sync_log
 
@@ -8657,6 +8658,373 @@ def _seed_crypto_lineages60(env):
     env["config"]["crypto"]["root_salt_fp"] = crypto_module.root_salt_fingerprint(b"\x00" * 16)
     save_config(env["config"], env["config_path"])
     return canonical, identical, distinct
+
+
+class TestNewerStorage66A:
+    @pytest.mark.parametrize("copy_name", ["mm-crypto-init", "mm-crypto-init 2"])
+    @pytest.mark.parametrize(
+        "command", ["push", "pull", "gc", "autopush", "autopull", "status", "diff", "recapture"]
+    )
+    def test_refuses_before_manifest_read(self, push_preview56, monkeypatch, copy_name, command):
+        from mind_meld import sidecar, upgrade
+
+        env = push_preview56
+        backend = env["backend"]
+        older = backend.get("mm-crypto-init")
+        (backend.root / copy_name).write_bytes(b"\x03")
+        if copy_name == "mm-crypto-init":
+            (backend.root / "mm-crypto-init 2").write_bytes(older)
+        before = _preview_tree(backend.root)
+        monkeypatch.setattr(
+            cli_module, "_fetch_remote_manifest", lambda *a, **kw: pytest.fail("read manifest")
+        )
+        result = runner.invoke(app, [command])
+        assert result.exit_code == (0 if command.startswith("auto") else 1), result.output
+        flat = " ".join(result.output.split())
+        assert upgrade.INSTALL_CMD in flat
+        assert "newer mm (format 0x03)" in flat
+        assert "delete" not in flat.lower()
+        assert "re-run 'mm init'" not in flat
+        assert _preview_tree(backend.root) == before
+        if command.startswith("auto"):
+            row = json.loads((sidecar.SIDECAR_DIR / "last-autorun.json").read_text())
+            assert row[command[4:]]["outcome"] == "crypto-error"
+
+    @pytest.mark.parametrize("race", [False, True])
+    def test_init_refuses_newer_probe_or_bootstrap_race(self, tmp_path, monkeypatch, race):
+        from mind_meld import upgrade
+        from mind_meld.errors import StorageError
+
+        cfg = TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        storage.mkdir()
+
+        def arrive(*a, **kw):
+            (storage / "mm-crypto-init").write_bytes(b"\x03")
+            raise StorageError("already exists")
+
+        if race:
+            monkeypatch.setattr(cli_module, "bootstrap_crypto_init", arrive)
+        else:
+            (storage / "mm-crypto-init").write_bytes(b"\x03")
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
+        assert result.exit_code == 1, result.output
+        assert upgrade.INSTALL_CMD in " ".join(result.output.split())
+        assert "delete" not in result.output.lower()
+        assert not cfg.exists()
+        assert {p.name: p.read_bytes() for p in storage.iterdir()} == {"mm-crypto-init": b"\x03"}
+
+    def test_init_refuses_newer_arriving_after_successful_bootstrap(self, tmp_path, monkeypatch):
+        from mind_meld import upgrade
+
+        cfg = TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        original = cli_module.bootstrap_crypto_init
+
+        def bootstrap(backend, passphrase, **kwargs):
+            result = original(backend, passphrase, **kwargs)
+            (backend.root / "mm-crypto-init").write_bytes(b"\x03")
+            return result
+
+        monkeypatch.setattr(cli_module, "bootstrap_crypto_init", bootstrap)
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
+        assert result.exit_code == 1, result.output
+        assert upgrade.INSTALL_CMD in " ".join(result.output.split())
+        assert not cfg.exists()
+        assert (storage / "mm-crypto-init").read_bytes() == b"\x03"
+
+    def test_repair_arrival_keeps_upgrade_remedy(self, push_preview56, monkeypatch):
+        from mind_meld import upgrade
+
+        backend = push_preview56["backend"]
+        original = crypto_module.apply_crypto_init_repair
+
+        def arrive(backend, fetch):
+            (backend.root / "mm-crypto-init 2").write_bytes(b"\x03")
+            return original(backend, fetch)
+
+        monkeypatch.setattr(crypto_module, "apply_crypto_init_repair", arrive)
+        before = backend.get("mm-crypto-init")
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 1, result.output
+        assert upgrade.INSTALL_CMD in " ".join(result.output.split())
+        assert backend.get("mm-crypto-init") == before
+        assert not backend.list_keys("manifests/")
+
+    @pytest.mark.parametrize("command", ["pull", "gc", "push"])
+    def test_newer_manifest_arrives_before_crypto_init(self, push_preview56, command):
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        peer_key = storage_keys.manifest_key("dev-peer")
+        backend.put(peer_key, b"\x03")
+        before = backend.get(peer_key)
+        local_before = _preview_tree(env["claude"])
+        result = runner.invoke(app, [command])
+        # Push publishes its own snapshot, then required auto-GC refuses the peer.
+        assert result.exit_code == (0 if command == "pull" else 1), result.output
+        assert backend.get(peer_key) == before
+        assert _preview_tree(env["claude"]) == local_before
+        if command == "push":
+            assert sorted(backend.list_keys("manifests/")) == [
+                storage_keys.manifest_key("dev-a"),
+                peer_key,
+            ]
+        else:
+            assert "corrupt" in result.output.lower()
+
+    @pytest.mark.parametrize("command", ["status", "diff"])
+    def test_newer_manifest_inspection_never_claims_recovery_or_empty_diff(
+        self, push_preview56, command
+    ):
+        from mind_meld import upgrade
+
+        env = push_preview56
+        backend = env["backend"]
+        backend.put(storage_keys.manifest_key(env["config"]["device"]["id"]), b"\x03")
+
+        result = runner.invoke(app, [command])
+        text = " ".join((result.output + (result.stderr or "")).split())
+        assert upgrade.INSTALL_CMD in text
+        assert "next 'mm push' will attempt recovery" not in text
+        assert "showing diff against empty remote" not in text
+        assert "In sync." not in text
+        assert "Total remote:" not in text
+        assert result.exit_code == (0 if command == "status" else 1), result.output
+
+    @pytest.mark.parametrize("shape", ["older-sibling", "conflict-only"])
+    def test_newer_manifest_sibling_blocks_gc(self, push_preview56, shape):
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        key = storage_keys.manifest_key("dev-peer")
+        parent = backend.root / Path(key).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        older = encrypt(
+            serialize_manifest(
+                {
+                    "device_id": "dev-peer",
+                    "device_name": "Peer",
+                    "sources": {},
+                    "tombstones": {},
+                }
+            ),
+            PASSPHRASE,
+            MEMORY_KB,
+        )
+        if shape == "older-sibling":
+            backend.put(key, b"\x03")
+            (parent / "manifest.json 2.enc").write_bytes(older)
+        else:
+            (parent / "manifest.json 2.enc").write_bytes(b"\x03")
+        blob = storage_keys.blob_key("dev-peer", "b" * 64)
+        backend.put(blob, b"\x03newer-only")
+        local_before = _preview_tree(env["claude"])
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 1, result.output
+        assert "cannot GC safely" in result.output
+        assert backend.get(blob) == b"\x03newer-only"
+        pull = runner.invoke(app, ["pull"])
+        assert pull.exit_code == 0, pull.output
+        assert backend.get(blob) == b"\x03newer-only"
+        assert _preview_tree(env["claude"]) == local_before
+
+    def test_newer_manifest_replacing_canonical_after_scan_blocks_gc(
+        self, push_preview56, monkeypatch
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        key = storage_keys.manifest_key("dev-peer")
+        parent = backend.root / Path(key).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        older = encrypt(
+            serialize_manifest(
+                {
+                    "device_id": "dev-peer",
+                    "device_name": "Peer",
+                    "sources": {},
+                    "tombstones": {},
+                }
+            ),
+            PASSPHRASE,
+            MEMORY_KB,
+        )
+        backend.put(key, older)
+        (parent / "manifest.json 2.enc").write_bytes(older)
+        blob = storage_keys.blob_key("dev-peer", "c" * 64)
+        backend.put(blob, b"newer-only")
+        reads = {"n": 0}
+        original = type(backend).get
+
+        def get(self, storage_key):
+            data = original(self, storage_key)
+            if storage_key == key:
+                reads["n"] += 1
+                if reads["n"] > 1:
+                    return b"\x03"
+            return data
+
+        monkeypatch.setattr(type(backend), "get", get)
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 1, result.output
+        assert "cannot GC safely" in result.output
+        assert backend.get(blob) == b"newer-only"
+
+    def test_newer_manifest_arriving_during_conflict_validation_is_not_ignored(
+        self, push_preview56, monkeypatch
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        key = storage_keys.manifest_key("dev-peer")
+        parent = backend.root / Path(key).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        current = encrypt(
+            serialize_manifest(
+                {
+                    "device_id": "dev-peer",
+                    "device_name": "Peer",
+                    "sources": {},
+                    "tombstones": {},
+                }
+            ),
+            PASSPHRASE,
+            MEMORY_KB,
+        )
+        conflict = parent / "manifest.json 2.enc"
+        conflict.write_bytes(current)
+        reads = 0
+        original = Path.read_bytes
+
+        def read_bytes(path):
+            nonlocal reads
+            if path == conflict:
+                reads += 1
+                if reads == 2:
+                    return b"\x03"
+            return original(path)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-peer", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "corrupt"
+        assert fetched.newer_version == 3
+
+    def test_late_newer_manifest_blocks_publish_and_gc(self, push_preview56, monkeypatch):
+        env = push_preview56
+        backend = env["backend"]
+        mine = env["config"]["device"]["id"]
+        key = storage_keys.manifest_key(mine)
+        original = cli_module._fetch_remote_manifest
+        phase = {"name": "push", "n": 0}
+
+        def fetch(storage, device_id, passphrase, memory_kb):
+            result = original(storage, device_id, passphrase, memory_kb)
+            if device_id != mine:
+                return result
+            phase["n"] += 1
+            if phase["n"] > 1:
+                return cli_module.ManifestFetch(status="corrupt", newer_version=3)
+            return result
+
+        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fetch)
+        published = backend.get(key) if backend.exists(key) else None
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 1, pushed.output
+        assert "newer mm (format 0x03)" in pushed.output
+        assert (backend.get(key) if backend.exists(key) else None) == published
+        phase["name"] = "gc"
+        phase["n"] = 0
+        blob = storage_keys.blob_key(mine, "d" * 64)
+        backend.put(blob, b"only-late-manifest")
+        collected = runner.invoke(app, ["gc"])
+        assert collected.exit_code == 1, collected.output
+        assert "cannot GC safely" in collected.output
+        assert backend.get(blob) == b"only-late-manifest"
+
+    def test_push_leaves_own_newer_manifest_in_place(self, push_preview56):
+        env = push_preview56
+        backend = env["backend"]
+        key = storage_keys.manifest_key(env["config"]["device"]["id"])
+        backend.put(key, b"\x03")
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 1, result.output
+        assert "newer mm (format 0x03)" in result.output
+        assert backend.get(key) == b"\x03"
+
+    def test_autopull_newer_blob_names_upgrade(self, push_preview56):
+        from mind_meld import sidecar, upgrade
+
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        sha = "b" * 64
+        backend.put(storage_keys.blob_key("dev-peer", sha), b"\x03")
+        fetched = crypto_module.fetch_crypto_init(backend)
+        crypto_module.set_crypto_session(fetched.root_salt, MEMORY_KB)
+        manifest = {
+            "device_id": "dev-peer",
+            "device_name": "Peer",
+            "sources": {
+                "claude": {"files": {"projects/-Users-kb-myapp/memory/new.md": {"sha256": sha}}}
+            },
+            "tombstones": {},
+        }
+        backend.put(
+            storage_keys.manifest_key("dev-peer"),
+            encrypt(serialize_manifest(manifest), PASSPHRASE, MEMORY_KB),
+        )
+        before = _preview_tree(env["claude"])
+        result = runner.invoke(app, ["autopull"])
+        assert result.exit_code == 0, result.output
+        flat = result.stderr
+        assert upgrade.INSTALL_CMD in flat
+        assert "unsupported format version 0x03" in flat
+        assert _preview_tree(env["claude"]) == before
+        row = json.loads((sidecar.SIDECAR_DIR / "last-autorun.json").read_text())
+        assert row["pull"]["outcome"] == "degraded"
+
+    def test_damaged_crypto_init_has_no_delete_advice(self, push_preview56):
+        from mind_meld.errors import NEWER_STORAGE_URL
+
+        backend = push_preview56["backend"]
+        (backend.root / "mm-crypto-init").write_bytes(b"\x10garbage")
+        result = runner.invoke(app, ["status"])
+        flat = (result.output + result.stderr).lower()
+        assert result.exit_code == 1, result.output
+        assert "delete" not in flat
+        assert "re-run 'mm init'" not in flat
+        assert NEWER_STORAGE_URL in result.output + result.stderr
+
+    def test_newer_blob_warning_names_upgrade(self, push_preview56):
+        from mind_meld import upgrade
+
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        sha = "a" * 64
+        backend.put(storage_keys.blob_key("dev-peer", sha), b"\x03")
+        fetched = crypto_module.fetch_crypto_init(backend)
+        crypto_module.set_crypto_session(fetched.root_salt, MEMORY_KB)
+        manifest = {
+            "device_id": "dev-peer",
+            "device_name": "Peer",
+            "sources": {
+                "claude": {"files": {"projects/-Users-kb-myapp/memory/new.md": {"sha256": sha}}}
+            },
+            "tombstones": {},
+        }
+        backend.put(
+            storage_keys.manifest_key("dev-peer"),
+            encrypt(serialize_manifest(manifest), PASSPHRASE, MEMORY_KB),
+        )
+        before = _preview_tree(env["claude"])
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+        assert upgrade.INSTALL_CMD in " ".join(result.stderr.split()), result.output
+        assert "unsupported format version 0x03" in result.stderr
+        assert _preview_tree(env["claude"]) == before
 
 
 class TestCryptoInspection60A:

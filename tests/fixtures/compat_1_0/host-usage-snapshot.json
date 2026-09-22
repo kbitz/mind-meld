@@ -1,0 +1,39 @@
+{
+  "active_days": [
+    "2026-09-22"
+  ],
+  "counter_semantics": "disjoint-v1",
+  "device": "compat",
+  "hosts": {
+    "codex": {
+      "2026-09-22": {
+        "cache_create": 20,
+        "cache_read": 30,
+        "input": 100,
+        "output": 40
+      }
+    }
+  },
+  "token_sources": [
+    "codex"
+  ],
+  "tokens_by_day": {
+    "2026-09-22": {
+      "by_model": {
+        "gpt-6-astra": {
+          "cache_create": 20,
+          "cache_read": 30,
+          "input": 100,
+          "output": 40
+        }
+      },
+      "cache_create": 20,
+      "cache_read": 30,
+      "input": 100,
+      "output": 40
+    }
+  },
+  "ts": "2026-09-22T12:00:00+00:00",
+  "type": "host-usage-snapshot",
+  "v": 2
+}

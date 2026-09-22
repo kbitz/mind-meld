@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.0.0 | 2026-09-22 | **Mind Meld 1.0 establishes the [Compatibility (1.x) contract](invariants/auto-upgrade.md#compatibility-1x) for storage, CLI, and machine-readable output.** Existing 0.14.x fleets interoperate without migration; newer-format storage now refuses safely. |
 | 0.14.18 | 2026-09-21 | **Status and diag show each reader's snapshot coverage and the last recorded attended attempt.** Publication receipts distinguish proven non-publication from unavailable evidence without changing content-sync exit codes. |
 | 0.14.17 | 2026-09-20 | **Attended pushes refresh consented host usage even when user files are in sync.** Usage-only publication preserves push counts and the Git cursor; capture failures warn while content sync continues. |
 | 0.14.16 | 2026-09-17 | **Warm Codex reads use less of the autopush budget, and attended captures publish their warm read.** Per-Mac read budgets and last-complete-read diagnostics make continuing capture headroom visible. |

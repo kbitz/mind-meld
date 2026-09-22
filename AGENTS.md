@@ -19,7 +19,7 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - **Sync log.** After pull, writes `.mind-meld-log.md` per project so Claude Code knows what changed from other machines.
 - Manifest-based diffing: SHA-256 hash every file, only upload/download changes.
 - Content-addressed storage: blobs stored by hash, not by path.
-- Gzip compression before encryption. Versioned blob format (v0x01).
+- Gzip compression before encryption. Versioned blob format (0x02).
 
 ## Source Layout
 
@@ -118,7 +118,7 @@ GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Pyt
 **PROGRESS row convention (load-bearing).** The PROGRESS.md row goes in the SAME PR as the `pyproject.toml` + `CHANGELOG.md` bump — not a workflow side-effect. The original v0.11.24 design tried to auto-append via `git push` from the workflow, which was rejected by branch protection ("Changes must be made through a pull request") on every release where the row wasn't already in the PR. v0.11.23 only "succeeded" because the row was pre-added in the PR and the script's idempotent-skip exited 0 before the push. v0.11.24 and v0.11.27 both hit the wall and shipped without rows. Lesson: a workflow that pushes to a protected branch is broken by definition; don't reintroduce that step. The row format mirrors what the old auto-append produced — CHANGELOG body lead paragraph (text from `## [version]` to first `### Section` or next `## [`), pipes escaped, single line, inserted directly after the `|---|---|---|` separator (newest at top). **The row is now CI-enforced** (Track 16A): `tests/test_docs_routing.py::test_every_changelog_version_has_a_progress_row` fails any PR that bumps the version without adding the row, enforced from 0.11.0 forward. That closes the recurrence the v0.11.24 auto-append design could not — a workflow that pushes to a protected branch is broken by definition, but a test in the PR is not. Still does NOT solve parallel-workspace version collisions (two open PRs both claiming the same version slot) — that remains deferred.
 
 ## Commands
-mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture
+mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture
 
 Push: attended `mm push` refreshes consented host usage automatically (64A), under the lock after final source resolution. Usage-only publication appends one host row, preserves activity counts/cursor, and skips auto-GC; user-source byte, mtime or selection changes capture activity once. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Capture failures warn and continue content sync without a second reader attempt. Exit 1 means sync or required maintenance stopped; exit 2 means invalid arguments. Autopush remains change-gated and never warms; previews never capture. See `docs/invariants/events-retro.md`.
 
@@ -131,7 +131,7 @@ Migrate-config flags: `--yes`, `--dry-run`. Idempotent: appends missing recommen
 Previews (62A): `push`, `pull`, `gc`, and `recapture` allow only the local lock;
 `migrate-config --dry-run` and `diff` take no lock. See README’s Previews table.
 Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`.
-`COMMAND_INTENTS62` in integration tests classifies all 23 commands and audits
+`COMMAND_INTENTS62` in integration tests classifies all 24 commands and audits
 every preview/inspection with exact status-seed and author-filtered identity
 cache exemptions. Never add a command without updating that intent table.
 
@@ -205,6 +205,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `skills/retro_fleet/SKILL.md` (two-pass card flow; `## Step 0: preflight` and its terminal rule) | `docs/invariants/events-retro.md` |
 | `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `_preview_mm_events_bootstrap` / `resolve_sources` / `get_sources` (`bootstrap=` gate, `SourceResolution.would_create`) / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
 | `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
+| Command/option names, positional arguments, exit codes, format constants, host families, token fields/order, device-registry fields, machine-readable output | `docs/invariants/auto-upgrade.md` “Compatibility (1.x)” |
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
 
 If you're touching multiple areas (e.g., adding a new field to mm-push event that also flows through aggregator + adds a CLI flag), read every applicable invariant file. They're short; bulk-reading is cheap. The cost of skipping one and breaking a load-bearing invariant is much higher.

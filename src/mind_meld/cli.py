@@ -93,6 +93,7 @@ from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import (
     FORMAT_VERSION,
     CryptoInitFetch,
+    _newer_version,
     bootstrap_crypto_init,
     decrypt,
     encrypt,
@@ -116,6 +117,7 @@ from mind_meld.devices import (
 from mind_meld.errors import (
     GIT_WALK_FAILURES_URL,
     HOST_USAGE_CAPTURE_URL,
+    NEWER_STORAGE_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
@@ -123,6 +125,7 @@ from mind_meld.errors import (
     LockError,
     ManifestError,
     MindMeldError,
+    NewerFormatError,
     SnapshotError,
     StorageError,
     os_error_cause,
@@ -235,6 +238,7 @@ class ManifestFetch:
 
     status: FetchStatus
     manifest: dict | None = None
+    newer_version: int | None = None
 
     @property
     def is_ok(self) -> bool:
@@ -438,6 +442,26 @@ def _get_passphrase_or_exit() -> str:
         raise
 
 
+def _newer_format_message(version: int, subject: str = "mm-crypto-init") -> str:
+    """One upgrade remedy for newer envelopes, owned by the CLI layer."""
+    return (
+        f"crypto: {subject} was written by a newer mm (format 0x{version:02x}) "
+        f"or is damaged; this Mac runs mm {__version__}. "
+        f"Upgrade with: {upgrade.INSTALL_CMD}. "
+        f"If this Mac is already on the latest release, see {NEWER_STORAGE_URL}."
+    )
+
+
+def _apply_verified_crypto_repair(backend: LocalBackend, fetch: CryptoInitFetch) -> None:
+    """Add the shared CLI remedy if newer evidence arrives after verification."""
+    try:
+        crypto.apply_crypto_init_repair(backend, fetch)
+    except NewerFormatError as exc:
+        # The exception subject can be a race sentence. The shared remedy
+        # always names the file, and the typed cause keeps the race detail.
+        raise CryptoError(_newer_format_message(exc.version)) from exc
+
+
 def _init_crypto_session(
     backend: LocalBackend,
     passphrase: str,
@@ -463,6 +487,8 @@ def _init_crypto_session(
       interactive; stderr print for autopull/autopush).
     """
     fetch = fetch_crypto_init(backend)
+    if fetch.newer_version is not None:
+        raise CryptoError(_newer_format_message(fetch.newer_version))
     if fetch.status == "missing":
         raise CryptoError(
             "crypto: mm-crypto-init not found at storage root. "
@@ -472,8 +498,7 @@ def _init_crypto_session(
         raise CryptoError(
             "crypto: mm-crypto-init is corrupt. If another device still has a "
             "valid copy in its local iCloud cache, wait for sync to reconcile. "
-            "Otherwise delete mm-crypto-init from the storage root and re-run "
-            "'mm init' (WARNING: destroys all existing v2 blobs for every device)."
+            f"For non-destructive recovery, see {NEWER_STORAGE_URL}."
         )
 
     assert fetch.root_salt is not None and fetch.argon2_memory_kb is not None
@@ -506,7 +531,7 @@ def _init_crypto_session(
     assert fetch.keycheck_blob is not None
     verify_passphrase(master_key, fetch.keycheck_blob)
     if not read_only:
-        crypto.apply_crypto_init_repair(backend, fetch)
+        _apply_verified_crypto_repair(backend, fetch)
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
@@ -603,9 +628,57 @@ def _fetch_remote_manifest(
     mkey = manifest_key(device_id)
     manifests: list[dict] = []
 
-    is_valid_manifest = _make_manifest_validator(passphrase, memory_kb)
     canonical_exists = backend.exists(mkey)
-    conflict_copies = backend.find_conflict_copies(mkey, is_valid_manifest)
+    # Reserved-window bytes are unreadable even beside an older sibling.
+    # The validator used to return False for them, which hid a newer conflict
+    # or let an older copy win. Record every observed byte, including the
+    # validator's own read, and refuse before either outcome.
+    newer_seen: list[int] = []
+
+    def _note_manifest_bytes(raw: bytes | None) -> None:
+        if raw is None:
+            return
+        version = _newer_version(raw)
+        if version is not None:
+            newer_seen.append(version)
+
+    def _corrupt_if_newer() -> ManifestFetch | None:
+        if not newer_seen:
+            return None
+        return ManifestFetch(status="corrupt", newer_version=max(newer_seen))
+
+    if canonical_exists:
+        try:
+            _note_manifest_bytes(backend.get(mkey))
+        except (OSError, MindMeldError):
+            pass
+    for path in backend.find_conflict_copies(mkey, lambda _path: True):
+        try:
+            _note_manifest_bytes(path.read_bytes())
+        except OSError:
+            pass
+    if (blocked := _corrupt_if_newer()) is not None:
+        return blocked
+
+    def _valid_and_current(path: Path) -> bool:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return False
+        # Judge this read. A second read can observe a newer replacement and
+        # report it as an ordinary invalid sibling.
+        _note_manifest_bytes(raw)
+        if _newer_version(raw) is not None or not raw or raw[0] != FORMAT_VERSION:
+            return False
+        try:
+            deserialize_manifest(decrypt(raw, passphrase, memory_kb))
+            return True
+        except Exception:
+            return False
+
+    conflict_copies = backend.find_conflict_copies(mkey, _valid_and_current)
+    if (blocked := _corrupt_if_newer()) is not None:
+        return blocked
     had_any_source = canonical_exists or bool(conflict_copies)
 
     # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
@@ -618,6 +691,10 @@ def _fetch_remote_manifest(
             enc_data = backend.get(mkey)
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
+        except NewerFormatError as exc:
+            # The preliminary scan can miss a copy that becomes newer before
+            # this read. Do not fall through to an older sibling.
+            return ManifestFetch(status="corrupt", newer_version=exc.version)
         except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # canonical unreadable — try conflict copies
 
@@ -627,6 +704,8 @@ def _fetch_remote_manifest(
             enc_data = conflict_path.read_bytes()
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
+        except NewerFormatError as exc:
+            return ManifestFetch(status="corrupt", newer_version=exc.version)
         except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # skip unreadable conflict copies
 
@@ -1792,10 +1871,6 @@ def _prompt_conflict_choice(
     prompt_default = "s"
     choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
 
-    # Shared compatibility policy maps only exact b/both values and emits the
-    # existing notice. Inline's c/f fallback remains its existing local policy.
-    choice = resolveflow._normalize_legacy_skip_choice_and_warn(choice)
-
     if choice in ("l", "local", "keep-canonical"):
         return "keep-canonical", None
     if choice in ("r", "remote", "keep-remote"):
@@ -1970,7 +2045,9 @@ def _warn_apply_failure(
     location = "/".join(safe(p) for p in (device_name, src_name, rel_path) if p is not None)
     error_number = getattr(exc, "errno", None) or getattr(exc.__cause__, "errno", None)
     remedy = ""
-    if error_number in (errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
+    if isinstance(exc, NewerFormatError):
+        remedy = _newer_format_message(exc.version, exc.subject) + " "
+    elif error_number in (errno.EEXIST, errno.ENOTDIR, errno.EISDIR):
         try:
             collider = _first_existing_ancestor(local_path.parent)
             if not collider.is_dir():
@@ -2634,7 +2711,17 @@ def _download_and_apply(
             try:
                 plain_data = decrypt(enc_data, passphrase, memory_kb)
             except CryptoError as e:
-                if not quiet:
+                if isinstance(e, NewerFormatError):
+                    _warn_apply_failure(
+                        reporter.device_name,
+                        reporter.src_name,
+                        rel_path,
+                        base_path / rel_path,
+                        "decrypt failed",
+                        e,
+                        preserved="local preserved",
+                    )
+                elif not quiet:
                     console.print(
                         f"  [red]decrypt failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
                     )
@@ -2981,6 +3068,9 @@ def _bootstrap_or_verify_crypto(
     derive blob-level keys.
     """
     if is_first_device:
+        arrived = fetch_crypto_init(backend)
+        if arrived.newer_version is not None:
+            _error(_newer_format_message(arrived.newer_version))
         try:
             bootstrap = bootstrap_crypto_init(
                 backend, passphrase, argon2_memory_kb=DEFAULT_ARGON2_MEMORY_KB
@@ -2993,6 +3083,8 @@ def _bootstrap_or_verify_crypto(
                 "verifying against their mm-crypto-init.[/dim]"
             )
             retry_fetch = fetch_crypto_init(backend)
+            if retry_fetch.newer_version is not None:
+                _error(_newer_format_message(retry_fetch.newer_version))
             if retry_fetch.status != "ok":
                 _error("init: lost bootstrap race but peer's mm-crypto-init not ok.")
             assert retry_fetch.root_salt is not None
@@ -3004,11 +3096,14 @@ def _bootstrap_or_verify_crypto(
                 success_message="  Verified passphrase against peer mm-crypto-init.",
             )
             try:
-                crypto.apply_crypto_init_repair(backend, retry_fetch)
+                _apply_verified_crypto_repair(backend, retry_fetch)
             except MindMeldError as e:
                 _error(str(e))
             return verified
 
+        arrived = fetch_crypto_init(backend)
+        if arrived.newer_version is not None:
+            _error(_newer_format_message(arrived.newer_version))
         assert bootstrap.root_salt is not None
         assert bootstrap.argon2_memory_kb is not None
         assert bootstrap.keycheck_blob is not None
@@ -3032,7 +3127,7 @@ def _bootstrap_or_verify_crypto(
     )
 
     try:
-        crypto.apply_crypto_init_repair(backend, fetch)
+        _apply_verified_crypto_repair(backend, fetch)
     except MindMeldError as e:
         _error(str(e))
     return verified
@@ -3261,12 +3356,13 @@ def init() -> None:
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
     fetch = fetch_crypto_init(backend)
+    if fetch.newer_version is not None:
+        _error(_newer_format_message(fetch.newer_version))
     if fetch.status == "corrupt":
         _error(
             "init: mm-crypto-init at storage root is corrupt. If another device "
             "still has a valid copy in its local iCloud cache, wait for sync to "
-            "reconcile and retry. Otherwise remove mm-crypto-init manually and "
-            "retry init (WARNING: this destroys all existing v2 blobs)."
+            f"reconcile and retry. For non-destructive recovery, see {NEWER_STORAGE_URL}."
         )
 
     # Two-tier guard: storage occupancy is authoritative state, not just
@@ -3996,6 +4092,9 @@ def _push_core(
     # `fetch.manifest` (when ok) is pre-normalized via load_manifest;
     # _recover_prior_manifest's sidecar/peer paths emit the same shape.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    if fetch.newer_version is not None:
+        # Heal would replace this Mac's newer manifest with a v2 snapshot.
+        _error(_newer_format_message(fetch.newer_version, "manifest"))
     remote_manifest = _recover_prior_manifest(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
     )
@@ -4275,6 +4374,9 @@ def _push_core(
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
+    fresh_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    if fresh_manifest.newer_version is not None:
+        _error(_newer_format_message(fresh_manifest.newer_version, "manifest"))
     backend.put(mkey, enc_manifest)
     if attempt is not None:
         attempt.content_accepted = True
@@ -5784,6 +5886,12 @@ def status(
         )
     if fetch.status == "missing":
         console.print("  [dim]Remote manifest: not yet pushed from this device.[/dim]")
+    elif fetch.newer_version is not None:
+        console.print(
+            "  [yellow]Remote manifest requires a newer mm:[/yellow] "
+            + _newer_format_message(fetch.newer_version, "manifest")
+        )
+        return
     elif fetch.status == "corrupt":
         console.print(
             "  [yellow]Remote manifest: CORRUPT[/yellow] — next 'mm push' "
@@ -6551,6 +6659,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         }
     else:
         crypto_init = {"status": fetch.status}
+    crypto_init["newer_version"] = fetch.newer_version
 
     # Sidecar (scoped by local device_id for device_id-mismatch detection).
     sidecar_info: dict = {"path": str(sidecar.sidecar_path())}
@@ -6740,6 +6849,9 @@ def diag(
     ci = state["crypto_init"]
     console.print("\n[bold]mm-crypto-init[/bold]")
     console.print(f"  status:        {ci.get('status')}")
+    console.print(f"  newer_version: {ci.get('newer_version')}")
+    if ci.get("newer_version") is not None:
+        console.print(safe_str(_newer_format_message(ci["newer_version"])))
     if ci.get("status") == "ok":
         console.print(f"  root_salt_fp:  {ci.get('root_salt_fp')}")
         console.print(f"  argon2 mem kb: {ci.get('argon2_memory_kb')}")
@@ -7090,6 +7202,8 @@ def diff_cmd(
             f"[dim]No remote manifest for "
             f"{'device ' + target_id if from_device else 'this device'} yet.[/dim]"
         )
+    elif diff_fetch.newer_version is not None:
+        _error(_newer_format_message(diff_fetch.newer_version, "manifest"))
     elif diff_fetch.status == "corrupt":
         console.print(
             f"[yellow]Warning:[/yellow] remote manifest for "
@@ -7247,10 +7361,15 @@ def _do_gc(
     referenced_hashes: set[str] = set()
 
     corrupt_devices: list[str] = []
+    newer_devices: list[str] = []
     for device in devices:
         did = device["device_id"]
         gc_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
         if gc_fetch.status == "missing":
+            continue
+        label = f"{device.get('device_name', did)} ({did})"
+        if gc_fetch.newer_version is not None:
+            newer_devices.append(label)
             continue
         if gc_fetch.status == "corrupt":
             # A corrupt manifest may reference blobs we'd otherwise orphan.
@@ -7266,6 +7385,13 @@ def _do_gc(
             for info in src_data.get("files", {}).values():
                 referenced_hashes.add(info["sha256"])
 
+    if newer_devices:
+        _error(
+            "cannot GC safely — newer-format manifest(s) are corrupt on: "
+            f"{', '.join(newer_devices)}. Leave them in place. "
+            f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
+        )
+
     if corrupt_devices:
         msg = (
             "cannot GC safely — manifest(s) corrupt on: "
@@ -7279,6 +7405,20 @@ def _do_gc(
         # referenced_hashes. A user who copies that list into a separate
         # delete flow would reap live data.
         _error(msg + (DRY_RUN_REFUSAL if dry_run else ""))
+
+    # A reserved-version manifest can arrive after the reference scan.
+    # Revalidate before the first deletion.
+    for device in devices:
+        did = device["device_id"]
+        again = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        if again.newer_version is None:
+            continue
+        label = f"{device.get('device_name', did)} ({did})"
+        _error(
+            "cannot GC safely — newer-format manifest(s) are corrupt on: "
+            f"{label}. Leave them in place. "
+            f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
+        )
 
     # List all blobs across all devices
     all_blobs = backend.list_keys(DATA_PREFIX)
@@ -8886,6 +9026,8 @@ def recover(
     # Refuse-when-healthy: if the normal recovery chain has any viable
     # source, this command has no business running.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    if fetch.newer_version is not None:
+        _error(_newer_format_message(fetch.newer_version, "manifest"))
     if fetch.is_ok:
         _error(
             "remote manifest is readable — recovery is not required. "
@@ -8972,6 +9114,8 @@ def resolve(
     the other machine.
     (r)emote keeps the bytes from the other machine and discards your
     local edits on this conflict.
+    (n)ewer keeps the more recently modified side; equal or unreadable
+    mtimes re-prompt for a manual choice.
     (m)erge accepts the LCS-merged result over canonical (offered only
     when the content is text; never the default key -- you must type it).
     (p)romote keeps BOTH: renames the .sync-conflict-* sidecar to its own
@@ -8998,10 +9142,8 @@ def resolve(
     Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.
 
-    Backwards-compat letters: `c` / `f` from pre-v0.9.0 are still
-    rejected loudly (real silent-data-loss risk pre-inversion). `b` /
-    `both` from pre-v0.11.x is aliased to (s)kip with a one-time notice
-    until 1.0 -- same on-disk effect, no risk in mapping it through.
+    `c` / `f` are rejected with exit 1. Any other unrecognized input,
+    including `b` / `both` (alias removed in 1.0.0), skips without a notice.
     """
     config = _get_config(read_only=False)
     backend = get_backend(config)

@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.0.0] - 2026-09-22
+
+**Mind Meld 1.0 establishes the [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x) for storage, CLI, and machine-readable output.** Existing 0.14.x fleets interoperate without migration; newer-format storage now refuses safely.
+
+### Removed
+
+- Retired the `b` / `both` conflict alias and its stderr notice: no action needed. Both keys now use ordinary unknown-input handling, leaving both files on disk just as before. `mm resolve --help` now lists `(n)ewer`; `c` / `f` still exit 1 in resolve and keep both files in inline pull.
+
+### Changed
+
+- Any crypto-init copy with version 0x03–0x0F now refuses selection and repair, including short envelopes and newer keychecks. Repair re-checks for newly arrived copies before mutation. Newer blobs raise a typed crypto error, and the CLI gives one upgrade remedy without deletion advice. Status/diag expose newer-format state; `diag --json` adds nullable `crypto_init.newer_version`. Autorun refusals retain exit 0 and the `crypto-error` breadcrumb.
+- The `/retro-fleet` skill no longer passes `--no-save`. The hidden no-op remains compatible with stale skill stores, and its notice names removal in 2.0.
+
+### Documentation
+
+- Recorded the failed-read cache-write probe: no repeated writes in 39 steady incomplete reader-0 passes; documented the unobserved later-reader allowance mechanism and intentional writes after complete scans. No cache-write behavior changed.
+- Declared Production/Stable, corrected historical v1-blob wording and the 0x02 blob-format reference, and documented macOS/iCloud Drive, Python 3.11+, and pipx prerequisites.
+- Added the 1.x compatibility classification, exit-code table, older/newer-side format gates and arrival-window limits, deprecation/downgrade rules, frozen 1.0 reader fixtures, CLI golden, vocabulary pins and behavioral exit checks.
+
+### Upgrade notes
+
+- No action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets interoperate; no wire or storage format changed. A future format-changing MAJOR must first require every registered peer to run at least 1.0.0, then write the new crypto-init before new-format data.
+- The upgrade nudge never downgrades. Once v1.0.0 is tagged, a regression ships as 1.0.1. Rollback within 1.x is a reinstall unless an intervening MINOR's Upgrade notes say otherwise; [the README rollback recipe](README.md#upgrading) pins `@v0.14.18`, moves the newer skill store aside, then runs `mm install-skills`. Re-run the `@latest` reinstall to resume upgrades.
+
 ## [0.14.18] - 2026-09-21
 
 **Status and diag show each reader's snapshot coverage and the last recorded attended attempt.** Publication receipts distinguish proven non-publication from unavailable evidence without changing content-sync exit codes.

@@ -4709,8 +4709,7 @@ def _resolve_events_dir() -> Path:
 
 
 NO_SAVE_REMOVED_IN = "v0.12.39"
-"""Named in the ``--no-save`` no-op notice so the eventual flag deletion
-needs no second announcement."""
+"""Version where snapshot saving was removed; the flag remains until 2.0."""
 
 
 def _read_mm_events_config_path() -> Path | None:
@@ -4858,7 +4857,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"mm: notice: --no-save is a no-op as of {NO_SAVE_REMOVED_IN} "
             "(trends are computed from the events corpus; snapshots are gone) "
-            "and will be removed in a future release.\n"
+            "and will be removed in 2.0.\n"
         )
 
     events_dir = _resolve_events_dir()

@@ -3,7 +3,7 @@
 > Open-source, self-hosted CLI tool for syncing Claude Code sessions across Macs via iCloud Drive.
 
 **License:** MIT
-**Status:** Pre-release
+**Status:** 1.0 — Production/Stable
 
 This is a personal tool. Anyone with a Claude Code setup and a Mac with iCloud Drive should be able to install it, run `mm init`, and be syncing within five minutes — no account creation, no third-party API, no vendor trust required.
 
@@ -248,8 +248,8 @@ is a seed used only during first-device bootstrap.
 
 **Per-file blob format (v2):** `[version=0x02:1][salt:16][nonce:12][compressed_ciphertext+tag:*]`
 - **Version:** 1 byte — `0x02` for the v0.6 format. v1 (`0x01`) is recognized
-  and rejected with a clear error; Mind Meld is pre-release and has no v1
-  blobs in the wild.
+  and rejected with a clear error. v1 blobs predated v0.6 and never reached
+  user storage; 1.0 retains the v2 format.
 - **Salt:** random 16 bytes, unique per file — input to HKDF (NOT to Argon2).
 - **Nonce:** random 12 bytes, unique per file.
 - **Ciphertext + GCM auth tag:** remaining bytes. Plaintext is gzip-compressed
@@ -566,7 +566,7 @@ Sidecars remain local-only. Promote or copy a managed sidecar to a regular filen
 
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
-- `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; pre-1.0 letters `b` / `both` accepted as deprecated alias mapping to skip). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site, because `_apply_incoming_file` already skipped before prompting whenever local was the newer file, so `(n)` would be a redundant alias of `(r)`.
+- `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; `b` / `both` skip silently as unrecognized input since the alias was removed in 1.0.0). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site, because `_apply_incoming_file` already skipped before prompting whenever local was the newer file, so `(n)` would be a redundant alias of `(r)`.
 - `fail`: preflights via `pullplan` (Track 62A) and exits **3** before applying any file if a conflict or local failure is predicted; mergeable changes from multiple peers no longer cause a false conflict. For CI use; combine with `--dry-run` for a write-free gate (`mm pull --dry-run --conflict-mode fail`). Best-effort without `--dry-run` — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
 **Conflict-prompt UX (v0.11.1, extended v0.12.8 / v0.12.10).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
@@ -576,7 +576,7 @@ Sidecars remain local-only. Promote or copy a managed sidecar to a regular filen
 4. The unified diff (`+`/`-` colored as before).
 5. Concrete-action option copy: `(l)ocal → discard <conflict>, keep <canonical>` / `(r)emote → overwrite <canonical> with <conflict> bytes` / `(s)kip → leave both files; run `mm resolve` later or delete manually` / `(a)bort → stop reviewing; exit`.
 
-Default flipped from `b` to `s` in v0.11.1; `b` / `both` aliased with one-time stderr notice until 1.0. The prior `c` / `f` letters from pre-v0.9.0 remain loud-rejected (real silent-data-loss risk pre-inversion). Since v0.12.8 the default key is **always** `(s)kip` at both sites — Enter never auto-accepts a merge, and since v0.12.10 it never auto-accepts a recency guess either.
+Default flipped from `b` to `s` in v0.11.1; `b` / `both` now skip silently as unrecognized input (alias removed in 1.0.0). The prior `c` / `f` letters are rejected with exit 1 in `mm resolve` only; inline pull keeps both files. Since v0.12.8 the default key is **always** `(s)kip` at both sites — Enter never auto-accepts a merge, and since v0.12.10 it never auto-accepts a recency guess either.
 
 The shared leaf renderers (`render_prompt`, `render_banner`, `render_capped_diff`, `count_divergent_lines`, `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`) live in `conflictdiff.py`; site-level dispatch over the four canonical-exists × inversion-mode shapes stays at each call site.
 

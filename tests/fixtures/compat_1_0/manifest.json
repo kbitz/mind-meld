@@ -1,0 +1,23 @@
+{
+  "device_id": "compat",
+  "device_name": "Compat",
+  "sources": {
+    "notes": {
+      "base_path": "/compat/notes",
+      "files": {
+        "note.md": {
+          "mtime": "2026-09-22T14:40:00.737876+00:00",
+          "sha256": "bdfabe681bf388c168117f38e2aa878898da80591c377967017e5c82a4ad2f1d",
+          "size": 37
+        }
+      }
+    }
+  },
+  "timestamp": "2026-09-22T14:40:00.738813+00:00",
+  "tombstones": {
+    "notes:removed.md": {
+      "deleted_at": "2026-09-22T12:00:00+00:00",
+      "deleted_by": "compat"
+    }
+  }
+}

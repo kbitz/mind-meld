@@ -1370,74 +1370,17 @@ class TestResolveInteractiveLoop:
         assert canonical.read_bytes() == b"local content"
         assert conflict.read_bytes() == b"remote content"
 
-    def test_b_alias_warns_then_skips(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        """Pre-1.0 deprecation alias: 'b' / 'both' map to (s)kip with a
-        one-time stderr notice. On-disk effect identical to skip --
-        no risk of silent data loss in mapping it through."""
-
+    @pytest.mark.parametrize("choice", ["b", "both", "back", "browse", "between", "unknown"])
+    def test_unknown_input_skips_silently(self, tmp_path, monkeypatch, capsys, choice):
+        """The retired keys use ordinary unknown-input handling in 1.0."""
         canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "b")
-
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
         _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        # Skip semantics: nothing changes on disk.
         assert canonical.read_bytes() == b"local content"
         assert conflict.read_bytes() == b"remote content"
-
         captured = capsys.readouterr()
-        assert "mm: notice:" in captured.err
-        assert "now means 'skip'" in captured.err
-
-    def test_full_word_both_alias_warns_then_skips(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
-        """The full word 'both' is also accepted as the deprecation alias."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-
-        captured = capsys.readouterr()
-        assert "mm: notice:" in captured.err
-
-    def test_back_does_not_trigger_b_alias(self, tmp_path: Path, monkeypatch, capsys) -> None:
-        """REGRESSION: alias dispatch is exact-match, not startswith.
-        'back', 'browse', 'between' must NOT silently trigger the alias."""
-
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "back")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        # Falls through to the unrecognized-input branch -- skip semantics.
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
-        # No alias notice should fire for 'back'.
-        captured = capsys.readouterr()
+        assert "skipped; both files left on disk" in captured.out
         assert "mm: notice:" not in captured.err
-
-    def test_resolve_delegates_legacy_alias_to_shared_normalizer(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        canonical, conflict = self._make_conflict_pair(tmp_path)
-        choices: list[str] = []
-
-        def fake_normalizer(choice: str) -> str:
-            choices.append(choice)
-            return "s"
-
-        monkeypatch.setattr(resolveflow, "_normalize_legacy_skip_choice_and_warn", fake_normalizer)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
-
-        _resolve_interactive_loop([("s1", conflict, canonical)])
-
-        assert choices == ["both"]
-        assert canonical.read_bytes() == b"local content"
-        assert conflict.read_bytes() == b"remote content"
 
     def test_resolve_uses_shared_diff_renderer_with_its_80_line_cap(
         self, tmp_path: Path, monkeypatch
@@ -1788,7 +1731,7 @@ class TestResolveInteractiveLoopNewBehavior:
     * color LOCAL/REMOTE banners above the diff
     * device-name attribution on the REMOTE banner
     * three-number divergence summary
-    * (b)oth -> (s)kip alias with one-time notice
+    * unknown input, including retired b/both, skips silently
     * (a)bort leaves all on-disk state unchanged
     """
 
@@ -2925,37 +2868,20 @@ class TestParseConflictDeviceShort:
 # ── Component 1: never default Enter to (m)erge ──────────────────────
 
 
-class TestInlinePromptLegacySkipAlias:
+class TestInlinePromptUnknownInput:
     @staticmethod
     def _local_file(tmp_path: Path) -> Path:
         local = tmp_path / "notes.md"
         local.write_bytes(b"local content\n")
         return local
 
-    @pytest.mark.parametrize("choice", ["b", "both"])
-    def test_alias_warns_and_keeps_both(
-        self, tmp_path: Path, monkeypatch, capsys, choice: str
-    ) -> None:
+    @pytest.mark.parametrize("choice", ["b", "both", "back", "browse", "between", "unknown"])
+    def test_unknown_input_keeps_both_silently(self, tmp_path, monkeypatch, capsys, choice):
         local = self._local_file(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
-
         outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
-
         assert (outcome, merged) == ("keep-both", None)
-        captured = capsys.readouterr()
-        assert "mm: notice:" in captured.err
-        assert "now means 'skip'" in captured.err
-
-    @pytest.mark.parametrize("choice", ["back", "browse", "between"])
-    def test_near_miss_does_not_emit_alias_notice(
-        self, tmp_path: Path, monkeypatch, capsys, choice: str
-    ) -> None:
-        local = self._local_file(tmp_path)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
-
-        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
-
-        assert (outcome, merged) == ("keep-both", None)
+        assert local.read_bytes() == b"local content\n"
         assert "mm: notice:" not in capsys.readouterr().err
 
     @pytest.mark.parametrize("choice", ["c", "f"])
@@ -2991,22 +2917,6 @@ class TestInlinePromptLegacySkipAlias:
 
         assert (outcome, merged) == ("keep-both", None)
         assert caps == [60]
-
-    def test_delegates_legacy_alias_to_shared_normalizer(self, tmp_path: Path, monkeypatch) -> None:
-        local = self._local_file(tmp_path)
-        choices: list[str] = []
-
-        def fake_normalizer(choice: str) -> str:
-            choices.append(choice)
-            return "s"
-
-        monkeypatch.setattr(resolveflow, "_normalize_legacy_skip_choice_and_warn", fake_normalizer)
-        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "both")
-
-        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
-
-        assert (outcome, merged) == ("keep-both", None)
-        assert choices == ["both"]
 
 
 class TestNeverDefaultToMerge:
@@ -3136,7 +3046,7 @@ class TestSuppressMergeWithoutLineStructure:
         passing. Nothing else in the suite asserts that the inline prompt offers
         `(m)erge` at all — the pre-existing `_prompt_conflict_choice` merge
         tests all use single-line content on both sides and only exercise the
-        `b`/`both` aliases.
+        retired `b`/`both` keys (ordinary unknown input).
         """
         local = tmp_path / "notes.md"
         local.write_bytes(b"line one\nline two\n")
