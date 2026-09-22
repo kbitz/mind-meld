@@ -1957,6 +1957,40 @@ class TestSyntheticAndUnpricedTokens:
         assert "<synthetic>" in result.tokens_by_model
         assert result.tokens_by_model["<synthetic>"]["input"] == 999_999
 
+    def test_synthetic_only_and_zero_days_are_not_active(self):
+        """A day counts only when a non-excluded model moves a counter."""
+        from mind_meld.skills.retro_fleet.aggregator import aggregate_sessions
+
+        def bucket(model, n):
+            return {
+                "input": n,
+                "cache_create": 0,
+                "cache_read": 0,
+                "output": 0,
+                "by_model": {
+                    model: {
+                        "input": n,
+                        "cache_create": 0,
+                        "cache_read": 0,
+                        "output": 0,
+                    }
+                },
+            }
+
+        ev = self._make_sessions_event(
+            tokens_by_day={
+                "2026-04-30": bucket("claude-sonnet-4-6", 10),
+                "2026-05-01": bucket("<synthetic>", 999),
+                "2026-05-02": bucket("claude-sonnet-4-6", 0),
+            }
+        )
+        result, _skills_unused = aggregate_sessions(
+            [ev],
+            since=datetime(2026, 4, 24, tzinfo=timezone.utc),
+            until=datetime(2026, 5, 3, tzinfo=timezone.utc),
+        )
+        assert result.active_days == {"2026-04-30"}
+
     def test_unpriced_model_note_surfaces_in_render(self):
         from mind_meld.skills.retro_fleet.aggregator import (
             RetroData,
@@ -2078,9 +2112,9 @@ class TestCostLineHonesty:
 
     def _data(self, tokens_by_model):
         """Top-level totals are derived from ``by_model`` rather than
-        hand-set: ``_render_token_block`` hides the whole block when they
-        sum to zero, so a fixture that omits them makes every assertion
-        pass vacuously."""
+        hand-set. ``aggregate_agent_usage`` prices and sums the Claude row
+        from that map, so a fixture whose totals do not match it would
+        assert a number the renderer never shows."""
         from mind_meld.skills.retro_fleet.aggregator import RetroData, SessionsAggregate
 
         def _sum(field):
@@ -6265,12 +6299,11 @@ class TestAgentsCardBlock:
     AGENT LOGS pair, which reported two units from two sources and is the
     reason the card read Claude-first."""
 
-    def _usage(self, rows, *, machines_known=3, with_activity=1, accepted=1):
+    def _usage(self, rows, *, machines_known=3, with_activity=1):
         return aggregator.FleetAgentUsage(
             rows=tuple(rows),
             machines_with_activity=with_activity,
             machines_known=machines_known,
-            snapshots_accepted=accepted,
         )
 
     def _row(self, key, label, tokens, days, *, machines=1, by_model=None, known=True, causes=()):

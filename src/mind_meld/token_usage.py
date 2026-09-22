@@ -565,14 +565,13 @@ def sum_bucket(bucket: dict[str, Any]) -> int:
     "adding a 5th token field is a one-line change to ``TOKEN_FIELDS``"
     keeps holding for summing too.
 
-    **Deliberately NOT shared with the aggregator's
-    ``_aggregate_model_families``, which sums the same four fields.** That
-    looks like the same operation and is not, because the two callers sit on
-    opposite sides of a trust boundary:
+    **Deliberately NOT shared with ``aggregate_agent_usage``, which sums the
+    same four fields.** That looks like the same operation and is not, because
+    the two callers sit on opposite sides of a trust boundary:
 
-    * ``_aggregate_model_families`` reads ``SessionsAggregate.tokens_by_model``,
+    * ``aggregate_agent_usage`` reads ``SessionsAggregate.tokens_by_model``,
       a PUBLIC dataclass field that tests and library callers hand-build, so it
-      wraps every field in ``_safe_int``-style coercion on purpose.
+      wraps every field in ``_safe_aggregate_token_int`` on purpose.
     * This helper's callers read ``HostDeviceSnapshot.lifetime_by_family``,
       which ``_accept_hosts_payload`` already proved is exactly
       ``TOKEN_FIELDS`` with non-bool ints in ``[0, _MAX_COUNTER]``.

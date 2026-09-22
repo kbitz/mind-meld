@@ -640,11 +640,6 @@ class FleetAgentUsage:
     duplicate_ledger: tuple[str, ...] = ()
     machines_with_activity: int = 0
     machines_known: int | None = None
-    snapshots_accepted: int = 0
-
-    @property
-    def any_activity(self) -> bool:
-        return any(r.has_volume for r in self.rows)
 
 
 def _host_family_day_tuples(
@@ -946,7 +941,6 @@ def aggregate_agent_usage(
         duplicate_ledger=_detect_duplicate_ledgers(_host_family_day_tuples(inventory, lo, hi)),
         machines_with_activity=len(activity_devices),
         machines_known=machines_known,
-        snapshots_accepted=len(inventory.by_device),
     )
 
 
@@ -3212,6 +3206,8 @@ def _safe_aggregate_token_int(x: object) -> int:
 
 
 _DEVICE_TABLE_LABEL_WIDTH = 8
+# Leave room for " ({short id})" when two registry names sanitize to one label.
+_COLLIDING_LABEL_BUDGET = 110
 
 
 def _device_table_label(device: str) -> str:
@@ -3742,9 +3738,9 @@ def _agent_coverage_notes(
         else:
             # Reachable whenever the device registry is unavailable:
             # `aggregate_host_usage` sets `missing = frozenset()` when
-            # `registered_ids is None`. Without this branch the card block, the
-            # body section AND the notes are all empty, so a vanished block
-            # becomes the only diagnostic — exactly what the contract forbids.
+            # `registered_ids is None`. The card and table already say no
+            # usage was observed; this note is what attaches the
+            # attended-refresh remedy in health.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
                 f"for each Mac that should publish usage, {_attended_usage_remedy()}."
@@ -4001,7 +3997,7 @@ def device_labels(fleet: FleetState) -> dict[str, str]:
     for label, devices in by_name.items():
         if len(devices) > 1:
             for device in devices:
-                out[device] = f"{label[:110]} ({_device_table_label(device)})"
+                out[device] = f"{label[:_COLLIDING_LABEL_BUDGET]} ({_device_table_label(device)})"
     return out
 
 

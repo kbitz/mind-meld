@@ -132,12 +132,12 @@ class TestTokenFieldsAndFactories:
 
 
 class TestSumBucket:
-    """`sum_bucket` is the leaf the agent-log renderers total buckets with.
+    """`sum_bucket` totals one already-validated host bucket.
 
-    Deliberately NOT shared with `aggregator._aggregate_model_families`, which
-    sums the same four fields on the other side of a trust boundary. These tests
-    pin the contract that keeps them separable: type-defensive, never
-    value-clamping, and driven entirely by `TOKEN_FIELDS`.
+    Deliberately NOT shared with `aggregate_agent_usage`, which sums the same
+    four fields on the public `tokens_by_model` side of the trust boundary.
+    These tests pin the contract that keeps them separable: type-defensive,
+    never value-clamping, and driven entirely by `TOKEN_FIELDS`.
     """
 
     def test_sums_only_token_fields(self) -> None:
