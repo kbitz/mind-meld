@@ -4374,6 +4374,9 @@ def _push_core(
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
+    fresh_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
+    if fresh_manifest.newer_version is not None:
+        _error(_newer_format_message(fresh_manifest.newer_version, "manifest"))
     backend.put(mkey, enc_manifest)
     if attempt is not None:
         attempt.content_accepted = True
@@ -7394,6 +7397,20 @@ def _do_gc(
         # referenced_hashes. A user who copies that list into a separate
         # delete flow would reap live data.
         _error(msg + (DRY_RUN_REFUSAL if dry_run else ""))
+
+    # A reserved-version manifest can arrive after the reference scan.
+    # Revalidate before the first deletion.
+    for device in devices:
+        did = device["device_id"]
+        again = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+        if again.newer_version is None:
+            continue
+        label = f"{device.get('device_name', did)} ({did})"
+        _error(
+            "cannot GC safely — newer-format manifest(s) are corrupt on: "
+            f"{label}. Leave them in place. "
+            f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
+        )
 
     # List all blobs across all devices
     all_blobs = backend.list_keys(DATA_PREFIX)

@@ -8833,6 +8833,38 @@ class TestNewerStorage66A:
         assert "cannot GC safely" in result.output
         assert backend.get(blob) == b"newer-only"
 
+    def test_late_newer_manifest_blocks_publish_and_gc(self, push_preview56, monkeypatch):
+        env = push_preview56
+        backend = env["backend"]
+        mine = env["config"]["device"]["id"]
+        key = storage_keys.manifest_key(mine)
+        original = cli_module._fetch_remote_manifest
+        phase = {"name": "push", "n": 0}
+
+        def fetch(storage, device_id, passphrase, memory_kb):
+            result = original(storage, device_id, passphrase, memory_kb)
+            if device_id != mine:
+                return result
+            phase["n"] += 1
+            if phase["n"] > 1:
+                return cli_module.ManifestFetch(status="corrupt", newer_version=3)
+            return result
+
+        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fetch)
+        published = backend.get(key) if backend.exists(key) else None
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 1, pushed.output
+        assert "newer mm (format 0x03)" in pushed.output
+        assert (backend.get(key) if backend.exists(key) else None) == published
+        phase["name"] = "gc"
+        phase["n"] = 0
+        blob = storage_keys.blob_key(mine, "d" * 64)
+        backend.put(blob, b"only-late-manifest")
+        collected = runner.invoke(app, ["gc"])
+        assert collected.exit_code == 1, collected.output
+        assert "cannot GC safely" in collected.output
+        assert backend.get(blob) == b"only-late-manifest"
+
     def test_push_leaves_own_newer_manifest_in_place(self, push_preview56):
         env = push_preview56
         backend = env["backend"]
