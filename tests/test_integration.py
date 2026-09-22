@@ -8714,6 +8714,26 @@ class TestNewerStorage66A:
         assert not cfg.exists()
         assert {p.name: p.read_bytes() for p in storage.iterdir()} == {"mm-crypto-init": b"\x03"}
 
+    def test_init_refuses_newer_arriving_after_successful_bootstrap(self, tmp_path, monkeypatch):
+        from mind_meld import upgrade
+
+        cfg = TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        storage.mkdir()
+        original = cli_module.bootstrap_crypto_init
+
+        def bootstrap(backend, passphrase, **kwargs):
+            result = original(backend, passphrase, **kwargs)
+            (backend.root / "mm-crypto-init").write_bytes(b"\x03")
+            return result
+
+        monkeypatch.setattr(cli_module, "bootstrap_crypto_init", bootstrap)
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
+        assert result.exit_code == 1, result.output
+        assert upgrade.INSTALL_CMD in " ".join(result.output.split())
+        assert not cfg.exists()
+        assert (storage / "mm-crypto-init").read_bytes() == b"\x03"
+
     def test_repair_arrival_keeps_upgrade_remedy(self, push_preview56, monkeypatch):
         from mind_meld import upgrade
 
@@ -8753,6 +8773,25 @@ class TestNewerStorage66A:
             ]
         else:
             assert "corrupt" in result.output.lower()
+
+    @pytest.mark.parametrize("command", ["status", "diff"])
+    def test_newer_manifest_inspection_never_claims_recovery_or_empty_diff(
+        self, push_preview56, command
+    ):
+        from mind_meld import upgrade
+
+        env = push_preview56
+        backend = env["backend"]
+        backend.put(storage_keys.manifest_key(env["config"]["device"]["id"]), b"\x03")
+
+        result = runner.invoke(app, [command])
+        text = " ".join((result.output + (result.stderr or "")).split())
+        assert upgrade.INSTALL_CMD in text
+        assert "next 'mm push' will attempt recovery" not in text
+        assert "showing diff against empty remote" not in text
+        assert "In sync." not in text
+        assert "Total remote:" not in text
+        assert result.exit_code == (0 if command == "status" else 1), result.output
 
     @pytest.mark.parametrize("shape", ["older-sibling", "conflict-only"])
     def test_newer_manifest_sibling_blocks_gc(self, push_preview56, shape):
@@ -8832,6 +8871,45 @@ class TestNewerStorage66A:
         assert result.exit_code == 1, result.output
         assert "cannot GC safely" in result.output
         assert backend.get(blob) == b"newer-only"
+
+    def test_newer_manifest_arriving_during_conflict_validation_is_not_ignored(
+        self, push_preview56, monkeypatch
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        register_device(backend, "dev-peer", "Peer")
+        key = storage_keys.manifest_key("dev-peer")
+        parent = backend.root / Path(key).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        current = encrypt(
+            serialize_manifest(
+                {
+                    "device_id": "dev-peer",
+                    "device_name": "Peer",
+                    "sources": {},
+                    "tombstones": {},
+                }
+            ),
+            PASSPHRASE,
+            MEMORY_KB,
+        )
+        conflict = parent / "manifest.json 2.enc"
+        conflict.write_bytes(current)
+        reads = 0
+        original = Path.read_bytes
+
+        def read_bytes(path):
+            nonlocal reads
+            if path == conflict:
+                reads += 1
+                if reads == 2:
+                    return b"\x03"
+            return original(path)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-peer", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "corrupt"
+        assert fetched.newer_version == 3
 
     def test_late_newer_manifest_blocks_publish_and_gc(self, push_preview56, monkeypatch):
         env = push_preview56

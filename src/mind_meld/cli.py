@@ -5886,6 +5886,12 @@ def status(
         )
     if fetch.status == "missing":
         console.print("  [dim]Remote manifest: not yet pushed from this device.[/dim]")
+    elif fetch.newer_version is not None:
+        console.print(
+            "  [yellow]Remote manifest requires a newer mm:[/yellow] "
+            + _newer_format_message(fetch.newer_version, "manifest")
+        )
+        return
     elif fetch.status == "corrupt":
         console.print(
             "  [yellow]Remote manifest: CORRUPT[/yellow] — next 'mm push' "
@@ -7196,6 +7202,8 @@ def diff_cmd(
             f"[dim]No remote manifest for "
             f"{'device ' + target_id if from_device else 'this device'} yet.[/dim]"
         )
+    elif diff_fetch.newer_version is not None:
+        _error(_newer_format_message(diff_fetch.newer_version, "manifest"))
     elif diff_fetch.status == "corrupt":
         console.print(
             f"[yellow]Warning:[/yellow] remote manifest for "

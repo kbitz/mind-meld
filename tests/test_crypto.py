@@ -140,6 +140,39 @@ class TestNewerFormats66A:
             crypto.apply_crypto_init_repair(backend, fetched)
         assert canonical.read_bytes() == b"\x03"
 
+    def test_current_canonical_arriving_during_preserve_is_not_overwritten(
+        self, tmp_path, monkeypatch
+    ):
+        tmp_path = tmp_path / "storage"
+        backend = LocalBackend(tmp_path)
+
+        def init_bytes(salt: bytes) -> bytes:
+            master = crypto.load_master_key(PASSPHRASE, salt, MEMORY_KB)
+            return crypto._serialize_crypto_init(
+                MEMORY_KB,
+                salt,
+                crypto._encrypt_with_master_key(crypto._KEYCHECK_PLAINTEXT, master),
+            )
+
+        canonical = tmp_path / CRYPTO_INIT_KEY
+        backend.put(CRYPTO_INIT_KEY, init_bytes(b"\xff" * 16))
+        conflict = tmp_path / "mm-crypto-init 2"
+        conflict.write_bytes(init_bytes(b"\x00" * 16))
+        fetched = fetch_crypto_init(backend)
+        replacement = init_bytes(b"\xaa" * 16)
+        original_put = backend.put
+
+        def put(key, data):
+            if str(key).startswith(f"{CRYPTO_INIT_KEY}.preserved-"):
+                canonical.write_bytes(replacement)
+            return original_put(key, data)
+
+        monkeypatch.setattr(backend, "put", put)
+        with pytest.raises(CryptoError, match="changed while the command ran"):
+            crypto.apply_crypto_init_repair(backend, fetched)
+        assert canonical.read_bytes() == replacement
+        assert conflict.exists()
+
 
 # ── derive_key (Argon2 primitive) ─────────────────────────────────────
 
