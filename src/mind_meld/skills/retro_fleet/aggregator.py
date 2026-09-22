@@ -817,11 +817,9 @@ def aggregate_agent_usage(
             # family-partitioned, so unattributed residue cannot be blamed on
             # one family. Shared is the honest scope.
             shared.add("some tokens were not attributed to a named model (the per-day model cap)")
-        if (snap.partial_reason or snap.degraded_reason) and not (snap.partial or snap.degraded):
-            shared.add(
-                f"{device_label(device, labels)}: "
-                "host coverage metadata was unusable; run `mm diag`"
-            )
+        unusable_coverage = (snap.partial_reason or snap.degraded_reason) and not (
+            snap.partial or snap.degraded
+        )
         if snap.tokens_by_day is None and touched:
             shared.add(
                 f"{device_label(device, labels)}: "
@@ -854,6 +852,16 @@ def aggregate_agent_usage(
             per_family.setdefault(fam, set()).add(
                 "a host reader failed (" + ", ".join(_reader_display_labels(tuple(readers))) + ")"
             )
+        if unusable_coverage:
+            # An empty reader list is not "no problem". The machine contributed
+            # no family to attach the warning to, and a healthy peer would
+            # otherwise render an ordinary estimate.
+            cause = (
+                f"{device_label(device, labels)}: "
+                "host coverage metadata was unusable; run `mm diag`"
+            )
+            for family in sorted(_HOST_FAMILIES):
+                per_family.setdefault(family, set()).add(cause)
         for family in touched:
             family_slice = {
                 m: u for m, u in by_model.items() if host_usage.host_family(m) == family
@@ -4044,6 +4052,16 @@ def agent_row_floor_causes(row: FleetAgentRow) -> tuple[str, ...]:
 def _agent_row_cost(row: FleetAgentRow) -> tuple[float | None, bool]:
     """``(total, is_floor)``; ``None`` when nothing in the row is priceable."""
     if not row.counters_known or not row.by_model:
+        return None, False
+    # A priced model retained at zero tokens must not turn an all-unpriced
+    # row into ``≥$0``. Availability needs nonzero volume under a resolved card.
+    if not any(
+        isinstance(bucket, dict)
+        and model not in token_usage.COST_EXCLUDED_MODELS
+        and token_usage.resolve_prices(model) is not None
+        and token_usage.sum_bucket(bucket) > 0
+        for model, bucket in row.by_model.items()
+    ):
         return None, False
     floor = bool(agent_row_floor_causes(row))
     total, costs = _section_costs(row.by_model, floor=floor)

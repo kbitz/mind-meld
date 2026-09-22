@@ -29,6 +29,7 @@ All notable changes to Mind Meld will be documented in this file.
 - Partial/failed-reader coverage stays conservative across all families; per-machine Grok bounds retain their machine labels. Skill names and fleet-name lists remain bounded in the JSON payloads and report.
 - Pricing health matches the visible cell: `cost_floor` accompanies a priced `≥` subtotal; `cost_unavailable` explains `—` when no priced basis exists. Legacy rows suppress numeric and extrapolated pricing health and identify the machines needing a versioned upgrade. Missing or rejected detail retains its machine and acceptor reason.
 - The card's machine ratio counts current registry members, while row machine counts retain all observed Claude contributors. Reader failures from snapshots predating the window no longer change current cost markers or pricing rates.
+- A peer with unusable coverage metadata and no in-window usage still floors the agents another machine did report. A priced model recorded at zero tokens does not turn an otherwise unpriced row into `$0`.
 
 ### Upgrade notes
 

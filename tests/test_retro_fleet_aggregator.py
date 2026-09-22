@@ -6810,6 +6810,52 @@ class TestUnifiedAgents:
         row = self._row(self._usage_for(self._data([snap])), "codex")
         assert row.tokens == 1_000_000
         assert aggregator._agent_row_cost(row) == (5.0, True)
+        assert any("not attributed to a named model" in cause for cause in row.floor_causes)
+
+    def test_unusable_coverage_metadata_floors_without_naming_a_reader(self):
+        """A reason with an empty reader list is broken metadata, not a failed reader."""
+        snap = _snap(
+            "dev-a",
+            self.UNTIL,
+            families={"codex": {"2026-04-22": _usage(7)}},
+        )
+        snap.degraded_reason = "invalid_coverage"
+        row = self._row(self._usage_for(self._data([snap], known_ids=("dev-a",))), "codex")
+        assert any("host coverage metadata was unusable" in cause for cause in row.floor_causes)
+        assert not any("host reader failed" in cause for cause in row.floor_causes)
+
+    def test_empty_malformed_snapshot_floors_a_healthy_peer(self):
+        healthy = _snap(
+            "dev-a",
+            self.UNTIL,
+            families={"codex": {"2026-04-22": _usage(1_000_000)}},
+            counter_semantics="disjoint-v1",
+        )
+        healthy.tokens_by_day = {
+            "2026-04-22": {**_usage(1_000_000), "by_model": {"gpt-6-astra": _usage(1_000_000)}}
+        }
+        empty = _snap("dev-b", self.UNTIL, families={})
+        empty.degraded_reason = "invalid_coverage"
+        usage = self._usage_for(self._data([healthy, empty], known_ids=("dev-a", "dev-b")))
+        row = self._row(usage, "codex")
+        assert any("host coverage metadata was unusable" in cause for cause in row.floor_causes)
+        total, is_floor = aggregator._agent_row_cost(row)
+        assert is_floor is True
+        assert total is not None and total > 0
+
+    def test_zero_priced_bucket_does_not_price_unpriced_volume(self):
+        row = aggregator.FleetAgentRow(
+            key="codex",
+            label="Codex",
+            by_model={
+                "gpt-6-astra": _usage(0),
+                "gpt-not-a-real-model": _usage(1_000_000),
+            },
+            tokens=1_000_000,
+            active_days=1,
+            machines=1,
+        )
+        assert aggregator._agent_row_cost(row) == (None, False)
 
     def test_zero_only_model_maps_are_not_agent_activity(self):
         hosts = {"codex": {"2026-04-22": _usage(0)}}
