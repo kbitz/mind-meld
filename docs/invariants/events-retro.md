@@ -654,6 +654,11 @@ happened on.
   conservative result is `≥` on every agent's available priced subtotal.
   Only snapshots eligible for the requested window propagate reader causes;
   stale inventory remains available for diagnostics without repricing current rows.
+  Unusable coverage metadata is the same scope: a snapshot that carries
+  `partial_reason` or `degraded_reason` but empty `partial` / `degraded` lists
+  still floors every host family, including when that machine contributed no
+  in-window usage. An empty reader list is not "no problem"; a healthy peer
+  would otherwise render an ordinary estimate.
   Inherent pricing-tier causes remain specific to the models they describe;
   each machine's recorded-token bounds name that machine in the health payload.
 - `residual` (the per-day model cap leaving unattributable tokens) is
@@ -672,6 +677,10 @@ happened on.
   row with no priced basis renders `—` and emits `cost_unavailable`, retaining
   the reasons and remedies for missing, dropped, or entirely unpriced detail.
   Do not describe an unavailable cell as a priced floor.
+- A priced model retained at zero tokens is not a priced basis.
+  `_agent_row_cost` returns unavailable unless some non-excluded model has
+  nonzero volume under a resolved card, so a zero-token priced id cannot turn
+  an otherwise unpriced row into `≥$0`.
 
 #### The health payload replaced the Notes section
 

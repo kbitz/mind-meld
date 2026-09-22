@@ -453,7 +453,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Cost is not subscription spend: historical tokens are repriced at the rates bundled with this mm release, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
-Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
+Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
 Legend:
 
@@ -464,7 +464,7 @@ Legend:
   long-context tier, and are named per agent in `MM_HEALTH`.
 - `—` is unavailable, not zero.
 
-An agent with no priceable model shows `—`, never a confident `$0`. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader or nonzero model cache writes suppress that figure.
+An agent with no priceable model shows `—`, never a confident `$0`. A priced model stored at zero tokens is not a priced basis, so it cannot turn that row into `$0` either. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader or nonzero model cache writes suppress that figure.
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump.
 

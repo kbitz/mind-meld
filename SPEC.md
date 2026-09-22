@@ -22,7 +22,7 @@ Claude Code stores sessions, todos, artifacts, and tool results locally in `~/.c
 5. **Single binary feel** — Python CLI installed via `pipx`, zero config to start.
 6. **Open-source and forkable** — MIT-licensed, clean codebase, no proprietary dependencies.
 7. **Newcomer-friendly docs** — a first-time user with no context should go from `pip install` to working sync by following the README alone.
-8. **Host-interchangeable retro usage** — Claude session totals and Codex/Grok host snapshots appear as labeled families on one MODELS card. Usage consent is not file sync. See [Host Interchangeability](#host-interchangeability).
+8. **Host-interchangeable retro usage** — Claude, Codex, and Grok appear as identical rows (tokens, days, machines, cost, top model) on one `## Agents` table and the card `AGENTS` block. Usage consent is not file sync. See [Host Interchangeability](#host-interchangeability).
 
 ## Non-Goals
 
@@ -784,7 +784,7 @@ Claude, Codex, and Grok are the three hosts. They are peers for **fleet usage di
 
 | If someone asks for… | The answer |
 |---|---|
-| Grok (or Codex) rows next to Claude on the MODELS card | Tracks 22A / 23A. 18D is the Grok reader; 21A is consent + publish. |
+| Grok (or Codex) rows next to Claude on the fleet retro | Shipped in v1.1 as one `## Agents` table and one card `AGENTS` block; the rows share a unit. 18D is the Grok reader; 21A is consent + publish. Tracks 22A / 23A were the pre-1.1 card. |
 | Grok skills / home rules roaming across Macs | `type: "grok"` source. Walker hardcodes `skills/`, `commands/`, `rules/`. Same verb as usage: `mm enable-source grok`. |
 | `retro-fleet` installed into `~/.grok/skills` | No. Plan C resolved in v0.12.43: Grok 1.0.5 already discovers `~/.claude/skills` via default-on Claude compat, so mm maintains no Grok skill link. `mm diag --json` reports that under the sibling `host_skill_discovery` key, never as a `skill_links` row. |
 | Uploading Grok / Codex / Claude sessions | No. Claude does not sync `~/.claude/projects/**/*.jsonl` either. |
@@ -801,7 +801,7 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 
 ### Planned follow-ups (not 18D / 21A)
 
-1. **Plan A (scheduled):** Groups 22 and 23 render accepted host snapshots beside Claude totals, with coverage, not false zeros.
+1. **Plan A (shipped, then superseded in v1.1):** Groups 22 and 23 rendered accepted host snapshots beside Claude totals, with coverage, not false zeros. v1.1 replaced that split card with one Agents table.
 2. **Plan B (Track 22B):** a `type: "grok"` source named `grok`. Walker hardcodes `skills/`, `commands/`, `rules/`. Never `sessions/`, credentials, or `config.toml`.
 3. **Plan C (resolved, v0.12.43):** mm maintains **no** Grok skill link. Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (verified with `grok inspect --json`), so a fourth `skill_link` target would duplicate a link the host already reads. `mm diag` reports discovery under `host_skill_discovery` instead. Exit criterion for any future host: mm maintains a skill link only for hosts that do not discover `~/.claude/skills`. See `docs/designs/host-parity.md`.
 
