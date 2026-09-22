@@ -77,6 +77,25 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
 # ── JSON mode ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("newer", [False, True])
+def test_crypto_init_newer_version66a(tmp_path, monkeypatch, newer):
+    from mind_meld import upgrade
+
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    if newer:
+        (storage / "mm-crypto-init 2").write_bytes(b"\x03")
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    ci = json.loads(result.stdout)["crypto_init"]
+    assert ci["newer_version"] == (3 if newer else None)
+    assert ci["status"] == ("corrupt" if newer else "ok")
+    if newer:
+        result = runner.invoke(app, ["diag"])
+        flat = " ".join(result.output.split())
+        assert "newer_version: 3" in flat
+        assert upgrade.INSTALL_CMD in flat
+
+
 def _enable_capture_sources(tmp_path, *, readers):
     cfg = load_config()
     names = {s["name"] for s in cfg["sync"]["sources"]}

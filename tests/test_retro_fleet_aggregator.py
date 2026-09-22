@@ -4374,6 +4374,7 @@ class TestMainCliFlags:
         captured = capsys.readouterr()
         assert captured.out.startswith("# Retro")
         assert "mm: notice: --no-save is a no-op as of v0.12.39" in captured.err
+        assert "will be removed in 2.0" in captured.err
         assert "warning:" not in captured.err
 
     def test_bare_integer_window_suggests_nd(self, capsys):

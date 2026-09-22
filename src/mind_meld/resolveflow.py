@@ -74,25 +74,6 @@ from mind_meld.safety import safe_str
 # filename timestamp is on or after this are post-inversion mints.
 _INVERSION_SHIPPED_AT = datetime(2026, 4, 25, tzinfo=timezone.utc)
 
-_LEGACY_SKIP_ALIAS_NOTICE = (
-    "mm: notice: 'b' / 'both' now means 'skip'; use 's' going forward (alias removed at 1.0)."
-)
-
-
-def _normalize_legacy_skip_choice_and_warn(choice: str) -> str:
-    """Map only the retired ``b`` / ``both`` aliases to skip and warn.
-
-    This is deliberately a side-effecting compatibility helper: both prompt
-    sites must preserve the exact stderr notice while one authority owns the
-    exact-match rule. Callers normalize casing and whitespace before calling.
-    All other input, including ``back`` / ``browse`` / ``between`` and the
-    resolver-only legacy ``c`` / ``f`` policy, stays untouched.
-    """
-    if choice in ("b", "both"):
-        print(_LEGACY_SKIP_ALIAS_NOTICE, file=sys.stderr)
-        return "s"
-    return choice
-
 
 def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
     """Return the directories `mm push` would walk for this source.
@@ -821,10 +802,6 @@ def _resolve_interactive_loop(
                     )
                     continue
 
-            # Map only the retired b/both compatibility aliases after the
-            # resolver-specific c/f and newer policies above. The shared
-            # helper emits the existing stderr notice on an exact match.
-            choice = _normalize_legacy_skip_choice_and_warn(choice)
             break
 
         # Exact-match dispatch (not startswith): "leave" / "lookup" must

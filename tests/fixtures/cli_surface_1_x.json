@@ -1,0 +1,583 @@
+{
+  "<root>": {
+    "no_check_version": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--no-check-version"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "version": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--version"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "autopull": {},
+  "autopush": {},
+  "conflicts": {},
+  "devices": {
+    "fmt": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--format"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "diag": {
+    "as_json": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--json"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "diff": {
+    "from_device": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--from"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "source": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--source"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "disable-source": {
+    "force": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--force"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "name": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "argument",
+      "multiple": false,
+      "names": [
+        "name"
+      ],
+      "nargs": 1,
+      "required": true,
+      "type": "str"
+    }
+  },
+  "enable-source": {
+    "force": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--force"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "name": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "argument",
+      "multiple": false,
+      "names": [
+        "name"
+      ],
+      "nargs": 1,
+      "required": true,
+      "type": "str"
+    }
+  },
+  "gc": {
+    "dry_run": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dry-run"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "prune_conflicts": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--conflicts"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "verbose": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--verbose",
+        "-v"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "init": {},
+  "install-skills": {
+    "agent": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": true,
+      "names": [
+        "--agent"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "log": {
+    "action": {
+      "choices": [
+        "written",
+        "merged",
+        "merged-via-lcs",
+        "skipped",
+        "conflicted",
+        "excluded",
+        "uploaded",
+        "failed"
+      ],
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--action"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "choice"
+    },
+    "fmt": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--format"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "limit": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--limit",
+        "-n"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "int"
+    },
+    "since": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--since"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "source": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--source"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "verb": {
+      "choices": [
+        "pull",
+        "push",
+        "self-upgrade"
+      ],
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--verb"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "choice"
+    }
+  },
+  "migrate-config": {
+    "dry_run": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dry-run"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "yes": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--yes",
+        "-y"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "pull": {
+    "conflict_mode": {
+      "choices": [
+        "prompt",
+        "keep-both",
+        "fail"
+      ],
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--conflict-mode"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "choice"
+    },
+    "dry_run": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dry-run"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "from_device": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--from"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "source": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--source"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "verbose": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--verbose",
+        "-v"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "push": {
+    "dry_run": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dry-run"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "verbose": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--verbose",
+        "-v"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "recapture": {
+    "dry_run": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dry-run"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "window": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "argument",
+      "multiple": false,
+      "names": [
+        "window"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "reconfigure-sources": {},
+  "recover": {
+    "abandon_manifest": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--abandon-manifest"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "yes": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--yes",
+        "-y"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "refresh-identity": {
+    "json_output": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--json"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    }
+  },
+  "resolve": {
+    "path": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "argument",
+      "multiple": false,
+      "names": [
+        "path"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "retro-fleet": {
+    "dump_host_usage": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--dump-host-usage"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "name": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--name"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "no_author_filter": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--no-author-filter"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "no_save": {
+      "choices": null,
+      "is_flag": true,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--no-save"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "boolean"
+    },
+    "noteworthy": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--noteworthy"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "theme": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": true,
+      "names": [
+        "--theme"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    },
+    "window": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "argument",
+      "multiple": false,
+      "names": [
+        "window"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  },
+  "sources": {},
+  "status": {
+    "source": {
+      "choices": null,
+      "is_flag": false,
+      "kind": "option",
+      "multiple": false,
+      "names": [
+        "--source"
+      ],
+      "nargs": 1,
+      "required": false,
+      "type": "str"
+    }
+  }
+}

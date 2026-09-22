@@ -615,7 +615,13 @@ def test_every_extracted_module_has_a_routing_row() -> None:
 _INVARIANT_ROW = re.compile(r"^- `src/mind_meld/(?P<file>[\w/]+\.py)` — (?P<rest>.+)$", re.M)
 
 
-_REMOVED_EVENT_HELPERS = ("_last_mm_push_ts", "_run_events_recapture", "_read_events")
+_REMOVED_EVENT_HELPERS = (
+    "_last_mm_push_ts",
+    "_run_events_recapture",
+    "_read_events",
+    "_normalize_legacy_skip_choice_and_warn",
+    "_LEGACY_SKIP_ALIAS_NOTICE",
+)
 
 
 def _removed_helper_citations(paths) -> list[str]:

@@ -228,9 +228,7 @@ Keep them tight. The card has a fixed width and Python truncates with
 
 Call the aggregator again with the synthesized strings and `--name` set to
 the user's identifier (use `git config --global user.email` to derive a
-short handle when the user hasn't said one explicitly). `--no-save` is a
-no-op as of v0.12.39 (kept so this invocation stays compatible across an
-upgrade whose skill store still has the old SKILL.md).
+short handle when the user hasn't said one explicitly).
 
 ```bash
 mm retro-fleet <window> \
@@ -238,8 +236,7 @@ mm retro-fleet <window> \
   --noteworthy "<your noteworthy line>" \
   --theme "<theme 1>" \
   --theme "<theme 2>" \
-  --theme "<theme 3>" \
-  --no-save
+  --theme "<theme 3>"
 ```
 
 **Echo the output as your assistant message text — do NOT rely on the

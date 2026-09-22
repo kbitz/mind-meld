@@ -57,6 +57,50 @@ A test-fixture passphrase (`pw123`) reached a real fleet's macOS Keychain throug
 
 ## Verified crypto repair and read-only inspection (Tracks 56A/60A)
 
+### Newer format refusal (Track 66A, v1.0.0)
+
+`crypto.FORMAT_VERSION_MAX` reserves 0x03–0x0F for future crypto-init and blob
+versions. Read the version byte before assuming a layout, even on a one-byte
+envelope. A current-format init with a keycheck in that window is newer too.
+Empty/truncated v2 and bytes above 0x0F remain corrupt; ASCII garbage beside a
+valid copy still self-heals. If **any** observed canonical or conflict copy is
+newer, `fetch_crypto_init` returns `corrupt` with `newer_version` set, no winner
+and no repair plan. Every crypto session refuses. Status reports the refusal;
+diag remains an inspection and exposes `crypto_init.newer_version` (null when
+none). Neither uses a newer copy's assumed salt or keycheck layout.
+
+`apply_crypto_init_repair` re-fetches even with no pending plan; fresh newer
+evidence raises `NewerFormatError` before writing, preserving, or unlinking.
+The CLI adds the single upgrade remedy using `upgrade.INSTALL_CMD`; crypto
+never imports upgrade. Autorun keeps exit 0 and the `crypto-error` breadcrumb.
+Newer blobs raise the same typed `CryptoError` subclass; per-file pull warnings
+add the upgrade remedy. `_fetch_remote_manifest` and `_make_manifest_validator`
+deliberately fold that subclass into corrupt-manifest handling. A manifest
+copy whose first byte is in 0x03–0x0F is unreadable even when an older sibling
+still decrypts, and a newer conflict copy is not "missing". A read that sees
+that byte after the preliminary scan, including the conflict validator's own
+read, still returns corrupt instead of using the older sibling. Pull skips
+that peer and GC refuses. Push and manifest recovery refuse before replacing
+this Mac's own newer manifest. Blobs only the unread copy could name are kept.
+
+iCloud does not order arrival. A format-changing MAJOR must write its new
+crypto-init **before** new-format manifests/blobs, and refuse on the newer side
+while any registered peer runs below 1.0.0 (0.14.x lacks this gate). A manifest
+or blob may still arrive first: pull skips an unreadable peer manifest with a
+warning, GC refuses while any manifest is unreadable, and push writes only its
+own manifest. Init rescans immediately before bootstrap and again before
+accepting a new salt, so a newer copy that arrives during the prompts refuses
+without saving config. This is an optimistic local recheck, not a distributed transaction.
+See [Compatibility (1.x)](auto-upgrade.md#compatibility-1x).
+
+Tests: `TestNewerFormats66A` in `tests/test_crypto.py` (including newer canonical
+plus valid older copy, byte-for-byte preservation and late arrival),
+`TestNewerStorage66A` in `tests/test_integration.py` (command refusal, bootstrap
+race, arrival window and blob remedy), and `test_crypto_init_newer_version66a`
+in `tests/test_diag.py`.
+
+### Current-format reconciliation
+
 `fetch_crypto_init(backend)` is pure; there is no `repair` parameter. It selects the lex-smallest-salt valid candidate (canonical first on ties), retains the exact winning bytes, and returns a frozen `CryptoInitRepairPlan`. The plan binds each canonical/conflict candidate's name and content hash to `delete` for byte-identical conflict copies or `preserve` for distinct/unreadable bytes. Different salt, memory parameters, keycheck, or malformed content are all preserved. Canonical and conflict copies are read with `O_NOFOLLOW` as regular files; a symlink or other unreadable name has no digest authorizing removal or a preserve-copy into storage. An unreadable canonical refuses repair.
 
 `_init_crypto_session` orders pure fetch → fingerprint drift check → load key → verify passphrase → `crypto.apply_crypto_init_repair` for mutating sessions. The repair function re-fetches and aborts with `CryptoError` when the exact winner changed, even if there was no pending repair. It rechecks the canonical hash before replacing it, preserves displaced canonical bytes, then writes the winner to canonical with file and directory fsync. Each differing readable conflict is written and fsynced under `mm-crypto-init.preserved-<fp8>-<utc>` before unlink; identical conflicts are deleted only after all required writes/fsyncs succeed. Names are re-listed and intersected with the plan, never joined from stored strings. Changed or newly arrived copies survive. Before that unlink pass, a whole-repair recheck confirms canonical still holds the exact winner bytes this process just published; if a second concurrent repair has already replaced canonical again in the interim, every remaining conflict copy is left in place rather than deleted, so the losing side of that second race can never erase the only surviving copy of the winner it lost to (pinned by `tests/test_crypto.py::TestConflictConvergence::test_concurrent_canonical_replacement_retains_conflict_copies`). A write/fsync failure leaves every conflict candidate in place; preserved files lie outside the conflict pattern. Rechecking is optimistic local filesystem coordination, not an iCloud-wide transaction.

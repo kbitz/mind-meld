@@ -45,7 +45,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from mind_meld.errors import CryptoError
+from mind_meld.errors import CryptoError, NewerFormatError
 from mind_meld.safety import safe_str
 from mind_meld.storage.keys import CRYPTO_INIT_KEY
 
@@ -71,6 +71,7 @@ __all__ = [
 ]
 
 FORMAT_VERSION = 0x02
+FORMAT_VERSION_MAX = 0x0F  # reserved future versions; ASCII/garbage remains corrupt
 FORMAT_VERSION_LEGACY_V1 = 0x01  # recognized to fail loud; no back-compat decryption
 
 SALT_LEN = 16
@@ -242,9 +243,8 @@ def _encrypt_with_master_key(plaintext: bytes, master_key: bytes) -> bytes:
 def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
     """Decrypt a v2-format blob. Requires an active session.
 
-    v1 blobs (format byte 0x01) are recognized and refused loudly; Mind Meld is
-    pre-release, has no v1 blobs in any user's storage, and dropping the v1
-    decryption path keeps the code honest.
+    v1 blobs (format byte 0x01) predated v0.6 and never reached user storage.
+    They remain recognized and refused; 1.0 retains the v2 format.
     """
     session_root_salt, session_memory_kb = _current_session_or_raise()
     if memory_kb != session_memory_kb:
@@ -256,8 +256,15 @@ def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
     return _decrypt_with_master_key(blob, master_key)
 
 
+def _newer_version(data: bytes) -> int | None:
+    """Inspect the discriminator without assuming any current-format layout."""
+    return data[0] if data and FORMAT_VERSION < data[0] <= FORMAT_VERSION_MAX else None
+
+
 def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
     """Decrypt with an already-derived master_key. Used by decrypt() and verify."""
+    if (newer := _newer_version(blob)) is not None:
+        raise NewerFormatError(newer)
     if len(blob) < 1 + SALT_LEN + NONCE_LEN + 1:
         raise CryptoError("decrypt: blob too short — corrupt or truncated data.")
 
@@ -334,22 +341,28 @@ class CryptoInitFetch:
     keycheck_blob: bytes | None = None
     repair_plan: CryptoInitRepairPlan | None = None
     winner_bytes: bytes | None = None
+    newer_version: int | None = None
+    canonical_newer: bool = False
 
 
 def _parse_crypto_init(data: bytes) -> CryptoInitFetch:
     """Parse an mm-crypto-init blob. Returns ok or corrupt; never missing."""
+    if (newer := _newer_version(data)) is not None:
+        return CryptoInitFetch(status="corrupt", newer_version=newer)
     minimum = 1 + MEMORY_KB_FIELD_LEN + ROOT_SALT_LEN + 1
     if len(data) < minimum:
         return CryptoInitFetch(status="corrupt")
     version = data[0]
     if version != FORMAT_VERSION:
         return CryptoInitFetch(status="corrupt")
+    keycheck_blob = data[1 + MEMORY_KB_FIELD_LEN + ROOT_SALT_LEN :]
+    if (newer := _newer_version(keycheck_blob)) is not None:
+        return CryptoInitFetch(status="corrupt", newer_version=newer)
     argon2_memory_kb = int.from_bytes(data[1 : 1 + MEMORY_KB_FIELD_LEN], "big")
     # Sanity bounds: 1KB floor, 1GB ceiling (argon2 would OOM long before 1GB).
     if argon2_memory_kb < 1_024 or argon2_memory_kb > 1_048_576:
         return CryptoInitFetch(status="corrupt")
     root_salt = data[1 + MEMORY_KB_FIELD_LEN : 1 + MEMORY_KB_FIELD_LEN + ROOT_SALT_LEN]
-    keycheck_blob = data[1 + MEMORY_KB_FIELD_LEN + ROOT_SALT_LEN :]
     # keycheck_blob must itself be a valid v2 blob header.
     if len(keycheck_blob) < 1 + SALT_LEN + NONCE_LEN + 1 or keycheck_blob[0] != FORMAT_VERSION:
         return CryptoInitFetch(status="corrupt")
@@ -430,8 +443,20 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
         observed.append((CRYPTO_INIT_KEY, canonical_raw))
     for path in conflicts:
         observed.append((path.name, _read_regular_nofollow(path)))
-    valid = [(raw, _parse_crypto_init(raw)) for _, raw in observed if raw is not None]
-    valid = [(raw, parsed) for raw, parsed in valid if parsed.status == "ok"]
+    parsed_copies = [
+        (name, raw, _parse_crypto_init(raw)) for name, raw in observed if raw is not None
+    ]
+    newer = [parsed.newer_version for _, _, parsed in parsed_copies if parsed.newer_version]
+    if newer:
+        return CryptoInitFetch(
+            status="corrupt",
+            newer_version=max(newer),
+            canonical_newer=any(
+                name == CRYPTO_INIT_KEY and parsed.newer_version is not None
+                for name, _, parsed in parsed_copies
+            ),
+        )
+    valid = [(raw, parsed) for _, raw, parsed in parsed_copies if parsed.status == "ok"]
     if not valid:
         return CryptoInitFetch(status="corrupt")
     winner_raw, winner = min(valid, key=lambda item: item[1].root_salt)
@@ -481,6 +506,8 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
     """
     changed = "crypto: mm-crypto-init changed while the command ran; nothing was published. Retry."
     fresh = fetch_crypto_init(backend)
+    if fresh.newer_version is not None:
+        raise NewerFormatError(fresh.newer_version, "mm-crypto-init changed while the command ran")
     if fetch.winner_bytes is None or fresh.winner_bytes != fetch.winner_bytes:
         raise CryptoError(changed)
     plan = fetch.repair_plan
@@ -520,6 +547,18 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
     # Preserve a displaced canonical lineage before overwriting it.
     if canonical_raw is not None and plan.replace_canonical:
         preserve(canonical_raw)
+    # A newer copy can arrive while preserve() writes. Recheck before the
+    # canonical replacement so that write cannot cover the new bytes.
+    fresh_before_put = fetch_crypto_init(backend)
+    if fresh_before_put.newer_version is not None:
+        raise NewerFormatError(
+            fresh_before_put.newer_version,
+            "mm-crypto-init changed while the command ran",
+        )
+    before_put = _read_regular_nofollow(canonical_path)
+    before_hash = hashlib.sha256(before_put).hexdigest() if before_put is not None else None
+    if before_hash != (plan.canonical.content_hash if plan.canonical else None):
+        raise CryptoError(changed)
     backend.put(CRYPTO_INIT_KEY, plan.winner_bytes)
 
     planned = {candidate.name: candidate for candidate in plan.copies}

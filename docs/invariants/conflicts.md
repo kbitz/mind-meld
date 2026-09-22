@@ -56,9 +56,16 @@ Bare `mm gc --dry-run` previews this reaper; apply still requires `--conflicts`.
 
 The two interactive prompt sites (`resolveflow.py:_resolve_interactive_loop` for the `mm resolve` walk, `cli.py:_prompt_conflict_choice` for the inline pull-time prompt) share leaf primitives in `src/mind_meld/conflictdiff.py`: `render_prompt`, `render_banner`, `render_capped_diff`, `count_divergent_lines`. `render_capped_diff(diff, *, cap)` is the ONLY renderer for raw peer-controlled unified-diff entries: it runs every entry through `safe_text`, colors `+` / `-` content but not `+++` / `---` headers, renders the empty/binary hint, and owns exact overflow copy. Cap counts raw diff entries; inline passes **60** and `mm resolve` passes **80**. Do NOT standardize those windows without a deliberate UX change. Site-level diff construction, semantic count mapping, banners/timestamps, prompt defaults, available actions, and dispatch over the four shapes (canonical-exists × pre-inversion / post-inversion × canonical-missing) stay at each call site — burying them in a helper would hide the load-bearing filename-prefix dispatch.
 
-**`(b)oth` → `(s)kip` rename + alias.** Default key changed from `b` to `s` in v0.11.1. Same on-disk effect — both leave the canonical and `.sync-conflict-*` files in place — but the option name now matches the action. The pre-1.0 letters `b` / `both` are centralized in `resolveflow._normalize_legacy_skip_choice_and_warn`: both prompt sites call it after their existing `.strip().lower()` handling; it maps only those exact values to skip and emits the one-time `mm: notice:` so stale scripts continue to work. Alias removes at 1.0. `back`/`browse`/`between` must NOT silently trigger the alias.
+**`(s)kip` and unknown input.** The default changed from `b` to `s` in
+v0.11.1. The `b` / `both` alias was removed in 1.0.0. Both now take the
+ordinary unrecognized-input path: resolve skips with both files left on disk;
+inline pull returns `keep-both`. No notice or special branch. `back`, `browse`,
+`between` and other unknown keys do the same.
 
-The pre-v0.9.0 letters `c` / `f` remain LOUD-rejected in the **`mm resolve` path only** (real silent-data-loss risk in mapping them through post-inversion). That rejection runs before resolver-only `(n)ewer` handling and before the shared b/both helper. Inline pull intentionally retains its existing unrecognized-input → keep-both fallback for `c` / `f`; Track 18B does not expand or unify that policy. The asymmetry is deliberate: `c`/`f` encoded directional ambiguity that the v0.9.2 inversion broke; `b` does not.
+The pre-v0.9.0 letters `c` / `f` remain loud-rejected with exit 1 in
+**`mm resolve` only**, before `(n)ewer` handling: their old directional meaning
+became unsafe after inversion. Inline pull keeps its unknown-input → keep-both
+fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1.x.
 
 **Honest skip-lifecycle copy.** The `(s)kip` line reads `leave both files on disk; run `mm resolve` later or delete manually` — explicit that the next pull does NOT re-prompt unless remote changes again. That is the current-action wording; it is not an indefinite-history promise. A later pull of *different* bytes from the same peer may replace the managed sidecar after the new copy is published (latest-per-peer). Unchanged peer content is a no-write no-cleanup retry. Promote or copy the sidecar out of managed naming to keep a durable editable document. Codex outside-voice review (T2) caught the misleading prior wording ("decide on the next pull").
 

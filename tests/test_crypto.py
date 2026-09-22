@@ -32,11 +32,113 @@ from mind_meld.crypto import (
     set_crypto_session,
     verify_passphrase,
 )
-from mind_meld.errors import CryptoError, StorageError
+from mind_meld.errors import CryptoError, NewerFormatError, StorageError
 from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "test-passphrase-123"
 MEMORY_KB = 1024  # matches conftest autouse fixture
+
+
+class TestNewerFormats66A:
+    @pytest.mark.parametrize("version", [0x03, 0x0F])
+    @pytest.mark.parametrize("length", [1, 5, 100])
+    def test_version_precedes_layout(self, version, length):
+        raw = bytes([version]) + bytes(length - 1)
+        fetched = crypto._parse_crypto_init(raw)
+        assert fetched.status == "corrupt"
+        assert fetched.newer_version == version
+        with pytest.raises(NewerFormatError, match=f"unsupported format version 0x{version:02x}"):
+            crypto._decrypt_with_master_key(raw, bytes(32))
+
+    @pytest.mark.parametrize("raw", [b"", b"\x02", b"\x02" * 10, b"\x10", b"\xff", b"garbage"])
+    def test_garbage_is_not_newer(self, raw):
+        fetched = crypto._parse_crypto_init(raw)
+        assert fetched.status == "corrupt"
+        assert fetched.newer_version is None
+        with pytest.raises(CryptoError) as caught:
+            crypto._decrypt_with_master_key(raw, bytes(32))
+        assert not isinstance(caught.value, NewerFormatError)
+
+    def test_newer_keycheck_precedes_current_layout_bounds(self):
+        raw = b"\x02" + bytes(4 + 16) + b"\x03"
+        assert crypto._parse_crypto_init(raw).newer_version == 3
+
+    @pytest.mark.parametrize("canonical_newer", [True, False])
+    def test_any_newer_copy_refuses_without_winner_or_mutation(self, tmp_path, canonical_newer):
+        """CRITICAL: an older valid copy must never revert a newer canonical."""
+        tmp_path = tmp_path / "storage"
+        backend = LocalBackend(tmp_path)
+        bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
+        canonical = tmp_path / CRYPTO_INIT_KEY
+        older = canonical.read_bytes()
+        canonical.write_bytes(b"\x03" if canonical_newer else older)
+        (tmp_path / "mm-crypto-init 2").write_bytes(older if canonical_newer else b"\x03")
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        fetched = fetch_crypto_init(backend)
+        assert fetched.status == "corrupt"
+        assert fetched.newer_version == 3
+        assert fetched.canonical_newer is canonical_newer
+        assert fetched.winner_bytes is fetched.root_salt is fetched.repair_plan is None
+        with pytest.raises(NewerFormatError):
+            crypto.apply_crypto_init_repair(backend, fetched)
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+        assert not list(tmp_path.glob("*.preserved-*"))
+
+    def test_highest_version_across_copies(self, tmp_path):
+        tmp_path = tmp_path / "storage"
+        backend = LocalBackend(tmp_path)
+        backend.put(CRYPTO_INIT_KEY, b"\x03")
+        (tmp_path / "mm-crypto-init 2").write_bytes(b"\x0f")
+        assert fetch_crypto_init(backend).newer_version == 15
+
+    @pytest.mark.parametrize("pending_repair", [False, True])
+    def test_newer_copy_arriving_before_repair_blocks_all_mutation(
+        self, tmp_path, monkeypatch, pending_repair
+    ):
+        tmp_path = tmp_path / "storage"
+        backend = LocalBackend(tmp_path)
+        bootstrap_crypto_init(backend, PASSPHRASE, MEMORY_KB)
+        if pending_repair:
+            (tmp_path / "mm-crypto-init 2").write_bytes(b"corrupt")
+        fetched = fetch_crypto_init(backend)
+        (tmp_path / "mm-crypto-init 3").write_bytes(b"\x03")
+        before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+        monkeypatch.setattr(backend, "put", lambda *a: pytest.fail("wrote after newer evidence"))
+        monkeypatch.setattr(Path, "unlink", lambda *a: pytest.fail("unlinked after newer evidence"))
+        with pytest.raises(NewerFormatError, match="changed while the command ran"):
+            crypto.apply_crypto_init_repair(backend, fetched)
+        assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+    def test_newer_canonical_arriving_during_preserve_is_not_overwritten(
+        self, tmp_path, monkeypatch
+    ):
+        tmp_path = tmp_path / "storage"
+        backend = LocalBackend(tmp_path)
+
+        def init_bytes(salt: bytes) -> bytes:
+            master = crypto.load_master_key(PASSPHRASE, salt, MEMORY_KB)
+            return crypto._serialize_crypto_init(
+                MEMORY_KB,
+                salt,
+                crypto._encrypt_with_master_key(crypto._KEYCHECK_PLAINTEXT, master),
+            )
+
+        canonical = tmp_path / CRYPTO_INIT_KEY
+        backend.put(CRYPTO_INIT_KEY, init_bytes(b"\xff" * 16))
+        (tmp_path / "mm-crypto-init 2").write_bytes(init_bytes(b"\x00" * 16))
+        fetched = fetch_crypto_init(backend)
+        assert fetched.repair_plan is not None and fetched.repair_plan.replace_canonical
+        original_put = backend.put
+
+        def put(key, data):
+            if str(key).startswith(f"{CRYPTO_INIT_KEY}.preserved-"):
+                canonical.write_bytes(b"\x03")
+            return original_put(key, data)
+
+        monkeypatch.setattr(backend, "put", put)
+        with pytest.raises(NewerFormatError, match="changed while the command ran"):
+            crypto.apply_crypto_init_repair(backend, fetched)
+        assert canonical.read_bytes() == b"\x03"
 
 
 # ── derive_key (Argon2 primitive) ─────────────────────────────────────

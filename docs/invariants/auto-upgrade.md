@@ -126,3 +126,118 @@ and nudges the fleet to upgrade to it. /ship is responsible for tagging.
 
 Skipping this discipline does not break sync, but it can leak unfinished
 features to the fleet on the next push to main if you forget to NOT tag.
+
+## Compatibility (1.x)
+
+1.0 freezes the interoperable storage/wire formats, command and flag names,
+positional arguments, documented prompt keys, `config.toml` keys, exit-code
+meanings, and the machine-readable surfaces listed below. Mixed 0.14.x/1.0.0
+fleets interoperate: this release changes no wire or storage format.
+
+| Release | Classification |
+|---|---|
+| MAJOR | A change after which a 1.x peer cannot read newer storage or sync with its writer; removing/renaming a command, flag, argument, documented prompt key, config key or stable output field; incompatible argument type/arity/requiredness/choices; changing an exit meaning, including making a currently successful outcome fail. |
+| MINOR | Compatible additions: commands, flags, optional config keys, output fields and enum values **where existing readers tolerate them**. Also changes needing downgrade care, and raising the Python floor, announced in Upgrade notes. |
+| PATCH | Other compatible fixes, including repairs to best-effort vendor usage readers. |
+
+**MAJOR exceptions to additive changes:** a new host family, token counter
+field, reordering known token-source names, or changing the device-registry
+field contract. Host families are closed (`host_usage.HostFamily` and
+`aggregator._accept_hosts_payload`); token buckets require exactly
+`TOKEN_FIELDS` (`aggregator._copy_usage_bucket`). Known token-source order is
+checked by `_token_sources_subsequence`. The registry's `device_id`,
+`device_name`, `registered`, `last_seen`, and `last_seen_version` are pinned;
+`_list_devices_impl` requires identity/name and the fleet gate interprets the
+last-seen version. A missing last-seen version on a never-pushed legacy device
+retains its existing treatment. `test_closed_vocabularies` and
+`test_device_registry_writer_fields` enforce these exceptions.
+
+There is no blanket unknown-value promise. Existing behavior is:
+
+- Host snapshot unknown **top-level** fields are ignored by
+  `_accept_host_usage_snapshot`; unknown nested families or token keys reject
+  the row. A new reader/token-source name is MINOR: bounded unknown names are
+  retained by `_token_sources_subsequence`, with known names still ordered.
+- `manifest.load_manifest` preserves unknown top-level metadata while
+  validating known sources/tombstones; it does not make arbitrary changes
+  to known fields safe. Event consumers dispatch by `type` and ignore types
+  they do not consume (`aggregate_pushes`, `aggregate_host_usage`).
+- Consumers of additive public JSON fields must ignore unfamiliar keys;
+  enum additions qualify as MINOR only after checking the affected reader.
+  Do not infer tolerance of nested values from top-level tolerance.
+
+**Both sides of a format-changing MAJOR must refuse safely.** The
+`mm-crypto-init` version byte is the older-side gate. Any MAJOR changing blob,
+manifest, mm-events row, or conflict-filename formats must bump that byte in
+the same release, within the reserved **0x03–0x0F** window. Future blob bytes
+must also stay in that window. Write new crypto-init before any new-format
+manifest/blob. The newer-side fleet gate must refuse while any registered
+peer runs below 1.0.0, because 0.14.x lacks the older-side protection; extend
+the `_check_fleet_version_or_refuse` pattern for that release.
+
+In 1.0, any observed newer crypto-init copy refuses selection and repair;
+repair re-fetches before mutation and again immediately before replacing
+canonical. iCloud can deliver files out of order: with an older init still
+visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
+sibling, so pull skips that peer and GC refuses. Push rewrites only this
+Mac's own manifest. A push
+can finish publication and then exit 1 when required auto-GC refuses. Newer
+blob errors reach the per-file pull warning; manifest validators intentionally
+fold them into corruption. These are the implemented limits, not an
+iCloud-wide transaction. `TestNewerFormats66A`, `TestNewerStorage66A`, and
+[the init invariant](init-devices.md#newer-format-refusal-track-66a-v100)
+pin the gate, late-copy recheck and arrival windows.
+
+**Machine-readable surfaces:**
+
+| Surface | Stable scope |
+|---|---|
+| `diag --json` | Top-level keys pinned by `_DIAG_JSON_TOP_LEVEL` in `tests/test_docs_routing.py`, plus the fields documented in README (including `crypto_init.newer_version`). Other nested diagnostics may change in a MINOR. |
+| `refresh-identity --json` | The documented identity result fields. |
+| `devices --format json` | Device records and their existing field meanings. |
+| `log --format jsonl` | Existing history row fields; row variants retain their own shapes. |
+| `retro-fleet --dump-host-usage` | Existing forensic inventory fields and meanings. |
+| `MM_THEMES_PROMPT` JSON block in `retro-fleet` | Versioned with SKILL.md; additive fields are MINOR. |
+
+Plain-text status/diag/pull output, prompt wording, defaults (including
+`exclude_patterns`), and private vendor usage formats are not stable surfaces.
+Host readers remain best-effort: vendor format repairs are PATCH or MINOR.
+Framework-owned `--help`, completion options and parse-error presentation are
+excluded from the CLI golden; their usage errors remain documented exit 2.
+The supported Python floor is `requires-python`; CI qualifies Python 3.13
+only. A higher floor is MINOR with Upgrade notes, not evidence that other
+interpreters were tested.
+
+**Exit outcomes:** [one README table](../../README.md#exit-codes) is the
+operator reference, including post-parse value errors (1), usage errors (2),
+pull preflight (3), and partial recapture (4). Valid autopull/autopush
+invocations exit 0 even on refusal; per-file pull failures also retain exit 0.
+A stricter pull exit policy must be an opt-in flag in a MINOR.
+`tests/test_compat_contract.py:EXIT_EVIDENCE` maps every outcome to behavioral
+tests and checks those references exist. Its all-module exit AST scan is
+supplementary, not a substitute for those tests.
+
+**Deprecation and downgrade:** a deprecated item keeps working until its
+named removal MAJOR and emits `mm: notice:` naming that MAJOR when used.
+`--no-save` remains a hidden no-op until **2.0**. Retired prompt keys `b`,
+`both`, `c`, and `f` are never reassigned during 1.x. The prompt fallback
+tests in `test_conflict_copy.py` and no-op tests in
+`test_retro_fleet_aggregator.py` pin today's behavior.
+
+Rollback within 1.x is a reinstall unless an intervening MINOR's Upgrade
+notes say otherwise. The upgrade nudge selects the highest release tag and
+never downgrades (`tests/test_upgrade.py`); a regression after 1.0.0 ships as
+1.0.1. Skill stores refresh on init, non-quiet push, or install-skills and
+never downgrade. After rollback, move the store aside before reinstalling
+the running package's skill; see [the README recipe](../../README.md#upgrading).
+`TestDurableStore.test_publish_skipped_when_stored_version_is_newer` pins the
+refusal to downgrade, and `test_empty_store_installs_running_package` pins
+publication into an empty store.
+
+**Release tripwires:** `tests/test_compat_contract.py` pins format constants,
+closed vocabularies, the registry shape, and the detailed CLI surface in
+`tests/fixtures/cli_surface_1_x.json` (root options, hidden options, arguments,
+names, requiredness, flag/value, multiplicity, arity, types and choices).
+Additions and removals both fail: classify before updating the golden.
+Frozen `tests/fixtures/compat_1_0/` payloads are decrypted/parsed by the current
+readers, never regenerated during tests: a 1.x reader must read what 1.0 wrote.
