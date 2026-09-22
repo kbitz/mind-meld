@@ -4,7 +4,7 @@
 ║  0 commits · 0 repos · 0 PRs · 2 machines                    ║
 ║  +0 / -0 LOC                                                 ║
 ║                                                              ║
-║  AGENTS (2 of 2 machines)                                    ║
+║  AGENTS (2 of 2 registered machines)                         ║
 ║  Claude  13.3M tokens · 1 day · ~$54                         ║
 ║  Codex   3.2M tokens · 1 day · ~$18                          ║
 ║  Grok    1.1M tokens · 1 day · ≥$2                           ║

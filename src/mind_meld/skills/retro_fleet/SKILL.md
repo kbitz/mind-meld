@@ -54,6 +54,12 @@ Claude, Codex and Grok are reported **identically**: fleet-summed tokens,
 active days, contributing machines, estimated cost, top model. Both the card's
 `AGENTS` block and the body's `## Agents` table use that one shape.
 
+The card counts currently registered machines with observed usage; each row's
+`Machines` count includes all observed contributors. Historical Claude usage
+can remain after deregistration, explained by `unregistered_devices` in
+`MM_HEALTH`. If the registry is unavailable, the card counts all observed
+machines and omits the denominator.
+
 Comparing the rows is the point. They share a unit (tokens), a window, and a
 counter basis (input + cache write + cache read + output, disjoint counters
 only). Say "Claude carried roughly twice Codex's volume" if the numbers say so.

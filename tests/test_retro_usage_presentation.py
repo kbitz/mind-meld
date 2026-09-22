@@ -273,7 +273,7 @@ def test_stale_on_window_start_day_contributes_nothing_but_is_not_zero():
     assert view.machines_with_activity == 0 and not view.any_activity
     assert row(data, "codex") is None
     out = agg.format_retro(data, name="Example")
-    assert "AGENTS (0 of 2 machines)" in out
+    assert "AGENTS (0 of 2 registered machines)" in out
     assert "$0" not in out
     snap = data.host_inventory.by_device["dev-a"]
     assert agg._windowed_host_by_model(snap, "2026-09-07", "2026-09-14") == ({}, False)

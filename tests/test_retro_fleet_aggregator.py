@@ -6299,7 +6299,7 @@ class TestAgentsCardBlock:
 
     def test_empty_but_covered_keeps_the_provenance_count(self):
         lines = aggregator._render_agents_card_block(self._usage([], with_activity=0))
-        assert "AGENTS (0 of 3 machines)" in lines[0]
+        assert "AGENTS (0 of 3 registered machines)" in lines[0]
         assert "No agent usage observed this window" in lines[1]
 
     def test_registry_unavailable_drops_the_denominator(self):
@@ -6314,7 +6314,7 @@ class TestAgentsCardBlock:
             self._usage([self._row("codex", "Codex", 5, 1)], machines_known=1)
         )
         assert "1 day" in lines[1] and "1 days" not in lines[1]
-        assert "1 of 1 machines" in lines[0]
+        assert "1 of 1 registered machines" in lines[0]
 
     def test_legacy_counters_render_unavailable_not_a_number(self):
         """Inclusive counters run up to ~2x high. That is the one caveat that
@@ -6677,7 +6677,55 @@ class TestUnifiedAgents:
         data.sessions.active_days = {"2026-04-22"}
         data.sessions.token_devices = {"dev-a": self.UNTIL}
         assert self._usage_for(data).machines_with_activity == expected
-        assert f"AGENTS ({expected} of 2 machines)" in aggregator.format_retro(data, name="test")
+        assert f"AGENTS ({expected} of 2 registered machines)" in aggregator.format_retro(
+            data, name="test"
+        )
+
+    @pytest.mark.parametrize(
+        "registered,contributors,expected_active",
+        [
+            (("current",), ("current", "retired"), 1),
+            (("current",), ("retired",), 0),
+            ((), ("retired",), 0),
+            (None, ("current", "retired"), 2),
+        ],
+    )
+    def test_card_registry_scope_preserves_historical_claude_contributors(
+        self, tmp_path, monkeypatch, registered, contributors, expected_active
+    ):
+        events_dir = tmp_path / "events"
+        day = NOW.date().isoformat()
+        for device in contributors:
+            project = _proj_with_skills(skills_by_day={day: {"ship": 1}})
+            project["tokens_by_day"] = {
+                day: {**_usage(1_000_000), "by_model": {"claude-sonnet-5": _usage(1_000_000)}}
+            }
+            _write_events(events_dir, device, day, [_sessions_event(device, 0.5, [project])])
+        registry = (
+            (None, [])
+            if registered is None
+            else (len(registered), [{"device_id": d, "device_name": d} for d in registered])
+        )
+        monkeypatch.setattr(aggregator, "get_known_devices", lambda: registry)
+        data = _aggregate(events_dir)
+        usage = self._usage_for(data)
+        claude = self._row(usage, "claude")
+        assert usage.machines_with_activity == expected_active
+        assert claude.machines == len(contributors)
+        assert claude.tokens == len(contributors) * 1_000_000
+        assert set(data.sessions.token_devices) == set(contributors)
+        assert data.skills.invocations == len(contributors)
+        card = aggregator.format_retro(data, name="test")
+        if registered is None:
+            assert f"AGENTS ({expected_active} machines)" in card
+            assert _health_entry(aggregator.format_retro(data), "registry_unavailable")
+        else:
+            assert f"AGENTS ({expected_active} of {len(registered)} registered machines)" in card
+            assert data.fleet.devices_in_events == set(contributors) & set(registered)
+            entry = _health_entry(aggregator.format_retro(data), "unregistered_devices")
+            assert entry is not None
+            assert "registered-machine counts" in entry["detail"]
+            assert "Claude" in entry["detail"]
 
     @pytest.mark.parametrize("semantics", [None, "disjoint-v1"])
     def test_cross_version_classification_keeps_volume_without_phantom_pricing(self, semantics):
@@ -7830,6 +7878,37 @@ class TestAgentEconomics:
         assert self._row(data) is None
         out = aggregator.format_retro(data)
         assert "$0" not in out
+
+    @pytest.mark.parametrize("coverage", ["partial_sources", "degraded_sources"])
+    def test_stale_reader_failure_does_not_reprice_current_agents(self, coverage):
+        hosts = _priced_hosts()
+        current = _host_event(
+            "dev-a",
+            self.TS,
+            hosts=hosts,
+            extra={"tokens_by_day": _sibling(hosts, "gpt-5.6-terra")},
+        )
+        old_hosts = _priced_hosts(day="2026-04-20") if coverage == "partial_sources" else {}
+        old = _host_event(
+            "dev-old",
+            "2026-04-20T12:00:00+00:00",
+            hosts=old_hosts,
+            token_sources=() if coverage == "degraded_sources" else ("codex",),
+            extra={coverage: ["codex"], "tokens_by_day": _sibling(old_hosts)},
+        )
+        data = _econ_data([current, old])
+        assert data.host_inventory.rejected_rows == 0
+        old_snap = data.host_inventory.by_device["dev-old"]
+        assert old_snap.stale
+        assert getattr(old_snap, "partial" if coverage == "partial_sources" else "degraded") == (
+            "codex",
+        )
+        data.sessions.tokens_by_model = {
+            "claude-sonnet-5": {**_usage(1_000_000), "cache_create": 1_000_000}
+        }
+        assert aggregator._agent_row_cost(self._row(data)) == (2.0, False)
+        assert aggregator._agent_row_cost(self._row(data, "claude")) == (6.0, False)
+        assert _health_entry(aggregator.format_retro(data), "cost_floor") is None
 
     def test_duplicate_history_is_detected_rather_than_refused(self):
         """Pre-1.1 this rendered two per-machine floors and no fleet figure,

@@ -772,6 +772,8 @@ def aggregate_agent_usage(
             continue
         families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
         bounds = window_bounds(snap, lo, hi)
+        if bounds is None:
+            continue
         active_here = False
         touched: set[str] = set()
         for family, days in families.items():
@@ -928,6 +930,16 @@ def aggregate_agent_usage(
 
     order = {key: i for i, (key, _) in enumerate(AGENT_ROW_ORDER)}
     rows.sort(key=lambda r: (order.get(r.key, 99), r.key))
+
+    # The card compares current registry members. Historical Claude usage
+    # remains in the rows, whose machine counts describe actual contributors.
+    if machines_known is not None:
+        registered = {
+            d.get("device_id")
+            for d in data.fleet.devices_known_list
+            if isinstance(d, dict) and isinstance(d.get("device_id"), str)
+        }
+        activity_devices.intersection_update(registered)
 
     return FleetAgentUsage(
         rows=tuple(rows),
@@ -4069,7 +4081,7 @@ def _render_agents_card_block(usage: FleetAgentUsage) -> list[str]:
     if usage.machines_known is None:
         scope = f"{n} machine{'' if n == 1 else 's'}"
     else:
-        scope = f"{n} of {usage.machines_known} machines"
+        scope = f"{n} of {usage.machines_known} registered machines"
     out = [_card_line(f"AGENTS ({scope})")]
 
     rows = [r for r in usage.rows if r.has_volume]
@@ -4606,7 +4618,9 @@ def format_retro(
         note(
             "unregistered_devices",
             f"{data.fleet.unregistered_event_devices} unregistered device id(s) had events "
-            f"in this window and were filtered out. Stale files reap after "
+            "in this window and were filtered from registered-machine counts. "
+            "Retained Claude token and skill data may still contribute to the report. "
+            "Stale files reap after "
             f"{EVENTS_RETENTION_DAYS} days.",
         )
     if data.pushes.discovery_errors:

@@ -561,6 +561,14 @@ days, contributing machines, estimated cost, top model. The card's `AGENTS`
 block and the body's `## Agents` table share that row shape, and comparing the
 rows is legitimate — they share a unit, a window, and a counter basis.
 
+The card's `N of M registered machines` scope counts currently registered
+machines with observed agent usage. The table's `Machines` column counts
+actual contributors: historical Claude session/token/skill data remains after
+deregistration, with an `unregistered_devices` health explanation. Do not drop
+that usage or reduce its contributor count to make it match the card scope.
+When the registry is unavailable, the card counts all observed machines and
+omits the denominator.
+
 This replaced a split that had become indefensible. Pre-1.1 the card carried
 `MODELS (Claude Code sessions)` (Claude token magnitudes) above `AGENT LOGS`
 (Codex/Grok day counts), with a standing prohibition on comparing them, and
@@ -644,6 +652,8 @@ happened on.
   cannot establish which families are missing. Do not infer ownership from
   a reader name or from the families that happened to contribute. The simple,
   conservative result is `≥` on every agent's available priced subtotal.
+  Only snapshots eligible for the requested window propagate reader causes;
+  stale inventory remains available for diagnostics without repricing current rows.
   Inherent pricing-tier causes remain specific to the models they describe;
   each machine's recorded-token bounds name that machine in the health payload.
 - `residual` (the per-day model cap leaving unattributable tokens) is

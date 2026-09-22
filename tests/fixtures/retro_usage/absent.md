@@ -4,7 +4,7 @@
 ║  0 commits · 0 repos · 0 PRs · 2 machines                    ║
 ║  +0 / -0 LOC                                                 ║
 ║                                                              ║
-║  AGENTS (0 of 2 machines)                                    ║
+║  AGENTS (0 of 2 registered machines)                         ║
 ║  No agent usage observed this window                         ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
