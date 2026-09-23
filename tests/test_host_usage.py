@@ -3966,6 +3966,27 @@ class TestCursorUsage67A:
         assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
         assert hu.CURSOR_HOST_CACHE_RETENTION_DAYS == 90
 
+    def test_torn_later_file_keeps_earlier_stable_runs(self, cursor_store):
+        paths = sorted(cursor_store.glob("*/runs.ndjson"))
+        first, second = paths[0], paths[1]
+        kept = [json.loads(line) for line in first.read_text().splitlines()]
+        second.write_bytes(second.read_bytes() + b'{"runId":"unfinished')
+        assert self._read(cursor_store).reason == "malformed"
+        cached = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
+        assert len(cached) == len(kept)
+        assert all(run["usage"] is not None for run in cached.values())
+
+    def test_success_then_unsupported_store_loss_keeps_the_blocker(self, cursor_store):
+        assert self._read(cursor_store).complete
+        path, row = self._single(cursor_store)
+        row["status"] = "renamed-terminal"
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "unsupported"
+        shutil.rmtree(cursor_store)
+        result = self._read(cursor_store)
+        assert result.reason == "unsupported"
+        assert not result.complete
+
     def test_torn_file_never_commits_prefix(self, cursor_store):
         path, _ = self._single(cursor_store)
         path.write_bytes(path.read_bytes() + b'{"runId":"unfinished')

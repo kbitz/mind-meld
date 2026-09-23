@@ -356,9 +356,10 @@ remain until the reader's retention cutoff. Runs deleted before mm ever read
 them are unrecoverable; accumulation bounds future loss and does not fix backlog.
 
 Every file is reparsed, with descriptor and path stats before/after, including
-ctime. A torn/changed file contributes no staged prefix. A rejected duplicate
-does not commit earlier revisions from that scan, so a running copy cannot
-erase retained history. Stable complete files
+ctime. A torn/changed file contributes no staged prefix. Files fully read before
+that failure are kept. A cross-file runId conflict commits nothing from that
+scan, so one copy cannot erase retained history. An outstanding blocker
+outranks retained history when the store disappears. Stable complete files
 learned before a later failure/deadline commit; incomplete reader totals never
 publish. If the store disappears before the first complete scan, the learned
 prefix stays in the cache and the read stays incomplete. Repeated short-budget scans **need not converge**, because cached run

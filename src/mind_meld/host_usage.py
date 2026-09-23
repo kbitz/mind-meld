@@ -716,6 +716,7 @@ def read_cursor_usage(
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
             learned: dict[str, Any] = {}
             removed: set[str] = set()
+            conflict = False
 
             def _commit_learned() -> None:
                 for key in removed:
@@ -729,6 +730,10 @@ def read_cursor_usage(
                 try:
                     root_stat = source_root.lstat()
                 except FileNotFoundError:
+                    # An outstanding blocker outranks retained history: a
+                    # later unreadable run must not publish as a clean scan.
+                    if prior[0]:
+                        raise _ReadFailure(prior[0])
                     # A finished scan's retained history is authoritative.
                     # A prefix from a deadline is not: publishing it would
                     # latch complete_once on an undercount.
@@ -736,7 +741,7 @@ def read_cursor_usage(
                         if not runs and locked.read_state == "missing":
                             locked.write_on_exit = False
                             return _incomplete("no_metadata_ledger")
-                        raise _ReadFailure(prior[0] or "stale")
+                        raise _ReadFailure("stale")
                 else:
                     if not stat.S_ISDIR(root_stat.st_mode):
                         raise _ReadFailure("unsupported")
@@ -744,6 +749,7 @@ def read_cursor_usage(
                     for path in _iter_cursor_ledgers(source_root, read_deadline):
                         staged = _read_cursor_file(path, read_deadline)
                         if any(key in seen and seen[key] != run for key, run in staged.items()):
+                            conflict = True
                             raise _ReadFailure("malformed")
                         seen.update(staged)
                         for key, run in staged.items():
@@ -759,7 +765,10 @@ def read_cursor_usage(
                 result = _cursor_buckets(runs)
             except _ReadFailure as exc:
                 result = _incomplete(exc.reason)
-                if exc.reason == "deadline":
+                # Keep files fully read before a later tear or refusal.
+                # A cross-file conflict does not: committing the first copy
+                # would erase retained history with an arbitrary winner.
+                if not conflict:
                     _commit_learned()
             except OSError:
                 result = _incomplete("io_error")
