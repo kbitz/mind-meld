@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -134,17 +135,8 @@ can't blow up the card height."""
 MAX_TOKEN_COVERAGE_PEER_NAMES = 5
 """Maximum affected-peer names rendered in the token-coverage Note."""
 
-MAX_AGENT_INVENTORY_MACHINES = 12
-"""Cap on rendered agent-inventory rows. ``get_known_devices`` loads the device
-registry wholesale and returns every record uncapped, and when that read FAILS
-``aggregate_host_usage`` keeps every accepted view instead, so row count is
-bounded only by however many distinct device ids appear across the retained event
-window. ``_safe_short`` bounds each id's LENGTH, never the row COUNT, so a corrupt
-or hostile peer registry would otherwise produce an enormous Markdown table and an
-enormous LLM prompt. Same reasoning as ``MAX_TOKEN_COVERAGE_PEER_NAMES``, sized
-larger because a real fleet legitimately has more machines than a warning wants to
-name. Rows are ordered by information content BEFORE this cap applies, so a
-no-snapshot machine can never evict one that has data."""
+MAX_AGENT_FLOOR_CAUSES = 12
+"""Bound machine/model diagnostic details sent to the skill in one agent row."""
 
 MAX_HOST_MODEL_ID_BYTES = 256
 """UTF-8 byte ceiling for a peer-controlled host model id. Writer-side
@@ -170,6 +162,16 @@ Named in events-retro as the schema floor. Refresh remedies use
 ``ATTENDED_USAGE_MIN_VERSION``; a machine below this schema floor still
 cannot contribute agent-log activity no matter how often it pushes."""
 
+SKILL_MIN_VERSION = "v1.1.0"
+"""Floor for SKILL.md's own Step 0 gate.
+
+Distinct from ``ATTENDED_USAGE_MIN_VERSION``, which is the floor a PEER must
+clear to publish a usable capture and is what every fleet remedy cites. This
+one is about the RENDERING machine: below 1.1.0 the aggregator emits the
+pre-1.1 sections and no ``MM_HEALTH`` block at all, so a 1.1 SKILL.md loaded
+against an older binary would be reading for surfaces that do not exist.
+"""
+
 ATTENDED_USAGE_MIN_VERSION = "v0.14.17"
 """First release that captures on every attended push, including converged trees.
 Below this floor a converged mm push reports success without refreshing usage.
@@ -187,38 +189,6 @@ def _attended_usage_remedy() -> str:
 CARD_INNER_WIDTH = CARD_WIDTH - 6  # ║ + 2 spaces + content + 2 spaces + ║ = 6
 """Usable content width inside the card. Themes/noteworthy strings
 longer than this are truncated with an ellipsis suffix at render time."""
-
-MODEL_FAMILY_ROWS: tuple[tuple[str, str], ...] = (
-    ("claude", "Claude"),
-    ("codex", "Codex"),
-    ("grok", "Grok"),
-    ("other", "Unclassified"),
-)
-"""Fixed display order for the canonical ``host_usage.host_family`` buckets."""
-
-AGENT_FAMILY_ROWS: tuple[tuple[str, str], ...] = (
-    ("claude", "Claude (via agents)"),
-    ("codex", "Codex models"),
-    ("grok", "Grok models"),
-    ("other", "Unclassified models"),
-)
-"""Same canonical families as ``MODEL_FAMILY_ROWS``, labelled for the AGENT LOGS
-block. Two separate label sets on purpose, for two reasons:
-
-1. **A row here is a MODEL FAMILY, not an agent.** The wire carries no
-   reader-to-family attribution at all (``events.HostUsageSnapshot``: the row
-   has "no ... per-source status"), and ``host_usage.host_family`` buckets by
-   model-id prefix, so the Codex and OpenCode readers both land GPT models in
-   the ``codex`` family. Labelling these rows "Codex"/"Grok" bare would claim an
-   attribution the data cannot support; the trailing "models" says what they are.
-2. **``claude`` is a legal host family**, so OpenCode running a ``claude-*``
-   model renders a Claude row here — directly below the MODELS block's own
-   ``Claude`` row, meaning something different. ``Claude (via agents)``
-   disambiguates rather than relying on block headers to carry a collision the
-   labels created.
-
-Keys must stay identical to ``MODEL_FAMILY_ROWS`` and ``_HOST_FAMILIES``;
-``tests/test_retro_fleet_aggregator.py`` pins all three sets equal."""
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +318,13 @@ class SessionsAggregate:
     token_devices: dict[str, datetime] = field(default_factory=dict)
     token_missing_projects: int = 0
     token_missing_sessions: int = 0
+    # UTC day keys inside the window that carried non-excluded Claude token
+    # activity. Collected so the unified Agents table can report a day count
+    # for Claude on the same footing as the host families, which have carried
+    # one since ``_agent_rhythm_view``. A set, so re-merging a project's
+    # per-day map (many projects per device, many devices per fleet) is
+    # idempotent — the same property that makes the host-side day union safe.
+    active_days: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -566,15 +543,10 @@ class HostUsageInventory:
 
 @dataclass(frozen=True)
 class AgentRhythmView:
-    """In-window agent-log activity rhythm for the card. Carries NO magnitude.
+    """Host-only in-window activity for coverage diagnostics; no token volume.
 
-    Four live fields by design. An earlier draft carried nine; the denominator,
-    the numerator clamp, and the change-gate were all deleted during review, and
-    with them ``window_days``, ``devices_consulted_nothing``,
-    ``devices_without_snapshot``, ``rejected_rows``, and ``rejected_reasons``.
-    Those last four are body concerns and ``HostUsageInventory`` already exposes
-    them, so copying them into a CARD view would create a second source of truth
-    for a body string.
+    ``HostUsageInventory`` owns missing-snapshot and rejected-row details.
+    The card uses ``FleetAgentUsage``, which also includes Claude sessions.
 
     ``rows`` is deliberately not named ``active_days``: the wire already uses
     ``active_days`` for a ``list[str]`` of UTC day keys
@@ -590,6 +562,394 @@ class AgentRhythmView:
     @property
     def any_activity(self) -> bool:
         return bool(self.rows)
+
+
+AGENT_ROW_ORDER: tuple[tuple[str, str], ...] = (
+    ("claude", "Claude"),
+    ("codex", "Codex"),
+    ("grok", "Grok"),
+    ("other", "Unclassified"),
+)
+"""Display order for the unified Agents table and card block.
+
+Supersedes the split ``MODEL_FAMILY_ROWS`` / ``AGENT_FAMILY_ROWS`` pair. Those
+existed to keep two blocks apart that reported different units from different
+sources; one table reporting one unit needs one label set. Keys stay identical
+to ``host_usage.HostFamily`` so ``host_family()`` remains the only classifier.
+"""
+
+
+@dataclass(frozen=True)
+class FleetAgentRow:
+    """One agent's in-window usage, summed across the fleet.
+
+    ``by_model`` is the priced basis; ``tokens`` is the authoritative volume.
+    They can differ: the host writer caps ``by_model`` at
+    ``MAX_HOST_MODELS_PER_DAY`` while leaving day totals whole, so a busy day
+    can leave unattributable residue. ``floor_causes`` records that;
+    ``agent_row_floor_causes`` adds unpriced models, so the renderer marks
+    ``≥`` instead of ``~`` without the caller re-deriving the reason.
+
+    ``counters_known`` is False when any contributing host snapshot published
+    legacy inclusive counters. That is NOT a hedge to be moved into the health
+    payload: inclusive counters run up to ~2x high, so rendering the number
+    would be wrong in the one direction every other caveat here does not point.
+
+    ``floor_causes`` carries every reason this row's cost is a lower bound,
+    named. It is the fleet-wide successor to the per-device cause list the
+    pre-1.1 ``_device_economics_cell`` built, and it exists so that collapsing
+    a per-machine table into one row does not quietly drop the reason a number
+    is a floor — only the machine it happened on.
+    """
+
+    key: str
+    label: str
+    by_model: dict[str, dict[str, int]] = field(default_factory=dict)
+    tokens: int = 0
+    active_days: int = 0
+    machines: int = 0
+    counters_known: bool = True
+    floor_causes: tuple[str, ...] = ()
+    legacy_devices: tuple[str, ...] = ()
+
+    @property
+    def has_volume(self) -> bool:
+        return self.tokens > 0 or any(token_usage.sum_bucket(b) > 0 for b in self.by_model.values())
+
+
+@dataclass(frozen=True)
+class FleetAgentUsage:
+    """Every agent on one footing: fleet-summed tokens, days, machines.
+
+    **Why this sums host tokens where the pre-1.1 renderer refused to.** The
+    refusal rested on a claim in ``_agent_rhythm_view``'s docstring — that a
+    migrated home directory yields two device ids with overlapping history and
+    "the aggregator has no signal that could detect the overlap". That claim is
+    false. The overlap is a byte-for-byte ledger copy, so the duplicated days
+    carry *identical* counter tuples on both devices. Independent activity can
+    also match, so ``duplicate_ledger`` flags suspected overlap for inspection.
+
+    The asymmetry it replaced was indefensible on its own terms: Claude Code
+    session tokens were already summed fleet-wide under the identical hazard
+    (``CLAUDE_SCOPE`` said so out loud), so the same risk produced a number for
+    one agent and a refusal for the others. One rule now covers all of them —
+    sum, and say so loudly if the detector ever fires.
+    """
+
+    rows: tuple[FleetAgentRow, ...] = ()
+    duplicate_ledger: tuple[str, ...] = ()
+    machines_with_activity: int = 0
+    machines_known: int | None = None
+
+
+def _host_family_day_tuples(
+    inventory: HostUsageInventory, lo: str, hi: str
+) -> dict[tuple[str, str], dict[str, tuple[int, ...]]]:
+    """``(family, day) -> {device: counter tuple}`` for in-window, nonzero days."""
+    out: dict[tuple[str, str], dict[str, tuple[int, ...]]] = {}
+    for device, snap in inventory.by_device.items():
+        if not isinstance(snap, HostDeviceSnapshot):
+            continue
+        families = snap.lifetime_by_family
+        if not isinstance(families, dict):
+            continue
+        bounds = window_bounds(snap, lo, hi)
+        for family, days in families.items():
+            if family not in _HOST_FAMILIES or not isinstance(days, dict):
+                continue
+            for day, bucket in days.items():
+                if not isinstance(bucket, dict):
+                    continue
+                if token_usage.sum_bucket(bucket) <= 0:
+                    continue
+                if not contributes_in_window(day, bounds):
+                    continue
+                counters = tuple(_safe_int(bucket.get(k)) for k in token_usage.TOKEN_FIELDS)
+                out.setdefault((family, day), {})[device] = counters
+    return out
+
+
+def _detect_duplicate_ledgers(
+    day_tuples: dict[tuple[str, str], dict[str, tuple[int, ...]]],
+) -> tuple[str, ...]:
+    """Families where two devices report an identical counter tuple on one day.
+
+    A migrated home directory copies the host ledger verbatim, so shared days
+    match exactly. Equal aggregate counters can also occur independently;
+    this signal calls for inspection, not automatic device removal.
+    """
+    hits: set[str] = set()
+    for (family, _day), per_device in day_tuples.items():
+        if len(per_device) < 2:
+            continue
+        seen: set[tuple[int, ...]] = set()
+        for counters in per_device.values():
+            if counters in seen:
+                hits.add(family)
+                break
+            seen.add(counters)
+    return tuple(family for family, _ in AGENT_ROW_ORDER if family in hits)
+
+
+def aggregate_agent_usage(
+    data: RetroData,
+    *,
+    machines_known: int | None,
+) -> FleetAgentUsage:
+    """Build the one table every agent shares.
+
+    Claude comes from Claude Code session snapshots (already a fleet sum);
+    Codex / Grok / Unclassified come from host-usage snapshots, summed here for
+    the first time. Day counts are set unions on both sides, so they stay
+    idempotent under a duplicated corpus even when token sums would not be.
+    """
+    inventory = data.host_inventory
+    if not isinstance(inventory, HostUsageInventory):
+        inventory = HostUsageInventory()
+
+    lo, hi = _window_day_keys(data.since, data.until)
+    labels = device_labels(data.fleet)
+    rows: list[FleetAgentRow] = []
+
+    # --- Claude: the Claude Code session corpus, whole. Not re-bucketed by
+    # `host_family`; the source IS the agent, and re-classifying would split
+    # its own excluded-model rows into an "Unclassified" line that means
+    # something entirely different from a host's unclassified models.
+    # Defang before pricing. ``_merge_token_window`` only ever builds
+    # well-formed buckets, but ``tokens_by_model`` is a public dataclass field
+    # fed from peer-controlled events, and both ``estimate_cost`` and
+    # ``_unpriced_token_summary`` index into each bucket. A non-dict value
+    # (``"malformed": "not-a-bucket"``) would take down the whole render.
+    claude_by_model = {
+        m: {k: _safe_aggregate_token_int(b.get(k)) for k in token_usage.TOKEN_FIELDS}
+        for m, b in (data.sessions.tokens_by_model or {}).items()
+        if isinstance(m, str)
+        and m.strip()
+        and isinstance(b, dict)
+        and m not in token_usage.COST_EXCLUDED_MODELS
+    }
+    # Derived from the same map that prices the row. The four
+    # ``SessionsAggregate`` totals carry the identical value in production —
+    # both exclude ``COST_EXCLUDED_MODELS`` — but reading one number from one
+    # field and its cost from another lets the two disagree, which is exactly
+    # the class of drift this Track removed everywhere else.
+    claude_tokens = sum(token_usage.sum_bucket(b) for b in claude_by_model.values())
+    if claude_tokens > 0:
+        rows.append(
+            FleetAgentRow(
+                key="claude",
+                label="Claude",
+                by_model=claude_by_model,
+                tokens=claude_tokens,
+                active_days=len(data.sessions.active_days),
+                machines=len(data.sessions.token_devices),
+                counters_known=True,
+                floor_causes=(
+                    ("token coverage is incomplete on some machines",)
+                    if _token_coverage_peers(data.sessions)
+                    else ()
+                ),
+            )
+        )
+
+    # --- Host families.
+    day_union: dict[str, set[str]] = {}
+    fam_tokens: dict[str, int] = {}
+    fam_machines: dict[str, set[str]] = {}
+    fam_by_model: dict[str, dict[str, dict[str, int]]] = {}
+    fam_counters_known: dict[str, bool] = {}
+    fam_legacy_devices: dict[str, set[str]] = {}
+    fam_causes: dict[str, set[str]] = {}
+    activity_devices = set(data.sessions.token_devices) if rows else set()
+
+    for device, snap in inventory.by_device.items():
+        if not isinstance(snap, HostDeviceSnapshot):
+            continue
+        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
+        bounds = window_bounds(snap, lo, hi)
+        if bounds is None:
+            continue
+        active_here = False
+        touched: set[str] = set()
+        for family, days in families.items():
+            if family not in _HOST_FAMILIES or not isinstance(days, dict):
+                continue
+            for day, bucket in days.items():
+                if not isinstance(bucket, dict) or token_usage.sum_bucket(bucket) <= 0:
+                    continue
+                if not contributes_in_window(day, bounds):
+                    continue
+                day_union.setdefault(family, set()).add(day)
+                fam_tokens[family] = fam_tokens.get(family, 0) + token_usage.sum_bucket(bucket)
+                fam_machines.setdefault(family, set()).add(device)
+                touched.add(family)
+                active_here = True
+        # Per-model slice for pricing. Absent on a pre-33A peer, in which case
+        # the family keeps its token volume and loses only its cost basis.
+        by_model, residual = _windowed_host_by_model(snap, lo, hi)
+        families_match = _host_model_families_match(snap, lo, hi)
+        if not families_match:
+            # The acceptor deliberately permits classifier differences across
+            # versions. Never price one family's volume under another label.
+            by_model = {}
+        for model, usage in by_model.items():
+            family = host_usage.host_family(model)
+            if family not in _HOST_FAMILIES:
+                continue
+            dest = fam_by_model.setdefault(family, {}).setdefault(
+                model, {k: 0 for k in token_usage.TOKEN_FIELDS}
+            )
+            token_usage.merge_usage_bucket(dest, usage)
+
+        # Every floor cause the pre-1.1 per-device cell named — but attributed
+        # PER FAMILY, not per machine. A Mac running both readers publishes one
+        # snapshot covering both, so a machine-scoped cause list put Grok's
+        # "logs do not record per-request prompt sizes" on the Codex row, which
+        # is a claim about a different vendor's log format.
+        shared: set[str] = set()
+        if not families_match:
+            shared.add(
+                f"{device_label(device, labels)}: "
+                "per-model detail uses a different family classification"
+            )
+        if residual:
+            # Genuinely cross-family: `tokens_by_day` day totals are not
+            # family-partitioned, so unattributed residue cannot be blamed on
+            # one family. Shared is the honest scope.
+            shared.add("some tokens were not attributed to a named model (the per-day model cap)")
+        unusable_coverage = (snap.partial_reason or snap.degraded_reason) and not (
+            snap.partial or snap.degraded
+        )
+        if snap.tokens_by_day is None and touched:
+            shared.add(
+                f"{device_label(device, labels)}: "
+                + _host_detail_phrase(snap.detail, snap.detail_reason, device=device)
+            )
+        coverage_unknown = bool(
+            snap.partial or snap.degraded or snap.partial_reason or snap.degraded_reason
+        )
+
+        def _reader_scope(readers: tuple[str, ...]) -> dict[str, list[str]]:
+            """An incomplete reader may omit any family; the wire cannot say which.
+
+            Reader identity does not identify its model provider. Even a known
+            failed reader can have contributed no data for an affected family.
+            """
+            scoped: dict[str, list[str]] = {}
+            for reader in readers:
+                for fam in sorted(_HOST_FAMILIES):
+                    scoped.setdefault(fam, []).append(reader)
+            return scoped
+
+        per_family: dict[str, set[str]] = {}
+        for fam, readers in _reader_scope(snap.partial).items():
+            per_family.setdefault(fam, set()).add(
+                "a host declared totals incomplete ("
+                + ", ".join(_reader_display_labels(tuple(readers)))
+                + ")"
+            )
+        for fam, readers in _reader_scope(snap.degraded).items():
+            per_family.setdefault(fam, set()).add(
+                "a host reader failed (" + ", ".join(_reader_display_labels(tuple(readers))) + ")"
+            )
+        if unusable_coverage:
+            # An empty reader list is not "no problem". The machine contributed
+            # no family to attach the warning to, and a healthy peer would
+            # otherwise render an ordinary estimate.
+            cause = (
+                f"{device_label(device, labels)}: "
+                "host coverage metadata was unusable; run `mm diag`"
+            )
+            for family in sorted(_HOST_FAMILIES):
+                per_family.setdefault(family, set()).add(cause)
+        for family in touched:
+            family_slice = {
+                m: u for m, u in by_model.items() if host_usage.host_family(m) == family
+            }
+            long_context = _long_context_cause(family_slice, incomplete=coverage_unknown)
+            if long_context:
+                per_family.setdefault(family, set()).add(
+                    f"{device_label(device, labels)}: {long_context}"
+                )
+
+        for family in touched:
+            if not snap.counters_disjoint:
+                fam_counters_known[family] = False
+                fam_legacy_devices.setdefault(family, set()).add(device)
+            if shared:
+                fam_causes.setdefault(family, set()).update(shared)
+        # Reader coverage causes apply even to a family this machine contributed
+        # NO data for: a failed codex reader means the fleet's Codex total is
+        # missing this machine's share, which is exactly a lower bound. Causes
+        # for a family that never materializes as a row simply never render.
+        for family, causes_here in per_family.items():
+            fam_causes.setdefault(family, set()).update(causes_here)
+        if active_here:
+            activity_devices.add(device)
+
+    for key, label in AGENT_ROW_ORDER:
+        existing = next((r for r in rows if r.key == key), None)
+        if key not in fam_tokens and key not in fam_by_model and existing is None:
+            continue
+        host_row = FleetAgentRow(
+            key=key,
+            label=label,
+            by_model=fam_by_model.get(key, {}),
+            tokens=fam_tokens.get(key, 0),
+            active_days=len(day_union.get(key, set())),
+            machines=len(fam_machines.get(key, set())),
+            counters_known=fam_counters_known.get(key, True),
+            floor_causes=tuple(sorted(fam_causes.get(key, set()))),
+            legacy_devices=tuple(sorted(fam_legacy_devices.get(key, set()))),
+        )
+        if existing is None:
+            rows.append(host_row)
+            continue
+        # Only ``claude`` can collide: Claude Code sessions already produced a
+        # row, and a host ledger can ALSO carry claude-* models (a Codex CLI
+        # pointed at a Claude model, or a legacy peer). Dropping the host side
+        # would silently lose real tokens, so the row means "usage of this
+        # model family across the fleet" and both sources add into it. The two
+        # corpora cannot overlap — ``host_usage`` reads Codex and Grok ledgers
+        # and never Claude Code's own session jsonls — so this is a sum, not a
+        # double count.
+        merged_by_model = {m: dict(b) for m, b in existing.by_model.items()}
+        for model, usage_bucket in host_row.by_model.items():
+            dest = merged_by_model.setdefault(model, {k: 0 for k in token_usage.TOKEN_FIELDS})
+            token_usage.merge_usage_bucket(dest, usage_bucket)
+        rows[rows.index(existing)] = FleetAgentRow(
+            key=key,
+            label=label,
+            by_model=merged_by_model,
+            tokens=existing.tokens + host_row.tokens,
+            active_days=len(set(data.sessions.active_days) | day_union.get(key, set())),
+            machines=len(set(data.sessions.token_devices) | fam_machines.get(key, set())),
+            counters_known=existing.counters_known and host_row.counters_known,
+            floor_causes=tuple(sorted(set(existing.floor_causes) | set(host_row.floor_causes))),
+            legacy_devices=tuple(
+                sorted(set(existing.legacy_devices) | set(host_row.legacy_devices))
+            ),
+        )
+
+    order = {key: i for i, (key, _) in enumerate(AGENT_ROW_ORDER)}
+    rows.sort(key=lambda r: (order.get(r.key, 99), r.key))
+
+    # The card compares current registry members. Historical Claude usage
+    # remains in the rows, whose machine counts describe actual contributors.
+    if machines_known is not None:
+        registered = {
+            d.get("device_id")
+            for d in data.fleet.devices_known_list
+            if isinstance(d, dict) and isinstance(d.get("device_id"), str)
+        }
+        activity_devices.intersection_update(registered)
+
+    return FleetAgentUsage(
+        rows=tuple(rows),
+        duplicate_ledger=_detect_duplicate_ledgers(_host_family_day_tuples(inventory, lo, hi)),
+        machines_with_activity=len(activity_devices),
+        machines_known=machines_known,
+    )
 
 
 @dataclass(frozen=True)
@@ -1716,7 +2076,7 @@ _MAX_COUNTER_SEMANTICS_LEN = 32
 The only legal value is 12 bytes; anything longer is fail-closed."""
 
 _UNPRICED_MODEL_NOTE_CAP = 8
-"""Named unpriced ids in the Notes line. Ordered, sanitized, truncated."""
+"""Named model ids in health details. Ordered, sanitized, truncated."""
 
 
 def _accept_counter_semantics(raw: object) -> str | None:
@@ -2493,6 +2853,13 @@ def _merge_token_window(
             out.tokens_cache_create += cc
             out.tokens_cache_read += cr
             out.tokens_output += outp
+            # Same basis as the four totals: a day counts as active only when
+            # a non-excluded model moved a counter on it. ``<synthetic>``-only
+            # days are tool-execution turns that never called the API, so
+            # counting them would make Claude's day column mean something
+            # different from every other row's.
+            if in_ or cc or cr or outp:
+                out.active_days.add(day_key)
 
 
 # ---------------------------------------------------------------------------
@@ -2846,64 +3213,14 @@ def _safe_aggregate_token_int(x: object) -> int:
     return _safe_int(x)
 
 
-def _aggregate_model_families(tokens_by_model: object) -> list[tuple[str, int]]:
-    """Return nonzero token totals in canonical model-family display order.
-
-    ``tokens_by_model`` is normally populated by ``_merge_token_window``,
-    which hardens peer-controlled counters. ``SessionsAggregate`` is also a
-    public dataclass used directly by tests and library callers, so this
-    presentation helper repeats that small defensive boundary instead of
-    trusting hand-built values. Synthetic, blank, malformed, and zero-total
-    inputs never create apparent model usage.
-    """
-    if not isinstance(tokens_by_model, dict):
-        return []
-
-    totals = {family: 0 for family, _label in MODEL_FAMILY_ROWS}
-    for model, bucket in tokens_by_model.items():
-        if not isinstance(model, str) or not model.strip():
-            continue
-        if model in token_usage.COST_EXCLUDED_MODELS or not isinstance(bucket, dict):
-            continue
-
-        total = sum(
-            _safe_aggregate_token_int(bucket.get(field)) for field in token_usage.TOKEN_FIELDS
-        )
-        if total <= 0:
-            continue
-        totals[host_usage.host_family(model)] += total
-
-    return [(label, totals[family]) for family, label in MODEL_FAMILY_ROWS if totals[family] > 0]
-
-
-MAX_MODEL_COST_ROWS = 5
 _DEVICE_TABLE_LABEL_WIDTH = 8
+# Leave room for " ({short id})" when two registry names sanitize to one label.
+_COLLIDING_LABEL_BUDGET = 110
 
 
 def _device_table_label(device: str) -> str:
-    """One prefix width for Agent activity, economics, and model subtotals."""
+    """Bounded device-id fallback when no registry hostname is available."""
     return _safe_short(device)[:_DEVICE_TABLE_LABEL_WIDTH] or "(unnamed)"
-
-
-RATE_MARKER_LEGEND = (
-    "- ``~``: estimate from the recorded tokens and bundled rates. "
-    "May use a family-extrapolated rate.",
-    "- ``>=``: floor of the priced subtotal under bundled rate assumptions, never a guaranteed "
-    "billing minimum; causes include unpriced models, incomplete coverage, a dropped reader, "
-    "unattributed tokens, or a model whose long-context tier cannot be reconstructed. See Notes.",
-    "- ``—``: the figure is unavailable, not zero.",
-    "- Anthropic cache writes use the 1-hour rate for estimates and the 5-minute rate for floors. "
-    "Once a floor applies, every priced cell in that section uses floor rates.",
-    "- Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates.",
-)
-CLAUDE_SCOPE = (
-    "Source: Claude Code session logs; sum of per-machine inventories, not deduplicated "
-    "(a migrated home directory can be counted twice)."
-)
-HOST_SCOPE = (
-    "Source: latest host-usage snapshots; per machine, never summed. "
-    "Host logs can lose old records; observed endpoints do not prove continuous coverage."
-)
 
 
 def _section_costs(by_model: dict, *, floor: bool) -> tuple[float, dict[str, float]]:
@@ -2924,72 +3241,6 @@ def _floor_costs(by_model: dict, costs: dict) -> tuple[float, dict[str, float]]:
     return sum(floors.values()), floors
 
 
-def _marked_cost(amount: float, *, floor: bool) -> str:
-    return (">=" if floor else "~") + _format_usd(amount, bound="floor" if floor else "estimate")
-
-
-def _model_cost_rows(by_model: dict, costs: dict, *, floor: bool) -> list[str]:
-    """Bounded, sanitized four-counter model rows, ordered by token volume."""
-    ordered = sorted(
-        (m for m in by_model if m not in token_usage.COST_EXCLUDED_MODELS),
-        key=lambda m: (-token_usage.sum_bucket(by_model[m]), m),
-    )
-    rows = []
-    for model in ordered[:MAX_MODEL_COST_ROWS]:
-        counters = by_model[model]
-        cells = [
-            _format_token_count(_safe_aggregate_token_int(counters.get(k)))
-            for k in token_usage.TOKEN_FIELDS
-        ]
-        cell = _marked_cost(costs[model], floor=floor) if model in costs else "—"
-        label = _safe_short(_short_model_name(_safe_short(model)))[:22]
-        rows.append(f"| {label} | {' | '.join(cells)} | {cell} |")
-    if len(ordered) > MAX_MODEL_COST_ROWS:
-        rows.append(f"| (+{len(ordered) - MAX_MODEL_COST_ROWS} more) | | | | | |")
-    return rows
-
-
-def _render_token_block(lines: list[str], sessions: SessionsAggregate) -> None:
-    """Render all four fields and bounded per-model list-rate equivalents."""
-    totals = [
-        sessions.tokens_input,
-        sessions.tokens_cache_create,
-        sessions.tokens_cache_read,
-        sessions.tokens_output,
-    ]
-    if not sum(totals):
-        return
-    consumed = sum(totals[:3])
-    if consumed:
-        lines.append(f"- Cache hit ratio:    {sessions.tokens_cache_read / consumed:.0%}")
-    unpriced, _, _ = _unpriced_token_summary(sessions.tokens_by_model)
-    floor = bool(unpriced or _token_coverage_peers(sessions))
-    total, costs = _section_costs(sessions.tokens_by_model, floor=floor)
-    cell = _marked_cost(total, floor=floor) if costs else "—"
-    lines.extend(
-        [
-            "",
-            "API list-rate equivalent (Claude Code, window sum)",
-            "",
-            "In = input; Cache w = cache write; Cache r = cache read; Out = output.",
-            "",
-            "| Model | In | Cache w | Cache r | Out | List-rate $ |",
-            "|---|---:|---:|---:|---:|---:|",
-        ]
-    )
-    lines.extend(_model_cost_rows(sessions.tokens_by_model, costs, floor=floor))
-    cells = " | ".join(_format_token_count(n) for n in totals)
-    lines.append(f"| All models | {cells} | {cell} |")
-    lines.extend(
-        [
-            "",
-            f"Anthropic rates verified {token_usage.PRICING_LAST_UPDATED}; "
-            "see the shared legend in API list-rate equivalent (per machine); "
-            "these two figures come from different logs; never add them.",
-        ]
-    )
-
-
 def _format_usd(amount: float, *, bound: str = "estimate") -> str:
     """Nearest estimates, downward floors, upward ceilings; whole dollars at $100."""
     rounding = {"estimate": ROUND_HALF_EVEN, "floor": ROUND_FLOOR, "ceiling": ROUND_CEILING}[bound]
@@ -3008,12 +3259,12 @@ def _unpriced_token_summary(
 
     Shares ``resolve_prices`` with ``estimate_cost`` rather than
     re-testing ``model in PRICING``. That duplication is exactly what
-    would make the cost line and this Notes line contradict each other
+    would make the cost line and its health entry contradict each other
     once family-tier fallback landed: the cost line would price
     ``claude-opus-6`` while this line still called it unpriced. One
     predicate, one answer — see ``token_usage.resolve_prices``.
 
-    ``model_ids`` is sorted for deterministic Notes text. Sanitization
+    ``model_ids`` is sorted for deterministic health text. Sanitization
     and the display cap happen at the render site, not here.
     """
     total = 0
@@ -3236,39 +3487,6 @@ def _format_coverage_peer_names(peers: set[str]) -> str:
     return summary
 
 
-def _render_models_block(sessions: SessionsAggregate) -> list[str]:
-    """Render the second-pass card's observed-model usage block.
-
-    Family names classify observed model IDs. They do not assert fleet-host
-    coverage.
-
-    **Provenance lives in the HEADER, not in a following line.** The pre-v0.12.37
-    block appended a literal ``MODEL_COVERAGE_LINE`` ("Coverage: Claude Code
-    session snapshots only"). Once the sibling AGENT LOGS block exists, a line
-    saying "only" that scopes just the rows ABOVE it reads as a contradiction of
-    the block below it, and rewording it to say so cost more characters than the
-    header parenthetical does — while introducing the word "row", which appears
-    nowhere else on the card. Scoping in the header is unconditional, costs no
-    line, and cannot drift away from the rows it describes.
-    """
-    out = [_card_line("MODELS (Claude Code sessions)")]
-    rows = _aggregate_model_families(sessions.tokens_by_model)
-    if rows:
-        for family, total in rows:
-            out.append(_card_line(f"{family}: {_format_token_count(total)} tokens"))
-    else:
-        # Scoped to Claude Code on purpose: the unscoped pre-v0.12.37 string
-        # ("No model usage observed in available snapshots") becomes FALSE the
-        # moment the AGENT LOGS block reports a family beside it.
-        out.append(_card_line("No Claude Code model usage observed"))
-
-    coverage_peers = _token_coverage_peers(sessions)
-    if coverage_peers:
-        incomplete = f"Model-token coverage incomplete: {len(coverage_peers)} peer(s); see Notes"
-        out.append(_card_line(incomplete))
-    return out
-
-
 def _window_day_keys(since: datetime, until: datetime) -> tuple[str, str]:
     """Inclusive UTC day-key bounds for a window, as comparable strings.
 
@@ -3307,26 +3525,17 @@ def _agent_rhythm_view(
     until: datetime,
     machines_known: int | None,
 ) -> AgentRhythmView:
-    """Per-family count of distinct in-window UTC days with agent activity.
+    """Host-only activity projection used by the coverage diagnostics.
 
-    **Why days and not tokens.** Cross-machine rhythm is a UNION of day keys, and
-    set union is idempotent under duplicate corpora. Migrating a Mac's home
-    directory and running ``mm init`` fresh gives two ``device_id``s carrying
-    overlapping history — the host stores live outside every mm sync source, so
-    they move only by OS-level migration — and the aggregator has no signal that
-    could detect the overlap. A summed token total would be silently wrong and
-    unfalsifiable; a day-set union is simply unaffected.
+    Day counts are set unions, so duplicate ledgers cannot inflate them.
+    ``aggregate_agent_usage`` separately builds the unified fleet rows and
+    detects identical per-day counter tuples with ``_detect_duplicate_ledgers``.
+    This projection remains host-only so Claude session activity cannot hide
+    missing host snapshots from ``_agent_coverage_notes``.
 
-    **The count is still a LOWER BOUND, for a changed reason.** It used to be one
-    because resuming a session moved its entire cumulative total onto a new
-    last-touch day, so a day key could DISAPPEAR between snapshots ("63 of 440
-    rollouts on a real corpus land on a day they did not start"). Track 32A made
-    every reader per-turn, so day keys no longer move and that mechanism is gone.
-    What remains: a peer on an older mm still publishes the old shape, and a
-    machine that never pushed in a window contributes no days at all. The error
-    stays one-directional — it can only understate — which is why the rendered
-    copy says "seen on N days" rather than asserting a count, and why nothing
-    diffs or charts this value.
+    The counts describe observed days, not complete fleet coverage: an older
+    peer may publish last-touch totals, and a machine that has not pushed
+    contributes no days. Nothing diffs, charts, or renders a ratio of them.
 
     Day keys are clamped to ``min(until, as_of)`` so a snapshot can never report
     activity later than its own observation. The acceptor validates day-key
@@ -3354,7 +3563,7 @@ def _agent_rhythm_view(
             if family not in _HOST_FAMILIES or not isinstance(days, dict):
                 continue
             for day, bucket in days.items():
-                # Mirror _aggregate_model_families' `if total <= 0: continue`.
+                # Match the unified rows' nonzero-activity gate.
                 # An all-zero bucket is a real accepted shape (zero is a valid
                 # counter and the writer does not drop zero buckets), and
                 # rendering it would be absence-as-zero from the other side.
@@ -3366,7 +3575,7 @@ def _agent_rhythm_view(
         machines_with_activity += 1 if active_here else 0
 
     rows = tuple(
-        (label, len(union[family])) for family, label in AGENT_FAMILY_ROWS if union.get(family)
+        (label, len(union[family])) for family, label in AGENT_ROW_ORDER if union.get(family)
     )
     return AgentRhythmView(
         rows=rows,
@@ -3374,43 +3583,6 @@ def _agent_rhythm_view(
         machines_known=machines_known,
         snapshots_accepted=len(inventory.by_device),
     )
-
-
-def _render_agent_block(view: AgentRhythmView) -> list[str]:
-    """Render the card's AGENT LOGS block. Never carries a token magnitude.
-
-    Its own block rather than extra rows inside MODELS: readers scan blocks
-    semantically rather than type-checking units, so adjacency plus differing
-    units is not enough to stop "Claude 6.5B vs Codex 5" being read as a
-    comparison. A CAPS header matching every sibling block costs one line and
-    makes the mistake structurally unavailable.
-
-    **Omitted only when no snapshot was ever accepted** — the one state where mm
-    genuinely knows nothing. Omitting it whenever there is merely no ACTIVITY
-    would destroy the ``N of M machines`` provenance count exactly when it
-    matters, and would make "all machines reported, nobody used an agent" look
-    identical to "mm has no idea". One family per line, unconditionally: a joined
-    line reaches 96 characters at four families against a 58-char budget and
-    ``_card_line`` would silently truncate a metric.
-    """
-    if view.snapshots_accepted <= 0:
-        return []
-
-    n = view.machines_with_activity
-    if view.machines_known is None:
-        # Registry read failed. Render a visibly weaker claim rather than a
-        # denominator of None; format_retro already notes the cause.
-        scope = f"{n} machine{'' if n == 1 else 's'} with agent activity"
-    else:
-        scope = f"{n} of {view.machines_known} machines with agent activity"
-    out = [_card_line(f"AGENT LOGS ({scope})")]
-
-    if not view.any_activity:
-        out.append(_card_line("No agent activity this window"))
-        return out
-    for label, days in view.rows:
-        out.append(_card_line(f"{label}: seen on {days} day{'' if days == 1 else 's'}"))
-    return out
 
 
 def _snapshot_day_ceiling(snap: HostDeviceSnapshot, window_hi: str) -> str:
@@ -3427,38 +3599,6 @@ def _snapshot_day_ceiling(snap: HostDeviceSnapshot, window_hi: str) -> str:
     return min(window_hi, snap.as_of.date().isoformat())
 
 
-def _agent_state_label(snap: HostDeviceSnapshot, *, has_window_activity: bool) -> str:
-    """Reader-facing state string. Never a raw field name.
-
-    ``future_dated`` printed raw reads as a broken clock; the acceptor already
-    rejects anything beyond ``until + _HOST_FUTURE_SKEW``, so the band is at most
-    24h and the boundary itself is ACCEPTED (the test is ``>``), hence ``<=24h``.
-    ``stale`` means "last observed before this window", not "unreliable".
-
-    ``has_window_activity`` is IN-WINDOW activity, not retained activity. Gating
-    it on the retained total instead would make this string unreachable for a
-    machine whose only activity predates the window, and would put the State
-    column at odds with the card's ``N of M machines with agent activity`` count,
-    which is itself in-window.
-    """
-    if snap.future_dated:
-        return "clock ahead (<=24h)"
-    if snap.stale:
-        return "last seen before window"
-    if not has_window_activity:
-        return "current, no agent activity observed"
-    return "current"
-
-
-def _agent_state_cell(snap: HostDeviceSnapshot, *, active: bool) -> str:
-    return {
-        "current": "current",
-        "current, no agent activity observed": "idle",
-        "last seen before window": "stale",
-        "clock ahead (<=24h)": "ahead",
-    }[_agent_state_label(snap, has_window_activity=active)]
-
-
 _UNKNOWN_READER_LABEL = "unknown/retired reader"
 
 
@@ -3471,197 +3611,6 @@ def _reader_display_labels(readers: Iterable[object]) -> tuple[str, ...]:
     if any(not isinstance(reader, str) or reader not in live_set for reader in values):
         labels.append(_UNKNOWN_READER_LABEL)
     return tuple(labels)
-
-
-def _render_agent_inventory(
-    data: RetroData,
-) -> list[str]:
-    """Per-machine agent-log magnitude. The body, never the card.
-
-    This is the read ``docs/invariants/events-retro.md`` names as allowed for a
-    23A consumer: iterate ``by_device`` and print ``consulted`` + ``as_of`` +
-    ``current``. One row per (machine, model family) rather than per (machine,
-    agent), because the wire carries no reader-to-family attribution — the Codex
-    and OpenCode readers both classify GPT into the ``codex`` family, so an
-    agent-grained row would either double-count or erase a reader. Which readers
-    ran is therefore reported per MACHINE, below the table.
-
-    No cross-machine sum is ever formed here, which is what makes magnitude safe
-    in this section at all.
-    """
-    inventory = data.host_inventory
-    if not isinstance(inventory, HostUsageInventory):
-        return []
-    if not inventory.by_device and not inventory.devices_without_accepted_row:
-        return []
-
-    lo, hi = _window_day_keys(data.since, data.until)
-    known_ids: list[str] = [
-        d.get("device_id", "")
-        for d in data.fleet.devices_known_list
-        if isinstance(d, dict) and isinstance(d.get("device_id"), str) and d.get("device_id")
-    ]
-    # Every machine mm knows about, plus every machine with an accepted snapshot,
-    # plus the ones the inventory explicitly recorded as having none — so the
-    # table reconciles without the reader doing arithmetic against prose.
-    candidates = (
-        set(known_ids) | set(inventory.by_device) | set(inventory.devices_without_accepted_row)
-    )
-    if not candidates:
-        return []
-
-    # ORDER BY INFORMATION CONTENT, then cap. Sorting alphabetically and
-    # truncating would let a dozen no-snapshot machines evict the only machine
-    # that actually has data — on a 13-machine fleet the table rendered twelve
-    # `no snapshot` rows, zero data rows, and dropped the readers line entirely,
-    # while the card simultaneously said "1 of 13 machines with agent activity".
-    # The cap exists to bound a hostile registry, not to decide what matters.
-    def _rank(device: str) -> tuple[int, str]:
-        snap = inventory.by_device.get(device)
-        if snap is None or not isinstance(snap, HostDeviceSnapshot):
-            return (2, device)  # no usable snapshot
-        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
-        has_data = any(
-            token_usage.sum_bucket(b) > 0
-            for days in families.values()
-            if isinstance(days, dict)
-            for b in days.values()
-        )
-        return (0 if has_data else 1, device)
-
-    ordered = sorted(candidates, key=_rank)
-    shown, omitted = ordered[:MAX_AGENT_INVENTORY_MACHINES], ordered[MAX_AGENT_INVENTORY_MACHINES:]
-
-    rows: list[str] = []
-    readers: list[str] = []
-    observations: list[str] = []
-    for device in shown:
-        label = _device_table_label(device)
-        snap = inventory.by_device.get(device)
-        # Mirror _agent_rhythm_view's guard: by_device is a public dataclass
-        # field, so a hand-built inventory can carry a non-snapshot value.
-        # Without this the whole retro render dies on an AttributeError.
-        if not isinstance(snap, HostDeviceSnapshot):
-            rows.append(f"| {label} | — | — | missing | — | — |")
-            continue
-        # The acceptor retains identifier-bounded unknown names for wire
-        # compatibility, but peer-controlled reader ids never become prose.
-        consulted = ", ".join(_reader_display_labels(snap.consulted)) or "none"
-        readers.append(f"{label} {consulted}")
-        families = snap.lifetime_by_family if isinstance(snap.lifetime_by_family, dict) else {}
-        bounds = window_bounds(snap, lo, hi)
-        as_of = snap.as_of.date().isoformat()
-        observed = sorted(
-            {day for days in families.values() if isinstance(days, dict) for day in days}
-        )
-        extent = f"{observed[0]} → {observed[-1]}" if observed else "no recorded days"
-        coverage = (
-            "incomplete; see Notes"
-            if (
-                snap.partial
-                or snap.degraded
-                or snap.partial_reason
-                or snap.degraded_reason
-                or not snap.counters_disjoint
-            )
-            else "historical coverage unknown"
-        )
-        observations.append(
-            f"- {_safe_short(device)}: snapshot {snap.as_of.isoformat()}; "
-            f"observed UTC days {extent}; {coverage}."
-        )
-        emitted = False
-        priceable = snap.counters_disjoint
-        for family, family_label in AGENT_FAMILY_ROWS:
-            days = families.get(family)
-            if not isinstance(days, dict):
-                continue
-            retained = 0
-            in_window = 0
-            for day, bucket in days.items():
-                total = token_usage.sum_bucket(bucket)
-                if total <= 0:
-                    continue
-                retained += total
-                if contributes_in_window(day, bounds):
-                    in_window += total
-            if retained <= 0:
-                continue
-            if priceable:
-                retained_cell = _format_token_count(retained)
-                window_cell = _format_token_count(in_window) if bounds is not None else "—"
-            else:
-                # Inclusive counters would be a ceiling up to ~2x high.
-                # Never show that under ``>=``; ``—`` means unavailable.
-                retained_cell = "—"
-                window_cell = "—"
-            short_family = {
-                "claude": "Claude*",
-                "codex": "Codex",
-                "grok": "Grok",
-                "other": "Other",
-            }[family]
-            short_state = _agent_state_cell(snap, active=in_window > 0)
-            rows.append(
-                f"| {label} | {short_family} | {as_of} | {short_state} "
-                f"| {retained_cell} | {window_cell} |"
-            )
-            emitted = True
-        if not emitted:
-            # Accepted snapshot, nothing observed. Zero is known only for a
-            # disjoint-v1 peer; a legacy inclusive counter is unavailable even
-            # when its retained map is empty. Otherwise this fallback bypasses
-            # the pre-marker guard used by the populated-family rows above.
-            state = _agent_state_cell(snap, active=False)
-            retained_cell = "0" if priceable else "—"
-            window_cell = "0" if priceable and bounds is not None else "—"
-            rows.append(f"| {label} | — | {as_of} | {state} | {retained_cell} | {window_cell} |")
-
-    cap = token_usage.MAX_BY_DAY_DAYS
-    out = [
-        "## Agent activity",
-        "",
-        HOST_SCOPE + f" Window: {lo} → {hi} UTC days; observation and coverage per machine below.",
-        "",
-        "| Machine | Family | As of UTC | State | Retained | Window |",
-        "|---|---|---|---|---|---|",
-    ]
-    out.extend(rows)
-    out.extend(
-        [
-            "",
-            "All token counts sum input, cache write, cache read and output. "
-            "Claude* = Claude (via agents). State: stale = last seen before window; "
-            "ahead = clock ahead (<=24h); idle = current, no agent activity observed; "
-            "missing = no snapshot.",
-            "",
-        ]
-    )
-    out.extend(observations)
-    if readers:
-        # "no reader contributed" is exactly what an empty `token_sources` says.
-        # "not authorized" would overclaim: the wire cannot distinguish an
-        # unenabled source from an uninstalled host from a reader that was
-        # dropped as absent, and asserting one of those three would be the same
-        # class of false precision this whole block exists to avoid.
-        out.append(f"- Readers per machine (`none` = no reader contributed): {'; '.join(readers)}.")
-    if omitted:
-        out.append(f"- (+{len(omitted)} more machines omitted; those with data are shown first.)")
-    out.append(
-        # The header above calls these counters per-turn, which is true only of
-        # a peer on mm >= v0.12.48. An older peer still publishes last-touch
-        # totals, so ITS token columns overstate the recent edge -- the caveat
-        # the pre-33A wording carried for every machine, now scoped to the
-        # machines it still applies to. Dropping it entirely would make the
-        # table read as exact across a fleet this repo knows is mixed.
-        "- *A peer on an older mm still reports last-touch totals rather than "
-        "per-turn ones, so its token columns overstate the recent edge and its "
-        "day counts are lower bounds; a machine that never pushed in this "
-        "window contributes no days either. Counters cover at most the "
-        f"{cap} most recent active UTC days.*"
-    )
-    out.append("")
-    return out
 
 
 def _windowed_host_by_model(
@@ -3700,135 +3649,33 @@ def _windowed_host_by_model(
     return merged, residual
 
 
-def _render_host_economics(data: RetroData) -> tuple[list[str], list[str]]:
-    """Per-device API list-rate equivalent. Never a fleet sum.
+def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bool:
+    """Check pricing attribution without rejecting a cross-version snapshot.
 
-    Host totals never enter ``_render_token_block``. ``estimate_cost`` is
-    called per device. A currency table invites mental summation, so the
-    do-not-sum rule is a prominent subheading, not a Notes footnote.
+    Detail may be smaller than family totals because the writer caps models.
+    Check each day and counter separately so a mismatch cannot cancel out.
     """
-    inventory = data.host_inventory
-    if not isinstance(inventory, HostUsageInventory):
-        return [], []
-    snaps = [
-        (device, snap)
-        for device, snap in inventory.by_device.items()
-        if isinstance(snap, HostDeviceSnapshot)
-    ]
-    if not snaps and not data.sessions.tokens_by_model:
-        return [], []
-
-    lo, hi = _window_day_keys(data.since, data.until)
-    evaluated = [(device, *_device_economics_cell(snap, lo, hi)) for device, snap in snaps]
-    floor_trigger = next((row for row in evaluated if row[1].startswith(">=")), None)
-    section_floor = floor_trigger is not None
-    if section_floor:
-        repriced = []
-        for device, cell, device_notes, by_model, costs in evaluated:
-            if cell != "—":
-                total, costs = _floor_costs(by_model, costs)
-                cell = _marked_cost(total, floor=True)
-            repriced.append((device, cell, device_notes, by_model, costs))
-        evaluated = repriced
-
-    # ORDER BY INFORMATION CONTENT before capping, mirroring Agent activity.
-    # Alphabetical truncation can otherwise hide the fleet's only estimate
-    # behind twelve unavailable rows. A known zero is still more informative
-    # than unavailable, but positive/floor estimates come first.
-    def _rank(row: tuple) -> tuple[int, str]:
-        device, cell, _notes, _by_model, costs = row
-        if cell == "—":
-            return (2, device)
-        if not costs or sum(costs.values()) == 0:
-            return (1, device)
-        return (0, device)
-
-    ordered = sorted(evaluated, key=_rank)
-    shown = ordered[:MAX_AGENT_INVENTORY_MACHINES]
-    omitted = ordered[MAX_AGENT_INVENTORY_MACHINES:]
-    lines = [
-        "## API list-rate equivalent (per machine)",
-        "",
-        "- Anthropic list rates, verified "
-        f"{token_usage.PRICING_LAST_UPDATED}: "
-        "https://platform.claude.com/docs/en/about-claude/pricing",
-        "- OpenAI short-context list rates, verified "
-        f"{token_usage.PRICING_OPENAI_LAST_UPDATED} against "
-        "https://developers.openai.com/api/docs/pricing",
-        "- xAI base and long-context list rates, verified "
-        f"{token_usage.PRICING_XAI_LAST_UPDATED}: "
-        "https://docs.x.ai/developers/models/grok-4.6",
-        "",
-        "Historical usage is repriced at current rates: the rates bundled with "
-        "this mm release, verified on the dates above. Not subscription spend. "
-        f"{token_usage.SUBSCRIPTION_CAVEAT}",
-        "",
-        *RATE_MARKER_LEGEND,
-        "",
-        HOST_SCOPE + f" Window: {lo} → {hi} UTC days; observation times, observed day ranges "
-        "and coverage are listed in Agent activity. API list-rate equivalent "
-        "(per machine — do not sum).",
-        "",
-        "### Do not sum these values",
-        "",
-        "Machines may hold duplicated history (OS migration, a fresh "
-        "`mm init`) and these values must not be summed.",
-        "",
-        "| Machine | API list-rate equivalent |",
-        "|---|---|",
-    ]
-    notes: list[str] = []
-    for device, cell, device_notes, _by_model, _costs in shown:
-        label = _device_table_label(device)
-        lines.append(f"| {label} | {cell} |")
-        notes.extend(device_notes)
-    lines.append("")
-    if floor_trigger is not None:
-        if floor_trigger[0] not in {row[0] for row in shown}:
-            # A hidden trigger still explains the basis of every visible row.
-            notes.extend(floor_trigger[2])
-        notes.append(
-            "API list-rate equivalent uses floor rates throughout the per-machine section: "
-            "at least one machine has a floor condition described in Notes; every priced row "
-            "and model subtotal uses the same minimum cache-write assumptions."
-        )
-    if shown:
-        lines.extend(
-            [
-                "### Largest priced models (per machine; does not sum to the row in general)",
-                "",
-                "Top models by tokens, capped per machine; unpriced model cells are —.",
-                "",
-                "| Machine | Model | List-rate $ |",
-                "|---|---|---:|",
-            ]
-        )
-        for device, cell, _, by_model, costs in shown:
-            if cell != "—":
-                lines.extend(_per_model_cost_summary(device, by_model, costs, floor=section_floor))
-        lines.append("")
-    if omitted:
-        lines.append(
-            f"- (+{len(omitted)} more machines omitted; those with an estimate are shown first.)"
-        )
-        lines.append("")
-    return lines, notes
-
-
-def _per_model_cost_summary(device: str, by_model: dict, costs: dict, *, floor: bool) -> list[str]:
-    """Small per-machine model table; reuse the machine total's exact pricing."""
-    ordered = sorted(
-        (m for m in by_model if m not in token_usage.COST_EXCLUDED_MODELS),
-        key=lambda m: (-token_usage.sum_bucket(by_model[m]), m),
-    )
-    label = _device_table_label(device)
-    lines = []
-    for model in ordered[:MAX_MODEL_COST_ROWS]:
-        cell = _marked_cost(costs[model], floor=floor) if model in costs else "—"
-        lines.append(f"| {label} | {_safe_short(model)[:28]} | {cell} |")
-    if len(ordered) > MAX_MODEL_COST_ROWS:
-        lines.append(f"| {label} | (+{len(ordered) - MAX_MODEL_COST_ROWS} more) | |")
-    return lines
+    bounds = window_bounds(snap, lo, hi)
+    for day, bucket in (snap.tokens_by_day or {}).items():
+        if not isinstance(day, str) or not isinstance(bucket, dict):
+            continue
+        if not contributes_in_window(day, bounds):
+            continue
+        by_model = bucket.get("by_model") or {}
+        if not isinstance(by_model, dict):
+            continue
+        classified: dict[str, dict[str, int]] = {}
+        for model, usage in by_model.items():
+            if not isinstance(model, str) or not isinstance(usage, dict):
+                continue
+            family = host_usage.host_family(model)
+            dest = classified.setdefault(family, token_usage.zero_model_bucket())
+            token_usage.merge_usage_bucket(dest, usage)
+        for family, usage in classified.items():
+            reported = snap.lifetime_by_family.get(family, {}).get(day, {})
+            if any(usage[k] > reported.get(k, 0) for k in token_usage.TOKEN_FIELDS):
+                return False
+    return True
 
 
 def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool) -> str | None:
@@ -3866,92 +3713,26 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
     )
 
 
-def _device_economics_cell(
-    snap: HostDeviceSnapshot, lo: str, hi: str
-) -> tuple[str, list[str], dict, dict]:
-    """One per-device cell and the Notes lines that diagnose it."""
-    device = snap.device
-    notes: list[str] = []
-    if not snap.counters_disjoint:
-        notes.append(_host_detail_phrase("absent", "legacy_counters", device=device))
-        return "—", notes, {}, {}
-    if window_bounds(snap, lo, hi) is None:
-        notes.append(
-            "API list-rate equivalent unavailable for `"
-            + _safe_short(device)
-            + f"`: its agent-log snapshot predates this window; {_attended_usage_remedy()}, "
-            "then re-run."
-        )
-        return "—", notes, {}, {}
-    if snap.tokens_by_day is None:
-        notes.append(
-            "Not available for `"
-            + _safe_short(device)
-            + "`: "
-            + _host_detail_phrase(snap.detail, snap.detail_reason, device=device)
-        )
-        return "—", notes, {}, {}
-
-    by_model, residual = _windowed_host_by_model(snap, lo, hi)
-    unpriced_tokens, unpriced_n, unpriced_ids = _unpriced_token_summary(by_model)
-    causes: list[str] = []
-    if unpriced_tokens > 0:
-        named = _format_unpriced_model_ids(unpriced_ids)
-        causes.append(
-            f"{unpriced_n} unpriced model(s) ({named}); upgrading mm on the machine "
-            "that renders this report may price it; republishing does not add a rate; "
-            "do not estimate"
-        )
-    if snap.partial:
-        causes.append(
-            "host declared totals incomplete ("
-            + ", ".join(_reader_display_labels(snap.partial))
-            + ")"
-        )
-    if snap.degraded:
-        causes.append(
-            "a host reader failed (" + ", ".join(_reader_display_labels(snap.degraded)) + ")"
-        )
-    coverage_unknown = bool(
-        snap.partial or snap.degraded or snap.partial_reason or snap.degraded_reason
-    )
-    if (snap.partial_reason or snap.degraded_reason) and not (snap.partial or snap.degraded):
-        causes.append("host coverage metadata was unusable")
-    if residual:
-        causes.append("some tokens were not attributed to a named model (the per-day model cap)")
-    long_context = _long_context_cause(by_model, incomplete=coverage_unknown)
-    if long_context:
-        causes.append(long_context)
-    floor = bool(causes)
-    total_cost, costs = _section_costs(by_model, floor=floor)
-    notes.extend(_extrapolation_notes(by_model, scope=device))
-    if causes:
-        notes.append(
-            "API list-rate equivalent for `"
-            + _safe_short(device)
-            + "` is a floor (>=): "
-            + "; ".join(causes)
-            + "."
-        )
-    return _marked_cost(total_cost, floor=floor), notes, by_model, costs
-
-
-def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = None) -> list[str]:
-    """Name why the AGENT LOGS block is quiet, with a remedy for each cause.
+def _agent_coverage_notes(
+    data: RetroData,
+    *,
+    view: AgentRhythmView | None = None,
+    labels: dict[str, str] | None = None,
+) -> list[str]:
+    """Describe host-usage coverage in the health payload, with remedies.
 
     Ordered most-actionable first. Each line follows the product's established
     problem/cause/fix shape, qualifying every attended refresh by its release floor.
 
-    ``view`` is the same ``AgentRhythmView`` the card rendered. Pass it whenever
-    one exists: two independent construction sites with hand-copied keyword
-    arguments can silently disagree about whether there was activity, which would
-    put the card and this Notes line in direct contradiction. Recomputing is a
-    correctness hazard first and a (negligible, sub-millisecond) cost second.
+    ``view`` is the host-only ``AgentRhythmView`` built by ``format_retro``.
+    Reuse it when available; the card uses the separate ``FleetAgentUsage``
+    because it includes Claude session activity as well as host snapshots.
     """
     inventory = data.host_inventory
     if not isinstance(inventory, HostUsageInventory):
         return []
 
+    labels = labels or {}
     notes: list[str] = []
     snaps = [s for s in inventory.by_device.values() if isinstance(s, HostDeviceSnapshot)]
 
@@ -3965,9 +3746,9 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
         else:
             # Reachable whenever the device registry is unavailable:
             # `aggregate_host_usage` sets `missing = frozenset()` when
-            # `registered_ids is None`. Without this branch the card block, the
-            # body section AND the notes are all empty, so a vanished block
-            # becomes the only diagnostic — exactly what the contract forbids.
+            # `registered_ids is None`. The card and table already say no
+            # usage was observed; this note is what attaches the
+            # attended-refresh remedy in health.
             notes.append(
                 "No agent-log snapshots were accepted from any machine — "
                 f"for each Mac that should publish usage, {_attended_usage_remedy()}."
@@ -4002,7 +3783,7 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
                 )
             else:
                 notes.append(
-                    "No agent activity observed in this window. Counts are lower bounds: "
+                    "No host-ledger activity observed in this window. Counts are lower bounds: "
                     "a machine that has not pushed contributes no days, and a peer on an "
                     "older mm still reports last-touch totals rather than per-turn ones."
                 )
@@ -4037,28 +3818,33 @@ def _agent_coverage_notes(data: RetroData, *, view: AgentRhythmView | None = Non
     # existing tree keeps complexity down and preserves most-actionable-first
     # ordering of the quiet-block notes above. Aggregate across machines;
     # never one line per device.
-    notes.extend(_host_reader_coverage_notes(snaps))
+    notes.extend(_host_reader_coverage_notes(snaps, labels))
     return notes
 
 
-def _host_reader_coverage_notes(snaps: list[HostDeviceSnapshot]) -> list[str]:
+def _host_reader_coverage_notes(
+    snaps: list[HostDeviceSnapshot], labels: dict[str, str] | None = None
+) -> list[str]:
     """One aggregated note per coverage class, never one per device."""
+    labels = labels or {}
     notes: list[str] = []
     degraded_note = _reader_issue_note(
         "degraded",
         [(s.device, s.degraded) for s in snaps if s.degraded],
+        labels,
     )
     if degraded_note:
         notes.append(degraded_note)
     partial_note = _reader_issue_note(
         "partial",
         [(s.device, s.partial) for s in snaps if s.partial],
+        labels,
     )
     if partial_note:
         notes.append(partial_note)
     stale = [s for s in snaps if s.stale]
     if stale:
-        names = _format_coverage_peer_names({s.device for s in stale})
+        names = _format_coverage_peer_names({device_label(s.device, labels) for s in stale})
         oldest = min(s.as_of for s in stale).date().isoformat()
         notes.append(
             f"Host-usage captures from {names} predate this window "
@@ -4071,10 +3857,12 @@ def _host_reader_coverage_notes(snaps: list[HostDeviceSnapshot]) -> list[str]:
 def _reader_issue_note(
     kind: str,
     rows: list[tuple[str, tuple[str, ...]]],
+    labels: dict[str, str] | None = None,
 ) -> str | None:
     if not rows:
         return None
-    names = _format_coverage_peer_names({device for device, _ in rows})
+    labels = labels or {}
+    names = _format_coverage_peer_names({device_label(device, labels) for device, _ in rows})
     seen_readers = {reader for _, readers in rows for reader in readers}
     live_set = set(mm_events.HOST_USAGE_TOKEN_SOURCES)
     # Do not interpolate a retained peer string into the card. A retired or
@@ -4090,7 +3878,7 @@ def _reader_issue_note(
     live_named = [r for _, readers in rows for r in readers if r in live_set]
     if len(rows) == 1:
         device, readers = rows[0]
-        machine = _safe_short(device)
+        machine = device_label(device, labels)
         live_here = [r for r in readers if r in live_set]
         if len(live_here) == 1 and len(readers) == 1:
             remedy = f"on `{machine}`, run `mm diag` and inspect `host_usage.{live_here[0]}`"
@@ -4123,7 +3911,7 @@ def _render_ascii_card(
     name: str | None,
     themes: list[str],
     noteworthy: str,
-    agent_view: AgentRhythmView,
+    agent_usage: FleetAgentUsage,
 ) -> list[str]:
     """Render the screenshot-friendly ASCII card. Pure padding — every
     line is forced to the same width so the right border aligns. LLM-
@@ -4155,6 +3943,7 @@ def _render_ascii_card(
         _card_line(
             f"{data.git.commits} commits · "
             f"{len(data.git.repos_by_count)} repos · "
+            f"{data.git.pull_requests} PRs · "
             f"{n_devices} {machines_word}"
         )
     )
@@ -4165,16 +3954,10 @@ def _render_ascii_card(
             f"-{_format_loc_short(data.git.deletions)} LOC{streak_part}"
         )
     )
-    out.append(_card_line(f"{data.git.pull_requests} detected GitHub PR references"))
     out.append(_card_line(""))
 
-    out.extend(_render_models_block(data.sessions))
+    out.extend(_render_agents_card_block(agent_usage))
     out.append(_card_line(""))
-
-    agent_block = _render_agent_block(agent_view)
-    if agent_block:
-        out.extend(agent_block)
-        out.append(_card_line(""))
 
     if noteworthy:
         out.append(_card_line("NOTEWORTHY"))
@@ -4193,15 +3976,183 @@ def _render_ascii_card(
     return out
 
 
-def _render_commit_types(commit_types: CommitTypes) -> list[str]:
-    """Sorted-by-count commit-type breakdown, with percent. Shape:
-    ``feat 12 (40%) · fix 8 (27%) · ...``. Single-line so it doesn't
-    bloat the markdown."""
-    if commit_types.total <= 0 or not commit_types.counts:
-        return []
-    items = sorted(commit_types.counts.items(), key=lambda kv: kv[1], reverse=True)
-    parts = [f"{kw} {n} ({n / commit_types.total:.0%})" for kw, n in items if n > 0]
-    return [f"- Mix: {' · '.join(parts)}"] if parts else []
+def device_labels(fleet: FleetState) -> dict[str, str]:
+    """``device_id -> hostname`` from the registry, for humans.
+
+    ``mm devices --format json`` has always carried ``device_name`` (set from
+    ``socket.gethostname()`` at ``mm init``), and ``FleetState`` has always
+    fetched those records — the retro just never used them, so every table
+    keyed on 8-hex ids nobody can read. Peer-controlled, so it takes the same
+    ``_safe_short`` path as every other string from the wire, and falls back to
+    the short id whenever the registry read failed or the name is unusable.
+    """
+    out: dict[str, str] = {}
+    for rec in fleet.devices_known_list:
+        if not isinstance(rec, dict):
+            continue
+        device = rec.get("device_id")
+        name = rec.get("device_name")
+        if not isinstance(device, str) or not device:
+            continue
+        if not isinstance(name, str) or not name.strip():
+            continue
+        label = _safe_short(name).strip()
+        if label:
+            out[device] = label
+    by_name: dict[str, list[str]] = {}
+    for device, label in out.items():
+        by_name.setdefault(label, []).append(device)
+    for label, devices in by_name.items():
+        if len(devices) > 1:
+            for device in devices:
+                out[device] = f"{label[:_COLLIDING_LABEL_BUDGET]} ({_device_table_label(device)})"
+    return out
+
+
+def device_label(device: str, labels: dict[str, str]) -> str:
+    """Hostname when known, else the short device id. Never empty."""
+    return labels.get(device) or _device_table_label(device)
+
+
+def _format_usd_short(amount: float, *, floor: bool = False) -> str:
+    """Card-width dollars: ``$5.6k`` / ``$546`` / ``$0``.
+
+    ``floor`` rounds DOWN, matching ``_format_usd(bound="floor")``. Without it
+    the card and the body table disagree by a dollar on the same figure, and a
+    value printed under a ``≥`` marker must never round up past the bound it
+    claims.
+    """
+    if amount >= 1000:
+        scaled = amount / 1000
+        if floor:
+            scaled = math.floor(scaled * 10) / 10
+        return f"${scaled:.1f}k"
+    return f"${math.floor(amount) if floor else round(amount):,.0f}"
+
+
+def agent_row_floor_causes(row: FleetAgentRow) -> tuple[str, ...]:
+    """Bounded named reasons for the row's pricing limitations, unpriced included."""
+    causes = list(row.floor_causes)
+    unpriced_tokens, unpriced_n, unpriced_ids = _unpriced_token_summary(row.by_model)
+    if unpriced_tokens > 0:
+        causes.insert(
+            0,
+            f"{unpriced_n} unpriced model(s) ({_format_unpriced_model_ids(unpriced_ids)}); "
+            "upgrading mm on the machine that renders this report may price them; "
+            "republishing does not add a rate; do not estimate",
+        )
+    if len(causes) > MAX_AGENT_FLOOR_CAUSES:
+        omitted = len(causes) - MAX_AGENT_FLOOR_CAUSES
+        causes = causes[:MAX_AGENT_FLOOR_CAUSES] + [
+            f"{omitted} additional machine/model details omitted; inspect `--dump-host-usage`"
+        ]
+    return tuple(causes)
+
+
+def _agent_row_cost(row: FleetAgentRow) -> tuple[float | None, bool]:
+    """``(total, is_floor)``; ``None`` when nothing in the row is priceable."""
+    if not row.counters_known or not row.by_model:
+        return None, False
+    # A priced model retained at zero tokens must not turn an all-unpriced
+    # row into ``≥$0``. Availability needs nonzero volume under a resolved card.
+    if not any(
+        isinstance(bucket, dict)
+        and model not in token_usage.COST_EXCLUDED_MODELS
+        and token_usage.resolve_prices(model) is not None
+        and token_usage.sum_bucket(bucket) > 0
+        for model, bucket in row.by_model.items()
+    ):
+        return None, False
+    floor = bool(agent_row_floor_causes(row))
+    total, costs = _section_costs(row.by_model, floor=floor)
+    if not costs:
+        return None, False
+    return total, floor
+
+
+def _agent_top_model(row: FleetAgentRow) -> str:
+    """Largest priced-basis model in the row, with its volume. ``—`` if none."""
+    if not row.by_model:
+        return "—"
+    model, bucket = max(row.by_model.items(), key=lambda kv: (token_usage.sum_bucket(kv[1]), kv[0]))
+    total = token_usage.sum_bucket(bucket)
+    if total <= 0:
+        return "—"
+    label = _safe_short(_short_model_name(_safe_short(model)))[:22]
+    return f"{label} ({_format_token_count(total)})"
+
+
+def _render_agents_card_block(usage: FleetAgentUsage) -> list[str]:
+    """The card's one AGENTS block: every agent, one unit, one row shape.
+
+    Replaces the split ``MODELS`` / ``AGENT LOGS`` pair. Those reported
+    different units (tokens vs distinct days) from different sources, which is
+    precisely why the card read as Claude-first: one agent got a magnitude and
+    the others got a rhythm. They are all magnitudes now, so the block carries
+    no prohibition on comparing its own rows.
+    """
+    n = usage.machines_with_activity
+    if usage.machines_known is None:
+        scope = f"{n} machine{'' if n == 1 else 's'}"
+    else:
+        scope = f"{n} of {usage.machines_known} registered machines"
+    out = [_card_line(f"AGENTS ({scope})")]
+
+    rows = [r for r in usage.rows if r.has_volume]
+    if not rows:
+        out.append(_card_line("No agent usage observed this window"))
+        return out
+
+    width = max(len(r.label) for r in rows)
+    for row in rows:
+        if not row.counters_known:
+            out.append(_card_line(f"{row.label:<{width}}  — (legacy counters; see health)"))
+            continue
+        parts = [
+            f"{_format_token_count(row.tokens)} tokens",
+            f"{row.active_days} day{'' if row.active_days == 1 else 's'}",
+        ]
+        total, floor = _agent_row_cost(row)
+        if total is not None:
+            parts.append(("≥" if floor else "~") + _format_usd_short(total, floor=floor))
+        out.append(_card_line(f"{row.label:<{width}}  " + " · ".join(parts)))
+    return out
+
+
+def _render_agents_table(usage: FleetAgentUsage) -> list[str]:
+    """The body's single ``## Agents`` section.
+
+    Supersedes three sections that said the same thing three ways: ``Claude
+    Code activity`` (a Claude-only token block plus a per-model cost table),
+    ``Agent activity`` (a per-machine host family table), and ``API list-rate
+    equivalent`` (a per-machine dollar table with a do-not-sum warning and a
+    five-line marker legend). One table, one unit, one row per agent.
+    """
+    lines = ["## Agents", ""]
+    rows = [r for r in usage.rows if r.has_volume]
+    if not rows:
+        lines.append("No agent usage observed in this window.")
+        lines.append("")
+        return lines
+
+    lines.append("| Agent | Tokens | Days | Machines | Est. cost | Top model |")
+    lines.append("|---|---:|---:|---:|---:|---|")
+    for row in rows:
+        if not row.counters_known:
+            lines.append(f"| {row.label} | — | {row.active_days} | {row.machines} | — | — |")
+            continue
+        total, floor = _agent_row_cost(row)
+        cost = (
+            ("≥" if floor else "~") + _format_usd(total, bound="floor" if floor else "estimate")
+            if total is not None
+            else "—"
+        )
+        lines.append(
+            f"| {row.label} | {_format_token_count(row.tokens)} | {row.active_days} "
+            f"| {row.machines} | {cost} | {_agent_top_model(row)} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _render_hourly(hourly: dict[int, int]) -> list[str]:
@@ -4212,24 +4163,11 @@ def _render_hourly(hourly: dict[int, int]) -> list[str]:
     items = sorted(hourly.items(), key=lambda kv: kv[1], reverse=True)[:TOP_N_HOURS]
     if not items or items[0][1] == 0:
         return []
-    peak_count = items[0][1]
-    lines = ["- Peak hours (local time):"]
-    for hour, n in sorted(items, key=lambda kv: kv[0]):
-        bar_width = max(1, int(round(20 * n / peak_count)))
-        lines.append(f"  - {hour:02d}:00  {n:>3}  {'█' * bar_width}")
-    return lines
-
-
-def _render_bursts(bursts: CommitBursts) -> list[str]:
-    """One-line burst summary. Honest framing: 'commit bursts' not
-    'sessions' — captures clusters separated by 45-min idleness."""
-    if bursts.burst_count <= 0:
-        return []
-    return [
-        f"- Commit bursts: {bursts.burst_count} "
-        f"(deep {bursts.deep} · medium {bursts.medium} · micro {bursts.micro}) "
-        f"· avg span {bursts.avg_minutes:.0f}min"
-    ]
+    # One line, ordered by volume. The pre-1.1 renderer drew a five-row bar
+    # chart; it cost five lines to say what the ordering already says, and the
+    # shape of a personal commit-hour histogram does not move week to week.
+    joined = " · ".join(f"{hour:02d}:00 ({n})" for hour, n in items)
+    return [f"- Peak hours (local): {joined}"]
 
 
 def _render_ship(ship: ShipOfWeek) -> list[str]:
@@ -4344,12 +4282,100 @@ def _render_themes_prompt(data: RetroData) -> list[str]:
             if data.git.ship.has_data
             else None
         ),
+        # Moved here in 1.1 from the rendered body. The commit-type mix and
+        # burst shape are useful for synthesizing a theme and near-useless to
+        # read: the mix's largest bucket is routinely "other" (a commit that
+        # used no conventional-commit prefix), and the burst count tracks the
+        # commit count. Theme synthesis still gets both.
+        "commit_types": dict(sorted(data.git.commit_types.counts.items(), key=lambda kv: -kv[1])),
+        "bursts": {
+            "count": data.git.bursts.burst_count,
+            "deep": data.git.bursts.deep,
+            "medium": data.git.bursts.medium,
+            "micro": data.git.bursts.micro,
+            "avg_minutes": round(data.git.bursts.avg_minutes, 1),
+        },
+        "skills": [
+            {"skill": _safe_short(skill), "invocations": count}
+            for skill, count in sorted(data.skills.by_skill.items(), key=lambda kv: -kv[1])[
+                :TOP_N_SKILLS
+            ]
+        ],
+        "agents": [
+            {
+                "agent": r.label,
+                "tokens": r.tokens if r.counters_known else None,
+                "counters_known": r.counters_known,
+                "active_days": r.active_days,
+                "machines": r.machines,
+            }
+            for r in aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
+            if r.has_volume
+        ],
     }
     return [
         "<!-- MM_THEMES_PROMPT -->",
         "```json",
         json.dumps(payload, indent=2),
         "```",
+    ]
+
+
+def _render_health_block(health: list[dict]) -> list[str]:
+    """Machine-readable data-quality payload, tagged for the skill to find.
+
+    **Why the caveats moved off the page.** The pre-1.1 body rendered every
+    known degradation as prose: a ``## Notes`` section with a closed
+    thirty-entry vocabulary, a five-line marker legend, per-section scope
+    sentences, and a "do not sum these values" subheading. That is what a
+    program must do when nothing downstream can exercise judgment. Something
+    downstream can: this renderer feeds an LLM skill. So the detail lands here,
+    intact and with its remedies, and the skill decides whether a given issue
+    is worth one sentence to the reader or worth nothing at all.
+
+    Nothing is discarded — ``detail`` strings are the same ones the Notes
+    section used to print, so a stale skill copy that ignores this block loses
+    presentation, never information.
+    """
+    payload = {
+        # Rate provenance moved here in 1.1 from a six-line rendered header.
+        # It is real information — a dollar column is uninterpretable without
+        # knowing which rate card produced it — but it is reference material,
+        # not something a reader needs on every retro. The skill can cite it
+        # when asked; the README carries the same URLs.
+        "pricing": {
+            "anthropic_verified": token_usage.PRICING_LAST_UPDATED,
+            "anthropic_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+            "openai_verified": token_usage.PRICING_OPENAI_LAST_UPDATED,
+            "openai_url": "https://developers.openai.com/api/docs/pricing",
+            "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
+            "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
+            "basis": (
+                "Historical usage is repriced at the rates bundled with this mm release. "
+                "Not subscription spend. `~` is an estimate, `≥` a floor, `—` unavailable "
+                "(never zero). Anthropic cache writes use the 1-hour rate for estimates and "
+                "the 5-minute rate for floors. Fast-mode turns on Opus 5 / 4.8 bill at 2x "
+                "and are priced here at standard rates."
+            ),
+        },
+        "issues": health,
+    }
+    return [
+        "<!-- MM_HEALTH -->",
+        "```json",
+        json.dumps(payload, indent=2),
+        "```",
+    ]
+
+
+def _health_summary_line(health: list[dict]) -> list[str]:
+    """One italic line pointing at the payload. Never a wall of caveats."""
+    if not health:
+        return []
+    n = len(health)
+    return [
+        f"_Data health: {n} item{'' if n == 1 else 's'} worth knowing about — ask me to diagnose._",
+        "",
     ]
 
 
@@ -4360,49 +4386,48 @@ def format_retro(
     themes: list[str] | None = None,
     noteworthy: str = "",
 ) -> str:
-    """Render the markdown retro. Output is paste-ready for iMessage / email
-    — single-message length when realistic data is present.
+    """Render the markdown retro. Paste-ready, and short on purpose.
 
-    ``themes`` / ``noteworthy`` / ``name`` are LLM-supplied via the second
-    pass of the two-pass card flow. When any of them is non-empty/non-None
-    an ASCII screenshot card is rendered at the TOP of the output; without
-    them, the markdown body still includes a ``MM_THEMES_PROMPT`` block at
-    the END to feed the next pass. Pure markdown body (no card) is
-    rendered when the caller is a non-skill consumer (the test fixture
-    path that just wants data).
+    ``themes`` / ``noteworthy`` / ``name`` are LLM-supplied via the second pass
+    of the two-pass card flow. When any is non-empty an ASCII card is rendered
+    at the TOP; without them the body carries ``MM_THEMES_PROMPT`` at the END to
+    feed the next pass.
 
-    Section layout (post-v0.12.39):
+    Section layout (1.1):
 
-    * (Optional) ASCII card with global stats, observed model-family usage,
-      source coverage, NOTEWORTHY, and TOP WORK themes. No trends row —
-      the card is width-constrained and a down-arrow on a shareable
-      artifact is public self-flagellation.
-    * Header — date range + activity-across-N-machines line.
-    * Code shipped — commits, LOC, top repos, commit-type mix, peak hours,
-      commit bursts, ship-of-the-window.
-    * Week-over-week — bucketed table when window_days >= 14.
-    * Trends vs prior Nd — two-column ``prior | current`` table when
-      window_days < 14, computed from the synced corpus. Identical in
-      both passes. Unavailable renders the heading with the reason inline.
-    * Claude Code activity — sessions and token block.
-    * Skills used — fleet-wide invocation rollup.
-    * Agent activity — per-machine token inventory.
-    * API list-rate equivalent — per machine, never summed.
-    * mm sync activity — push counts.
-    * Notes — every aside consolidated.
-    * MM_THEMES_PROMPT — JSON sidecar for LLM theme synthesis.
+    * (Optional) ASCII card — global stats, one AGENTS block, NOTEWORTHY, TOP
+      WORK. No trends row: the card is width-constrained and a down-arrow on a
+      shareable artifact is public self-flagellation.
+    * Header — date range + activity-across-N-machines.
+    * Code shipped — commits, LOC, top repos, peak hours, ship, week-over-week.
+    * Trends vs prior Nd — when window_days < 14.
+    * Agents — ONE table: every agent, fleet-summed tokens, active days,
+      machines, estimated cost, top model.
+    * Skills used — one line.
+    * Fleet — push counts and silent machines.
+    * A single data-health line, with the detail in ``MM_HEALTH``.
+    * MM_THEMES_PROMPT — first pass only.
+
+    Three body sections were removed in 1.1, not relocated: the per-machine
+    ``Agent activity`` table, the per-machine ``API list-rate equivalent``
+    section, and the Claude-only session/cache-ratio block. They reported one
+    fleet three ways, keyed on unreadable 8-hex device ids, and their combined
+    length was most of the document.
     """
     lines: list[str] = []
-    notes: list[str] = []
+    health: list[dict] = []
 
-    # Built ONCE and shared by the card block and the coverage notes, so the two
-    # can never disagree about whether there was agent activity this window.
+    def note(code: str, detail: str, **extra: object) -> None:
+        health.append({"code": code, "detail": detail, **extra})
+
+    labels = device_labels(data.fleet)
     agent_view = _agent_rhythm_view(
         data.host_inventory,
         since=data.since,
         until=data.until,
         machines_known=data.fleet.devices_known,
     )
+    agent_usage = aggregate_agent_usage(data, machines_known=data.fleet.devices_known)
 
     themes_list = list(themes) if themes else []
     has_card_input = bool(themes_list) or bool(noteworthy) or bool(name)
@@ -4413,14 +4438,11 @@ def format_retro(
                 name=name,
                 themes=themes_list,
                 noteworthy=noteworthy,
-                agent_view=agent_view,
+                agent_usage=agent_usage,
             )
         )
         lines.append("")
 
-    # Header date matches the card's local-time framing — using
-    # ``data.since.date()`` directly returns the naive UTC date, which
-    # diverges from the card by a day near UTC boundaries.
     lines.append(
         f"# Retro: {data.since.astimezone().date().isoformat()} → "
         f"{data.until.astimezone().date().isoformat()} "
@@ -4428,269 +4450,259 @@ def format_retro(
     )
     lines.append("")
 
-    # Activity-across-N-machines header. Phantom events are filtered out at
-    # aggregate() so the count reflects the active fleet.
     n_in_events = len(data.fleet.devices_in_events)
     if data.fleet.devices_known is not None:
         m_known = data.fleet.devices_known
-        lines.append(f"**Activity across {n_in_events} of {m_known} known machines**")
+        lines.append(f"**Activity across {n_in_events} of {m_known} machines**")
         if n_in_events < m_known:
-            missing = m_known - n_in_events
-            notes.append(
-                f"Fleet incomplete: {missing} registered device(s) haven't pushed "
-                f"events in this window."
+            silent = sorted(
+                {
+                    rec.get("device_id")
+                    for rec in data.fleet.devices_known_list
+                    if isinstance(rec, dict)
+                    and isinstance(rec.get("device_id"), str)
+                    and rec.get("device_id") not in data.fleet.devices_in_events
+                }
+                - {None}
+            )
+            silent_labels = {device_label(d, labels) for d in silent}
+            named = _format_coverage_peer_names(silent_labels) or "unknown"
+            note(
+                "fleet_incomplete",
+                f"{m_known - n_in_events} registered machine(s) haven't pushed events in "
+                f"this window ({named}). Their activity is missing, not zero.",
+                machines=sorted(silent_labels)[:MAX_TOKEN_COVERAGE_PEER_NAMES],
+                machines_omitted=max(0, len(silent_labels) - MAX_TOKEN_COVERAGE_PEER_NAMES),
+                remedy="Run `mm push` on the named machine(s), then re-run the retro.",
             )
     else:
         lines.append(f"**Activity across {n_in_events} machine(s)**")
-        notes.append("Known-fleet count unavailable (`mm devices --format=json` failed).")
+        note(
+            "registry_unavailable",
+            "Known-fleet count unavailable (`mm devices --format=json` failed), so the "
+            "denominator is dropped. Not a data-loss signal.",
+        )
     lines.append("")
 
-    # Code shipped.
+    # --- Code shipped.
     lines.append("## Code shipped")
+    streak = f" · {data.git.streak_days}-day commit streak" if data.git.streak_days > 0 else ""
+    prs = f" · {data.git.pull_requests} PRs" if data.git.pull_requests else ""
     lines.append(
-        f"- {data.git.commits} commits across {len(data.git.repos_by_count)} repos "
-        f"(deduped across machines)"
+        f"- {data.git.commits} commits across {len(data.git.repos_by_count)} repos{prs} · "
+        f"+{data.git.additions:,} / -{data.git.deletions:,} LOC{streak}"
     )
-    lines.append(f"- +{data.git.additions:,} / -{data.git.deletions:,} LOC")
-    if data.git.streak_days > 0:
-        lines.append(f"- {data.git.streak_days}-day commit streak")
     if data.git.repos_by_count:
         top_repos = sorted(data.git.repos_by_count.items(), key=lambda kv: kv[1], reverse=True)[
             :TOP_N_REPOS
         ]
-        lines.append("- Top repos:")
-        for r, n in top_repos:
-            # Defang BEFORE shorten: ``_shorten_repo_url`` adds a trusted
-            # ``[...]`` placeholder that the URL-safe whitelist would
-            # otherwise bucket to ``_..._``.
-            lines.append(f"  - {_shorten_repo_url(_safe_repo_url(r))} ({n})")
-    lines.extend(_render_commit_types(data.git.commit_types))
+        joined = " · ".join(f"{_shorten_repo_url(_safe_repo_url(r))} ({n})" for r, n in top_repos)
+        lines.append(f"- Top repos: {joined}")
     lines.extend(_render_hourly(data.git.hourly))
-    lines.extend(_render_bursts(data.git.bursts))
     lines.extend(_render_ship(data.git.ship))
     lines.extend(_render_weekly(data.git.weekly))
     lines.append("")
 
-    # Trends vs prior equal period — below Code shipped (accomplishment
-    # first, context second). Gated off at window_days >= 14.
     lines.extend(_render_period_comparison(data))
 
-    # Claude Code activity. Per-user feedback v0.11.12: drop MB total,
-    # "counted separately" parenthetical, and Most active list — they were
-    # noise. v0.11.14 adds the token-usage block (raw counts, cache hit
-    # ratio, cost equivalent) when the fleet has any token data. The
-    # Claude footer names its rate date and points at the shared legend.
-    lines.append("## Claude Code activity")
-    contributors = data.sessions.token_devices
-    newest = max(contributors.values()).isoformat() if contributors else "unavailable"
-    known = data.fleet.devices_known if data.fleet.devices_known is not None else "unknown"
-    coverage = (
-        "incomplete; see Notes"
-        if _token_coverage_peers(data.sessions)
-        else "no known token-capture gaps"
-    )
-    lines.extend(
-        [
-            "",
-            CLAUDE_SCOPE + f" Tokens from {len(contributors)} of {known} machines; "
-            f"newest contributing snapshot {newest}; window {data.since.date()} → "
-            f"{data.until.date()} UTC days; coverage {coverage}.",
-            "",
-        ]
-    )
-    if data.sessions.total_sessions == 0 and not data.sessions.pre_v2_peers:
-        lines.append("- No Claude Code sessions captured in this window.")
-    else:
-        # Projects-count was misleading: Claude Code keys session storage by
-        # encoded cwd, so each Conductor workspace and git worktree counts as
-        # a distinct "project" even though they trace back to ~10 real repos.
-        # The repo count under "Code shipped" already covers the useful
-        # signal; surface ephemeral as an inline qualifier on sessions
-        # instead of a Notes aside.
-        if data.sessions.ephemeral_sessions:
-            lines.append(
-                f"- {data.sessions.total_sessions} sessions, "
-                f"{data.sessions.ephemeral_sessions} of which are in ephemeral "
-                f"Conductor workspaces"
-            )
-        else:
-            lines.append(f"- {data.sessions.total_sessions} sessions")
-        # Token block — only renders when fleet has any token data. Hides
-        # cleanly on a fresh fleet so empty zeros don't pollute output.
-        _render_token_block(lines, data.sessions)
-    lines.append("")
+    # --- Agents: one table, one unit, every agent on the same footing.
+    lines.extend(_render_agents_table(agent_usage))
 
-    # Skills used — fleet-wide as of v0.11.27 (was: this-machine-only via
-    # gstack analytics file). Sanitize each skill name at render time —
-    # peer-controlled string crossing the trust boundary into LLM-consumed
-    # markdown. Same defense-in-depth as model-name sanitization in the
-    # token block.
-    lines.append(f"## Skills used ({data.skills.invocations} invocations)")
-    if not data.skills.available:
-        lines.append(
-            "- *No fleet device has shipped skill data yet — section omitted "
-            "(upgrade peers to v0.11.27+ for fleet-wide skill counts).*"
-        )
-    elif data.skills.invocations == 0:
-        lines.append("- No skill invocations captured.")
-    else:
+    # --- Skills.
+    if data.skills.available and data.skills.invocations:
         top = sorted(data.skills.by_skill.items(), key=lambda kv: kv[1], reverse=True)[
             :TOP_N_SKILLS
         ]
-        formatted = ", ".join(f"/{_safe_short(s)} ({n})" for s, n in top)
-        lines.append(f"- {formatted}")
-    lines.append("")
+        lines.append(f"## Skills used ({data.skills.invocations})")
+        lines.append(" · ".join(f"/{_safe_short(k)} ({n})" for k, n in top))
+        lines.append("")
 
-    # Agent-log inventory (per machine, never summed across machines).
-    lines.extend(_render_agent_inventory(data))
-
-    # Per-device API list-rate equivalent. Never a fleet sum; never
-    # enters ``_render_token_block``.
-    econ_lines, econ_notes = _render_host_economics(data)
-    lines.extend(econ_lines)
-    notes.extend(econ_notes)
-
-    # mm sync activity.
-    lines.append("## mm sync activity")
+    # --- Fleet.
+    lines.append("## Fleet")
+    pushers = (
+        _format_coverage_peer_names(
+            {device_label(d, labels) for d in data.pushes.devices_with_pushes}
+        )
+        if data.pushes.devices_with_pushes
+        else ""
+    )
     lines.append(
-        f"- {data.pushes.push_events} pushes across "
-        f"{len(data.pushes.devices_with_pushes)} device(s)"
+        f"{data.pushes.push_events} pushes across "
+        f"{len(data.pushes.devices_with_pushes)} machine(s)" + (f" ({pushers})" if pushers else "")
     )
     lines.append("")
 
-    # Collect remaining notes — most live in this block (rather than in
-    # render-site appends above) because they describe data quality, not
-    # activity. Order: data-trust signals first, then visibility/diagnostic.
+    # --- Health. Every one of these used to be a rendered Notes bullet.
+    if agent_usage.duplicate_ledger:
+        note(
+            "duplicate_ledger",
+            "Two machines report identical token counters on the same day for "
+            f"{', '.join(agent_usage.duplicate_ledger)} — this may indicate a migrated "
+            "home directory, so those agents' token and cost figures may be "
+            "double-counted. Equal totals alone do not prove overlap. "
+            "Day counts are unaffected (set union).",
+            families=list(agent_usage.duplicate_ledger),
+            remedy="Inspect `mm devices` and `mm retro-fleet --dump-host-usage` to confirm "
+            "overlap before deregistering a retired device, then re-run.",
+        )
+    for row in agent_usage.rows:
+        if not row.has_volume:
+            continue
+        if not row.counters_known:
+            machines = {device_label(d, labels) for d in row.legacy_devices}
+            affected = (
+                _format_coverage_peer_names(machines) if machines else "a contributing machine"
+            )
+            note(
+                "legacy_counters",
+                f"{row.label} tokens are unavailable (not zero): "
+                f"{affected} "
+                "published legacy inclusive counters, which run up to ~2x high.",
+                agent=row.label,
+                machines=sorted(machines)[:MAX_TOKEN_COVERAGE_PEER_NAMES],
+                machines_omitted=max(0, len(machines) - MAX_TOKEN_COVERAGE_PEER_NAMES),
+                remedy=f"On the named machines, {_attended_usage_remedy()}.",
+            )
+        else:
+            causes = agent_row_floor_causes(row)
+            if causes:
+                if _agent_row_cost(row)[0] is None:
+                    note(
+                        "cost_unavailable",
+                        f"{row.label}'s cost is unavailable (—), not zero: "
+                        + "; ".join(causes)
+                        + ".",
+                        agent=row.label,
+                        causes=list(causes),
+                    )
+                else:
+                    note(
+                        "cost_floor",
+                        f"{row.label}'s cost is a floor (≥), not an estimate: "
+                        + "; ".join(causes)
+                        + ".",
+                        agent=row.label,
+                        causes=list(causes),
+                    )
     if data.sessions.pre_v2_peers:
-        n_pre = len(data.sessions.pre_v2_peers)
-        notes.append(
-            f"Sessions count incomplete: {n_pre} peer(s) on pre-v0.11.0 — upgrade for "
-            f"accurate session totals."
+        note(
+            "sessions_incomplete",
+            f"{len(data.sessions.pre_v2_peers)} peer(s) on pre-v0.11.0 emit delta-semantics "
+            "session snapshots; their session totals are omitted rather than double-counted.",
+            remedy="Upgrade mm on those machines.",
         )
     token_coverage_peers = _token_coverage_peers(data.sessions)
     if token_coverage_peers:
-        coverage_reasons: list[str] = []
+        reasons = []
         if data.sessions.pre_v2_peers:
-            coverage_reasons.append("pre-v0.11.0 session schema")
+            reasons.append("pre-v0.11.0 session schema")
         if data.sessions.pre_token_peers:
-            coverage_reasons.append("pre-v0.11.14 OR cold token cache")
-        notes.append(
-            f"Tokens incomplete on {_format_coverage_peer_names(token_coverage_peers)}: "
-            f"{' + '.join(coverage_reasons)} — run "
-            "`mm push` on those machines; upgrade if the warning persists for accurate "
-            "token totals."
+            reasons.append("pre-v0.11.14 OR cold token cache")
+        note(
+            "tokens_incomplete",
+            f"Claude token coverage is incomplete on "
+            f"{_format_coverage_peer_names(token_coverage_peers)}: {' + '.join(reasons)}.",
+            remedy="Run `mm push` on those machines; upgrade if it persists.",
         )
-    if token_coverage_peers and any(
-        token_usage.resolve_prices(m) is not None
-        for m in data.sessions.tokens_by_model
-        if m not in token_usage.COST_EXCLUDED_MODELS
-    ):
-        notes.append(
-            "Claude Code API list-rate equivalent is a floor (>=): token coverage is incomplete; "
-            f"{data.sessions.token_missing_projects} of {data.sessions.projects} selected projects "
-            f"({data.sessions.token_missing_sessions} of {data.sessions.total_sessions} sessions) "
-            "lack token data in v2 snapshots; pre-v2 peers are not measurable. "
-            "Every priced Claude row uses floor rates; see Tokens incomplete for the remedy."
-        )
-    notes.extend(_extrapolation_notes(data.sessions.tokens_by_model, scope="Claude Code"))
     if data.skills.pre_skills_peers:
-        n_skills = len(data.skills.pre_skills_peers)
-        notes.append(
-            f"Skills incomplete: {n_skills} peer(s) on pre-v0.11.27 OR with cold token "
-            f"cache — upgrade and/or run `mm push` on those machines for accurate "
-            f"skill totals."
+        note(
+            "skills_incomplete",
+            f"{len(data.skills.pre_skills_peers)} peer(s) on pre-v0.11.27 or with a cold "
+            "token cache omit skill counts.",
+            remedy="Run `mm push` interactively on those machines.",
         )
-    # Unpriced-model breadcrumb. Models present in the fleet's
-    # ``tokens_by_model`` but missing from the pricing table contribute to
-    # the displayed token totals (they're real API traffic) but are skipped
-    # by ``estimate_cost``. Surface the volume so a reader knows the cost
-    # line is an under-estimate rather than authoritative.
-    unpriced_tokens, unpriced_models, unpriced_ids = _unpriced_token_summary(
-        data.sessions.tokens_by_model
-    )
-    if unpriced_tokens > 0:
-        named = _format_unpriced_model_ids(unpriced_ids)
-        notes.append(
-            f"{_format_token_count(unpriced_tokens)} tokens from {unpriced_models} unpriced "
-            f"model(s) excluded from cost estimate: {named}."
-        )
-    # Agent-log diagnostics. The card block goes quiet in several distinct
-    # states; a vanished block must never BE the diagnostic, so name the cause
-    # here every time, with its remedy. Without this, "no agent activity", "no
-    # snapshot yet", "no reader contributed", "all snapshots stale" and "snapshots
-    # rejected" are indistinguishable to the reader.
-    notes.extend(_agent_coverage_notes(data, view=agent_view))
+    for row in agent_usage.rows:
+        if not row.has_volume or not row.counters_known:
+            continue
+        unpriced_tokens, unpriced_models, _ = _unpriced_token_summary(row.by_model)
+        if unpriced_tokens > 0:
+            note(
+                "unpriced_models",
+                f"{row.label}: {_format_token_count(unpriced_tokens)} tokens from "
+                f"{unpriced_models} unpriced model(s) are counted in the token column but "
+                "excluded from pricing; see this agent's cost health causes.",
+                agent=row.label,
+                remedy="Upgrade mm on the machine rendering this report; do not estimate a rate.",
+            )
+        for detail in _extrapolation_notes(row.by_model, scope=row.label):
+            note("pricing_extrapolated", detail, agent=row.label)
+    for detail in _agent_coverage_notes(data, view=agent_view, labels=labels):
+        note("agent_coverage", detail)
     if data.fleet.unregistered_event_devices:
-        notes.append(
-            f"{data.fleet.unregistered_event_devices} unregistered device id(s) had "
-            f"events in this window (filtered out). Stale event files reap automatically "
-            f"after {EVENTS_RETENTION_DAYS} days."
+        note(
+            "unregistered_devices",
+            f"{data.fleet.unregistered_event_devices} unregistered device id(s) had events "
+            "in this window and were filtered from registered-machine counts. "
+            "Retained Claude token and skill data may still contribute to the report. "
+            "Stale files reap after "
+            f"{EVENTS_RETENTION_DAYS} days.",
         )
     if data.pushes.discovery_errors:
-        notes.append(
-            f"{len(data.pushes.discovery_errors)} discovery error(s) recorded — run mm diag."
+        note(
+            "discovery_errors",
+            f"{len(data.pushes.discovery_errors)} discovery error(s) recorded.",
+            remedy="Run `mm diag`.",
         )
     if data.git.git_budget_aborts:
-        abort_names = _format_coverage_peer_names(set(data.git.git_budget_aborts))
-        notes.append(
-            f"Git walk ran out of budget on {abort_names} — some repositories "
-            "were not captured. On those machines, run `mm diag` and inspect "
-            "`git_capture.recorded.walk_budget_aborts`; this is not a missing push."
+        note(
+            "git_budget",
+            "Git walk ran out of budget on "
+            + _format_coverage_peer_names(
+                {device_label(d, labels) for d in data.git.git_budget_aborts}
+            )
+            + " — some repositories were not captured. This is not a missing push.",
+            remedy="On those machines run `mm diag` and inspect "
+            "`git_capture.recorded.walk_budget_aborts`.",
         )
     if data.git.uncovered_git:
-        gap_names = _format_coverage_peer_names(set(data.git.uncovered_git))
-        notes.append(
-            f"Git history has an uncovered interval on {gap_names} — those "
-            "windows were never captured. On those machines, run `mm recapture` "
-            "for the missing window, then `mm diag` to confirm."
+        note(
+            "git_gap",
+            "Git history has an uncovered interval on "
+            + _format_coverage_peer_names({device_label(d, labels) for d in data.git.uncovered_git})
+            + " — those windows were never captured.",
+            remedy="On those machines run `mm recapture` for the missing window, then `mm diag`.",
         )
     for device, (n_zero, n_total) in sorted(data.git.zero_repo_captures.items()):
-        notes.append(
-            f"Machine {_safe_short(device)} captured 0 repositories on "
-            f"{n_zero} of {n_total} pushes; its commits are missing from this window."
+        note(
+            "zero_repo_capture",
+            f"{device_label(device, labels)} captured 0 repositories on {n_zero} of "
+            f"{n_total} pushes; its commits are missing, so the commit count is a lower bound.",
+            machine=device_label(device, labels),
+            remedy="Run `mm recapture` on that machine. Do not read a trend off this window.",
         )
     n_events = data.skipped_per_source.get(SKIP_CATEGORY_EVENTS, 0)
     if n_events:
-        notes.append(
-            f"{n_events} event(s) skipped due to parse errors in mm event log. "
-            f"Output may be incomplete."
+        note(
+            "parse_errors",
+            f"{n_events} event(s) skipped due to parse errors in the mm event log. "
+            "Output is partial.",
         )
-    # Backward-compat fallback for foreign callers that set skipped_lines
-    # without populating skipped_per_source. aggregate() always populates
-    # per-source, so this only fires for hand-built RetroData.
     if not data.skipped_per_source and data.skipped_lines:
-        notes.append(
-            f"{data.skipped_lines} record(s) skipped due to parse errors. Output may be incomplete."
+        note(
+            "parse_errors",
+            f"{data.skipped_lines} record(s) skipped due to parse errors. "
+            "Output may be incomplete.",
         )
     if data.window_exceeds_retention:
-        # Mutually exclusive with the trends unavailable line: that section
-        # is gated off at window_days >= 14, and this note only fires when
-        # window_days > 90. Emit this one alone.
-        notes.append(
-            f"Requested {data.window_days}d window exceeds the {EVENTS_RETENTION_DAYS}-day "
-            f"events retention. Older days are reaped by `mm gc` and will not appear."
+        note(
+            "window_exceeds_retention",
+            f"The requested {data.window_days}d window exceeds the "
+            f"{EVENTS_RETENTION_DAYS}-day events retention; older days were reaped by `mm gc`.",
         )
     elif data.comparison.status == "ok" and data.comparison.fleet_changed:
-        notes.append(
-            f"Fleet composition changed between windows: "
-            f"the set of devices that pushed in the prior {data.window_days}d "
-            f"differs from this {data.window_days}d. Counts are still comparable "
-            f"as activity, not as a same-machine pair."
+        note(
+            "fleet_changed",
+            f"The set of machines that pushed in the prior {data.window_days}d differs from "
+            f"this {data.window_days}d. Counts compare as activity, not as a same-machine pair.",
         )
 
-    if notes:
-        lines.append("## Notes")
-        for n in notes:
-            lines.append(f"- {n}")
-        lines.append("")
+    lines.extend(_health_summary_line(health))
 
-    # First-pass artifact for the two-pass card flow. Only rendered when
-    # the caller did NOT supply card content — a second-pass render
-    # (which carries themes/noteworthy/name) is the final shareable
-    # output and should not include the synthesis prompt block.
     if not has_card_input:
         lines.append("")
         lines.extend(_render_themes_prompt(data))
+        lines.append("")
+        lines.extend(_render_health_block(health))
 
     return "\n".join(lines).rstrip() + "\n"
 

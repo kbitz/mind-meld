@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.1.0 | 2026-09-22 | **The fleet retro now reports Claude, Codex and Grok identically — fleet-summed tokens, active days, machines, cost and top model in one `## Agents` table — and moves every data-quality caveat into a machine-readable `MM_HEALTH` block.** Output drops from roughly 150 lines to about 50. |
 | 1.0.0 | 2026-09-22 | **Mind Meld 1.0 establishes the [Compatibility (1.x) contract](invariants/auto-upgrade.md#compatibility-1x) for storage, CLI, and machine-readable output.** Existing 0.14.x fleets interoperate without migration; newer-format storage now refuses safely. |
 | 0.14.18 | 2026-09-21 | **Status and diag show each reader's snapshot coverage and the last recorded attended attempt.** Publication receipts distinguish proven non-publication from unavailable evidence without changing content-sync exit codes. |
 | 0.14.17 | 2026-09-20 | **Attended pushes refresh consented host usage even when user files are in sync.** Usage-only publication preserves push counts and the Git cursor; capture failures warn while content sync continues. |

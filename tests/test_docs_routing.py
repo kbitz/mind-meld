@@ -385,12 +385,15 @@ def test_skill_md_step0_preflight_contract() -> None:
     )
 
 
-def test_skill_md_step0_gates_on_the_attended_floor_from_the_constant() -> None:
-    """Step 0's binary floor must track the constant every fleet remedy cites.
+def test_skill_md_step0_gates_on_the_skill_floor_from_the_constant() -> None:
+    """Step 0's binary floor must track the constant, not a hand-typed number.
 
-    Below the attended floor a converged ``mm push`` exits 0 without refreshing
-    usage, so the agent must STOP rather than read a stale capture as fresh. A
-    hand-typed version here would rot the first time the floor moves.
+    Two distinct floors exist and conflating them is the failure mode. The
+    RENDERING machine must clear ``SKILL_MIN_VERSION``: below it the aggregator
+    emits neither the unified Agents table nor ``MM_HEALTH``, so a 1.1 SKILL.md
+    would be reading for surfaces that are not there. A PEER only has to clear
+    ``ATTENDED_USAGE_MIN_VERSION`` to publish a usable capture, which is what
+    every fleet remedy cites.
     """
     from mind_meld.skills.retro_fleet import aggregator
 
@@ -400,7 +403,7 @@ def test_skill_md_step0_gates_on_the_attended_floor_from_the_constant() -> None:
     step0 = skill[skill.index("## Step 0") : skill.index("## Step 1")]
     stage_0a = step0[: step0.index("**0B")]
     flat = " ".join(stage_0a.split())
-    floor = f"Require **mm {aggregator.ATTENDED_USAGE_MIN_VERSION} or newer** before continuing."
+    floor = f"Require **mm {aggregator.SKILL_MIN_VERSION} or newer** before continuing."
     assert floor in flat
     gate = flat[flat.index(floor) :]
     assert "Below that floor, STOP" in gate, "the floor must stop the run, not warn"
@@ -427,68 +430,56 @@ def test_every_skill_md_floor_mention_is_the_attended_constant() -> None:
     )
     floors = re.findall(r"mm (v\d+\.\d+\.\d+)(?:\+| or newer)", skill)
     assert floors, "the floor mentions moved; update this pattern with them"
-    assert set(floors) == {aggregator.ATTENDED_USAGE_MIN_VERSION}
+    assert set(floors) == {
+        aggregator.SKILL_MIN_VERSION,
+        aggregator.ATTENDED_USAGE_MIN_VERSION,
+    }
 
 
-def test_every_notes_line_has_a_skill_decoder_entry() -> None:
-    """Every aggregator Notes line has a SKILL.md decoder entry.
+def test_every_health_code_is_documented_in_skill_md() -> None:
+    """Every ``note(<code>, ...)`` in the renderer is named in SKILL.md.
 
-    SKILL.md's Notes section is the AI agent's API doc. A new Notes line the
-    decoder doesn't cover means the agent either drops it or invents an
-    explanation. Retro-catches the v0.12.37 drift where aggregator emitted
-    ``pre-v0.11.14 OR cold token cache`` while SKILL.md documented
-    ``pre-v0.11.0 session schema and/or pre-v0.11.14``.
+    Successor to the 1.0 Notes-decoder contract, which pinned rendered PROSE:
+    every aggregator ``notes.append`` stem had to appear verbatim in a SKILL.md
+    decoder section, so a copy edit was a doc change and the skill needed a
+    standing rule that an unlisted line "is reported verbatim and never
+    interpreted". 1.1 emits a machine-readable ``MM_HEALTH`` payload instead,
+    and the codes — not the prose — are the interface. Reword a detail freely;
+    adding a code without documenting it still fails.
     """
-    aggregator = (
+    aggregator_src = (
         ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "aggregator.py"
     ).read_text(encoding="utf-8")
     skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
         encoding="utf-8"
     )
-    decoder = skill.split("## Notes section in aggregator output", 1)[-1].split(
-        "## Trends vs prior", 1
-    )[0]
 
-    required: list[str] = []
-    tree = ast.parse(aggregator)
-    for node in ast.walk(tree):
+    codes: list[str] = []
+    for node in ast.walk(ast.parse(aggregator_src)):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr != "append":
-            continue
-        if not isinstance(func.value, ast.Name):
-            continue
-        # notes.append(...) and coverage_reasons.append(...) both feed Notes.
-        if func.value.id not in {"notes", "coverage_reasons"}:
+        if not isinstance(node.func, ast.Name) or node.func.id != "note":
             continue
         if not node.args:
             continue
-        pieces = [" ".join(c.split()) for c in _string_constants(node.args[0])]
-        identifying = next((p for p in pieces if len(p) >= 16), None)
-        if identifying is not None:
-            required.append(identifying[:32].rstrip())
+        first = node.args[0]
+        assert isinstance(first, ast.Constant) and isinstance(first.value, str), (
+            "health codes must be string literals so this check can see them"
+        )
+        codes.append(first.value)
 
-    assert required, "parser found no Notes stems — the extractor broke"
-    missing = [p for p in required if p not in decoder]
-    assert missing == [], (
-        "aggregator Notes identifying fragments with no SKILL.md decoder "
-        "entry: " + "; ".join(missing)
-    )
-    # ``notes.append(_host_detail_phrase(...))`` is not a string literal, so
-    # the AST walk above cannot discover this critical fail-closed decoder.
-    decoder_one_line = " ".join(decoder.split())
-    assert "that Mac runs an mm that reported token counters in an older format" in decoder_one_line
-    assert (
-        "Grok's logs do not record per-request prompt sizes; no action resolves this"
-        in decoder_one_line
-    )
-    assert (
-        "The at-most figure bounds that model's recorded token charges only: never average it "
-        "with the floor, never sum machines, never present it as the machine's cost"
-    ) in decoder_one_line
-    assert "upgrading mm on the machine that renders this report may price it" in decoder_one_line
-    assert "republishing does not add a rate; do not estimate" in decoder_one_line
+    assert codes, "parser found no health codes — the extractor broke"
+    missing = sorted({c for c in codes if f"`{c}`" not in skill})
+    assert missing == [], "health codes with no SKILL.md entry: " + "; ".join(missing)
+
+    # A stale installed SKILL.md is the normal case, so the skill must still
+    # refuse to invent meaning for a code it does not recognise.
+    flat = " ".join(skill.split())
+    assert "reported verbatim" in flat and "never interpreted" in flat
+    # The two codes that change what a number MEANS must be called out by name,
+    # not left to the generic list.
+    assert "duplicate_ledger" in flat and "double-counted" in flat
+    assert "zero_repo_capture" in flat and "lower bound" in flat
 
 
 def test_readme_prices_all_three_vendors_with_matching_provenance():
@@ -569,16 +560,15 @@ def test_usage_capture_help_names_prerequisites_and_exits() -> None:
 def test_dump_host_usage_vocabulary_is_in_skill_md() -> None:
     """``--dump-host-usage`` status vocabulary is JSON, not notes.append.
 
-    The Notes decoder cannot see it. Pin the LLM contract here instead:
-    SKILL.md must name the flag, keep Agent activity family-only, and explain
+    The health-code audit cannot see it. Pin the LLM contract here instead:
+    SKILL.md must name the flag, keep the Agents table fleet-wide, and explain
     the per-model data's tightly scoped economics use.
     """
     skill = (ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "--dump-host-usage" in skill
-    assert "Agent activity table stays family-only until Group" in skill
-    assert "and the per-machine API list-rate" in skill
+    assert "complete retained\nper-model host inventory by machine" in skill
     assert "Do not narrate raw per-model host data as actual spend" in skill
     aggregator_src = (
         ROOT / "src" / "mind_meld" / "skills" / "retro_fleet" / "aggregator.py"
@@ -887,25 +877,40 @@ def test_release_yml_latest_advance_compares_tag_to_head() -> None:
     assert "::warning::Skipping latest-advance" in body
 
 
-def test_usage_scope_sentences_are_pinned_in_decoder_and_render():
+def test_agents_section_replaces_the_three_usage_sections():
+    """1.1 collapses three sections into one table on one footing.
+
+    The 1.0 contract pinned two scope sentences — ``CLAUDE_SCOPE`` ("sum of
+    per-machine inventories") and ``HOST_SCOPE`` ("per machine, never summed")
+    — in both SKILL.md and the render, and pinned the ordering of the three
+    sections they headed. Those two sentences WERE the Claude-centricity: the
+    same duplication hazard produced a fleet sum for one agent and a refusal
+    for the others. Both constants are gone; assert the successor.
+    """
     from mind_meld.skills.retro_fleet import aggregator as agg
     from tests.test_retro_usage_presentation import presentation_data
 
     skill = (ROOT / "src/mind_meld/skills/retro_fleet/SKILL.md").read_text()
     out = agg.format_retro(presentation_data())
-    for sentence in (
-        "Source: Claude Code session logs; sum of per-machine inventories, not deduplicated "
-        "(a migrated home directory can be counted twice).",
-        "Source: latest host-usage snapshots; per machine, never summed. "
-        "Host logs can lose old records; observed endpoints do not prove continuous coverage.",
+
+    for gone in (
+        "## Claude Code activity",
+        "## Agent activity",
+        "## API list-rate equivalent",
+        "### Do not sum these values",
+        "## Notes",
+        "per machine, never summed",
     ):
-        assert sentence in skill and sentence in out
-    assert out.index("## Claude Code activity") < out.index("## Agent activity")
-    assert out.index("## Agent activity") < out.index("## API list-rate equivalent")
-    assert "## Rates and markers" not in out
-    assert (
-        "Fast-mode turns on Opus 5 / 4.8 bill at 2x and are priced here at standard rates." in out
-    )
+        assert gone not in out, gone
+    assert not hasattr(agg, "CLAUDE_SCOPE")
+    assert not hasattr(agg, "HOST_SCOPE")
+
+    assert "## Agents" in out
+    assert out.index("## Code shipped") < out.index("## Agents")
+    assert "| Agent | Tokens | Days | Machines | Est. cost | Top model |" in out
+    # The skill documents the one table and says comparison is now legitimate.
+    assert "One table, every agent" in skill
+    assert "Comparing the rows is the point." in skill
 
 
 def test_preview_docs_describe_diff_as_snapshot_comparison62():
@@ -917,46 +922,52 @@ def test_preview_docs_describe_diff_as_snapshot_comparison62():
     assert "| `mm diff` | Compare local files with this Mac" in readme
 
 
-def test_notes_decoder_compatibility_fixtures_both_directions():
+def test_pre_1_1_notes_semantics_survive_as_health_entries():
+    """Nothing the 1.0 Notes section told the reader was DROPPED in 1.1.
+
+    The output moved — from a rendered ``## Notes`` list to the ``MM_HEALTH``
+    payload — and the point of the move was presentation, not amnesia. The
+    fixtures under ``fixtures/retro_usage/`` capture the 1.0 decoder and a 1.0
+    render; every semantic class they carried must still be reachable, with its
+    remedy, from a 1.1 run.
+    """
     from mind_meld.skills.retro_fleet import aggregator as agg
-    from tests.test_retro_usage_presentation import GOLDENS, presentation_data
+    from tests.test_retro_usage_presentation import GOLDENS, health, presentation_data
 
     old_decoder = (GOLDENS / "decoder-before.md").read_text()
     old_output = (GOLDENS / "output-before.md").read_text()
-    new_decoder = (
-        (ROOT / "src/mind_meld/skills/retro_fleet/SKILL.md")
-        .read_text()
-        .split("## Notes section in aggregator output", 1)[1]
-        .split("## Trends vs prior", 1)[0]
-    )
-    new_output = agg.format_retro(presentation_data("degraded"), name="Example")
-    # Retained interpretation is compatible; refresh remedies deliberately gain
-    # a binary floor. Compare stable stems explicitly, never normalize commands.
-    for stem in (
-        "Fleet incomplete:",
-        "Sessions count incomplete:",
-        "Tokens incomplete",
-        "Skills incomplete:",
-        "No agent-log reader contributed",
-        "No agent activity observed",
-        "API list-rate equivalent unavailable",
+    assert "## Notes" in old_output, "fixture must predate the 1.1 move"
+
+    issues = health(agg.format_retro(presentation_data("degraded")))
+    assert issues, "the degraded corpus must surface health entries"
+    for item in issues:
+        assert set(item) >= {"code", "detail"}
+        assert item["detail"].strip()
+
+    codes = {item["code"] for item in issues}
+    assert {"tokens_incomplete", "cost_floor", "agent_coverage"} <= codes
+
+    # Remedies survived intact, including the fail-closed pricing language the
+    # 1.0 decoder pinned.
+    def _blob(entries):
+        return " ".join(
+            " ".join(str(v) for v in item.values() if isinstance(v, str)) for item in entries
+        )
+
+    blob = _blob(issues)
+    # The fixture is wrapped prose; compare against normalized text so a
+    # reflow in either direction is not a false failure.
+    flat_decoder = " ".join(old_decoder.split())
+    for phrase in (
+        "Grok's logs do not record per-request prompt sizes; no action resolves this",
+        "upgrading mm on the machine that renders this report may price",
+        "republishing does not add a rate; do not estimate",
     ):
-        assert stem in old_decoder and stem in new_decoder
-    assert agg.ATTENDED_USAGE_MIN_VERSION in new_decoder
-    assert "verify `mm --version`" in new_decoder
-    old_notes = old_output.split("## Notes\n", 1)[1].splitlines()
-    new_notes = new_output.split("## Notes\n", 1)[1].splitlines()
-    for line in old_notes:
-        if not line.strip():
-            continue
-        if "Not available for" in line:
-            assert any(
-                "Not available for" in new
-                and agg.ATTENDED_USAGE_MIN_VERSION in new
-                and "then run `mm push`" in new
-                for new in new_notes
-            )
-        else:
-            assert line in new_notes
-    for decoder in (old_decoder, new_decoder):
-        assert "reported verbatim" in decoder and "never interpreted" in decoder
+        assert phrase in flat_decoder, phrase
+        assert phrase in " ".join(blob.split()), phrase
+
+    # The attended floor a PEER must clear reaches the corpus that actually
+    # lacks a snapshot — a degraded reader is a different remedy.
+    absent = _blob(health(agg.format_retro(presentation_data("absent"))))
+    assert agg.ATTENDED_USAGE_MIN_VERSION in absent
+    assert "verify with `mm --version`" in absent
