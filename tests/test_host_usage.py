@@ -3901,6 +3901,21 @@ class TestCursorUsage67A:
         self._write(path, row)
         assert set(self._read(cursor_store).tokens_by_day) == {"2026-09-23"}
 
+    def test_far_future_ended_at_is_malformed(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["endedAt"] = int(datetime(2026, 9, 25, tzinfo=timezone.utc).timestamp() * 1000)
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_one_day_ahead_still_buckets(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["endedAt"] = int(datetime(2026, 9, 24, 18, tzinfo=timezone.utc).timestamp() * 1000)
+        self._write(path, row)
+        assert set(self._read(cursor_store).tokens_by_day) == {"2026-09-24"}
+
     def test_seconds_scale_ended_at_is_malformed_not_reaped(self, cursor_store):
         path, row = self._single(cursor_store)
         row["endedAt"] = int(datetime(2026, 9, 23, tzinfo=timezone.utc).timestamp())

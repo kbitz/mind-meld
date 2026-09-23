@@ -123,6 +123,8 @@ CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION = "0.87.3"
 """CLI generating the sessions and app producing the persisted schema, respectively."""
 _CURSOR_ENDED_AT_MIN_MS = 1_577_836_800_000
 """2020-01-01 UTC. A seconds-scale clock cannot pass; older millisecond days still reap."""
+_CURSOR_ENDED_AT_FUTURE_SLACK = timedelta(days=1)
+"""Clock skew plus a one-day revision. Farther ahead would occupy a newest-day snapshot slot."""
 CACHE_VERSION = 1
 DEFAULT_READ_BUDGET_S = 5.0
 
@@ -544,9 +546,12 @@ def _cursor_day(value: Any) -> str:
     if not _is_nonnegative_int(value) or value < _CURSOR_ENDED_AT_MIN_MS:
         raise _ReadFailure("malformed")
     try:
-        return datetime.fromtimestamp(value / 1000, timezone.utc).date().isoformat()
+        when = datetime.fromtimestamp(value / 1000, timezone.utc)
     except (ValueError, OverflowError, OSError) as exc:
         raise _ReadFailure("malformed") from exc
+    if when > datetime.now(timezone.utc) + _CURSOR_ENDED_AT_FUTURE_SLACK:
+        raise _ReadFailure("malformed")
+    return when.date().isoformat()
 
 
 def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:

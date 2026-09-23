@@ -336,6 +336,8 @@ between zero and outputTokens and is not added again. Each whole turn belongs
 to **endedAt's UTC date**; a turn crossing midnight is never split.
 A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
 cannot be reaped as ancient history and still report a successful scan.
+A timestamp more than one day after the read is malformed, so a far-future
+day cannot take a slot in the shared 90-day snapshot window.
 A nonzero cacheWrite labels the day partial via `unattributable_days`; it does
 not suppress the counters or the disjoint-v1 marker. The identity must still
 hold, and the unpublished cache-write price remains unknown. A null usage with
