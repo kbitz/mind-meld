@@ -140,6 +140,7 @@ HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     # consent, matching Codex. The 21A [retro].grok_host_usage bit remains
     # an OR so a prior usage-only opt-in does not go dark.
     "grok": "grok",
+    **dict.fromkeys(mm_config.HOST_USAGE_ONLY_CONSENT),
 }
 """Which enabled sync source each reader's consent derives from.
 
@@ -151,12 +152,12 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
-WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok"})
-"""Readers with an incremental cache a warm can populate.
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor"})
+"""Readers with cached totals an attended warm can populate.
 
 A future reader whose cache stores no totals must not be added here.
-Both live readers happen to be warmable; that coincidence is not the
-contract — the useful pin is that every warmable name is a live reader."""
+Every current live reader is warmable; that is not the contract — the
+useful pin is that every warmable name is a live reader."""
 
 
 @dataclass(frozen=True)
@@ -316,13 +317,15 @@ def _default_host_readers(
     sources: list[dict],
     *,
     grok_consented: bool = False,
+    cursor_consented: bool = False,
 ) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
     see ``HOST_READER_SOURCE_GATE``. Grok is included when the grok source is
     enabled or when ``grok_consented`` is true (21A bit), bound to
-    ``consented=True``.
+    ``consented=True``. Cursor has no sync source: ``cursor_consented`` is its
+    only gate (``HOST_USAGE_ONLY_CONSENT``).
 
     Module-qualified lookups on purpose (CLAUDE.md's dead-alias rule in
     reverse): a from-import would bind this module's own global, so a test
@@ -338,6 +341,12 @@ def _default_host_readers(
             return host_usage.read_grok_usage(deadline=deadline, consented=True)
 
         chosen.append(("grok", _read_grok))
+    if cursor_consented:
+
+        def _read_cursor(*, deadline: float) -> host_usage.HostUsageResult:
+            return host_usage.read_cursor_usage(deadline=deadline, consented=True)
+
+        chosen.append(("cursor", _read_cursor))
     return tuple(chosen)
 
 
@@ -589,10 +598,14 @@ def _host_skip_phrase(
             "run pipx upgrade mind-meld before refreshing usage."
         )
     if reason in _HOST_PERMANENT_REASONS:
+        stop = (
+            mm_config.host_usage_consent_remedy(reader, enabled=False).removesuffix(".").lower()
+            if HOST_READER_SOURCE_GATE.get(reader) is None
+            else f"run `mm disable-source {reader}`"
+        )
         return (
             f"{phrase}. {reader} wrote a record this version cannot read. "
-            f"A newer mm may read it: run `pipx upgrade mind-meld`, or run "
-            f"`mm disable-source {reader}` to stop retrying."
+            f"A newer mm may read it: run `pipx upgrade mind-meld`, or {stop} to stop retrying."
         )
     if reason == "deadline":
         if attended:
@@ -606,12 +619,22 @@ def _host_skip_phrase(
             def shown(value: int | None) -> str:
                 return "unknown" if value is None else str(value)
 
-            unit = "ledgers" if reader == "grok" else "rollouts"
+            unit = {"grok": "ledgers"}.get(reader, "rollouts")
+            if reader == "cursor":
+                progress = (
+                    f"{shown(evidence.files_cached)} retained runs; "
+                    "Conductor files still on disk are not counted"
+                )
+            else:
+                progress = (
+                    f"{shown(evidence.files_cached)} of "
+                    f"{shown(evidence.files_on_disk)} {unit} cached"
+                )
             return (
                 f"{phrase}. Last read allowed {shown(evidence.last_deadline_allotted_ms)} ms; "
                 f"last complete read {shown(evidence.last_complete_ms)} ms "
                 f"({host_read_age(evidence.last_complete_at)}); "
-                f"{shown(evidence.files_cached)} of {shown(evidence.files_on_disk)} {unit} cached. "
+                f"{progress}. "
                 "If the last complete read is over your autopush budget, raise "
                 "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
                 "and can warm cold readers; "
@@ -963,7 +986,9 @@ def _run_events_tail(
             suppress_host_capture=suppress_host_capture,
             prepare_token_cache=prepare_tail_token_cache,
             host_readers=_default_host_readers(
-                sources, grok_consented=grok_host_usage_enabled(config)
+                sources,
+                grok_consented=grok_host_usage_enabled(config),
+                cursor_consented=mm_config.cursor_host_usage_enabled(config),
             ),
         )
 
@@ -1151,7 +1176,9 @@ def _run_events_backfill(
             prepare_token_cache=prepare_backfill_token_cache,
             origin=events.GIT_SNAPSHOT_ORIGIN_INIT,
             host_readers=_default_host_readers(
-                sources, grok_consented=grok_host_usage_enabled(config)
+                sources,
+                grok_consented=grok_host_usage_enabled(config),
+                cursor_consented=mm_config.cursor_host_usage_enabled(config),
             ),
         )
 

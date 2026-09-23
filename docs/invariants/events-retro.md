@@ -225,7 +225,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok readers as one additive
+The tail publishes the local Codex / Grok / Cursor-via-Conductor readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -309,6 +309,83 @@ prompt IDs, or conversation bytes. Equal duplicate
 `(workspace, session, prompt_id, model)` records count once; conflicting
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
+
+**Cursor via Conductor (Track 67A, v1.2.0).** Only
+`~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
+is read. No bare-CLI billing counters persist; a successful mixed-use Mac scan
+still excludes bare cursor-agent usage. No sync source or skill-link row is
+added. `[retro] cursor_host_usage = true` is the sole consent;
+`HOST_READER_SOURCE_GATE["cursor"] = None` cannot be satisfied by any source.
+Every capture caller passes that bit. Both enable and disable remedies name
+the config setting, never the nonexistent `mm enable-source cursor` command.
+
+The persisted schema producer is Conductor **0.87.3**, with sessions generated
+by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
+and documents the three-run, two-session, one-Mac census. Runtime validation,
+not version pins, detects drift: only `finished` plus non-null usage counts;
+`running` plus null usage is pending. Missing usage, malformed counters and
+unknown statuses (including error/cancelled) refuse the reader. No store and
+no prior cache is `no_metadata_ledger`; found-but-unreadable data
+is `malformed`/`unsupported`, never invisible source absence.
+A known unreadable store disappearing preserves its blocker rather than
+becoming source absence; previously captured runs survive a missing store.
+
+Counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
+== totalTokens. No inclusive normalization applies. reasoningTokens must be
+between zero and outputTokens and is not added again. Each whole turn belongs
+to **endedAt's UTC date**; a turn crossing midnight is never split.
+A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
+cannot be reaped as ancient history and still report a successful scan.
+A timestamp more than one day after the read is malformed, so a far-future
+day cannot take a slot in the shared 90-day snapshot window.
+A nonzero cacheWrite labels the day partial via `unattributable_days`; it does
+not suppress the counters or the disjoint-v1 marker. The identity must still
+hold, and the unpublished cache-write price remains unknown. A null usage with
+non-null usageRef persists a partial placeholder. When known usage shares that
+day, the row carries partial_sources. If the day has no token bucket, the reader
+returns incomplete `partial`, since the existing writer trims that warning away.
+This fail-closed resolution was accepted during implementation; it invents no
+zero tokens and changes no wire shape.
+
+The private `cursor-host-tokens.json` is **authoritative history after pruning**,
+not a disposable parse cache. It uses shared `host_usage.CACHE_VERSION` and
+reader-owned `CURSOR_HOST_CACHE_RETENTION_DAYS = 90`, numerically equal to but
+not derived from `events.CURSOR_SCAN_DAYS` (the mm-events read-position window).
+Entries are keyed by hashed runId. A later finished revision replaces the old
+model, day and counters; reducing the replaced map reverses the old contribution.
+A running revision retracts an old terminal contribution. Conductor-deleted runs
+remain until the reader's retention cutoff. Runs deleted before mm ever read
+them are unrecoverable; accumulation bounds future loss and does not fix backlog.
+
+Every file is reparsed, with descriptor and path stats before/after, including
+ctime. A torn/changed file contributes no staged prefix. Files fully read before
+that failure are kept. A cross-file runId conflict commits nothing from that
+scan, so one copy cannot erase retained history. An outstanding blocker
+outranks retained history when the store disappears. Stable complete files
+learned before a later failure/deadline commit; incomplete reader totals never
+publish. If the store disappears before the first complete scan, the learned
+prefix stays in the cache and the read stays incomplete. Repeated short-budget scans **need not converge**, because cached run
+IDs do not eliminate parsing of rewritten files. The tests pin repeated deadline
+results followed by an adequate-budget scan with exact, nonduplicated totals.
+Cursor is warmable and has both the WARMABLE_HOST_READERS entry and the inline
+warm branch; attended warming or a larger configured budget is the remedy.
+
+`lockedjson.locked_json_durable_rmw` locks a stable sibling `.lock` inode and
+writes through `fsutil.atomic_write_bytes(fsync=True, mode=0o600)`: temp-file
+fsync, atomic rename, parent-directory fsync. Corrupt/empty/version-mismatched
+history refuses without normalization or reset. Write/fsync failure returns
+incomplete io_error, never a successful observation. Pre-rename failure preserves
+the old bytes; directory-fsync failure may occur after rename. Read-only diagnostics
+inspect an immutable old-or-new data inode without creating a lock or store.
+Existing Codex/Grok forensic caches retain their original write protocol.
+
+`HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
+predicate, including status, recapture's reminder and diag JSON. Cursor's cache
+inventory reports retained runs, not files still present in Conductor. Status
+names **Cursor via Conductor** and its own standing blocker. No Grok cache state
+may supply Cursor's upgrade/reminder decision. Consent, registration and this
+dispatch land together. The token-source tuples append cursor after codex/grok;
+this is MINOR under the 1.x compatibility contract, not a new host family.
 
 **First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
 The latch's premise was already false (`complete_once` arms on an empty
@@ -624,8 +701,9 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap — `host_usage` reads Codex and Grok ledgers, never Claude Code's own
-  session jsonls — so this is a sum, not a double count.
+  overlap: `host_usage` reads Codex, Grok Build and Cursor via Conductor
+  ledgers, never Claude Code's own session jsonls. Cursor offers Claude models;
+  the initial Cursor census observed only Grok 4.7, not Claude usage.
 - **`AGENT_ROW_ORDER` is the only label registry.** The pre-1.1 pair
   (`MODEL_FAMILY_ROWS` + `AGENT_FAMILY_ROWS`, with deliberately different
   labels like `Claude (via agents)`) existed so two adjacent card blocks could
@@ -1558,10 +1636,11 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex and Grok). Only `deadline` qualifies, including a reader whose
+(today Codex, Grok and Cursor via Conductor). Only `deadline` qualifies, including a reader whose
 first invocation was prevented by sweep expiry. A healthy empty scan never
-warms. Autopush supplies no warm callback and continues to converge through
-partial commits.
+warms. Autopush supplies no warm callback. Codex/Grok continue to converge
+through partial commits; Cursor commits stable-file progress but reparses
+rewritten files, so repeated short passes need not converge.
 
 `warm_host_cache` is now the attended-notice hook only. After
 `mm: reading <reader> usage beyond the push budget (about 5 s of scanning)...`,
@@ -2582,6 +2661,26 @@ threshold. The 303-turn `costUsdTicks` census corroborates the rate shape
 field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
 `grok-build-0.1` is a different SKU and a name trap.
+
+**Cursor Grok 4.7 list-rate basis (67A).** The exact `grok-4.7` alias maps
+to its own family card, $2 input / $0.50 cache read / $6 output per MTok; long
+context is $4 / $1 / $12 when a REQUEST exceeds 256k input. Per-turn aggregates
+cannot recover that tier, so the standard-speed estimate is a floor. Cursor's
+2026-09-23 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
+https://cursor.com/docs/models-and-pricing and
+https://cursor.com/docs/models/grok-4-7 are its sources. The dollar column is a
+list-rate equivalent, **not spend** on the censused Cursor Ultra subscription.
+Included usage and on-demand charges cannot be reconstructed from these counters.
+
+`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, deliberately
+absent from both the pricing alias registry and VERIFIED_MODEL_IDS. Standard
+Fast costs 2x base and long-context Fast 3x base; effort has no separate rate.
+Fast-only rows retain tokens and render cost `—` / cost_unavailable; mixed rows
+render `≥` / cost_floor for the priced subtotal, excluding Fast cost entirely.
+The reader cannot set floor_causes; existing unpriced-model rendering does it.
+Nonzero cache writes remain a labelled unknown and suppress any at-most claim.
+Tests follow both surprise guards through capture → publication → rendering.
+Pricing Fast properly and adding auto/composer families are deferred in TODOS.
 
 **Other vendors' context assumptions.** Codex's observed 258,400-token window
 cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789

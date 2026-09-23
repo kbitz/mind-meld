@@ -3800,3 +3800,515 @@ def test_reduction_overrun_commits_pruning_timing_and_deadline(tmp_path, monkeyp
     assert data["last_complete_ms"] == 300
     assert data["last_deadline_allotted_ms"] == 250
     assert datetime.fromisoformat(data["last_complete_at"]).tzinfo is not None
+
+
+class TestCursorUsage67A:
+    def _read(self, root):
+        return hu.read_cursor_usage(root, consented=True)
+
+    def _single(self, root):
+        paths = sorted(root.glob("*/runs.ndjson"))
+        row = json.loads(paths[0].read_text().splitlines()[0])
+        for path in paths[1:]:
+            path.unlink()
+        self._write(paths[0], row)
+        return paths[0], row
+
+    def _write(self, path, *rows):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def test_real_census_disjoint_identity_and_pins(self, cursor_store, monkeypatch):
+        def forbidden(*_args):
+            pytest.fail("Cursor counters must never use the inclusive normalizer")
+
+        monkeypatch.setattr(hu, "_normalize_inclusive_counters", forbidden)
+        result = self._read(cursor_store)
+        assert result.complete
+        assert sum(tu.sum_bucket(day) for day in result.tokens_by_day.values()) == 32_729_640
+        assert set(result.hosts) == {"grok"}
+        for path in cursor_store.glob("*/runs.ndjson"):
+            for line in path.read_text().splitlines():
+                record = json.loads(line)
+                usage = record["usage"]
+                assert (
+                    sum(
+                        usage[k]
+                        for k in (
+                            "inputTokens",
+                            "outputTokens",
+                            "cacheReadTokens",
+                            "cacheWriteTokens",
+                        )
+                    )
+                    == usage["totalTokens"]
+                )
+                assert 0 <= usage["reasoningTokens"] <= usage["outputTokens"]
+        contract = (FIXTURES / "cursor/CONTRACT.md").read_text()
+        assert hu.CURSOR_USAGE_CENSUS_HOST_VERSION == "2026.09.18-9a7762b"
+        assert hu.CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION == "0.87.3"
+        assert hu.CURSOR_USAGE_CENSUS_HOST_VERSION in contract
+        assert hu.CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION in contract
+        assert hu.CURSOR_CACHE_PATH.stat().st_mode & 0o777 == 0o600
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        assert cache["version"] == hu.CACHE_VERSION
+        assert len(cache["runs"]) == 3
+        assert all(len(key) == 64 for key in cache["runs"])
+
+    def test_no_consent_performs_no_path_io(self, monkeypatch):
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("unconsented reader touched a path")
+
+        monkeypatch.setattr(Path, "lstat", forbidden)
+        monkeypatch.setattr(Path, "open", forbidden)
+        monkeypatch.setattr(Path, "mkdir", forbidden)
+        result = hu.read_cursor_usage()
+        assert not result.complete
+        assert result.reason == "no_metadata_ledger"
+
+    def test_bare_cli_absence_is_not_completed_empty(self):
+        result = hu.read_cursor_usage(consented=True)
+        assert not result.complete
+        assert result.reason == "no_metadata_ledger"
+        assert not hu.CURSOR_CACHE_PATH.exists()
+
+    def test_expired_budget_does_not_touch_either_store(self, monkeypatch):
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("an already-expired Cursor read touched disk")
+
+        monkeypatch.setattr(Path, "lstat", forbidden)
+        monkeypatch.setattr(Path, "mkdir", forbidden)
+        result = hu.read_cursor_usage(deadline=time.monotonic() - 1, consented=True)
+        assert not result.complete
+        assert result.reason == "deadline"
+
+    def test_running_rewrite_and_finished_revision_replace(self, cursor_store):
+        path, row = self._single(cursor_store)
+        original = json.loads(json.dumps(row))
+        row.update(status="running", usage=None, endedAt=None)
+        self._write(path, row)
+        assert self._read(cursor_store).hosts == {}
+        self._write(path, original)
+        first = self._read(cursor_store)
+        assert self._read(cursor_store) == first
+        original["model"]["id"] = "gpt-6-astra"
+        original["endedAt"] += 86_400_000
+        original["usage"]["inputTokens"] += 100
+        original["usage"]["totalTokens"] += 100
+        self._write(path, original)
+        revised = self._read(cursor_store)
+        assert revised.complete
+        assert set(revised.hosts) == {"codex"}
+        assert set(revised.tokens_by_day) == {"2026-09-23"}
+        assert tu.sum_bucket(revised.tokens_by_day["2026-09-23"]) == 25_891_871
+        assert len(json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]) == 1
+
+    def test_completion_utc_day_owns_midnight_turn(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["startedAt"] = int(
+            datetime(2026, 9, 22, 23, 59, tzinfo=timezone.utc).timestamp() * 1000
+        )
+        row["endedAt"] = row["startedAt"] + 120_000
+        self._write(path, row)
+        assert set(self._read(cursor_store).tokens_by_day) == {"2026-09-23"}
+
+    def test_far_future_ended_at_is_malformed(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["endedAt"] = int(datetime(2026, 9, 25, tzinfo=timezone.utc).timestamp() * 1000)
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_one_day_ahead_still_buckets(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["endedAt"] = int(datetime(2026, 9, 24, 18, tzinfo=timezone.utc).timestamp() * 1000)
+        self._write(path, row)
+        assert set(self._read(cursor_store).tokens_by_day) == {"2026-09-24"}
+
+    def test_seconds_scale_ended_at_is_malformed_not_reaped(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["endedAt"] = int(datetime(2026, 9, 23, tzinfo=timezone.utc).timestamp())
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    @pytest.mark.parametrize("status", ["completed", "error", "cancelled", "renamed", None, {}])
+    def test_unknown_or_newly_billable_status_refuses(self, cursor_store, status):
+        path, row = self._single(cursor_store)
+        row["status"] = status
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == "unsupported"
+
+    @pytest.mark.parametrize(
+        "mutation", ["missing", "null", "identity", "reasoning", "bool", "model"]
+    )
+    def test_malformed_usage_never_becomes_absence(self, cursor_store, mutation):
+        path, row = self._single(cursor_store)
+        if mutation == "missing":
+            del row["usage"]
+        elif mutation == "null":
+            row["usage"] = None
+        elif mutation == "identity":
+            row["usage"]["totalTokens"] += 1
+        elif mutation == "reasoning":
+            row["usage"]["reasoningTokens"] = row["usage"]["outputTokens"] + 1
+        elif mutation == "bool":
+            row["usage"]["inputTokens"] = True
+        else:
+            row["model"] = None
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
+
+    @pytest.mark.parametrize(
+        ("model_id", "params", "reason"),
+        [
+            ("grok-4.7", [], "unsupported"),
+            (
+                "grok-4.7",
+                [{"id": "fast", "value": "true"}, {"id": "fast", "value": "false"}],
+                "unsupported",
+            ),
+            ("grok-4.7", [{"id": "fast", "value": True}], "unsupported"),
+            ("gpt-6-astra", None, "malformed"),
+        ],
+    )
+    def test_model_parameter_contract_refuses_unobserved_shapes(
+        self, cursor_store, model_id, params, reason
+    ):
+        path, row = self._single(cursor_store)
+        row["model"]["id"] = model_id
+        row["model"]["params"] = params
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == reason
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_running_record_with_usage_reference_is_unsupported(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row.update(status="running", usage=None, usageRef="pending")
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == "unsupported"
+
+    def test_invalid_run_identity_and_duplicate_within_file_refuse(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["runId"] = ""
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "malformed"
+        self._write(path, row | {"runId": "stable"}, row | {"runId": "stable"})
+        assert self._read(cursor_store).reason == "malformed"
+
+    def test_non_directory_store_is_unsupported_without_overwriting_cache(self, tmp_path):
+        root = tmp_path / "not-a-directory"
+        root.write_text("x")
+        result = hu.read_cursor_usage(root, consented=True)
+        assert not result.complete
+        assert result.reason == "unsupported"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["last_reason"] == "unsupported"
+
+    def test_symlinked_workspace_ledger_is_ignored(self, cursor_store, tmp_path):
+        for path in cursor_store.glob("*/runs.ndjson"):
+            path.unlink()
+        outside = tmp_path / "outside.ndjson"
+        row = json.loads((FIXTURES / "cursor/session-1/runs.ndjson").read_text().splitlines()[0])
+        outside.write_text(json.dumps(row) + "\n")
+        linked = cursor_store / "linked"
+        linked.mkdir()
+        (linked / "runs.ndjson").symlink_to(outside)
+        result = self._read(cursor_store)
+        assert result.complete
+        assert result.tokens_by_day == {}
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_pruned_runs_survive_including_missing_store(self, cursor_store):
+        first = self._read(cursor_store)
+        for path in cursor_store.glob("*/runs.ndjson"):
+            path.unlink()
+        assert self._read(cursor_store) == first
+        shutil.rmtree(cursor_store)
+        assert self._read(cursor_store) == first
+
+    def test_broken_store_disappearing_never_becomes_nothing_ever(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["status"] = "renamed-terminal"
+        path.write_text(json.dumps(row) + "\n")
+        assert self._read(cursor_store).reason == "unsupported"
+        shutil.rmtree(cursor_store)
+        assert self._read(cursor_store).reason == "unsupported"
+
+    def test_retention_is_reader_owned_and_reverses_revisions(self, cursor_store):
+        path, row = self._single(cursor_store)
+        assert self._read(cursor_store).complete
+        row["endedAt"] = int(datetime(2026, 6, 1, tzinfo=timezone.utc).timestamp() * 1000)
+        self._write(path, row)
+        assert self._read(cursor_store).hosts == {}
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+        assert hu.CURSOR_HOST_CACHE_RETENTION_DAYS == 90
+
+    def test_torn_later_file_keeps_earlier_stable_runs(self, cursor_store):
+        paths = sorted(cursor_store.glob("*/runs.ndjson"))
+        first, second = paths[0], paths[1]
+        kept = [json.loads(line) for line in first.read_text().splitlines()]
+        second.write_bytes(second.read_bytes() + b'{"runId":"unfinished')
+        assert self._read(cursor_store).reason == "malformed"
+        cached = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
+        assert len(cached) == len(kept)
+        assert all(run["usage"] is not None for run in cached.values())
+
+    def test_success_then_unsupported_store_loss_keeps_the_blocker(self, cursor_store):
+        assert self._read(cursor_store).complete
+        path, row = self._single(cursor_store)
+        row["status"] = "renamed-terminal"
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "unsupported"
+        shutil.rmtree(cursor_store)
+        result = self._read(cursor_store)
+        assert result.reason == "unsupported"
+        assert not result.complete
+
+    def test_torn_file_never_commits_prefix(self, cursor_store):
+        path, _ = self._single(cursor_store)
+        path.write_bytes(path.read_bytes() + b'{"runId":"unfinished')
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_mutation_during_read_discards_revision(self, cursor_store, monkeypatch):
+        path, row = self._single(cursor_store)
+        assert self._read(cursor_store).complete
+        prior = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
+        stat_fn = hu._regular_stat
+        calls = 0
+
+        def mutate(target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                row["usage"]["inputTokens"] += 100
+                row["usage"]["totalTokens"] += 100
+                self._write(path, row)
+            return stat_fn(target)
+
+        monkeypatch.setattr(hu, "_regular_stat", mutate)
+        assert self._read(cursor_store).reason == "stale"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == prior
+
+    def test_short_passes_preserve_progress_but_need_not_converge(self, cursor_store, monkeypatch):
+        original = hu._read_cursor_file
+        parsed = False
+
+        def read(path, deadline):
+            nonlocal parsed
+            result = original(path, deadline)
+            parsed = True
+            return result
+
+        with monkeypatch.context() as limited:
+            limited.setattr(hu, "_read_cursor_file", read)
+            limited.setattr(hu, "_expired", lambda deadline: parsed)
+            assert self._read(cursor_store).reason == "deadline"
+            first = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
+            assert len(first) == 2
+            parsed = False
+            assert self._read(cursor_store).reason == "deadline"
+            assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == first
+        result = self._read(cursor_store)
+        assert result.complete
+        assert sum(tu.sum_bucket(day) for day in result.tokens_by_day.values()) == 32_729_640
+
+    @pytest.mark.parametrize(
+        "content", [b"", b"garbage", b"[]", b"{}", b'{"version":99,"runs":{}}']
+    )
+    def test_corrupt_authoritative_cache_is_not_reset(self, cursor_store, content):
+        hu.CURSOR_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_CACHE_PATH.write_bytes(content)
+        assert not self._read(cursor_store).complete
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == content
+
+    def test_malformed_cached_run_is_not_rewritten(self, cursor_store):
+        assert self._read(cursor_store).complete
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        first_run = next(iter(cache["runs"].values()))
+        first_run["usage"]["outputTokens"] = True
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(cache))
+        malformed_bytes = hu.CURSOR_CACHE_PATH.read_bytes()
+
+        result = self._read(cursor_store)
+
+        assert not result.complete
+        assert result.reason == "malformed"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == malformed_bytes
+
+    def test_cursor_diag_reports_malformed_cache_and_lock_contention(self, cursor_store):
+        assert self._read(cursor_store).complete
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        first_run = next(iter(cache["runs"].values()))
+        first_run["usage"]["outputTokens"] = True
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(cache))
+
+        malformed = hu.cursor_usage_diag()
+        assert malformed["cache_state"] == "unreadable"
+        assert malformed["last_reason"] == "malformed"
+
+        with hu.CURSOR_CACHE_PATH.open("rb") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            contended = hu.cursor_usage_diag()
+        assert contended["cache_state"] == "unreadable"
+        assert contended["last_reason"] == "locked"
+
+    def test_ledger_replacement_between_stat_and_open_is_rejected(self, cursor_store, monkeypatch):
+        path, _row = self._single(cursor_store)
+        original_open = os.open
+        replaced = False
+
+        def replace_before_open(target, flags, mode=0o777, *args, **kwargs):
+            nonlocal replaced
+            if Path(target) == path and not replaced:
+                replaced = True
+                original = path.with_name(path.name + ".original")
+                path.replace(original)
+                path.write_text(original.read_text())
+            return original_open(target, flags, mode, *args, **kwargs)
+
+        monkeypatch.setattr(hu.os, "open", replace_before_open)
+
+        with pytest.raises(hu._ReadFailure) as exc_info:
+            hu._read_cursor_file(path, time.monotonic() + 5)
+
+        assert replaced
+        assert exc_info.value.reason == "stale"
+
+    def test_durable_failure_preserves_previous_bytes_and_refuses_publication(
+        self, cursor_store, monkeypatch
+    ):
+        from mind_meld import fsutil
+
+        assert self._read(cursor_store).complete
+        before = hu.CURSOR_CACHE_PATH.read_bytes()
+
+        def fail(_fd):
+            raise OSError(errno.EIO, "injected fsync failure")
+
+        monkeypatch.setattr(fsutil, "_fsync_fd", fail)
+        assert self._read(cursor_store).reason == "io_error"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == before
+        assert not list(hu.CURSOR_CACHE_PATH.parent.glob("*.tmp"))
+
+    def test_sibling_lock_refuses_without_losing_history(self, cursor_store):
+        assert self._read(cursor_store).complete
+        before = hu.CURSOR_CACHE_PATH.read_bytes()
+        with hu.CURSOR_CACHE_PATH.with_name(hu.CURSOR_CACHE_PATH.name + ".lock").open("rb") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert self._read(cursor_store).reason == "locked"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == before
+
+    def test_never_opens_content_siblings_or_bare_cli_database(self, cursor_store, monkeypatch):
+        original = os.open
+        opened = []
+
+        def track(path, flags, mode=0o777, *args, **kwargs):
+            opened.append(Path(path).name)
+            return original(path, flags, mode, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", track)
+        assert self._read(cursor_store).complete
+        assert "runs.ndjson" in opened
+        assert {
+            "agents.ndjson",
+            "store.db",
+            "checkpoints.ndjson",
+            "run_events.ndjson",
+            "prompt_history.json",
+        }.isdisjoint(opened)
+
+    def test_warming_calls_cursor_with_consent(self, monkeypatch):
+        seen = []
+
+        def read(root, *, deadline, consented):
+            seen.append((root, deadline, consented))
+            return hu.HostUsageResult({}, complete=True)
+
+        monkeypatch.setattr(hu, "read_cursor_usage", read)
+        assert hu.warm_host_cache_inline(reader="cursor").complete
+        assert seen[0][2] is True
+
+    def test_partially_learned_history_survives_store_pruning(self, cursor_store, monkeypatch):
+        first = sorted(cursor_store.glob("*/runs.ndjson"))[0]
+        reader = hu._read_cursor_file
+
+        def fail_second(path, deadline):
+            if path != first:
+                raise hu._ReadFailure("deadline")
+            return reader(path, deadline)
+
+        with monkeypatch.context() as limited:
+            limited.setattr(hu, "_read_cursor_file", fail_second)
+            assert self._read(cursor_store).reason == "deadline"
+        shutil.rmtree(cursor_store)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == "deadline"
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        assert cache["complete_once"] is False
+        assert sum(tu.sum_bucket(run["usage"]) for run in cache["runs"].values()) == 30_871_121
+
+    def test_duplicate_ids_across_workspaces_count_once_and_conflicts_refuse(self, cursor_store):
+        path, row = self._single(cursor_store)
+        duplicate = cursor_store / "copied" / "runs.ndjson"
+        duplicate.parent.mkdir()
+        self._write(duplicate, row)
+        result = self._read(cursor_store)
+        assert result.complete
+        assert sum(tu.sum_bucket(day) for day in result.tokens_by_day.values()) == 25_891_771
+        row["usage"]["inputTokens"] += 1
+        row["usage"]["totalTokens"] += 1
+        self._write(duplicate, row)
+        assert self._read(cursor_store).reason == "malformed"
+
+    def test_rejected_running_copy_does_not_erase_cached_history(self, cursor_store):
+        path, row = self._single(cursor_store)
+        assert self._read(cursor_store).complete
+        prior = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
+        running = dict(row)
+        running["status"] = "running"
+        running["usage"] = None
+        early = cursor_store / "aaa" / "runs.ndjson"
+        early.parent.mkdir()
+        self._write(early, running)
+        assert self._read(cursor_store).reason == "malformed"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == prior
+
+    def test_fifo_substituted_for_ledger_does_not_block(self, tmp_path, monkeypatch):
+        fifo = tmp_path / "runs.ndjson"
+        os.mkfifo(fifo)
+        original_stat = hu._regular_stat
+
+        def pretend_regular(path):
+            try:
+                return original_stat(path)
+            except hu._ReadFailure:
+                return path.lstat()
+
+        monkeypatch.setattr(hu, "_regular_stat", pretend_regular)
+        started = time.monotonic()
+        with pytest.raises(hu._ReadFailure):
+            hu._read_cursor_file(fifo, started + 5)
+        assert time.monotonic() - started < 2
+
+    def test_unobserved_models_keep_existing_family_classification(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["model"]["id"] = "composer-2.5"
+        self._write(path, row)
+        assert set(self._read(cursor_store).hosts) == {"other"}
+        row["model"]["id"] = "auto"
+        self._write(path, row)
+        assert set(self._read(cursor_store).hosts) == {"other"}

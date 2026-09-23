@@ -274,6 +274,8 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
     monkeypatch.setattr(_host_usage, "CACHE_PATH", root / "host-tokens.json")
     monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
+    monkeypatch.setattr(_host_usage, "CURSOR_STORE_PATH", root / "cursor-sdk-store")
+    monkeypatch.setattr(_host_usage, "CURSOR_CACHE_PATH", root / "cursor-host-tokens.json")
 
 
 @pytest.fixture(autouse=True)
@@ -451,3 +453,23 @@ def _setup_real_config(tmp_path, monkeypatch):
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     return claude_dir
+
+
+@pytest.fixture
+def cursor_store(tmp_path, monkeypatch):
+    """Real redacted 67A census, kept inside its reader retention window."""
+    import shutil
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from mind_meld import host_usage
+
+    class CensusClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 23, 18, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(host_usage, "datetime", CensusClock)
+    root = host_usage.CURSOR_STORE_PATH
+    shutil.copytree(Path(__file__).parent / "fixtures/host_sessions/cursor", root)
+    return root

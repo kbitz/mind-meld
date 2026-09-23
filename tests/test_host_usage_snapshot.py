@@ -112,7 +112,9 @@ class TestReaderOrchestration:
         assert [
             name
             for name, _ in events_tail._default_host_readers(
-                self._enabled(*_mm_events.ACTIVE_HOST_READERS), grok_consented=True
+                self._enabled(*_mm_events.ACTIVE_HOST_READERS),
+                grok_consented=True,
+                cursor_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 
@@ -170,6 +172,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
                 grok_consented=True,
+                cursor_consented=True,
             )
         ]
         assert set(events_tail.HOST_READER_SOURCE_GATE) == set(invoked)
@@ -179,7 +182,12 @@ class TestReaderOrchestration:
         can actually invoke. A key with no reader is a consent check of
         nothing."""
         enabled = self._enabled(*events_tail.HOST_READER_SOURCE_GATE)
-        names = [n for n, _ in events_tail._default_host_readers(enabled, grok_consented=True)]
+        names = [
+            n
+            for n, _ in events_tail._default_host_readers(
+                enabled, grok_consented=True, cursor_consented=True
+            )
+        ]
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
@@ -201,7 +209,9 @@ class TestReaderOrchestration:
 
         capture = events_tail._capture_host_usage(
             events_tail._default_host_readers(
-                self._enabled(*_mm_events.ACTIVE_HOST_READERS), grok_consented=True
+                self._enabled(*_mm_events.ACTIVE_HOST_READERS),
+                grok_consented=True,
+                cursor_consented=True,
             ),
             deadline=1_000.0,
             now=lambda: 0.0,
@@ -371,6 +381,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 grok_consented=True,
+                cursor_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 
@@ -785,8 +796,10 @@ def _stub_hosts(monkeypatch, codex=None, grok=None, synth=None, calls: list | No
         orig = events_tail._default_host_readers
         synth_fn = make(SYNTH, synth)
 
-        def with_synth(sources, *, grok_consented=False):
-            return orig(sources, grok_consented=grok_consented) + ((SYNTH, synth_fn),)
+        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
+            return orig(
+                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
+            ) + ((SYNTH, synth_fn),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1559,8 +1572,10 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, grok_consented=False):
-            return orig(sources, grok_consented=grok_consented) + ((SYNTH, synth),)
+        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
+            return orig(
+                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
+            ) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1622,8 +1637,10 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, grok_consented=False):
-            return orig(sources, grok_consented=grok_consented) + ((SYNTH, synth),)
+        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
+            return orig(
+                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
+            ) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -2136,6 +2153,17 @@ def test_partial_takes_the_retry_sentence_not_warming(reader):
     assert "warming" not in phrase
 
 
+def test_cursor_deadline_reports_retained_runs():
+    evidence = events_tail.HostReadEvidence(250, 300, "2026-09-23T00:00:00+00:00", 3, None)
+    phrase = events_tail._host_skip_phrase(
+        "cursor", "deadline", readiness="ready", evidence=evidence
+    )
+    assert "3 retained runs" in phrase
+    assert "Conductor files still on disk are not counted" in phrase
+    assert "unknown of unknown" not in phrase
+    assert "run files" not in phrase
+
+
 @pytest.mark.parametrize("reader", ["codex", "grok"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
@@ -2298,3 +2326,57 @@ def test_deadline_wording_follows_whether_the_caller_could_warm(
         assert warms == ["codex"]
         assert "Attended warming also exhausted its allowance" in text
         assert "can warm cold readers" not in text
+
+
+def test_cursor_gate_none_requires_own_consent(monkeypatch):
+    source = [{"name": "cursor", "path": "/unused", "type": "generic"}]
+    assert events_tail.HOST_READER_SOURCE_GATE["cursor"] is None
+    assert events_tail._default_host_readers(source) == ()
+    assert [n for n, _ in events_tail._default_host_readers(source, grok_consented=True)] == [
+        "grok"
+    ]
+    seen = []
+
+    def read(*, deadline, consented):
+        seen.append(consented)
+        return _complete()
+
+    monkeypatch.setattr(_mm_host_usage, "read_cursor_usage", read)
+    readers = events_tail._default_host_readers([], cursor_consented=True)
+    assert [n for n, _ in readers] == ["cursor"]
+    readers[0][1](deadline=1000)
+    assert seen == [True]
+    assert "cursor" in events_tail.WARMABLE_HOST_READERS
+
+
+@pytest.mark.parametrize("entry", ["tail", "backfill", "attended"])
+def test_cursor_consent_reaches_every_capture_caller(tmp_path, monkeypatch, entry):
+    from mind_meld import cli
+
+    root = tmp_path / "events_root"
+    root.mkdir()
+    sources = [
+        {"name": "mm-events", "path": str(root), "type": "generic", "include_dirs": ["events"]}
+    ]
+    config = {
+        "device": {"id": "dev-a"},
+        "sync": {"sources": sources, "max_file_size": 52_428_800},
+        "retro": {"cursor_host_usage": True},
+    }
+    seen = []
+
+    def read(*, deadline, consented):
+        seen.append(consented)
+        return _complete()
+
+    monkeypatch.setattr(_mm_host_usage, "read_cursor_usage", read)
+    if entry == "attended":
+        cli._capture_attended_usage(config, sources, sources, verbose=False)
+    elif entry == "tail":
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=True)
+    else:
+        events_tail._run_events_backfill(config, sources, "dev-a")
+    assert seen == [True]
+    row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
+    assert row["token_sources"] == ["cursor"]
+    assert row["empty_sources"] == ["cursor"]

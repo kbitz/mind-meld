@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.2.0] - 2026-09-23
+
+**Cursor usage through Conductor now joins the fleet Agents table, behind explicit local consent.** Captured runs survive Conductor pruning in durable local history, and coverage and pricing limits stay visible.
+
+### Added
+
+- Opt-in `[retro] cursor_host_usage = true` reader for Conductor's Cursor `runs.ndjson`. Finished runs use disjoint counters, checked against totalTokens, and endedAt's UTC date. Rewritten run IDs replace prior counters, model and day; stable reads reject torn revisions.
+- Private 90-day accumulated history with fsynced atomic replacement and corruption refusal. History pruned before the first mm capture remains unrecoverable; short-budget repeated reads need not converge.
+- Cursor's own status, recapture readiness and diag state, without borrowing Grok's cache. Consent, reader registration and diagnostic dispatch ship together.
+- Grok 4.7 standard and long-context list-rate cards, verified against Cursor's published rates on 2026-09-23. Fast tokens remain deliberately unpriced: fast-only cost is unavailable, mixed cost is a floor excluding Fast. Values are list-rate equivalents, not subscription spend.
+
+### Upgrade notes
+
+- Enable Cursor capture with the local retro bit, then `mm push` and check `mm status`. No Cursor sync source or skill link is added. Coverage means Cursor via Conductor; bare CLI usage is invisible even on mixed-use Macs.
+- Upgrade producing Macs for capture and rendering Macs for the new Grok rate. Existing 1.x peers accept the additive cursor token-source name; existing names retain their order. Downgrades leave the private Cursor history intact but do not refresh it.
+
 ## [1.1.0] - 2026-09-22
 
 **The fleet retro now reports Claude, Codex and Grok identically — fleet-summed tokens, active days, machines, cost and top model in one `## Agents` table — and moves every data-quality caveat into a machine-readable `MM_HEALTH` block.** Output drops from roughly 150 lines to about 50.
@@ -22,7 +38,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Fixed
 
-- Host ledgers carrying `claude-*` models were dropped entirely rather than counted. They now merge into the Claude row; the two corpora cannot overlap, because `host_usage` reads Codex and Grok ledgers and never Claude Code's session jsonls.
+- Host ledgers carrying `claude-*` models were dropped entirely rather than counted. They now merge into the Claude row; the two corpora cannot overlap, because host readers use separate Codex, Grok Build and Cursor-via-Conductor corpora, never Claude Code's session jsonls. Cursor offers Claude models, though the initial Cursor census observed only Grok 4.7.
 - Claude's token volume and its cost basis derive from the same model map, so the two cannot drift.
 - Card dollar amounts under a `≥` marker round down, matching the body table instead of rounding up past the bound they claim.
 - The card counts Claude-only machines; zero-only model buckets do not create activity rows. Mixed-version model classifications preserve reported volume without inventing another agent's cost. Legacy counters remain unavailable during theme synthesis too.

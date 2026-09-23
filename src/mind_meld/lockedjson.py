@@ -36,12 +36,17 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Sequence
+
+from mind_meld import fsutil
+
+_MAX_JSON_BYTES = 64 * 1024 * 1024
 
 _DEFAULT_RETRY_INTERVALS: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4)
 """Same shape as ``devices._LOCK_RETRY_INTERVALS_S``. Total ~750ms before
@@ -50,6 +55,69 @@ giving up — well under any single-push budget."""
 
 class LockContended(RuntimeError):
     """Raised by ``on_contention="raise"`` when the retry budget exhausts."""
+
+
+class InvalidJsonCache(ValueError):
+    """An authoritative JSON store cannot be rebuilt from a corrupt read."""
+
+
+@contextmanager
+def locked_json_durable_rmw(
+    path: Path, *, default_factory: Callable[[], dict[str, Any]] = dict
+) -> Iterator[LockedJson]:
+    """Crash-durable R/M/W for data that cannot be regenerated.
+
+    A stable sibling ``.lock`` inode owns exclusion across atomic replacements.
+    Never mix this protocol with ``locked_json_rmw`` on the same data path.
+    A missing data file starts fresh; empty/corrupt/unreadable data refuses,
+    never resets. Exceptions (including fsync failures) propagate to the caller.
+    Read-only diagnostics may use ``locked_json_snapshot``: the data inode is
+    immutable once published, so its old-or-new snapshot is coherent without
+    acquiring/creating the sibling lock. They do not claim writer exclusion.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(path.with_name(path.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        acquired = _acquire_lock(
+            fd,
+            on_contention="raise",
+            retry_intervals=(),
+            contention_warning="durable JSON store locked",
+        )
+        try:
+            data_fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            data = default_factory()
+            read_state = "missing"
+        else:
+            try:
+                data_stat = os.fstat(data_fd)
+                if not stat.S_ISREG(data_stat.st_mode) or data_stat.st_size > _MAX_JSON_BYTES:
+                    raise InvalidJsonCache("not a bounded regular JSON file")
+                snapshot = _read_json_snapshot(data_fd)
+                if os.lseek(data_fd, 0, os.SEEK_CUR) != data_stat.st_size:
+                    raise InvalidJsonCache("incomplete authoritative JSON read")
+            finally:
+                os.close(data_fd)
+            if snapshot.state == "unreadable":
+                raise snapshot.error or OSError("durable JSON store unreadable")
+            if snapshot.state != "valid":
+                raise InvalidJsonCache(snapshot.state)
+            data = snapshot.data
+            read_state = snapshot.state
+        locked = LockedJson(data=data, is_locked=True, read_state=read_state)
+        yield locked
+        if locked.write_on_exit:
+            payload = json.dumps(locked.data, sort_keys=True, separators=(",", ":")).encode()
+            if len(payload) > _MAX_JSON_BYTES:
+                raise InvalidJsonCache("authoritative JSON exceeds readable size")
+            locked.write_attempted = True
+            fsutil.atomic_write_bytes(path, payload, mode=0o600, fsync=True)
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 SnapshotState = Literal[
@@ -261,7 +329,7 @@ def locked_json_snapshot(path: Path, *, blocking: bool = True) -> Iterator[Locke
 def _read_json_snapshot(fd: int) -> LockedJsonSnapshot:
     try:
         os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, 64 * 1024 * 1024)
+        raw = os.read(fd, _MAX_JSON_BYTES)
     except OSError as e:
         return LockedJsonSnapshot(data=None, state="unreadable", error=e)
     if not raw:
@@ -299,9 +367,11 @@ def _write_json(fd: int, data: dict[str, Any], *, compact: bool = False) -> OSEr
 
 
 __all__ = [
+    "InvalidJsonCache",
     "LockContended",
     "LockedJson",
     "LockedJsonSnapshot",
     "locked_json_rmw",
+    "locked_json_durable_rmw",
     "locked_json_snapshot",
 ]

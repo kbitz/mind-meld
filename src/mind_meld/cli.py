@@ -3489,7 +3489,9 @@ def _capture_attended_usage(
     phase = "capture-failed"
     try:
         readers = events_tail._default_host_readers(
-            sources, grok_consented=grok_host_usage_enabled(config)
+            sources,
+            grok_consented=grok_host_usage_enabled(config),
+            cursor_consented=_config_module.cursor_host_usage_enabled(config),
         )
         readiness = _config_module.usage_capture_readiness(
             selected, sources, reader_consented=bool(readers)
@@ -6001,10 +6003,7 @@ def status(
     publication = _host_publication(
         config, sources_configs, capture_rows, selected=source_resolution.selected
     )
-    reader_states = {
-        name: _host_usage.codex_usage_diag() if name == "codex" else _host_usage.grok_usage_diag()
-        for name in publication["readers"]
-    }
+    reader_states = {name: _host_usage.reader_usage_diag(name) for name in publication["readers"]}
     capture_remedy = _usage_capture_remedy(publication, reader_states)
     upgrade_required = _usage_capture_needs_upgrade(publication, reader_states)
     _print_host_publication(publication, reader_states=reader_states)
@@ -6068,6 +6067,23 @@ def status(
                 "run [bold]mm enable-source grok[/bold] to sync Grok customizations "
                 "and publish token totals (session files stay local)."
             )
+
+    if "cursor" in reader_states:
+        cursor_diag = reader_states["cursor"]
+        if cursor_diag.get("last_reason"):
+            narrative = _host_usage_blocker(
+                "cursor",
+                cursor_diag,
+                readiness=_reader_capture_readiness(publication, "cursor"),
+                upgrade_required=upgrade_required,
+            )
+        elif cursor_diag.get("complete_once") is True:
+            narrative = "enabled; a prior scan completed successfully"
+        else:
+            narrative = "enabled, but no successful scan yet — " + safe_str(capture_remedy)
+        console.print(
+            f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
+        )
 
     # Per-source breakdown
     total_local = 0
@@ -6183,12 +6199,14 @@ def _host_usage_blocker(
     reason = state.get("last_reason")
     if reason is None:
         return "none"
+    cached = state.get("runs_cached") if reader == "cursor" else state.get("files_cached")
+    on_disk = None if reader == "cursor" else state.get("files_on_disk")
     evidence = events_tail.HostReadEvidence(
         last_deadline_allotted_ms=state.get("last_deadline_allotted_ms"),
         last_complete_ms=state.get("last_complete_ms"),
         last_complete_at=state.get("last_complete_at"),
-        files_cached=state.get("files_cached"),
-        files_on_disk=state.get("files_on_disk"),
+        files_cached=cached,
+        files_on_disk=on_disk,
     )
     phrase = events_tail._host_skip_phrase(
         reader,
@@ -6333,7 +6351,9 @@ def _host_publication(
     readers = [
         name
         for name, _ in events_tail._default_host_readers(
-            sources, grok_consented=grok_host_usage_enabled(config)
+            sources,
+            grok_consented=grok_host_usage_enabled(config),
+            cursor_consented=_config_module.cursor_host_usage_enabled(config),
         )
     ]
     try:
@@ -6364,11 +6384,15 @@ def _print_host_publication(state: dict, *, reader_states: dict[str, dict]) -> N
     console.print(
         f"    Publication: {safe_str(state['publication'] + reason)} (accepted manifest evidence)"
     )
+    from mind_meld import host_usage as _host_usage
+
     for reader, coverage in state["readers"].items():
         if reader not in events.HOST_USAGE_TOKEN_SOURCES:
             continue
         outcome = "empty" if reader in (state.get("empty_readers") or ()) else coverage
-        console.print(f"    {safe_str(reader)}: {safe_str(events.host_reader_label(outcome))}")
+        descriptor = _host_usage.HOST_READER_DIAGS.get(reader)
+        label = descriptor.label if descriptor is not None else reader
+        console.print(f"    {safe_str(label)}: {safe_str(events.host_reader_label(outcome))}")
     for line in attemptlog.render(
         state,
         age=events_tail.host_read_age(state.get("latest_attempt_at")),
@@ -6412,14 +6436,12 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
     from mind_meld import host_usage
 
     for name, _ in events_tail._default_host_readers(
-        sources, grok_consented=grok_host_usage_enabled(config)
+        sources,
+        grok_consented=grok_host_usage_enabled(config),
+        cursor_consented=_config_module.cursor_host_usage_enabled(config),
     ):
-        state = host_usage.codex_usage_diag() if name == "codex" else host_usage.grok_usage_diag()
-        cold = (
-            state.get("state") != "ready"
-            if name == "codex"
-            else state.get("complete_once") is not True
-        )
+        state = host_usage.reader_usage_diag(name)
+        cold = host_usage.reader_cache_cold(name, state)
         if cold or state.get("last_reason"):
             console.print(
                 "Recapture covers Git history only. Refresh host usage on this Mac: "
@@ -6604,10 +6626,12 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * host_usage values other than the cache and path-count diag keys: grok's
         consented / complete_once / usage_less_skipped / last_reason /
         last_reason_since / cache_state / model_count / models / files_cached /
-        files_on_disk, and Codex's cache_state / state /
+        files_on_disk, Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
-        pending / model_count / models / last_reason / last_reason_since;
-        both readers also expose last_complete_ms / last_complete_at /
+        pending / model_count / models / last_reason / last_reason_since, and
+        Cursor via Conductor's consented / complete_once / cache_state /
+        runs_cached / model_count / models / last_reason / last_reason_since;
+        every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
         (never a path, never a host store,
@@ -6743,29 +6767,13 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         grok_consented = grok_host_usage_enabled(cfg) or any(
             source.get("name") == "grok" for source in resolved_sources
         )
-    grok_diag = _host_usage.grok_usage_diag()
     host_usage_state = {
-        "grok": {
-            "consented": grok_consented,
-            "complete_once": grok_diag["complete_once"],
-            "usage_less_skipped": grok_diag["usage_less_skipped"],
-            "last_reason": grok_diag.get("last_reason"),
-            "last_reason_since": grok_diag.get("last_reason_since"),
-            "last_complete_ms": grok_diag.get("last_complete_ms"),
-            "last_complete_at": grok_diag.get("last_complete_at"),
-            "last_deadline_allotted_ms": grok_diag.get("last_deadline_allotted_ms"),
-            "cache_state": grok_diag["cache_state"],
-            "model_count": grok_diag.get("model_count", 0),
-            "models": grok_diag.get("models", []),
-            "files_cached": grok_diag.get("files_cached"),
-            "files_on_disk": grok_diag.get("files_on_disk"),
-        },
-        # Codex needs its own block for the same reason Grok does: a reader
-        # whose cache is mid-rebuild publishes less than it will, and nothing
-        # else on any surface says so. Cache-only, so this stays inside diag's
-        # no-passphrase contract.
-        "codex": _host_usage.codex_usage_diag(),
+        name: _host_usage.reader_usage_diag(name) for name in _host_usage.HOST_READER_DIAGS
     }
+    host_usage_state["grok"]["consented"] = grok_consented
+    host_usage_state["cursor"]["consented"] = (
+        _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
+    )
     capture_rows = _read_capture_rows(resolved_sources, dev_id)
     return {
         "mm_version": __version__,
@@ -7014,6 +7022,31 @@ def diag(
                 )
             )
         )
+
+    cursor_state = state["host_usage"].get("cursor", {})
+    from mind_meld.host_usage import HOST_READER_DIAGS
+
+    console.print(f"  {HOST_READER_DIAGS['cursor'].label} (bare CLI usage is outside coverage):")
+    consent = cursor_state.get("consented")
+    console.print(
+        "    consented: " + ("unknown" if consent is None else "yes" if consent else "no")
+    )
+    console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
+    if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):
+        console.print(
+            "    usage read blocker: "
+            + _host_usage_blocker(
+                "cursor",
+                cursor_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "cursor"),
+                upgrade_required=upgrade_required,
+            )
+        )
+    retained = cursor_state.get("runs_cached")
+    console.print(f"    runs retained: {'unknown' if retained is None else retained}")
+    console.print("    models cached: " + _diag_models_line(cursor_state))
+    console.print("    last complete read: " + safe_str(_host_complete_read_line(cursor_state)))
 
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")

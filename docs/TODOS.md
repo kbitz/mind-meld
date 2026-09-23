@@ -44,7 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-_Empty. Drained 2026-09-21; see the drain record below._
+### [plan-ceo-review] Price Cursor Grok Fast after a real census
+- **Why:** Track 67A publishes `grok-4.7-fast` as deliberately unpriced. Fast-only cost is unavailable; mixed cost omits Fast. Standard Fast is 2x base and long-context Fast 3x, so base pricing would underquote.
+- **Context:** Choose promotion of the pseudo-id to verified pricing versus a params axis across reader, wire and renderer. `fast=true` was not observed in the three-run 2026-09-23 census. No pricing expansion authorized in 67A.
+- **Effort:** M
+- **Priority:** P2
+
+### [plan-ceo-review] Revisit Cursor auto/composer classification only after observed use
+- **Why:** Neither auto nor composer-2.5 was present in the initial Cursor corpus. They remain Unclassified and unpriced. A new host family changes the closed 1.x vocabulary and requires a compatibility decision.
+- **Context:** Trigger is a real fleet run with either id, not a synthetic fixture. Cursor customization sync likewise waits for a user-authored skill/command. A second-Mac Cursor census would strengthen evidence but is not a release gate.
+- **Effort:** M
+- **Priority:** P3
 
 
 ## Drain records

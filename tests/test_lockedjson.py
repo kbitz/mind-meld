@@ -265,3 +265,52 @@ class TestLockedJsonReturnType:
             assert isinstance(ljson, LockedJson)
             assert hasattr(ljson, "data")
             assert hasattr(ljson, "is_locked")
+
+
+class TestDurableJson67A:
+    def test_oversized_valid_prefix_cannot_replace_history(self, tmp_path, monkeypatch):
+        path = tmp_path / "history.json"
+        original = b'{"old":1}' + b" " * 20 + b'{"unread":2}'
+        path.write_bytes(original)
+        monkeypatch.setattr(lockedjson, "_MAX_JSON_BYTES", 10)
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            with lockedjson.locked_json_durable_rmw(path):
+                pytest.fail("partial parse must not yield writable history")
+        assert path.read_bytes() == original
+
+    def test_write_cannot_exceed_next_reads_limit(self, tmp_path, monkeypatch):
+        path = tmp_path / "history.json"
+        path.write_bytes(b'{"old":1}')
+        monkeypatch.setattr(lockedjson, "_MAX_JSON_BYTES", 10)
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            with lockedjson.locked_json_durable_rmw(path) as locked:
+                locked.data["extra"] = "too large"
+        assert path.read_bytes() == b'{"old":1}'
+
+    def test_atomic_replacement_keeps_exclusion_and_coherent_snapshots(self, tmp_path):
+        path = tmp_path / "history.json"
+        with lockedjson.locked_json_durable_rmw(path) as locked:
+            locked.data["count"] = 1
+        old_inode = path.stat().st_ino
+        with lockedjson.locked_json_durable_rmw(path) as locked:
+            locked.data["count"] = 2
+            with pytest.raises(LockContended):
+                with lockedjson.locked_json_durable_rmw(path):
+                    pytest.fail("concurrent writer acquired the sibling lock")
+            with locked_json_snapshot(path) as snap:
+                assert snap.data == {"count": 1}
+        assert path.stat().st_ino != old_inode
+        with lockedjson.locked_json_durable_rmw(path) as locked:
+            assert locked.data == {"count": 2}
+            locked.data["count"] += 1
+        assert json.loads(path.read_text()) == {"count": 3}
+
+    def test_exception_preserves_authoritative_bytes(self, tmp_path):
+        path = tmp_path / "history.json"
+        path.write_text('{"count":1}')
+        before = path.read_bytes()
+        with pytest.raises(RuntimeError):
+            with lockedjson.locked_json_durable_rmw(path) as locked:
+                locked.data["count"] = 2
+                raise RuntimeError("interrupted")
+        assert path.read_bytes() == before

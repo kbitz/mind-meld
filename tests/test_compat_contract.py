@@ -83,7 +83,7 @@ def test_closed_vocabularies():
     assert token_usage.TOKEN_FIELDS == ("input", "cache_create", "cache_read", "output"), (
         FORMAT_FAILURE
     )
-    assert events.HOST_USAGE_TOKEN_SOURCES == ("codex", "grok"), FORMAT_FAILURE
+    assert events.HOST_USAGE_TOKEN_SOURCES == ("codex", "grok", "cursor"), FORMAT_FAILURE
 
 
 def test_device_registry_writer_fields(tmp_path):

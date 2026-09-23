@@ -389,7 +389,7 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok")
+ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok", "cursor")
 """The live host readers, in the fixed order ``events_tail`` invokes them.
 
 This is the reader universe. Adding a reader means appending here AND to
@@ -397,7 +397,7 @@ This is the reader universe. Adding a reader means appending here AND to
 tuple (the writer) and from the gate. Do not serialize this constant into a
 row; see ``make_host_usage_snapshot``."""
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok")
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "cursor")
 """Live host-reader names, in the same order ``events_tail`` invokes them.
 
 A row's ``token_sources`` is the per-push SUBSET that actually contributed,
