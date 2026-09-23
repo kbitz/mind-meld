@@ -643,9 +643,10 @@ def test_error_url_anchors_resolve():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     headings = re.findall(r"^#{2,3} (.+)$", readme, re.M)
     anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
+    anchors.update(re.findall(r'<a id="([^"]+)"\s*>', readme))
     for name, url in vars(errors).items():
         if name.endswith("_URL") and isinstance(url, str) and "#" in url:
-            assert url.split("#", 1)[1] in anchors, f"{name} has no README heading: {url}"
+            assert url.split("#", 1)[1] in anchors, f"{name} has no README anchor: {url}"
 
 
 def _invariant_citations() -> list[tuple[str, str, str]]:

@@ -910,9 +910,9 @@ def aggregate_agent_usage(
         # pointed at a Claude model, or a legacy peer). Dropping the host side
         # would silently lose real tokens, so the row means "usage of this
         # model family across the fleet" and both sources add into it. The two
-        # corpora cannot overlap — ``host_usage`` reads Codex and Grok ledgers
-        # and never Claude Code's own session jsonls — so this is a sum, not a
-        # double count.
+        # corpora are disjoint: host_usage reads Codex, Grok Build and Cursor
+        # via Conductor ledgers, never Claude Code session jsonls. Cursor offers
+        # Claude models too (not observed in the initial Cursor census).
         merged_by_model = {m: dict(b) for m, b in existing.by_model.items()}
         for model, usage_bucket in host_row.by_model.items():
             dest = merged_by_model.setdefault(model, {k: 0 for k in token_usage.TOKEN_FIELDS})
@@ -3607,7 +3607,13 @@ def _reader_display_labels(readers: Iterable[object]) -> tuple[str, ...]:
     values = tuple(readers)
     live = mm_events.HOST_USAGE_TOKEN_SOURCES
     live_set = set(live)
-    labels = [reader for reader in live if reader in values]
+    labels = [
+        host_usage.HOST_READER_DIAGS[reader].label
+        if reader in host_usage.HOST_READER_DIAGS
+        else reader
+        for reader in live
+        if reader in values
+    ]
     if any(not isinstance(reader, str) or reader not in live_set for reader in values):
         labels.append(_UNKNOWN_READER_LABEL)
     return tuple(labels)
@@ -3706,11 +3712,15 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
         models.append(detail)
     if not models:
         return None
-    return (
-        "Grok's logs do not record per-request prompt sizes; no action resolves this ("
-        + "; ".join(models)
-        + ")"
-    )
+    # grok-4.6 stays a Grok Build log limit. grok-4.7's uncertainty is the
+    # per-request tier a per-turn aggregate cannot recover, including Cursor.
+    if any(model == "grok-4.7" for model in by_model):
+        lead = (
+            "Per-turn totals cannot recover the per-request context tier; no action resolves this ("
+        )
+    else:
+        lead = "Grok's logs do not record per-request prompt sizes; no action resolves this ("
+    return lead + "; ".join(models) + ")"
 
 
 def _agent_coverage_notes(
@@ -4348,6 +4358,8 @@ def _render_health_block(health: list[dict]) -> list[str]:
             "anthropic_url": "https://platform.claude.com/docs/en/about-claude/pricing",
             "openai_verified": token_usage.PRICING_OPENAI_LAST_UPDATED,
             "openai_url": "https://developers.openai.com/api/docs/pricing",
+            "cursor_verified": token_usage.PRICING_CURSOR_LAST_UPDATED,
+            "cursor_url": "https://cursor.com/docs/models/grok-4-7",
             "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
             "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
             "basis": (

@@ -21,7 +21,7 @@ Inclusive extractors therefore emit disjoint buckets via
 ``_normalize_inclusive_usage`` (``uncached = input - cache_read -
 cache_create``). Do **not** normalize in ``_add_usage``: that is where
 readers converge, and subtracting ``cache_read`` from an already-disjoint
-bucket (Claude today; historically OpenCode) would clamp real billable
+bucket (Claude and Cursor; historically OpenCode) would clamp real billable
 tokens to zero. Keep this boundary in any future extraction; see
 "Share host-reader filesystem resume primitives only after measuring
 duplication cost" in ``docs/roadmap-future.md``. Malformed inclusive counters
@@ -57,12 +57,17 @@ published?" and "did we learn something durable about individual files?" are
 different questions, and conflating them left a large corpus unable to
 bootstrap under the caller's 250ms/500ms budget: every bounded scan re-parsed
 the same prefix, expired in the same place, and discarded it — measured as six
-consecutive scans and zero bytes cached. A COMPLETE pass replaces the map
+consecutive scans and zero bytes cached. For Codex/Grok, a COMPLETE pass replaces the map
 (that is what prunes deleted rollouts); a PARTIAL pass MERGES, because
 replacing would delete entries it never reached and pruning on a listing it
 never finished would drop files that were never absent. ``warm_host_cache_inline``
 is the attended-command escape hatch for a deadline miss. Attended callers
 publish that warm read's result; unattended callers keep their short budget.
+
+Track 67A reads only Conductor's Cursor ``runs.ndjson``. Its disjoint counters
+need no normalization. Unlike the forensic caches above, Cursor history is
+authoritative after Conductor pruning: durable atomic writes retain run IDs
+for 90 days. Every file is reparsed, and short passes need not converge.
 """
 
 from __future__ import annotations
@@ -78,12 +83,20 @@ import sys
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, TypedDict, get_args
 
-from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
+from mind_meld.errors import StorageError
+from mind_meld.lockedjson import (
+    InvalidJsonCache,
+    LockContended,
+    locked_json_durable_rmw,
+    locked_json_rmw,
+    locked_json_snapshot,
+)
 from mind_meld.token_usage import (
+    MAX_JSONL_LINE_BYTES,
     TOKEN_FIELDS,
     DayBucket,
     Usage,
@@ -99,6 +112,17 @@ CACHE_PATH = Path.home() / ".config" / "mind-meld" / "host-tokens.json"
 CODEX_SESSIONS_PATH = Path.home() / ".codex" / "sessions"
 GROK_SESSIONS_PATH = Path.home() / ".grok" / "sessions"
 GROK_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "grok-host-tokens.json"
+CURSOR_STORE_PATH = (
+    Path.home() / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
+)
+CURSOR_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "cursor-host-tokens.json"
+CURSOR_HOST_CACHE_RETENTION_DAYS = 90
+"""Reader-owned retention, unrelated to events.CURSOR_SCAN_DAYS (read position)."""
+CURSOR_USAGE_CENSUS_HOST_VERSION = "2026.09.18-9a7762b"
+CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION = "0.87.3"
+"""CLI generating the sessions and app producing the persisted schema, respectively."""
+_CURSOR_ENDED_AT_MIN_MS = 1_577_836_800_000
+"""2020-01-01 UTC. A seconds-scale clock cannot pass; older millisecond days still reap."""
 CACHE_VERSION = 1
 DEFAULT_READ_BUDGET_S = 5.0
 
@@ -176,8 +200,9 @@ class HostUsageBuckets:
     every measured live bucket has ``cache_create == 0``, so the three-term
     formula is correct under both hypotheses today. A nonzero write from
     Codex or Grok marks the day unattributable rather than silently
-    pricing it. A disjoint extractor never writes this set — its cache
-    write is already a real priced field.
+    pricing it. Cursor's disjoint extractor also marks nonzero writes because
+    its cache-write semantics and price have no nonzero census evidence; its
+    arithmetic identity must still hold. This labels, not suppresses, counters.
     """
 
 
@@ -200,7 +225,8 @@ class HostUsageResult:
 
     Grok writes it for ``usageIsIncomplete`` turns; Codex writes it when
     an inclusive increment carried a nonzero ``cache_create`` (the
-    three-term-formula tripwire). A disjoint extractor leaves it empty.
+    three-term-formula tripwire). Cursor marks nonzero writes and unresolved
+    usageRef days too; a day with no known tokens refuses the whole reader.
     Day-scoped on purpose: a lifetime boolean would let one two-year-old
     incomplete turn mark every future snapshot partial forever, while the
     90-day cap had already dropped that day.
@@ -462,7 +488,9 @@ def warm_host_cache_inline(
 
     The result is the retry: attended capture publishes it through the usual
     reader failure boundary, without a second short-budget read. Autopush
-    never calls this helper; its partial commits converge across pushes.
+    never calls this helper. Codex/Grok can resume partial progress across
+    pushes; Cursor reparses rewritten files and need not converge under the
+    same short allowance.
     ``reader`` selects a name in ``events_tail.WARMABLE_HOST_READERS``.
 
     2026-09-17, device 3a6c7dc9, Python 3.14.7: an empty-cache parse of
@@ -473,7 +501,367 @@ def warm_host_cache_inline(
     deadline = time.monotonic() + budget_s
     if reader == "grok":
         return read_grok_usage(root, deadline=deadline, consented=True)
+    if reader == "cursor":
+        return read_cursor_usage(root, deadline=deadline, consented=True)
     return read_codex_usage(root, deadline=deadline)
+
+
+def _empty_cursor_cache() -> dict[str, Any]:
+    return {"version": CACHE_VERSION, "runs": {}, "complete_once": False}
+
+
+def _cursor_cached_runs(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate authoritative history in full; never salvage/reset a corrupt root."""
+    if data.get("version") != CACHE_VERSION:
+        raise _ReadFailure("unsupported")
+    runs = data.get("runs")
+    if not isinstance(runs, dict) or type(data.get("complete_once")) is not bool:
+        raise _ReadFailure("malformed")
+    for key, run in runs.items():
+        if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
+            raise _ReadFailure("malformed")
+        if not isinstance(run, dict) or set(run) != {"day", "model", "usage", "partial"}:
+            raise _ReadFailure("malformed")
+        if not _validated_day(run["day"]) or type(run["partial"]) is not bool:
+            raise _ReadFailure("malformed")
+        if _validated_table([run["model"]], _MAX_MODEL_ID_BYTES) is None:
+            raise _ReadFailure("malformed")
+        usage = run["usage"]
+        if usage is None and run["partial"]:
+            continue  # unresolved usageRef; never a fabricated zero bucket
+        if (
+            not isinstance(usage, dict)
+            or set(usage) != set(TOKEN_FIELDS)
+            or not all(_is_valid_counter(n) for n in usage.values())
+            or sum(usage.values()) > _MAX_COUNTER
+            or (usage["cache_create"] > 0 and not run["partial"])
+        ):
+            raise _ReadFailure("malformed")
+    return runs
+
+
+def _cursor_day(value: Any) -> str:
+    if not _is_nonnegative_int(value) or value < _CURSOR_ENDED_AT_MIN_MS:
+        raise _ReadFailure("malformed")
+    try:
+        return datetime.fromtimestamp(value / 1000, timezone.utc).date().isoformat()
+    except (ValueError, OverflowError, OSError) as exc:
+        raise _ReadFailure("malformed") from exc
+
+
+def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:
+    """Project only run identity, model, completion day and disjoint counters."""
+    if not isinstance(row, dict) or "usage" not in row:
+        raise _ReadFailure("malformed")
+    run_id = row.get("runId")
+    if _validated_table([run_id], _MAX_PROMPT_ID_BYTES) is None:
+        raise _ReadFailure("malformed")
+    key = hashlib.sha256(run_id.encode()).hexdigest()
+    status = row.get("status")
+    if not isinstance(status, str) or status not in {"running", "finished"}:
+        # Includes renamed terminal states and billable error/cancelled rows.
+        raise _ReadFailure("unsupported")
+    raw = row["usage"]
+    if status == "running":
+        if raw is not None or row.get("usageRef") is not None:
+            raise _ReadFailure("unsupported")
+        return key, None
+    day = _cursor_day(row.get("endedAt"))
+    model = row.get("model")
+    if (
+        not isinstance(model, dict)
+        or _validated_table([model.get("id")], _MAX_MODEL_ID_BYTES) is None
+    ):
+        raise _ReadFailure("malformed")
+    model_id = model["id"]
+    params = model.get("params")
+    if not isinstance(params, list):
+        raise _ReadFailure("malformed")
+    fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
+    if len(fast) > 1 or (fast and fast[0] not in ("true", "false")):
+        raise _ReadFailure("unsupported")
+    # Only the observed normalized Grok id receives this deliberate, UNPRICED
+    # pseudo-id. No params axis or new verified rate is implied.
+    if model_id == "grok-4.7":
+        if not fast:
+            raise _ReadFailure("unsupported")
+        if fast[0] == "true":
+            model_id = "grok-4.7-fast"
+    if raw is None:
+        if row.get("usageRef") is None:
+            raise _ReadFailure("malformed")
+        return key, {"day": day, "model": model_id, "usage": None, "partial": True}
+    if not isinstance(raw, dict):
+        raise _ReadFailure("malformed")
+    names = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
+    if not all(_is_valid_counter(raw.get(n)) for n in (*names, "totalTokens", "reasoningTokens")):
+        raise _ReadFailure("malformed")
+    if sum(raw[n] for n in names) != raw["totalTokens"]:
+        raise _ReadFailure("malformed")
+    if raw["reasoningTokens"] > raw["outputTokens"]:
+        raise _ReadFailure("malformed")
+    usage: Usage = {
+        "input": raw["inputTokens"],
+        "cache_create": raw["cacheWriteTokens"],
+        "cache_read": raw["cacheReadTokens"],
+        "output": raw["outputTokens"],
+    }
+    return key, {
+        "day": day,
+        "model": model_id,
+        "usage": usage,
+        "partial": raw["cacheWriteTokens"] > 0,
+    }
+
+
+def _iter_cursor_ledgers(root: Path, deadline: float) -> Iterator[Path]:
+    """Only immediate workspace runs.ndjson files; never any content-bearing sibling."""
+    for directory in _sorted_children(root, deadline):
+        if _expired(deadline):
+            raise _ReadFailure("deadline")
+        if _is_directory(directory):
+            path = directory / "runs.ndjson"
+            if _is_regular_non_symlink(path):
+                yield path
+
+
+def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
+    before = _regular_stat(path)
+    staged: dict[str, Any] = {}
+    # O_NONBLOCK closes the check-then-open window where a FIFO would block
+    # the push lock. A non-regular descriptor is refused before any read.
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise _ReadFailure("stale") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _ReadFailure("stale")
+        fp = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+    with fp:
+        if not _same_source(before, os.fstat(fp.fileno())):
+            raise _ReadFailure("stale")
+        while True:
+            if _expired(deadline):
+                raise _ReadFailure("deadline")
+            line = fp.readline(MAX_JSONL_LINE_BYTES + 1)
+            if not line:
+                break
+            if len(line) > MAX_JSONL_LINE_BYTES or not line.endswith(b"\n"):
+                raise _ReadFailure("malformed")
+            try:
+                key, run = _cursor_run(json.loads(line))
+            except ValueError as exc:
+                raise _ReadFailure("malformed") from exc
+            if key in staged:
+                raise _ReadFailure("malformed")
+            staged[key] = run
+        after_fd = os.fstat(fp.fileno())
+    after = _regular_stat(path)
+    if (
+        not _same_source(before, after_fd)
+        or not _same_source(before, after)
+        or before.st_ctime_ns != after.st_ctime_ns
+    ):
+        raise _ReadFailure("stale")
+    return staged
+
+
+def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
+    buckets = HostUsageBuckets()
+    for run in runs.values():
+        if run["usage"] is not None:
+            _add_usage(buckets, run["day"], run["model"], run["usage"])
+        if run["partial"]:
+            buckets.unattributable_days.add(run["day"])
+    if buckets.unattributable_days - buckets.by_day.keys():
+        # The writer trims partial_days to actual token days. Refuse rather
+        # than letting an unresolved-only day disappear as completed-empty.
+        return _incomplete("partial")
+    return _result_from_buckets(buckets, partial_days=frozenset(buckets.unattributable_days))
+
+
+@_pause_gc()
+def read_cursor_usage(
+    root: Path | None = None, *, deadline: float | None = None, consented: bool = False
+) -> HostUsageResult:
+    """Cursor via Conductor only. Bare CLI has no persisted billing ledger.
+
+    runs.ndjson is rewritten in place: reparse whole files, replace by hashed
+    runId, then reduce once (reverses old day/model/counter contributions).
+    Stable whole-file progress commits even on a later deadline, never a torn
+    file's prefix. Repeated short passes need NOT converge: cached ids do not
+    avoid reparsing. Attended warming / a larger budget is the escape hatch.
+    Pruned runs survive for 90 days; runs pruned before any read are unrecoverable.
+    """
+    if not consented:
+        return _incomplete("no_metadata_ledger")
+    started = time.monotonic()
+    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
+    if _expired(read_deadline):
+        return _incomplete("deadline")
+    source_root = root if root is not None else CURSOR_STORE_PATH
+    try:
+        with locked_json_durable_rmw(
+            CURSOR_CACHE_PATH, default_factory=_empty_cursor_cache
+        ) as locked:
+            # Shape failures propagate without writing the sole surviving copy.
+            runs = dict(_cursor_cached_runs(locked.data))
+            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
+            now = datetime.now(timezone.utc)
+            cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
+            runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
+            learned: dict[str, Any] = {}
+            removed: set[str] = set()
+
+            def _commit_learned() -> None:
+                for key in removed:
+                    runs.pop(key, None)
+                for key, run in learned.items():
+                    runs[key] = run
+
+            try:
+                if _expired(read_deadline):
+                    raise _ReadFailure("deadline")
+                try:
+                    root_stat = source_root.lstat()
+                except FileNotFoundError:
+                    # A finished scan's retained history is authoritative.
+                    # A prefix from a deadline is not: publishing it would
+                    # latch complete_once on an undercount.
+                    if not locked.data["complete_once"]:
+                        if not runs and locked.read_state == "missing":
+                            locked.write_on_exit = False
+                            return _incomplete("no_metadata_ledger")
+                        raise _ReadFailure(prior[0] or "stale")
+                else:
+                    if not stat.S_ISDIR(root_stat.st_mode):
+                        raise _ReadFailure("unsupported")
+                    seen: dict[str, Any] = {}
+                    for path in _iter_cursor_ledgers(source_root, read_deadline):
+                        staged = _read_cursor_file(path, read_deadline)
+                        if any(key in seen and seen[key] != run for key, run in staged.items()):
+                            raise _ReadFailure("malformed")
+                        seen.update(staged)
+                        for key, run in staged.items():
+                            # A running revision invalidates a previous terminal
+                            # contribution, just as a changed completion day does.
+                            removed.add(key)
+                            if run is not None and run["day"] >= cutoff:
+                                learned[key] = run
+                            else:
+                                learned.pop(key, None)
+                    # A rejected file must not erase history already learned.
+                    _commit_learned()
+                result = _cursor_buckets(runs)
+            except _ReadFailure as exc:
+                result = _incomplete(exc.reason)
+                if exc.reason == "deadline":
+                    _commit_learned()
+            except OSError:
+                result = _incomplete("io_error")
+            ready = time.monotonic()
+            over_budget = result.complete and _expired(read_deadline)
+            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
+            timing = _carry_read_timing(
+                locked.data,
+                result,
+                carried[0],
+                started,
+                ready,
+                read_deadline,
+                now,
+                over_budget=over_budget,
+            )
+            updated = {
+                **timing,
+                "version": CACHE_VERSION,
+                "runs": runs,
+                "complete_once": locked.data["complete_once"] or result.complete,
+                "last_reason": carried[0],
+                "last_reason_since": carried[1],
+            }
+            locked.write_on_exit = result.complete or updated != locked.data
+            locked.data = updated
+            if over_budget:
+                result = _incomplete("deadline")
+        return result
+    except LockContended:
+        return _incomplete("locked")
+    except InvalidJsonCache:
+        return _incomplete("malformed")
+    except _ReadFailure as exc:
+        return _incomplete(exc.reason)
+    except (OSError, StorageError):
+        # Authoritative history failed to become durable: do not publish success.
+        return _incomplete("io_error")
+
+
+def cursor_usage_diag() -> dict[str, Any]:
+    """Inspect durable Cursor history only; never open Conductor run files."""
+    blank = {
+        **_cached_read_timing({}),
+        "cache_state": "missing",
+        "complete_once": False,
+        "last_reason": None,
+        "last_reason_since": None,
+        "runs_cached": None,
+        "model_count": 0,
+        "models": [],
+    }
+    with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
+        if snap.state == "missing":
+            return blank
+        if snap.state != "valid":
+            reason = {"unreadable": "io_error", "lock_failed": "locked"}.get(
+                snap.state, "malformed"
+            )
+            return {**blank, "cache_state": "unreadable", "last_reason": reason}
+        data = snap.data
+    try:
+        runs = _cursor_cached_runs(data)
+    except _ReadFailure as exc:
+        return {**blank, "cache_state": "unreadable", "last_reason": exc.reason}
+    models = sorted({r["model"] for r in runs.values()})
+    return {
+        **blank,
+        **_cached_read_timing(data),
+        "cache_state": "ok",
+        "complete_once": data["complete_once"],
+        "runs_cached": len(runs),
+        "model_count": len(models),
+        "models": models[:_DIAG_MODEL_CAP],
+        "last_reason": _cached_last_reason(data),
+        "last_reason_since": _cached_reason_since(data),
+    }
+
+
+@dataclass(frozen=True)
+class HostReaderDiag:
+    function: str
+    ready_key: str
+    ready_value: Any
+    label: str
+
+
+HOST_READER_DIAGS = {
+    "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex"),
+    "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "grok"),
+    "cursor": HostReaderDiag("cursor_usage_diag", "complete_once", True, "Cursor via Conductor"),
+}
+
+
+def reader_usage_diag(reader: str) -> dict[str, Any]:
+    # Resolve at call time so patching the owner still reaches every consumer.
+    return globals()[HOST_READER_DIAGS[reader].function]()
+
+
+def reader_cache_cold(reader: str, state: dict[str, Any]) -> bool:
+    descriptor = HOST_READER_DIAGS[reader]
+    return state.get(descriptor.ready_key) != descriptor.ready_value
 
 
 def grok_completed_once() -> bool:
@@ -2580,6 +2968,16 @@ def _incomplete(reason: Reason) -> HostUsageResult:
 
 
 __all__ = [
+    "CURSOR_STORE_PATH",
+    "CURSOR_CACHE_PATH",
+    "CURSOR_HOST_CACHE_RETENTION_DAYS",
+    "CURSOR_USAGE_CENSUS_HOST_VERSION",
+    "CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION",
+    "HOST_READER_DIAGS",
+    "cursor_usage_diag",
+    "reader_usage_diag",
+    "reader_cache_cold",
+    "read_cursor_usage",
     "CACHE_PATH",
     "CACHE_VERSION",
     "CODEX_SESSIONS_PATH",

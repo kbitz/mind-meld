@@ -716,7 +716,9 @@ after 90 days by their filename date; GC also runs after an interactive
 `mm push` that published user-content changes, never from autopush. Upgrading does not
 claim to repair historical attribution.
 
-### Host usage capture (Codex and Grok)
+<a id="host-usage-capture-codex-and-grok"></a>
+
+### Host usage capture (Codex, Grok and Cursor via Conductor)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -744,6 +746,40 @@ storage backend; it does not prove delivery to another Mac.
 Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok`;
 Grok also accepts the existing `[retro] grok_host_usage = true` usage-only consent.
+
+Cursor **via Conductor** requires mm v1.2.0+ and uses only local usage consent. In
+`~/.config/mind-meld/config.toml`, add the key to the existing `[retro]` table
+(or create that table if absent):
+
+```toml
+[retro]
+cursor_host_usage = true
+```
+
+Then run `mm push` and inspect `mm status`; `mm diag --json` includes
+`host_usage.cursor` with its own blocker, retained-run count and last complete
+read. Set the bit to `false` to stop reading. There is no Cursor sync source
+or `mm enable-source cursor` command. Run files remain local; only aggregate
+usage crosses the encrypted sync boundary.
+
+Coverage is limited to Conductor's Cursor SDK store. Bare cursor-agent usage
+has no persisted billing counters, including on a Mac that also uses Conductor.
+Runs are counted when finished, on endedAt's UTC day. mm retains captured runs
+for 90 days even after Conductor prunes them, using private durable
+`cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
+Do not delete this file to troubleshoot a slow read: it may hold the only copy.
+Repeated short reads need not converge on a rewritten ledger; attended warming
+or a larger configured read budget may be necessary.
+
+Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
+read / $6 output per million tokens), with an unknown per-request long-context
+tier making the cost a floor. This is list-rate equivalent, not Cursor Ultra
+subscription spend. Fast tokens use the unpriced `grok-4.7-fast` id: fast-only
+cost is `—`; a mixed row's `≥` subtotal excludes Fast cost. Fast can cost 3x
+standard in long context. Cache-write price is unpublished. Sources:
+[Cursor pricing](https://cursor.com/docs/models-and-pricing) and
+[Grok 4.7](https://cursor.com/docs/models/grok-4-7).
+
 Restore an unavailable custom mm-events folder before retrying. Enabling Codex
 sync now authorizes reading its local rollouts on **every attended push**, including
 converged pushes; its session transcripts remain local.

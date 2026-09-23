@@ -380,3 +380,107 @@ def test_populated_absent_degraded_goldens_at_terminal_widths(monkeypatch):
         else:
             os.environ["TZ"] = original_tz
         time.tzset()
+
+
+def cursor_capture_view(cursor_store, mode):
+    """Mutate real metadata; drive the reader, capture, writer, acceptor and render."""
+    from mind_meld import events_tail
+    from mind_meld import host_usage as hu
+
+    paths = sorted(cursor_store.glob("*/runs.ndjson"))
+    records = [json.loads(line) for path in paths for line in path.read_text().splitlines()]
+    for path in paths[1:]:
+        path.unlink()
+    records = records[:2] if mode in {"mixed-fast", "usage-ref"} else records[:1]
+    if mode in {"fast-only", "mixed-fast"}:
+        records[0]["model"]["params"][0]["value"] = "true"
+    if mode == "cache-write":
+        records[0]["usage"]["cacheWriteTokens"] = 10
+        records[0]["usage"]["totalTokens"] += 10
+    if mode in {"usage-ref", "usage-ref-only"}:
+        records[0]["usage"] = None
+        records[0]["usageRef"] = "synthetic-unresolved-ref"
+        if len(records) > 1:
+            records[0]["endedAt"] = records[1]["endedAt"]
+    paths[0].write_text("".join(json.dumps(r) + "\n" for r in records))
+    readers = events_tail._default_host_readers([], cursor_consented=True)
+    if mode == "usage-ref-only":
+
+        def codex(*, deadline):
+            return hu.HostUsageResult(
+                {"codex": {"2026-09-23": usage(100)}},
+                complete=True,
+                tokens_by_day={"2026-09-23": day_bucket({"gpt-6-astra": usage(100)})},
+            )
+
+        readers = (("codex", codex), *readers)
+    capture, rows = events_tail._capture_host_snapshot("cursor-mac", readers, host_budget_ms=5000)
+    assert len(rows) == 1
+    since = datetime(2026, 9, 21, tzinfo=timezone.utc)
+    until = datetime(2026, 9, 23, 23, tzinfo=timezone.utc)
+    rows[0]["ts"] = until.isoformat()
+    data = agg.RetroData(window_days=7, since=since, until=until)
+    data.fleet = agg.FleetState(
+        devices_known=1,
+        devices_in_events={"cursor-mac"},
+        devices_known_list=[{"device_id": "cursor-mac"}],
+    )
+    data.host_inventory = agg.aggregate_host_usage(
+        rows, since=since, until=until, registered_ids={"cursor-mac"}
+    )
+    assert data.host_inventory.by_device
+    return capture, rows[0], data, agg.format_retro(data)
+
+
+def test_cursor_fast_only_preserves_tokens_but_has_no_price(cursor_store):
+    capture, published, data, out = cursor_capture_view(cursor_store, "fast-only")
+    assert capture.complete
+    assert published["token_sources"] == ["cursor"]
+    assert published["counter_semantics"] == "disjoint-v1"
+    assert row(data, "grok").counters_known
+    assert row(data, "grok").tokens == 25_891_771
+    assert agg._agent_row_cost(row(data, "grok")) == (None, False)
+    assert entry(out, "cost_unavailable")
+    assert "—" in out
+
+
+def test_cursor_mixed_fast_prices_only_standard_subtotal(cursor_store):
+    _, _, data, out = cursor_capture_view(cursor_store, "mixed-fast")
+    grok = row(data, "grok")
+    assert grok.tokens == 30_871_121
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor
+    assert abs(total - (2_618_647 * 2 + 2_343_424 * 0.5 + 17_279 * 6) / 1_000_000) < 1e-9
+    assert entry(out, "cost_floor")
+    assert "≥" in out
+    assert "grok-4.7-fast" in out
+    assert "Grok's logs do not record" not in out
+    assert "per-request context tier" in out
+
+
+def test_cursor_cache_write_is_visible_partial_not_suppressed(cursor_store):
+    _, published, data, out = cursor_capture_view(cursor_store, "cache-write")
+    assert published["partial_sources"] == ["cursor"]
+    assert row(data, "grok").tokens == 25_891_781
+    assert "Cursor via Conductor" in out
+    assert entry(out, "cost_floor")
+    assert "at most" not in out
+
+
+def test_cursor_usage_ref_with_known_same_day_usage_publishes_partial(cursor_store):
+    _, published, data, out = cursor_capture_view(cursor_store, "usage-ref")
+    assert published["partial_sources"] == ["cursor"]
+    assert row(data, "grok").tokens == 4_979_350
+    assert "Cursor via Conductor" in out
+    assert entry(out, "cost_floor")
+
+
+def test_cursor_usage_ref_only_cannot_disappear_as_completed_empty(cursor_store):
+    capture, published, data, out = cursor_capture_view(cursor_store, "usage-ref-only")
+    assert capture.dropped == (("cursor", "partial"),)
+    assert published["token_sources"] == ["codex"]
+    assert published["degraded_sources"] == ["cursor"]
+    assert "cursor" not in published["empty_sources"]
+    assert row(data, "grok") is None
+    assert "Cursor via Conductor" in out
+    assert entry(out, "cost_floor")

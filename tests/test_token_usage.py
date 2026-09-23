@@ -2634,3 +2634,27 @@ def test_floor_cards_bound_every_nonnegative_usage(model):
     floor["input"] = -1
     assert tu.floor_prices(model)["input"] >= 0
     assert tu.floor_prices("unknown") is None
+
+
+def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
+    from mind_meld import token_usage as tu
+
+    assert tu.PRICING_FAMILY_BY_MODEL["grok-4.7"] == "grok-4.7"
+    assert tu.resolve_prices("grok-4.7") == {
+        "input": 2.0,
+        "cache_read": 0.5,
+        "cache_create": 0.0,
+        "output": 6.0,
+    }
+    assert tu.resolve_long_context_prices("grok-4.7") == {
+        "input": 4.0,
+        "cache_read": 1.0,
+        "cache_create": 0.0,
+        "output": 12.0,
+    }
+    assert "grok-4.7" in tu.VERIFIED_MODEL_IDS
+    assert tu.resolve_prices("grok-4.7-fast") is None
+    assert "grok-4.7-fast" not in tu.VERIFIED_MODEL_IDS
+    assert "grok-4.7-fast" not in tu.PRICING_FAMILY_BY_MODEL
+    assert tu.PRICING_CURSOR_LAST_UPDATED == "2026-09-23"
+    assert tu.PRICING_XAI_LAST_UPDATED == "2026-09-10"

@@ -1466,3 +1466,87 @@ def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch,
     )
     assert f"{reader} last complete read: scan 197 ms (excludes cache write), {suffix}" in plain
     assert "forged" not in plain
+
+
+@pytest.mark.parametrize("reader", ["codex", "grok", "cursor"])
+def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
+    from mind_meld import cli, events
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=() if reader == "cursor" else (reader,))
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = reader == "cursor"
+    save_config(cfg)
+    assert tuple(host_usage.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS
+    for name in host_usage.HOST_READER_DIAGS:
+        monkeypatch.setattr(
+            host_usage,
+            f"{name}_usage_diag",
+            lambda name=name: {
+                "cache_state": "ok",
+                "state": "ready",
+                "complete_once": True,
+                "usage_less_skipped": 0,
+                "last_reason": None if name == reader else "unsupported",
+            },
+        )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        # Other readers' cached unsupported formats cannot poison this consent set.
+        assert "pipx upgrade mind-meld" not in " ".join(result.output.split())
+    monkeypatch.setattr(
+        host_usage,
+        f"{reader}_usage_diag",
+        lambda: {
+            "cache_state": "ok",
+            "state": "ready",
+            "complete_once": True,
+            "usage_less_skipped": 0,
+            "last_reason": "unsupported",
+        },
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        assert "pipx upgrade mind-meld" in " ".join(result.output.split())
+    if reader == "cursor":
+        assert "Cursor via Conductor" in result.output
+        assert "cursor_host_usage = false" in " ".join(result.output.split())
+        assert "disable-source cursor" not in result.output
+    with monkeypatch.context() as ready:
+        ready.setattr(
+            host_usage,
+            f"{reader}_usage_diag",
+            lambda: {
+                "state": "ready",
+                "complete_once": True,
+                "last_reason": None,
+            },
+        )
+        # The recapture bridge must use the same reader's own readiness test.
+        lines = []
+        ready.setattr(cli.console, "print", lambda *args, **kw: lines.append(args))
+        cli._notice_recapture_host_usage(cfg, cfg["sync"]["sources"])
+        assert lines == []
+
+
+def test_cursor_diag_is_read_only_and_exposes_own_cache(cursor_store, tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    assert host_usage.read_cursor_usage(consented=True).complete
+    cache = host_usage.CURSOR_CACHE_PATH
+    before = (cache.read_bytes(), cache.stat().st_mtime_ns)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("diag opened the Cursor host ledger")
+
+    monkeypatch.setattr(host_usage, "_read_cursor_file", forbidden)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    state = json.loads(result.stdout)["host_usage"]["cursor"]
+    assert state["runs_cached"] == 3
+    assert state["complete_once"] is True
+    assert state["consented"] is False
+    assert state["models"] == ["grok-4.7"]
+    assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before

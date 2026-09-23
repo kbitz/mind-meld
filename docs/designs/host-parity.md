@@ -30,13 +30,13 @@ either upload prompts or mint a fake `grok` sync source.
 
 ## Capability matrix
 
-| Capability | Claude | Codex | Grok |
-|---|---|---|---|
-| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render |
-| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` |
-| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No |
-| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C |
-| Session / transcript sync | Never | Never | Never |
+| Capability | Claude | Codex | Grok | Cursor via Conductor |
+|---|---|---|---|---|
+| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger; model-family rows |
+| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` | None; no user-authored tree observed |
+| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
+| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C | None; discovers ~/.claude/skills with third-party extensibility enabled |
+| Session / transcript sync | Never | Never | Never | Never |
 
 Claude is not the template for "sync the home directory." Claude does
 not sync `~/.claude/projects/**/*.jsonl`. Codex only roams because it
@@ -236,3 +236,19 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
   (`codex`)
 - Execution: `docs/ROADMAP.md` Groups 18, 21, 22, 23; Future items
   for B and C
+
+
+## Cursor via Conductor (Track 67A)
+
+`[retro] cursor_host_usage = true` authorizes reading Conductor's metadata-only
+`runs.ndjson`. Bare cursor-agent has no persisted billing ledger and stays
+outside coverage even on a Mac also using Conductor. The reader never reads
+Conductor's Claude/Codex copy (would double-count existing corpora), SQLite,
+transcripts, agents.ndjson, checkpoints or usage APIs.
+
+No Cursor sync source: the measured skills directory contains generated links,
+not user files. Revisit only when a user-authored skill or command exists.
+No AGENT_ROWS entry: Cursor already discovers ~/.claude/skills, follows the
+mm-owned store link, and has third-party extensibility enabled by default.
+Grok Build remains exempt for the same reason. No new host family: Grok 4.7
+joins Grok, while unobserved auto/composer remain Unclassified.

@@ -2182,3 +2182,27 @@ def test_host_read_budget_lower_bounds(key, value):
     }
     with pytest.raises(ConfigError, match="must be an integer between"):
         _validate(config)
+
+
+class TestCursorHostConsent67A:
+    @pytest.mark.parametrize("value", ["true", 1, 0, None, [], {}])
+    def test_non_boolean_rejected(self, value):
+        with pytest.raises(ConfigError, match="cursor_host_usage must be a boolean"):
+            _validate(
+                {
+                    "device": {"id": "abc", "name": "Mac"},
+                    "storage": {"path": "/tmp"},
+                    "retro": {"cursor_host_usage": value},
+                }
+            )
+
+    def test_default_off_and_usage_only_remedy(self):
+        from mind_meld import config
+
+        assert not config.cursor_host_usage_enabled({})
+        assert not config.cursor_host_usage_enabled({"retro": {"cursor_host_usage": False}})
+        assert config.cursor_host_usage_enabled({"retro": {"cursor_host_usage": True}})
+        assert "cursor" not in {s["name"] for s in DEFAULT_SOURCES}
+        text = config.usage_capture_remedy("no-reader", reader="cursor")
+        assert "[retro] cursor_host_usage = true" in text
+        assert "enable-source cursor" not in text

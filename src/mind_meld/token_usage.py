@@ -232,6 +232,13 @@ short-context, not Batch / Flex / Fast / long-context.
 ``gpt-5.6-terra`` during review ($2/$12 vs $2.50/$15); this table uses
 the official page on this date, not a third-party aggregator."""
 
+PRICING_CURSOR_LAST_UPDATED = "2026-09-23"
+"""Cursor: https://cursor.com/docs/models-and-pricing and
+https://cursor.com/docs/models/grok-4-7. Standard Grok 4.7 shares xAI's
+$2/$0.50/$6 card; >256k input per REQUEST doubles it. Per-turn aggregates
+cannot select the tier. Cache-write price is unpublished, not proven free.
+Fast is deliberately unpriced (2x standard, 3x at long context)."""
+
 PRICING_XAI_LAST_UPDATED = "2026-09-10"
 """xAI rates: https://docs.x.ai/developers/models/grok-4.6, accessed on
 this date. Requests whose prompt reaches 200k tokens pay the higher rate
@@ -363,6 +370,7 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # card is always a floor: aggregate counters cannot recover request tiers.
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
     "grok-4.6-build": "grok-4.6",
+    "grok-4.7": "grok-4.7",
     "gpt-6-astra": "gpt-6-astra",
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",
@@ -393,6 +401,7 @@ VERIFIED_MODEL_IDS = frozenset(
         "claude-mythos-5",
         "claude-mythos-5-1",
         "grok-4.6-build",
+        "grok-4.7",
         "gpt-6-astra",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
@@ -408,6 +417,12 @@ VERIFIED_MODEL_IDS = frozenset(
 # xAI's source and alias evidence are documented at PRICING_XAI_LAST_UPDATED.
 # Do not derive these from ``_tier``.
 VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "grok-4.7": {
+        "input": 2.0,
+        "cache_read": 0.5,
+        "cache_create": 0.0,
+        "output": 6.0,
+    },
     "grok-4.6": {
         "input": 2.00,
         "cache_read": 0.50,
@@ -450,6 +465,12 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # Codex's observed 258,400-token window is below OpenAI's 272K threshold;
 # its short-context estimate rests on that assumption (tripwire in TODOS).
 VENDOR_LONG_CONTEXT_TIERS: dict[str, dict[str, float]] = {
+    "grok-4.7": {
+        "input": 4.0,
+        "cache_read": 1.0,
+        "cache_create": 0.0,
+        "output": 12.0,
+    },
     "grok-4.6": {
         "input": 4.00,
         "cache_read": 1.00,
@@ -2006,6 +2027,7 @@ __all__ = [
     "PRICING_LAST_UPDATED",
     "PRICING_OPENAI_LAST_UPDATED",
     "PRICING_XAI_LAST_UPDATED",
+    "PRICING_CURSOR_LAST_UPDATED",
     "VENDOR_FAMILY_TIERS",
     "VENDOR_LONG_CONTEXT_TIERS",
     "SUBSCRIPTION_CAVEAT",
