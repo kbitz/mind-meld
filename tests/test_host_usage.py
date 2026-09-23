@@ -4134,6 +4134,59 @@ class TestCursorUsage67A:
         assert not self._read(cursor_store).complete
         assert hu.CURSOR_CACHE_PATH.read_bytes() == content
 
+    def test_malformed_cached_run_is_not_rewritten(self, cursor_store):
+        assert self._read(cursor_store).complete
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        first_run = next(iter(cache["runs"].values()))
+        first_run["usage"]["outputTokens"] = True
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(cache))
+        malformed_bytes = hu.CURSOR_CACHE_PATH.read_bytes()
+
+        result = self._read(cursor_store)
+
+        assert not result.complete
+        assert result.reason == "malformed"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == malformed_bytes
+
+    def test_cursor_diag_reports_malformed_cache_and_lock_contention(self, cursor_store):
+        assert self._read(cursor_store).complete
+        cache = json.loads(hu.CURSOR_CACHE_PATH.read_text())
+        first_run = next(iter(cache["runs"].values()))
+        first_run["usage"]["outputTokens"] = True
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(cache))
+
+        malformed = hu.cursor_usage_diag()
+        assert malformed["cache_state"] == "unreadable"
+        assert malformed["last_reason"] == "malformed"
+
+        with hu.CURSOR_CACHE_PATH.open("rb") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            contended = hu.cursor_usage_diag()
+        assert contended["cache_state"] == "unreadable"
+        assert contended["last_reason"] == "locked"
+
+    def test_ledger_replacement_between_stat_and_open_is_rejected(self, cursor_store, monkeypatch):
+        path, _row = self._single(cursor_store)
+        original_open = os.open
+        replaced = False
+
+        def replace_before_open(target, flags, mode=0o777, *args, **kwargs):
+            nonlocal replaced
+            if Path(target) == path and not replaced:
+                replaced = True
+                original = path.with_name(path.name + ".original")
+                path.replace(original)
+                path.write_text(original.read_text())
+            return original_open(target, flags, mode, *args, **kwargs)
+
+        monkeypatch.setattr(hu.os, "open", replace_before_open)
+
+        with pytest.raises(hu._ReadFailure) as exc_info:
+            hu._read_cursor_file(path, time.monotonic() + 5)
+
+        assert replaced
+        assert exc_info.value.reason == "stale"
+
     def test_durable_failure_preserves_previous_bytes_and_refuses_publication(
         self, cursor_store, monkeypatch
     ):
