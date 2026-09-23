@@ -3871,6 +3871,16 @@ class TestCursorUsage67A:
         assert result.reason == "no_metadata_ledger"
         assert not hu.CURSOR_CACHE_PATH.exists()
 
+    def test_expired_budget_does_not_touch_either_store(self, monkeypatch):
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("an already-expired Cursor read touched disk")
+
+        monkeypatch.setattr(Path, "lstat", forbidden)
+        monkeypatch.setattr(Path, "mkdir", forbidden)
+        result = hu.read_cursor_usage(deadline=time.monotonic() - 1, consented=True)
+        assert not result.complete
+        assert result.reason == "deadline"
+
     def test_running_rewrite_and_finished_revision_replace(self, cursor_store):
         path, row = self._single(cursor_store)
         original = json.loads(json.dumps(row))
@@ -3955,6 +3965,69 @@ class TestCursorUsage67A:
         result = self._read(cursor_store)
         assert result.reason == "malformed"
         assert not result.complete
+
+    @pytest.mark.parametrize(
+        ("model_id", "params", "reason"),
+        [
+            ("grok-4.7", [], "unsupported"),
+            (
+                "grok-4.7",
+                [{"id": "fast", "value": "true"}, {"id": "fast", "value": "false"}],
+                "unsupported",
+            ),
+            ("grok-4.7", [{"id": "fast", "value": True}], "unsupported"),
+            ("gpt-6-astra", None, "malformed"),
+        ],
+    )
+    def test_model_parameter_contract_refuses_unobserved_shapes(
+        self, cursor_store, model_id, params, reason
+    ):
+        path, row = self._single(cursor_store)
+        row["model"]["id"] = model_id
+        row["model"]["params"] = params
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == reason
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
+
+    def test_running_record_with_usage_reference_is_unsupported(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row.update(status="running", usage=None, usageRef="pending")
+        self._write(path, row)
+        result = self._read(cursor_store)
+        assert not result.complete
+        assert result.reason == "unsupported"
+
+    def test_invalid_run_identity_and_duplicate_within_file_refuse(self, cursor_store):
+        path, row = self._single(cursor_store)
+        row["runId"] = ""
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "malformed"
+        self._write(path, row | {"runId": "stable"}, row | {"runId": "stable"})
+        assert self._read(cursor_store).reason == "malformed"
+
+    def test_non_directory_store_is_unsupported_without_overwriting_cache(self, tmp_path):
+        root = tmp_path / "not-a-directory"
+        root.write_text("x")
+        result = hu.read_cursor_usage(root, consented=True)
+        assert not result.complete
+        assert result.reason == "unsupported"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["last_reason"] == "unsupported"
+
+    def test_symlinked_workspace_ledger_is_ignored(self, cursor_store, tmp_path):
+        for path in cursor_store.glob("*/runs.ndjson"):
+            path.unlink()
+        outside = tmp_path / "outside.ndjson"
+        row = json.loads((FIXTURES / "cursor/session-1/runs.ndjson").read_text().splitlines()[0])
+        outside.write_text(json.dumps(row) + "\n")
+        linked = cursor_store / "linked"
+        linked.mkdir()
+        (linked / "runs.ndjson").symlink_to(outside)
+        result = self._read(cursor_store)
+        assert result.complete
+        assert result.tokens_by_day == {}
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
 
     def test_pruned_runs_survive_including_missing_store(self, cursor_store):
         first = self._read(cursor_store)
