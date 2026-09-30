@@ -35,7 +35,8 @@ plugins, configuration, or usage-reporting parity.
 tested in the prototype, implemented in the initial transport/bridge, and
 retested before release. A happy-path recall demonstration cannot waive either
 gate. Semantic search and richer consolidation are later work; these two
-correctness requirements are not.
+correctness requirements are not. The hostile-content checks (H1-H4) are held
+to the same standard.
 
 ## Evidence and unknowns
 
@@ -45,7 +46,7 @@ correctness requirements are not.
 | Codex sync | `config.DEFAULT_SOURCES` and this Mac's source select `skills/`, `plugins/`, and `AGENTS.md`; no memory path | A portable export and a receiving-host consumer |
 | Codex in Conductor | Live processes run `codex app-server` and open `~/.codex/state_5.sqlite`; memory-enabled processes also open `~/.codex/memories_1.sqlite` | Qualification on another Mac and a fresh session |
 | Codex generation | After the user enabled memories, `codex features list` reported `memories stable true`; four completed extraction rows had nonempty memory and summary content at inspection | Consolidation and successful recall; counts are a point-in-time observation |
-| Codex artifacts | `memories/` contains `MEMORY.md`, `memory_summary.md`, `raw_memories.md`, an internal `.git/`, and `extensions/ad_hoc/instructions.md` | Which records and import surfaces are stable enough to integrate |
+| Codex artifacts | `memories/` contains `MEMORY.md`, `memory_summary.md`, `raw_memories.md`, an internal `.git/`, `extensions/ad_hoc/instructions.md`, and an empty `rollout_summaries/` directory | Which records and import surfaces are stable enough to integrate |
 | Codex completion | The three main Markdown files still contained initialization placeholders while extraction rows existed and consolidation was pending | Do not equate a created file, enabled flag, or extraction job with usable recalled knowledge |
 | Cursor | mm captures usage from Conductor's run store | Whether this integration produces portable memories; usage records are not memory records |
 
@@ -57,8 +58,19 @@ unverified; mm must not silently change host settings to make this feature work.
 Observed database schemas and file names are version-specific evidence, not
 public API guarantees. No private memory text or conversation data belongs in
 this design or committed fixtures. Use sanitized fixtures that preserve the
-measured structure. Keep raw qualification artifacts outside ephemeral
-workspaces, under the existing `~/.gstack/projects/kbitz-mind-meld/` directory.
+measured structure.
+
+Raw qualification artifacts (extraction rows, database copies, recalled text)
+stay outside ephemeral workspaces **and outside every enabled mm sync source**.
+Before writing any, resolve the destination, following symlinks in it and in
+each enabled source path, and verify it is not inside a resolved source root.
+The default gstack source syncs `~/.gstack/projects/`, so that directory is not
+a safe home for raw memory content. `~/scratch/` is a candidate to verify, not
+an automatic guarantee. Never copy `auth.json` or any other credential file
+into an experimental `CODEX_HOME`. If a run needs credentials, supply them by a
+means that leaves no credential file in the disposable home and record that
+means in the source contract; if none exists, the run is unsupported. Delete
+the disposable home after the run.
 
 OpenAI describes local memories as asynchronously generated state and advises
 against hand-editing the generated files as the primary control surface. That
@@ -100,6 +112,25 @@ walker; documentation alone does not prove fleet path portability. See
 - Project docs and current user instructions remain authoritative. Recalled
   content is attributed context, not a new instruction tier. Native forgetting,
   corrections, and user opt-out must remain meaningful after replication.
+- Recalled memory is untrusted, attributed data, because it is LLM-summarized
+  session content that a peer, or a poisoned tool output, may have shaped. It
+  cannot grant tool permissions, override current user or project instructions,
+  request or authorize a retirement, or enroll a project. Deliver it bounded and
+  labeled with its origin, never as an instruction. This is a separate control
+  from terminal safety: escaping control sequences at a print site keeps a
+  terminal from being driven by peer text, and it does **not** prevent prompt
+  injection. Every new print site follows the existing sink rules in
+  [init-devices](../invariants/init-devices.md): `safe_str` for Rich markup,
+  `safe_text` for diff content, and `safe_terminal_str` for single-line plain
+  stderr. The hostile-content tests below cover both controls separately.
+- New commands, flags, exit codes, output fields, wire records and
+  configuration keys are classified under the
+  [1.x compatibility contract](../invariants/auto-upgrade.md#compatibility-1x).
+  A new record format needs older-side and newer-side refusal of unsupported
+  versions. Because retirement holds only if every peer that can publish
+  honors it, qualification must state which peer versions honor retirement
+  records and whether enrollment needs a minimum-version fleet gate
+  (the `_check_fleet_version_or_refuse` pattern).
 
 ## Work packages and release gates
 
@@ -111,7 +142,7 @@ package, not permission to deploy an incomplete sync protocol.
 | Work package / TODO | Depends on | Deliverable | Exit gate |
 |---|---|---|---|
 | [Qualify Codex memory portability and recall](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) | None | Versioned adapter contract, sanitized live-source fixtures, isolated import/recall prototype | Native lifecycle measured; forgetting and ancestry capabilities established; unsafe integration candidates rejected |
-| [Deliver Codex memory sync across Macs](../roadmap-future.md#codex-memory-sync) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting and echo gates below pass; native regeneration preserves the qualified behavior |
+| [Deliver Codex memory sync across Macs](../roadmap-future.md#codex-memory-sync) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting, echo and hostile-content gates below pass; native regeneration preserves the qualified behavior |
 | [Qualify Claude and Codex memory parity across the fleet](../roadmap-future.md#memory-fleet-parity) | Codex transport | Dated two-Mac CLI/Conductor qualification report and regression tests | Full parity matrix, including offline forgetting and same-agent re-export, passes on supported versions |
 | [Share project memories between Claude and Codex](../roadmap-future.md#cross-agent-memory) | Fleet parity | Project identity, shared recall view, startup integration, required forget control | Fresh-session recall in both directions; live cross-agent forgetting and echo tests pass; unsupported ancestry cannot auto-publish |
 | [Establish Cursor's memory capability and portability contract](../roadmap-future.md#cursor-memory-contract) | Codex qualification for discovery; parity/bridge for integration | Measured capability matrix and qualified adapter or documented shared-view consumer | Same isolation, forgetting, and echo gates; discovery alone does not claim Cursor implementation is complete |
@@ -183,7 +214,7 @@ Resolve the following in the source contract before writing production code:
 
 | Decision | Required behavior |
 |---|---|
-| Unit of export | Smallest durable memory unit the native source can actually identify; use a source snapshot if individual facts have no reliable identity |
+| Unit of export | Smallest durable memory unit the native source can actually identify. If individual facts have no reliable identity, fall back only to a project-scoped export that carries the same enforceable ownership, stable root identity, immutable revisions, retirement and ancestry semantics as finer units. A copied generated handbook or a mixed-project dump is never that fallback |
 | Ownership | Origin host/device owns its source export; every revision preserves its root identity and imported ancestry; received replicas and generated retrieval views are not newly authored memories |
 | Revision | Stable source identifier plus immutable content revision and explicit supersession; preserve source date and observation date separately; peer clock alone does not choose truth |
 | Publication | Read a consistent source revision, validate it, write atomically, and publish only a complete export through the existing encrypted manifest |
@@ -342,8 +373,25 @@ justify allowing echoes and promising later cleanup.
 | E3: genuinely new feedback | In a session that used imported context, provide a new user correction and repeat extraction/export | New authorized knowledge can be captured through the qualified route while the recalled fact is not duplicated; restrictions on automatic capture remain explicit |
 | E4: loss of provenance | Restart with a changed/unknown native schema or output lacking expected ancestry | The affected automatic exporter stops before publication; neither the last accepted export nor unrelated sources are replaced with a fabricated empty snapshot |
 
-Run F1-F4 and E1-E4 against sanitized deterministic fixtures in the prototype,
-then record live host evidence for consolidation, recall, and withdrawal. The
+### Hostile content and the trust boundary
+
+Every memory a peer publishes, and every native summary derived from one, is
+untrusted input. These deterministic checks are release gates alongside F1-F4
+and E1-E4. They test the two controls separately: what the agent is allowed to
+do with recalled content, and what a terminal is allowed to render.
+
+| Test | Experiment | Pass condition |
+|---|---|---|
+| H1: forged authority | A memory body, and a revision or summary derived from it, asks to retire an identity, enroll a project, grant a tool permission or override an instruction | The retirement set, enrollment and permissions are unchanged; the text is delivered only as bounded, origin-labeled data |
+| H2: mis-scoped records | A record or control targets another project's identity, or has an unattributable or multi-project scope | It is rejected or left unshared, and cannot retire, supersede or appear in another project's view |
+| H3: forged or unsupported metadata | A record claims ancestry, origin, revision, or a control/schema version it cannot support | The affected view is unavailable; the record cannot gain independence, suppress other records, or count as a newer authority |
+| H4: instruction-like and terminal-control content | Recalled content mixes instruction-like text with ESC/C1/OSC/CSI sequences and Rich-markup lookalikes | Two separate assertions pass: delivery to the agent is bounded, attributed data that requests no privilege, and every print site applies its sink's sanitizer (`safe_str`, `safe_text` or `safe_terminal_str`). Passing one never substitutes for the other |
+
+H1 and H2 test the deterministic part of retirement authority. Who may author a
+retirement, and how a peer proves it, is an open qualification question below.
+
+Run F1-F4, E1-E4 and H1-H4 against sanitized deterministic fixtures in the
+prototype, then record live host evidence for consolidation, recall, and withdrawal. The
 fixtures alone cannot establish native behavior. Execute the same suite for
 same-agent transfer first and the Claude/Codex bridge second. Assertions inspect
 the actual delivered context and record lineage; an answer that guesses the
@@ -396,10 +444,16 @@ identifier, timestamps, and memory content. Keep machine-local native locators
 outside the wire payload. The existing generic JSONL union merger alone does
 not implement these semantics.
 
-**Automatic discovery and bounded context.** Add a small startup instruction
-through the existing shared agent-config/project-instruction mechanism that
-resolves this project and reads a bounded index. Load individual memories only
-when relevant. Prototype CLI-based retrieval first; an MCP transport is an
+**Automatic discovery and bounded context.** Add a small,
+hand-authored startup instruction through the existing shared
+agent-config/project-instruction mechanism that resolves this project and reads
+a bounded index. That file may sync like other agent configuration because it
+holds only the static retrieval instruction. Retrieved memory content,
+generated recall views, credentials and local enrollment state never enter it,
+and the retrieval command enforces enrollment locally, so a Mac that has not
+enrolled the project gets an honest unavailable result from the same
+instruction. Installing the instruction is a user-approved change; mm does not
+edit host settings silently. Load individual memories only when relevant. Prototype CLI-based retrieval first; an MCP transport is an
 alternative if needed, not a required server. Proposed commands such as
 `mm memory context` and `mm memory show` are design examples and do not exist.
 The receiving integration must be tested in Conductor and direct CLI; an
@@ -426,7 +480,7 @@ and let current code, docs, and user instructions override a recalled claim.
 Acceptance includes a pair of fresh-session experiments: Claude-origin knowledge
 used by Codex, then Codex-origin knowledge used by Claude, first on one Mac
 and then on a second Mac/new workspace. All isolation scenarios and F1-F4 /
-E1-E4 must also pass for the enabled integration. This establishes useful sharing
+E1-E4 / H1-H4 must also pass for the enabled integration. This establishes useful sharing
 before semantic consolidation, embeddings, ranking models, or automatic
 promotion into project docs are considered.
 
@@ -460,3 +514,80 @@ evidence that the corresponding capability is present and needed.
 
 These are bounded qualification questions. The immediate next work is the
 first TODO, not a blanket expansion of the Codex sync allowlist.
+
+### Further questions retained for qualification and later packages
+
+Track 68A settles what its evidence can settle. Each item below stays open, in
+this plan, until a Track resolves it; none is decided by this document.
+
+6. **Retirement versus deletion machinery.** Retirement records must outlive
+   payload cleanup, yet manifests are complete snapshots and an absent file
+   becomes a tombstone that expires after `manifest.TOMBSTONE_TTL_DAYS` (30
+   days). Where do retirement records
+   live so that a Mac that reinstalls, is newly enrolled, or publishes a
+   manifest without them cannot erase the forgetting guarantee? Options include
+   a distinct storage class or a field outside snapshot semantics. Add an F-test
+   for "a Mac publishes a manifest without its retirement records". Confirm
+   against the [sync invariants](../invariants/sync.md) that no path treats the
+   absence as deletion.
+7. **Retirement authority and permanence.** Retirement records are published by
+   peers under the fleet's shared symmetric key, which does not authenticate an
+   individual author, and they never expire. What can a buggy or compromised
+   peer suppress, and how does the user detect and recover from that? Decide
+   whether a restoration path exists, what identifies the enrolled user's own
+   retirements, and which peer versions honor retirement records at all
+   (see the compatibility constraint above).
+8. **Project-identity ordering.** Codex transport scopes exports by project and
+   parity needs correct association across different home paths, but the
+   project identity contract appears only in the later bridge package, and
+   Claude's path-encoded project directories cannot pass parity without it.
+   Decide which package owns the minimal identity contract and whether the
+   Claude identity fix belongs to parity or to the bridge.
+9. **Ancestry-loss behavior against the acceptance clauses.** If native
+   extraction cannot preserve imported ancestry, automatic export of native
+   summaries is blocked, and a Future acceptance clause that requires a memory
+   learned on Mac B to reach Mac A cannot be met without an explicit,
+   user-approved capture path. Decide whether that path is in the transport
+   package or the acceptance is restated. Split E2 by adapter mode: an
+   ancestry-preserving adapter shows the paraphrase suppressed as independent
+   evidence; a block-mode adapter shows the block keyed on actual ancestry loss,
+   the restriction visible in `status` and `diag`, and the block in force before
+   any foreign context is delivered.
+10. **Proving recall safely.** A correct answer is not evidence of recall.
+    Qualify an observation channel for the context the host actually loaded or
+    retrieved. Each live scenario needs a positive control (the fact is
+    delivered before retirement), a control arm with the memory absent, a trial
+    count and pass threshold for nondeterministic runs, and a tri-state result
+    (pass, fail, inconclusive because consolidation has not run). Record host
+    and Conductor versions, date and device short id beside every measurement,
+    since two Macs already differ in configuration. Run F1 and F2 over a stale
+    revision whose clock is older, equal, newer and far in the future, because
+    a peer clock alone must not choose truth.
+11. **What the prototype proves, and where it lives.** Track 68A declares no
+    source module, so the prototype protocol model can only sit in a tests-only
+    harness. State that passing proves the protocol model and not the
+    production transport or native recall. Prefer an adapter-conformance suite
+    that the transport and bridge Tracks re-run against production code, and
+    keep deliberately broken reference models (mtime wins, hash-only identity,
+    retirement inferred from absence) that each F and E test must fail.
+12. **Fixtures and the contract document.** Native stores include a nested
+    `.git` and SQLite in WAL mode, which cannot be committed as reviewable
+    fixtures and can retain deleted text. Generate structural fixtures from
+    committed DDL and synthetic rows, allowlist every committed value, and
+    check that none holds a home path, email, or prose. Decide whether the
+    source contract sits beside the fixtures as a `CONTRACT.md`, following the
+    existing host-session fixtures, or in `docs/designs/`, and pin the recorded
+    host versions to the fixtures either way.
+13. **Transport gate completeness.** The Codex transport exit gate must itself
+    cover cross-project isolation, capture/use opt-out, unsupported-version
+    rejection, unreadable or empty source never publishing emptiness, and a
+    check that memory payloads reach storage only as encrypted blobs. The
+    parity table repeats some of these for live use, but the first shipped
+    transport cannot pass without the deterministic versions. A `codex` source
+    configured with `memories` in `include_dirs` also reaches the basename
+    `MEMORY.md` line-union today; decide whether to reject that configuration
+    or bypass the merger for it.
+
+The [Track 68A card](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall)
+carries this document in its read-first list so these questions travel with the
+work. Later regenerations size the packages once the answers are recorded.
