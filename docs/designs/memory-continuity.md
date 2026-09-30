@@ -78,7 +78,11 @@ avoid is:
 Verify by physical location, not path strings. Resolve the destination
 completely (resolve its deepest existing ancestor and append the parts that do
 not exist yet), then compare each ancestor of the resolved path with each root
-by file identity (device and inode, for example `os.path.samefile`). Symlinks,
+by file identity (device and inode, for example `os.path.samefile`). A root
+that does not exist yet has no identity to compare: resolve it the same way,
+compare its existing part by identity, and treat any destination at or under it
+as unsafe, comparing the remaining components case-insensitively on a
+case-insensitive volume. Symlinks,
 case-insensitive aliases and firmlinks defeat string containment, and a lexical
 walk up the parents misses a symlink into a synced subtree. The default gstack
 source syncs `~/.gstack/projects/`, so that directory is not a safe home for
