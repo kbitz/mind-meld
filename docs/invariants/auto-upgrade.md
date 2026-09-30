@@ -87,7 +87,10 @@ The parent closes its copy without `LOCK_UN`, so the detached child retains
 exclusion after its hook exits and releases it automatically when pipx exits.
 Never unlink this lockfile. Explicit updates and automatic retries cannot
 start another installer while it is held, even after 24 hours or for a newer
-release. The claim checks this live lock before changing the cache.
+release. The claim checks this live lock before changing the cache. Installer
+acquisition retries briefly so a read-only liveness probe does not spuriously
+consume the day's attempt. Continuing contention is a `busy` refusal, not a
+failed installation; `mm update` exits 1 without suggesting a forced reinstall.
 
 - A live installer is always `in-flight`. Inside `INSTALL_GRACE` (10 min),
   an unfinished cache-only attempt also reads as `in-flight`: later
@@ -119,6 +122,8 @@ after its parent and pipes exit. Pipe cleanup is bounded too. Recovery
 commands bind the same pipx home and preserve the suffix.
 If pipx already exited before the pipe timeout, bounded cleanup preserves
 that exit result and the caller still verifies the installed metadata.
+Ctrl-C during process creation is deferred until the caller owns the process
+handle, then follows the same bounded cleanup before releasing the mm lock.
 Further Ctrl-C presses are ignored until cleanup finishes; the previous
 signal handler is then restored before propagating the original interruption.
 Cancelling an optional update preserves the completed sync and marks its

@@ -108,6 +108,7 @@ PIPX_METADATA_NAME = "pipx_metadata.json"
 PACKAGE_NAME = "mind-meld"
 UPDATE_LOG_NAME = "auto-update.log"
 INSTALL_LOCK_NAME = "install.lock"
+INSTALL_LOCK_RETRY_DELAYS = (0, 0.01, 0.05, 0.1)
 # Hooks can run with a thinner PATH than the login shell that installed pipx.
 _PIPX_FALLBACK_PATHS = ("/opt/homebrew/bin/pipx", "/usr/local/bin/pipx", "~/.local/bin/pipx")
 
@@ -737,6 +738,7 @@ class UpdateOutcome:
     status:
       "updated"    — pipx exited 0 and the recorded version or spec moved.
       "unchanged"  — pipx exited 0 and nothing moved.
+      "busy"       — another installer holds the lock; this one did not start.
       "failed"     — pipx exited non-zero, timed out, or could not start.
     """
 
@@ -766,6 +768,10 @@ def _install_is_running() -> bool:
         os.close(fd)
 
 
+class _PipxBusy(OSError):
+    """Installer contention is a refusal, never an installation failure."""
+
+
 @contextmanager
 def _pipx_install_lock() -> Iterator[int]:
     """Exclude all mm installers for the lifetime of their pipx process.
@@ -778,10 +784,17 @@ def _pipx_install_lock() -> Iterator[int]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(CACHE_DIR / INSTALL_LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise OSError("another mm update is still running; retry after it finishes") from error
+        for delay in INSTALL_LOCK_RETRY_DELAYS:
+            if delay:
+                time.sleep(delay)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as error:
+                if delay == INSTALL_LOCK_RETRY_DELAYS[-1]:
+                    raise _PipxBusy(
+                        "another mm update is still running; retry after it finishes"
+                    ) from error
         yield fd
     finally:
         os.close(fd)
@@ -799,18 +812,40 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Foreground pipx. Subprocess seam: tests monkeypatch THIS function."""
     _refuse_under_pytest()
     with _pipx_install_lock() as install_fd:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            env=_pipx_environment(argv),
-            start_new_session=True,
-            pass_fds=(install_fd,),
-        )
+        # Popen can be interrupted after creating the isolated child but before
+        # returning its handle. Defer launch-phase Ctrl-C until cleanup owns it.
+        launch_interrupted = False
+        launch_sigint = None
+
+        def defer_interrupt(signum, frame):
+            nonlocal launch_interrupted
+            launch_interrupted = True
+
+        if threading.current_thread() is threading.main_thread():
+            launch_sigint = signal.getsignal(signal.SIGINT)
+            if launch_sigint != signal.SIG_IGN:
+                signal.signal(signal.SIGINT, defer_interrupt)
         try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                env=_pipx_environment(argv),
+                start_new_session=True,
+                pass_fds=(install_fd,),
+            )
+        except BaseException:
+            if launch_sigint is not None:
+                signal.signal(signal.SIGINT, launch_sigint)
+            raise
+        try:
+            if launch_sigint is not None:
+                signal.signal(signal.SIGINT, launch_sigint)
+            if launch_interrupted:
+                raise KeyboardInterrupt
             output, _ = proc.communicate(timeout=PIPX_TIMEOUT_SECONDS)
         except BaseException as error:
             # A second Ctrl-C must not release the mm lock with pipx still running.
@@ -963,6 +998,8 @@ def run_update(install: InstallInfo, pipx: str, *, latest: str | None = None) ->
     old = install.version
     try:
         proc = _run_pipx(argv)
+    except _PipxBusy as error:
+        return UpdateOutcome("busy", old, None, str(error))
     except subprocess.TimeoutExpired as e:
         output = e.output if isinstance(e.output, str) else ""
         detail = f"pipx did not finish within {PIPX_TIMEOUT_SECONDS}s"
@@ -1132,6 +1169,8 @@ def _auto_install(
         if claim == "claimed":
             try:
                 _spawn_pipx(argv, update_log_path())
+            except _PipxBusy:
+                return True, False
             except (Exception, KeyboardInterrupt):
                 _record_install_failed(result.latest)
                 return False, True
@@ -1177,6 +1216,8 @@ def _auto_install(
         return False, claim == "claimed"
     finally:
         lockfile.release_lock()
+    if outcome.status == "busy":
+        return True, False
     _write_update_log(argv, outcome.output)
     if outcome.status == "updated":
         print(

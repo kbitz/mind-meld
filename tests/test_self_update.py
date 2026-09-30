@@ -22,6 +22,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.client import IncompleteRead
@@ -241,6 +242,78 @@ class TestUpdateArgv:
 
 
 class TestPipxSeams:
+    def test_launch_phase_cancellation_stops_the_created_installer(self, tmp_path):
+        code = (
+            "import os, signal, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "from mind_meld import upgrade\n"
+            "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade.CACHE_DIR = Path(sys.argv[1]) / 'config'\n"
+            "upgrade._install_prefix = lambda: Path(sys.argv[1]) / 'pipx/venvs/mind-meld'\n"
+            "upgrade.PIPX_STOP_GRACE_SECONDS = 0.1\n"
+            "created = []\n"
+            "popen = subprocess.Popen\n"
+            "def interrupt(signum, frame):\n"
+            "    raise KeyboardInterrupt\n"
+            "signal.signal(signal.SIGINT, interrupt)\n"
+            "def cancelled_launch(*args, **kwargs):\n"
+            "    proc = popen(*args, **kwargs)\n"
+            "    created.append(proc)\n"
+            "    os.kill(os.getpid(), signal.SIGINT)\n"
+            "    return proc\n"
+            "upgrade.subprocess.Popen = cancelled_launch\n"
+            "try:\n"
+            "    upgrade._run_pipx([sys.executable, '-c', 'import time\\ntime.sleep(30)'])\n"
+            "except KeyboardInterrupt:\n"
+            "    print('cancelled', created[0].poll() is not None, "
+            "signal.getsignal(signal.SIGINT) is interrupt)\n"
+            "finally:\n"
+            "    for proc in created:\n"
+            "        if proc.poll() is None: os.killpg(proc.pid, signal.SIGKILL)\n"
+            "        proc.wait(timeout=5)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            start_new_session=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "cancelled True True"
+
+    def test_installer_retries_brief_probe_contention(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        path = upgrade.CACHE_DIR / upgrade.INSTALL_LOCK_NAME
+        probe_fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+        flock = upgrade.fcntl.flock
+        flock(probe_fd, upgrade.fcntl.LOCK_EX | upgrade.fcntl.LOCK_NB)
+        blocked = threading.Event()
+
+        def release_probe():
+            blocked.wait(timeout=5)
+            os.close(probe_fd)
+
+        def observed_flock(fd, operation):
+            try:
+                return flock(fd, operation)
+            except BlockingIOError:
+                blocked.set()
+                raise
+
+        probe = threading.Thread(target=release_probe)
+        probe.start()
+        monkeypatch.setattr(upgrade.fcntl, "flock", observed_flock)
+        try:
+            result = upgrade._run_pipx([sys.executable, "-c", "print('ran')"])
+            assert result.stdout.strip() == "ran"
+            assert blocked.is_set(), "the test never exercised lock contention"
+        finally:
+            blocked.set()
+            probe.join(timeout=5)
+            assert not probe.is_alive()
+
     @pytest.mark.parametrize("first_detached", [False, True])
     @pytest.mark.parametrize("second_detached", [False, True])
     def test_active_installer_excludes_all_other_installers(
@@ -371,6 +444,16 @@ class TestPipxSeams:
             "Path(sys.argv[1]).write_text(str(child.pid))\n"
             "print('completed', flush=True)\n"
         )
+        popen = subprocess.Popen
+
+        def completed_parent(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            proc.wait(timeout=5)
+            return proc
+
+        # The seam must receive an already-exited parent. Interpreter startup
+        # time must not decide whether this exercises live-installer timeout.
+        monkeypatch.setattr(upgrade.subprocess, "Popen", completed_parent)
         try:
             result = upgrade._run_pipx([sys.executable, "-c", code, str(pid_file)])
             assert result.returncode == 0
@@ -1170,6 +1253,17 @@ def _flat(text: str) -> str:
 
 
 class TestUpdateCommand:
+    def test_busy_installer_refuses_without_a_forced_reinstall_remedy(
+        self, pipx_install, monkeypatch
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        with upgrade._pipx_install_lock():
+            result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        assert "still running" in _flat(result.stderr)
+        assert "pipx install --force" not in _flat(result.stderr)
+
     @pytest.mark.parametrize(
         "imported, installed, expected_runs", [("1.2.0", "1.3.0", 0), ("1.3.0", "1.2.0", 1)]
     )

@@ -8804,6 +8804,8 @@ def update() -> None:
     finally:
         release_lock()
 
+    if outcome.status == "busy":
+        _error(f"Update not started: {outcome.detail}. See {upgrade.update_log_path()}.")
     if outcome.status == "failed":
         if outcome.output:
             print(strip_terminal_escapes(outcome.output.rstrip()), file=sys.stderr)
