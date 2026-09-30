@@ -44,20 +44,31 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-ceo-review] Price Cursor Grok Fast after a real census
-- **Why:** Track 67A publishes `grok-4.7-fast` as deliberately unpriced. Fast-only cost is unavailable; mixed cost omits Fast. Standard Fast is 2x base and long-context Fast 3x, so base pricing would underquote.
-- **Context:** Choose promotion of the pseudo-id to verified pricing versus a params axis across reader, wire and renderer. `fast=true` was not observed in the three-run 2026-09-23 census. No pricing expansion authorized in 67A.
-- **Effort:** M
-- **Priority:** P2
-
-### [plan-ceo-review] Revisit Cursor auto/composer classification only after observed use
-- **Why:** Neither auto nor composer-2.5 was present in the initial Cursor corpus. They remain Unclassified and unpriced. A new host family changes the closed 1.x vocabulary and requires a compatibility decision.
-- **Context:** Trigger is a real fleet run with either id, not a synthetic fixture. Cursor customization sync likewise waits for a user-authored skill/command. A second-Mac Cursor census would strengthen evidence but is not a release gate.
-- **Effort:** M
-- **Priority:** P3
-
+None.
 
 ## Drain records
+
+### Roadmap drain — 2026-09-30
+
+7 inbox items: **1 placed, 6 deferred, 0 killed, 0 discharged**. Inbox authored-false rate: 0 / (1 + 0) = **0%**. Verification baseline: `c43b777` (v1.2.0), even with `origin/main`. The five memory work packages remain linked to [the formal plan](designs/memory-continuity.md); qualification is executable now, and the remaining four have explicit promotion gates. Forgetting F1-F4, echo prevention E1-E4 and hostile-content checks H1-H4 are required during prototyping and initial implementation, not deferred cleanup.
+
+| Inbox item | Title | Disposition / destination | Evidence or reason |
+|---|---|---|---|
+| 1 | Qualify Codex memory portability and recall | place → [Track 68A](ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) | Codex memories are absent from DEFAULT_SOURCES; native export/import and fresh-session recall remain unqualified. |
+| 2 | Deliver Codex memory sync across Macs | defer → [Future](roadmap-future.md#codex-memory-sync) | Promote after Track 68A establishes a supported export/recall contract, retirement and ancestry semantics, and concrete implementation footprints; size the production work from that evidence. |
+| 3 | Qualify Claude and Codex memory parity across the fleet | defer → [Future](roadmap-future.md#memory-fleet-parity) | Promote after the Codex transport/recall implementation passes its deterministic gates; requires live two-Mac access and the same scenarios for Claude and Codex. |
+| 4 | Share project memories between Claude and Codex | defer → [Future](roadmap-future.md#cross-agent-memory) | Promote after the same-agent fleet parity gate passes; keep both cross-agent directions and the forgetting/echo gates in the initial bridge. |
+| 5 | Establish Cursor's memory capability and portability contract | defer → [Future](roadmap-future.md#cursor-memory-contract) | Promote discovery after Track 68A supplies the reusable adapter requirements; implementation follows Codex parity and the qualified shared-view contract. Cursor discovery does not block Claude/Codex sharing. |
+| 6 | Price Cursor Grok Fast after a real census | defer → [Future](roadmap-future.md#cursor-fast-pricing) | Keep the real observed Fast-run census trigger. The committed Cursor CONTRACT.md still records fast=true as unobserved; this regeneration establishes no newer census and adds no pricing. |
+| 7 | Revisit Cursor auto/composer classification only after observed use | defer → [Future](roadmap-future.md#cursor-auto-classification) | Keep the real observed auto/composer-run trigger and explicit compatibility decision. The committed Cursor CONTRACT.md records neither in the initial corpus; usage capture alone does not authorize customization sync. |
+
+**Former active plan:** 66A's alias removal and 1.0 cut are `discharged@2ddaa39`; the compatibility refusal behavior shipped beyond the old card. Its cache-jitter task is **killed**, not discharged as a fix: the implementation's live probe did not reproduce the premise for reader 0 (zero writes in 39 steady failed passes; the later-reader allowance mechanism is documented but unobserved; `docs/invariants/events-retro.md`, Track 66A probe). Group 66 moves to shipped history.
+
+**Additional shipped work:** `c76f41d` (v1.1.0 unified agent reporting) and `c43b777` (v1.2.0 Cursor usage) both called themselves 67A. Group 67 records both by version and title, without rewriting historical references or pretending two PRs were one Track session. No ID renames; 68A is new.
+
+**Future membership:** 91 existing bullets retained verbatim, 2 discharged, 6 appended: **93 → 97**. “Stable note codes for all 19 `## Notes` strings” and “Retro-card machine/cause diagnostics” are `discharged@c76f41d`: `aggregator._render_health_block` emits coded `MM_HEALTH` issues with machine/cause details and remedies, `retro_fleet/SKILL.md` consumes them, and `tests/test_docs_routing.py` checks the interface. The latter had no more specific residual requirement to carry forward. All other deferred entries retain their existing text and triggers; none is promoted on an unmeasured premise.
+
+**Advisory override:** keep `docs/designs/grok-build-usage-reader.md`, `host-parity.md`, `memory-continuity.md` and `sync-gstack-context.md` in place. The archive heuristic mistakes external host versions or historical baseline references for completed mm plans; these remain active source documents. PROGRESS covers every tagged/changelog version. Documentation only; no version bump.
 
 ### Roadmap drain — 2026-09-21
 
@@ -422,4 +433,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-21 by /roadmap: inbox drained, Groups 63–65 reconciled to shipped history, Track 66A carded as the v1.0.0 cut. Prior drain records are historical._
+_Last updated 2026-09-30 by /roadmap: inbox drained; v1.0.0–v1.2.0 reconciled; Track 68A qualifies Codex memory continuity. Prior drain records are historical._

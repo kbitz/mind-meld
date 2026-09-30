@@ -4,7 +4,7 @@ State-organized execution plan: **In Progress** / **Current Plan** / **Future** 
 
 Audit configuration (recorded 2026-09-14): release-bearing Tracks here declare 9–14 files (source, tests, invariants, README, plus CHANGELOG / PROGRESS / pyproject) and this repo ships weight-6 sessions as one PR (53A landed 1,790 insertions on a weight-4 card, 57A 1,169 on weight 3), so the roadmap audit runs with raised caps set through gstack-extend's `bin/config`. The defaults (8 files, weight 4) fail every card in this plan and in the 2026-09-06 plan. The setting is machine-local (`~/.gstack-extend/config`), so it differs by Mac: 16 files / weight 6 where this paragraph was first written, 24 files / weight 5 on the Mac that ran the 2026-09-17 regeneration. Re-read it with `bin/config get` before trusting a SIZE verdict.
 
-**mm supports three agents: Claude Code, Codex, and Grok Build.** OpenCode was dropped on 2026-09-01 by user decision; Groups 36 and 44 removed it (shipped v0.12.53 → v0.13.0). Do not re-add a fourth agent without a measured need — see the skill-link constraint below, which already refuses one on discovery grounds.
+**mm reports usage for Claude Code, Codex, Grok Build, and Cursor via Conductor.** Cursor usage capture shipped in v1.2.0; it adds no Cursor customization or memory source. Memory capture, recall and sync parity are planned separately in [the memory continuity design](designs/memory-continuity.md). OpenCode remains dropped by the 2026-09-01 user decision (Groups 36 and 44, v0.12.53 → v0.13.0). New host integrations still require a measured need and must satisfy the skill-discovery constraint below.
 
 Standing constraints — these can refuse a Track, not merely shape how one is written:
 
@@ -25,53 +25,63 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 
 ## In Progress
 
-Nothing is partially shipped. Groups 63–65 shipped as v0.14.16–v0.14.18 and live in `docs/roadmap-shipped.md`.
+Nothing is partially shipped. The 1.0 release and both releases historically
+labeled 67A (v1.1.0 unified reporting and v1.2.0 Cursor usage) are recorded in
+[shipped history](roadmap-shipped.md).
 
 ## Current Plan
 
 _tombstone: 27_
 
-#### Group 66: Cut 1.0
+#### Group 68: Qualify memory continuity
 
 _Depends on: none_
 
-##### Track 66A: Cut v1.0.0: retire the pre-1.0 conflict alias and converge the failed-read cache write
-_3 tasks . ~120 LOC . low risk . 12 files_
-_touches: src/mind_meld/resolveflow.py, src/mind_meld/cli.py, src/mind_meld/host_usage.py, tests/test_conflict_copy.py, tests/test_host_usage.py, docs/invariants/conflicts.md, docs/invariants/events-retro.md, SPEC.md, README.md, CHANGELOG.md, docs/PROGRESS.md, pyproject.toml_
-_read-first: docs/invariants/conflicts.md (the `(b)oth` → `(s)kip` alias paragraph), docs/invariants/events-retro.md (standing read blockers; "Optional cache timing fields (Track 63A)"), AGENTS.md (Source Layout, import direction, testing)_
-_produces: v1.0.0, with the one deprecation the code and docs promise to remove "at 1.0" removed, and a host read that is steadily over budget writing its cache once instead of on every autopush_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_conflict_copy.py tests/test_host_usage.py tests/test_diag.py tests/test_silent_failure_contract.py tests/test_docs_routing.py_
+##### Track 68A: Qualify Codex memory portability and recall
+_3 tasks . ~350 LOC . medium risk . 3 files plus sanitized fixtures_
+_touches: docs/designs/memory-continuity.md, docs/designs/codex-memory-contract.md (new), tests/fixtures/host_memories/codex/ (new), tests/test_memory_contract.py (new)_
+_read-first: docs/designs/memory-continuity.md (native qualification, forgetting/echo/hostile-content contracts, and the retained open qualification questions), docs/invariants/sync.md (generated files, consent, deletion proof, tombstones and previews), docs/invariants/conflicts.md (MEMORY.md merge dispatch), docs/invariants/init-devices.md (sink-specific sanitization of peer-controlled strings), docs/invariants/auto-upgrade.md (Compatibility (1.x) and newer-format refusal), AGENTS.md (testing, source ownership and the autopush/autopull unattended-hook rules)_
+_produces: a versioned live-source contract, sanitized fixtures, repeatable recall evidence, and a qualified native-import or explicitly separate mm recall design that the transport implementation can consume_
+_session: fresh · effort: high · verify: ./bin/check tests/test_memory_contract.py tests/test_docs_routing.py_
 
-_Source: the 1.0 goal (user, 2026-09-21) and `[ship]` "host_usage.py: last_deadline_allotted_ms jitter can defeat the failed-pass write-skip" (P2, PR #181 /ship adversarial review, 2026-09-18). Verified at cdffc34: the alias is the only pre-1.0 shim in the tree — `resolveflow._LEGACY_SKIP_ALIAS_NOTICE` says "alias removed at 1.0", `_normalize_legacy_skip_choice_and_warn` is called from `resolveflow.py:827` and `cli.py:1797`, `cli.py:9004`'s docstring, `docs/invariants/conflicts.md:59`, `SPEC.md:569` / `:579` and `README.md:521` all describe it as living "until 1.0", and `grep -rn 'pre-1\.0\|until 1\.0' src docs/invariants` finds nothing else. `_carry_read_timing` computes `last_deadline_allotted_ms` as `round((deadline - started) * 1000)` where `deadline` is the caller's monotonic clock plus budget and `started` is the callee's own `time.monotonic()`, and `_skip_failed_cache_write` compares the whole timing map for equality, so scheduling latency between the two reads flips the value by ±1 ms between otherwise-identical over-budget passes and the failed-pass skip never converges; both readers share the helper (`host_usage.py:413`, `:775`). README carries no beta or pre-release statement, so nothing there needs removing for 1.0._
+_Source: [manual] user request, 2026-09-30; docs/TODOS.md drain record of the same date. At c43b777, config.DEFAULT_SOURCES selects Codex skills/plugins/AGENTS.md, not memories; merge._merge_strategy line-unions any MEMORY.md. The formal plan records local extraction, with consolidation and receiving-host recall still unqualified. Neither adding memories to include_dirs nor transferring generated handbooks is a qualified implementation._
 
-- **Retire the `b` / `both` alias** -- delete `_LEGACY_SKIP_ALIAS_NOTICE` and `_normalize_legacy_skip_choice_and_warn` with both call sites, so `b` and `both` fall through to each prompt's existing unknown-choice re-prompt and join the loud-rejected pre-v0.9.0 `c` / `f` letters. Rewrite the four alias tests in `tests/test_conflict_copy.py` (the `"both"` prompt cases near lines 1397–1438 and the `["b", "both"]` parametrize near 2935–3009) as rejection pins. Update the `cli.py:9004` docstring, the conflicts invariant paragraph, both SPEC.md sentences and README's `mm resolve` line to say the alias was removed at 1.0. _resolveflow.py + cli.py + test_conflict_copy.py + conflicts.md + SPEC.md + README.md, ~60 lines (del)._ (S)
-- **Converge the failed-pass cache write** -- make `_skip_failed_cache_write`'s comparison insensitive to sub-budget jitter: compare `last_deadline_allotted_ms` on the caller's nominal budget (or a coarse bucket) while still persisting and displaying the value events-retro.md records. Decide at review which of the two the invariant keeps; the persisted formula is documented, so changing it needs the doc updated in the same commit. Pin: two consecutive over-budget passes whose fake clocks differ by 1 ms between caller and callee write the cache once. _host_usage.py + test_host_usage.py + events-retro.md, ~40 lines._ (S)
-- **Release 1.0.0** -- CHANGELOG entry (the alias removal is the one BREAKING line), PROGRESS row, `pyproject.toml` to 1.0.0. Run the targeted checks above, then the full `./bin/check`. _CHANGELOG.md + docs/PROGRESS.md + pyproject.toml, ~20 lines._ (S)
+- **Measure the native lifecycle and recall boundary** -- Follow the formal plan's CLI/Conductor census using the installed versions and an isolated host home and raw artifacts placed under the plan's raw-artifact rules (`docs/designs/memory-continuity.md`, "Evidence and unknowns"): outside every location mm or iCloud syncs, verified by physical location, with no credential-bearing file copied into the host home. Those rules take precedence over the default artifact locations. Observe an actual Mind Meld memory through extraction, consolidation, fresh-session recall, import into a populated store, regeneration, and capture/use opt-out. Record reliable project attribution, durable source identities, withdrawal, imported ancestry and unsupported cases in a source contract; commit only sanitized structural fixtures. _docs/designs/codex-memory-contract.md + tests/fixtures/host_memories/codex/, ~180 lines._ (M)
+- **Prototype the forgetting and echo contracts** -- Use disposable stores to exercise F1-F4, E1-E4 and the hostile-content checks H1-H4 from the formal plan: offline resurrection, correction/regeneration, interrupted control publication, unknown absence, repeated transit, paraphrases, genuine new feedback, missing ancestry, forged authority, mis-scoped records, forged or unsupported metadata and instruction-like or terminal-control content. Keep deterministic protocol checks separate from live host recall evidence. Prove the chosen recall/export boundary; if imported ancestry is lost, require suppression of automatic re-export before delivering foreign context. Prototype output cannot claim production sync or native recall that the host did not demonstrate. _tests/test_memory_contract.py + source contract, ~130 lines._ (M)
+- **Record the integration choice and promotion gate** -- Select a supported native import only if it passes; otherwise specify the mm-owned recall integration and its limitations. Freeze export identity, retirement and ancestry semantics; name the receiving consumer and enrollment boundary; update the formal plan with evidence and concrete implementation footprints. Failed host gates remain unresolved and block transport promotion. Transport, two-Mac parity, the Claude/Codex bridge and Cursor discovery remain linked follow-ons, sized from this evidence at the next regeneration. _docs/designs/memory-continuity.md + source contract, ~40 lines._ (S)
 
 ### Execution Map
 
-A Group may launch when every Group in its ← set has landed, regardless of document order; document order is priority, not gating.
+A Group may launch when every Group in its ← set has landed, regardless of
+document order; document order is priority, not gating.
 
-Adjacency from gstack-extend's `roadmap-pack` tool on the drafted Track (identical to the audit's GROUP_DEPS after apply; this is the `/roadmap` skill's own packer, not a script in this repo's `bin/`):
+Adjacency from gstack-extend's `roadmap-pack` output on the drafted Track:
 
 ```
-- Group 66 ← {}
+- Group 68 ← {}
 ```
 
 Track detail per group:
 
 ```
-Group 66: Cut 1.0
-  +-- Track 66A ........... ~M . 3 tasks
+Group 68: Qualify memory continuity
+  +-- Track 68A ........... ~L . 3 tasks
 ```
 
 **Total: 1 group . 1 track remaining.**
+
+The [formal plan](designs/memory-continuity.md#dependency-order) preserves the
+full sequence: qualification → Codex transport/recall → two-Mac parity →
+Claude/Codex sharing, with Cursor discovery following qualification. Only
+qualification is ready to execute; later work is retained in Future with
+explicit promotion gates. Forgetting, echo prevention and hostile-content
+checks are mandatory prototype and release gates throughout.
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (93 items)
+Deferred: docs/roadmap-future.md (97 items)
 
 ## Shipped
 
