@@ -50,7 +50,7 @@ None.
 
 ### Roadmap drain — 2026-09-30
 
-7 inbox items: **1 placed, 6 deferred, 0 killed, 0 discharged**. Inbox authored-false rate: 0 / (1 + 0) = **0%**. Verification baseline: `c43b777` (v1.2.0), even with `origin/main`. The five memory work packages remain linked to [the formal plan](designs/memory-continuity.md); qualification is executable now, and the remaining four have explicit promotion gates. Forgetting F1-F4 and echo prevention E1-E4 are required during prototyping and initial implementation, not deferred cleanup.
+7 inbox items: **1 placed, 6 deferred, 0 killed, 0 discharged**. Inbox authored-false rate: 0 / (1 + 0) = **0%**. Verification baseline: `c43b777` (v1.2.0), even with `origin/main`. The five memory work packages remain linked to [the formal plan](designs/memory-continuity.md); qualification is executable now, and the remaining four have explicit promotion gates. Forgetting F1-F4, echo prevention E1-E4 and hostile-content checks H1-H4 are required during prototyping and initial implementation, not deferred cleanup.
 
 | Inbox item | Title | Disposition / destination | Evidence or reason |
 |---|---|---|---|
