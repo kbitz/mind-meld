@@ -49,6 +49,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -763,48 +764,61 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         output, _ = proc.communicate(timeout=PIPX_TIMEOUT_SECONDS)
     except BaseException as error:
-        # Give pipx and its pip/git/build children a bounded chance to stop
-        # before escalating. Keep the mm lock throughout cleanup.
-        stop_deadline = time.monotonic() + PIPX_STOP_GRACE_SECONDS
+        # A second Ctrl-C must not release the mm lock with pipx still running.
+        # Python dispatches signals only on the main thread.
+        previous_sigint = None
+        if threading.current_thread() is threading.main_thread():
+            previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            os.killpg(proc.pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
-        try:
-            output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
+            # Give pipx and its pip/git/build children a bounded chance to stop
+            # before escalating. Keep the mm lock throughout cleanup.
+            stop_deadline = time.monotonic() + PIPX_STOP_GRACE_SECONDS
+            # Reap an exited parent even when an escaped child keeps stdout open.
+            # macOS can reject signaling a group containing only the zombie parent.
+            proc.poll()
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGINT)
             except ProcessLookupError:
                 pass
             try:
                 output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired as lingering:
-                # A descendant outside our group can retain the pipe. Do not
-                # let that extend cleanup indefinitely after killing pipx.
-                output = lingering.output or ""
-                if isinstance(output, bytes):
-                    output = output.decode("utf-8", errors="replace")
-                if proc.stdout is not None:
-                    proc.stdout.close()
-                proc.wait(timeout=PIPX_STOP_GRACE_SECONDS)
-        # Closed pipes and a reaped parent do not prove its children stopped:
-        # a child can ignore SIGINT and redirect its output. Check the group
-        # independently, allowing the same grace before killing survivors.
-        while True:
-            try:
-                os.killpg(proc.pid, 0)
-            except ProcessLookupError:
-                break
-            if time.monotonic() >= stop_deadline:
+            except subprocess.TimeoutExpired:
+                proc.poll()
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                break
-            time.sleep(min(0.05, max(0, stop_deadline - time.monotonic())))
-        if isinstance(error, subprocess.TimeoutExpired):
-            error.output = output
+                try:
+                    output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
+                except subprocess.TimeoutExpired as lingering:
+                    # A descendant outside our group can retain the pipe. Do not
+                    # let that extend cleanup indefinitely after killing pipx.
+                    output = lingering.output or ""
+                    if isinstance(output, bytes):
+                        output = output.decode("utf-8", errors="replace")
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    proc.wait(timeout=PIPX_STOP_GRACE_SECONDS)
+            # Closed pipes and a reaped parent do not prove its children stopped:
+            # a child can ignore SIGINT and redirect its output. Check the group
+            # independently, allowing the same grace before killing survivors.
+            while True:
+                try:
+                    os.killpg(proc.pid, 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() >= stop_deadline:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    break
+                time.sleep(min(0.05, max(0, stop_deadline - time.monotonic())))
+            if isinstance(error, subprocess.TimeoutExpired):
+                error.output = output
+        finally:
+            if previous_sigint is not None:
+                signal.signal(signal.SIGINT, previous_sigint)
         raise
     return subprocess.CompletedProcess(argv, proc.returncode, stdout=output)
 
@@ -823,6 +837,10 @@ def _pipx_environment(argv: list[str]) -> dict[str, str]:
         # pipx force-exposes apps too. A different home/bin selection must
         # never redirect a sibling install's executable to this venv.
         bin_dir = Path(env.get("PIPX_BIN_DIR") or Path.home() / ".local" / "bin").expanduser()
+        bin_dir = bin_dir.resolve()
+        # Self-managed pipx can infer another bin directory. Bind the one
+        # checked here so --force cannot expose apps into an unchecked home.
+        env["PIPX_BIN_DIR"] = str(bin_dir)
         destination = bin_dir / f"mm{install.suffix}"
         if destination.exists() or destination.is_symlink():
             if destination.resolve() != (prefix / "bin" / "mm").resolve():

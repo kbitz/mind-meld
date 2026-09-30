@@ -62,7 +62,8 @@ another pipx home. An explicit reinstall preserves the recorded suffix, so
 updating a rollback environment cannot overwrite its unsuffixed sibling.
 Before a forced reinstall, the subprocess seam also refuses an existing
 executable destination that belongs to another install, including an ambient
-`PIPX_BIN_DIR` selecting a sibling home's command.
+`PIPX_BIN_DIR` selecting a sibling home's command. It binds `PIPX_BIN_DIR` to
+the checked directory so self-managed pipx cannot infer a different destination.
 
 **Completion is verified from metadata.** A successful pipx exit must leave
 readable metadata for a release-tracking install. When the check found a newer
@@ -101,6 +102,8 @@ first sends SIGINT, waits at most five seconds, then escalates to SIGKILL
 and waits before releasing the mm lock. It checks the process group even
 after its parent and pipes exit. Pipe cleanup is bounded too. Recovery
 commands bind the same pipx home and preserve the suffix.
+Further Ctrl-C presses are ignored until cleanup finishes; the previous
+signal handler is then restored before propagating the original interruption.
 Cancelling an optional update preserves the completed sync and marks its
 claimed attempt failed without shortening the daily retry gate. Cancelling
 the push itself skips the update tail entirely.

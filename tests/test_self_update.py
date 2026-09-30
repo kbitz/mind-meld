@@ -241,6 +241,119 @@ class TestUpdateArgv:
 
 
 class TestPipxSeams:
+    def test_repeated_interrupt_stops_the_installer_before_returning(self, tmp_path):
+        pid_file = tmp_path / "installer-pid"
+        cleanup_started = tmp_path / "cleanup-started"
+        child_code = (
+            "import os, signal, sys, time\n"
+            "from pathlib import Path\n"
+            "def interrupt(signum, frame):\n"
+            "    Path(sys.argv[2]).touch()\n"
+            "signal.signal(signal.SIGINT, interrupt)\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "time.sleep(30)\n"
+        )
+        runner_code = (
+            "import signal, sys\n"
+            "from pathlib import Path\n"
+            "from mind_meld import upgrade\n"
+            "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade._install_prefix = lambda: Path(sys.argv[1]) / 'pipx/venvs/mind-meld'\n"
+            "upgrade.PIPX_STOP_GRACE_SECONDS = 0.5\n"
+            "def interrupt(signum, frame):\n"
+            "    raise KeyboardInterrupt\n"
+            "signal.signal(signal.SIGINT, interrupt)\n"
+            "try:\n"
+            f"    upgrade._run_pipx([sys.executable, '-c', {child_code!r}, "
+            "sys.argv[2], sys.argv[3]])\n"
+            "except KeyboardInterrupt:\n"
+            "    print('interrupted', signal.getsignal(signal.SIGINT) is interrupt)\n"
+        )
+        # Signals go only to this isolated Python runner; it can launch only
+        # the synthetic Python child above, never a real installer.
+        proc = subprocess.Popen(
+            [sys.executable, "-c", runner_code, str(tmp_path), str(pid_file), str(cleanup_started)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert pid_file.exists(), "synthetic installer never started"
+            os.kill(proc.pid, signal.SIGINT)
+            while not cleanup_started.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert cleanup_started.exists(), "installer cleanup never started"
+            time.sleep(0.1)
+            os.kill(proc.pid, signal.SIGINT)
+            output, _ = proc.communicate(timeout=5)
+            assert proc.returncode == 0 and output.strip() == "interrupted True", output
+            state = subprocess.run(
+                ["ps", "-p", pid_file.read_text(), "-o", "stat="],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            assert not state or state.startswith("Z"), f"installer still running: {state}"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            if pid_file.exists():
+                try:
+                    os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_timeout_is_bounded_when_an_escaped_child_retains_the_output_pipe(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 1)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.2)
+        pid_file = tmp_path / "escaped-child"
+        code = (
+            "import signal, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "signal.signal(signal.SIGINT, lambda signum, frame: sys.exit(0))\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time\\ntime.sleep(10)'], start_new_session=True)\n"
+            "Path(sys.argv[1]).write_text(str(child.pid))\n"
+            "print('installer started', flush=True)\n"
+            "child.wait()\n"
+        )
+        started = time.monotonic()
+        try:
+            with pytest.raises(subprocess.TimeoutExpired) as caught:
+                upgrade._run_pipx([sys.executable, "-c", code, str(pid_file)])
+            assert caught.value.timeout == 1
+            assert "installer started" in caught.value.output
+            # The child keeps stdout open for ten seconds; cleanup must return
+            # before that lifetime instead of waiting for the escaped child.
+            assert time.monotonic() - started < 8
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_forced_reinstall_binds_the_checked_default_executable_directory(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0")
+        monkeypatch.delenv("PIPX_BIN_DIR", raising=False)
+        home = tmp_path / "checked-home"
+        monkeypatch.setattr(upgrade.Path, "home", lambda: home)
+        argv = upgrade.update_argv(PIPX, upgrade.detect_install())
+        environment = upgrade._pipx_environment(argv)
+        # Self-managed pipx can infer its own executable directory unless we
+        # bind the same directory whose existing mm link the guard checked.
+        assert environment["PIPX_BIN_DIR"] == str(home / ".local" / "bin")
+
     def test_cleanup_stops_a_child_after_its_parent_and_pipes_exit(
         self, pipx_install, monkeypatch, tmp_path
     ):
