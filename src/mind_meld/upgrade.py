@@ -42,6 +42,7 @@ so the warning-class reader trust stays focused on data-at-risk signals only.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -53,11 +54,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -97,15 +99,15 @@ DEV_BUILD_SENTINEL = "0.0.0+dev"
 # One automatic install attempt per release per day. A newer release resets
 # the gate; a failed attempt falls back to the nudge until the gap elapses.
 DEFAULT_INSTALL_RETRY_GAP = timedelta(hours=24)
-# A detached install reports nothing back. Inside this window an unfinished
-# attempt reads as still running, so a second hook neither re-spawns pipx nor
-# calls a healthy install failed. Past it, still being behind means it failed.
+# After the installer exits, this window gives its metadata time to settle.
+# A live install's separate kernel lock always overrides this age heuristic.
 INSTALL_GRACE = timedelta(minutes=10)
 PIPX_TIMEOUT_SECONDS = 600
 PIPX_STOP_GRACE_SECONDS = 5
 PIPX_METADATA_NAME = "pipx_metadata.json"
 PACKAGE_NAME = "mind-meld"
 UPDATE_LOG_NAME = "auto-update.log"
+INSTALL_LOCK_NAME = "install.lock"
 # Hooks can run with a thinner PATH than the login shell that installed pipx.
 _PIPX_FALLBACK_PATHS = ("/opt/homebrew/bin/pipx", "/usr/local/bin/pipx", "~/.local/bin/pipx")
 
@@ -290,6 +292,12 @@ def cached_upgrade_view(
         except InvalidVersion:
             return UpgradeCheckResult("unknown", local, None, None, cache_state="malformed")
         attempt = _attempt_state(snapshot.data, latest, now) if available else None
+    if attempt is not None:
+        install = detect_install()
+        if install.kind != "tracking" or Version(install.version or "") >= Version(latest):
+            attempt = None
+        elif _install_is_running():
+            attempt = "in-flight"
     return UpgradeCheckResult(
         "upgrade-available" if available else "current",
         local,
@@ -740,6 +748,45 @@ class UpdateOutcome:
     now_tracking: bool = False
 
 
+def _install_is_running() -> bool:
+    """Read-only, nonblocking probe; status never creates an installer lock."""
+    try:
+        fd = os.open(str(CACHE_DIR / INSTALL_LOCK_NAME), os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        return False
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _pipx_install_lock() -> Iterator[int]:
+    """Exclude all mm installers for the lifetime of their pipx process.
+
+    The child inherits only this descriptor, never the mm lock. Closing the
+    parent's copy leaves its flock alive in the detached child. Do not use
+    LOCK_UN here: that would release the shared lock before the child exits.
+    Never unlink the file, which would let contenders lock different inodes.
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(CACHE_DIR / INSTALL_LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise OSError("another mm update is still running; retry after it finishes") from error
+        yield fd
+    finally:
+        os.close(fd)
+
+
 def _refuse_under_pytest() -> None:
     """Same guard as `crypto.store_passphrase_in_keyring`: PYTEST_CURRENT_TEST
     is inherited by subprocesses, so no test layer can reach a real pipx by
@@ -751,76 +798,82 @@ def _refuse_under_pytest() -> None:
 def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
     """Foreground pipx. Subprocess seam: tests monkeypatch THIS function."""
     _refuse_under_pytest()
-    proc = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        errors="replace",
-        env=_pipx_environment(argv),
-        start_new_session=True,
-    )
-    try:
-        output, _ = proc.communicate(timeout=PIPX_TIMEOUT_SECONDS)
-    except BaseException as error:
-        # A second Ctrl-C must not release the mm lock with pipx still running.
-        # Python dispatches signals only on the main thread.
-        previous_sigint = None
-        if threading.current_thread() is threading.main_thread():
-            previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    with _pipx_install_lock() as install_fd:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=_pipx_environment(argv),
+            start_new_session=True,
+            pass_fds=(install_fd,),
+        )
         try:
-            # Give pipx and its pip/git/build children a bounded chance to stop
-            # before escalating. Keep the mm lock throughout cleanup.
-            stop_deadline = time.monotonic() + PIPX_STOP_GRACE_SECONDS
-            # Reap an exited parent even when an escaped child keeps stdout open.
-            # macOS can reject signaling a group containing only the zombie parent.
-            proc.poll()
+            output, _ = proc.communicate(timeout=PIPX_TIMEOUT_SECONDS)
+        except BaseException as error:
+            # A second Ctrl-C must not release the mm lock with pipx still running.
+            # Python dispatches signals only on the main thread.
+            previous_sigint = None
+            if threading.current_thread() is threading.main_thread():
+                previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
             try:
-                os.killpg(proc.pid, signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            try:
-                output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                proc.poll()
+                # Give pipx and its pip/git/build children a bounded chance to stop
+                # before escalating. Keep the mm lock throughout cleanup.
+                stop_deadline = time.monotonic() + PIPX_STOP_GRACE_SECONDS
+                # Reap an exited parent even when an escaped child keeps stdout open.
+                # macOS can reject signaling a group containing only the zombie parent.
+                finished_returncode = proc.poll()
                 try:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    os.killpg(proc.pid, signal.SIGINT)
                 except ProcessLookupError:
                     pass
                 try:
                     output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-                except subprocess.TimeoutExpired as lingering:
-                    # A descendant outside our group can retain the pipe. Do not
-                    # let that extend cleanup indefinitely after killing pipx.
-                    output = lingering.output or ""
-                    if isinstance(output, bytes):
-                        output = output.decode("utf-8", errors="replace")
-                    if proc.stdout is not None:
-                        proc.stdout.close()
-                    proc.wait(timeout=PIPX_STOP_GRACE_SECONDS)
-            # Closed pipes and a reaped parent do not prove its children stopped:
-            # a child can ignore SIGINT and redirect its output. Check the group
-            # independently, allowing the same grace before killing survivors.
-            while True:
-                try:
-                    os.killpg(proc.pid, 0)
-                except ProcessLookupError:
-                    break
-                if time.monotonic() >= stop_deadline:
+                except subprocess.TimeoutExpired:
+                    proc.poll()
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    break
-                time.sleep(min(0.05, max(0, stop_deadline - time.monotonic())))
-            if isinstance(error, subprocess.TimeoutExpired):
-                error.output = output
-        finally:
-            if previous_sigint is not None:
-                signal.signal(signal.SIGINT, previous_sigint)
-        raise
-    return subprocess.CompletedProcess(argv, proc.returncode, stdout=output)
+                    try:
+                        output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired as lingering:
+                        # A descendant outside our group can retain the pipe. Do not
+                        # let that extend cleanup indefinitely after killing pipx.
+                        output = lingering.output or ""
+                        if isinstance(output, bytes):
+                            output = output.decode("utf-8", errors="replace")
+                        if proc.stdout is not None:
+                            proc.stdout.close()
+                        proc.wait(timeout=PIPX_STOP_GRACE_SECONDS)
+                # Closed pipes and a reaped parent do not prove its children stopped:
+                # a child can ignore SIGINT and redirect its output. Check the group
+                # independently, allowing the same grace before killing survivors.
+                while True:
+                    try:
+                        os.killpg(proc.pid, 0)
+                    except ProcessLookupError:
+                        break
+                    if time.monotonic() >= stop_deadline:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        break
+                    time.sleep(min(0.05, max(0, stop_deadline - time.monotonic())))
+                if isinstance(error, subprocess.TimeoutExpired):
+                    error.output = output
+            finally:
+                if previous_sigint is not None:
+                    signal.signal(signal.SIGINT, previous_sigint)
+            if isinstance(error, subprocess.TimeoutExpired) and finished_returncode is not None:
+                # A completed installer can have a descendant retaining stdout.
+                # Cleanup stays bounded; the caller still verifies its metadata.
+                return subprocess.CompletedProcess(argv, finished_returncode, stdout=output)
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout=output)
 
 
 def _pipx_environment(argv: list[str]) -> dict[str, str]:
@@ -858,20 +911,22 @@ def _spawn_pipx(argv: list[str], log_path: Path) -> None:
     close when mm exits. Nothing waits on it.
     """
     _refuse_under_pytest()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, _log_header(argv).encode("utf-8"))
-        subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=fd,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env=_pipx_environment(argv),
-        )
-    finally:
-        os.close(fd)
+    with _pipx_install_lock() as install_fd:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, _log_header(argv).encode("utf-8"))
+            subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=fd,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                pass_fds=(install_fd,),
+                env=_pipx_environment(argv),
+            )
+        finally:
+            os.close(fd)
 
 
 def _log_header(argv: list[str]) -> str:
@@ -986,6 +1041,8 @@ def _claim_install_attempt(latest: str, *, now: datetime | None = None) -> str:
     be recorded. Unrecorded means unclaimed: without the stamp every later
     pull and push would start its own pipx.
     """
+    if _install_is_running():
+        return "in-flight"
     now = now or datetime.now(timezone.utc)
     try:
         with locked_json_rmw(CACHE_PATH, default_factory=_empty_cache) as ljson:

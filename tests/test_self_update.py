@@ -241,6 +241,147 @@ class TestUpdateArgv:
 
 
 class TestPipxSeams:
+    @pytest.mark.parametrize("first_detached", [False, True])
+    @pytest.mark.parametrize("second_detached", [False, True])
+    def test_active_installer_excludes_all_other_installers(
+        self, pipx_install, monkeypatch, tmp_path, first_detached, second_detached
+    ):
+        venv = pipx_install()
+        ready = tmp_path / "installer-pid"
+        release = tmp_path / "release-installer"
+        second_started = tmp_path / "second-started"
+        log = tmp_path / "first.log"
+        child_code = (
+            "import os, sys, time\n"
+            "from pathlib import Path\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "while not Path(sys.argv[2]).exists(): time.sleep(0.01)\n"
+        )
+        runner_code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from mind_meld import lockfile, upgrade\n"
+            "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade.CACHE_DIR = Path(sys.argv[1])\n"
+            "upgrade._install_prefix = lambda: Path(sys.argv[2])\n"
+            "lockfile.acquire_lock(Path(sys.argv[6]))\n"
+            f"argv = [sys.executable, '-c', {child_code!r}, sys.argv[3], sys.argv[4]]\n"
+            + (
+                "upgrade._spawn_pipx(argv, Path(sys.argv[5]))\n"
+                if first_detached
+                else "upgrade._run_pipx(argv)\n"
+            )
+        )
+        # Only fixed Python children run; the actual installer guard remains
+        # installed everywhere else, including ordinary subprocess tests.
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                runner_code,
+                str(upgrade.CACHE_DIR),
+                str(venv),
+                str(ready),
+                str(release),
+                str(log),
+                str(tmp_path / "mm.lock"),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        second = [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path\nPath({str(second_started)!r}).touch()",
+        ]
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), "synthetic installer did not start"
+            if first_detached:
+                # The child must keep exclusion after its hook has exited.
+                output, _ = proc.communicate(timeout=5)
+                assert proc.returncode == 0, output
+                lockfile.acquire_lock(tmp_path / "mm.lock")
+                lockfile.release_lock(tmp_path / "mm.lock")
+            with pytest.raises(OSError, match="another mm update is still running"):
+                if second_detached:
+                    upgrade._spawn_pipx(second, log)
+                else:
+                    upgrade._run_pipx(second)
+            assert not second_started.exists()
+            upgrade.CACHE_PATH.write_text(
+                json.dumps(
+                    {
+                        "latest_version": "1.3.0",
+                        "checked_at": NOW.isoformat(),
+                        "install_attempt_version": "1.3.0",
+                        "install_attempt_at": NOW.isoformat(),
+                    }
+                )
+            )
+            assert (
+                upgrade._claim_install_attempt("1.4.0", now=NOW + timedelta(hours=30))
+                == "in-flight"
+            )
+            assert (
+                upgrade.cached_upgrade_view({}, now=NOW + timedelta(hours=30)).install_attempt
+                == "in-flight"
+            )
+            release.touch()
+            output, _ = proc.communicate(timeout=5)
+            assert proc.returncode == 0, output
+            # Kernel ownership ends at child exit, even without a completion
+            # callback and regardless of the age/version of a cached claim.
+            while True:
+                try:
+                    upgrade._run_pipx(second)
+                    break
+                except OSError:
+                    assert time.monotonic() < deadline, "installer lock did not release"
+                    time.sleep(0.01)
+            assert second_started.exists()
+        finally:
+            release.touch()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            if ready.exists():
+                try:
+                    os.killpg(int(ready.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_completed_installer_with_retained_pipe_is_not_a_failed_update(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.1)
+        pid_file = tmp_path / "escaped-child"
+        code = (
+            "import subprocess, sys\n"
+            "from pathlib import Path\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time\\ntime.sleep(30)'], "
+            "start_new_session=True)\n"
+            "Path(sys.argv[1]).write_text(str(child.pid))\n"
+            "print('completed', flush=True)\n"
+        )
+        try:
+            result = upgrade._run_pipx([sys.executable, "-c", code, str(pid_file)])
+            assert result.returncode == 0
+            assert "completed" in result.stdout
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_repeated_interrupt_stops_the_installer_before_returning(self, tmp_path):
         pid_file = tmp_path / "installer-pid"
         cleanup_started = tmp_path / "cleanup-started"
@@ -258,6 +399,7 @@ class TestPipxSeams:
             "from pathlib import Path\n"
             "from mind_meld import upgrade\n"
             "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade.CACHE_DIR = Path(sys.argv[1]) / 'config'\n"
             "upgrade._install_prefix = lambda: Path(sys.argv[1]) / 'pipx/venvs/mind-meld'\n"
             "upgrade.PIPX_STOP_GRACE_SECONDS = 0.5\n"
             "def interrupt(signum, frame):\n"
@@ -737,8 +879,8 @@ class TestAttemptGate:
         monkeypatch.setattr(upgrade, "locked_json_rmw", refuse)
         assert upgrade._claim_install_attempt("1.3.0", now=NOW) == "unavailable"
 
-    def test_cached_view_reports_the_attempt(self, monkeypatch):
-        _set_version(monkeypatch, "1.2.0")
+    def test_cached_view_reports_the_attempt(self, pipx_install):
+        pipx_install()
         base = {"latest_version": "1.3.0", "checked_at": NOW.isoformat()}
         upgrade.CACHE_PATH.write_text(json.dumps(base))
         assert upgrade.cached_upgrade_view({}, now=NOW).install_attempt is None
@@ -751,6 +893,22 @@ class TestAttemptGate:
         # An attempt at an older release says nothing about this one.
         upgrade.CACHE_PATH.write_text(json.dumps(base | attempt | {"latest_version": "1.4.0"}))
         assert upgrade.cached_upgrade_view({}, now=NOW).install_attempt is None
+
+    def test_cached_view_does_not_blame_a_foreign_install(self, pipx_install):
+        pipx_install(spec="git+https://github.com/someone/mind-meld.git@latest")
+        upgrade.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "1.3.0",
+                    "checked_at": NOW.isoformat(),
+                    "install_attempt_version": "1.3.0",
+                    "install_attempt_at": NOW.isoformat(),
+                }
+            )
+        )
+        assert (
+            upgrade.cached_upgrade_view({}, now=NOW + timedelta(hours=30)).install_attempt is None
+        )
 
 
 # ── update_or_nudge ───────────────────────────────────────────────────────
@@ -1345,9 +1503,9 @@ class TestSeams:
         assert result.exit_code == 0, result.output
         assert "did not complete" in result.stderr
 
-    def test_status_names_a_failed_automatic_update(self, tmp_path, monkeypatch):
+    def test_status_names_a_failed_automatic_update(self, tmp_path, monkeypatch, pipx_install):
         _setup_real_config(tmp_path, monkeypatch)
-        _set_version(monkeypatch, "1.2.0")
+        pipx_install()
         now = datetime.now(timezone.utc)
         cache = {"latest_version": "1.3.0", "checked_at": now.isoformat()}
         upgrade.CACHE_PATH.write_text(json.dumps(cache))

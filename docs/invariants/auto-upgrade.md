@@ -80,13 +80,28 @@ cache keys carry it: `install_attempt_version`, `install_attempt_at`,
 `install_attempt_outcome`. A claim that cannot be recorded is not a claim —
 without the stamp every later pull and push would start its own pipx.
 
-- Inside `INSTALL_GRACE` (10 min) an unfinished attempt is `in-flight`: later
+**Installer exclusion is independent of the daily claim.** Both subprocess
+seams take a nonblocking kernel flock on `~/.config/mind-meld/install.lock`.
+Only that descriptor is passed to pipx; it does not inherit the mm lock.
+The parent closes its copy without `LOCK_UN`, so the detached child retains
+exclusion after its hook exits and releases it automatically when pipx exits.
+Never unlink this lockfile. Explicit updates and automatic retries cannot
+start another installer while it is held, even after 24 hours or for a newer
+release. The claim checks this live lock before changing the cache.
+
+- A live installer is always `in-flight`. Inside `INSTALL_GRACE` (10 min),
+  an unfinished cache-only attempt also reads as `in-flight`: later
   runs neither re-spawn nor nudge. A detached install reports nothing back, so
   this window is what stops a second hook calling a healthy install failed.
-- Past the grace, still being behind means the attempt failed. The nudge
+- Past the grace, with no live installer, still being behind means the attempt failed. The nudge
   resumes (its own 24h gate) with the log path appended, `mm status` prints
   one extra line, and the next attempt waits out `DEFAULT_INSTALL_RETRY_GAP`.
 - A newer release resets the gate immediately.
+
+Status probes the installer lock without creating it or waiting. It surfaces
+an attempt only for the running release-tracking install while its recorded
+version is still behind; a foreign or already-updated install never inherits
+another installation's failed-attempt message.
 
 **Attended vs unattended.** `push` / `pull` run pipx in the foreground after
 `release_lock()`, re-take the mm lock for the swap, and print
@@ -102,6 +117,8 @@ first sends SIGINT, waits at most five seconds, then escalates to SIGKILL
 and waits before releasing the mm lock. It checks the process group even
 after its parent and pipes exit. Pipe cleanup is bounded too. Recovery
 commands bind the same pipx home and preserve the suffix.
+If pipx already exited before the pipe timeout, bounded cleanup preserves
+that exit result and the caller still verifies the installed metadata.
 Further Ctrl-C presses are ignored until cleanup finishes; the previous
 signal handler is then restored before propagating the original interruption.
 Cancelling an optional update preserves the completed sync and marks its
