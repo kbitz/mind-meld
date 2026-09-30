@@ -60,27 +60,38 @@ public API guarantees. No private memory text or conversation data belongs in
 this design or committed fixtures. Use sanitized fixtures that preserve the
 measured structure.
 
-Raw qualification artifacts (extraction rows, database copies, recalled text)
-stay outside ephemeral workspaces **and outside everything mm or iCloud
-syncs**: every source `mm sources` lists, enabled or disabled (a disabled
-source syncs again when re-enabled), every root in `config.DEFAULT_SOURCES`
-whether or not its directory exists yet (mm adds the default for a host as soon
-as its directory appears, so `config.toml` alone understates the set), mm's own
-storage root, and any iCloud-synced folder. Verify by file
-identity, not path strings. Walk up from the destination and confirm that no
-ancestor is the same file (device and inode, for example `os.path.samefile`)
-as any of those roots, because symlinks, case-insensitive aliases and firmlinks
-defeat string containment. The default gstack source syncs
-`~/.gstack/projects/`, so that directory is not a safe home for raw memory
-content. `~/scratch/` is a candidate to verify, not an automatic guarantee.
+Raw qualification artifacts (extraction rows, database copies, recalled text),
+including the disposable `CODEX_HOME` that accumulates them, stay outside
+ephemeral workspaces **and outside everything mm or iCloud syncs**. The set to
+avoid is:
+
+- every source configured in `config.toml`, including a custom source whose
+  directory does not exist yet (`mm sources` lists a source only while its
+  directory exists, so an experiment that creates the directory can start a
+  sync);
+- every source that is disabled, since it syncs again when re-enabled;
+- every root in `config.DEFAULT_SOURCES`, existing or not, because mm adds a
+  host's default source as soon as its directory appears;
+- mm's own storage root, and iCloud-synced folders such as
+  `~/Library/Mobile Documents/` and, when enabled, Desktop and Documents.
+
+Verify by physical location, not path strings. Resolve the destination
+completely (resolve its deepest existing ancestor and append the parts that do
+not exist yet), then compare each ancestor of the resolved path with each root
+by file identity (device and inode, for example `os.path.samefile`). Symlinks,
+case-insensitive aliases and firmlinks defeat string containment, and a lexical
+walk up the parents misses a symlink into a synced subtree. The default gstack
+source syncs `~/.gstack/projects/`, so that directory is not a safe home for
+raw memory content. `~/scratch/` is a candidate to verify, not an automatic
+guarantee.
 
 Never copy `auth.json`, `config.toml` (which can embed provider environment
 variables) or any other credential-bearing file into an experimental
 `CODEX_HOME`; write a minimal configuration by hand. If a run needs
-credentials, use only a mechanism the source contract records, and remove what
-it created, including any keyring entry, when the run ends. If the host offers
-no such mechanism, the affected measurement is unsupported. Delete the
-disposable home after the run.
+credentials, record the mechanism in the source contract before the credentialed
+run begins, and remove what it created, including any keyring entry, when the
+run ends. If the host offers no such mechanism, the affected measurement is
+unsupported. Delete the disposable home after the run.
 
 OpenAI describes local memories as asynchronously generated state and advises
 against hand-editing the generated files as the primary control surface. That
@@ -147,15 +158,22 @@ walker; documentation alone does not prove fleet path portability. See
   retirement holds only if every peer that can publish honors it,
   qualification must state which peer versions honor retirement records and
   how enrollment is bounded for peers that cannot be gated that way.
+- The exporter and the receiving consumer run on push and pull, so they follow
+  the unattended-hook contract in [AGENTS.md](../../AGENTS.md) and
+  [events and retro](../invariants/events-retro.md): `autopull` and `autopush`
+  are silent on the happy path, never prompt, respect their budgets, and record
+  a degraded breadcrumb for any new degradation. A failure like E4 or F3 on an
+  unattended path must surface in `mm status`, not only in a hook's stderr.
 
 ## Work packages and release gates
 
-Each row maps to a work package routed from the TODO inbox. The linked work package defines its tasks;
-this table defines the deliverable and the evidence needed to finish it. All
+Each row maps to a work package routed from the TODO inbox. The linked work
+package defines its tasks; this table defines the deliverable and the evidence
+needed to finish it. All
 packages are pending. The prototype is part of qualification and the bridge
 package, not permission to deploy an incomplete sync protocol.
 
-| Work package / TODO | Depends on | Deliverable | Exit gate |
+| Work package | Depends on | Deliverable | Exit gate |
 |---|---|---|---|
 | [Qualify Codex memory portability and recall](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) | None | Versioned adapter contract, sanitized live-source fixtures, isolated import/recall prototype | Native lifecycle measured; forgetting and ancestry capabilities established; unsafe integration candidates rejected |
 | [Deliver Codex memory sync across Macs](../roadmap-future.md#codex-memory-sync) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting, echo and hostile-content gates below pass; native regeneration preserves the qualified behavior |
@@ -230,7 +248,7 @@ Resolve the following in the source contract before writing production code:
 
 | Decision | Required behavior |
 |---|---|
-| Unit of export | Smallest durable memory unit the native source can actually identify. If individual facts have no reliable identity, fall back only to a project-scoped export with enforceable ownership, a stable root identity, immutable revisions, retirement and ancestry semantics. Retirement then applies at the granularity of that export: the mm forget control retires the whole unit and, on an explicit user action, mints a successor identity seeded from the remaining facts, and the limitation is reported. A later native export that merely omits a fact never supersedes it (see Absence/removal), and F2 runs in this mode across a native regeneration. Per-fact forgetting needs a native per-fact delete signal or an mm-owned capture path. A copied generated handbook or a mixed-project dump is never that fallback |
+| Unit of export | Smallest durable memory unit the native source can actually identify. If individual facts have no reliable identity, fall back only to a project-scoped export with enforceable ownership, a stable root identity, immutable revisions, retirement and ancestry semantics. Retirement then applies at the granularity of that export: the mm forget control retires the whole unit and the limitation is reported. A later native export that merely omits a fact never supersedes it (see Absence/removal), and F2 runs in this mode across a native regeneration in which the native store still holds the forgotten fact. Per-fact forgetting needs a native per-fact delete signal or an mm-owned capture path, and any successor or restoration path is open question 7. A copied generated handbook or a mixed-project dump is never that fallback |
 | Ownership | Origin host/device owns its source export; every revision preserves its root identity and imported ancestry; received replicas and generated retrieval views are not newly authored memories |
 | Revision | Stable source identifier plus immutable content revision and explicit supersession; preserve source date and observation date separately; peer clock alone does not choose truth |
 | Publication | Read a consistent source revision, validate it, write atomically, and publish only a complete export through the existing encrypted manifest |
@@ -304,14 +322,19 @@ then stands.
 ### Forgetting and corrections
 
 **Identity and authority.** A memory has a stable root identity scoped by
-project, originating agent/device, and native source identifier. Changes create
-immutable revisions of that identity. Source ownership governs ordinary
+project, originating agent/device, and native source identifier. That identity
+must survive a device re-registration (a new `device_id`) and a project alias
+remap, or retirement must carry over across them (open question 17). Changes
+create immutable revisions of that identity. Source ownership governs ordinary
 updates; the enrolled user can retire a shared memory from either agent/Mac.
 Peer-supplied text cannot itself request retirement or create user authority.
-The forget and enroll controls demand a confirmation an agent cannot supply,
-such as an interactive prompt or another out-of-band step. An agent-run
-invocation without it authors no retirement and no enrollment, so a poisoned
-memory cannot talk an agent into retiring or enrolling anything.
+The forget and enroll controls must not be satisfiable by an agent acting on
+recalled text. An interactive prompt alone does not qualify, because piped
+stdin or a pty answers one. Qualification must name an approval channel outside
+the agent's tool control, or record that none exists; until one is qualified,
+an agent-run invocation of either control is unsupported and authors nothing.
+The same rule covers a native delete: it becomes a retirement only when
+qualification shows the delete was user-originated.
 
 **Retirement wins.** A forget action writes a separate encrypted retirement
 record targeting the root identity, not just the current content hash. The
@@ -331,12 +354,15 @@ deferred until a proven peer-acknowledgment protocol can preserve the guarantee.
 as one accepted local view before serving the new revision. Apply retirement
 filtering before indexing and at retrieval; invalidate cached excerpts and
 indexes. Unknown or unsupported control state makes the affected view
-unavailable, not permissively live. The affected view is the one named by a
-validated storage-key component of the control record, never by its body; when
-no component validates, every enrolled project view on the receiving Mac is
-unavailable, with a visible local remedy. Derived indexes remain rebuildable local
-state. Disabling sharing hides records without authoring retirements; an
-incomplete scan or empty consolidation cannot create a forget action.
+unavailable, not permissively live. The affected view is the one named by the
+record's validated project scope, which is checked against the enrolled
+projects and lives in the encrypted record header or manifest path; it is never
+taken from a body a peer authored, and a project identifier never appears in a
+plaintext storage key. When no scope validates, every enrolled project view on
+the receiving Mac is unavailable, with a visible local remedy. Derived indexes
+remain rebuildable local state. Disabling sharing hides records without
+authoring retirements; an incomplete scan or empty consolidation cannot create
+a forget action.
 
 **Handle source changes deliberately.** A qualified native delete signal can
 produce retirement. Mere disappearance during consolidation cannot. If the
@@ -415,20 +441,27 @@ behaves, which live qualification observes separately.
 
 | Test | Experiment | Pass condition |
 |---|---|---|
-| H1: forged authority | A memory body, and a revision or summary derived from it, asks to retire an identity, enroll a project, grant a tool permission, override an instruction, edit an instruction file or run the forget or enroll control, and tries to forge its own origin label with a newline, delimiter or fake header | The retirement set, enrollment, permission grants and instruction files are unchanged by mm, and an agent-run forget or enroll without the confirmation an agent cannot supply authors nothing; the text is delivered only as bounded data inside a frame it cannot close, under an origin label built from validated identifiers rather than peer-supplied names |
+| H1: forged authority | A memory body, and a revision or summary derived from it, asks to retire an identity, enroll a project, grant a tool permission, override an instruction, edit an instruction file, run the forget or enroll control, or delete a native memory, and tries to forge its own origin label with a newline, delimiter or fake header. A peer-controlled `device_id`, project identifier or path component carrying newline, ESC, bidirectional or delimiter characters is added too, because the existing validators reject only path traversal | The retirement set, enrollment, permission grants and instruction files are unchanged by mm. An agent-run forget or enroll authors nothing, including one that answers a prompt through piped stdin or a pty or passes a bypass flag; a native delete without qualified user origin authors no retirement. The text is delivered only as bounded data inside a frame it cannot close, under an origin label built from a strict allowlist grammar (for example a fixed-length hexadecimal device short id and a defined project-identifier charset), never from peer-supplied names |
 | H2: mis-scoped records | A record or control targets another project's identity, or has an unattributable or multi-project scope | It is rejected, and cannot retire, supersede or appear in another project's view. A memory record that cannot be scoped is not exported; a control record that cannot be scoped follows the fail-closed rule under Make withdrawal coherent |
-| H3: forged or unsupported metadata | A record claims ancestry, origin, revision, or a control/schema version it cannot support | Unsupported control or schema state makes the affected view unavailable, as defined under Make withdrawal coherent, and does not touch other views. A memory record cannot gain independence, suppress unrelated identities, or count as a newer authority by claiming ancestry or origin it cannot support. Whether one unsupported control record may deny a project's recall fleet-wide is open question 7 |
+| H3: forged or unsupported metadata | A record claims ancestry, origin, revision, or a control/schema version it cannot support | Unsupported control or schema state makes the affected view unavailable, as defined under Make withdrawal coherent; when the record's project scope validates, other views stay live. A memory record cannot gain independence, suppress unrelated identities, or count as a newer authority by claiming ancestry or origin it cannot support. Whether one unsupported control record may deny a project's recall fleet-wide is open question 7 |
 | H4: instruction-like and terminal-control content | Recalled content mixes instruction-like text with ESC/C1/OSC/CSI sequences, CR, BEL, bidirectional and other invisible format characters, and Rich-markup lookalikes | Two separate assertions pass on rendered output, not on whether a sanitizer was called. First, each terminal print site the feature adds is free of ESC/C1 and shows the payload literally. `safe_str` and `safe_text` remove only ESC/C1, so CR, BEL and bidirectional or format characters still reach the terminal; a site that shows recalled content must neutralize them, as `safe_terminal_str` does for single-line output, and multi-line display needs a helper the qualification defines (open question 15). Second, delivery to the agent is bounded, attributed data that requests no privilege. Passing one never substitutes for the other |
 
 H1 and H2 test the deterministic part of retirement authority. Who may author a
 retirement, and how a peer proves it, is an open qualification question below.
 
+Expected view state for the control-record cases, so a test author can decide
+each one: an unsupported version whose project scope validates makes that view
+unavailable and leaves every other view live; an unsupported version whose
+scope does not validate makes every enrolled project view on the receiving Mac
+unavailable; a record whose validated scope names project A but whose target
+names project B is rejected and leaves A live.
+
 Run F1-F4, E1-E4 and H1-H4 against sanitized deterministic fixtures in the
 prototype, then record live host evidence for consolidation, recall, and
 withdrawal. Hostile payloads are constructed in test code, never committed as
-prose. The
-fixtures alone cannot establish native behavior. Execute the same suite for
-same-agent transfer first and the Claude/Codex bridge second. Assertions inspect
+prose. The fixtures alone cannot establish native behavior. Execute the same
+suite for same-agent transfer first and the Claude/Codex bridge second.
+Assertions inspect
 the actual delivered context and record lineage; an answer that guesses the
 forgotten fact from code is not evidence of a transport failure.
 
@@ -488,8 +521,9 @@ generated recall views, credentials and local enrollment state never enter it,
 and the retrieval command enforces enrollment locally, so a Mac that has not
 enrolled the project gets an honest unavailable result from the same
 instruction. Installing the instruction is a user-approved change; mm does not
-edit host settings silently. Load individual memories only when relevant. Prototype CLI-based retrieval first; an MCP transport is an
-alternative if needed, not a required server. Proposed commands such as
+edit host settings silently. Load individual memories only when relevant.
+Prototype CLI-based retrieval first; an MCP transport is an alternative if
+needed, not a required server. Proposed commands such as
 `mm memory context` and `mm memory show` are design examples and do not exist.
 The receiving integration must be tested in Conductor and direct CLI; an
 installed skill alone is not proof that every fresh session retrieves memories.
@@ -547,8 +581,8 @@ evidence that the corresponding capability is present and needed.
    re-export loops? If not, demonstrate the required publication block and
    explicitly size any user-approved capture fallback before enabling sharing.
 
-These are bounded qualification questions. The immediate next work is the
-first TODO, not a blanket expansion of the Codex sync allowlist.
+These are bounded qualification questions. The immediate next work is Track 68A
+(qualification), not a blanket expansion of the Codex sync allowlist.
 
 ### Further questions retained for qualification and later packages
 
@@ -572,9 +606,11 @@ this plan, until a Track resolves it; none is decided by this document.
    peer suppress, and how does the user detect and recover from that? Can one
    unsupported or forged control record make a project's recall unavailable
    across the whole fleet, given that unknown control state fails closed? Decide
-   whether a restoration path exists and what identifies the enrolled user's
-   own retirements. Which peer versions honor retirement records is governed by
-   the compatibility constraint above.
+   whether a restoration or successor path exists, what identifies the enrolled
+   user's own retirements, and which approval channel an agent cannot drive
+   (see Identity and authority; piped stdin and a pty defeat a plain prompt).
+   Which peer versions honor retirement records is governed by the
+   compatibility constraint above.
 8. **Project-identity ordering.** Codex transport scopes exports by project and
    parity needs correct association across different home paths, but the
    project identity contract appears only in the later bridge package, and
@@ -636,16 +672,21 @@ this plan, until a Track resolves it; none is decided by this document.
     machine-local paths. Establish which channel actually carries it: on this
     Mac, at inspection, `~/.codex/AGENTS.md` is a symlink into a dotfiles
     repository, and mm's walker does not sync symlinks below a source root, so
-    the carrier may be git and not mm. An honest "unavailable" result is read by an agent, so
-    enrollment must not be an action the agent can invoke from a remedy string.
+    the carrier may be git and not mm. An honest "unavailable" result is read
+    by an agent, so enrollment must not be an action the agent can invoke from
+    a remedy string.
 15. **The agent-facing delivery sink.** Recalled content that reaches an agent
     is neither a Rich markup site, a diff body nor single-line stderr, so none
-    of the three terminal helpers fits: `safe_str` backslash-escapes brackets,
-    `safe_terminal_str` flattens newlines, and none of them removes CR,
-    bidirectional or other invisible format characters. Define the framing
-    (bounded, delimited, a frame the payload cannot close), the origin label
-    (built from validated identifiers, never a peer-supplied display name such
-    as `device_name`), and what is neutralized, then test it under H1 and H4.
+    of the three terminal helpers fits. `safe_str` and `safe_text` remove only
+    ESC/C1 and leave CR, BEL and bidirectional or format characters in place,
+    while `safe_terminal_str` renders those characters and newlines as visible
+    ASCII notation, which alters the payload instead of delivering it. Terminal
+    display of multi-line memory, such as a proposed `mm memory show`, has the
+    same need; the existing composition for a Rich sink is
+    `safe_str(safe_terminal_str(x))`. Define the framing (bounded, delimited, a
+    frame the payload cannot close), the origin label (built from an allowlist
+    grammar, never a peer-supplied display name such as `device_name`), and what
+    is neutralized, then test it under H1 and H4.
 16. **The Claude adapter's own census.** The bridge adds a Claude adapter over
     project memory directories, but qualification censuses only Codex. Claude's
     per-project memory can hold typed entries (user, feedback, project,
@@ -654,6 +695,25 @@ this plan, until a Track resolves it; none is decided by this document.
     not project scope. Census Claude's records and use their type as one scope
     signal before the bridge. Until then, user-type and unattributable entries
     stay unshared by default.
+17. **Identity stability.** Root identity includes the originating device, and
+    `devices.py` mints a fresh `device_id` on every registration, while the
+    project identifier can be remapped for remote renames and forks. A retired
+    memory must stay retired after a Mac is re-initialized or a project alias
+    changes, so decide which inputs are stable enough to derive identity from,
+    or how retirement carries across a remap. Add F-cases for "a Mac
+    re-registers with a new device_id" and "the project remote is renamed or
+    aliased".
+18. **Coexistence with the existing raw Claude memory sync.** The claude source
+    already syncs each project's `memory/` directory as ordinary files:
+    `manifest.walk_claude_source` publishes it, `_apply_incoming_file` writes
+    peer bytes into the native directory, and `merge._merge_strategy` line-unions
+    any `MEMORY.md`. Retirement never reaches that path, so it can carry a
+    retired memory or bring back index lines, and mixed-fleet peers keep
+    republishing the raw files. Decide what happens to that sync once the Claude
+    adapter is enabled for a project (narrow or disable it, or identify replicas
+    from pull-history or accepted-manifest evidence), and extend E1 and F1 to the
+    Claude native-directory path. The statement that exporters exclude mm's
+    downloaded replicas by construction cannot be assumed for Claude until then.
 
 The [Track 68A card](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall)
 carries this document in its read-first list so these questions travel with the

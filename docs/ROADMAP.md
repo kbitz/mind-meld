@@ -40,7 +40,7 @@ _Depends on: none_
 ##### Track 68A: Qualify Codex memory portability and recall
 _3 tasks . ~350 LOC . medium risk . 3 files plus sanitized fixtures_
 _touches: docs/designs/memory-continuity.md, docs/designs/codex-memory-contract.md (new), tests/fixtures/host_memories/codex/ (new), tests/test_memory_contract.py (new)_
-_read-first: docs/designs/memory-continuity.md (native qualification, forgetting/echo/hostile-content contracts, and the retained open qualification questions), docs/invariants/sync.md (generated files, consent, deletion proof, tombstones and previews), docs/invariants/conflicts.md (MEMORY.md merge dispatch), docs/invariants/init-devices.md (sink-specific sanitization of peer-controlled strings), docs/invariants/auto-upgrade.md (Compatibility (1.x) and newer-format refusal), AGENTS.md (testing and source ownership)_
+_read-first: docs/designs/memory-continuity.md (native qualification, forgetting/echo/hostile-content contracts, and the retained open qualification questions), docs/invariants/sync.md (generated files, consent, deletion proof, tombstones and previews), docs/invariants/conflicts.md (MEMORY.md merge dispatch), docs/invariants/init-devices.md (sink-specific sanitization of peer-controlled strings), docs/invariants/auto-upgrade.md (Compatibility (1.x) and newer-format refusal), AGENTS.md (testing, source ownership and the autopush/autopull unattended-hook rules)_
 _produces: a versioned live-source contract, sanitized fixtures, repeatable recall evidence, and a qualified native-import or explicitly separate mm recall design that the transport implementation can consume_
 _session: fresh · effort: high · verify: ./bin/check tests/test_memory_contract.py tests/test_docs_routing.py_
 
