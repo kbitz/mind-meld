@@ -4632,12 +4632,13 @@ def test_capture_failure_nudges_upgrade_after_unlock(capture61, monkeypatch):
     )
     calls = []
 
-    def nudge(config):
+    def nudge(config, *, attended):
         cli_module.acquire_lock()
         cli_module.release_lock()
+        assert attended
         calls.append("nudge")
 
-    monkeypatch.setattr(cli_module.upgrade, "emit_nudge_if_due", nudge)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", nudge)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert calls == ["nudge"]
@@ -7120,6 +7121,7 @@ COMMAND_INTENTS62 = {
         "resolve",
         "autopull",
         "autopush",
+        "update",
     )
 } | {
     name: ("inspection", None)
@@ -9558,13 +9560,14 @@ def test_push_stop_reports_failure_and_nudges_only_after_a_real_attempt(
 
     nudges = []
 
-    def nudge(config):
+    def nudge(config, *, attended):
         cli_module.acquire_lock()  # proves the lock was released first
         cli_module.release_lock()
+        assert attended
         nudges.append(config["device"]["id"])
 
     monkeypatch.setattr(cli_module, "_push_core", stop)
-    monkeypatch.setattr(cli_module.upgrade, "emit_nudge_if_due", nudge)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", nudge)
     result = runner.invoke(app, ["push", *(["--dry-run"] if dry_run else [])])
     assert result.exit_code == 1, result.output
     flat = " ".join(result.stderr.split())

@@ -153,6 +153,11 @@ installed version; absent means unmeasured, not zero. The upgrade command is
 not invent a different one. After they run it they still need
 `mm install-skills`, then an agent restart.
 
+If the tail instead says mm **updated** itself, relay that verbatim too. The
+rest of this run already uses the new binary, but this session still holds the
+old skill: they need `mm install-skills`, then an agent restart, and no pipx
+command.
+
 Silence is not evidence of freshness. The notice is 24h-throttled, skipped when
 `[upgrade] auto_check = false` or `--no-check-version`, and network-dependent.
 

@@ -579,5 +579,6 @@
       "required": false,
       "type": "str"
     }
-  }
+  },
+  "update": {}
 }

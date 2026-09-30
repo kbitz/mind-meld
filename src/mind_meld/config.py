@@ -373,6 +373,14 @@ def _apply_defaults(config: dict[str, Any]) -> None:
     upgrade = config.setdefault("upgrade", {})
     if "auto_check" not in upgrade or not isinstance(upgrade.get("auto_check"), bool):
         upgrade["auto_check"] = True
+    # Self-update (v1.3.0): on by default, and it only acts on what
+    # `auto_check` finds. Same no-crash leniency, opposite fallback: this key
+    # lets mm run pipx, so a value that is not a boolean (`"false"`, `0`)
+    # reads as off rather than on.
+    if "auto_install" not in upgrade:
+        upgrade["auto_install"] = True
+    elif not isinstance(upgrade["auto_install"], bool):
+        upgrade["auto_install"] = False
 
     # Canonicalize paths: expanduser + resolve matches the walker / storage pattern.
     # claude_dir is only present in legacy configs; guard the expansion accordingly.
