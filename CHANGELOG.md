@@ -2,6 +2,32 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.3.0] - 2026-10-01
+
+**`mm update` installs the latest release for you, and `mm push`, `mm pull` and the Claude Code hooks keep a pipx install current on their own.** Updating needs no config or passphrase, and a failed update never changes the exit code of the sync that triggered it.
+
+### Added
+
+- `mm update` forces a release check, ignoring the 24-hour throttle, `[upgrade] auto_check = false` and `--no-check-version`, then runs pipx. It exits 0 once the install is current, never counting an intermediate version as done, and 1 when the update is incomplete or this is not a pipx release install. It works on a Mac whose sync is refusing, which is when an update is the remedy.
+- Optional `[upgrade] auto_install`, on by default; a non-boolean value reads as off. Attended `mm push` and `mm pull` update in the foreground under the mm lock. `mm autopull` and `mm autopush` start a detached pipx that logs to `~/.config/mind-meld/auto-update.log`. Both opt-outs of the release check also stop the install; `recapture` stays nudge-only and previews never check or install.
+- The automatic path runs only `pipx upgrade` on an exact `@latest` install of this repository. Tag-pinned rollbacks, forks, pipx-pinned and non-pipx installs keep the existing upgrade nudge, so a deliberate rollback is never undone behind your back, and a development build never checks at all. Only an explicit `mm update` can reinstall a tag pin, and only after a fresh check proves a newer release exists.
+- A background update that did not finish is never silent: `mm status` reports it and the upgrade nudge points at `~/.config/mind-meld/auto-update.log`. The retro-fleet skill forwards the "mm updated itself" notice.
+
+### Changed
+
+- One installer runs at a time: a kernel lock outlives a detached hook and releases when pipx exits, so a daily retry, a new release or an explicit `mm update` cannot start a second installer. Contention is reported as a refusal, not a failed install.
+- A successful pipx exit is not trusted on its own. The installed metadata must show the install at the target release, so an intermediate version or a pin that merely moved to `@latest` reports as incomplete rather than done.
+- Pull requests to this repository are reviewed by Greptile on request only (`greptile.json`).
+
+### Fixed
+
+- Cancelling an update, including Ctrl-C while pipx is starting, stops the installer's whole process group before the mm lock is released, and the pipx command always runs against the running install's own pipx home. A forced reinstall also checks and binds its executable directory, so a sibling install is never overwritten.
+
+### Upgrade notes
+
+- The installed 1.2.0 has no updater: install this release once by hand with `pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`. The first automatic update happens at the release after this one. Turn it off with `[upgrade] auto_install = false`.
+- A detached update replaces files while pip runs, so an mm process that starts in those few seconds can fail once at import; the next run works. The automatic path never runs `pipx install --force`, because pipx 1.17.7 removes the venv when a forced reinstall fails.
+
 ## [1.2.0] - 2026-09-23
 
 **Cursor usage through Conductor now joins the fleet Agents table, behind explicit local consent.** Captured runs survive Conductor pruning in durable local history, and coverage and pricing limits stay visible.
