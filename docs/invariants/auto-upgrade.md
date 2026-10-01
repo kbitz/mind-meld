@@ -51,9 +51,10 @@ paths onto one command.
 - `pipx-pinned`, `foreign`, `not-pipx`, `dev` — never touched by either path.
   `mm update` exits 1 and names the reason.
 
-The spec comparison is exact (`== INSTALL_SPEC`, or `REPO_SPEC` followed by
-`@`), never a prefix or substring match: a fork or a lookalike URL must not
-read as ours.
+The spec comparison is exact (`== INSTALL_SPEC` for `tracking`; `== REPO_SPEC`,
+or `REPO_SPEC` followed by `@`, for `pinned`, so an install with no ref at all
+is `pinned` too), never a prefix or substring match: a fork or a lookalike URL
+must not read as ours.
 
 The metadata's package name and suffix must also identify the running venv
 under its pipx home's `venvs/` directory. Both subprocess seams derive

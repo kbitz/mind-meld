@@ -133,7 +133,7 @@ Migrate-config flags: `--yes`, `--dry-run`. Idempotent: appends missing recommen
 Previews (62A): `push`, `pull`, `gc`, and `recapture` allow only the local lock;
 `migrate-config --dry-run` and `diff` take no lock. See README’s Previews table.
 Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`.
-`COMMAND_INTENTS62` in integration tests classifies all 25 commands and audits
+`COMMAND_INTENTS62` in integration tests classifies all 24 commands and audits
 every preview/inspection with exact status-seed and author-filtered identity
 cache exemptions. Never add a command without updating that intent table.
 

@@ -35,6 +35,8 @@ mm update
 
 That's it, and from v1.3.0 you rarely need it: `mm pull` and `mm push` (and the `autopull` / `autopush` hooks) install a newer release on their own once they notice one. See [Automatic updates](#automatic-updates). `mm update` needs no config and no passphrase, so it also works on a Mac whose sync is refusing.
 
+`mm update` and the automatic path both ship in v1.3.0, so an mm older than that (1.2.0 and below) has neither: update it once by hand with `pipx upgrade mind-meld`, or the `@latest` reinstall below if that leaves you on the same version. The first release an installed mm can fetch for you is the one after v1.3.0.
+
 Under the hood it runs `pipx upgrade mind-meld`. Because the install tracks the moving `latest` branch (not a frozen tag), pipx re-resolves it to the newest release and lands it. Running that pipx command yourself is equivalent.
 
 **Stuck on an old version?** If you ever installed or upgraded with the old `--force …@vX.Y.Z` form, your install is pinned to that exact tag — pipx re-resolves the frozen ref on every `pipx upgrade` and reports your current version as "latest" forever. A git tag never moves; a branch does. `mm update` detects the pin and, when a newer release exists, reinstalls onto the `latest` branch for you. On an mm older than v1.3.0, run this once instead:
@@ -49,12 +51,12 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub for a newer release tag after the sync has finished. If there is one, mm updates itself:
 
-- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground and print `mm: notice: updating mm <old> → <new> …`, then `updated`. Expect a short one-off wait per release while pipx clones and builds.
+- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground and print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it`. Expect a short one-off wait per release while pipx clones and builds.
 - **`mm autopull` / `mm autopush`** start the same command in the background and return immediately, printing nothing. The output goes to `~/.config/mind-meld/auto-update.log`.
 
 The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
 
-mm only ever updates itself with the in-place `pipx upgrade`, and only when it was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead.
+The automatic path only ever runs the in-place `pipx upgrade`, and only when mm was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead. Only an explicit `mm update` reinstalls a tag-pinned install onto `@latest`.
 
 To turn it off:
 
@@ -272,7 +274,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | Command | Description |
 |---------|-------------|
 | `mm --version` | Print the installed version and exit |
-| `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or this mm was not installed from the release branch by pipx (the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
+| `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture-codex-and-grok) |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
