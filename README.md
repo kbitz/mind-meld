@@ -30,18 +30,44 @@ The first push needing that refresh prints `mm: notice: refreshing identity cach
 For `Pull incomplete:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
 
 ```bash
-pipx upgrade mind-meld
+mm update
 ```
 
-That's it. Because the install tracks the moving `latest` branch (not a frozen tag), `pipx upgrade` re-resolves it to the newest release and lands it.
+That's it, and from v1.3.0 you rarely need it: `mm pull` and `mm push` (and the `autopull` / `autopush` hooks) install a newer release on their own once they notice one. See [Automatic updates](#automatic-updates). `mm update` needs no config and no passphrase, so it also works on a Mac whose sync is refusing.
 
-**Stuck on an old version?** If you ever installed or upgraded with the old `--force …@vX.Y.Z` form, your install is pinned to that exact tag — pipx re-resolves the frozen ref on every `pipx upgrade` and reports your current version as "latest" forever. A git tag never moves; a branch does. Run this once to switch onto the `latest` branch, after which plain `pipx upgrade mind-meld` works:
+`mm update` and the automatic path both ship in v1.3.0, so an mm older than that (1.2.0 and below) has neither: update it once by hand with `pipx upgrade mind-meld`, or the `@latest` reinstall below if that leaves you on the same version. The first release an installed mm can fetch for you is the one after v1.3.0.
+
+Under the hood it runs `pipx upgrade mind-meld`. Because the install tracks the moving `latest` branch (not a frozen tag), pipx re-resolves it to the newest release and lands it. Running that pipx command yourself is equivalent.
+
+**Stuck on an old version?** If you ever installed or upgraded with the old `--force …@vX.Y.Z` form, your install is pinned to that exact tag — pipx re-resolves the frozen ref on every `pipx upgrade` and reports your current version as "latest" forever. A git tag never moves; a branch does. `mm update` detects the pin and, when a newer release exists, reinstalls onto the `latest` branch for you. On an mm older than v1.3.0, run this once instead:
 
 ```bash
 pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 ```
 
-(This is exactly the command mm's auto-upgrade nudge prints.)
+(This is exactly the command mm's upgrade nudge prints.)
+
+### Automatic updates
+
+Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub for a newer release tag after the sync has finished. If there is one, mm updates itself:
+
+- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground and print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it`. Expect a short one-off wait per release while pipx clones and builds.
+- **`mm autopull` / `mm autopush`** start the same command in the background and return immediately, printing nothing. The output goes to `~/.config/mind-meld/auto-update.log`.
+
+The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
+
+The automatic path only ever runs the in-place `pipx upgrade`, and only when mm was installed from `@latest` by pipx. Anything else — a tag-pinned install (including the rollback below), a `pipx pin`, a fork, a local checkout, a non-pipx install — is left alone and gets the printed upgrade notice instead. Only an explicit `mm update` reinstalls a tag-pinned install onto `@latest`.
+
+To turn it off:
+
+```toml
+# ~/.config/mind-meld/config.toml
+[upgrade]
+auto_install = false   # keep the check and the notice; never run pipx
+auto_check = false     # no check at all: no notice and no automatic update
+```
+
+`mm --no-check-version <command>` skips both for one invocation. `mm update` ignores all three settings.
 
 **Need to roll back?** Pin the last 0.x release, then replace the skill store
 with the running package's copy. If the store exists, move it aside first:
@@ -55,8 +81,10 @@ mm install-skills
 
 1.0.0 and 0.14.18 use the same storage and wire formats. Rollback within 1.x
 is a reinstall unless an intervening MINOR's Upgrade notes say otherwise.
-Keep the moved store as a backup. Re-run the `@latest` reinstall above to
-resume upgrades; the nudge never downgrades a pinned install for you.
+Keep the moved store as a backup. A pinned install is never updated
+automatically, so the rollback holds until you run `mm update` (or the
+`@latest` reinstall above) to resume upgrades; neither the nudge nor the
+automatic update downgrades an install for you.
 
 ## Versioning and compatibility
 
@@ -160,7 +188,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, upgrade the producing Mac to v0.14.17+ and run mm push. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
-- **Auto-upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag and emit a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr if you're behind. `mm` never invokes pipx itself; you run the printed command. The command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which plain `pipx upgrade mind-meld` works (see [Upgrading](#upgrading)). Disable with `--no-check-version` for one invocation, or set `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml` to disable persistently. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the nudge fires before that, ideally making the refusal a backstop nobody hits.
+- **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
 
@@ -246,6 +274,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | Command | Description |
 |---------|-------------|
 | `mm --version` | Print the installed version and exit |
+| `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
 | `mm init` | Configure device, storage path, passphrase |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture-codex-and-grok) |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |

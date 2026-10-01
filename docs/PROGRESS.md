@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.3.0 | 2026-10-01 | **`mm update` installs the latest release for you, and `mm push`, `mm pull` and the Claude Code hooks keep a pipx install current on their own.** Updating needs no config or passphrase, and a failed update never changes the exit code of the sync that triggered it. |
 | 1.2.0 | 2026-09-23 | **Cursor usage through Conductor now joins the fleet Agents table, behind explicit local consent.** Captured runs survive Conductor pruning in durable local history, and coverage and pricing limits stay visible. |
 | 1.1.0 | 2026-09-22 | **The fleet retro now reports Claude, Codex and Grok identically — fleet-summed tokens, active days, machines, cost and top model in one `## Agents` table — and moves every data-quality caveat into a machine-readable `MM_HEALTH` block.** Output drops from roughly 150 lines to about 50. |
 | 1.0.0 | 2026-09-22 | **Mind Meld 1.0 establishes the [Compatibility (1.x) contract](invariants/auto-upgrade.md#compatibility-1x) for storage, CLI, and machine-readable output.** Existing 0.14.x fleets interoperate without migration; newer-format storage now refuses safely. |

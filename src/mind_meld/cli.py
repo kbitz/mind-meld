@@ -1,7 +1,7 @@
 """Mind Meld CLI — built with Typer.
 
 Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
-          sources, conflicts, resolve, retro-fleet, recapture.
+          sources, conflicts, resolve, retro-fleet, recapture, update.
 """
 
 from __future__ import annotations
@@ -350,8 +350,8 @@ def _main(
         False,
         "--no-check-version",
         help=(
-            "Skip the auto-upgrade nudge for this invocation. "
-            "Force-skips regardless of \\[upgrade] auto_check in config."
+            "Skip the update check for this invocation: no nudge and no "
+            "automatic update. Force-skips regardless of \\[upgrade] auto_check in config."
         ),
     ),
 ) -> None:
@@ -3850,9 +3850,10 @@ def push(
                     )
         finally:
             release_lock()
-        # Failed attended attempts need the nudge too; previews never fetch/write it.
-        if not dry_run:
-            upgrade.emit_nudge_if_due(config)
+        # Failed attended attempts need the update or nudge too; previews never
+        # fetch, install or write it.
+        if not dry_run and not isinstance(sys.exception(), KeyboardInterrupt):
+            upgrade.update_or_nudge(config, attended=True)
 
 
 def _ensure_device_registered(
@@ -4553,10 +4554,11 @@ def pull(
     finally:
         release_lock()
 
-    # Seam 2 — interactive pull tail nudge. Runs AFTER the lock is released
-    # so the cold-cache HTTP fetch never blocks pull progress.
+    # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
+    # the lock is released so the cold-cache HTTP fetch never blocks pull
+    # progress and the update can take the lock for itself.
     if not dry_run:
-        upgrade.emit_nudge_if_due(config)
+        upgrade.update_or_nudge(config, attended=True)
 
 
 @dataclass
@@ -5951,6 +5953,11 @@ def status(
             f"{safe_str(upgrade_result.local)} → {safe_str(upgrade_result.latest)} "
             f"(run [bold]{safe_str(upgrade_result.install_cmd)}[/bold])"
         )
+        if upgrade_result.install_attempt == "failed":
+            console.print(
+                "  [yellow]Automatic update did not complete:[/yellow] "
+                "run [bold]mm update[/bold] to see why."
+            )
     elif upgrade_result.state == "unknown":
         reason = (
             "contended"
@@ -8695,6 +8702,132 @@ def recapture(
         upgrade.emit_nudge_if_due(config)
 
 
+# ── update ────────────────────────────────────────────────────────────
+
+
+def _update_refusal(install: upgrade.InstallInfo) -> str | None:
+    """Why `mm update` leaves this install alone, or None when it can act."""
+    if install.kind == "dev":
+        return "This mm is a source-tree build, not an installed release. Update it with git."
+    if install.kind == "not-pipx":
+        return (
+            f"This mm ({sys.prefix}) was not installed by pipx, so it cannot update itself. "
+            f"Install the released build with: {upgrade.INSTALL_CMD}"
+        )
+    if install.kind == "pipx-pinned":
+        return f"This mm is held by pipx pin. Run pipx unpin {install.venv_name}, then mm update."
+    if install.kind == "foreign":
+        source = f"from {install.spec}" if install.spec else "from a source mm cannot read"
+        return (
+            f"This mm was installed {source}, not from the release branch, so mm update "
+            f"leaves it alone. To switch to released builds run: {upgrade.INSTALL_CMD}"
+        )
+    return None
+
+
+def _print_update_current(install: upgrade.InstallInfo) -> None:
+    console.print(f"mm {safe_str(install.version)} is up to date.")
+    if install.kind == "pinned":
+        console.print(
+            f"  This install is pinned to {safe_str(install.spec)}, so it will not follow "
+            f"later releases. To track them run: {upgrade.reinstall_cmd(install)}"
+        )
+
+
+@app.command()
+def update() -> None:
+    """Update mm to the latest release.
+
+    Runs pipx for you: an in-place pipx upgrade when this install tracks the
+    release branch, or the @latest reinstall when it is pinned to an old tag.
+    Needs no config and no passphrase, so it works on a Mac where sync is
+    refusing. pull and push do this on their own unless the
+    upgrade.auto_install setting is false.
+
+    Exit 0 means mm is on the latest release. Exit 1 means the update did not
+    complete, or this mm was not installed from the release branch by pipx.
+    """
+    install = upgrade.detect_install()
+    refusal = _update_refusal(install)
+    if refusal is not None:
+        _error(refusal)
+    pipx = upgrade.find_pipx()
+    if pipx is None:
+        _error(f"pipx was not found. Install pipx, then run: {upgrade.INSTALL_CMD}")
+    assert pipx is not None
+
+    # The user asked: the 24h throttle, auto_check and --no-check-version do
+    # not apply.
+    check = upgrade.check_for_upgrade(force=True)
+    pinned = install.kind == "pinned"
+    latest = check.latest if check.state in ("current", "upgrade-available") else None
+    if latest is not None and Version(install.version or "") >= Version(latest):
+        _print_update_current(install)
+        return
+    if pinned and latest is None:
+        # An unreachable GitHub is no verdict. The in-place upgrade below can
+        # still let pipx decide; the forced reinstall a pinned install needs
+        # deletes the venv if it fails, so it never runs on a guess.
+        _error(
+            "Could not reach GitHub to check for a newer release, and this install is pinned "
+            f"to {install.spec}. Retry when online, or run: {upgrade.INSTALL_CMD}"
+        )
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+    try:
+        # Another updater may have completed while the forced HTTP check ran.
+        # Reclassify under the mm lock before choosing a destructive reinstall.
+        install = upgrade.detect_install()
+        refusal = _update_refusal(install)
+        if refusal is not None:
+            _error(refusal)
+        if latest is not None and Version(install.version or "") >= Version(latest):
+            _print_update_current(install)
+            return
+        if install.kind == "pinned" and latest is None:
+            _error("The install is now pinned; retry mm update when GitHub is reachable.")
+        argv = upgrade.update_argv(pipx, install)
+        shown = " ".join(["pipx", *argv[1:]])
+        target = f" → {safe_str(latest)}" if latest is not None else ""
+        console.print(f"Updating mm {safe_str(install.version)}{target} ({shown})…")
+        outcome = upgrade.run_update(install, pipx, latest=latest)
+    except KeyboardInterrupt:
+        print(
+            "Update cancelled. If mm is now missing, reinstall with: "
+            f"{upgrade.reinstall_cmd(install)}",
+            file=sys.stderr,
+        )
+        raise
+    finally:
+        release_lock()
+
+    if outcome.status == "busy":
+        _error(f"Update not started: {outcome.detail}. See {upgrade.update_log_path()}.")
+    if outcome.status == "failed":
+        if outcome.output:
+            print(strip_terminal_escapes(outcome.output.rstrip()), file=sys.stderr)
+        # pipx removes the venv when a forced reinstall fails; say so rather
+        # than leave the user with `mm: command not found` and no command.
+        lost = f" If mm is now missing, reinstall with: {upgrade.reinstall_cmd(install)}"
+        _error(f"Update did not complete: {outcome.detail}.{lost}")
+    if outcome.status == "unchanged":
+        if latest is not None and Version(outcome.new or "") < Version(latest):
+            _error(
+                f"pipx found no build newer than {outcome.old}, but {latest} is tagged. "
+                f"Retry in a minute, or run: {upgrade.INSTALL_CMD}"
+            )
+        console.print(f"mm {safe_str(outcome.old)} is already the latest release pipx can see.")
+        return
+    if outcome.new != outcome.old:
+        moved = f"{safe_str(outcome.old)} → {safe_str(outcome.new)}"
+        console.print(f"[bold green]Updated mm {moved}.[/bold green]")
+    if outcome.now_tracking:
+        console.print("  This install now tracks the release branch.")
+
+
 # ── refresh-identity ──────────────────────────────────────────────────
 
 
@@ -9775,11 +9908,12 @@ def autopull() -> None:
         else:
             _write_autorun_breadcrumb("pull", "success")
 
-        # Seam 2 — auto-upgrade nudge emission at the TAIL. Runs AFTER the
-        # main work + breadcrumb so the cold-cache HTTP fetch latency
-        # (~500ms 1x/24h) doesn't stack on sync latency. Silent unless an
-        # upgrade is genuinely available AND the 24h re-nudge gate permits.
-        upgrade.emit_nudge_if_due(setup.config)
+        # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
+        # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
+        # doesn't stack on sync latency. Unattended: a due update is spawned
+        # detached and says nothing; the nudge prints only when no update can
+        # run AND the 24h re-nudge gate permits.
+        upgrade.update_or_nudge(setup.config, attended=False)
 
 
 @app.command()
@@ -9838,8 +9972,8 @@ def autopush() -> None:
         else:
             _write_autorun_breadcrumb("push", "success")
 
-        # Seam 2 — auto-upgrade nudge emission at the TAIL (mirrors autopull).
-        upgrade.emit_nudge_if_due(setup.config)
+        # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
+        upgrade.update_or_nudge(setup.config, attended=False)
 
 
 # ── helpers ───────────────────────────────────────────────────────────

@@ -236,7 +236,7 @@ Honest writers (`manifest.walk_*`) build rel keys via `path.relative_to(base)` w
 
 ## Push dry-run setup contract (Track 56A)
 
-`mm push --dry-run` changes nothing except the local lock file, including the lock parent's creation when needed. `_get_config(read_only=True)` skips the entire transition hook, and push skips its second config load because migration cannot run. Migration emits the existing warning; only when both streams are TTYs does it explain that the preview uses current config and the command without `--dry-run` offers `mm migrate-config` (default yes). No confirm prompt runs. Crypto repair and mm-events bootstrap are planned; fingerprint backfill stays in memory. The nudge is gated on `not dry_run` in push's finally block. Previews never scan, warm or capture host usage. `lockfile.py` and `_prove_omitted_paths_absent` retain their existing contracts.
+`mm push --dry-run` changes nothing except the local lock file, including the lock parent's creation when needed. `_get_config(read_only=True)` skips the entire transition hook, and push skips its second config load because migration cannot run. Migration emits the existing warning; only when both streams are TTYs does it explain that the preview uses current config and the command without `--dry-run` offers `mm migrate-config` (default yes). No confirm prompt runs. Crypto repair and mm-events bootstrap are planned; fingerprint backfill stays in memory. The update-or-nudge tail (`upgrade.update_or_nudge`, v1.3.0) is gated on `not dry_run` in push's finally block, so a preview never checks, installs or nudges. Previews never scan, warm or capture host usage. `lockfile.py` and `_prove_omitted_paths_absent` retain their existing contracts.
 
 **Missing mm-events root (PC3 reversed by Track 59A).** Missing default event files are deletions, even when the root itself or its `events/` child is gone. Preview completes and reports the deletion a real push would publish, except for the activity row already excluded from preview. A missing default root is omitted from the source list passed to the unchanged deletion proof; it remains an empty source in the local manifest. There is no loss check or automatic restore. Missing custom roots follow the warning-and-skip rule above, in preview and real push. Strict read/access failures still refuse.
 
@@ -256,7 +256,8 @@ survive previews/inspections and are recorded by the next mutating caller.
 read_only: bool)` require an explicit policy. Interactive previews skip the
 post-migration reload and never prompt, even on a TTY; their notice names the
 current command without assuming push. Pull also skips its entire conflict
-discovery/migration sweep, excluded-path history and upgrade nudge. Real pull
+discovery/migration sweep, excluded-path history and the update-or-nudge tail
+(no check, install or nudge). Real pull
 keeps those writes. Success trailers are owned by command wrappers; interrupted
 or refused previews never say they completed. Core setup/crypto/fleet/device,
 GC and recapture refusals carry the lock-qualified dry-run suffix; config,

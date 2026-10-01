@@ -151,6 +151,10 @@ maintain_links = true      # false disables every agent link
                            # removing ONE link is not a config operation: delete it and mm leaves it deleted (v0.12.44)
 # agents = ["claude", "codex"]  # when present, an exhaustive allowlist
 
+[upgrade]                  # optional: release check and self-update (v1.3.0)
+auto_check = true          # false: no release check, so no nudge and no automatic update
+auto_install = true        # false: keep the check and the nudge, never run pipx; a non-boolean value reads as false
+
 [[sync.sources]]
 name = "claude"
 path = "~/.claude"
@@ -374,6 +378,9 @@ mm retro-fleet [WINDOW] [--no-author-filter]
 mm recapture [WINDOW] [--dry-run]
                             # recover Git history on this Mac (default 30d, 1d–90d); commits deduplicate fleet-wide. Does not relabel old event rows or refresh host usage.
                             # --dry-run discovers/walks and reports; changes nothing except the local lock file. Partial previews exit 0, stopped/no-repository previews exit 1.
+mm update                   # install the latest release through pipx (v1.3.0); needs no config or passphrase, so it works while sync is refusing
+                            # exit 0: mm is on the latest release; exit 1: the update did not complete, or this install is not one mm can update (source-tree build, non-pipx, pipx pin, fork)
+                            # push/pull/autopull/autopush run the in-place pipx upgrade themselves unless [upgrade] auto_install = false; see README "Automatic updates"
 ```
 
 `mm diag --json` separates reader cache inventory (`host_usage`) from recorded
@@ -812,7 +819,7 @@ Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill nam
 | Exit | Meaning |
 |---|---|
 | 0 | Command completed. For push, content sync succeeded regardless of capture outcome; verify recorded usage with mm status. |
-| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also an invalid WINDOW, no discovered repositories or a skipped event batch. |
+| 1 | Command stopped. For push, content sync or required maintenance stopped; capture failures alone do not block content. For recapture, also an invalid WINDOW, no discovered repositories or a skipped event batch. For update, the update did not complete or this install cannot be updated through pipx. |
 | 2 | Usage error from the argument parser, such as an unknown option or an invalid option value. |
 | 3 | `pull --conflict-mode fail` preflight refusal, before applying files (including with `--dry-run`). |
 | 4 | `recapture`: partial recovery after publishing available Git rows. Push does not use exit 4. |
