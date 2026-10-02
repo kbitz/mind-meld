@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.4.0] - 2026-10-02
+
+**Mind Meld now has a testable contract for qualifying Codex memory portability, though no route is qualified yet.** Native and Mind Meld-owned routes remain unqualified pending their evidence gates.
+
+### Added
+
+- Define retirement, corrections, ancestry, retention, trust boundaries, and route-promotion gates for a future Codex-memory route in the [Codex memory contract](docs/designs/codex-memory-contract.md) and [continuity plan](docs/designs/memory-continuity.md).
+- Add sanitized structural fixtures and a tests-only reference adapter that checks the contract without claiming real Codex recall, delivery, or user-authority behavior.
+
 ## [1.3.0] - 2026-10-01
 
 **`mm update` installs the latest release for you, and `mm push`, `mm pull` and the Claude Code hooks keep a pipx install current on their own.** Updating needs no config or passphrase, and a failed update never changes the exit code of the sync that triggered it.
