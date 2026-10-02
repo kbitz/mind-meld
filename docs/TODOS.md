@@ -44,7 +44,12 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-None.
+### [review:severity=informational,files=src/mind_meld/fsutil.py] atomic_write_bytes docstring promises an untouched target after a post-rename failure
+- **Description:** `fsutil.atomic_write_bytes` says that on any failure the target is untouched if it existed. With `fsync=True`, a failed `fsync_dir` after `os.replace` raises `StorageError` while the new bytes are already published. `tests/test_memory_contract.py::test_C2_real_atomic_helper_failure_reopens_actual_coherent_bytes[parent-fsync]` asserts exactly that. A caller that treats `StorageError` as "old bytes still in place" can serve or rewrite stale state.
+- **Why:** Track 68A's reference adapter had to model this as an uncertain publication; production callers of `fsync=True` writes (for example `lockedjson`) were not audited.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Found by /review-and-prep's Red Team pass on Track 68A, 2026-10-02. The user chose to keep production `fsutil` untouched in 68A (the [Track 68A card](ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) touches only docs and tests) and record the item here. Fix the docstring, then audit `fsync=True` callers that catch `StorageError`.
 
 ## Drain records
 
