@@ -261,18 +261,27 @@ column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empt
 **Tag = release. Merge to main alone is not.**
 
 The auto-upgrade feature reads the latest tag from `/repos/kbitz/mind-meld/tags`
-and nudges the fleet to upgrade to it. /ship is responsible for tagging.
+and nudges the fleet to upgrade to it. /ship prepares the release PR;
+`.github/workflows/release.yml` creates the tag and GitHub Release automatically
+after a push to `main` touching `pyproject.toml` or `CHANGELOG.md`.
 
-- **Non-breaking ships:** bump `pyproject.toml` + commit + tag (`git tag vX.Y.Z`
-  + `git push --tags`). Fleet sees the nudge within 24h.
-- **Mid-feature WIP merges to main:** land without a tag. Fleet stays on the
-  prior tagged version until a fresh tag is pushed.
+- **Release PRs:** bump `pyproject.toml`, add the matching `CHANGELOG.md` entry
+  and `docs/PROGRESS.md` row, then merge through the approved PR workflow.
+  The Release workflow creates missing tag/Release artifacts and advances
+  `latest` only when that tag points at the merged commit. Verify the workflow,
+  tag and Release after merge; /ship does not manually tag. Fleet sees the
+  nudge within 24h.
+- **Mid-feature WIP merges to main:** leave the released version in place.
+  A change to either trigger file can run the Release workflow, but existing
+  tag/Release artifacts are not recreated and `latest` does not advance to an
+  untagged commit. Fleet stays on the prior tagged release.
 - **Pre-release tags** (containing `-rc`, `-alpha`, `-beta`, `-dev`) and
   **local-version tags** (`+local`) are filtered out by `_pick_latest_tag` —
   tag freely for testing.
 
-Skipping this discipline does not break sync, but it can leak unfinished
-features to the fleet on the next push to main if you forget to NOT tag.
+A version bump merged to `main` triggers a release automatically. Keep
+unfinished release work on the feature branch; omitting a manual tag does not
+prevent publication.
 
 ## Compatibility (1.x)
 

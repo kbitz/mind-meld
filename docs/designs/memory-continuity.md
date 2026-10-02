@@ -62,8 +62,8 @@ measured structure.
 
 Raw qualification artifacts (extraction rows, database copies, recalled text),
 including the disposable `CODEX_HOME` that accumulates them, stay outside
-ephemeral workspaces **and outside everything mm or iCloud syncs**. The set to
-avoid is:
+ephemeral workspaces **and outside everything mm, iCloud, or a third-party
+sync provider syncs**. The set to avoid is:
 
 - every source configured in `config.toml`, including a custom source whose
   directory does not exist yet (`mm sources` lists a source only while its
@@ -73,7 +73,8 @@ avoid is:
 - every root in `config.DEFAULT_SOURCES`, existing or not, because mm adds a
   host's default source as soon as its directory appears;
 - mm's own storage root, and iCloud-synced folders such as
-  `~/Library/Mobile Documents/` and, when enabled, Desktop and Documents.
+  `~/Library/Mobile Documents/` and, when enabled, Desktop and Documents;
+- third-party sync-provider roots such as `~/Library/CloudStorage`.
 
 Verify by physical location, not path strings. Resolve the destination
 completely (resolve its deepest existing ancestor and append the parts that do

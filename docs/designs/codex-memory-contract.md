@@ -93,8 +93,9 @@ campaign budget is not falsely reported exhausted.
 Raw root handle `root-q1` was checked outside all configured sources, all six
 installed default roots, the disabled legacy OpenCode root, storage, Mobile
 Documents, Desktop and Documents (both conservatively excluded regardless of
-iCloud preference). The checker now also excludes `~/Library/CloudStorage`
-(third-party sync providers); that 2026-10-01 receipt predates this and the
+iCloud preference). Raw qualification artifacts must also remain outside
+third-party sync-provider roots such as `~/Library/CloudStorage`, which the
+checker now excludes. That 2026-10-01 receipt predates this and the
 other 2026-10-02 hardening and was not rerun. Absent roots remain in the
 inventory. The installed
 `config.py` provenance SHA at measurement was
