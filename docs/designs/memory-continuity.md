@@ -722,3 +722,86 @@ this plan, until a Track resolves it; none is decided by this document.
 The [Track 68A card](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall)
 carries this document in its read-first list so these questions travel with the
 work. Later regenerations size the packages once the answers are recorded.
+
+## Track 68A qualification findings — 2026-10-01
+
+The [Codex source contract](codex-memory-contract.md#capability-ledger) records
+exact-version evidence and the frozen trial inventory. The outcome is **NO
+QUALIFIED ROUTE**. A credential-free isolated Codex 0.159.2 app-server initialized
+successfully, but that observation establishes neither extraction nor recall.
+Actual Conductor 0.89.2 process ancestry uses the same 0.159.2 binary; a separate
+0.159.3 daemon is a different cohort. The qualification never redirected the
+running Conductor home, copied production authentication/configuration, created
+a Mac account or altered shared host settings.
+
+Measured empty-store DDL includes extraction, job and consolidation tables and
+thread scope/consent candidates. Extraction records have native thread IDs and
+timestamps, but the measured table supplies no ancestry or retirement fields.
+This is not a claim that other native surfaces lack those capabilities. The
+cross-store/thread/job/artifact revision join and supported same-agent export,
+populated-store import, regeneration and withdrawal remain **UNPROVEN**.
+Generated Markdown and readiness counts are local views, not qualified exports.
+
+The documented six-hour idle and 25-percent quota thresholds were refreshed;
+the installed configuration probe returned null for omitted thresholds, so
+resolved defaults and actual scheduler eligibility remain unobserved. No safe
+loaded-context channel, credentialed isolated lifecycle, supported actual
+Conductor home binding or outside-agent user-authority channel qualified in
+the approved preflight. Dependent live arms stopped. No R/C fact was seeded,
+no learning/recall session ran, and all **48 base recall trials** remain
+INCONCLUSIVE. They are unstarted trials, not 48 failed observations. The
+72-hour campaign never began and is not reported exhausted. Correct answers,
+an enabled feature or protocol tests cannot fill those missing observations.
+
+[tests/test_memory_contract.py](../../tests/test_memory_contract.py) supplies a
+tests-only conformance boundary for F1–F4, E1–E4, H1–H4 and 16 further
+engineering groups, 28 groups in all. It uses owned synthetic stores, permanent retirement, distinct user
+authority/completeness references and atomic accepted snapshots through the
+existing filesystem helper. Both fact and whole-project unit candidates remain
+available; no native column is frozen as the transport API. After a
+post-rename failure the instance serves and writes nothing until a reopen
+validates the actual persisted bytes. Each of eight deliberately broken
+adapters fails its mapped real F, E or H conformance test, which passes for the
+reference implementation. The tests establish protocol semantics, not a shipped
+consumer or native recall, and use assumed-trusted channels for authority,
+cohort inventory, device registration, aliases and the unresolved-control
+remedy. A 2026-10-02 pre-landing review tightened the model, root checker and
+promotion validators and replaced machine-specific checkout paths in the
+published recipes with a placeholder. The contract's
+[verification](codex-memory-contract.md#verification) section records that
+review, and its [known model limits](codex-memory-contract.md#known-limits)
+list what it deliberately left for the follow-ons.
+
+The [structural fixtures](../../tests/fixtures/host_memories/codex/) contain
+measured DDL and fixed synthetic rows with closed value allowlists, exact-build
+pins and sanitized evidence handles. No native memory bodies, database/WAL/SHM
+files or authentication material are committed. The separately opted-in
+physical-root checker validates installed source/configuration provenance,
+configured/disabled/default/absent roots, storage and iCloud exclusions in both
+directions. Default portable checks never inventory real roots or start a host.
+Native initialization created one mode-0644 installation-ID file; it was
+tightened only inside the owned tree after shutdown. A later autonomous native
+writer still needs a qualified permission/isolation boundary.
+
+The [decision and Q1–Q18 ownership](codex-memory-contract.md#open-questions)
+preserve every original promotion blocker. Transport must settle permanent
+retirement storage/completeness/encrypted encoding, minimal stable project
+identity, authenticated target-bound authority and registered-never-pushed
+peer enrollment. No released minimum peer version is selected. The mm-owned
+alternative still needs real startup delivery, persistent ancestry-loss blocks
+and a qualified explicit feedback-capture route; the synthetic model is its
+only current consumer. Shared agent-config owns any static startup carrier,
+which must remain free of retrieved content, local enrollment, credentials,
+project identifiers and machine-local paths. An unavailable remedy cannot
+grant agent-controlled enrollment.
+
+Two-Mac parity, transport, cross-agent sharing and Cursor discovery remain
+follow-ons. Before the bridge, qualify Claude's typed-entry/scope census and
+the raw Claude sync path that can otherwise resurrect or echo retired content.
+Ciphertext-only transport, unsupported-version refusal, opt-out/isolation,
+unreadable/empty-source preservation and exclusion from the MEMORY.md line
+merger remain required gates. Requalify only affected cohorts on build, schema,
+controls, import, consolidation, ancestry or carrier drift. The exact portable
+check and cleanup receipts are in the contract; human onboarding and native
+model behavior remain pending attended evidence. Claude's engineering pass
+was unavailable after a session-limit error and provides no external clearance.

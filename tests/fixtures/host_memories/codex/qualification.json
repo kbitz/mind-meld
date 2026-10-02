@@ -1,0 +1,452 @@
+{
+  "contract_version": 1,
+  "fixture_version": 1,
+  "host_builds": {
+    "app_server": "0.159.2",
+    "cli": "0.159.2",
+    "conductor": "0.89.2"
+  },
+  "lifecycle_inventory": [
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "local-baseline"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "populated-import"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "regeneration"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "retired"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "recall-only-extraction"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "restart"
+    },
+    {
+      "mode": "cli",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "path-replacement"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "local-baseline"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "populated-import"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "regeneration"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "retired"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "recall-only-extraction"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "restart"
+    },
+    {
+      "mode": "conductor",
+      "observed": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "reason": "unsupported-surface",
+      "repeats": 3,
+      "stage": "path-replacement"
+    }
+  ],
+  "preflight": [
+    {
+      "after": {
+        "app_server": "0.159.2",
+        "cli": "0.159.2",
+        "conductor": "0.89.2"
+      },
+      "anchor": "capability-ledger",
+      "answer_correct": null,
+      "arm": "preflight",
+      "before": {
+        "app_server": "0.159.2",
+        "cli": "0.159.2",
+        "conductor": "0.89.2"
+      },
+      "builds": {
+        "app_server": "0.159.2",
+        "cli": "0.159.2",
+        "conductor": "0.89.2"
+      },
+      "contract_version": 1,
+      "counts": {
+        "attempted": 1,
+        "completed": 1,
+        "observed": 0,
+        "planned": 1
+      },
+      "device_short": "889e42c0",
+      "eligibility": "unknown",
+      "evidence_class": "preflight",
+      "evidence_handle": "preflight-01",
+      "fixture_version": 1,
+      "lifecycle": {
+        "answer": null,
+        "consolidation": null,
+        "delivery": null,
+        "eligibility": null,
+        "extraction": null,
+        "seed": null
+      },
+      "mode": "cli",
+      "observed_delivery": null,
+      "outcome": "INCONCLUSIVE",
+      "owner": "track-68a-implementer",
+      "prerequisites": {
+        "authority": "unproven",
+        "binding": "not-applicable",
+        "credential": "unsupported",
+        "isolation": "unproven",
+        "observation": "unproven"
+      },
+      "reason": "credential-unsupported",
+      "schema_sha": "686274cd5a1e7c0cb4ba34883903071f53711085aeb5566fca09274213eafdd8",
+      "scope": "unknown",
+      "settings": {
+        "capture": false,
+        "evidence": "observed-config",
+        "use": false
+      },
+      "source_ref": "source-unknown",
+      "support": "observed",
+      "trial_id": "preflight-001",
+      "utc": "2026-10-01T17:18:34Z"
+    }
+  ],
+  "rows": {
+    "consolidation_progress": [
+      {
+        "max_thread_count": 0,
+        "singleton": 1
+      }
+    ],
+    "jobs": [
+      {
+        "finished_at": null,
+        "input_watermark": 1,
+        "job_key": "synthetic",
+        "kind": "synthetic",
+        "last_error": null,
+        "last_success_watermark": null,
+        "lease_until": null,
+        "ownership_token": null,
+        "retry_at": null,
+        "retry_remaining": 0,
+        "started_at": null,
+        "status": "synthetic",
+        "worker_id": null
+      }
+    ],
+    "stage1_outputs": [
+      {
+        "generated_at": 2,
+        "last_usage": null,
+        "raw_memory": "",
+        "rollout_slug": "synthetic",
+        "rollout_summary": "",
+        "selected_for_phase2": 0,
+        "selected_for_phase2_source_updated_at": null,
+        "source_updated_at": 1,
+        "thread_id": "00000000000000000000000000000001",
+        "usage_count": 0
+      }
+    ]
+  },
+  "schema_sha": "686274cd5a1e7c0cb4ba34883903071f53711085aeb5566fca09274213eafdd8",
+  "trial_inventory": [
+    {
+      "arm": "positive",
+      "arm_id": "cli-11-positive",
+      "capture": true,
+      "capture_ref": "capture-cli-11",
+      "expected_capture": true,
+      "expected_delivery": true,
+      "home_ref": "home-cli-11-positive",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": "seed-cli-11",
+      "use": true
+    },
+    {
+      "arm": "absent",
+      "arm_id": "cli-11-absent",
+      "capture": true,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-cli-11-absent",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": true
+    },
+    {
+      "arm": "positive",
+      "arm_id": "cli-10-positive",
+      "capture": true,
+      "capture_ref": "capture-cli-10",
+      "expected_capture": true,
+      "expected_delivery": false,
+      "home_ref": "home-cli-10-positive",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": "seed-cli-10",
+      "use": false
+    },
+    {
+      "arm": "absent",
+      "arm_id": "cli-10-absent",
+      "capture": true,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-cli-10-absent",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": false
+    },
+    {
+      "arm": "positive",
+      "arm_id": "cli-01-positive",
+      "capture": false,
+      "capture_ref": "capture-cli-01",
+      "expected_capture": false,
+      "expected_delivery": true,
+      "home_ref": "home-cli-01-positive",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": "seed-cli-01",
+      "use": true
+    },
+    {
+      "arm": "absent",
+      "arm_id": "cli-01-absent",
+      "capture": false,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-cli-01-absent",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": true
+    },
+    {
+      "arm": "positive",
+      "arm_id": "cli-00-positive",
+      "capture": false,
+      "capture_ref": "capture-cli-00",
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-cli-00-positive",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": "seed-cli-00",
+      "use": false
+    },
+    {
+      "arm": "absent",
+      "arm_id": "cli-00-absent",
+      "capture": false,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-cli-00-absent",
+      "mode": "cli",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": false
+    },
+    {
+      "arm": "positive",
+      "arm_id": "conductor-11-positive",
+      "capture": true,
+      "capture_ref": "capture-conductor-11",
+      "expected_capture": true,
+      "expected_delivery": true,
+      "home_ref": "home-conductor-11-positive",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": "seed-conductor-11",
+      "use": true
+    },
+    {
+      "arm": "absent",
+      "arm_id": "conductor-11-absent",
+      "capture": true,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-11-absent",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": true
+    },
+    {
+      "arm": "positive",
+      "arm_id": "conductor-10-positive",
+      "capture": true,
+      "capture_ref": "capture-conductor-10",
+      "expected_capture": true,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-10-positive",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": "seed-conductor-10",
+      "use": false
+    },
+    {
+      "arm": "absent",
+      "arm_id": "conductor-10-absent",
+      "capture": true,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-10-absent",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": false
+    },
+    {
+      "arm": "positive",
+      "arm_id": "conductor-01-positive",
+      "capture": false,
+      "capture_ref": "capture-conductor-01",
+      "expected_capture": false,
+      "expected_delivery": true,
+      "home_ref": "home-conductor-01-positive",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": "seed-conductor-01",
+      "use": true
+    },
+    {
+      "arm": "absent",
+      "arm_id": "conductor-01-absent",
+      "capture": false,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-01-absent",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": true
+    },
+    {
+      "arm": "positive",
+      "arm_id": "conductor-00-positive",
+      "capture": false,
+      "capture_ref": "capture-conductor-00",
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-00-positive",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": "seed-conductor-00",
+      "use": false
+    },
+    {
+      "arm": "absent",
+      "arm_id": "conductor-00-absent",
+      "capture": false,
+      "capture_ref": null,
+      "expected_capture": false,
+      "expected_delivery": false,
+      "home_ref": "home-conductor-00-absent",
+      "mode": "conductor",
+      "repeats": 3,
+      "seed_ref": null,
+      "use": false
+    }
+  ]
+}
