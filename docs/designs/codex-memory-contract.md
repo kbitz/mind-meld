@@ -100,7 +100,8 @@ inventory. The installed
 `config.py` provenance SHA at measurement was
 `86dc34566c8f3b03c058a4ab8b32d5a22f9308c11ebc3f3b0548cc37fcccc831`.
 Configured-source resolution never calls `mm sources`, which hides absent
-roots. Physical comparisons use deepest existing ancestors, `samefile` and
+roots. It reads every supported config shape: explicit `[[sync.sources]]`, a
+legacy `[sync].claude_dir` and a defaults-only config. Physical comparisons use deepest existing ancestors, `samefile` and
 case- and Unicode-normalization-folded absent suffixes in both containment
 directions. A raw root cannot contain a present or future sync child, and can
 never be the owned parent itself under any alias. Relative paths, `..` parts,

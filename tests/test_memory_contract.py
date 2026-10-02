@@ -1235,12 +1235,18 @@ def installed_inventory():
     raw = config.read_bytes()
     data = tomllib.loads(raw.decode())
     defaults = default_sources(sources[0])
-    roots = [Path(s["path"]).expanduser() for s in data["sync"]["sources"]]
+    # Every supported shape: explicit [[sync.sources]], a legacy [sync].claude_dir,
+    # or neither (DEFAULT_SOURCES). Defaults are always excluded as well.
+    sync = data.get("sync", {})
+    configured = sync.get("sources", [])
+    roots = [Path(s["path"]).expanduser() for s in configured]
+    if "claude_dir" in sync:
+        roots.append(Path(sync["claude_dir"]).expanduser())
     roots += [path for _, path in defaults]
-    known = {s["name"] for s in data["sync"]["sources"]} | {name for name, _ in defaults}
+    known = {s["name"] for s in configured} | {name for name, _ in defaults}
     # The disabled retired source is no longer in DEFAULT_SOURCES. Retain its
     # legacy exclusion conservatively. Unknown forced-disabled names refuse.
-    if set(data["sync"].get("disabled_sources", [])) - known - {"opencode"}:
+    if set(sync.get("disabled_sources", [])) - known - {"opencode"}:
         raise ValueError("unsafe-root")
     roots += [Path.home() / ".config/opencode"]
     roots += [
@@ -2918,7 +2924,17 @@ def test_I2_installed_inventory_reads_real_shapes_and_refuses_unknown_disables(
     ):
         assert expected in inventory["roots"]
     assert inventory["provenance"]["package"] == "9.9.9"
-    config.write_text(config.read_text() + 'disabled_sources = ["unknown-source"]\n')
+    # A legacy claude_dir config and a defaults-only config are both supported.
+    defaults = [path for _, path in default_sources(site / "mind_meld/config.py")]
+    for text, extra in (
+        ('[storage]\npath = "/synthetic/store"\n[sync]\nclaude_dir = "/synthetic/legacy"\n', True),
+        ('[storage]\npath = "/synthetic/store"\n', False),
+    ):
+        config.write_text(text)
+        roots = installed_inventory()["roots"]
+        assert all(path in roots for path in defaults)
+        assert (Path("/synthetic/legacy") in roots) == extra
+    config.write_text(config.read_text() + '[sync]\ndisabled_sources = ["unknown-source"]\n')
     with pytest.raises(ValueError, match="unsafe-root"):
         installed_inventory()
 
