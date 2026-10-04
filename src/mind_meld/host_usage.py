@@ -1183,7 +1183,8 @@ def unread_cursor_stores(root: Path | None = None) -> int | None:
     """
     source_root = root if root is not None else CURSOR_STORE_PATH
     try:
-        children = list(os.scandir(source_root))
+        with os.scandir(source_root) as entries:
+            children = list(entries)
     except FileNotFoundError:
         return 0
     except OSError:
