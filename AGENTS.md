@@ -21,6 +21,20 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
 - Content-addressed storage: blobs stored by hash, not by path.
 - Gzip compression before encryption. Versioned blob format (0x02).
 
+## Planning
+
+Apply these checks when drafting or draining roadmap work. The admission gates
+live in [docs/ROADMAP.md](docs/ROADMAP.md); their rationale is retained in
+[constraint history](docs/roadmap-shipped.md#planning-constraint-history).
+
+- **Verify premises against current HEAD.** Inspect the cited code or artifact this turn. Discharge an already-delivered approved goal; kill a disproved or obsolete work order rather than emitting it again.
+- **Establish demand before pricing repairs.** Probe current use and artifact liveness. A cold artifact on one Mac establishes only that Mac's inactivity, not that nobody uses the feature; repair or retirement must follow the supported product scope.
+- **Investigate the forward action before adding its inverse.** Fix unwanted automatic behavior at its cause. Removal or revocation controls remain valid when they serve a demonstrated user need.
+- **Name consumers for persisted fields.** A card adding a wire, cache or log field must name its reader or the Track delivering that reader, including the Track's title so a future renumber does not lose the dependency.
+- **Inspect cache shape when changing a reader.** Trace normalization, retained fields and migration gates as well as runtime behavior. A source field that the cache discards cannot reach a downstream consumer.
+- **Prove counter semantics before pricing, summing or trending.** Inspect every contributing reader's source schema and normalization; inclusive/disjoint input semantics belong to the reader, not the model ID. Follow the counter-semantics section of [events/retro invariants](docs/invariants/events-retro.md).
+- **Read current audit limits.** Inspect the roadmap audit's reported effective SIZE limits. To check machine-local file and weight caps, use the installed gstack-extend's `bin/config get roadmap_max_files_per_track` and `bin/config get roadmap_max_session_weight`; environment overrides also affect the effective limits. Historical values from another Mac are not project limits.
+
 ## Source Layout
 
 One line per module, with what lives there. Grep this table for a filename
