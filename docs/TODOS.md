@@ -44,7 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-None.
+### [plan-eng-review:severity=medium,files=src/mind_meld/cli.py|src/mind_meld/config.py] Init deletes device registration after a published config save fails
+
+- **What:** Make init's cleanup decision respect config publication before removing the device registration; qualify the current init failure contract.
+- **Why:** A config save can publish its new device_id and then raise on parent-directory durability. `_register_and_save` treats every save exception as an unpublished config and deletes that device's storage entry, leaving the local pointer and registry inconsistent.
+- **Repro:** On HEAD e9e56db, use a temporary LocalBackend and monkeypatch config.CONFIG_PATH to another temporary directory. Run the real `_register_and_save` with a synthetic device config; make fsutil.fsync_dir raise StorageError only for the config parent. Registration succeeds, config.toml contains the new id, the call raises, and backend.exists(device_key(id)) is false. Control: fail the config's file flush before replacement; registration is removed and config remains absent. Both assertions passed under pytest on 2026-10-03. No real config, Keychain or iCloud storage was touched.
+- **Context:** Track 69B autoplan caller audit; branch kbitz/atomic-write-publication-failures-clarify. `cli.py:_register_and_save` calls `save_config` inside an except Exception cleanup that deletes dev_key; `config.py:save_config` uses atomic_write_bytes(fsync=True). Durable review probe: `~/.gstack/projects/kbitz-mind-meld/69b-current-behavior-probe.py` (2 passed). This proves the current helper/caller sequence, not full CLI retry or power-loss behavior. Existing `_ensure_device_registered` may self-heal on a later push; inspect retry/passphrase/guard behavior before choosing a repair. Read docs/invariants/init-devices.md and sync.md first. The contract-only Track 69B must not repair this consumer.
+- **Pros:** Removes a demonstrated wrong cleanup assumption and makes the init failure contract honest.
+- **Cons:** Recovery-policy work must preserve existing pre-publication cleanup and retry behavior; requires isolated caller regression coverage.
+- **Effort:** S
+- **Priority:** P2
+- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
 
 ## Drain records
 
