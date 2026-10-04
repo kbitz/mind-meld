@@ -4423,6 +4423,28 @@ class TestCursorUsage67A:
         assert not result.complete
         assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
 
+    def test_sqlite_layout_stores_are_counted_never_opened(self, cursor_store, tmp_path):
+        baseline = self._read(cursor_store)
+        sqlite_store = cursor_store / "newer-conductor"
+        sqlite_store.mkdir()
+        (sqlite_store / "index.db").write_bytes(b"SQLite format 3\x00")
+        (sqlite_store / "index.db").chmod(0)  # any open would fail
+        both = cursor_store / "migrating"
+        both.mkdir()
+        (both / "index.db").touch()
+        (both / "runs.ndjson").touch()
+        (cursor_store / "stray-file").touch()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "index.db").touch()
+        (cursor_store / "linked").symlink_to(elsewhere)
+        try:
+            assert hu.unread_cursor_stores(cursor_store) == 1
+            assert self._read(cursor_store).hosts == baseline.hosts
+        finally:
+            (sqlite_store / "index.db").chmod(0o600)
+        assert hu.unread_cursor_stores(tmp_path / "absent") == 0
+
     @pytest.mark.parametrize("status", ["cancelled", "error", "queued"])
     def test_counterless_unfinished_rows_contribute_nothing(self, cursor_store, status):
         path, row = self._single(cursor_store)

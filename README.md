@@ -836,6 +836,9 @@ for 90 days even after Conductor prunes them, using private durable
 Standalone completions wait in private `cursor-standalone-spool.jsonl` until
 the next `mm push` folds them in; `mm diag` shows how many are pending.
 Do not delete either file to troubleshoot a slow read: each may hold the only copy.
+Conductor 0.90.1 stores new Cursor runs in a SQLite database that mm does not
+read yet; `mm status` and `mm diag` say how many workspace stores this affects,
+and those runs are not counted until a reader ships.
 Repeated short reads need not converge on a rewritten ledger; attended warming
 or a larger configured read budget may be necessary.
 

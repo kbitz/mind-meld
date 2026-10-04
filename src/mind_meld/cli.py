@@ -6098,6 +6098,12 @@ def status(
             )
         elif hook_state not in (None, "installed"):
             narrative += f"; the completion hook file is {safe_str(hook_state)} (see mm diag)"
+        unread = cursor_diag.get("unread_sqlite_stores")
+        if isinstance(unread, int) and unread > 0:
+            narrative += (
+                f"; {unread} Conductor workspace store(s) use Conductor's newer SQLite "
+                "format, which mm does not read yet, so those runs are not counted"
+            )
         console.print(
             f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
         )
@@ -6648,7 +6654,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         pending / model_count / models / last_reason / last_reason_since, and
         Cursor's consented / complete_once / cache_state / runs_cached /
         model_count / models / last_reason / last_reason_since / hook_state /
-        pending_completions;
+        pending_completions / unread_sqlite_stores;
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
@@ -7054,6 +7060,11 @@ def diag(
     console.print(
         "    pending completions: "
         + ("unknown" if pending is None else f"{pending} (merged by the next push)")
+    )
+    unread = cursor_state.get("unread_sqlite_stores")
+    console.print(
+        "    newer Conductor stores not read: "
+        + ("unknown" if unread is None else f"{unread} (SQLite format; runs there are not counted)")
     )
     console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
     if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):

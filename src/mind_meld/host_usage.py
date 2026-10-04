@@ -1174,8 +1174,32 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
     return True
 
 
+def unread_cursor_stores(root: Path | None = None) -> int | None:
+    """Count Conductor workspace stores in the SQLite layout this reader cannot read.
+
+    Conductor 0.90.1 writes new runs to ``<store>/index.db`` instead of
+    ``runs.ndjson``. Only directory entries are inspected (lstat), so no database
+    is ever opened; None means the store root could not be listed.
+    """
+    source_root = root if root is not None else CURSOR_STORE_PATH
+    try:
+        children = list(os.scandir(source_root))
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    unread = 0
+    for child in children:
+        if not child.is_dir(follow_symlinks=False):
+            continue
+        store = Path(child.path)
+        if os.path.lexists(store / "index.db") and not os.path.lexists(store / "runs.ndjson"):
+            unread += 1
+    return unread
+
+
 def cursor_usage_diag() -> dict[str, Any]:
-    """Inspect durable Cursor history only; never open Conductor run files."""
+    """Inspect durable Cursor history; never open Conductor run files or databases."""
     blank = {
         **_cached_read_timing({}),
         "cache_state": "missing",
@@ -1187,6 +1211,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         "models": [],
         "hook_state": cursor_hook_state(),
         "pending_completions": _pending_cursor_completions(),
+        "unread_sqlite_stores": unread_cursor_stores(),
     }
     with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
         if snap.state == "missing":

@@ -1486,6 +1486,23 @@ def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_s
     assert "outside coverage" not in diag
 
 
+@pytest.mark.parametrize("unread", [0, 2, None])
+def test_unread_conductor_sqlite_stores_reach_status_and_diag(tmp_path, monkeypatch, unread):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(host_usage, "unread_cursor_stores", lambda: unread)
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
+    notice = "use Conductor's newer SQLite format, which mm does not read yet"
+    assert (notice in status) is (unread == 2)
+    expected = "unknown" if unread is None else f"{unread} (SQLite format"
+    assert f"newer Conductor stores not read: {expected}" in diag
+
+
 @pytest.mark.parametrize("reader", ["codex", "grok", "cursor"])
 def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
     from mind_meld import cli, events
