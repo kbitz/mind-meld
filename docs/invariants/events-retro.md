@@ -366,9 +366,11 @@ private `requests` map: a matching standalone generation is removed only once
 the Conductor run is retained **with counters**. A running run or a usageRef
 placeholder never erases known standalone usage, and later callbacks keep
 updating it until then. Aliases survive pruning of their source files.
-Malformed aliases refuse without resetting history. The ID-equality premise
-(hook `generation_id` == Conductor `requestId`) is not yet measured; the live
-store holds bare-UUID requestIds and `run-`-prefixed runIds.
+Malformed aliases refuse without resetting history. Measured 2026-10-04
+(Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
+the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
+new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does
+not open; see the Cursor fixture contract's live follow-up.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no

@@ -75,6 +75,31 @@ counters; they are not additional census evidence. No second producing Mac,
 Fast run, nonzero cache write or Conductor/CLI overlap was measured here;
 mutations exercise those branches without claiming a new census.
 
+## Live follow-up (2026-10-04)
+
+CLI **2026.10.01-e373342** (self-updated since the census) with Conductor
+**0.90.1**, one Mac. Stop payload keys were unchanged. A two-turn interactive
+Ask session (grok-4.7-low) produced one stop event per turn in the same
+conversation, with distinct generation IDs:
+
+| turn | input | cache read | cache write | output |
+|---|---|---|---|---|
+| 1 (~300 words) | 47,657 | 0 | 0 | 527 |
+| 2 ("just OK") | 48,299 | 47,616 | 0 | 15 |
+
+Counters are **per turn**, not cumulative (turn 2 output 15), and input is
+inclusive: turn 2 = turn 1 context + its answer + the new prompt, so the
+normalized input is 683. Cursor resolves the hook's bare `mm` from its own
+environment (the installed pipx `mm`), not the launching terminal's PATH.
+
+A Cursor turn run through Conductor 0.90.1 fired **no** user-level stop hook,
+so Conductor runs and hook captures do not overlap; request-ID dedup is
+defensive. Conductor 0.90.1 no longer writes `runs.ndjson`: the new workspace
+store is SQLite (`index.db` with a `runs` table carrying `request_id`,
+`status` `FINISHED`, `model`, `model_params_json`, disjoint `usage_json`
+and ISO `finished_at`; per-agent `store.db` holds blobs). The reader still
+reads only `runs.ndjson`, so runs in the new store are not counted yet.
+
 Prices are API **list-rate equivalents**, not spend on the censused Cursor
 Ultra subscription. Cursor's rates were fetched 2026-09-23:
 https://cursor.com/docs/models-and-pricing and
