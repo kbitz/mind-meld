@@ -89,6 +89,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, TypedDict, get_args
 
+from mind_meld import fsutil
 from mind_meld.errors import StorageError
 from mind_meld.lockedjson import (
     InvalidJsonCache,
@@ -125,9 +126,14 @@ CURSOR_HOOK_ENTRY = {"command": CURSOR_HOOK_COMMAND, "timeout": 10}
 CURSOR_HOOK_STDIN_MAX_BYTES = 64 * 1024
 """The measured stop payload carries counters and identifiers, never response text."""
 _CURSOR_CONFIG_MAX_BYTES = 1024 * 1024
-CURSOR_WRITER_RETRY_INTERVALS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0)
-"""~5.2 s inside the 10 s hook timeout: covers a push reader's longest hold (the
-5 s attended warm) so a completion that has no other ledger is not dropped."""
+CURSOR_SPOOL_PATH = Path.home() / ".config" / "mind-meld" / "cursor-standalone-spool.jsonl"
+"""Private queue of sanitized standalone completions awaiting the next Cursor read.
+
+The hook and wrapper append here under a short lock and never wait for a push
+reader's multi-second hold on the history; the reader rotates the file to
+``<name>.merging``, folds it into history, and unlinks it only after the history
+write is durable. A crash re-folds the leftover idempotently."""
+CURSOR_SPOOL_MAX_BYTES = 16 * 1024 * 1024
 _CURSOR_RUN_STATUSES = frozenset({"queued", "running", "finished", "cancelled", "error"})
 """Only finished rows contribute; the rest must carry neither usage nor usageRef."""
 _CURSOR_STORE_BLOCKERS: frozenset[str] = frozenset({"unsupported", "malformed"})
@@ -738,6 +744,7 @@ def read_cursor_usage(
     if _expired(read_deadline):
         return _incomplete("deadline")
     source_root = root if root is not None else CURSOR_STORE_PATH
+    spool_taken = False
     try:
         with locked_json_durable_rmw(
             CURSOR_CACHE_PATH, default_factory=_empty_cursor_cache
@@ -749,6 +756,11 @@ def read_cursor_usage(
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
+            spooled, spool_taken = _take_cursor_spool()
+            _fold_cursor_spool(runs, requests, spooled, cutoff)
+            # Standalone captures are complete by construction: with no
+            # outstanding blocker, they make retained history authoritative.
+            complete_once = locked.data["complete_once"] or (bool(spooled) and not prior[0])
             learned: dict[str, Any] = {}
             learned_requests: dict[str, str] = {}
             removed: set[str] = set()
@@ -781,14 +793,12 @@ def read_cursor_usage(
                     # reason (deadline, io_error, stale) cannot be resolved by a
                     # store that is gone, so it does not stick; otherwise a
                     # standalone-only Mac would never publish again.
-                    if prior[0] in _CURSOR_STORE_BLOCKERS or (
-                        prior[0] and not locked.data["complete_once"]
-                    ):
+                    if prior[0] in _CURSOR_STORE_BLOCKERS or (prior[0] and not complete_once):
                         raise _ReadFailure(prior[0])
                     # A finished scan's retained history is authoritative.
                     # A prefix from a deadline is not: publishing it would
                     # latch complete_once on an undercount.
-                    if not locked.data["complete_once"]:
+                    if not complete_once:
                         if not runs and locked.read_state == "missing":
                             locked.write_on_exit = False
                             return _incomplete("no_metadata_ledger")
@@ -851,7 +861,7 @@ def read_cursor_usage(
                 "version": CACHE_VERSION,
                 "runs": runs,
                 "requests": requests,
-                "complete_once": locked.data["complete_once"] or result.complete,
+                "complete_once": complete_once or result.complete,
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
             }
@@ -859,6 +869,10 @@ def read_cursor_usage(
             locked.data = updated
             if over_budget:
                 result = _incomplete("deadline")
+        if spool_taken:
+            # History is durable now; a failed unlink only re-folds next time.
+            with suppress(OSError):
+                _cursor_spool_merging_path().unlink()
         return result
     except LockContended:
         return _incomplete("locked")
@@ -882,6 +896,81 @@ def _cursor_requests(data: dict[str, Any]) -> dict[str, str]:
     ):
         raise _ReadFailure("malformed")
     return dict(requests)
+
+
+def _cursor_spool_merging_path() -> Path:
+    return CURSOR_SPOOL_PATH.with_name(CURSOR_SPOOL_PATH.name + ".merging")
+
+
+def _read_bounded_bytes(path: Path, limit: int) -> bytes:
+    """Read one small regular file without blocking on a FIFO or reading unbounded."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as fp:
+        if not stat.S_ISREG(os.fstat(fp.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = fp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("oversized")
+    return data
+
+
+def _take_cursor_spool() -> tuple[list[dict[str, Any]], bool]:
+    """Rotate queued completions aside and parse them; the caller unlinks later.
+
+    A leftover ``.merging`` file (crash after rotation) is folded first; the
+    live spool rotates on a later read. Torn or invalid rows are skipped with a
+    notice rather than wedging every future read.
+    """
+    merging = _cursor_spool_merging_path()
+    if not os.path.lexists(merging):
+        fsutil.rotate_jsonl(CURSOR_SPOOL_PATH, merging)
+    try:
+        data = _read_bounded_bytes(merging, CURSOR_SPOOL_MAX_BYTES)
+    except FileNotFoundError:
+        return [], False
+    except ValueError as exc:
+        raise _ReadFailure("malformed") from exc
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            key = record.pop("key")
+            _cursor_cached_runs(
+                {"version": CACHE_VERSION, "runs": {key: record}, "complete_once": False}
+            )
+            if record["usage"] is None:
+                raise _ReadFailure("malformed")
+        except (ValueError, RecursionError, AttributeError, KeyError, TypeError, _ReadFailure):
+            skipped += 1
+            continue
+        records.append({"key": key, **record})
+    if skipped:
+        sys.stderr.write(f"mm: notice: skipped {skipped} unreadable Cursor completion record(s)\n")
+    return records, True
+
+
+def _fold_cursor_spool(
+    runs: dict[str, Any], requests: dict[str, str], records: list[dict[str, Any]], cutoff: str
+) -> None:
+    """Apply queued completions in order: replays keep their first day, take new counters."""
+    for record in records:
+        key = record["key"]
+        canonical = requests.get(key)
+        conductor = runs.get(canonical) if canonical is not None else None
+        # A matching Conductor run supersedes this generation only once it has
+        # counters; a usageRef placeholder must not erase known usage.
+        if (conductor is not None and conductor["usage"] is not None) or record["day"] < cutoff:
+            continue
+        previous = runs.get(key)
+        runs[key] = {
+            "day": previous["day"] if previous else record["day"],
+            "model": record["model"],
+            "usage": record["usage"],
+            "partial": record["partial"],
+        }
 
 
 def _is_real_cursor_hook_config(path: Path) -> bool:
@@ -981,9 +1070,12 @@ def cursor_cli_model(args: list[str]) -> str | None:
 
 
 def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
-    """Durably record one completed generation. Hook counters are inclusive;
-    the print result has already normalized its input to disjoint counters.
-    Unknown fields (including prompts, transcripts and credentials) are discarded.
+    """Durably queue one completed generation for the next Cursor read.
+
+    Hook counters are inclusive; the print result has already normalized its
+    input to disjoint counters. Only the hashed generation ID, UTC day, model
+    and counters are kept; prompts, transcripts and credentials are discarded.
+    Appending never waits for a push reader holding the history lock.
     """
     if not isinstance(payload, dict):
         raise InvalidJsonCache("invalid Cursor usage record")
@@ -1027,39 +1119,15 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
     elif selected_model == "grok-4.7":
         # A bare id does not identify Fast mode, which defaults on for paid plans.
         selected_model = "grok-4.7-unspecified"
-    key = hashlib.sha256(generation.encode()).hexdigest()
-    now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
-    with locked_json_durable_rmw(
-        CURSOR_CACHE_PATH,
-        default_factory=_empty_cursor_cache,
-        retry_intervals=CURSOR_WRITER_RETRY_INTERVALS,
-    ) as locked:
-        try:
-            runs = dict(_cursor_cached_runs(locked.data))
-            requests = _cursor_requests(locked.data)
-        except _ReadFailure as exc:
-            raise InvalidJsonCache("unreadable Cursor history; preserved without reset") from exc
-        runs = {k: run for k, run in runs.items() if run["day"] >= cutoff}
-        canonical = requests.get(key)
-        conductor = runs.get(canonical) if canonical is not None else None
-        # A matching Conductor run supersedes this generation only once it has
-        # counters; a usageRef placeholder must not erase known usage.
-        if conductor is None or conductor["usage"] is None:
-            previous = runs.get(key)
-            runs[key] = {
-                "day": previous["day"] if previous else now.date().isoformat(),
-                "model": selected_model,
-                "usage": usage,
-                "partial": usage["cache_create"] > 0,
-            }
-        updated = {
-            **locked.data,
-            "runs": runs,
-            "complete_once": locked.data["complete_once"] or not locked.data.get("last_reason"),
-        }
-        locked.write_on_exit = updated != locked.data
-        locked.data = updated
+    record = {
+        "key": hashlib.sha256(generation.encode()).hexdigest(),
+        "day": datetime.now(timezone.utc).date().isoformat(),
+        "model": selected_model,
+        "usage": usage,
+        "partial": usage["cache_create"] > 0,
+    }
+    line = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    fsutil.append_rotatable_jsonl(CURSOR_SPOOL_PATH, line, max_bytes=CURSOR_SPOOL_MAX_BYTES)
     return True
 
 
@@ -1075,6 +1143,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         "model_count": 0,
         "models": [],
         "hook_state": cursor_hook_state(),
+        "pending_completions": _pending_cursor_completions(),
     }
     with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
         if snap.state == "missing":
@@ -1102,6 +1171,20 @@ def cursor_usage_diag() -> dict[str, Any]:
         "last_reason": _cached_last_reason(data),
         "last_reason_since": _cached_reason_since(data),
     }
+
+
+def _pending_cursor_completions() -> int | None:
+    """Count queued completions without rotating, locking or creating anything."""
+    total = 0
+    for path in (CURSOR_SPOOL_PATH, _cursor_spool_merging_path()):
+        try:
+            data = _read_bounded_bytes(path, CURSOR_SPOOL_MAX_BYTES)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return None
+        total += sum(1 for line in data.splitlines() if line.strip())
+    return total
 
 
 def cursor_hook_state() -> str:

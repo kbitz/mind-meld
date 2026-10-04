@@ -476,7 +476,7 @@ class TestCursorUsageConsent:
         )
         assert result.exit_code == 0, result.output
         assert result.stdout.strip() == "{}"
-        assert not host_usage.CURSOR_CACHE_PATH.exists()
+        assert not host_usage.CURSOR_SPOOL_PATH.exists()
 
     @pytest.mark.parametrize(
         "data", [b"x" * 65_537, b"\xff", b"[" * 1_200 + b"]" * 1_200], ids=["big", "bytes", "deep"]
@@ -532,7 +532,7 @@ class TestCursorUsageConsent:
         assert result.stdout.strip() == "{}"
         assert "could not be recorded" in result.stderr
         assert "PRIVATE" not in result.output
-        assert not host_usage.CURSOR_CACHE_PATH.exists()
+        assert not host_usage.CURSOR_SPOOL_PATH.exists()
 
     def _fake_cursor_agent(self, tmp_path, monkeypatch, *, exit_code=0):
         payload = {"type": "result", "subtype": "success", "result": "OK"}
@@ -588,7 +588,7 @@ class TestCursorUsageConsent:
         result = runner.invoke(app, ["cursor-agent", "-p", "--", "-p"])
         assert result.exit_code == 3, result.output
         assert argv() == ["-p", "--", "-p"]
-        assert not host_usage.CURSOR_CACHE_PATH.exists()
+        assert not host_usage.CURSOR_SPOOL_PATH.exists()
 
     def test_wrapper_passthrough_guards_under_consent(self, cfg, tmp_path, monkeypatch):
         self._consent(cfg)
@@ -640,7 +640,7 @@ class TestCursorUsageConsent:
         result = runner.invoke(app, ["cursor-agent", "-p", "hello", "--model", "grok-4.7-low"])
         assert result.exit_code == 0, result.output
         assert result.stdout == "bad ? surrogate\n"
-        assert json.loads(host_usage.CURSOR_CACHE_PATH.read_text())["runs"]
+        assert host_usage.CURSOR_SPOOL_PATH.read_bytes().count(b"\n") == 1
         error = '{"type":"result","subtype":"error","is_error":true,"error":"quota exceeded"}'
         fake.write_text("#!/bin/sh\necho '" + error + "'\nexit 1\n")
         result = runner.invoke(app, ["cursor-agent", "-p", "hello"])
@@ -671,7 +671,38 @@ class TestCursorUsageConsent:
         assert result.exit_code == 0, result.output
         assert result.stdout == "plain text\n"
         assert "no result line" in result.stderr
-        assert not host_usage.CURSOR_CACHE_PATH.exists()
+        assert not host_usage.CURSOR_SPOOL_PATH.exists()
+
+    def test_print_wrapper_preserves_stdout_and_exit_status(self, cfg, tmp_path, monkeypatch):
+        from mind_meld import host_usage
+
+        self._consent(cfg)
+        payload = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "wrapper-generation",
+            "result": "OK",
+            "usage": {
+                "inputTokens": 100,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 200,
+                "outputTokens": 10,
+            },
+        }
+        executable = tmp_path / "cursor-agent"
+        executable.write_text(
+            "#!/bin/sh\ncat <<'JSON'\n" + json.dumps(payload) + "\nJSON\nexit 7\n"
+        )
+        executable.chmod(0o700)
+        monkeypatch.setenv("PATH", _isolated_path(tmp_path))
+        args = ["--print", "--model", "grok-4.7-low", "--output-format", "json", "hello"]
+        result = runner.invoke(app, ["cursor-agent", *args])
+        assert result.exit_code == 7, result.output
+        assert result.stdout == json.dumps(payload) + "\n"
+        assert host_usage.read_cursor_usage(consented=True).complete
+        history = json.loads(host_usage.CURSOR_CACHE_PATH.read_text())
+        assert next(iter(history["runs"].values()))["usage"]["input"] == 100
 
     @pytest.mark.parametrize("consent", [False, True])
     @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP", "SIGINT"])
@@ -741,8 +772,8 @@ class TestCursorUsageConsent:
         _, err = wrapper.communicate(timeout=60)
         assert wrapper.returncode == 7, err
         assert b"Exception ignored" not in err
-        history = home / ".config" / "mind-meld" / "cursor-host-tokens.json"
-        assert json.loads(history.read_text())["runs"]
+        queued = home / ".config" / "mind-meld" / "cursor-standalone-spool.jsonl"
+        assert queued.read_bytes().count(b"\n") == 1
 
 
 class TestGrokUsageConsent:

@@ -28,7 +28,8 @@ import os
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from mind_meld.errors import StorageError
@@ -245,6 +246,87 @@ def flock_append_jsonl(
         if strict:
             raise
         return  # forensic aid only; never block the calling sync
+
+
+def append_rotatable_jsonl(
+    path: Path, line: bytes, *, max_bytes: int, mode: int = 0o600, attempts: int = 8
+) -> None:
+    """Durably append one JSONL row to a spool that a reader rotates by rename.
+
+    ``flock_append_jsonl`` locks a file that is never renamed. Here a reader may
+    rename the spool aside while this writer waits for the lock, so the row is
+    written only once the flock confirms ``path`` still names the locked inode;
+    otherwise the writer reopens. A row can therefore never land in a file the
+    reader already took. Errors raise (``AppendSizeLimit`` for the ceiling):
+    the caller holds the only copy of the row.
+    """
+    payload = line + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for _ in range(attempts):
+        fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, mode)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise OSError(errno.EINVAL, "spool is not a regular file")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                current = os.lstat(path)
+            except FileNotFoundError:
+                continue  # rotated away; the next open creates a fresh spool
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                continue
+            start = os.fstat(fd).st_size
+            data = payload
+            if start and os.pread(fd, 1, start - 1) != b"\n":
+                data = b"\n" + payload  # isolate a torn earlier row
+            if start + len(data) > max_bytes:
+                raise AppendSizeLimit("spool exceeds its size ceiling")
+            if os.write(fd, data) != len(data):
+                os.ftruncate(fd, start)
+                raise OSError("short spool append")
+            _fsync_fd(fd)
+            if start == 0:
+                fsync_dir(path.parent)
+            return
+        finally:
+            os.close(fd)
+    raise OSError(errno.EAGAIN, "spool kept rotating during the append")
+
+
+def rotate_jsonl(
+    path: Path, destination: Path, *, retry_intervals: Sequence[float] = (0.01, 0.05, 0.1)
+) -> bool:
+    """Rename a spool aside once no ``append_rotatable_jsonl`` holds it.
+
+    Returns False when there is nothing to rotate or a writer still holds the
+    lock after the short retries (rotate on a later pass). Non-blocking, so a
+    stuck writer can never wedge the caller.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "spool is not a regular file")
+        for delay in (0.0, *retry_intervals):
+            time.sleep(delay)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                continue
+        else:
+            return False
+        current = os.lstat(path)
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            return False
+        os.rename(path, destination)
+        fsync_dir(path.parent)
+        return True
+    finally:
+        os.close(fd)
 
 
 def fsync_dir(path: Path) -> None:

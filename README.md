@@ -833,7 +833,9 @@ the local capture's UTC day. Repeated callbacks replace the same generation,
 and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
 for 90 days even after Conductor prunes them, using private durable
 `cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
-Do not delete this file to troubleshoot a slow read: it may hold the only copy.
+Standalone completions wait in private `cursor-standalone-spool.jsonl` until
+the next `mm push` folds them in; `mm diag` shows how many are pending.
+Do not delete either file to troubleshoot a slow read: each may hold the only copy.
 Repeated short reads need not converge on a rewritten ledger; attended warming
 or a larger configured read budget may be necessary.
 

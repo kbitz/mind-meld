@@ -354,7 +354,8 @@ bounded stdin, returns `{}` and exits zero on malformed input or capture failure
 so it never controls Cursor's agent loop. Warnings contain no payload details.
 The same private authoritative history holds hashed generation IDs and counters;
 the local capture's UTC date owns standalone runs. Duplicate callbacks keep
-the original completion day and replace counters, rather than adding again.
+the original completion day and replace counters, rather than adding again,
+whether they fold in one read or across reads.
 Conductor `requestId` hashes map to canonical run-ID hashes in an additive
 private `requests` map: a matching standalone generation is removed only once
 the Conductor run is retained **with counters**. A running run or a usageRef
@@ -371,12 +372,21 @@ outlive the missing store; only `unsupported`/`malformed` survive it
 (`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
 still stands.
 
-Hook and wrapper completions write the durable history with a bounded lock
-retry (`CURSOR_WRITER_RETRY_INTERVALS`, ~5.2 s inside the 10 s hook timeout);
-readers keep zero retries and report `locked`. This covers one ordinary reader
-hold, not an attended push whose first-pass Cursor read misses its deadline and
-immediately warms for 5 s: back-to-back holds can exceed the schedule, and that
-completion is then dropped with a stderr warning.
+Hook and wrapper completions never touch the history lock. They append one
+sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
+private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
+which fsyncs and writes only after its flock confirms the path still names the
+locked inode, so a push reader's multi-second hold (first-pass read plus an
+immediate 5 s warm) can never drop or delay a completion. Under the history
+lock, `read_cursor_usage` renames the spool to `.merging` with
+`fsutil.rotate_jsonl` (non-blocking; a busy spool rotates on a later read),
+folds it, writes history durably, and only then unlinks `.merging`. A crash
+in between re-folds the leftover idempotently before the live spool rotates
+again. Torn or invalid rows are skipped with a notice instead of wedging every
+read; the spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
+history authoritative (`complete_once`) when no blocker is outstanding. Diag
+reports `pending_completions` read-only. A corrupt history refuses as before
+and leaves the queue in place.
 
 `mm enable-source cursor` installs the hook before granting consent, so a
 failed install grants nothing. `mm disable-source cursor` revokes consent first

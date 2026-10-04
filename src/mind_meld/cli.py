@@ -6647,7 +6647,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models / last_reason / last_reason_since, and
         Cursor's consented / complete_once / cache_state / runs_cached /
-        model_count / models / last_reason / last_reason_since / hook_state;
+        model_count / models / last_reason / last_reason_since / hook_state /
+        pending_completions;
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
@@ -7049,6 +7050,11 @@ def diag(
         "    consented: " + ("unknown" if consent is None else "yes" if consent else "no")
     )
     console.print("    completion hook: " + safe_str(cursor_state.get("hook_state", "unknown")))
+    pending = cursor_state.get("pending_completions")
+    console.print(
+        "    pending completions: "
+        + ("unknown" if pending is None else f"{pending} (merged by the next push)")
+    )
     console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
     if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):
         console.print(

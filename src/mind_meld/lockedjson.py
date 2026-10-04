@@ -63,16 +63,9 @@ class InvalidJsonCache(ValueError):
 
 @contextmanager
 def locked_json_durable_rmw(
-    path: Path,
-    *,
-    default_factory: Callable[[], dict[str, Any]] = dict,
-    retry_intervals: Sequence[float] = (),
+    path: Path, *, default_factory: Callable[[], dict[str, Any]] = dict
 ) -> Iterator[LockedJson]:
     """Crash-durable R/M/W for data that cannot be regenerated.
-
-    Contention raises ``LockContended`` after ``retry_intervals`` (none by
-    default). Budgeted readers keep the default; a writer holding the only copy
-    of an observation passes a bounded schedule instead of dropping it.
 
     A stable sibling ``.lock`` inode owns exclusion across atomic replacements.
     Never mix this protocol with ``locked_json_rmw`` on the same data path.
@@ -89,7 +82,7 @@ def locked_json_durable_rmw(
         acquired = _acquire_lock(
             fd,
             on_contention="raise",
-            retry_intervals=retry_intervals,
+            retry_intervals=(),
             contention_warning="durable JSON store locked",
         )
         try:

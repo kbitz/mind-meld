@@ -44,15 +44,27 @@ class TestCursorStandaloneUsage:
             **updates,
         }
 
+    def _history(self):
+        """Fold queued completions (no Conductor store) and return retained runs."""
+        hu.read_cursor_usage(consented=True)
+        return json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+
     def test_hook_retains_only_normalized_usage_and_deduplicates_replays(self):
         payload = self._hook(text="PRIVATE RESPONSE", user_email="PRIVATE EMAIL")
         assert hu.record_cursor_usage(payload)
-        first = hu.CURSOR_CACHE_PATH.read_bytes()
-        assert b"PRIVATE" not in first
-        assert b"standalone-generation" not in first
-        assert hu.CURSOR_CACHE_PATH.stat().st_mode & 0o777 == 0o600
+        queued = hu.CURSOR_SPOOL_PATH.read_bytes()
+        assert b"PRIVATE" not in queued
+        assert b"standalone-generation" not in queued
+        assert hu.CURSOR_SPOOL_PATH.stat().st_mode & 0o777 == 0o600
+        assert not hu.CURSOR_CACHE_PATH.exists()
+        assert hu.cursor_usage_diag()["pending_completions"] == 1
+        first = self._history()
+        assert not hu.CURSOR_SPOOL_PATH.exists()
+        assert hu.cursor_usage_diag()["pending_completions"] == 0
         assert hu.record_cursor_usage(payload)
-        assert hu.CURSOR_CACHE_PATH.read_bytes() == first
+        assert self._history() == first
+        history = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert b"PRIVATE" not in history and b"standalone-generation" not in history
         result = hu.read_cursor_usage(consented=True)
         assert result.complete
         day = datetime.now(timezone.utc).date().isoformat()
@@ -79,8 +91,7 @@ class TestCursorStandaloneUsage:
             "result": "PRIVATE RESPONSE",
         }
         assert hu.record_cursor_usage(result, model="grok-4.7-low-fast")
-        cached = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
-        run = next(iter(cached.values()))
+        run = next(iter(self._history().values()))
         assert run["usage"]["input"] == 100
         assert run["model"] == "grok-4.7-fast"
 
@@ -97,14 +108,45 @@ class TestCursorStandaloneUsage:
     def test_invalid_completion_never_creates_history(self, updates):
         with pytest.raises(lockedjson.InvalidJsonCache):
             hu.record_cursor_usage(self._hook(**updates))
+        assert not hu.CURSOR_SPOOL_PATH.exists()
         assert not hu.CURSOR_CACHE_PATH.exists()
 
-    def test_corrupt_history_is_preserved(self):
+    def test_corrupt_history_is_preserved_with_its_queue(self):
         hu.CURSOR_CACHE_PATH.parent.mkdir(parents=True)
         hu.CURSOR_CACHE_PATH.write_bytes(b"corrupt history")
-        with pytest.raises(lockedjson.InvalidJsonCache):
-            hu.record_cursor_usage(self._hook())
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(consented=True).reason == "malformed"
         assert hu.CURSOR_CACHE_PATH.read_bytes() == b"corrupt history"
+        assert hu.cursor_usage_diag()["pending_completions"] == 1
+
+    def test_queue_survives_a_crash_between_fold_and_cleanup(self, monkeypatch):
+        hu.record_cursor_usage(self._hook())
+        merging = hu._cursor_spool_merging_path()
+
+        def crash(*_args, **_kwargs):
+            raise KeyboardInterrupt  # dies after the durable history write
+
+        with monkeypatch.context() as dying:
+            dying.setattr(type(merging), "unlink", crash)
+            with pytest.raises(KeyboardInterrupt):
+                hu.read_cursor_usage(consented=True)
+        assert merging.exists()
+        first = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+        hu.record_cursor_usage(self._hook(generation_id="later", output_tokens=1))
+        result = hu.read_cursor_usage(consented=True)  # re-folds leftover once
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"] == first
+        assert not merging.exists() and hu.CURSOR_SPOOL_PATH.exists()
+        assert len(self._history()) == 2
+        day = datetime.now(timezone.utc).date().isoformat()
+        assert result.hosts["grok"][day]["input"] == 16_382
+
+    def test_torn_queue_rows_are_skipped_not_wedging(self, capsys):
+        hu.record_cursor_usage(self._hook())
+        with hu.CURSOR_SPOOL_PATH.open("ab") as spool:
+            spool.write(b'{"key":"torn')
+        hu.record_cursor_usage(self._hook(generation_id="after-tear"))
+        assert len(self._history()) == 2
+        assert "skipped 1 unreadable Cursor completion" in capsys.readouterr().err
 
     def _conductor_row(self, *, status="finished", usage=True, **updates):
         row = {
@@ -215,23 +257,22 @@ class TestCursorStandaloneUsage:
             },
         }
         assert hu.record_cursor_usage(result, model=hu.cursor_cli_model(["-p", "hello"]))
-        run = next(iter(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"].values()))
+        run = next(iter(self._history().values()))
         assert run["model"] == expected
 
-    def test_completion_waits_out_a_push_reader_holding_the_lock(self):
-        import threading
-
+    def test_completion_never_waits_for_a_push_reader_holding_history(self):
         lock = hu.CURSOR_CACHE_PATH.with_name(hu.CURSOR_CACHE_PATH.name + ".lock")
         lock.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)  # a push reader mid-scan
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a push reader mid-scan, for any duration
         try:
-            assert hu.read_cursor_usage(consented=True).reason == "locked"
-            threading.Timer(0.3, fcntl.flock, (fd, fcntl.LOCK_UN)).start()
+            started = time.monotonic()
             assert hu.record_cursor_usage(self._hook())
+            assert time.monotonic() - started < 1
+            assert hu.read_cursor_usage(consented=True).reason == "locked"
         finally:
             os.close(fd)
-        assert len(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]) == 1
+        assert len(self._history()) == 1
 
     def test_real_hooks_file_is_refused_under_pytest(self, monkeypatch):
         import pwd
@@ -275,13 +316,13 @@ class TestCursorStandaloneUsage:
     @pytest.mark.parametrize("requests", [{"not-hex": "a" * 64}, {"a" * 64: 7}, []])
     def test_malformed_alias_map_refuses_without_reset(self, requests):
         hu.record_cursor_usage(self._hook())
+        self._history()
         data = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())
         data["requests"] = requests
         hu.CURSOR_CACHE_PATH.write_text(json.dumps(data))
         before = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert hu.record_cursor_usage(self._hook())
         assert hu.read_cursor_usage(consented=True).reason == "malformed"
-        with pytest.raises(lockedjson.InvalidJsonCache):
-            hu.record_cursor_usage(self._hook())
         assert hu.cursor_usage_diag()["cache_state"] == "unreadable"
         assert hu.CURSOR_CACHE_PATH.read_bytes() == before
 
@@ -350,9 +391,10 @@ class TestCursorStandaloneUsage:
 
         monkeypatch.setattr(hu, "datetime", Clock)
         hu.record_cursor_usage(self._hook())
+        assert len(self._history()) == 1
         Clock.current = datetime(2026, 10, 4, 0, 1, tzinfo=timezone.utc)
         hu.record_cursor_usage(self._hook(output_tokens=200))
-        run = next(iter(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"].values()))
+        run = next(iter(self._history().values()))
         assert run["day"] == "2026-10-03"
         assert run["usage"]["output"] == 200
 
