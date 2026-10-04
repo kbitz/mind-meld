@@ -68,7 +68,9 @@ and every call's omitted/literal/conditional `fsync`, then search `backend.put`,
 `save_config` and `patch_config_on_disk` and follow their consumers, handlers and
 next readers. An ad hoc AST call listing cross-checked the source trace: 19 helper
 calls, six literal True, one conditional, eight False, four omitted (default
-False). The seven durable families below cover all currently found durable calls;
+False). The seven durable writer families below (the six True calls plus the
+conditional `LocalBackend.put`, which splits by key prefix into the crypto,
+manifest and device rows, so nine rows) cover all currently found durable calls;
 seven is an observed count, not an allowlist or an automated inventory gate.
 Re-enumerate when changing a writer or wrapper. Verdicts qualify the inspected
 policy, not physical crash survival or every CLI retry.
