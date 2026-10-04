@@ -56,6 +56,18 @@ here by hand, use the H3 form.
 - **Priority:** P2
 - **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
 
+### [review:severity=low,files=src/mind_meld/cli.py] Two handlers catch OSError for helper writes that raise StorageError
+
+- **What:** Make `_init_crypto_session`'s config backfill and `recover`'s quarantine handler catch the `StorageError` that `fsutil.atomic_write_bytes` actually raises, and give each the outcome its code already intends.
+- **Why:** The backfill says `except OSError: pass  # non-fatal`, and `patch_config_on_disk` tells backfill callers to swallow failures, but every write failure arrives as `StorageError` (a `MindMeldError`, not an `OSError`), so the crypto-error handler turns it into a command error. `recover` catches `OSError` around `_quarantine_corrupt_manifest` to print "quarantine failed", but a copy failure escapes it uncaught. `seen_sources.write` already fixed this class by catching both.
+- **Repro:** On the Track 69B branch (runtime identical to e9e56db), run each probe with `PYTHONPATH=tests` and `-p conftest` so the repo's isolation applies. `~/.gstack/projects/kbitz-mind-meld/69b-review-backfill-probe.py` (2 passed): a file-flush fault and a config-parent fault both let `StorageError` escape `_init_crypto_session`; after the parent fault, config.toml already holds the backfilled crypto keys. `~/.gstack/projects/kbitz-mind-meld/69b-review-quarantine-probe.py` (2 passed): `mm recover --abandon-manifest --yes` exits 1 on an uncaught `StorageError`, without "quarantine failed"; the source manifest stays, a parent fault also leaves a quarantine copy, and a fault-free re-run completes and keeps that copy. All state was under tmp_path; no real config, Keychain or iCloud storage was touched.
+- **Context:** Found by Track 69B's /review (maintainability and adversarial passes) and reproduced there; recorded in docs/invariants/sync.md "Atomic write publication failures". A post-publication failure means the write may already be visible, so the backfill must not assume the old config, and a re-run of recover must not depend on the earlier copy being absent. Read docs/invariants/sync.md and init-devices.md first. Track 69B repairs no consumer.
+- **Pros:** The backfill becomes non-fatal as its comment promises, and recover reports a handled error instead of an uncaught exception.
+- **Cons:** Needs isolated regression tests for both phases; the backfill's always-stderr warning must follow the visible-failure contract.
+- **Effort:** S
+- **Priority:** P3
+- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-03
