@@ -295,9 +295,10 @@ including root and supersession; staged rows against their keys; exports
 against the revision history's hashes; declared ancestry against lineage;
 accepted controls against their keys, retirement and authority) and refuses
 incoherent state.
-The real `atomic_write_bytes` docstring still promises an untouched target on
-any failure; C2 shows a parent-fsync failure after rename leaves the new bytes,
-and that discrepancy is filed in `docs/TODOS.md` rather than changed here.
+When this was written, the real `atomic_write_bytes` docstring promised an
+untouched target on any failure; C2 shows a parent-fsync failure after rename
+leaves the new bytes. Track 69B corrected the docstring; see
+`docs/invariants/sync.md` "Atomic write publication failures".
 
 Completeness requires a validated cohort inventory certified for that exact
 project and all its required controls, for cold and reinstalled receivers and

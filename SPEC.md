@@ -316,7 +316,7 @@ class LocalBackend:
 ```
 
 - Keys map to file paths relative to the configured root folder.
-- Atomic writes via temp file + `os.rename`.
+- Atomic writes via temp file + `os.replace`. Replacement is the publication point; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures) for what a failed durable write does and does not guarantee.
 - Detects and resolves iCloud and Dropbox-style conflicted copies automatically (see Conflict Resolution).
 
 Factory function `get_backend(config) → LocalBackend` reads `config.storage.path` and returns the backend.
@@ -443,7 +443,7 @@ attended push's conditional activity tail and exit contract, read
 7. For each incoming file, re-read the local hash and mtime, then decide per `_apply_incoming_file`: write / update-base / merge / skip (local newer) / conflict-copy. See Conflict Resolution for the full decision tree.
 8. Download + decrypt changed blobs. Decompress (gzip).
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
-10. Write files to their respective source paths using atomic writes (write to `.tmp`, then `os.rename`; `.tmp` siblings are cleaned up on failure).
+10. Write files to their respective source paths using atomic writes (write to a `.tmp` sibling, then `os.replace`; a caught write error unlinks the sibling best-effort and a crash can strand it; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures)).
 11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
