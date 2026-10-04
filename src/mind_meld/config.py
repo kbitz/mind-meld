@@ -69,6 +69,12 @@ def host_usage_consent_remedy(reader: str, *, enabled: bool) -> str:
     if reader in HOST_USAGE_ONLY_CONSENT:
         value = "true" if enabled else "false"
         verb = "enable" if enabled else "disable"
+        if enabled:
+            return (
+                f"Run mm enable-source {reader} (also installs the completion hook for "
+                f"standalone sessions), or set [retro] {HOST_USAGE_ONLY_CONSENT[reader]} = "
+                f"{value} in config.toml (Conductor runs only)."
+            )
         return (
             f"Run mm {verb}-source {reader}, or set [retro] "
             f"{HOST_USAGE_ONLY_CONSENT[reader]} = {value} in config.toml."

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -39,6 +40,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from typer.core import TyperCommand
 
 from mind_meld import (
     __version__,
@@ -6088,6 +6090,11 @@ def status(
             narrative = "enabled; a prior scan completed successfully"
         else:
             narrative = "enabled, but no successful scan yet — " + safe_str(capture_remedy)
+        if cursor_diag.get("hook_state") not in (None, "installed"):
+            narrative += (
+                "; standalone interactive sessions are not captured until "
+                "mm enable-source cursor installs the completion hook"
+            )
         console.print(
             f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
         )
@@ -6636,8 +6643,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         files_on_disk, Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models / last_reason / last_reason_since, and
-        Cursor via Conductor's consented / complete_once / cache_state /
-        runs_cached / model_count / models / last_reason / last_reason_since;
+        Cursor's consented / complete_once / cache_state / runs_cached /
+        model_count / models / last_reason / last_reason_since / hook_state;
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
@@ -7033,11 +7040,12 @@ def diag(
     cursor_state = state["host_usage"].get("cursor", {})
     from mind_meld.host_usage import HOST_READER_DIAGS
 
-    console.print(f"  {HOST_READER_DIAGS['cursor'].label} (bare CLI usage is outside coverage):")
+    console.print(f"  {HOST_READER_DIAGS['cursor'].label}:")
     consent = cursor_state.get("consented")
     console.print(
         "    consented: " + ("unknown" if consent is None else "yes" if consent else "no")
     )
+    console.print("    completion hook: " + safe_str(cursor_state.get("hook_state", "unknown")))
     console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
     if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):
         console.print(
@@ -7657,26 +7665,50 @@ def _set_grok_host_usage(config: dict, *, enabled: bool, quiet: bool = False) ->
         console.print("[dim]Run 'mm enable-source grok' to turn this back on.[/dim]")
 
 
-def _toggle_usage_only_reader(name: str, config: dict, *, enabled: bool) -> bool:
-    """Handle usage aliases without changing a user's file-source selection.
+def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
+    """Handle the cursor usage alias without changing file-source selection.
 
     An explicit custom source takes precedence over the alias so its existing
     enable/disable behavior remains available and does not grant usage consent.
+    Enable installs the hook before granting consent; disable revokes consent
+    before touching hooks.json, so a hook file mm cannot edit never blocks
+    revocation (the leftover hook records nothing without consent).
     """
     key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
-    if key is None or any(s["name"] == name for s in config.get("sync", {}).get("sources", [])):
+    if name != "cursor" or key is None:
+        return False
+    if any(s["name"] == name for s in config.get("sync", {}).get("sources", []) or []):
         return False
     from mind_meld import host_usage
 
-    try:
-        host_usage.configure_cursor_hook(enabled=enabled)
-    except (OSError, ValueError, RuntimeError, StorageError) as exc:
-        _error("Could not configure Cursor's completion hook: " + safe_str(str(exc)))
+    hook_errors = (OSError, ValueError, RuntimeError, StorageError)
+    already = config.get("retro", {}).get(key) is enabled
+    hook_changed = False
+    if enabled:
+        try:
+            hook_changed = host_usage.configure_cursor_hook(enabled=True)
+        except hook_errors as exc:
+            _error("Could not install Cursor's completion hook: " + safe_str(str(exc)))
+    if not already:
+        patch_config_on_disk({"retro": {key: enabled}})
+    if not enabled:
+        try:
+            hook_changed = host_usage.configure_cursor_hook(enabled=False)
+        except hook_errors as exc:
+            stderr_console.print(
+                "[yellow]mm: warning:[/yellow] Cursor usage capture is disabled, but mm's "
+                f"completion hook could not be removed from {host_usage.CURSOR_HOOK_CONFIG_PATH}: "
+                + safe_str(str(exc))
+                + f". It records nothing while capture is disabled; remove its "
+                f"'{host_usage.CURSOR_HOOK_COMMAND}' stop entry to clean up."
+            )
     state = "enabled" if enabled else "disabled"
-    if config.get("retro", {}).get(key) is enabled:
-        console.print(f"[dim]Cursor usage capture is already {state}.[/dim]")
+    if already:
+        repaired = ""
+        if hook_changed:
+            repaired = "; reinstalled its hook" if enabled else "; removed its hook"
+        console.print(f"[dim]Cursor usage capture is already {state}{repaired}.[/dim]")
         return True
-    patch_config_on_disk({"retro": {key: enabled}})
     verb = "Enabled" if enabled else "Disabled"
     console.print(f"[green]{verb} Cursor usage capture on this device.[/green]")
     if enabled:
@@ -7705,20 +7737,67 @@ def _record_cursor_completion(payload: object, *, model: str | None = None) -> N
 @app.command(name="capture-cursor-usage", hidden=True)
 def capture_cursor_usage() -> None:
     """Completion hook: retain counters only, and never block Cursor's agent loop."""
+    from mind_meld import host_usage
+
+    limit = host_usage.CURSOR_HOOK_STDIN_MAX_BYTES
     try:
-        data = sys.stdin.buffer.read(65_537)
-        if len(data) > 65_536:
+        data = sys.stdin.buffer.read(limit + 1)
+        if len(data) > limit:
             raise ValueError("oversized Cursor completion")
         payload = json.loads(data)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         print("mm: warning: Cursor completion metadata was unreadable.", file=sys.stderr)
     else:
-        _record_cursor_completion(payload)
+        try:
+            _record_cursor_completion(payload)
+        except Exception:
+            # The hook's contract outranks diagnostics: exit 0 with `{}`.
+            print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
     typer.echo("{}")
+
+
+class _RawArgsCommand(TyperCommand):
+    """Keep argv verbatim: Click's parser drops a literal `--` from ctx.args."""
+
+    def parse_args(self, ctx, args):
+        ctx.meta["raw_args"] = list(args)
+        return super().parse_args(ctx, args)
+
+
+def _cursor_usage_consented() -> bool:
+    if not _config_module.CONFIG_PATH.exists():
+        return False
+    try:
+        return _config_module.cursor_host_usage_enabled(load_config())
+    except (MindMeldError, OSError, ValueError):
+        print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
+        return False
+
+
+@contextmanager
+def _forwarding_signals(child: subprocess.Popen):
+    """Relay termination to the child and let Ctrl-C reach it from the terminal.
+
+    The terminal already delivers SIGINT to the child's process group, so the
+    wrapper ignores it rather than dying first and losing the child's status.
+    """
+    previous = {signal.SIGINT: signal.signal(signal.SIGINT, signal.SIG_IGN)}
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        previous[signum] = signal.signal(signum, lambda sig, _frame: child.send_signal(sig))
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _cursor_exit_code(code: int) -> int:
+    return code if code >= 0 else 128 - code
 
 
 @app.command(
     name="cursor-agent",
+    cls=_RawArgsCommand,
     context_settings={
         "allow_extra_args": True,
         "ignore_unknown_options": True,
@@ -7729,15 +7808,19 @@ def cursor_agent(ctx: typer.Context) -> None:
     """Run Cursor normally and retain print-mode usage for retro-fleet."""
     from mind_meld import host_usage, token_usage
 
-    args = list(ctx.args)
+    args = list(ctx.meta["raw_args"])
     options = args[: args.index("--")] if "--" in args else args
     printing = "--print" in options or "-p" in options
-    if not printing or "--help" in options or "-h" in options or "--version" in options:
+    capture = (
+        printing and not {"--help", "-h", "--version"} & set(options) and _cursor_usage_consented()
+    )
+    if not capture:
         try:
-            result = subprocess.run(["cursor-agent", *args])
+            with subprocess.Popen(["cursor-agent", *args]) as child, _forwarding_signals(child):
+                code = child.wait()
         except OSError:
             _error("cursor-agent could not be started; check that it is on PATH.")
-        raise typer.Exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+        raise typer.Exit(_cursor_exit_code(code))
 
     model = host_usage.cursor_cli_model(options)
     output = "text"
@@ -7755,26 +7838,47 @@ def cursor_agent(ctx: typer.Context) -> None:
             break
     else:
         child_args = ["--output-format=json", *child_args]
+    stdout_open = True
+    seen_result = False
+
+    def emit(data: bytes) -> None:
+        nonlocal stdout_open
+        if stdout_open:
+            try:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            except BrokenPipeError:
+                # Keep draining so the child is not blocked and usage is kept.
+                stdout_open = False
+
     try:
-        with subprocess.Popen(["cursor-agent", *child_args], stdout=subprocess.PIPE) as child:
+        with (
+            subprocess.Popen(["cursor-agent", *child_args], stdout=subprocess.PIPE) as child,
+            _forwarding_signals(child),
+        ):
             assert child.stdout is not None
             while line := child.stdout.readline(token_usage.MAX_JSONL_LINE_BYTES + 1):
                 try:
                     payload = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     payload = None
                 terminal = isinstance(payload, dict) and payload.get("type") == "result"
                 if output != "text" or not terminal:
-                    sys.stdout.buffer.write(line)
-                    sys.stdout.buffer.flush()
+                    emit(line)
                 elif isinstance(payload.get("result"), str):
-                    typer.echo(payload["result"])
+                    emit(payload["result"].encode() + b"\n")
                 if terminal:
+                    seen_result = True
                     _record_cursor_completion(payload, model=model)
             code = child.wait()
     except OSError:
         _error("cursor-agent could not be started or its output could not be read.")
-    raise typer.Exit(code if code >= 0 else 128 - code)
+    if code == 0 and not seen_result:
+        print(
+            "mm: warning: Cursor usage was not recorded: no result line was found.",
+            file=sys.stderr,
+        )
+    raise typer.Exit(_cursor_exit_code(code))
 
 
 def _record_seen(names: list[str]) -> None:
@@ -7812,7 +7916,7 @@ def disable_source(
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
     """
     config = _get_config(read_only=False)
-    if _toggle_usage_only_reader(name, config, enabled=False):
+    if _toggle_cursor_usage(name, config, enabled=False):
         return
     try:
         _validate_source_name(name, config, force=force)
@@ -7865,7 +7969,7 @@ def enable_source(
     install the link itself.
     """
     config = _get_config(read_only=False)
-    if _toggle_usage_only_reader(name, config, enabled=True):
+    if _toggle_cursor_usage(name, config, enabled=True):
         return
     try:
         _validate_source_name(name, config, force=force)

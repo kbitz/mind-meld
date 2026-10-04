@@ -331,8 +331,16 @@ its cache counters again. A plain native `--print` run does not emit a stop
 hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
 text from the final result and retains the exit code. It uses
 the explicit or locally selected model, and retains no transcript content or
-CLI config. Ambiguous bare Grok model IDs remain unpriced; known flat CLI
-aliases identify standard versus Fast without inventing a Fast rate.
+CLI config. Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a
+selected model without a fast parameter) are recorded as the unpriced
+`grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
+without inventing a Fast rate. The wrapper reads argv verbatim
+(`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
+text into live Cursor options. Without consent, or outside print mode, it is a
+pure passthrough with no output rewriting. It ignores SIGINT (the terminal
+already delivers it to the child), relays SIGTERM/SIGHUP to the child, keeps
+draining after a closed stdout, and maps signal exits to 128+N. A successful
+run with no result line warns that usage was not recorded.
 
 Both paths require the existing consent bit. The hidden hook command reads
 bounded stdin, returns `{}` and exits zero on malformed input or capture failure
@@ -341,18 +349,48 @@ The same private authoritative history holds hashed generation IDs and counters;
 the local capture's UTC date owns standalone runs. Duplicate callbacks keep
 the original completion day and replace counters, rather than adding again.
 Conductor `requestId` hashes map to canonical run-ID hashes in an additive
-private `requests` map: matching standalone generations are removed when the
-stable Conductor record is accepted, and the aliases survive pruning of its
-source files. Malformed aliases refuse without resetting history. Hook
-enrollment uses the shared durable JSON primitive, and tests isolate its path
-along with every host cache before any mutating command is exercised.
+private `requests` map: a matching standalone generation is removed only once
+the Conductor run is retained **with counters**. A running run or a usageRef
+placeholder never erases known standalone usage, and later callbacks keep
+updating it until then. Aliases survive pruning of their source files.
+Malformed aliases refuse without resetting history. The ID-equality premise
+(hook `generation_id` == Conductor `requestId`) is not yet measured; the live
+store holds bare-UUID requestIds and `run-`-prefixed runIds.
+
+On a Mac without a Conductor store, history is authoritative once a scan
+completed or a standalone completion was recorded (`complete_once`). A
+transient persisted reason (`deadline`, `io_error`, `stale`) then does not
+outlive the missing store; only `unsupported`/`malformed` survive it
+(`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
+still stands.
+
+Hook and wrapper completions write the durable history with a bounded lock
+retry (`CURSOR_WRITER_RETRY_INTERVALS`, ~5.2 s inside the 10 s hook timeout);
+a push reader holding the lock for its scan (up to the 5 s attended warm) no
+longer drops a completion that has no other ledger. Readers keep zero retries
+and report `locked`.
+
+`mm enable-source cursor` installs the hook before granting consent, so a
+failed install grants nothing. `mm disable-source cursor` revokes consent first
+and then removes the hook best-effort: a symlinked, unsupported or malformed
+hooks.json warns instead of blocking revocation (the leftover entry records
+nothing without consent). Re-running enable reports a repaired hook. Hook
+enrollment uses the shared durable JSON primitive (compact rewrite, sibling
+`.lock`, symlinks refused, not replaced). `configure_cursor_hook` refuses the
+real `~/.cursor/hooks.json` under pytest, derived from the account database
+rather than HOME. Status adds a hint when consent is on but the hook is not
+installed; diag prints the hook state.
 
 The persisted schema producer is Conductor **0.87.3**, with sessions generated
 by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
 and documents the three-run, two-session, one-Mac census. Runtime validation,
 not version pins, detects drift: only `finished` plus non-null usage counts;
-`running` plus null usage is pending. Missing usage, malformed counters and
-unknown statuses (including error/cancelled) refuse the reader. No store and
+`queued`/`running` plus null usage is pending. `cancelled`/`error` rows with
+null usage and no usageRef contribute nothing: Conductor recorded no counters
+for them (2026-10-03 store: 10 cancelled, 1 error, 1 queued across 7 of 16
+files, all null usage), so any spend they incurred is invisible to mm. Counters
+or a usageRef on any unfinished status, missing usage, malformed counters and
+unknown statuses refuse the reader. No store and
 no prior cache is `no_metadata_ledger`; found-but-unreadable data
 is `malformed`/`unsupported`, never invisible source absence.
 A known unreadable store disappearing preserves its blocker rather than

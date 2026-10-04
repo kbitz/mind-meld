@@ -241,8 +241,11 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 ## Cursor via Conductor (Track 67A)
 
 `[retro] cursor_host_usage = true` authorizes reading Conductor's metadata-only
-`runs.ndjson`. Bare cursor-agent has no persisted billing ledger and stays
-outside coverage even on a Mac also using Conductor. The reader never reads
+`runs.ndjson`. Bare cursor-agent has no persisted billing ledger. **Superseded
+in part:** `mm enable-source cursor` now enrolls a `stop` hook and
+`mm cursor-agent` wraps print runs, so future standalone completions are
+captured (see `docs/invariants/events-retro.md`, "Standalone Cursor capture");
+sessions before enrollment remain outside coverage. The reader never reads
 Conductor's Claude/Codex copy (would double-count existing corpora), SQLite,
 transcripts, agents.ndjson, checkpoints or usage APIs.
 

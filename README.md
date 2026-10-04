@@ -105,7 +105,8 @@ Each outcome maps to a behavioral test in
 table lists the applicable codes per command. Exit 0 from content sync does
 not prove host usage was captured or published.
 
-`mm cursor-agent` passes through Cursor's exit status (including signal exits).
+`mm cursor-agent` passes through Cursor's exit status (signal exits map to
+128+N; SIGTERM/SIGHUP sent to the wrapper are relayed to Cursor).
 Usage-recording failures warn without changing that status. The completion-hook
 command always exits 0 so it cannot stop the agent loop.
 
@@ -798,9 +799,10 @@ cursor_host_usage = true
 
 Conductor capture has been supported since mm v1.2.0. The config bit alone
 continues to enable that reader; standalone interactive capture also needs the
-hook installed by `mm enable-source cursor`. Run the command again to repair
-a missing hook. `mm disable-source cursor` removes mm's hook and stops usage
-reading. An explicitly configured custom file source named `cursor` retains
+hook installed by `mm enable-source cursor`; `mm status` says so when the hook
+is missing. Run the command again to repair a missing hook.
+`mm disable-source cursor` stops usage reading and removes mm's hook; if
+hooks.json cannot be edited it warns, and the leftover entry records nothing. An explicitly configured custom file source named `cursor` retains
 its existing file-source toggle behavior instead of using this usage alias.
 
 Run `mm push` and inspect `mm status`; `mm diag --json` includes
@@ -818,7 +820,8 @@ mm cursor-agent --print --output-format stream-json --model grok-4.7-low "Your p
 ```
 
 The wrapper forwards JSON/stream-JSON output unchanged and renders text from the
-final result when the run completes. It preserves Cursor's exit status and records only
+final result when the run completes. Arguments after `--` stay positional.
+Without usage consent it runs Cursor unchanged. It preserves Cursor's exit status and records only
 completed result metadata; responses, prompts, email addresses, paths and
 credentials are discarded. Native `cursor-agent --print` does not fire the
 completion hook in the measured CLI and therefore still needs the wrapper.

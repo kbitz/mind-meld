@@ -23,8 +23,11 @@ is a bounded subset of outputTokens, never an additional charge. The complete
 turn belongs to endedAt's UTC date, even if it started before midnight.
 
 Never observed: fast=true; composer-2.5/auto; nonzero cacheWriteTokens;
-non-null usageRef; error/cancelled rows; a midnight-spanning turn; a second
-producing Mac. Synthetic mutations in tests exercise these failure paths and
+non-null usageRef; a midnight-spanning turn; a second producing Mac.
+Observed later (2026-10-03, structure only): 10 `cancelled`, 1 `error` and
+1 `queued` row across 7 of 16 run files, every one with null usage and no
+usageRef. They contribute nothing; counters or a usageRef on them refuse.
+Synthetic mutations in tests exercise these failure paths and
 are explicitly not additional census evidence. Unknown statuses, missing
 usage fields, invalid arithmetic and unknown shapes fail visibly. Nonzero
 cache writes label the day partial; counters still publish with disjoint-v1
