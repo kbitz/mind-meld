@@ -873,7 +873,9 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
     assert names == {
         "autopull",
         "autopush",
+        "capture-cursor-usage",
         "conflicts",
+        "cursor-agent",
         "devices",
         "diag",
         "diff",

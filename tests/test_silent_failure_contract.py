@@ -2352,6 +2352,6 @@ def test_cursor_drift_survives_capture_and_attempt_outcomes(cursor_store, tmp_pa
     assert "dropped:no_metadata_ledger" not in attemptlog.READER_OUTCOMES
     phrase = events_tail._host_skip_phrase("cursor", "unsupported", readiness="ready")
     assert "[retro] cursor_host_usage = false" in phrase
-    assert "disable-source cursor" not in phrase
+    assert "disable-source cursor" in phrase
     degradations = events_tail._run_events_tail(cfg, sources, "dev-deg", dry_run=False, quiet=True)
     assert any("cursor unsupported" in reason for reason in degradations)

@@ -30,9 +30,9 @@ either upload prompts or mint a fake `grok` sync source.
 
 ## Capability matrix
 
-| Capability | Claude | Codex | Grok | Cursor via Conductor |
+| Capability | Claude | Codex | Grok | Cursor (Conductor + enrolled CLI) |
 |---|---|---|---|---|
-| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger; model-family rows |
+| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger plus enrolled standalone completions; model-family rows |
 | Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` | None; no user-authored tree observed |
 | Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
 | `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C | None; discovers ~/.claude/skills with third-party extensibility enabled |
@@ -241,8 +241,11 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 ## Cursor via Conductor (Track 67A)
 
 `[retro] cursor_host_usage = true` authorizes reading Conductor's metadata-only
-`runs.ndjson`. Bare cursor-agent has no persisted billing ledger and stays
-outside coverage even on a Mac also using Conductor. The reader never reads
+`runs.ndjson`. Bare cursor-agent has no persisted billing ledger. **Superseded
+in part:** `mm enable-source cursor` now enrolls a `stop` hook and
+`mm cursor-agent` wraps print runs, so future standalone completions are
+captured (see `docs/invariants/events-retro.md`, "Standalone Cursor capture");
+sessions before enrollment remain outside coverage. The reader never reads
 Conductor's Claude/Codex copy (would double-count existing corpora), SQLite,
 transcripts, agents.ndjson, checkpoints or usage APIs.
 

@@ -30,6 +30,494 @@ from tests import _host_usage_oracle as oracle
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
 
 
+class TestCursorStandaloneUsage:
+    def _hook(self, **updates):
+        return {
+            "hook_event_name": "stop",
+            "status": "completed",
+            "generation_id": "standalone-generation",
+            "model": "grok-4.7-low",
+            "input_tokens": 17_534,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 1_152,
+            "output_tokens": 147,
+            **updates,
+        }
+
+    def _history(self):
+        """Fold queued completions (no Conductor store) and return retained runs."""
+        hu.read_cursor_usage(consented=True)
+        return json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+
+    def test_hook_retains_only_normalized_usage_and_deduplicates_replays(self):
+        payload = self._hook(text="PRIVATE RESPONSE", user_email="PRIVATE EMAIL")
+        assert hu.record_cursor_usage(payload)
+        queued = hu.CURSOR_SPOOL_PATH.read_bytes()
+        assert b"PRIVATE" not in queued
+        assert b"standalone-generation" not in queued
+        assert hu.CURSOR_SPOOL_PATH.stat().st_mode & 0o777 == 0o600
+        assert not hu.CURSOR_CACHE_PATH.exists()
+        assert hu.cursor_usage_diag()["pending_completions"] == 1
+        first = self._history()
+        assert not hu.CURSOR_SPOOL_PATH.exists()
+        assert hu.cursor_usage_diag()["pending_completions"] == 0
+        assert hu.record_cursor_usage(payload)
+        assert self._history() == first
+        history = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert b"PRIVATE" not in history and b"standalone-generation" not in history
+        result = hu.read_cursor_usage(consented=True)
+        assert result.complete
+        day = datetime.now(timezone.utc).date().isoformat()
+        assert result.hosts["grok"][day] == {
+            "input": 16_382,
+            "cache_create": 0,
+            "cache_read": 1_152,
+            "output": 147,
+        }
+        assert result.tokens_by_day[day]["by_model"]["grok-4.7"]["input"] == 16_382
+
+    def test_print_results_are_already_disjoint(self):
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "print-generation",
+            "usage": {
+                "inputTokens": 100,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 200,
+                "outputTokens": 10,
+            },
+            "result": "PRIVATE RESPONSE",
+        }
+        assert hu.record_cursor_usage(result, model="grok-4.7-low-fast")
+        run = next(iter(self._history().values()))
+        assert run["usage"]["input"] == 100
+        assert run["model"] == "grok-4.7-fast"
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"input_tokens": True},
+            {"cache_read_tokens": 100_000},
+            {"output_tokens": None},
+            {"generation_id": ""},
+            {"model": None},
+        ],
+    )
+    def test_invalid_completion_never_creates_history(self, updates):
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.record_cursor_usage(self._hook(**updates))
+        assert not hu.CURSOR_SPOOL_PATH.exists()
+        assert not hu.CURSOR_CACHE_PATH.exists()
+
+    def test_corrupt_history_is_preserved_with_its_queue(self):
+        hu.CURSOR_CACHE_PATH.parent.mkdir(parents=True)
+        hu.CURSOR_CACHE_PATH.write_bytes(b"corrupt history")
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(consented=True).reason == "malformed"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == b"corrupt history"
+        assert hu.cursor_usage_diag()["pending_completions"] == 1
+
+    def test_queue_survives_a_crash_between_fold_and_cleanup(self, monkeypatch):
+        hu.record_cursor_usage(self._hook())
+        merging = hu._cursor_spool_merging_path()
+
+        def crash(*_args, **_kwargs):
+            raise KeyboardInterrupt  # dies after the durable history write
+
+        with monkeypatch.context() as dying:
+            dying.setattr(type(merging), "unlink", crash)
+            with pytest.raises(KeyboardInterrupt):
+                hu.read_cursor_usage(consented=True)
+        assert merging.exists()
+        first = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+        hu.record_cursor_usage(self._hook(generation_id="later", output_tokens=1))
+        result = hu.read_cursor_usage(consented=True)  # re-folds leftover once
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"] == first
+        assert not merging.exists() and hu.CURSOR_SPOOL_PATH.exists()
+        assert len(self._history()) == 2
+        day = datetime.now(timezone.utc).date().isoformat()
+        assert result.hosts["grok"][day]["input"] == 16_382
+
+    @pytest.mark.parametrize("first", [b"", b'{"key":"torn\n'], ids=["empty", "torn"])
+    def test_unusable_first_batch_never_wedges_a_storeless_mac(self, first):
+        hu.CURSOR_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_SPOOL_PATH.write_bytes(first)
+        assert hu.read_cursor_usage(consented=True).reason == "no_metadata_ledger"
+        assert not hu._cursor_spool_merging_path().exists()
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(consented=True).complete
+        assert len(self._history()) == 1
+        assert hu.cursor_usage_diag()["pending_completions"] == 0
+
+    def test_storeless_first_read_timeout_does_not_block_later_captures(self, monkeypatch):
+        hu.CURSOR_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_SPOOL_PATH.write_bytes(b"")
+        clock = iter([0.0, 1.0])
+        with monkeypatch.context() as late:
+            late.setattr(hu.time, "monotonic", lambda: next(clock, 10.0))
+            assert hu.read_cursor_usage(deadline=5.0, consented=True).reason == "deadline"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["complete_once"] is False
+        assert hu.record_cursor_usage(self._hook())
+        result = hu.read_cursor_usage(consented=True)
+        assert result.complete
+        assert result.hosts["grok"]
+
+    def test_failed_history_write_keeps_the_queue(self, monkeypatch):
+        hu.record_cursor_usage(self._hook())
+
+        def disk_full(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with monkeypatch.context() as full:
+            full.setattr(lockedjson.fsutil, "atomic_write_bytes", disk_full)
+            assert hu.read_cursor_usage(consented=True).reason == "io_error"
+        assert hu._cursor_spool_merging_path().exists()
+        assert len(self._history()) == 1
+        assert not hu._cursor_spool_merging_path().exists()
+
+    def test_newer_spool_rows_refuse_and_keep_the_batch(self):
+        hu.record_cursor_usage(self._hook())
+        row = json.loads(hu.CURSOR_SPOOL_PATH.read_bytes())
+        hu.CURSOR_SPOOL_PATH.write_text(json.dumps({**row, "v": 2}) + "\n")
+        assert hu.read_cursor_usage(consented=True).reason == "unsupported"
+        assert hu._cursor_spool_merging_path().exists()
+        # Persisted like a store-side blocker, so status can name the upgrade.
+        assert hu.cursor_usage_diag()["last_reason"] == "unsupported"
+
+    def test_same_batch_replays_keep_the_first_day(self, monkeypatch):
+        class Clock(datetime):
+            current = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        monkeypatch.setattr(hu, "datetime", Clock)
+        hu.record_cursor_usage(self._hook())
+        Clock.current = datetime(2026, 10, 4, 0, 1, tzinfo=timezone.utc)
+        hu.record_cursor_usage(self._hook(output_tokens=200))
+        run = next(iter(self._history().values()))
+        assert (run["day"], run["usage"]["output"]) == ("2026-10-03", 200)
+
+    @pytest.mark.parametrize(
+        "config,expected",
+        [
+            (
+                {
+                    "model": {"modelId": "gpt-5"},
+                    "selectedModel": {
+                        "modelId": "grok-4.7",
+                        "parameters": [{"id": "fast", "value": "false"}],
+                    },
+                },
+                "gpt-5",
+            ),
+            (
+                {
+                    "model": {"modelId": "grok-4.7"},
+                    "selectedModel": {
+                        "modelId": "grok-4.7",
+                        "parameters": [{"id": "fast", "value": "true"}],
+                    },
+                },
+                "grok-4.7-fast",
+            ),
+            ({"model": {"modelId": "grok-4.7"}}, "grok-4.7-unspecified"),
+            ({}, "cursor-unknown"),
+        ],
+        ids=["stale-selected", "matching-selected", "current-only", "unresolved"],
+    )
+    def test_print_model_follows_cursors_current_model(self, config, expected):
+        hu.CURSOR_CLI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_CLI_CONFIG_PATH.write_text(json.dumps(config))
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "print-model",
+            "usage": {
+                "inputTokens": 1,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 0,
+                "outputTokens": 1,
+            },
+        }
+        assert hu.record_cursor_usage(result, model=hu.cursor_cli_model(["-p", "x"]))
+        run = next(iter(self._history().values()))
+        assert run["model"] == expected
+        if expected == "cursor-unknown":
+            assert hu.host_family(expected) == "other"
+
+    def test_last_model_option_wins_like_cursor(self):
+        args = ["-p", "--model=gpt-5-codex", "--model", "grok-4.7-low", "--", "--model=x"]
+        assert hu.cursor_cli_model(args) == "grok-4.7-low"
+
+    def test_torn_queue_rows_are_skipped_not_wedging(self, capsys):
+        hu.record_cursor_usage(self._hook())
+        with hu.CURSOR_SPOOL_PATH.open("ab") as spool:
+            spool.write(b'{"key":"torn')
+        hu.record_cursor_usage(self._hook(generation_id="after-tear"))
+        assert len(self._history()) == 2
+        assert "skipped 1 unreadable Cursor completion" in capsys.readouterr().err
+
+    def _conductor_row(self, *, status="finished", usage=True, **updates):
+        row = {
+            "runId": "conductor-run",
+            "requestId": "standalone-generation",
+            "status": status,
+            "endedAt": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "model": {"id": "grok-4.7", "params": [{"id": "fast", "value": "false"}]},
+            "usage": {
+                "inputTokens": 16_000,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 1_152,
+                "outputTokens": 150,
+                "reasoningTokens": 0,
+                "totalTokens": 17_302,
+            },
+            **updates,
+        }
+        if status == "running":
+            row.update(usage=None, endedAt=None)
+        elif not usage:
+            row.update(usage=None, usageRef="usage-ref")
+        return row
+
+    def _conductor(self, tmp_path, *rows):
+        root = tmp_path / "conductor"
+        session = root / "session"
+        session.mkdir(parents=True, exist_ok=True)
+        (session / "runs.ndjson").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return root
+
+    def test_conductor_request_replaces_overlapping_hook_once(self, tmp_path):
+        hu.record_cursor_usage(self._hook())
+        root = self._conductor(tmp_path, self._conductor_row())
+        day = datetime.now(timezone.utc).date().isoformat()
+        result = hu.read_cursor_usage(root, consented=True)
+        assert result.complete
+        # Conductor's counters win over the hook's (input 16,382 / output 147).
+        assert result.hosts["grok"][day]["input"] == 16_000
+        assert result.hosts["grok"][day]["output"] == 150
+        assert len(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]) == 1
+        shutil.rmtree(root)
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(root, consented=True).hosts == result.hosts
+
+    def test_pending_conductor_run_keeps_standalone_usage(self, tmp_path):
+        hu.record_cursor_usage(self._hook())
+        day = datetime.now(timezone.utc).date().isoformat()
+        root = self._conductor(tmp_path, self._conductor_row(status="running"))
+        assert hu.read_cursor_usage(root, consented=True).hosts["grok"][day]["input"] == 16_382
+        root = self._conductor(tmp_path, self._conductor_row(usage=False))
+        result = hu.read_cursor_usage(root, consented=True)
+        assert result.hosts["grok"][day]["input"] == 16_382
+        assert day in result.partial_days
+        assert hu.record_cursor_usage(self._hook(output_tokens=200))
+        assert hu.read_cursor_usage(root, consented=True).hosts["grok"][day]["output"] == 200
+        root = self._conductor(tmp_path, self._conductor_row())
+        assert hu.read_cursor_usage(root, consented=True).hosts["grok"][day]["input"] == 16_000
+
+    @pytest.mark.parametrize(
+        "request_ids,complete",
+        [((None,), True), (("",), False), ((7,), False), (("same", "same"), False)],
+    )
+    def test_conductor_request_id_shapes(self, tmp_path, request_ids, complete):
+        rows = [
+            self._conductor_row(runId=f"run-{index}", requestId=request)
+            for index, request in enumerate(request_ids)
+        ]
+        result = hu.read_cursor_usage(self._conductor(tmp_path, *rows), consented=True)
+        assert result.complete is complete
+        if not complete:
+            assert result.reason == "malformed"
+
+    def test_standalone_only_transient_blocker_does_not_stick(self, tmp_path, monkeypatch):
+        hu.record_cursor_usage(self._hook())
+        missing = tmp_path / "no-conductor"
+        clock = iter([0.0, 1.0])
+        with monkeypatch.context() as late:
+            # A deadline that trips after the lock is taken persists its reason.
+            late.setattr(hu.time, "monotonic", lambda: next(clock, 10.0))
+            assert hu.read_cursor_usage(missing, deadline=5.0, consented=True).reason == "deadline"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["last_reason"] == "deadline"
+        assert hu.read_cursor_usage(missing, consented=True).complete
+
+    @pytest.mark.parametrize(
+        "params,expected",
+        [
+            ([{"id": "fast", "value": "false"}], "grok-4.7"),
+            ([{"id": "fast", "value": "true"}], "grok-4.7-fast"),
+            ([], "grok-4.7-unspecified"),
+        ],
+    )
+    def test_cli_config_model_matches_explicit_flag_policy(self, params, expected):
+        hu.CURSOR_CLI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_CLI_CONFIG_PATH.write_text(
+            json.dumps({"selectedModel": {"modelId": "grok-4.7", "parameters": params}})
+        )
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "config-model",
+            "usage": {
+                "inputTokens": 1,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 0,
+                "outputTokens": 1,
+            },
+        }
+        assert hu.record_cursor_usage(result, model=hu.cursor_cli_model(["-p", "hello"]))
+        run = next(iter(self._history().values()))
+        assert run["model"] == expected
+
+    def test_completion_never_waits_for_a_push_reader_holding_history(self):
+        lock = hu.CURSOR_CACHE_PATH.with_name(hu.CURSOR_CACHE_PATH.name + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a push reader mid-scan, for any duration
+        try:
+            started = time.monotonic()
+            assert hu.record_cursor_usage(self._hook())
+            assert time.monotonic() - started < 1
+            assert hu.read_cursor_usage(consented=True).reason == "locked"
+        finally:
+            os.close(fd)
+        assert len(self._history()) == 1
+
+    def test_real_hooks_file_is_refused_under_pytest(self, monkeypatch):
+        import pwd
+
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cursor" / "hooks.json"
+        for spelling in (real, real.parent / ".." / ".cursor" / "hooks.json"):
+            spelled = Path(str(spelling).replace("/.cursor/", "/.cursor/./"))
+            monkeypatch.setattr(hu, "CURSOR_HOOK_CONFIG_PATH", spelled)
+            with pytest.raises(PermissionError):
+                hu.configure_cursor_hook(enabled=True)
+
+    @pytest.mark.parametrize(
+        "ours",
+        [[{"command": "mm capture-cursor-usage", "timeout": 5}], [hu.CURSOR_HOOK_ENTRY] * 2],
+        ids=["stale", "duplicate"],
+    )
+    def test_hook_install_canonicalizes_stale_or_duplicate_entries(self, ours):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"version": 1, "hooks": {"stop": [{"command": "existing-hook"}, *ours]}})
+        )
+        assert hu.configure_cursor_hook(enabled=True) is True
+        stop = json.loads(path.read_text())["hooks"]["stop"]
+        assert stop == [{"command": "existing-hook"}, hu.CURSOR_HOOK_ENTRY]
+        assert hu.configure_cursor_hook(enabled=True) is False
+
+    def test_hook_state_and_model_reads_never_block_or_raise(self):
+        hu.CURSOR_HOOK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(hu.CURSOR_HOOK_CONFIG_PATH)
+        os.mkfifo(hu.CURSOR_CLI_CONFIG_PATH)
+        assert hu.cursor_hook_state() == "malformed"
+        assert hu.cursor_cli_model(["-p", "x"]) is None
+        deep = "[" * 200_000 + "]" * 200_000
+        for path, key in ((hu.CURSOR_HOOK_CONFIG_PATH, "hooks"), (hu.CURSOR_CLI_CONFIG_PATH, "x")):
+            path.unlink()
+            path.write_text('{"version":1,"' + key + '":' + deep + "}")
+        assert hu.cursor_hook_state() == "malformed"
+        assert hu.cursor_cli_model(["-p", "x"]) is None
+
+    @pytest.mark.parametrize("requests", [{"not-hex": "a" * 64}, {"a" * 64: 7}, []])
+    def test_malformed_alias_map_refuses_without_reset(self, requests):
+        hu.record_cursor_usage(self._hook())
+        self._history()
+        data = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())
+        data["requests"] = requests
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(data))
+        before = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(consented=True).reason == "malformed"
+        assert hu.cursor_usage_diag()["cache_state"] == "unreadable"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == before
+
+    def test_request_alias_conflicts_refuse_within_and_across_scans(self, tmp_path):
+        root = self._conductor(tmp_path, self._conductor_row(runId="run-a"))
+        (root / "other").mkdir()
+        other = root / "other" / "runs.ndjson"
+        other.write_text(json.dumps(self._conductor_row(runId="run-b")) + "\n")
+        assert hu.read_cursor_usage(root, consented=True).reason == "malformed"
+        other.unlink()
+        assert hu.read_cursor_usage(root, consented=True).complete
+        (root / "session" / "runs.ndjson").unlink()
+        other.write_text(json.dumps(self._conductor_row(runId="run-b")) + "\n")
+        before = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+        assert hu.read_cursor_usage(root, consented=True).reason == "malformed"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"] == before
+
+    def test_hook_install_and_removal_preserve_other_hooks_and_keys(self):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        original = {
+            "version": 1,
+            "hooks": {"stop": [{"command": "existing-hook"}], "sessionStart": []},
+            "unfamiliar": {"enabled": True},
+        }
+        path.write_text(json.dumps(original))
+        hu.configure_cursor_hook(enabled=True)
+        installed = json.loads(path.read_text())
+        assert installed["hooks"]["stop"] == [
+            {"command": "existing-hook"},
+            {"command": "mm capture-cursor-usage", "timeout": 10},
+        ]
+        assert installed["unfamiliar"] == original["unfamiliar"]
+        unchanged = path.read_bytes()
+        hu.configure_cursor_hook(enabled=True)
+        assert path.read_bytes() == unchanged
+        hu.configure_cursor_hook(enabled=False)
+        assert json.loads(path.read_text()) == original
+
+    def test_invalid_hooks_are_not_overwritten(self):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"invalid hooks")
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.configure_cursor_hook(enabled=True)
+        assert path.read_bytes() == b"invalid hooks"
+
+    def test_hook_diagnostic_does_not_create_state(self):
+        parent = hu.CURSOR_HOOK_CONFIG_PATH.parent
+        assert hu.cursor_usage_diag()["hook_state"] == "missing"
+        assert not parent.exists()
+        hu.configure_cursor_hook(enabled=True)
+        before = {path: path.read_bytes() for path in parent.iterdir()}
+        assert hu.cursor_usage_diag()["hook_state"] == "installed"
+        assert {path: path.read_bytes() for path in parent.iterdir()} == before
+
+    def test_duplicate_callback_keeps_its_original_utc_day(self, monkeypatch):
+        first_day = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+
+        class Clock(datetime):
+            current = first_day
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        monkeypatch.setattr(hu, "datetime", Clock)
+        hu.record_cursor_usage(self._hook())
+        assert len(self._history()) == 1
+        Clock.current = datetime(2026, 10, 4, 0, 1, tzinfo=timezone.utc)
+        hu.record_cursor_usage(self._hook(output_tokens=200))
+        run = next(iter(self._history().values()))
+        assert run["day"] == "2026-10-03"
+        assert run["usage"]["output"] == 200
+
+    @pytest.mark.parametrize("status", ["aborted", "error"])
+    def test_unfinished_hook_does_not_invent_usage(self, status):
+        assert hu.record_cursor_usage(self._hook(status=status)) is False
+        assert not hu.CURSOR_CACHE_PATH.exists()
+
+
 def _context(model: str = "gpt-5-codex", *, turn: str | None = None) -> dict:
     payload: dict = {"model": model}
     if turn is not None:
@@ -3935,6 +4423,60 @@ class TestCursorUsage67A:
         assert not result.complete
         assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
 
+    def test_sqlite_layout_stores_are_counted_never_opened(self, cursor_store, tmp_path):
+        baseline = self._read(cursor_store)
+        sqlite_store = cursor_store / "newer-conductor"
+        sqlite_store.mkdir()
+        (sqlite_store / "index.db").write_bytes(b"SQLite format 3\x00")
+        (sqlite_store / "index.db").chmod(0)  # any open would fail
+        both = cursor_store / "migrating"
+        both.mkdir()
+        (both / "index.db").touch()
+        (both / "runs.ndjson").touch()
+        (cursor_store / "stray-file").touch()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "index.db").touch()
+        (cursor_store / "linked").symlink_to(elsewhere)
+        try:
+            assert hu.unread_cursor_stores(cursor_store) == 2  # SQLite-only and migrating
+            assert self._read(cursor_store).hosts == baseline.hosts
+        finally:
+            (sqlite_store / "index.db").chmod(0o600)
+        assert hu.unread_cursor_stores(tmp_path / "absent") == 0
+
+    def test_store_scan_errors_report_unknown(self, cursor_store, monkeypatch):
+        class Entry:
+            path = str(cursor_store / "vanishing")
+
+            def is_dir(self, follow_symlinks=True):
+                raise PermissionError("stat failed")
+
+        class Entries(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(hu.os, "scandir", lambda root: Entries([Entry()]))
+        assert hu.unread_cursor_stores(cursor_store) is None
+
+    @pytest.mark.parametrize("status", ["cancelled", "error", "queued"])
+    def test_counterless_unfinished_rows_contribute_nothing(self, cursor_store, status):
+        path, row = self._single(cursor_store)
+        baseline = self._read(cursor_store)
+        assert baseline.complete
+        other = {**row, "runId": "other-" + status, "status": status, "usage": None}
+        if status == "queued":
+            other.pop("endedAt", None)
+        self._write(path, row, other)
+        result = self._read(cursor_store)
+        assert result.complete
+        assert result.hosts == baseline.hosts
+        self._write(path, row, {**other, "usageRef": "usage-ref"})
+        assert self._read(cursor_store).reason == "unsupported"
+
     @pytest.mark.parametrize("status", ["completed", "error", "cancelled", "renamed", None, {}])
     def test_unknown_or_newly_billable_status_refuses(self, cursor_store, status):
         path, row = self._single(cursor_store)
@@ -4063,6 +4605,17 @@ class TestCursorUsage67A:
         cached = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
         assert len(cached) == len(kept)
         assert all(run["usage"] is not None for run in cached.values())
+
+    def test_success_then_malformed_store_loss_keeps_the_blocker(self, cursor_store):
+        assert self._read(cursor_store).complete
+        path, row = self._single(cursor_store)
+        row["usage"] = {**row["usage"], "totalTokens": row["usage"]["totalTokens"] + 1}
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "malformed"
+        shutil.rmtree(cursor_store)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
 
     def test_success_then_unsupported_store_loss_keeps_the_blocker(self, cursor_store):
         assert self._read(cursor_store).complete

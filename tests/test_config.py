@@ -2205,4 +2205,4 @@ class TestCursorHostConsent67A:
         assert "cursor" not in {s["name"] for s in DEFAULT_SOURCES}
         text = config.usage_capture_remedy("no-reader", reader="cursor")
         assert "[retro] cursor_host_usage = true" in text
-        assert "enable-source cursor" not in text
+        assert "enable-source cursor" in text

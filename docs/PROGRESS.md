@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.5.0 | 2026-10-04 | **`mm enable-source cursor` now records Cursor usage from your own terminal sessions, alongside Conductor's, in the fleet Agents table.** Interactive `cursor-agent` sessions are captured by a completion hook, and print-mode runs go through the new `mm cursor-agent` wrapper. |
 | 1.4.0 | 2026-10-02 | **Mind Meld now has a testable contract for qualifying Codex memory portability, though no route is qualified yet.** Native and Mind Meld-owned routes remain unqualified pending their evidence gates. |
 | 1.3.0 | 2026-10-01 | **`mm update` installs the latest release for you, and `mm push`, `mm pull` and the Claude Code hooks keep a pipx install current on their own.** Updating needs no config or passphrase, and a failed update never changes the exit code of the sync that triggered it. |
 | 1.2.0 | 2026-09-23 | **Cursor usage through Conductor now joins the fleet Agents table, behind explicit local consent.** Captured runs survive Conductor pruning in durable local history, and coverage and pricing limits stay visible. |

@@ -27,7 +27,9 @@
   },
   "autopull": {},
   "autopush": {},
+  "capture-cursor-usage": {},
   "conflicts": {},
+  "cursor-agent": {},
   "devices": {
     "fmt": {
       "choices": null,

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -23,7 +24,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -39,6 +40,7 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 from rich.table import Table
+from typer.core import TyperCommand
 
 from mind_meld import (
     __version__,
@@ -6088,6 +6090,20 @@ def status(
             narrative = "enabled; a prior scan completed successfully"
         else:
             narrative = "enabled, but no successful scan yet — " + safe_str(capture_remedy)
+        hook_state = cursor_diag.get("hook_state")
+        if hook_state == "missing":
+            narrative += (
+                "; standalone interactive sessions are not captured until "
+                "mm enable-source cursor installs the completion hook"
+            )
+        elif hook_state not in (None, "installed"):
+            narrative += f"; the completion hook file is {safe_str(hook_state)} (see mm diag)"
+        unread = cursor_diag.get("unread_sqlite_stores")
+        if isinstance(unread, int) and unread > 0:
+            narrative += (
+                f"; {unread} Conductor workspace store(s) use Conductor's newer SQLite "
+                "format, which mm does not read yet, so those runs are not counted"
+            )
         console.print(
             f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
         )
@@ -6636,8 +6652,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         files_on_disk, Codex's cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models / last_reason / last_reason_since, and
-        Cursor via Conductor's consented / complete_once / cache_state /
-        runs_cached / model_count / models / last_reason / last_reason_since;
+        Cursor's consented / complete_once / cache_state / runs_cached /
+        model_count / models / last_reason / last_reason_since / hook_state /
+        pending_completions / unread_sqlite_stores;
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
@@ -7033,10 +7050,21 @@ def diag(
     cursor_state = state["host_usage"].get("cursor", {})
     from mind_meld.host_usage import HOST_READER_DIAGS
 
-    console.print(f"  {HOST_READER_DIAGS['cursor'].label} (bare CLI usage is outside coverage):")
+    console.print(f"  {HOST_READER_DIAGS['cursor'].label}:")
     consent = cursor_state.get("consented")
     console.print(
         "    consented: " + ("unknown" if consent is None else "yes" if consent else "no")
+    )
+    console.print("    completion hook: " + safe_str(cursor_state.get("hook_state", "unknown")))
+    pending = cursor_state.get("pending_completions")
+    console.print(
+        "    pending completions: "
+        + ("unknown" if pending is None else f"{pending} (merged by the next push)")
+    )
+    unread = cursor_state.get("unread_sqlite_stores")
+    console.print(
+        "    newer Conductor stores not read: "
+        + ("unknown" if unread is None else f"{unread} (SQLite format; runs there are not counted)")
     )
     console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
     if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):
@@ -7591,15 +7619,15 @@ def sources() -> None:
 
 
 def _known_source_names(config: dict) -> list[str]:
-    """Sorted union of explicit-config names and DEFAULT_SOURCES names.
+    """Sorted union of file sources and usage-only toggle names.
 
     The validation surface for `mm enable-source` / `mm disable-source`.
-    A name is "known" if either the user has it in [[sync.sources]] or
-    mm ships a default for it. Strict by default; --force accepts unknown.
+    A name is "known" if the user configures its file source, mm ships a default
+    for it, or it has a usage-only consent alias. --force accepts unknown names.
     """
     explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults))
+    return sorted(set(explicit) | set(defaults) | set(_config_module.HOST_USAGE_ONLY_CONSENT))
 
 
 def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
@@ -7657,6 +7685,264 @@ def _set_grok_host_usage(config: dict, *, enabled: bool, quiet: bool = False) ->
         console.print("[dim]Run 'mm enable-source grok' to turn this back on.[/dim]")
 
 
+def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
+    """Handle the cursor usage alias without changing file-source selection.
+
+    An explicit custom source takes precedence over the alias so its existing
+    enable/disable behavior remains available and does not grant usage consent.
+    Enable installs the hook before granting consent; disable revokes consent
+    before touching hooks.json, so a hook file mm cannot edit never blocks
+    revocation (the leftover hook records nothing without consent).
+    """
+    key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
+    if name != "cursor" or key is None:
+        return False
+    if any(s["name"] == name for s in config.get("sync", {}).get("sources", []) or []):
+        return False
+    from mind_meld import host_usage
+
+    hook_errors = (OSError, ValueError, RuntimeError, StorageError)
+    already = config.get("retro", {}).get(key) is enabled
+    hook_changed = False
+    if enabled:
+        try:
+            hook_changed = host_usage.configure_cursor_hook(enabled=True)
+        except hook_errors as exc:
+            _error("Could not install Cursor's completion hook: " + safe_str(str(exc)))
+    if not already:
+        patch_config_on_disk({"retro": {key: enabled}})
+    if not enabled:
+        try:
+            hook_changed = host_usage.configure_cursor_hook(enabled=False)
+        except hook_errors as exc:
+            stderr_console.print(
+                "[yellow]mm: warning:[/yellow] Cursor usage capture is disabled, but mm's "
+                f"completion hook could not be removed from {host_usage.CURSOR_HOOK_CONFIG_PATH}: "
+                + safe_str(str(exc))
+                + f". It records nothing while capture is disabled; remove its "
+                f"'{host_usage.CURSOR_HOOK_COMMAND}' stop entry to clean up."
+            )
+    state = "enabled" if enabled else "disabled"
+    if already:
+        repaired = ""
+        if hook_changed:
+            repaired = "; reinstalled its hook" if enabled else "; removed its hook"
+        console.print(f"[dim]Cursor usage capture is already {state}{repaired}.[/dim]")
+        return True
+    verb = "Enabled" if enabled else "Disabled"
+    console.print(f"[green]{verb} Cursor usage capture on this device.[/green]")
+    if enabled:
+        console.print(
+            "[dim]Standalone interactive sessions use the completion hook. "
+            "For --print runs, use 'mm cursor-agent' to record stdout usage. "
+            "Only usage aggregates are synced.[/dim]"
+        )
+        console.print("[dim]Run 'mm push' to refresh usage, then 'mm status' to verify.[/dim]")
+    opposite = "disable" if enabled else "enable"
+    console.print(f"[dim]Run 'mm {opposite}-source cursor' to change this setting.[/dim]")
+    return True
+
+
+_CURSOR_RECORD_WARNING = "mm: warning: Cursor usage could not be recorded; run mm diag."
+_CURSOR_WRAPPED_ENV = "MM_CURSOR_AGENT_ACTIVE"
+
+
+def _cursor_usage_consented() -> bool:
+    """Consent check shared by the hook and the wrapper; silent when mm is not set up."""
+    if not _config_module.CONFIG_PATH.exists():
+        return False
+    try:
+        return _config_module.cursor_host_usage_enabled(load_config())
+    except (MindMeldError, OSError, ValueError):
+        print(_CURSOR_RECORD_WARNING, file=sys.stderr)
+        return False
+
+
+def _record_cursor_completion(payload: object, *, model: str | None = None) -> None:
+    from mind_meld import host_usage
+
+    if not _cursor_usage_consented():
+        return
+    try:
+        host_usage.record_cursor_usage(payload, model=model)
+    except (MindMeldError, OSError, ValueError, RuntimeError):
+        print(_CURSOR_RECORD_WARNING, file=sys.stderr)
+
+
+@app.command(name="capture-cursor-usage", hidden=True)
+def capture_cursor_usage() -> None:
+    """Completion hook: retain counters only, and never block Cursor's agent loop."""
+    from mind_meld import host_usage
+
+    limit = host_usage.CURSOR_HOOK_STDIN_MAX_BYTES
+    try:
+        data = sys.stdin.buffer.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("oversized Cursor completion")
+        payload = json.loads(data)
+    except (OSError, ValueError, RecursionError):
+        print("mm: warning: Cursor completion metadata was unreadable.", file=sys.stderr)
+    else:
+        try:
+            _record_cursor_completion(payload)
+        except Exception:
+            # The hook's contract outranks diagnostics: exit 0 with `{}`.
+            print(_CURSOR_RECORD_WARNING, file=sys.stderr)
+    typer.echo("{}")
+
+
+class _RawArgsCommand(TyperCommand):
+    """Keep argv verbatim: Click's parser drops a literal `--` from ctx.args."""
+
+    def parse_args(self, ctx, args):
+        ctx.meta["raw_args"] = list(args)
+        return super().parse_args(ctx, args)
+
+
+def _terminal_delivers_sigint() -> bool:
+    """True when Ctrl-C on our foreground terminal already reaches the child too."""
+    for stream in (sys.stdin, sys.stderr):
+        try:
+            fd = stream.fileno()
+            if os.isatty(fd):
+                return os.tcgetpgrp(fd) == os.getpgrp()
+        except (AttributeError, OSError, ValueError):
+            continue
+    return False
+
+
+@contextmanager
+def _forwarding_signals(child: subprocess.Popen):
+    """Relay termination to the child, so the wrapper never dies first.
+
+    A foreground terminal already delivers Ctrl-C to the child's process group,
+    so the wrapper then ignores SIGINT instead of delivering it twice; a SIGINT
+    aimed only at the wrapper (a supervisor's cancel) is relayed.
+    """
+    previous = {}
+    relayed = [signal.SIGTERM, signal.SIGHUP]
+    if _terminal_delivers_sigint():
+        previous[signal.SIGINT] = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    else:
+        relayed.append(signal.SIGINT)
+    for signum in relayed:
+        previous[signum] = signal.signal(signum, lambda sig, _frame: child.send_signal(sig))
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _cursor_exit_code(code: int) -> int:
+    return code if code >= 0 else 128 - code
+
+
+@app.command(
+    name="cursor-agent",
+    cls=_RawArgsCommand,
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def cursor_agent(ctx: typer.Context) -> None:
+    """Run Cursor normally and retain print-mode usage for retro-fleet."""
+    from mind_meld import host_usage, token_usage
+
+    if os.environ.get(_CURSOR_WRAPPED_ENV):
+        _error(
+            "mm cursor-agent is running itself: the cursor-agent on PATH points back to mm. "
+            "Put Cursor's own cursor-agent first on PATH."
+        )
+    env = {**os.environ, _CURSOR_WRAPPED_ENV: "1"}
+    args = list(ctx.meta["raw_args"])
+    options = args[: args.index("--")] if "--" in args else args
+    printing = "--print" in options or "-p" in options
+    capture = (
+        printing and not {"--help", "-h", "--version"} & set(options) and _cursor_usage_consented()
+    )
+    if not capture:
+        try:
+            with (
+                subprocess.Popen(["cursor-agent", *args], env=env) as child,
+                _forwarding_signals(child),
+            ):
+                code = child.wait()
+        except OSError:
+            _error("cursor-agent could not be started; check that it is on PATH.")
+        raise typer.Exit(_cursor_exit_code(code))
+
+    model = host_usage.cursor_cli_model(options)
+    # The last --output-format before `--` wins, as in Cursor's own parser.
+    output, value_index = "text", None
+    for index, arg in enumerate(options):
+        if arg.startswith("--output-format="):
+            output, value_index = arg.removeprefix("--output-format="), index
+        elif arg == "--output-format" and index + 1 < len(options):
+            output, value_index = options[index + 1], index + 1
+    child_args = list(args)
+    if value_index is None:
+        child_args = ["--output-format=json", *child_args]
+    elif output == "text":
+        inline = child_args[value_index].startswith("--output-format=")
+        child_args[value_index] = "--output-format=json" if inline else "json"
+    stdout_open = True
+    result = None
+
+    def emit(data: bytes) -> None:
+        nonlocal stdout_open
+        if stdout_open:
+            try:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            except (OSError, AttributeError, ValueError):
+                # A closed pipe, hung-up tty or full disk: keep draining so the
+                # child is not blocked and usage is kept. Point fd 1 at
+                # /dev/null: Python retries the failed flush at exit and would
+                # otherwise replace Cursor's status with 120.
+                stdout_open = False
+                with suppress(OSError, ValueError):
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, sys.stdout.fileno())
+                    os.close(devnull)
+
+    try:
+        with (
+            subprocess.Popen(
+                ["cursor-agent", *child_args], stdout=subprocess.PIPE, env=env
+            ) as child,
+            _forwarding_signals(child),
+        ):
+            assert child.stdout is not None
+            while line := child.stdout.readline(token_usage.MAX_JSONL_LINE_BYTES + 1):
+                try:
+                    payload = json.loads(line)
+                except (ValueError, RecursionError):
+                    payload = None
+                terminal = isinstance(payload, dict) and payload.get("type") == "result"
+                if terminal:
+                    result = payload
+                if output == "text" and terminal and isinstance(payload.get("result"), str):
+                    emit(payload["result"].encode(errors="replace") + b"\n")
+                else:
+                    emit(line)
+            code = child.wait()
+    except OSError:
+        _error("cursor-agent could not be started or its output could not be read.")
+    # The result line is only final at EOF; queue it once Cursor has exited
+    # and the default signal handlers are back.
+    if result is not None:
+        _record_cursor_completion(result, model=model)
+    elif code == 0:
+        print(
+            "mm: warning: Cursor usage was not recorded: no result line was found.",
+            file=sys.stderr,
+        )
+    raise typer.Exit(_cursor_exit_code(code))
+
+
 def _record_seen(names: list[str]) -> None:
     """Mark `names` as acknowledged in the seen_sources tracker.
 
@@ -7690,8 +7976,14 @@ def disable_source(
     Strict by default: unknown name errors with a closest-match hint.
     `--force` accepts unknown names so you can pre-disable a source that
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
+
+    `cursor` is a usage-only alias (unless you configured a file source named
+    cursor): it revokes Cursor usage consent first, then removes mm's stop
+    entry from ~/.cursor/hooks.json, warning if that file cannot be edited.
     """
     config = _get_config(read_only=False)
+    if _toggle_cursor_usage(name, config, enabled=False):
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7741,8 +8033,15 @@ def enable_source(
     skill link maintained WITHOUT enabling sync or usage reading, use
     `mm install-skills --agent <key>` instead. This command does not
     install the link itself.
+
+    `cursor` is a usage-only alias (unless you configured a file source named
+    cursor): it installs one stop entry in ~/.cursor/hooks.json, preserving
+    other hooks, then sets `[retro] cursor_host_usage = true`. No Cursor
+    files sync; only usage aggregates are published.
     """
     config = _get_config(read_only=False)
+    if _toggle_cursor_usage(name, config, enabled=True):
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:

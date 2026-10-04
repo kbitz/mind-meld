@@ -276,6 +276,9 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
     monkeypatch.setattr(_host_usage, "CURSOR_STORE_PATH", root / "cursor-sdk-store")
     monkeypatch.setattr(_host_usage, "CURSOR_CACHE_PATH", root / "cursor-host-tokens.json")
+    monkeypatch.setattr(_host_usage, "CURSOR_SPOOL_PATH", root / "cursor-standalone-spool.jsonl")
+    monkeypatch.setattr(_host_usage, "CURSOR_HOOK_CONFIG_PATH", root / "cursor-hooks.json")
+    monkeypatch.setattr(_host_usage, "CURSOR_CLI_CONFIG_PATH", root / "cursor-cli-config.json")
 
 
 @pytest.fixture(autouse=True)

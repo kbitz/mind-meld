@@ -66,11 +66,17 @@ HOST_USAGE_ONLY_CONSENT = {"cursor": "cursor_host_usage"}
 
 
 def host_usage_consent_remedy(reader: str, *, enabled: bool) -> str:
-    if reader in HOST_USAGE_ONLY_CONSENT:
-        value = "true" if enabled else "false"
-        return f"Set [retro] {HOST_USAGE_ONLY_CONSENT[reader]} = {value} in config.toml."
     verb = "enable" if enabled else "disable"
-    return f"Run mm {verb}-source {reader}."
+    key = HOST_USAGE_ONLY_CONSENT.get(reader)
+    if key is None:
+        return f"Run mm {verb}-source {reader}."
+    if enabled:
+        return (
+            f"Run mm enable-source {reader} (also installs the completion hook for "
+            f"standalone sessions), or set [retro] {key} = true in config.toml "
+            "(Conductor runs only)."
+        )
+    return f"Run mm disable-source {reader}, or set [retro] {key} = false in config.toml."
 
 
 def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None = None) -> str:
@@ -85,8 +91,8 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (
             "No host reader is consented. Run mm enable-source codex or mm enable-source grok; "
-            "Grok usage-only consent also accepts [retro] grok_host_usage = true; "
-            "Cursor via Conductor uses [retro] cursor_host_usage = true."
+            "Grok usage-only consent also accepts [retro] grok_host_usage = true. "
+            "Run mm enable-source cursor to enroll Cursor usage capture."
         ),
         "unknown": "Usage capture readiness is unknown; repair the unreadable config first.",
     }[readiness]
