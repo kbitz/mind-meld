@@ -372,3 +372,19 @@ Historical ID collision, recorded 2026-09-30: both releases below independently 
 
 - Track 67A / v1.1.0 — **Unified agent reporting**, shipped at `c76f41d` (#186): a common Agents table and card with fleet-summed tokens, active days, contributing machines, estimated cost and top model; bounded `MM_HEALTH` issue codes carry machine/cause details and remedies, replacing the Notes prose interface. Legacy counters, incomplete coverage, duplicate ledgers, zero-token pricing and missing prices retain explicit limitations. The skill and doc tests consume the code interface.
 - Track 67A / v1.2.0 — **Cursor usage from Conductor**, shipped at `c43b777` (#187): explicitly consented reads of Conductor's `cursor-sdk-store/*/runs.ndjson`, a private 90-day accumulated history, independent status/diag remedies, and preservation on partial or failed scans. Bare Cursor CLI usage is outside the measured persistence contract. No Cursor sync source or skill-link row was added; Grok Fast remains deliberately unpriced and auto/composer classification waits for observed use.
+
+
+## Additional release history
+
+### v1.3.0: pipx self-updates
+
+- 2026-10-01: merged [PR #189](https://github.com/kbitz/mind-meld/pull/189) (commit `3642f6f50baddd6e90f7756378aa41810e2ebc99`). This release had no declared roadmap Track; no retrospective Track ID is assigned. S01–S12 are verified in the attributable preparation/scope receipt; S13 is explicitly user-deferred, required post-release and unpassed. Its remaining foreground, detached and explicit real-upgrade checks are carried by the regenerated Current Plan. Release implementation is delivered; a bootstrap or current installed version is not live self-update qualification.
+
+## Individual Track history
+_tombstone: 68_
+
+### Track 68A: Qualify Codex memory portability and recall ✓ Shipped (v1.4.0)
+
+- 2026-10-02: merged [PR #190](https://github.com/kbitz/mind-meld/pull/190) (commit `a3c5050ee34ad4c077469e036ab25808bbe519fb`); verified land-time Track 68A, original/current Group 68. Introduced by the 2026-09-30 roadmap commit `5b5fe1a`; no intervening ID rename. Approved scope SHA-256: `e63fc9dbbbc013776a7a69d553ef2c71369b4b75ad4ea0ae979288271197f28c`.
+- Closure evidence: the [attributable 88-row preparation receipt](https://github.com/kbitz/mind-meld/pull/190#issuecomment-5955570730) records 87 VERIFIED and A39 DEFERRED BY USER (D8). Native VERIFIED rows attest the approved INCONCLUSIVE record, not native qualification. D3 kept production fsutil untouched and filed its docstring follow-up; D7 retained the six reviewed model limitations with owners in the source contract. The merged tests/fixtures are byte-identical to prepared `331d1ae`; the accepted documentation/release delta changes no prototype implementation. These approved limits take precedence over the original card's stronger live-result wording.
+- Delivered: the versioned [Codex source contract](designs/codex-memory-contract.md), sanitized exact-build structural fixtures, tests-only reference adapter, F/E/H conformance and eight deliberate mutants, and the integration decision **NO QUALIFIED ROUTE**. Native trials remain **0/48 UNSTARTED/INCONCLUSIVE**. No production transport, native recall, user authority or actual mm receiving route is proven. Q1–Q18 and all known model limits remain promotion gates; live qualification and the D8 cold-reader timing retain their follow-up owners in Future. Group 68 is retired without declaring those follow-ons complete.

@@ -25,64 +25,75 @@ Standing constraints — these can refuse a Track, not merely shape how one is w
 
 ## In Progress
 
-Nothing is partially shipped. The 1.0 release and both releases historically
-labeled 67A (v1.1.0 unified reporting and v1.2.0 Cursor usage) are recorded in
-[shipped history](roadmap-shipped.md).
+No active branches, sessions or PRs were declared for this regeneration.
 
 ## Current Plan
 
 _tombstone: 27_
 
-#### Group 68: Qualify memory continuity
+#### Group 69: Self-update qualification and atomic-write contract
 
 _Depends on: none_
 
-##### Track 68A: Qualify Codex memory portability and recall
-_3 tasks . ~350 LOC . medium risk . 3 files plus sanitized fixtures_
-_touches: docs/designs/memory-continuity.md, docs/designs/codex-memory-contract.md (new), tests/fixtures/host_memories/codex/ (new), tests/test_memory_contract.py (new)_
-_read-first: docs/designs/memory-continuity.md (native qualification, forgetting/echo/hostile-content contracts, and the retained open qualification questions), docs/invariants/sync.md (generated files, consent, deletion proof, tombstones and previews), docs/invariants/conflicts.md (MEMORY.md merge dispatch), docs/invariants/init-devices.md (sink-specific sanitization of peer-controlled strings), docs/invariants/auto-upgrade.md (Compatibility (1.x) and newer-format refusal), AGENTS.md (testing, source ownership and the autopush/autopull unattended-hook rules)_
-_produces: a versioned live-source contract, sanitized fixtures, repeatable recall evidence, and a qualified native-import or explicitly separate mm recall design that the transport implementation can consume_
-_session: fresh · effort: high · verify: ./bin/check tests/test_memory_contract.py tests/test_docs_routing.py_
+##### Track 69A: Qualify real mm-driven self-updates
+_2 tasks . ~120 LOC . medium risk . 1 documentation file_
+_touches: docs/designs/self-update-qualification.md (new)_
+_out: 69B_
+_read-first: docs/invariants/auto-upgrade.md, README.md, tests/test_self_update.py_
+_produces: attributable S13 evidence for foreground, detached and explicit upgrades, or an exact pending prerequisite without crediting a simulated update_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_self_update.py tests/test_docs_routing.py_
 
-_Source: [manual] user request, 2026-09-30; docs/TODOS.md drain record of the same date. At c43b777, config.DEFAULT_SOURCES selects Codex skills/plugins/AGENTS.md, not memories; merge._merge_strategy line-unions any MEMORY.md. The formal plan records local extraction, with consolidation and receiving-host recall still unqualified. Neither adding memories to include_dirs nor transferring generated handbooks is a qualified implementation._
+_Source: PR #189's approved S13 post-release obligation and preparation receipt https://github.com/kbitz/mind-meld/pull/189#issuecomment-5919279593, 2026-09-30; released 2026-10-01. v1.4.0 is the following release. The 2026-10-03 read-only local inventory reports mm 1.4.0 with pipx's bare repository URL, so this installation is neither behind the target nor an exact @latest automatic-update candidate. That observation proves no S13 outcome._
 
-- **Measure the native lifecycle and recall boundary** -- Follow the formal plan's CLI/Conductor census using the installed versions and an isolated host home and raw artifacts placed under the plan's raw-artifact rules (`docs/designs/memory-continuity.md`, "Evidence and unknowns"): outside every location mm or iCloud syncs, verified by physical location, with no credential-bearing file copied into the host home. Those rules take precedence over the default artifact locations. Observe an actual Mind Meld memory through extraction, consolidation, fresh-session recall, import into a populated store, regeneration, and capture/use opt-out. Record reliable project attribution, durable source identities, withdrawal, imported ancestry and unsupported cases in a source contract; commit only sanitized structural fixtures. _docs/designs/codex-memory-contract.md + tests/fixtures/host_memories/codex/, ~180 lines._ (M)
-- **Prototype the forgetting and echo contracts** -- Use disposable stores to exercise F1-F4, E1-E4 and the hostile-content checks H1-H4 from the formal plan: offline resurrection, correction/regeneration, interrupted control publication, unknown absence, repeated transit, paraphrases, genuine new feedback, missing ancestry, forged authority, mis-scoped records, forged or unsupported metadata and instruction-like or terminal-control content. Keep deterministic protocol checks separate from live host recall evidence. Prove the chosen recall/export boundary; if imported ancestry is lost, require suppression of automatic re-export before delivering foreign context. Prototype output cannot claim production sync or native recall that the host did not demonstrate. _tests/test_memory_contract.py + source contract, ~130 lines._ (M)
-- **Record the integration choice and promotion gate** -- Select a supported native import only if it passes; otherwise specify the mm-owned recall integration and its limitations. Freeze export identity, retirement and ancestry semantics; name the receiving consumer and enrollment boundary; update the formal plan with evidence and concrete implementation footprints. Failed host gates remain unresolved and block transport promotion. Transport, two-Mac parity, the Claude/Codex bridge and Cursor discovery remain linked follow-ons, sized from this evidence at the next regeneration. _docs/designs/memory-continuity.md + source contract, ~40 lines._ (S)
+- **Prepare and verify the real trial prerequisites** -- Retain all three S13 checks from the receipt. Identify updater-enabled installs genuinely behind a newer released target, verify the recorded exact own @latest spec for automatic arms, and prepare bounded attended runs with install, lock, command, log and next-invocation receipts. An already-current install, bootstrap install, changed metadata or fake installer does not prove self-update. If no suitable install is available, record the prerequisite as pending and the retry at a following release; S13 stays required and unpassed. _docs/designs/self-update-qualification.md, ~70 lines._ (M)
+- **Run each eligible update arm and preserve the outcome** -- For attended push/pull, observe sync completion and foreground pipx under the mm lock; for autopull/autopush, observe prompt hook return, detached output and independent mm-lock availability; for explicit mm update, verify the known target and the current-version no-installer rerun. Each arm needs an eligible starting install and records the installed metadata plus the next mm --version. Keep unavailable arms pending; synthetic checks and an already-current version cannot fill them. File reproduced defects separately with their evidence. _docs/designs/self-update-qualification.md, ~50 lines._ (S)
+
+##### Track 69B: Clarify atomic-write publication failures
+_2 tasks . ~80 LOC . low risk . 3 files_
+_touches: src/mind_meld/fsutil.py, tests/test_fsutil.py, docs/invariants/sync.md_
+_out: 69A_
+_read-first: docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, docs/invariants/auto-upgrade.md, tests/test_fsutil.py, tests/test_memory_contract.py_
+_produces: a truthful atomic-write failure contract and a symbol-based audit of durable callers; any reproduced caller defect is filed separately_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_fsutil.py tests/test_lockedjson.py tests/test_storage_local.py tests/test_attemptlog.py tests/test_memory_contract.py tests/test_docs_routing.py_
+
+_Source: [review:severity=informational,files=src/mind_meld/fsutil.py], docs/TODOS.md, Track 68A review decision D3, 2026-10-02; verified at a3c5050. fsutil.atomic_write_bytes calls os.replace before fsync_dir; tests/test_fsutil.py::TestAtomicWriteBytes.test_parent_fsync_failure_is_fatal and tests/test_memory_contract.py::test_C2_real_atomic_helper_failure_reopens_actual_coherent_bytes already exercise publication followed by an error._
+
+- **Correct the failure guarantee** -- Document the publication boundary in atomic_write_bytes: failures before replacement preserve the old target; a parent-directory fsync failure after replacement leaves published bytes with unconfirmed durability. Cleanup does not roll back publication. Keep the existing regression coverage; add a case only for a concrete gap discovered by the caller audit. _src/mind_meld/fsutil.py, ~30 lines._ (S)
+- **Audit durable callers before proposing repairs** -- Trace explicit and conditional fsync=True consumers, including LocalBackend.put, sidecar.write, locked_json_durable_rmw, attemptlog and the CLI durable copy helper, through their StorageError handlers. Record whether each handler reopens current bytes, stops, or assumes the old state remains. Cite paths and symbols in the sync invariant; file any demonstrated stale-state/rewrite defect in TODOS with its reproduction instead of expanding this contract card across the consumers. _docs/invariants/sync.md, ~50 lines._ (S)
 
 ### Execution Map
 
 A Group may launch when every Group in its ← set has landed, regardless of
 document order; document order is priority, not gating.
 
-Adjacency from gstack-extend's `roadmap-pack` output on the drafted Track:
+Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 68 ← {}
+- Group 69 ← {}
 ```
 
 Track detail per group:
 
 ```
-Group 68: Qualify memory continuity
-  +-- Track 68A ........... ~L . 3 tasks
+Group 69: Self-update qualification and atomic-write contract
+  +-- Track 69B ........... ~M . 2 tasks
+  +-- Track 69A ........... ~M . 2 tasks
 ```
 
-**Total: 1 group . 1 track remaining.**
+**Total: 1 group . 2 tracks remaining.**
 
-The [formal plan](designs/memory-continuity.md#dependency-order) preserves the
-full sequence: qualification → Codex transport/recall → two-Mac parity →
-Claude/Codex sharing, with Cursor discovery following qualification. Only
-qualification is ready to execute; later work is retained in Future with
-explicit promotion gates. Forgetting, echo prevention and hostile-content
-checks are mandatory prototype and release gates throughout.
+Memory transport remains deferred. Track 68A shipped an accepted tests-only
+no-route result; native trials remain 0/48 UNSTARTED/INCONCLUSIVE. Complete
+live qualification and retain the contract's model limits and Q1–Q18 gates
+before promoting transport, fleet parity, sharing or Cursor integration.
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (97 items)
+Deferred: docs/roadmap-future.md (96 items)
 
 ## Shipped
 
+<a id="track-68a-qualify-codex-memory-portability-and-recall"></a>
 History: docs/roadmap-shipped.md

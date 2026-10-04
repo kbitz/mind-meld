@@ -44,14 +44,22 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:severity=informational,files=src/mind_meld/fsutil.py] atomic_write_bytes docstring promises an untouched target after a post-rename failure
-- **Description:** `fsutil.atomic_write_bytes` says that on any failure the target is untouched if it existed. With `fsync=True`, a failed `fsync_dir` after `os.replace` raises `StorageError` while the new bytes are already published. `tests/test_memory_contract.py::test_C2_real_atomic_helper_failure_reopens_actual_coherent_bytes[parent-fsync]` asserts exactly that. A caller that treats `StorageError` as "old bytes still in place" can serve or rewrite stale state.
-- **Why:** Track 68A's reference adapter had to model this as an uncertain publication; production callers of `fsync=True` writes (for example `lockedjson`) were not audited.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Found by /review-and-prep's Red Team pass on Track 68A, 2026-10-02. The user chose to keep production `fsutil` untouched in 68A (the [Track 68A card](ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) touches only docs and tests) and record the item here. Fix the docstring, then audit `fsync=True` callers that catch `StorageError`.
+None.
 
 ## Drain records
+
+### Roadmap drain — 2026-10-03
+
+One inbox item: **1 placed, 0 deferred, 0 killed, 0 discharged**. Authored-false rate for the inbox: 0 / (1 + 0) = **0%**. Verification baseline: `a3c5050` (v1.4.0); this regeneration changes documentation only.
+
+| Inbox item | Disposition / destination | Evidence |
+|---|---|---|
+| [review:severity=informational,files=src/mind_meld/fsutil.py] atomic_write_bytes docstring promises an untouched target after a post-rename failure | place → Track 69B | fsutil.atomic_write_bytes replaces before parent fsync; the existing tests/test_fsutil.py::TestAtomicWriteBytes.test_parent_fsync_failure_is_fatal and Track 68A C2 exercise published bytes followed by an error. The docstring still promises the old target survives every failure. Audit consumers before filing a separate demonstrated caller defect. |
+
+**Shipped reconciliation:** Track 68A, PR #190 / `a3c5050`, is archived under its accepted tests-only no-route scope and the attributable 88-row receipt (87 verified, A39 user-deferred by D8). D7 model limits and Q1–Q18 remain promotion gates. PR #189 / `3642f6f` delivers v1.3.0 self-update with no declared Track ID; its required, unpassed S13 post-release testing is placed in Track 69A. No active pins were declared; Group 68 is retired/reserved. No former live Track is renamed to either new card.
+
+**Future membership:** 94 existing bullets retained byte-for-byte; “Explicit upgrade check” and “Subprocess pipx upgrade” are discharged@3642f6f because mm update forces discovery and update_or_nudge runs pipx. The obsolete “cli.py micro-cleanups” work order is **killed**, not discharged: `_resolve_mm_events_dir` has no current definition anywhere in src/tests, and the remaining “status-enum follow-up” names no target or acceptance; reopen only with a current symbol and concrete benefit. Its former import/_empty_outcomes portions were already assigned to historical Track 18A. Two scoped follow-ups are appended: complete live memory qualification with its existing prerequisites/owners, and D8 cold-reader onboarding timing. **97 → 96**. No transport, parity, bridge or Cursor gate is promoted by the no-route receipt.
+
 
 ### Roadmap drain — 2026-09-30
 
@@ -438,4 +446,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-09-30 by /roadmap: inbox drained; v1.0.0–v1.2.0 reconciled; Track 68A qualifies Codex memory continuity. Prior drain records are historical._
+_Last updated 2026-10-03 by /roadmap: inbox drained; accepted Track 68A scope archived; S13 and the atomic-write contract are current work. Prior drain records are historical._
