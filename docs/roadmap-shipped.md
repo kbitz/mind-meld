@@ -372,3 +372,45 @@ Historical ID collision, recorded 2026-09-30: both releases below independently 
 
 - Track 67A / v1.1.0 — **Unified agent reporting**, shipped at `c76f41d` (#186): a common Agents table and card with fleet-summed tokens, active days, contributing machines, estimated cost and top model; bounded `MM_HEALTH` issue codes carry machine/cause details and remedies, replacing the Notes prose interface. Legacy counters, incomplete coverage, duplicate ledgers, zero-token pricing and missing prices retain explicit limitations. The skill and doc tests consume the code interface.
 - Track 67A / v1.2.0 — **Cursor usage from Conductor**, shipped at `c43b777` (#187): explicitly consented reads of Conductor's `cursor-sdk-store/*/runs.ndjson`, a private 90-day accumulated history, independent status/diag remedies, and preservation on partial or failed scans. Bare Cursor CLI usage is outside the measured persistence contract. No Cursor sync source or skill-link row was added; Grok Fast remains deliberately unpriced and auto/composer classification waits for observed use.
+
+
+## Additional release history
+
+### v1.3.0: pipx self-updates
+
+- 2026-10-01: merged [PR #189](https://github.com/kbitz/mind-meld/pull/189) (commit `3642f6f50baddd6e90f7756378aa41810e2ebc99`). This release had no declared roadmap Track; no retrospective Track ID is assigned. S01–S12 are verified in the attributable preparation/scope receipt; S13 is explicitly user-deferred, required post-release and unpassed. Its remaining foreground, detached and explicit real-upgrade checks are carried by the regenerated Current Plan. Release implementation is delivered; a bootstrap or current installed version is not live self-update qualification.
+
+## Individual Track history
+_tombstone: 68_
+
+### Track 68A: Qualify Codex memory portability and recall ✓ Shipped (v1.4.0)
+
+- 2026-10-02: merged [PR #190](https://github.com/kbitz/mind-meld/pull/190) (commit `a3c5050ee34ad4c077469e036ab25808bbe519fb`); verified land-time Track 68A, original/current Group 68. Introduced by the 2026-09-30 roadmap commit `5b5fe1a`; no intervening ID rename. Approved scope SHA-256: `e63fc9dbbbc013776a7a69d553ef2c71369b4b75ad4ea0ae979288271197f28c`.
+- Closure evidence: the [attributable 88-row preparation receipt](https://github.com/kbitz/mind-meld/pull/190#issuecomment-5955570730) records 87 VERIFIED and A39 DEFERRED BY USER (D8). Native VERIFIED rows attest the approved INCONCLUSIVE record, not native qualification. D3 kept production fsutil untouched and filed its docstring follow-up; D7 retained the six reviewed model limitations with owners in the source contract. The merged tests/fixtures are byte-identical to prepared `331d1ae`; the accepted documentation/release delta changes no prototype implementation. These approved limits take precedence over the original card's stronger live-result wording.
+- Delivered: the versioned [Codex source contract](designs/codex-memory-contract.md), sanitized exact-build structural fixtures, tests-only reference adapter, F/E/H conformance and eight deliberate mutants, and the integration decision **NO QUALIFIED ROUTE**. Native trials remain **0/48 UNSTARTED/INCONCLUSIVE**. No production transport, native recall, user authority or actual mm receiving route is proven. Q1–Q18 and all known model limits remain promotion gates; live qualification and the D8 cold-reader timing retain their follow-up owners in Future. Group 68 is retired without declaring those follow-ons complete.
+
+
+## Planning constraint history
+
+### 2026-10-03: Consolidated admission gates and planning rules
+
+The user approved shortening the standing constraints from roadmap commit
+2c877a5, moving reusable checks to AGENTS.md and retaining the rationale here.
+Current gates live in ROADMAP.md; this record describes earlier incidents and
+observations, rather than asserting their defects still exist.
+
+| Earlier rule | Rationale and current disposition |
+|---|---|
+| Skill-link discovery | Track 26A measured Grok 1.0.5 discovering ~/.claude/skills on 2026-08-24; this killed Track 27A on 2026-08-25. The 2026-10-03 read-only probe of Grok 1.0.46 again resolved retro-fleet from that directory. The old claim that Grok has no sync source was incorrect: config.DEFAULT_SOURCES and manifest.GROK_SYNCED_SUBDIRS support the narrow skills/commands/rules source; config.get_sources conditionally activates the default when those directories exist. They were absent on this Mac at the new probe. Discovery remains an admission gate; local absence is not a ban on customization sync. |
+| Verify premises at drain time | The earlier preamble reported seven Tracks built on falsified premises. AGENTS.md now requires verification against current HEAD and distinguishes a delivered approved goal from a disproved work order. |
+| Investigate automatic actions before adding inverses | v0.12.44 / Track 28A fixed the installer resurrecting deleted links; mm uninstall-skills, a revoked denylist and a third policy axis were refused because they treated that defect as a feature. The investigation rule survives in AGENTS.md without a blanket prohibition on useful removal controls. |
+| Release serialization | Two cleanly merging version claims can still target one tag. The release workflow checks that the tag resolves to HEAD before advancing latest, so the later same-version commit is not published as that release. Keep pyproject.toml outside shared infrastructure and coordinate version allocation, reconciliation and release-bearing merges; implementation can proceed in parallel. |
+| Refuse the roadmap-staleness gate | Track 28B was killed on 2026-08-25 when Current Plan was empty. The question was put again that day with seven Groups in flight and the user still refused it. This remains an explicit scope decision, independent of whether active work exists. The original design remains in the Group 28 history. |
+| Keep discovery paths off the wire | Track 29A's Conductor workspace scan published canonical remote URLs rather than local paths. The user refused Codex/Grok sessions attribution by decoding cwd/session-directory paths. The privacy gate and metadata-only project-index reconsideration trigger remain; see host-parity's “What we still do not walk.” |
+| Name field consumers | Track 34A review found four missing-consumer paths: degraded_sources, git_capture, usageIsIncomplete through cache normalization, and the skill decoder's fallback. The v0.12.51 conflict-log correction also exposed a deletion premise nobody had checked and stale synclog direction text. Require named consumers in AGENTS.md; these are historical findings, not claims that the current readers are absent. |
+| Check cache shape | Track 34A's six premises were verified or known-false, yet the card was under-priced 2.5x because _validated_grok_entry normalized turns to key/day/model/usage. AGENTS.md requires tracing normalization and migration before pricing a reader change. |
+| Prove source counter semantics | Track 35A avoided a 7.40x pricing error: Codex/Grok CLI input included cached input, while Claude input was disjoint; grok-4.6 could arrive through either reader. The reader-specific schema check now lives in AGENTS.md and the events/retro invariant. |
+| Probe demand before repairing | On 2026-09-01 the OpenCode database was 19 days cold and its config three weeks stale, mostly symlinks into version control. The user chose retirement in Groups 36 and 44. OpenCode remains out of scope; the general AGENTS.md rule now requires measured need without equating one cold installation with universal non-use. |
+| Qualify readers with real corpora | OpenCode's removed CONTRACT.md admitted a minimal synthetic schema because no live data directory was available; its reader returned zero of 42 real assistant rows. Track 36A deleted it in v0.12.53. A live, version-pinned census remains a host-reader admission gate; synthetic regression cases may supplement that evidence. |
+| Require observed publication-status problems | Four releases worked on host-usage publication evidence: v0.14.14, v0.14.16, v0.14.17 and v0.14.18. Track 65A /autoplan decision 16 (2026-09-21) required a wrong or permanently unknown line actually seen by a user; two proposed tasks needed synthetic unreadable-day/resolve-failure setups. The user-observation gate remains in ROADMAP.md. |
+| Read local audit configuration | The retired paragraph recorded different caps across Macs: 16 files / weight 6 and 24 files / weight 5 in the September plans. Its claim that defaults fail every current card is obsolete for 69A/69B. AGENTS.md retains the operational rule to inspect current machine-local configuration; historical caps do not define this project's permanent limits. |
