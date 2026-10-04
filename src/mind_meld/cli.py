@@ -7888,10 +7888,11 @@ def cursor_agent(ctx: typer.Context) -> None:
             try:
                 sys.stdout.buffer.write(data)
                 sys.stdout.buffer.flush()
-            except BrokenPipeError:
-                # Keep draining so the child is not blocked and usage is kept.
-                # Point fd 1 at /dev/null: Python retries the failed flush at
-                # exit and would otherwise replace Cursor's status with 120.
+            except (OSError, AttributeError, ValueError):
+                # A closed pipe, hung-up tty or full disk: keep draining so the
+                # child is not blocked and usage is kept. Point fd 1 at
+                # /dev/null: Python retries the failed flush at exit and would
+                # otherwise replace Cursor's status with 120.
                 stdout_open = False
                 with suppress(OSError, ValueError):
                     devnull = os.open(os.devnull, os.O_WRONLY)

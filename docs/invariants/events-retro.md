@@ -331,8 +331,12 @@ its cache counters again. A plain native `--print` run does not emit a stop
 hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
 text from the final result and retains the exit code. It uses
 the explicit or locally selected model, and retains no transcript content or
-CLI config. Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a
-selected model without a fast parameter) are recorded as the unpriced
+CLI config. The last `--model` wins; otherwise the CLI config's current `model`
+is used, with `selectedModel` parameters applied only while it names the same
+model (it can lag a switch). A print run whose model cannot be resolved is kept
+as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
+Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a current model
+without a fast parameter) are recorded as the unpriced
 `grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
 without inventing a Fast rate. The wrapper reads argv verbatim
 (`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
@@ -340,7 +344,8 @@ text into live Cursor options. Without consent, or outside print mode, it is a
 pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
 child, and SIGINT too unless it runs in the terminal's foreground process
 group (where Ctrl-C already reaches the child, so relaying would deliver it
-twice). After a closed stdout it points fd 1 at /dev/null and keeps draining,
+twice). After any stdout write failure (closed pipe, hung-up tty, full disk,
+a non-blocking pipe that fills) it points fd 1 at /dev/null and keeps draining,
 so Python's exit-time flush cannot replace the child's status with 120. Signal
 exits map to 128+N. Usage is queued after the child exits, once the result
 line is final and default signal handling is back. Text mode renders
@@ -390,7 +395,8 @@ live spool rotates again. Torn or invalid rows are skipped with a notice; a
 batch with no valid row is retired at once (including on the early
 `no_metadata_ledger` return), so it can never block later rotations. A row
 from a newer spool version refuses as `unsupported` and keeps the batch for
-the upgraded mm. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
+the upgraded mm; like any spool read failure it is persisted through
+`_carry_reason`, so status shows the upgrade remedy. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
 history authoritative (`complete_once`) when no blocker is outstanding. Diag
 reports `pending_completions` read-only. A corrupt history refuses as before
 and leaves the queue in place.

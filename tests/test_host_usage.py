@@ -183,6 +183,8 @@ class TestCursorStandaloneUsage:
         hu.CURSOR_SPOOL_PATH.write_text(json.dumps({**row, "v": 2}) + "\n")
         assert hu.read_cursor_usage(consented=True).reason == "unsupported"
         assert hu._cursor_spool_merging_path().exists()
+        # Persisted like a store-side blocker, so status can name the upgrade.
+        assert hu.cursor_usage_diag()["last_reason"] == "unsupported"
 
     def test_same_batch_replays_keep_the_first_day(self, monkeypatch):
         class Clock(datetime):
@@ -198,6 +200,55 @@ class TestCursorStandaloneUsage:
         hu.record_cursor_usage(self._hook(output_tokens=200))
         run = next(iter(self._history().values()))
         assert (run["day"], run["usage"]["output"]) == ("2026-10-03", 200)
+
+    @pytest.mark.parametrize(
+        "config,expected",
+        [
+            (
+                {
+                    "model": {"modelId": "gpt-5"},
+                    "selectedModel": {
+                        "modelId": "grok-4.7",
+                        "parameters": [{"id": "fast", "value": "false"}],
+                    },
+                },
+                "gpt-5",
+            ),
+            (
+                {
+                    "model": {"modelId": "grok-4.7"},
+                    "selectedModel": {
+                        "modelId": "grok-4.7",
+                        "parameters": [{"id": "fast", "value": "true"}],
+                    },
+                },
+                "grok-4.7-fast",
+            ),
+            ({"model": {"modelId": "grok-4.7"}}, "grok-4.7-unspecified"),
+            ({}, "cursor-unknown"),
+        ],
+        ids=["stale-selected", "matching-selected", "current-only", "unresolved"],
+    )
+    def test_print_model_follows_cursors_current_model(self, config, expected):
+        hu.CURSOR_CLI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_CLI_CONFIG_PATH.write_text(json.dumps(config))
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "print-model",
+            "usage": {
+                "inputTokens": 1,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 0,
+                "outputTokens": 1,
+            },
+        }
+        assert hu.record_cursor_usage(result, model=hu.cursor_cli_model(["-p", "x"]))
+        run = next(iter(self._history().values()))
+        assert run["model"] == expected
+        if expected == "cursor-unknown":
+            assert hu.host_family(expected) == "other"
 
     def test_last_model_option_wins_like_cursor(self):
         args = ["-p", "--model=gpt-5-codex", "--model", "grok-4.7-low", "--", "--model=x"]

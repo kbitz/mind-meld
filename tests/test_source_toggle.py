@@ -735,6 +735,47 @@ class TestCursorUsageConsent:
                 os.killpg(wrapper.pid, signal.SIGKILL)
                 wrapper.wait()
 
+    def test_wrapper_survives_a_stdout_that_stops_accepting_writes(self, tmp_path):
+        import os
+
+        home = _cursor_home(tmp_path, consent=True)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        usage = {"inputTokens": 1, "cacheWriteTokens": 0, "cacheReadTokens": 0, "outputTokens": 1}
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "stalled-stdout",
+            "result": "OK",
+            "usage": usage,
+        }
+        fake = bin_dir / "cursor-agent"
+        fake.write_text(
+            "#!/bin/sh\nyes '{}' | head -n 50000\necho '" + json.dumps(result) + "'\nexit 5\n"
+        )
+        fake.chmod(0o700)
+        read_end, write_end = os.pipe()
+        os.set_blocking(write_end, False)  # writes fail with EAGAIN once it fills
+        try:
+            wrapper = _wrapper_process(
+                tmp_path,
+                home,
+                bin_dir,
+                "-p",
+                "--output-format=stream-json",
+                "--model",
+                "grok-4.7-low",
+                "hi",
+                stdout=write_end,
+            )
+            os.close(write_end)
+            assert wrapper.wait(timeout=60) == 5
+        finally:
+            os.close(read_end)
+        queued = home / ".config" / "mind-meld" / "cursor-standalone-spool.jsonl"
+        assert queued.read_bytes().count(b"\n") == 1
+
     def test_wrapper_closed_stdout_keeps_usage_and_child_status(self, tmp_path):
         import subprocess
 

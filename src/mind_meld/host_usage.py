@@ -134,6 +134,8 @@ reader's multi-second hold on the history; the reader rotates the file to
 ``<name>.merging``, folds it into history, and unlinks it only after the history
 write is durable. A crash re-folds the leftover idempotently."""
 CURSOR_SPOOL_MAX_BYTES = 16 * 1024 * 1024
+CURSOR_UNKNOWN_MODEL = "cursor-unknown"
+"""Print runs with no resolvable model; host_family 'other', never priced."""
 _CURSOR_SPOOL_VERSION = 1
 
 
@@ -763,7 +765,14 @@ def read_cursor_usage(
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
-            spooled, spool_taken = _take_cursor_spool(read_deadline)
+            spool_failure: _ReadFailure | None = None
+            try:
+                spooled, spool_taken = _take_cursor_spool(read_deadline)
+            except _ReadFailure as exc:
+                spooled, spool_failure = [], exc
+            except OSError as exc:
+                spooled, spool_failure = [], _ReadFailure("io_error")
+                spool_failure.__cause__ = exc
             _fold_cursor_spool(runs, requests, spooled, cutoff)
             # Standalone captures are complete by construction and make retained
             # history authoritative. A transient prior reason must not block
@@ -792,6 +801,9 @@ def read_cursor_usage(
                         runs.pop(request, None)
 
             try:
+                if spool_failure is not None:
+                    # Persisted like any blocker, so status names its remedy.
+                    raise spool_failure
                 if _expired(read_deadline):
                     raise _ReadFailure("deadline")
                 try:
@@ -1074,12 +1086,17 @@ def cursor_cli_model(args: list[str]) -> str | None:
             CURSOR_CLI_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES, follow_symlinks=True
         )
         data = json.loads(raw)
-        model = data.get("selectedModel")
-        if not isinstance(model, dict) or not isinstance(model.get("modelId"), str):
+        # As in Cursor: `model` is current; `selectedModel` supplies parameters
+        # only while it names the same model (it can lag a model switch).
+        current, selected = data.get("model"), data.get("selectedModel")
+        name = current.get("modelId") if isinstance(current, dict) else None
+        if not isinstance(name, str):
+            name = selected.get("modelId") if isinstance(selected, dict) else None
+        if not isinstance(name, str) or not name:
             return None
-        name = model["modelId"]
+        same = isinstance(selected, dict) and selected.get("modelId") == name
         if name == "grok-4.7":
-            params = model.get("parameters", [])
+            params = selected.get("parameters", []) if same else []
             fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
             if fast == ["false"]:
                 return "grok-4.7[fast=false]"
@@ -1117,7 +1134,8 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
         if payload.get("is_error") is not False:
             return False
         generation = payload.get("request_id")
-        selected_model = model
+        # A run whose model cannot be resolved is still usage: keep it unpriced.
+        selected_model = model or CURSOR_UNKNOWN_MODEL
         names = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
         raw = payload.get("usage")
     if (
