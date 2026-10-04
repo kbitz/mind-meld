@@ -285,8 +285,9 @@ def append_rotatable_jsonl(
                 os.ftruncate(fd, start)
                 raise OSError("short spool append")
             _fsync_fd(fd)
-            if start == 0:
-                fsync_dir(path.parent)
+            # Every append: an earlier writer may have died before binding the
+            # spool's directory entry, and this caller is about to report success.
+            fsync_dir(path.parent)
             return
         finally:
             os.close(fd)
@@ -294,13 +295,18 @@ def append_rotatable_jsonl(
 
 
 def rotate_jsonl(
-    path: Path, destination: Path, *, retry_intervals: Sequence[float] = (0.01, 0.05, 0.1)
+    path: Path,
+    destination: Path,
+    *,
+    retry_intervals: Sequence[float] = (0.01, 0.05, 0.1),
+    deadline: float | None = None,
 ) -> bool:
     """Rename a spool aside once no ``append_rotatable_jsonl`` holds it.
 
     Returns False when there is nothing to rotate or a writer still holds the
     lock after the short retries (rotate on a later pass). Non-blocking, so a
-    stuck writer can never wedge the caller.
+    stuck writer can never wedge the caller; no retry sleeps past ``deadline``
+    (a ``time.monotonic()`` value).
     """
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -311,6 +317,8 @@ def rotate_jsonl(
         if not stat.S_ISREG(opened.st_mode):
             raise OSError(errno.EINVAL, "spool is not a regular file")
         for delay in (0.0, *retry_intervals):
+            if delay and deadline is not None and time.monotonic() + delay > deadline:
+                return False
             time.sleep(delay)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -140,6 +140,69 @@ class TestCursorStandaloneUsage:
         day = datetime.now(timezone.utc).date().isoformat()
         assert result.hosts["grok"][day]["input"] == 16_382
 
+    @pytest.mark.parametrize("first", [b"", b'{"key":"torn\n'], ids=["empty", "torn"])
+    def test_unusable_first_batch_never_wedges_a_storeless_mac(self, first):
+        hu.CURSOR_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_SPOOL_PATH.write_bytes(first)
+        assert hu.read_cursor_usage(consented=True).reason == "no_metadata_ledger"
+        assert not hu._cursor_spool_merging_path().exists()
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(consented=True).complete
+        assert len(self._history()) == 1
+        assert hu.cursor_usage_diag()["pending_completions"] == 0
+
+    def test_storeless_first_read_timeout_does_not_block_later_captures(self, monkeypatch):
+        hu.CURSOR_SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hu.CURSOR_SPOOL_PATH.write_bytes(b"")
+        clock = iter([0.0, 1.0])
+        with monkeypatch.context() as late:
+            late.setattr(hu.time, "monotonic", lambda: next(clock, 10.0))
+            assert hu.read_cursor_usage(deadline=5.0, consented=True).reason == "deadline"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["complete_once"] is False
+        assert hu.record_cursor_usage(self._hook())
+        result = hu.read_cursor_usage(consented=True)
+        assert result.complete
+        assert result.hosts["grok"]
+
+    def test_failed_history_write_keeps_the_queue(self, monkeypatch):
+        hu.record_cursor_usage(self._hook())
+
+        def disk_full(*_args, **_kwargs):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with monkeypatch.context() as full:
+            full.setattr(lockedjson.fsutil, "atomic_write_bytes", disk_full)
+            assert hu.read_cursor_usage(consented=True).reason == "io_error"
+        assert hu._cursor_spool_merging_path().exists()
+        assert len(self._history()) == 1
+        assert not hu._cursor_spool_merging_path().exists()
+
+    def test_newer_spool_rows_refuse_and_keep_the_batch(self):
+        hu.record_cursor_usage(self._hook())
+        row = json.loads(hu.CURSOR_SPOOL_PATH.read_bytes())
+        hu.CURSOR_SPOOL_PATH.write_text(json.dumps({**row, "v": 2}) + "\n")
+        assert hu.read_cursor_usage(consented=True).reason == "unsupported"
+        assert hu._cursor_spool_merging_path().exists()
+
+    def test_same_batch_replays_keep_the_first_day(self, monkeypatch):
+        class Clock(datetime):
+            current = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        monkeypatch.setattr(hu, "datetime", Clock)
+        hu.record_cursor_usage(self._hook())
+        Clock.current = datetime(2026, 10, 4, 0, 1, tzinfo=timezone.utc)
+        hu.record_cursor_usage(self._hook(output_tokens=200))
+        run = next(iter(self._history().values()))
+        assert (run["day"], run["usage"]["output"]) == ("2026-10-03", 200)
+
+    def test_last_model_option_wins_like_cursor(self):
+        args = ["-p", "--model=gpt-5-codex", "--model", "grok-4.7-low", "--", "--model=x"]
+        assert hu.cursor_cli_model(args) == "grok-4.7-low"
+
     def test_torn_queue_rows_are_skipped_not_wedging(self, capsys):
         hu.record_cursor_usage(self._hook())
         with hu.CURSOR_SPOOL_PATH.open("ab") as spool:

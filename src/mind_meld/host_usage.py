@@ -134,6 +134,13 @@ reader's multi-second hold on the history; the reader rotates the file to
 ``<name>.merging``, folds it into history, and unlinks it only after the history
 write is durable. A crash re-folds the leftover idempotently."""
 CURSOR_SPOOL_MAX_BYTES = 16 * 1024 * 1024
+_CURSOR_SPOOL_VERSION = 1
+
+
+class _SpoolFromNewerMm(Exception):
+    """A queued row written by a newer mm: refuse rather than discard it."""
+
+
 _CURSOR_RUN_STATUSES = frozenset({"queued", "running", "finished", "cancelled", "error"})
 """Only finished rows contribute; the rest must carry neither usage nor usageRef."""
 _CURSOR_STORE_BLOCKERS: frozenset[str] = frozenset({"unsupported", "malformed"})
@@ -756,11 +763,14 @@ def read_cursor_usage(
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
-            spooled, spool_taken = _take_cursor_spool()
+            spooled, spool_taken = _take_cursor_spool(read_deadline)
             _fold_cursor_spool(runs, requests, spooled, cutoff)
-            # Standalone captures are complete by construction: with no
-            # outstanding blocker, they make retained history authoritative.
-            complete_once = locked.data["complete_once"] or (bool(spooled) and not prior[0])
+            # Standalone captures are complete by construction and make retained
+            # history authoritative. A transient prior reason must not block
+            # this, or a store-less Mac whose first read timed out never recovers.
+            complete_once = locked.data["complete_once"] or (
+                bool(spooled) and prior[0] not in _CURSOR_STORE_BLOCKERS
+            )
             learned: dict[str, Any] = {}
             learned_requests: dict[str, str] = {}
             removed: set[str] = set()
@@ -902,9 +912,13 @@ def _cursor_spool_merging_path() -> Path:
     return CURSOR_SPOOL_PATH.with_name(CURSOR_SPOOL_PATH.name + ".merging")
 
 
-def _read_bounded_bytes(path: Path, limit: int) -> bytes:
-    """Read one small regular file without blocking on a FIFO or reading unbounded."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+def _read_bounded_bytes(path: Path, limit: int, *, follow_symlinks: bool = False) -> bytes:
+    """Read one small regular file without blocking on a FIFO or reading unbounded.
+
+    mm-owned files refuse symlinks; Cursor's own config may be a dotfile link.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | (0 if follow_symlinks else os.O_NOFOLLOW)
+    fd = os.open(path, flags)
     with os.fdopen(fd, "rb") as fp:
         if not stat.S_ISREG(os.fstat(fp.fileno()).st_mode):
             raise ValueError("not a regular file")
@@ -914,16 +928,18 @@ def _read_bounded_bytes(path: Path, limit: int) -> bytes:
     return data
 
 
-def _take_cursor_spool() -> tuple[list[dict[str, Any]], bool]:
+def _take_cursor_spool(deadline: float | None = None) -> tuple[list[dict[str, Any]], bool]:
     """Rotate queued completions aside and parse them; the caller unlinks later.
 
     A leftover ``.merging`` file (crash after rotation) is folded first; the
     live spool rotates on a later read. Torn or invalid rows are skipped with a
-    notice rather than wedging every future read.
+    notice rather than wedging every future read, and a batch with no valid row
+    is retired here, since nothing in it awaits a durable history write. A row
+    from a newer spool version refuses as ``unsupported`` and keeps the batch.
     """
     merging = _cursor_spool_merging_path()
     if not os.path.lexists(merging):
-        fsutil.rotate_jsonl(CURSOR_SPOOL_PATH, merging)
+        fsutil.rotate_jsonl(CURSOR_SPOOL_PATH, merging, deadline=deadline)
     try:
         data = _read_bounded_bytes(merging, CURSOR_SPOOL_MAX_BYTES)
     except FileNotFoundError:
@@ -937,18 +953,29 @@ def _take_cursor_spool() -> tuple[list[dict[str, Any]], bool]:
             continue
         try:
             record = json.loads(line)
+            version = record.pop("v")
+            if type(version) is int and version > _CURSOR_SPOOL_VERSION:
+                raise _SpoolFromNewerMm
+            if version != _CURSOR_SPOOL_VERSION:
+                raise _ReadFailure("malformed")
             key = record.pop("key")
             _cursor_cached_runs(
                 {"version": CACHE_VERSION, "runs": {key: record}, "complete_once": False}
             )
             if record["usage"] is None:
                 raise _ReadFailure("malformed")
+        except _SpoolFromNewerMm as exc:
+            raise _ReadFailure("unsupported") from exc
         except (ValueError, RecursionError, AttributeError, KeyError, TypeError, _ReadFailure):
             skipped += 1
             continue
         records.append({"key": key, **record})
     if skipped:
         sys.stderr.write(f"mm: notice: skipped {skipped} unreadable Cursor completion record(s)\n")
+    if not records:
+        with suppress(OSError):
+            merging.unlink()
+        return [], False
     return records, True
 
 
@@ -981,18 +1008,6 @@ def _is_real_cursor_hook_config(path: Path) -> bool:
         home = Path.home()
     real = home / ".cursor" / "hooks.json"
     return str(path.expanduser().resolve()).casefold() == str(real.resolve()).casefold()
-
-
-def _read_bounded_json(path: Path, limit: int) -> Any:
-    """Parse one small regular file without following it into a FIFO or reading unbounded."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as fp:
-        if not stat.S_ISREG(os.fstat(fp.fileno()).st_mode):
-            raise ValueError("not a regular file")
-        data = fp.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError("oversized")
-    return json.loads(data)
 
 
 def configure_cursor_hook(*, enabled: bool) -> bool:
@@ -1040,16 +1055,25 @@ def configure_cursor_hook(*, enabled: bool) -> bool:
 
 
 def cursor_cli_model(args: list[str]) -> str | None:
-    """Resolve only the selected model; never retain CLI config or auth fields."""
+    """Resolve only the selected model; never retain CLI config or auth fields.
+
+    The last ``--model`` before ``--`` wins, as in Cursor's own option parser.
+    """
+    chosen = None
     for index, arg in enumerate(args):
         if arg == "--":
             break
         if arg.startswith("--model="):
-            return arg.removeprefix("--model=")
-        if arg == "--model" and index + 1 < len(args):
-            return args[index + 1]
+            chosen = arg.removeprefix("--model=")
+        elif arg == "--model" and index + 1 < len(args):
+            chosen = args[index + 1]
+    if chosen is not None:
+        return chosen
     try:
-        data = _read_bounded_json(CURSOR_CLI_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES)
+        raw = _read_bounded_bytes(
+            CURSOR_CLI_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES, follow_symlinks=True
+        )
+        data = json.loads(raw)
         model = data.get("selectedModel")
         if not isinstance(model, dict) or not isinstance(model.get("modelId"), str):
             return None
@@ -1120,6 +1144,7 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
         # A bare id does not identify Fast mode, which defaults on for paid plans.
         selected_model = "grok-4.7-unspecified"
     record = {
+        "v": _CURSOR_SPOOL_VERSION,
         "key": hashlib.sha256(generation.encode()).hexdigest(),
         "day": datetime.now(timezone.utc).date().isoformat(),
         "model": selected_model,
@@ -1194,7 +1219,11 @@ def cursor_hook_state() -> str:
     file atomically, so an unlocked read sees the old or the new copy.
     """
     try:
-        data = _read_bounded_json(CURSOR_HOOK_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES)
+        data = json.loads(
+            _read_bounded_bytes(
+                CURSOR_HOOK_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES, follow_symlinks=True
+            )
+        )
     except FileNotFoundError:
         return "missing"
     except OSError:

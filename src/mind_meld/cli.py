@@ -7921,8 +7921,8 @@ def cursor_agent(ctx: typer.Context) -> None:
             code = child.wait()
     except OSError:
         _error("cursor-agent could not be started or its output could not be read.")
-    # Record after Cursor exits and signal handling is restored: a contended
-    # history lock may wait several seconds and must stay interruptible.
+    # The result line is only final at EOF; queue it once Cursor has exited
+    # and the default signal handlers are back.
     if result is not None:
         _record_cursor_completion(result, model=model)
     elif code == 0:

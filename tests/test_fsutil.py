@@ -453,6 +453,49 @@ class TestRotatableSpool:
         assert spool.read_bytes() == b'{"n":2}\n'
         assert stat.S_IMODE(spool.stat().st_mode) == 0o600
 
+    def test_append_reopens_when_a_new_spool_replaced_the_locked_one(self, tmp_path, monkeypatch):
+        import fcntl
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
+        real_flock = fcntl.flock
+        raced = []
+
+        def rotate_then_another_writer(fd, op):
+            if not raced and op == fcntl.LOCK_EX:
+                raced.append(fsutil.rotate_jsonl(spool, taken))
+                spool.write_bytes(b'{"n":3}\n')  # a second writer's fresh spool
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(fsutil.fcntl, "flock", rotate_then_another_writer)
+        fsutil.append_rotatable_jsonl(spool, b'{"n":2}', max_bytes=1024)
+        assert taken.read_bytes() == b'{"n":1}\n'
+        assert spool.read_bytes() == b'{"n":3}\n{"n":2}\n'
+
+    def test_every_append_binds_the_directory_entry(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fsutil, "fsync_dir", calls.append)
+        spool = tmp_path / "spool.jsonl"
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        assert calls == [tmp_path, tmp_path]
+
+    def test_rotation_never_sleeps_past_its_deadline(self, tmp_path, monkeypatch):
+        import fcntl
+        import time
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        fd = os.open(spool, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        slept = []
+        monkeypatch.setattr(fsutil.time, "sleep", slept.append)
+        try:
+            assert fsutil.rotate_jsonl(spool, taken, deadline=time.monotonic()) is False
+        finally:
+            os.close(fd)
+        assert slept == [0.0]
+
     def test_append_isolates_a_torn_row_and_enforces_its_ceiling(self, tmp_path):
         spool = tmp_path / "spool.jsonl"
         spool.write_bytes(b'{"torn')

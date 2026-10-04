@@ -342,8 +342,8 @@ child, and SIGINT too unless it runs in the terminal's foreground process
 group (where Ctrl-C already reaches the child, so relaying would deliver it
 twice). After a closed stdout it points fd 1 at /dev/null and keeps draining,
 so Python's exit-time flush cannot replace the child's status with 120. Signal
-exits map to 128+N. Usage is recorded after the child exits and signal handling
-is restored, so a contended history lock stays interruptible. Text mode renders
+exits map to 128+N. Usage is queued after the child exits, once the result
+line is final and default signal handling is back. Text mode renders
 a string `result` (lone surrogates replaced) and forwards any other result line
 raw. A successful run with no result line warns that usage was not recorded.
 `MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
@@ -366,7 +366,10 @@ Malformed aliases refuse without resetting history. The ID-equality premise
 store holds bare-UUID requestIds and `run-`-prefixed runIds.
 
 On a Mac without a Conductor store, history is authoritative once a scan
-completed or a standalone completion was recorded (`complete_once`). A
+completed or a queued standalone completion was folded while no
+`unsupported`/`malformed` blocker stood (`complete_once`); a transient prior
+reason does not block that latch, so a first read that timed out cannot stall
+a store-less Mac. A
 transient persisted reason (`deadline`, `io_error`, `stale`) then does not
 outlive the missing store; only `unsupported`/`malformed` survive it
 (`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
@@ -375,15 +378,19 @@ still stands.
 Hook and wrapper completions never touch the history lock. They append one
 sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
 private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
-which fsyncs and writes only after its flock confirms the path still names the
-locked inode, so a push reader's multi-second hold (first-pass read plus an
-immediate 5 s warm) can never drop or delay a completion. Under the history
-lock, `read_cursor_usage` renames the spool to `.merging` with
-`fsutil.rotate_jsonl` (non-blocking; a busy spool rotates on a later read),
-folds it, writes history durably, and only then unlinks `.merging`. A crash
-in between re-folds the leftover idempotently before the live spool rotates
-again. Torn or invalid rows are skipped with a notice instead of wedging every
-read; the spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
+which writes only after its flock confirms the path still names the locked
+inode, then fsyncs the file and its directory on every append, so a push
+reader's multi-second hold (first-pass read plus an immediate 5 s warm) can
+never drop or delay a completion. Rows carry `"v": 1`. Under the history lock,
+`read_cursor_usage` renames the spool to `.merging` with `fsutil.rotate_jsonl`
+(non-blocking, never sleeping past the read deadline; a busy spool rotates on
+a later read), folds it, writes history durably, and only then unlinks
+`.merging`. A crash in between re-folds the leftover idempotently before the
+live spool rotates again. Torn or invalid rows are skipped with a notice; a
+batch with no valid row is retired at once (including on the early
+`no_metadata_ledger` return), so it can never block later rotations. A row
+from a newer spool version refuses as `unsupported` and keeps the batch for
+the upgraded mm. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
 history authoritative (`complete_once`) when no blocker is outstanding. Diag
 reports `pending_completions` read-only. A corrupt history refuses as before
 and leaves the queue in place.
@@ -793,8 +800,9 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex, Grok Build and Cursor via Conductor
-  ledgers, never Claude Code's own session jsonls. Cursor offers Claude models;
+  overlap: `host_usage` reads Codex and Grok Build ledgers and Cursor
+  (Conductor runs plus enrolled standalone completions), never Claude Code's
+  own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.
 - **`AGENT_ROW_ORDER` is the only label registry.** The pre-1.1 pair
   (`MODEL_FAMILY_ROWS` + `AGENT_FAMILY_ROWS`, with deliberately different
@@ -1729,7 +1737,7 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok and Cursor via Conductor). Only `deadline` qualifies, including a reader whose
+(today Codex, Grok and Cursor). Only `deadline` qualifies, including a reader whose
 first invocation was prevented by sweep expiry. A healthy empty scan never
 warms. Autopush supplies no warm callback. Codex/Grok continue to converge
 through partial commits; Cursor commits stable-file progress but reparses

@@ -911,7 +911,7 @@ def aggregate_agent_usage(
         # would silently lose real tokens, so the row means "usage of this
         # model family across the fleet" and both sources add into it. The two
         # corpora are disjoint: host_usage reads Codex, Grok Build and Cursor
-        # via Conductor ledgers, never Claude Code session jsonls. Cursor offers
+        # (Conductor plus standalone) ledgers, never Claude Code session jsonls. Cursor offers
         # Claude models too (not observed in the initial Cursor census).
         merged_by_model = {m: dict(b) for m, b in existing.by_model.items()}
         for model, usage_bucket in host_row.by_model.items():
