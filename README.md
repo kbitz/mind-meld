@@ -475,7 +475,7 @@ publish a usable capture.
 | Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
 ```
 
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `cursor`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
 
 Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
@@ -806,8 +806,9 @@ hooks.json cannot be edited it warns, and the leftover entry records nothing. An
 its existing file-source toggle behavior instead of using this usage alias.
 
 Run `mm push` and inspect `mm status`; `mm diag --json` includes
-`host_usage.cursor` with its own blocker, retained-run count and last complete
-read. There is no built-in Cursor customization or memory sync source.
+`host_usage.cursor` with its own blocker, retained-run count, last complete
+read, `hook_state`, `pending_completions` and `unread_sqlite_stores`. There is no
+built-in Cursor customization or memory sync source.
 Run files remain local; only aggregate
 usage crosses the encrypted sync boundary.
 
@@ -1222,6 +1223,8 @@ Only want `/retro-fleet` gone from one agent, and keeping `mm`? That is not this
 If you remove `~/.local/share/mind-meld` while keeping `~/.config/mind-meld` and continue using or reinstall `mm`, the next push publishes the missing default mm-events files as deletions. Status and other inspection commands do not recreate that data. The skill store shares this root; reinstalling skills does not restore event history.
 
 The link loop below is written to survive the state you are actually in: it needs no `mm` on `PATH`, no config, and no valid config, so it works whether you run it before or after `pipx uninstall`.
+
+If you enabled Cursor usage capture, neither step below touches mm's `stop` hook in `~/.cursor/hooks.json`. Run `mm disable-source cursor` first, or afterwards delete the hook entry whose command is `mm capture-cursor-usage`.
 
 ```bash
 pipx uninstall mind-meld

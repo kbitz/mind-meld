@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw`
-- `src/mind_meld/host_usage.py` — `read_cursor_usage`
+- `src/mind_meld/host_usage.py` — `read_cursor_usage` / `configure_cursor_hook`
 - `src/mind_meld/cli.py` — `_register_and_save` / `_quarantine_corrupt_manifest` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
@@ -72,12 +72,16 @@ False). The seven durable writer families below (the six True calls plus the
 conditional `LocalBackend.put`, which splits by key prefix into the crypto,
 manifest and device rows, so nine rows) cover all currently found durable calls;
 seven is an observed count, not an allowlist or an automated inventory gate.
+`host_usage.py:configure_cursor_hook` (v1.5.0) adds a second
+`locked_json_durable_rmw` call after this inventory; the counts above are not
+recomputed, and its row below carries no verdict.
 Re-enumerate when changing a writer or wrapper. Verdicts qualify the inspected
 policy, not physical crash survival or every CLI retry.
 
 | Durable writer and consumers | Error policy and next reader | Evidence verdict |
 |---|---|---|
-| `lockedjson.py:locked_json_durable_rmw` → `host_usage.py:read_cursor_usage` | The sibling lock spans read and atomic replacement; errors propagate through context exit/finally unlocking. Cursor catches `OSError` / `StorageError`, returns incomplete `io_error`, and publishes no successful observation. Its next invocation opens actual history again under that lock; `cursor_usage_diag` uses `locked_json_snapshot`. Pruned runs make this authoritative history. | **No demonstrated defect:** source shows fresh reads and no stale retry; `tests/test_lockedjson.py:TestDurableJson67A` pins exclusion/coherent snapshots. Cursor's existing file-flush test does not qualify its post-replacement CLI outcome. |
+| `lockedjson.py:locked_json_durable_rmw` → `host_usage.py:read_cursor_usage` | The sibling lock spans read and atomic replacement; errors propagate through context exit/finally unlocking. Cursor catches `OSError` / `StorageError`, returns incomplete `io_error`, and publishes no successful observation. Its next invocation opens actual history again under that lock; `cursor_usage_diag` uses `locked_json_snapshot`. Pruned runs make this authoritative history. A taken standalone-completion batch (`cursor-standalone-spool.jsonl.merging`) is unlinked only after this write returns, so a failed write re-folds it idempotently on the next read. | **No demonstrated defect:** source shows fresh reads and no stale retry; `tests/test_lockedjson.py:TestDurableJson67A` pins exclusion/coherent snapshots. Cursor's existing file-flush test does not qualify its post-replacement CLI outcome. |
+| `lockedjson.py:locked_json_durable_rmw` → `host_usage.py:configure_cursor_hook` (`~/.cursor/hooks.json`) | Same sibling-lock primitive. No write when the file already has the wanted state, and a symlinked file is refused before the primitive runs. `cli.py:_toggle_cursor_usage` catches `OSError` / `ValueError` / `RuntimeError` / `StorageError`: enable stops with an error before it writes consent, while disable has already revoked consent and only warns. Each re-run re-reads the actual file under the lock; `cursor_hook_state` reads it without a lock. | **Unassessed:** added after the inventory. Tests pin the symlink, wrong-version and malformed-JSON refusals; none injects a replacement or directory-flush fault. |
 | `storage/local.py:LocalBackend.put` via `_needs_fsync` → `crypto.py:apply_crypto_init_repair` (canonical and preserved `mm-crypto-init*`) | `preserve` and canonical puts propagate failures before the conflict-unlink pass. `cli.py:_apply_verified_crypto_repair` only translates `NewerFormatError`; `_init_crypto_session` / `_bootstrap_or_verify_crypto` stop on other failures, with command-specific handling. Next `fetch_crypto_init` reads actual canonical/copies and creates a fresh repair plan, not a stale retry. | **No demonstrated defect:** inspected ordering retains conflict candidates on a failed put and preserves displaced lineage before replacement. This is optimistic local coordination, not a fleet transaction; see init-devices.md's reconciliation contract. |
 | Same `LocalBackend.put` → `cli.py:_push_core` (`manifests/`) | Put failure stops before `content_accepted`, sidecar, last_seen and conflict cleanup. `push` catches `OSError` / `MindMeldError`; `_auto_command_scope` records failure for autopush. Push's finally then records any attended capture attempt as `push-failed` via `Attempt.stopped()`, and `_host_publication` judges publication from the unrefreshed sidecar. Next push/pull uses `_fetch_remote_manifest` and `_recover_prior_manifest` on actual storage; a following no-op push returns before `sidecar.write`, so the sidecar can stay one generation behind a visible manifest and later corrupt-manifest recovery would use it as prior state. | **Unknown:** no stale content retry was found, but after a late error that follows visible replacement, `push` says content was not pushed, the attempt record says `push-failed`, and `mm status` reports publication `unknown` for a manifest peers can read. Owner: CLI/sync maintainer; prove pre/post-failure receipt, warning, attempt/status and next-push sidecar behavior with isolated manifest-parent faults before proposing a repair. |
 | Same `LocalBackend.put` → `devices.py:update_last_seen` (`devices/`) | Put errors propagate after the read inside `_devices_write_lock`, which yields without the lock once its retries are exhausted (its warning says the update is skipped; it is not). `_push_core` warns/continues for attended maintenance; unattended errors reach `_auto_command_scope`. Next `update_last_seen` re-GETs; `list_devices` / `list_devices_with_drops` read current registry bytes. Registration itself uses the excluded create-only writer below. | **No demonstrated defect** in publication-failure handling: current last_seen/version fields are recomputed from a fresh read, with no cached-state retry. Under lock contention the read-modify-write can run unlocked. `tests/test_storage_local.py:TestFsyncRouting` pins the conditional prefixes and mode, not every failure handler. |
@@ -128,7 +132,10 @@ a stranded temp on a raw write/flush `OSError`. Its consumers are
 `devices.py:register_device` and `crypto.py:bootstrap_crypto_init`. Ordinary
 `lockedjson.py:locked_json_rmw` / `_write_json` forensic caches (identity,
 upgrade, token usage, Codex/Grok host usage), `seen_sources` in-place flock
-writes and `fsutil.py:flock_append_jsonl` are separate protocols, not omitted
+writes, `fsutil.py:flock_append_jsonl` and the Cursor completion spool's
+`fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` (an fsynced append and a
+rename-aside rotation; between them they call `_fsync_fd` and `fsync_dir`
+directly, never `atomic_write_bytes`) are separate protocols, not omitted
 durable atomic-write families. Pull's end-of-batch `fsync_dir` has the separate
 apply exception boundary below. This audit does not qualify the crash
 durability of these `fsync=False` writes: a directory flush covers entries, not

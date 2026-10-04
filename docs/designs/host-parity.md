@@ -30,9 +30,9 @@ either upload prompts or mint a fake `grok` sync source.
 
 ## Capability matrix
 
-| Capability | Claude | Codex | Grok | Cursor via Conductor |
+| Capability | Claude | Codex | Grok | Cursor (Conductor + enrolled CLI) |
 |---|---|---|---|---|
-| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger; model-family rows |
+| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger plus enrolled standalone completions; model-family rows |
 | Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` | None; no user-authored tree observed |
 | Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
 | `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C | None; discovers ~/.claude/skills with third-party extensibility enabled |

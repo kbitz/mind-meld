@@ -37,8 +37,9 @@ known token bucket, the reader refuses as partial, since the existing wire
 would otherwise discard that warning. If the day has known usage, it publishes
 with partial_sources. No synthetic zero tokens are invented.
 
-The private cursor-host-tokens.json stores hashed run IDs, model IDs, UTC days
-and counters. It uses the shared CACHE_VERSION and reader-owned
+The private cursor-host-tokens.json stores hashed run IDs, hashed requestId
+aliases (v1.5.0), model IDs, UTC days and counters. It uses the shared
+CACHE_VERSION and reader-owned
 CURSOR_HOST_CACHE_RETENTION_DAYS = 90 (not events.CURSOR_SCAN_DAYS). Whole stable
 files learned before a deadline commit, never a partially parsed file.
 Repeated short passes are not guaranteed to converge: each rewritten file

@@ -361,9 +361,12 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 mm enable-source NAME       # turn a configured sync source ON for this machine
                             # NAME=grok adds its scoped skills/ commands/ rules/
                             # source and keeps [retro].grok_host_usage enabled
+                            # NAME=cursor is a usage-only alias (no files sync): installs mm's stop hook in ~/.cursor/hooks.json, then sets [retro].cursor_host_usage (v1.5.0)
+                            # an explicitly configured file source named cursor keeps its ordinary file-source toggle
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
                             # NAME=grok disables that scoped source and clears
                             # its retained usage-consent compatibility bit
+                            # NAME=cursor revokes that consent first, then removes mm's hook; a hooks.json mm cannot edit only warns
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
@@ -381,6 +384,9 @@ mm recapture [WINDOW] [--dry-run]
 mm update                   # install the latest release through pipx (v1.3.0); needs no config or passphrase, so it works while sync is refusing
                             # exit 0: mm is on the latest release; exit 1: the update did not complete, or this install is not one mm can update (source-tree build, non-pipx, pipx pin, fork)
                             # push/pull/autopull/autopush run the in-place pipx upgrade themselves unless [upgrade] auto_install = false; see README "Automatic updates"
+mm cursor-agent [CURSOR ARGS...]   # run cursor-agent unchanged; in print mode (--print / -p) with Cursor usage consent, also record the completed run's usage (v1.5.0)
+                            # exit status is Cursor's (signal exits map to 128+N); a recording failure warns without changing it
+                            # the hidden `capture-cursor-usage` command is the stop-hook entry point: bounded stdin, prints {}, always exits 0
 ```
 
 `mm diag --json` separates reader cache inventory (`host_usage`) from recorded

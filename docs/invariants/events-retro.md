@@ -225,7 +225,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / Cursor-via-Conductor readers as one additive
+The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -442,8 +442,9 @@ is `malformed`/`unsupported`, never invisible source absence.
 A known unreadable store disappearing preserves its blocker rather than
 becoming source absence; previously captured runs survive a missing store.
 
-Counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
-== totalTokens. No inclusive normalization applies. reasoningTokens must be
+Conductor counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
+== totalTokens. No inclusive normalization applies to them (stop-hook counters
+are inclusive; see Standalone Cursor capture above). reasoningTokens must be
 between zero and outputTokens and is not added again. Each whole turn belongs
 to **endedAt's UTC date**; a turn crossing midnight is never split.
 A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
