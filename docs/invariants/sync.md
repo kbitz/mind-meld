@@ -31,11 +31,13 @@ referent. With `fsync=True`, directory open/flush/close runs after replacement
 and can fail while complete new bytes are visible and durability is unconfirmed.
 Cleanup never rolls back publication. A caller must follow its own stop/readback
 policy before deciding what to write next; a failed durable return alone does not
-establish the disk state. With `fsync=False` no code runs after `os.replace`, so
-a raised exception means this invocation did not replace the target. Pull's
-`_ApplyReporter` relies on that ("Publication and normal return must agree"
-below); moving an apply site to `fsync=True` must first route post-replacement
-errors through `published()`.
+establish the disk state. With `fsync=False` no fallible step follows
+`os.replace`, so an `OSError` / `StorageError` raised by the call means this
+invocation did not replace the target (an asynchronous interrupt in the last
+bytecodes is not covered). Pull's apply sites rely on that: a raised write
+becomes `reporter.failed(...)`, which neither voids a deferred keep-local bump
+nor registers a touched parent. Moving an apply site to `fsync=True` first needs
+a publication signal from the primitive (see "Residual windows" below).
 
 `fsync=False` is the default and requests no fsync calls or crash persistence.
 `fsync=True` flushes the temp file before replacement and the parent afterward;
@@ -56,8 +58,8 @@ publication-phase API. Only caught `OSError` triggers best-effort unlink of the
 owned temp. Unlink failure, process death or other uncaught exceptions can strand
 it. `retention.py:_sweep_local_tmp_files` covers only this device's storage
 `data/<id>/` and `manifests/<id>/`; no reaper covers other temps (devices,
-crypto-init, config, caches, markers, or pull/resolve/skill-store temps in
-source trees, which the manifest walker skips).
+crypto-init, config, caches, markers, the skill store, or pull/resolve temps in
+source trees, which the manifest walker's `*.tmp` exclusion keeps out of sync).
 
 **Point-in-time inventory.** Re-enumerated on 2026-10-04 at HEAD
 `e9e56dbe804dd2a109ebb0dc5c5ddc66cc53f583`: search `src/` with
@@ -75,7 +77,7 @@ policy, not physical crash survival or every CLI retry.
 |---|---|---|
 | `lockedjson.py:locked_json_durable_rmw` → `host_usage.py:read_cursor_usage` | The sibling lock spans read and atomic replacement; errors propagate through context exit/finally unlocking. Cursor catches `OSError` / `StorageError`, returns incomplete `io_error`, and publishes no successful observation. Its next invocation opens actual history again under that lock; `cursor_usage_diag` uses `locked_json_snapshot`. Pruned runs make this authoritative history. | **No demonstrated defect:** source shows fresh reads and no stale retry; `tests/test_lockedjson.py:TestDurableJson67A` pins exclusion/coherent snapshots. Cursor's existing file-flush test does not qualify its post-replacement CLI outcome. |
 | `storage/local.py:LocalBackend.put` via `_needs_fsync` → `crypto.py:apply_crypto_init_repair` (canonical and preserved `mm-crypto-init*`) | `preserve` and canonical puts propagate failures before the conflict-unlink pass. `cli.py:_apply_verified_crypto_repair` only translates `NewerFormatError`; `_init_crypto_session` / `_bootstrap_or_verify_crypto` stop on other failures, with command-specific handling. Next `fetch_crypto_init` reads actual canonical/copies and creates a fresh repair plan, not a stale retry. | **No demonstrated defect:** inspected ordering retains conflict candidates on a failed put and preserves displaced lineage before replacement. This is optimistic local coordination, not a fleet transaction; see init-devices.md's reconciliation contract. |
-| Same `LocalBackend.put` → `cli.py:_push_core` (`manifests/`) | Put failure stops before `content_accepted`, sidecar, last_seen and conflict cleanup. `push` catches `OSError` / `MindMeldError`; `_auto_command_scope` records failure for autopush. Push's finally then records any attended capture attempt as `push-failed` via `Attempt.stopped()`, and `_host_publication` judges publication from the unrefreshed sidecar. Next push/pull uses `_fetch_remote_manifest` and `_recover_prior_manifest` on actual storage; a following no-op push returns before `sidecar.write`, so the sidecar can stay one generation behind a visible manifest and later corrupt-manifest recovery would use it as prior state. | **Unknown:** no stale content retry was found, but after a late error that follows visible replacement, `push` says content was not pushed, the attempt record says `push-failed`, and `mm status` can report not-published for a manifest peers can read. Owner: CLI/sync maintainer; prove pre/post-failure receipt, warning, attempt/status and next-push sidecar behavior with isolated manifest-parent faults before proposing a repair. |
+| Same `LocalBackend.put` → `cli.py:_push_core` (`manifests/`) | Put failure stops before `content_accepted`, sidecar, last_seen and conflict cleanup. `push` catches `OSError` / `MindMeldError`; `_auto_command_scope` records failure for autopush. Push's finally then records any attended capture attempt as `push-failed` via `Attempt.stopped()`, and `_host_publication` judges publication from the unrefreshed sidecar. Next push/pull uses `_fetch_remote_manifest` and `_recover_prior_manifest` on actual storage; a following no-op push returns before `sidecar.write`, so the sidecar can stay one generation behind a visible manifest and later corrupt-manifest recovery would use it as prior state. | **Unknown:** no stale content retry was found, but after a late error that follows visible replacement, `push` says content was not pushed, the attempt record says `push-failed`, and `mm status` reports publication `unknown` for a manifest peers can read. Owner: CLI/sync maintainer; prove pre/post-failure receipt, warning, attempt/status and next-push sidecar behavior with isolated manifest-parent faults before proposing a repair. |
 | Same `LocalBackend.put` → `devices.py:update_last_seen` (`devices/`) | Put errors propagate after the read inside `_devices_write_lock`, which yields without the lock once its retries are exhausted (its warning says the update is skipped; it is not). `_push_core` warns/continues for attended maintenance; unattended errors reach `_auto_command_scope`. Next `update_last_seen` re-GETs; `list_devices` / `list_devices_with_drops` read current registry bytes. Registration itself uses the excluded create-only writer below. | **No demonstrated defect** in publication-failure handling: current last_seen/version fields are recomputed from a fresh read, with no cached-state retry. Under lock contention the read-modify-write can run unlocked. `tests/test_storage_local.py:TestFsyncRouting` pins the conditional prefixes and mode, not every failure handler. |
 | `sidecar.py:write` → `cli.py:_push_core` | Catches `OSError` / `StorageError`, warns and continues after successful manifest acceptance. It does not restore the old sidecar. Next `_recover_prior_manifest`, `_host_publication`, `_collect_diag_state` or `recover` calls `sidecar.read`, which opens current bytes and validates shape/device identity. | **No demonstrated defect** in the inspected read/write policy. The warning's promised peer fallback overstates what a late error proves: a visible valid sidecar is still eligible. No fresh reproduction of historical sidecar disappearance is established. |
 | `config.py:save_config` → `cli.py:_register_and_save`; `config.py:patch_config_on_disk` → CLI patch consumers | Save errors propagate. Init's `except Exception` deletes the device key and re-raises without config readback. Patches first re-read TOML: `_set_grok_host_usage`, `disable_source`, `enable_source`, `reconfigure_sources`, `_migrate_config_core` propagate write errors and stop before success/acknowledgment; migration releases its lock in finally. `install_skills_cmd` catches `ConfigError` / `OSError` / `StorageError` and exits before changing links; its "could not write" message, like the sidecar warning, can follow a visible write. `_init_crypto_session` backfill catches only `OSError` / `ConfigError`; `StorageError` reaches its command's crypto-error handler. Next `load_config` / `_get_config` and init's `_load_prior_device_metadata` read actual config; each later patch also re-reads. | **Reproduced defects** in init cleanup and in the backfill handler (both below). **No demonstrated defect** in the source-toggle/migration/install stop-and-fresh-read policies. No config-family blanket safety claim. |
@@ -99,8 +101,8 @@ outcomes remain unqualified; Track 69B changes no consumer or exception API.
 
 **Review reproductions: handlers that catch `OSError` for a `StorageError`.**
 Two handlers expect `OSError` from a helper write that raises `StorageError`.
-Both were reproduced at the same HEAD with tmp_path state under the repo's
-conftest isolation, each with a file-flush (pre-publication) and a parent-flush
+Both were reproduced on the Track 69B branch, whose runtime matches that HEAD,
+with tmp_path state under the repo's conftest isolation, each with a file-flush (pre-publication) and a parent-flush
 (post-publication) fault. `_init_crypto_session`'s backfill comment says
 `except OSError: pass  # non-fatal`, yet `StorageError` escaped in both phases,
 which its callers turn into a command error; after the parent fault the
@@ -141,7 +143,8 @@ and `tests/test_memory_contract.py:test_C2_real_atomic_helper_failure_reopens_ac
 retain phase/mode/platform and four-fault readback/stale-refusal coverage. C2 is
 a tests-only model, not production caller or cloud qualification. Review found
 one concrete missing assertion: the fallback test now covers all three
-documented `F_FULLFSYNC` errnos, so narrowing that tuple fails a test.
+documented `F_FULLFSYNC` errnos, so on Darwin (where they are distinct)
+narrowing that tuple fails a test.
 
 ## Complete snapshots (load-bearing, v0.14.3)
 

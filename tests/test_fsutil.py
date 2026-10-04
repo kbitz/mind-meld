@@ -210,7 +210,7 @@ class TestFsyncFd:
         assert all(op == fsutil.fcntl.F_FULLFSYNC for _fd, op in fcntl_calls)
         assert fsync_calls == []
 
-    @pytest.mark.parametrize("code", [errno.ENOTSUP, errno.EINVAL, errno.EOPNOTSUPP])
+    @pytest.mark.parametrize("code", sorted({errno.ENOTSUP, errno.EINVAL, errno.EOPNOTSUPP}))
     def test_darwin_fullfsync_unsupported_falls_back_to_fsync(self, tmp_path, monkeypatch, code):
         """On Darwin, each documented "unsupported" F_FULLFSYNC errno falls back to os.fsync."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)

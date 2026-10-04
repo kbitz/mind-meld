@@ -78,8 +78,9 @@ def atomic_write_bytes(
         or an absent target absent. Concurrent external writers are not isolated.
       - With fsync=True, parent-directory open/flush/close runs after
         replacement and can fail with new bytes already published and
-        durability unconfirmed. No rollback. With fsync=False nothing runs
-        after replacement, so a raised error means this call did not replace.
+        durability unconfirmed. No rollback. With fsync=False no fallible
+        step follows replacement, so OSError/StorageError from this call
+        means it did not replace (asynchronous interrupts excepted).
       - Caught OSError triggers best-effort unlink of only the owned temp;
         successful replacement consumes that name. Cleanup is not guaranteed
         across process death, unlink failure or arbitrary uncaught exceptions.
