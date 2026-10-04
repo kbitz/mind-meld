@@ -1,9 +1,10 @@
 """Atomic file-write, directory-flush and flock-append primitives.
 
 Atomic writes publish at successful os.replace. Before that boundary this
-invocation preserves the target; afterward, a parent-directory error can
-leave complete new bytes visible with durability unconfirmed. Failed return
-does not mean rollback. Owned-temp cleanup for caught OSError is best-effort.
+invocation preserves the target; afterward, with fsync=True, a parent-directory
+error can leave complete new bytes visible with durability unconfirmed. Failed
+return does not mean rollback. Owned-temp cleanup for caught OSError is
+best-effort.
 
 With fsync=True, normal return confirms file and parent flushes as reported
 by the platform. Darwin prefers F_FULLFSYNC, falling back to os.fsync on
@@ -75,8 +76,10 @@ def atomic_write_bytes(
       - Successful replacement makes complete new bytes visible at `path`.
         Before it, this invocation leaves an existing target's bytes intact
         or an absent target absent. Concurrent external writers are not isolated.
-      - After replacement, parent-directory open/flush/close can fail with
-        new bytes already published and durability unconfirmed. No rollback.
+      - With fsync=True, parent-directory open/flush/close runs after
+        replacement and can fail with new bytes already published and
+        durability unconfirmed. No rollback. With fsync=False nothing runs
+        after replacement, so a raised error means this call did not replace.
       - Caught OSError triggers best-effort unlink of only the owned temp;
         successful replacement consumes that name. Cleanup is not guaranteed
         across process death, unlink failure or arbitrary uncaught exceptions.
