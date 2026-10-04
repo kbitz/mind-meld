@@ -331,7 +331,8 @@ its cache counters again. A plain native `--print` run does not emit a stop
 hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
 text from the final result and retains the exit code. It uses
 the explicit or locally selected model, and retains no transcript content or
-CLI config. The last `--model` wins; otherwise the CLI config's current `model`
+CLI config. The last `--model` and the last `--output-format` before `--` win, as
+in Cursor's parser; otherwise the CLI config's current `model`
 is used, with `selectedModel` parameters applied only while it names the same
 model (it can lag a switch). A print run whose model cannot be resolved is kept
 as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
@@ -371,9 +372,11 @@ Malformed aliases refuse without resetting history. Measured 2026-10-04
 the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
 new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does
 not open; see the Cursor fixture contract's live follow-up. Until a reader
-exists, `unread_cursor_stores` counts such store directories by `lstat` only
-(never opening a database): diag reports the count and status names the
-undercount, without blocking the read or standalone publication.
+exists, `unread_cursor_stores` counts store directories holding an `index.db`
+(including ones that still also hold `runs.ndjson`) by `lstat` only, never
+opening a database; any inspection error reports unknown. Diag reports the
+count and status names the undercount, without blocking the read or
+standalone publication.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no

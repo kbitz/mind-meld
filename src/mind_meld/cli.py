@@ -7875,21 +7875,19 @@ def cursor_agent(ctx: typer.Context) -> None:
         raise typer.Exit(_cursor_exit_code(code))
 
     model = host_usage.cursor_cli_model(options)
-    output = "text"
-    child_args = list(args)
+    # The last --output-format before `--` wins, as in Cursor's own parser.
+    output, value_index = "text", None
     for index, arg in enumerate(options):
         if arg.startswith("--output-format="):
-            output = arg.removeprefix("--output-format=")
-            if output == "text":
-                child_args[index] = "--output-format=json"
-            break
-        if arg == "--output-format" and index + 1 < len(options):
-            output = options[index + 1]
-            if output == "text":
-                child_args[index + 1] = "json"
-            break
-    else:
+            output, value_index = arg.removeprefix("--output-format="), index
+        elif arg == "--output-format" and index + 1 < len(options):
+            output, value_index = options[index + 1], index + 1
+    child_args = list(args)
+    if value_index is None:
         child_args = ["--output-format=json", *child_args]
+    elif output == "text":
+        inline = child_args[value_index].startswith("--output-format=")
+        child_args[value_index] = "--output-format=json" if inline else "json"
     stdout_open = True
     result = None
 

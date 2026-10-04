@@ -1175,28 +1175,27 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
 
 
 def unread_cursor_stores(root: Path | None = None) -> int | None:
-    """Count Conductor workspace stores in the SQLite layout this reader cannot read.
+    """Count Conductor workspace stores holding a SQLite ``index.db`` this reader cannot read.
 
     Conductor 0.90.1 writes new runs to ``<store>/index.db`` instead of
-    ``runs.ndjson``. Only directory entries are inspected (lstat), so no database
-    is ever opened; None means the store root could not be listed.
+    ``runs.ndjson``; a store holding both still has unread runs, so it counts.
+    Only directory entries are inspected (lstat), so no database is ever opened.
+    None means the store could not be inspected.
     """
     source_root = root if root is not None else CURSOR_STORE_PATH
     try:
         with os.scandir(source_root) as entries:
             children = list(entries)
+        return sum(
+            1
+            for child in children
+            if child.is_dir(follow_symlinks=False)
+            and os.path.lexists(Path(child.path) / "index.db")
+        )
     except FileNotFoundError:
         return 0
     except OSError:
         return None
-    unread = 0
-    for child in children:
-        if not child.is_dir(follow_symlinks=False):
-            continue
-        store = Path(child.path)
-        if os.path.lexists(store / "index.db") and not os.path.lexists(store / "runs.ndjson"):
-            unread += 1
-    return unread
 
 
 def cursor_usage_diag() -> dict[str, Any]:

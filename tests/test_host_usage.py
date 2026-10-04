@@ -4439,11 +4439,28 @@ class TestCursorUsage67A:
         (elsewhere / "index.db").touch()
         (cursor_store / "linked").symlink_to(elsewhere)
         try:
-            assert hu.unread_cursor_stores(cursor_store) == 1
+            assert hu.unread_cursor_stores(cursor_store) == 2  # SQLite-only and migrating
             assert self._read(cursor_store).hosts == baseline.hosts
         finally:
             (sqlite_store / "index.db").chmod(0o600)
         assert hu.unread_cursor_stores(tmp_path / "absent") == 0
+
+    def test_store_scan_errors_report_unknown(self, cursor_store, monkeypatch):
+        class Entry:
+            path = str(cursor_store / "vanishing")
+
+            def is_dir(self, follow_symlinks=True):
+                raise PermissionError("stat failed")
+
+        class Entries(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(hu.os, "scandir", lambda root: Entries([Entry()]))
+        assert hu.unread_cursor_stores(cursor_store) is None
 
     @pytest.mark.parametrize("status", ["cancelled", "error", "queued"])
     def test_counterless_unfinished_rows_contribute_nothing(self, cursor_store, status):

@@ -562,6 +562,14 @@ class TestCursorUsageConsent:
             (["--output-format", "text"], ["-p", "--output-format", "json", "hello"]),
             (["--output-format=json"], ["-p", "--output-format=json", "hello"]),
             (["--output-format=stream-json"], ["-p", "--output-format=stream-json", "hello"]),
+            (
+                ["--output-format=text", "--output-format=stream-json"],
+                ["-p", "--output-format=text", "--output-format=stream-json", "hello"],
+            ),
+            (
+                ["--output-format", "stream-json", "--output-format", "text"],
+                ["-p", "--output-format", "stream-json", "--output-format", "json", "hello"],
+            ),
         ],
     )
     def test_wrapper_output_formats(self, cfg, tmp_path, monkeypatch, flags, child):
@@ -569,7 +577,7 @@ class TestCursorUsageConsent:
         raw, argv = self._fake_cursor_agent(tmp_path, monkeypatch)
         result = runner.invoke(app, ["cursor-agent", "-p", *flags, "hello"])
         assert result.exit_code == 0, result.output
-        renders_text = not flags or "text" in flags[-1]
+        renders_text = not flags or flags[-1] in {"text", "--output-format=text"}
         assert result.stdout == ("OK\n" if renders_text else raw)
         assert argv() == child
 
