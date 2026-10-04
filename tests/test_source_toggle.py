@@ -478,14 +478,32 @@ class TestCursorUsageConsent:
         assert result.stdout.strip() == "{}"
         assert not host_usage.CURSOR_SPOOL_PATH.exists()
 
-    @pytest.mark.parametrize(
-        "data", [b"x" * 65_537, b"\xff", b"[" * 1_200 + b"]" * 1_200], ids=["big", "bytes", "deep"]
-    )
+    @pytest.mark.parametrize("data", [b"x" * 65_537, b"\xff"], ids=["big", "bytes"])
     def test_unreadable_hook_input_never_blocks_cursor(self, cfg, data):
         result = runner.invoke(app, ["capture-cursor-usage"], input=data)
         assert result.exit_code == 0, result.output
         assert result.stdout.strip() == "{}"
         assert "unreadable" in result.stderr
+
+    def test_parser_recursion_never_blocks_cursor(self, cfg, monkeypatch):
+        from mind_meld import cli
+
+        # Whether a given depth recurses is version-dependent (3.11 at ~1,000
+        # levels, 3.13's C parser far deeper), so force the parser's failure.
+        def too_deep(_data):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(cli.json, "loads", too_deep)
+        result = runner.invoke(app, ["capture-cursor-usage"], input=b"[[[]]]")
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip() == "{}"
+        assert "unreadable" in result.stderr
+
+    def test_deeply_nested_hook_input_keeps_the_contract(self, cfg):
+        deep = b"[" * 30_000 + b"]" * 30_000  # fits the 64 KiB bound
+        result = runner.invoke(app, ["capture-cursor-usage"], input=deep)
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip() == "{}"
 
     def test_hook_without_mm_config_is_silent(self, tmp_path, monkeypatch):
         from mind_meld import config as config_module
