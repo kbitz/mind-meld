@@ -294,6 +294,144 @@ class TestEnableSource:
         assert added == get_default_source(source_name)
 
 
+class TestCursorUsageConsent:
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_cursor_toggle_changes_only_usage_consent(self, cfg, isolated_seen_sources, enabled):
+        import tomllib
+
+        before = tomllib.loads(cfg.read_text())
+        before["retro"] = {"cursor_host_usage": not enabled, "author_emails": ["test@example.com"]}
+        save_config(before, cfg)
+        command = "enable-source" if enabled else "disable-source"
+        result = runner.invoke(app, [command, "cursor"])
+        assert result.exit_code == 0, result.output
+        after = tomllib.loads(cfg.read_text())
+        assert after["retro"]["cursor_host_usage"] is enabled
+        assert after["retro"]["author_emails"] == ["test@example.com"]
+        assert after["sync"] == before["sync"]
+        assert "usage capture" in result.output
+        assert "--force" not in result.output
+        assert not seen_sources.seen_path().exists()
+
+        original = cfg.read_bytes()
+        again = runner.invoke(app, [command, "cursor"])
+        assert again.exit_code == 0, again.output
+        assert "already" in again.output
+        assert cfg.read_bytes() == original
+
+    def test_existing_custom_cursor_source_retains_file_toggle(self, cfg, isolated_seen_sources):
+        import tomllib
+
+        before = tomllib.loads(cfg.read_text())
+        before["sync"]["sources"].append(
+            {"name": "cursor", "path": str(cfg.parent), "type": "generic"}
+        )
+        save_config(before, cfg)
+        result = runner.invoke(app, ["disable-source", "cursor"])
+        assert result.exit_code == 0, result.output
+        after = tomllib.loads(cfg.read_text())
+        assert after["sync"]["disabled_sources"] == ["cursor"]
+        assert after.get("retro", {}).get("cursor_host_usage") is not True
+
+    def test_unconsented_hook_is_write_free_and_does_not_block_cursor(self, cfg):
+        from mind_meld import host_usage
+
+        result = runner.invoke(
+            app, ["capture-cursor-usage"], input='{"hook_event_name":"stop","status":"completed"}'
+        )
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip() == "{}"
+        assert not host_usage.CURSOR_CACHE_PATH.exists()
+
+    def test_capture_failure_does_not_block_cursor_or_expose_payload(self, cfg):
+        import tomllib
+
+        from mind_meld import host_usage
+
+        config = tomllib.loads(cfg.read_text())
+        config["retro"] = {"cursor_host_usage": True}
+        save_config(config, cfg)
+        result = runner.invoke(
+            app,
+            ["capture-cursor-usage"],
+            input=json.dumps(
+                {
+                    "hook_event_name": "stop",
+                    "status": "completed",
+                    "text": "PRIVATE RESPONSE",
+                    "model": "PRIVATE MODEL",
+                }
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip() == "{}"
+        assert "could not be recorded" in result.stderr
+        assert "PRIVATE" not in result.output
+        assert not host_usage.CURSOR_CACHE_PATH.exists()
+
+    @pytest.mark.parametrize("output", [None, "text", "json", "stream-json"])
+    def test_wrapper_output_formats(self, cfg, tmp_path, monkeypatch, output):
+        from mind_meld import host_usage
+
+        executable = tmp_path / "cursor-agent"
+        payload = {"type": "result", "subtype": "success", "result": "OK"}
+        raw = json.dumps(payload) + "\n"
+        executable.write_text("#!/bin/sh\ncat <<'JSON'\n" + raw + "JSON\n")
+        executable.chmod(0o700)
+        monkeypatch.setenv("PATH", str(tmp_path) + ":" + __import__("os").environ["PATH"])
+        args = ["cursor-agent", "-p"]
+        if output is not None:
+            args += ["--output-format=" + output]
+        result = runner.invoke(app, [*args, "hello"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == ("OK\n" if output in {None, "text"} else raw)
+        assert not host_usage.CURSOR_CACHE_PATH.exists()
+
+    def test_print_wrapper_preserves_stdout_and_exit_status(self, cfg, tmp_path, monkeypatch):
+        import tomllib
+
+        from mind_meld import host_usage
+
+        config = tomllib.loads(cfg.read_text())
+        config["retro"] = {"cursor_host_usage": True}
+        save_config(config, cfg)
+        payload = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "wrapper-generation",
+            "result": "OK",
+            "usage": {
+                "inputTokens": 100,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 200,
+                "outputTokens": 10,
+            },
+        }
+        executable = tmp_path / "cursor-agent"
+        executable.write_text(
+            "#!/bin/sh\ncat <<'JSON'\n" + json.dumps(payload) + "\nJSON\nexit 7\n"
+        )
+        executable.chmod(0o700)
+        monkeypatch.setenv("PATH", str(tmp_path) + ":" + __import__("os").environ["PATH"])
+        result = runner.invoke(
+            app,
+            [
+                "cursor-agent",
+                "--print",
+                "--model",
+                "grok-4.7-low",
+                "--output-format",
+                "json",
+                "hello",
+            ],
+        )
+        assert result.exit_code == 7, result.output
+        assert result.stdout == json.dumps(payload) + "\n"
+        history = json.loads(host_usage.CURSOR_CACHE_PATH.read_text())
+        assert next(iter(history["runs"].values()))["usage"]["input"] == 100
+
+
 class TestGrokUsageConsent:
     def test_grok_toggle_patches_source_and_usage_consent_together(
         self, cfg, isolated_seen_sources, monkeypatch

@@ -7591,15 +7591,15 @@ def sources() -> None:
 
 
 def _known_source_names(config: dict) -> list[str]:
-    """Sorted union of explicit-config names and DEFAULT_SOURCES names.
+    """Sorted union of file sources and usage-only toggle names.
 
     The validation surface for `mm enable-source` / `mm disable-source`.
-    A name is "known" if either the user has it in [[sync.sources]] or
-    mm ships a default for it. Strict by default; --force accepts unknown.
+    A name is "known" if the user configures its file source, mm ships a default
+    for it, or it has a usage-only consent alias. --force accepts unknown names.
     """
     explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults))
+    return sorted(set(explicit) | set(defaults) | set(_config_module.HOST_USAGE_ONLY_CONSENT))
 
 
 def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
@@ -7657,6 +7657,126 @@ def _set_grok_host_usage(config: dict, *, enabled: bool, quiet: bool = False) ->
         console.print("[dim]Run 'mm enable-source grok' to turn this back on.[/dim]")
 
 
+def _toggle_usage_only_reader(name: str, config: dict, *, enabled: bool) -> bool:
+    """Handle usage aliases without changing a user's file-source selection.
+
+    An explicit custom source takes precedence over the alias so its existing
+    enable/disable behavior remains available and does not grant usage consent.
+    """
+    key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
+    if key is None or any(s["name"] == name for s in config.get("sync", {}).get("sources", [])):
+        return False
+    from mind_meld import host_usage
+
+    try:
+        host_usage.configure_cursor_hook(enabled=enabled)
+    except (OSError, ValueError, RuntimeError, StorageError) as exc:
+        _error("Could not configure Cursor's completion hook: " + safe_str(str(exc)))
+    state = "enabled" if enabled else "disabled"
+    if config.get("retro", {}).get(key) is enabled:
+        console.print(f"[dim]Cursor usage capture is already {state}.[/dim]")
+        return True
+    patch_config_on_disk({"retro": {key: enabled}})
+    verb = "Enabled" if enabled else "Disabled"
+    console.print(f"[green]{verb} Cursor usage capture on this device.[/green]")
+    if enabled:
+        console.print(
+            "[dim]Standalone interactive sessions use the completion hook. "
+            "For --print runs, use 'mm cursor-agent' to record stdout usage. "
+            "Only usage aggregates are synced.[/dim]"
+        )
+        console.print("[dim]Run 'mm push' to refresh usage, then 'mm status' to verify.[/dim]")
+    opposite = "disable" if enabled else "enable"
+    console.print(f"[dim]Run 'mm {opposite}-source cursor' to change this setting.[/dim]")
+    return True
+
+
+def _record_cursor_completion(payload: object, *, model: str | None = None) -> None:
+    from mind_meld import host_usage
+
+    try:
+        config = load_config()
+        if _config_module.cursor_host_usage_enabled(config):
+            host_usage.record_cursor_usage(payload, model=model)
+    except (MindMeldError, OSError, ValueError, RuntimeError):
+        print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
+
+
+@app.command(name="capture-cursor-usage", hidden=True)
+def capture_cursor_usage() -> None:
+    """Completion hook: retain counters only, and never block Cursor's agent loop."""
+    try:
+        data = sys.stdin.buffer.read(65_537)
+        if len(data) > 65_536:
+            raise ValueError("oversized Cursor completion")
+        payload = json.loads(data)
+    except (OSError, ValueError):
+        print("mm: warning: Cursor completion metadata was unreadable.", file=sys.stderr)
+    else:
+        _record_cursor_completion(payload)
+    typer.echo("{}")
+
+
+@app.command(
+    name="cursor-agent",
+    context_settings={
+        "allow_extra_args": True,
+        "ignore_unknown_options": True,
+        "help_option_names": [],
+    },
+)
+def cursor_agent(ctx: typer.Context) -> None:
+    """Run Cursor normally and retain print-mode usage for retro-fleet."""
+    from mind_meld import host_usage, token_usage
+
+    args = list(ctx.args)
+    options = args[: args.index("--")] if "--" in args else args
+    printing = "--print" in options or "-p" in options
+    if not printing or "--help" in options or "-h" in options or "--version" in options:
+        try:
+            result = subprocess.run(["cursor-agent", *args])
+        except OSError:
+            _error("cursor-agent could not be started; check that it is on PATH.")
+        raise typer.Exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+
+    model = host_usage.cursor_cli_model(options)
+    output = "text"
+    child_args = list(args)
+    for index, arg in enumerate(options):
+        if arg.startswith("--output-format="):
+            output = arg.removeprefix("--output-format=")
+            if output == "text":
+                child_args[index] = "--output-format=json"
+            break
+        if arg == "--output-format" and index + 1 < len(options):
+            output = options[index + 1]
+            if output == "text":
+                child_args[index + 1] = "json"
+            break
+    else:
+        child_args = ["--output-format=json", *child_args]
+    try:
+        with subprocess.Popen(["cursor-agent", *child_args], stdout=subprocess.PIPE) as child:
+            assert child.stdout is not None
+            while line := child.stdout.readline(token_usage.MAX_JSONL_LINE_BYTES + 1):
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    payload = None
+                terminal = isinstance(payload, dict) and payload.get("type") == "result"
+                if output != "text" or not terminal:
+                    sys.stdout.buffer.write(line)
+                    sys.stdout.buffer.flush()
+                elif isinstance(payload.get("result"), str):
+                    typer.echo(payload["result"])
+                if terminal:
+                    _record_cursor_completion(payload, model=model)
+            code = child.wait()
+    except OSError:
+        _error("cursor-agent could not be started or its output could not be read.")
+    raise typer.Exit(code if code >= 0 else 128 - code)
+
+
 def _record_seen(names: list[str]) -> None:
     """Mark `names` as acknowledged in the seen_sources tracker.
 
@@ -7692,6 +7812,8 @@ def disable_source(
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
     """
     config = _get_config(read_only=False)
+    if _toggle_usage_only_reader(name, config, enabled=False):
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:
@@ -7743,6 +7865,8 @@ def enable_source(
     install the link itself.
     """
     config = _get_config(read_only=False)
+    if _toggle_usage_only_reader(name, config, enabled=True):
+        return
     try:
         _validate_source_name(name, config, force=force)
     except ConfigError as e:

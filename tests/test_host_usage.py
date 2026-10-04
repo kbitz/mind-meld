@@ -30,6 +30,175 @@ from tests import _host_usage_oracle as oracle
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
 
 
+class TestCursorStandaloneUsage:
+    def _hook(self, **updates):
+        return {
+            "hook_event_name": "stop",
+            "status": "completed",
+            "generation_id": "standalone-generation",
+            "model": "grok-4.7-low",
+            "input_tokens": 17_534,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 1_152,
+            "output_tokens": 147,
+            **updates,
+        }
+
+    def test_hook_retains_only_normalized_usage_and_deduplicates_replays(self):
+        payload = self._hook(text="PRIVATE RESPONSE", user_email="PRIVATE EMAIL")
+        assert hu.record_cursor_usage(payload)
+        first = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert b"PRIVATE" not in first
+        assert b"standalone-generation" not in first
+        assert hu.CURSOR_CACHE_PATH.stat().st_mode & 0o777 == 0o600
+        assert hu.record_cursor_usage(payload)
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == first
+        result = hu.read_cursor_usage(consented=True)
+        assert result.complete
+        day = datetime.now(timezone.utc).date().isoformat()
+        assert result.hosts["grok"][day] == {
+            "input": 16_382,
+            "cache_create": 0,
+            "cache_read": 1_152,
+            "output": 147,
+        }
+        assert result.tokens_by_day[day]["by_model"]["grok-4.7"]["input"] == 16_382
+
+    def test_print_results_are_already_disjoint(self):
+        result = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "request_id": "print-generation",
+            "usage": {
+                "inputTokens": 100,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 200,
+                "outputTokens": 10,
+            },
+            "result": "PRIVATE RESPONSE",
+        }
+        assert hu.record_cursor_usage(result, model="grok-4.7-low-fast")
+        cached = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+        run = next(iter(cached.values()))
+        assert run["usage"]["input"] == 100
+        assert run["model"] == "grok-4.7-fast"
+
+    @pytest.mark.parametrize(
+        "updates",
+        [
+            {"input_tokens": True},
+            {"cache_read_tokens": 100_000},
+            {"output_tokens": None},
+            {"generation_id": ""},
+            {"model": None},
+        ],
+    )
+    def test_invalid_completion_never_creates_history(self, updates):
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.record_cursor_usage(self._hook(**updates))
+        assert not hu.CURSOR_CACHE_PATH.exists()
+
+    def test_corrupt_history_is_preserved(self):
+        hu.CURSOR_CACHE_PATH.parent.mkdir(parents=True)
+        hu.CURSOR_CACHE_PATH.write_bytes(b"corrupt history")
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.record_cursor_usage(self._hook())
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == b"corrupt history"
+
+    def test_conductor_request_replaces_overlapping_hook_once(self, tmp_path):
+        hu.record_cursor_usage(self._hook())
+        root = tmp_path / "conductor"
+        session = root / "session"
+        session.mkdir(parents=True)
+        day = datetime.now(timezone.utc)
+        row = {
+            "runId": "conductor-run",
+            "requestId": "standalone-generation",
+            "status": "finished",
+            "endedAt": int(day.timestamp() * 1000),
+            "model": {"id": "grok-4.7", "params": [{"id": "fast", "value": "false"}]},
+            "usage": {
+                "inputTokens": 16_382,
+                "cacheWriteTokens": 0,
+                "cacheReadTokens": 1_152,
+                "outputTokens": 147,
+                "reasoningTokens": 0,
+                "totalTokens": 17_681,
+            },
+        }
+        (session / "runs.ndjson").write_text(json.dumps(row) + "\n")
+        result = hu.read_cursor_usage(root, consented=True)
+        assert result.complete
+        assert result.hosts["grok"][day.date().isoformat()]["input"] == 16_382
+        assert len(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]) == 1
+        shutil.rmtree(root)
+        assert hu.record_cursor_usage(self._hook())
+        assert hu.read_cursor_usage(root, consented=True).hosts == result.hosts
+
+    def test_hook_install_and_removal_preserve_other_hooks_and_keys(self):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        original = {
+            "version": 1,
+            "hooks": {"stop": [{"command": "existing-hook"}], "sessionStart": []},
+            "unfamiliar": {"enabled": True},
+        }
+        path.write_text(json.dumps(original))
+        hu.configure_cursor_hook(enabled=True)
+        installed = json.loads(path.read_text())
+        assert installed["hooks"]["stop"] == [
+            {"command": "existing-hook"},
+            {"command": "mm capture-cursor-usage", "timeout": 10},
+        ]
+        assert installed["unfamiliar"] == original["unfamiliar"]
+        unchanged = path.read_bytes()
+        hu.configure_cursor_hook(enabled=True)
+        assert path.read_bytes() == unchanged
+        hu.configure_cursor_hook(enabled=False)
+        assert json.loads(path.read_text()) == original
+
+    def test_invalid_hooks_are_not_overwritten(self):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"invalid hooks")
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.configure_cursor_hook(enabled=True)
+        assert path.read_bytes() == b"invalid hooks"
+
+    def test_hook_diagnostic_does_not_create_state(self):
+        parent = hu.CURSOR_HOOK_CONFIG_PATH.parent
+        assert hu.cursor_usage_diag()["hook_state"] == "missing"
+        assert not parent.exists()
+        hu.configure_cursor_hook(enabled=True)
+        before = {path: path.read_bytes() for path in parent.iterdir()}
+        assert hu.cursor_usage_diag()["hook_state"] == "installed"
+        assert {path: path.read_bytes() for path in parent.iterdir()} == before
+
+    def test_duplicate_callback_keeps_its_original_utc_day(self, monkeypatch):
+        first_day = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+
+        class Clock(datetime):
+            current = first_day
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current
+
+        monkeypatch.setattr(hu, "datetime", Clock)
+        hu.record_cursor_usage(self._hook())
+        Clock.current = datetime(2026, 10, 4, 0, 1, tzinfo=timezone.utc)
+        hu.record_cursor_usage(self._hook(output_tokens=200))
+        run = next(iter(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"].values()))
+        assert run["day"] == "2026-10-03"
+        assert run["usage"]["output"] == 200
+
+    @pytest.mark.parametrize("status", ["aborted", "error"])
+    def test_unfinished_hook_does_not_invent_usage(self, status):
+        assert hu.record_cursor_usage(self._hook(status=status)) is False
+        assert not hu.CURSOR_CACHE_PATH.exists()
+
+
 def _context(model: str = "gpt-5-codex", *, turn: str | None = None) -> dict:
     payload: dict = {"model": model}
     if turn is not None:

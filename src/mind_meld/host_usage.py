@@ -64,10 +64,11 @@ never finished would drop files that were never absent. ``warm_host_cache_inline
 is the attended-command escape hatch for a deadline miss. Attended callers
 publish that warm read's result; unattended callers keep their short budget.
 
-Track 67A reads only Conductor's Cursor ``runs.ndjson``. Its disjoint counters
-need no normalization. Unlike the forensic caches above, Cursor history is
-authoritative after Conductor pruning: durable atomic writes retain run IDs
-for 90 days. Every file is reparsed, and short passes need not converge.
+Cursor reads Conductor's ``runs.ndjson`` and enrolled standalone completions.
+Conductor and print-mode counters are disjoint; stop-hook counters are inclusive.
+Unlike the forensic caches above, Cursor history is authoritative after source
+pruning: durable atomic writes retain hashed run IDs for 90 days. Every Conductor
+file is reparsed, and short passes need not converge.
 """
 
 from __future__ import annotations
@@ -116,6 +117,9 @@ CURSOR_STORE_PATH = (
     Path.home() / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
 )
 CURSOR_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "cursor-host-tokens.json"
+CURSOR_HOOK_CONFIG_PATH = Path.home() / ".cursor" / "hooks.json"
+CURSOR_CLI_CONFIG_PATH = Path.home() / ".cursor" / "cli-config.json"
+CURSOR_HOOK_COMMAND = "mm capture-cursor-usage"
 CURSOR_HOST_CACHE_RETENTION_DAYS = 90
 """Reader-owned retention, unrelated to events.CURSOR_SCAN_DAYS (read position)."""
 CURSOR_USAGE_CENSUS_HOST_VERSION = "2026.09.18-9a7762b"
@@ -630,9 +634,17 @@ def _iter_cursor_ledgers(root: Path, deadline: float) -> Iterator[Path]:
                 yield path
 
 
+class _CursorFileRuns(dict):
+    """Whole-file projection, including aliases for completion-hook deduplication."""
+
+    def __init__(self):
+        super().__init__()
+        self.requests: dict[str, str] = {}
+
+
 def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
     before = _regular_stat(path)
-    staged: dict[str, Any] = {}
+    staged = _CursorFileRuns()
     # O_NONBLOCK closes the check-then-open window where a FIFO would block
     # the push lock. A non-regular descriptor is refused before any read.
     try:
@@ -658,12 +670,21 @@ def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
             if len(line) > MAX_JSONL_LINE_BYTES or not line.endswith(b"\n"):
                 raise _ReadFailure("malformed")
             try:
-                key, run = _cursor_run(json.loads(line))
+                row = json.loads(line)
+                key, run = _cursor_run(row)
             except ValueError as exc:
                 raise _ReadFailure("malformed") from exc
             if key in staged:
                 raise _ReadFailure("malformed")
             staged[key] = run
+            request = row.get("requestId")
+            if request is not None:
+                if _validated_table([request], _MAX_PROMPT_ID_BYTES) is None:
+                    raise _ReadFailure("malformed")
+                alias = hashlib.sha256(request.encode()).hexdigest()
+                if alias in staged.requests and staged.requests[alias] != key:
+                    raise _ReadFailure("malformed")
+                staged.requests[alias] = key
         after_fd = os.fstat(fp.fileno())
     after = _regular_stat(path)
     if (
@@ -693,7 +714,7 @@ def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
 def read_cursor_usage(
     root: Path | None = None, *, deadline: float | None = None, consented: bool = False
 ) -> HostUsageResult:
-    """Cursor via Conductor only. Bare CLI has no persisted billing ledger.
+    """Conductor runs and enrolled standalone CLI completions.
 
     runs.ndjson is rewritten in place: reparse whole files, replace by hashed
     runId, then reduce once (reverses old day/model/counter contributions).
@@ -715,11 +736,13 @@ def read_cursor_usage(
         ) as locked:
             # Shape failures propagate without writing the sole surviving copy.
             runs = dict(_cursor_cached_runs(locked.data))
+            requests = _cursor_requests(locked.data)
             prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
             learned: dict[str, Any] = {}
+            learned_requests: dict[str, str] = {}
             removed: set[str] = set()
             conflict = False
 
@@ -728,6 +751,13 @@ def read_cursor_usage(
                     runs.pop(key, None)
                 for key, run in learned.items():
                     runs[key] = run
+                requests.update(learned_requests)
+                requests_copy = dict(requests)
+                for request, canonical in requests_copy.items():
+                    if request != canonical:
+                        runs.pop(request, None)
+                    if canonical not in runs:
+                        requests.pop(request, None)
 
             try:
                 if _expired(read_deadline):
@@ -757,6 +787,14 @@ def read_cursor_usage(
                             conflict = True
                             raise _ReadFailure("malformed")
                         seen.update(staged)
+                        aliases = getattr(staged, "requests", {})
+                        if any(
+                            key in learned_requests and learned_requests[key] != value
+                            for key, value in aliases.items()
+                        ):
+                            conflict = True
+                            raise _ReadFailure("malformed")
+                        learned_requests.update(aliases)
                         for key, run in staged.items():
                             # A running revision invalidates a previous terminal
                             # contribution, just as a changed completion day does.
@@ -794,6 +832,7 @@ def read_cursor_usage(
                 **timing,
                 "version": CACHE_VERSION,
                 "runs": runs,
+                "requests": requests,
                 "complete_once": locked.data["complete_once"] or result.complete,
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
@@ -814,6 +853,150 @@ def read_cursor_usage(
         return _incomplete("io_error")
 
 
+def _cursor_requests(data: dict[str, Any]) -> dict[str, str]:
+    requests = data.get("requests", {})
+    if not isinstance(requests, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", key) is None
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for key, value in requests.items()
+    ):
+        raise _ReadFailure("malformed")
+    return dict(requests)
+
+
+def configure_cursor_hook(*, enabled: bool) -> None:
+    """Preserve every other hook and config key; edit only mm's exact stop entry."""
+    if not enabled and not CURSOR_HOOK_CONFIG_PATH.exists():
+        return
+    with locked_json_durable_rmw(
+        CURSOR_HOOK_CONFIG_PATH, default_factory=lambda: {"version": 1, "hooks": {}}
+    ) as locked:
+        data = locked.data
+        hooks = data.get("hooks", {})
+        if data.get("version") != 1 or not isinstance(hooks, dict):
+            raise InvalidJsonCache("unsupported Cursor hooks config")
+        stop = hooks.get("stop", [])
+        if not isinstance(stop, list) or not all(isinstance(hook, dict) for hook in stop):
+            raise InvalidJsonCache("invalid Cursor stop hooks")
+        entry = {"command": CURSOR_HOOK_COMMAND, "timeout": 10}
+        updated = [hook for hook in stop if hook.get("command") != CURSOR_HOOK_COMMAND]
+        if enabled:
+            updated.append(entry)
+        locked.write_on_exit = updated != stop
+        if locked.write_on_exit:
+            new_hooks = {**hooks}
+            if updated:
+                new_hooks["stop"] = updated
+            else:
+                new_hooks.pop("stop", None)
+            locked.data = {**data, "hooks": new_hooks}
+
+
+def cursor_cli_model(args: list[str]) -> str | None:
+    """Resolve only the selected model; never retain CLI config or auth fields."""
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg.startswith("--model="):
+            return arg.removeprefix("--model=")
+        if arg == "--model" and index + 1 < len(args):
+            return args[index + 1]
+    try:
+        data = json.loads(CURSOR_CLI_CONFIG_PATH.read_bytes())
+        model = data.get("selectedModel")
+        if not isinstance(model, dict) or not isinstance(model.get("modelId"), str):
+            return None
+        name = model["modelId"]
+        if name == "grok-4.7":
+            params = model.get("parameters", [])
+            fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
+            if fast == ["false"]:
+                return "grok-4.7[fast=false]"
+            if fast == ["true"]:
+                return "grok-4.7[fast=true]"
+            return None
+        return name
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+
+
+def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
+    """Durably record one completed generation. Hook counters are inclusive;
+    the print result has already normalized its input to disjoint counters.
+    Unknown fields (including prompts, transcripts and credentials) are discarded.
+    """
+    if not isinstance(payload, dict):
+        raise InvalidJsonCache("invalid Cursor usage record")
+    is_hook = payload.get("hook_event_name") == "stop"
+    if is_hook:
+        if payload.get("status") != "completed":
+            return False
+        generation = payload.get("generation_id")
+        selected_model = payload.get("model")
+        names = ("input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens")
+        raw = payload
+    else:
+        if payload.get("type") != "result" or payload.get("subtype") != "success":
+            return False
+        if payload.get("is_error") is not False:
+            return False
+        generation = payload.get("request_id")
+        selected_model = model
+        names = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
+        raw = payload.get("usage")
+    if (
+        _validated_table([generation], _MAX_PROMPT_ID_BYTES) is None
+        or _validated_table([selected_model], _MAX_MODEL_ID_BYTES) is None
+        or not isinstance(raw, dict)
+        or not all(_is_valid_counter(raw.get(name)) for name in names)
+    ):
+        raise InvalidJsonCache("Cursor completion has no valid model, identity or usage")
+    usage = dict(zip(TOKEN_FIELDS, (raw[name] for name in names)))
+    if is_hook:
+        try:
+            usage = _normalize_inclusive_usage(usage)
+        except _ReadFailure as exc:
+            raise InvalidJsonCache("invalid inclusive Cursor counters") from exc
+    if sum(usage.values()) > _MAX_COUNTER:
+        raise InvalidJsonCache("Cursor counters exceed supported bounds")
+    match = re.fullmatch(r"grok-4\.7-(?:low|medium|high|xhigh)(-fast)?", selected_model)
+    if match:
+        selected_model = "grok-4.7-fast" if match[1] else "grok-4.7"
+    elif selected_model in {"grok-4.7[fast=true]", "grok-4.7[fast=false]"}:
+        selected_model = "grok-4.7-fast" if selected_model.endswith("true]") else "grok-4.7"
+    elif selected_model == "grok-4.7":
+        # A bare id does not identify Fast mode, which defaults on for paid plans.
+        selected_model = "grok-4.7-unspecified"
+    key = hashlib.sha256(generation.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
+    with locked_json_durable_rmw(CURSOR_CACHE_PATH, default_factory=_empty_cursor_cache) as locked:
+        try:
+            runs = dict(_cursor_cached_runs(locked.data))
+            requests = _cursor_requests(locked.data)
+        except _ReadFailure as exc:
+            raise InvalidJsonCache("unreadable Cursor history; preserved without reset") from exc
+        runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
+        if requests.get(key) not in runs:
+            previous = runs.get(key)
+            runs[key] = {
+                "day": previous["day"] if previous else now.date().isoformat(),
+                "model": selected_model,
+                "usage": usage,
+                "partial": usage["cache_create"] > 0,
+            }
+        updated = {
+            **locked.data,
+            "runs": runs,
+            "complete_once": locked.data["complete_once"] or not locked.data.get("last_reason"),
+        }
+        locked.write_on_exit = updated != locked.data
+        locked.data = updated
+    return True
+
+
 def cursor_usage_diag() -> dict[str, Any]:
     """Inspect durable Cursor history only; never open Conductor run files."""
     blank = {
@@ -825,6 +1008,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         "runs_cached": None,
         "model_count": 0,
         "models": [],
+        "hook_state": cursor_hook_state(),
     }
     with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
         if snap.state == "missing":
@@ -837,6 +1021,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         data = snap.data
     try:
         runs = _cursor_cached_runs(data)
+        _cursor_requests(data)
     except _ReadFailure as exc:
         return {**blank, "cache_state": "unreadable", "last_reason": exc.reason}
     models = sorted({r["model"] for r in runs.values()})
@@ -853,6 +1038,20 @@ def cursor_usage_diag() -> dict[str, Any]:
     }
 
 
+def cursor_hook_state() -> str:
+    """Read enrollment without creating a hook, lock or directory."""
+    with locked_json_snapshot(CURSOR_HOOK_CONFIG_PATH, blocking=False) as snapshot:
+        if snapshot.state != "valid":
+            return snapshot.state
+        hooks = snapshot.data.get("hooks")
+        if snapshot.data.get("version") != 1 or not isinstance(hooks, dict):
+            return "malformed"
+        stop = hooks.get("stop", [])
+        if not isinstance(stop, list):
+            return "malformed"
+        return "installed" if {"command": CURSOR_HOOK_COMMAND, "timeout": 10} in stop else "missing"
+
+
 @dataclass(frozen=True)
 class HostReaderDiag:
     function: str
@@ -864,7 +1063,9 @@ class HostReaderDiag:
 HOST_READER_DIAGS = {
     "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex"),
     "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "grok"),
-    "cursor": HostReaderDiag("cursor_usage_diag", "complete_once", True, "Cursor via Conductor"),
+    "cursor": HostReaderDiag(
+        "cursor_usage_diag", "complete_once", True, "Cursor (Conductor + enrolled CLI)"
+    ),
 }
 
 

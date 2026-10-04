@@ -105,6 +105,10 @@ Each outcome maps to a behavioral test in
 table lists the applicable codes per command. Exit 0 from content sync does
 not prove host usage was captured or published.
 
+`mm cursor-agent` passes through Cursor's exit status (including signal exits).
+Usage-recording failures warn without changing that status. The completion-hook
+command always exits 0 so it cannot stop the agent loop.
+
 ## Quick Start
 
 ```bash
@@ -747,7 +751,7 @@ claim to repair historical attribution.
 
 <a id="host-usage-capture-codex-and-grok"></a>
 
-### Host usage capture (Codex, Grok and Cursor via Conductor)
+### Host usage capture (Codex, Grok and Cursor)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -776,24 +780,54 @@ Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok`;
 Grok also accepts the existing `[retro] grok_host_usage = true` usage-only consent.
 
-Cursor **via Conductor** requires mm v1.2.0+ and uses only local usage consent. In
-`~/.config/mind-meld/config.toml`, add the key to the existing `[retro]` table
-(or create that table if absent):
+Cursor uses local usage consent. Enable capture with:
+
+```sh
+mm enable-source cursor
+mm push
+mm status
+```
+
+This sets the following key in `~/.config/mind-meld/config.toml` and installs
+one `stop` hook in `~/.cursor/hooks.json`, preserving other hooks and settings:
 
 ```toml
 [retro]
 cursor_host_usage = true
 ```
 
-Then run `mm push` and inspect `mm status`; `mm diag --json` includes
+Conductor capture has been supported since mm v1.2.0. The config bit alone
+continues to enable that reader; standalone interactive capture also needs the
+hook installed by `mm enable-source cursor`. Run the command again to repair
+a missing hook. `mm disable-source cursor` removes mm's hook and stops usage
+reading. An explicitly configured custom file source named `cursor` retains
+its existing file-source toggle behavior instead of using this usage alias.
+
+Run `mm push` and inspect `mm status`; `mm diag --json` includes
 `host_usage.cursor` with its own blocker, retained-run count and last complete
-read. Set the bit to `false` to stop reading. There is no Cursor sync source
-or `mm enable-source cursor` command. Run files remain local; only aggregate
+read. There is no built-in Cursor customization or memory sync source.
+Run files remain local; only aggregate
 usage crosses the encrypted sync boundary.
 
-Coverage is limited to Conductor's Cursor SDK store. Bare cursor-agent usage
-has no persisted billing counters, including on a Mac that also uses Conductor.
-Runs are counted when finished, on endedAt's UTC day. mm retains captured runs
+Standalone interactive `cursor-agent` runs are recorded by the completion hook.
+For print-mode runs, use the wrapper with the same Cursor arguments:
+
+```sh
+mm cursor-agent --print --model grok-4.7-low "Your prompt"
+mm cursor-agent --print --output-format stream-json --model grok-4.7-low "Your prompt"
+```
+
+The wrapper forwards JSON/stream-JSON output unchanged and renders text from the
+final result when the run completes. It preserves Cursor's exit status and records only
+completed result metadata; responses, prompts, email addresses, paths and
+credentials are discarded. Native `cursor-agent --print` does not fire the
+completion hook in the measured CLI and therefore still needs the wrapper.
+Cursor's native chat history has no billing ledger: sessions completed before
+enrollment cannot be backfilled from context-window counts.
+
+Conductor runs are counted on endedAt's UTC day; standalone completions use
+the local capture's UTC day. Repeated callbacks replace the same generation,
+and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
 for 90 days even after Conductor prunes them, using private durable
 `cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
 Do not delete this file to troubleshoot a slow read: it may hold the only copy.

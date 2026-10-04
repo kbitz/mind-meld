@@ -1512,9 +1512,9 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         assert result.exit_code == 0, result.output
         assert "pipx upgrade mind-meld" in " ".join(result.output.split())
     if reader == "cursor":
-        assert "Cursor via Conductor" in result.output
+        assert "Cursor (Conductor + enrolled CLI)" in result.output
         assert "cursor_host_usage = false" in " ".join(result.output.split())
-        assert "disable-source cursor" not in result.output
+        assert "disable-source cursor" in result.output
     with monkeypatch.context() as ready:
         ready.setattr(
             host_usage,

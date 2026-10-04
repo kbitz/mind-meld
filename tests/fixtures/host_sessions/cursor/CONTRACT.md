@@ -45,12 +45,32 @@ cannot recover runs pruned before mm first saw them. Temp-file fsync, atomic
 rename and directory fsync protect the authoritative history; corrupt reads
 refuse without replacing it. This bounds future loss, not historical backlog.
 
-Coverage means **Cursor via Conductor**, never all Cursor use. Bare cursor-agent
-persists no billing ledger; context-window token counts are not usage. A mixed
-Conductor/bare-CLI Mac has invisible bare-CLI usage even on a successful scan.
+The original corpus covers **Cursor via Conductor**. Bare cursor-agent
+persists no historical billing ledger; context-window token counts are not usage.
 No Conductor store and no prior cache returns no_metadata_ledger; format drift
 returns malformed/unsupported. No SQLite database or content-bearing sibling
 is ever opened.
+
+## Standalone completion census (2026-10-03)
+
+CLI **2026.09.26-dd393fe** was probed outside Conductor through one interactive
+Ask-mode run and headless Ask/Agent-mode runs. The interactive stop hook emitted
+`model: grok-4.7-low`, input 17,534, cache read 1,152, cache write 0 and output
+147. The installed CLI passes its inclusive turn counters to that hook, while
+normalizing print-result usage to disjoint counters before emitting stdout.
+The corresponding hook bucket is input 16,382, cache read 1,152 and output 147.
+No context-window count was used to derive these figures.
+
+Headless probes emitted result usage on stdout and sessionStart/sessionEnd
+hooks, but no stop hook. Therefore native print-mode usage still needs the
+`mm cursor-agent --print` wrapper. Interactive use can keep the original
+`cursor-agent` command after `mm enable-source cursor` enrolls the stop hook.
+Only future completed runs are measured. Earlier native sessions cannot be
+recovered, and canceled/failed runs remain outside this completed-run contract.
+Regression cases use redacted synthetic generation IDs and the observed hook
+counters; they are not additional census evidence. No second producing Mac,
+Fast run, nonzero cache write or Conductor/CLI overlap was measured here;
+mutations exercise those branches without claiming a new census.
 
 Prices are API **list-rate equivalents**, not spend on the censused Cursor
 Ultra subscription. Cursor's rates were fetched 2026-09-23:

@@ -310,14 +310,42 @@ prompt IDs, or conversation bytes. Equal duplicate
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
 
-**Cursor via Conductor (Track 67A, v1.2.0).** Only
+**Cursor usage (Conductor reader: Track 67A, v1.2.0).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
-is read. No bare-CLI billing counters persist; a successful mixed-use Mac scan
-still excludes bare cursor-agent usage. No sync source or skill-link row is
-added. `[retro] cursor_host_usage = true` is the sole consent;
+is read from Conductor. The native standalone CLI has no historical billing
+ledger. Standalone capture now records future completions through the enrolled
+`stop` hook or the `mm cursor-agent --print` wrapper. No sync source or
+skill-link row is added. `[retro] cursor_host_usage = true` is the sole consent;
 `HOST_READER_SOURCE_GATE["cursor"] = None` cannot be satisfied by any source.
-Every capture caller passes that bit. Both enable and disable remedies name
-the config setting, never the nonexistent `mm enable-source cursor` command.
+Every capture caller passes that bit. `mm enable-source cursor` and
+`mm disable-source cursor` are usage-only aliases and install/remove only mm's
+exact completion-hook entry, preserving unrelated hooks and settings. Existing
+custom file sources named `cursor` take precedence and keep their file toggles;
+merely resolving such a source still grants no usage permission.
+
+**Standalone Cursor capture.** The measured CLI is
+**2026.09.26-dd393fe**. Interactive `stop` payloads carry inclusive counters;
+normalize with `_normalize_inclusive_usage` exactly once. Headless result
+`usage` has already been normalized by Cursor and is disjoint, so never subtract
+its cache counters again. A plain native `--print` run does not emit a stop
+hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
+text from the final result and retains the exit code. It uses
+the explicit or locally selected model, and retains no transcript content or
+CLI config. Ambiguous bare Grok model IDs remain unpriced; known flat CLI
+aliases identify standard versus Fast without inventing a Fast rate.
+
+Both paths require the existing consent bit. The hidden hook command reads
+bounded stdin, returns `{}` and exits zero on malformed input or capture failure
+so it never controls Cursor's agent loop. Warnings contain no payload details.
+The same private authoritative history holds hashed generation IDs and counters;
+the local capture's UTC date owns standalone runs. Duplicate callbacks keep
+the original completion day and replace counters, rather than adding again.
+Conductor `requestId` hashes map to canonical run-ID hashes in an additive
+private `requests` map: matching standalone generations are removed when the
+stable Conductor record is accepted, and the aliases survive pruning of its
+source files. Malformed aliases refuse without resetting history. Hook
+enrollment uses the shared durable JSON primitive, and tests isolate its path
+along with every host cache before any mutating command is exercised.
 
 The persisted schema producer is Conductor **0.87.3**, with sessions generated
 by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
@@ -382,7 +410,8 @@ Existing Codex/Grok forensic caches retain their original write protocol.
 `HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
 predicate, including status, recapture's reminder and diag JSON. Cursor's cache
 inventory reports retained runs, not files still present in Conductor. Status
-names **Cursor via Conductor** and its own standing blocker. No Grok cache state
+names **Cursor (Conductor + enrolled CLI)** and its own standing blocker. Diag
+also reports the read-only completion-hook enrollment state. No Grok cache state
 may supply Cursor's upgrade/reminder decision. Consent, registration and this
 dispatch land together. The token-source tuples append cursor after codex/grok;
 this is MINOR under the 1.x compatibility contract, not a new host family.
