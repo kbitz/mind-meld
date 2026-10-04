@@ -24,7 +24,7 @@ import sys
 import time
 import traceback
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -6090,11 +6090,14 @@ def status(
             narrative = "enabled; a prior scan completed successfully"
         else:
             narrative = "enabled, but no successful scan yet — " + safe_str(capture_remedy)
-        if cursor_diag.get("hook_state") not in (None, "installed"):
+        hook_state = cursor_diag.get("hook_state")
+        if hook_state == "missing":
             narrative += (
                 "; standalone interactive sessions are not captured until "
                 "mm enable-source cursor installs the completion hook"
             )
+        elif hook_state not in (None, "installed"):
+            narrative += f"; the completion hook file is {safe_str(hook_state)} (see mm diag)"
         console.print(
             f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
         )
@@ -7723,15 +7726,30 @@ def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
     return True
 
 
+_CURSOR_RECORD_WARNING = "mm: warning: Cursor usage could not be recorded; run mm diag."
+_CURSOR_WRAPPED_ENV = "MM_CURSOR_AGENT_ACTIVE"
+
+
+def _cursor_usage_consented() -> bool:
+    """Consent check shared by the hook and the wrapper; silent when mm is not set up."""
+    if not _config_module.CONFIG_PATH.exists():
+        return False
+    try:
+        return _config_module.cursor_host_usage_enabled(load_config())
+    except (MindMeldError, OSError, ValueError):
+        print(_CURSOR_RECORD_WARNING, file=sys.stderr)
+        return False
+
+
 def _record_cursor_completion(payload: object, *, model: str | None = None) -> None:
     from mind_meld import host_usage
 
+    if not _cursor_usage_consented():
+        return
     try:
-        config = load_config()
-        if _config_module.cursor_host_usage_enabled(config):
-            host_usage.record_cursor_usage(payload, model=model)
+        host_usage.record_cursor_usage(payload, model=model)
     except (MindMeldError, OSError, ValueError, RuntimeError):
-        print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
+        print(_CURSOR_RECORD_WARNING, file=sys.stderr)
 
 
 @app.command(name="capture-cursor-usage", hidden=True)
@@ -7752,7 +7770,7 @@ def capture_cursor_usage() -> None:
             _record_cursor_completion(payload)
         except Exception:
             # The hook's contract outranks diagnostics: exit 0 with `{}`.
-            print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
+            print(_CURSOR_RECORD_WARNING, file=sys.stderr)
     typer.echo("{}")
 
 
@@ -7764,25 +7782,33 @@ class _RawArgsCommand(TyperCommand):
         return super().parse_args(ctx, args)
 
 
-def _cursor_usage_consented() -> bool:
-    if not _config_module.CONFIG_PATH.exists():
-        return False
-    try:
-        return _config_module.cursor_host_usage_enabled(load_config())
-    except (MindMeldError, OSError, ValueError):
-        print("mm: warning: Cursor usage could not be recorded; run mm diag.", file=sys.stderr)
-        return False
+def _terminal_delivers_sigint() -> bool:
+    """True when Ctrl-C on our foreground terminal already reaches the child too."""
+    for stream in (sys.stdin, sys.stderr):
+        try:
+            fd = stream.fileno()
+            if os.isatty(fd):
+                return os.tcgetpgrp(fd) == os.getpgrp()
+        except (AttributeError, OSError, ValueError):
+            continue
+    return False
 
 
 @contextmanager
 def _forwarding_signals(child: subprocess.Popen):
-    """Relay termination to the child and let Ctrl-C reach it from the terminal.
+    """Relay termination to the child, so the wrapper never dies first.
 
-    The terminal already delivers SIGINT to the child's process group, so the
-    wrapper ignores it rather than dying first and losing the child's status.
+    A foreground terminal already delivers Ctrl-C to the child's process group,
+    so the wrapper then ignores SIGINT instead of delivering it twice; a SIGINT
+    aimed only at the wrapper (a supervisor's cancel) is relayed.
     """
-    previous = {signal.SIGINT: signal.signal(signal.SIGINT, signal.SIG_IGN)}
-    for signum in (signal.SIGTERM, signal.SIGHUP):
+    previous = {}
+    relayed = [signal.SIGTERM, signal.SIGHUP]
+    if _terminal_delivers_sigint():
+        previous[signal.SIGINT] = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    else:
+        relayed.append(signal.SIGINT)
+    for signum in relayed:
         previous[signum] = signal.signal(signum, lambda sig, _frame: child.send_signal(sig))
     try:
         yield
@@ -7808,6 +7834,12 @@ def cursor_agent(ctx: typer.Context) -> None:
     """Run Cursor normally and retain print-mode usage for retro-fleet."""
     from mind_meld import host_usage, token_usage
 
+    if os.environ.get(_CURSOR_WRAPPED_ENV):
+        _error(
+            "mm cursor-agent is running itself: the cursor-agent on PATH points back to mm. "
+            "Put Cursor's own cursor-agent first on PATH."
+        )
+    env = {**os.environ, _CURSOR_WRAPPED_ENV: "1"}
     args = list(ctx.meta["raw_args"])
     options = args[: args.index("--")] if "--" in args else args
     printing = "--print" in options or "-p" in options
@@ -7816,7 +7848,10 @@ def cursor_agent(ctx: typer.Context) -> None:
     )
     if not capture:
         try:
-            with subprocess.Popen(["cursor-agent", *args]) as child, _forwarding_signals(child):
+            with (
+                subprocess.Popen(["cursor-agent", *args], env=env) as child,
+                _forwarding_signals(child),
+            ):
                 code = child.wait()
         except OSError:
             _error("cursor-agent could not be started; check that it is on PATH.")
@@ -7839,7 +7874,7 @@ def cursor_agent(ctx: typer.Context) -> None:
     else:
         child_args = ["--output-format=json", *child_args]
     stdout_open = True
-    seen_result = False
+    result = None
 
     def emit(data: bytes) -> None:
         nonlocal stdout_open
@@ -7849,11 +7884,19 @@ def cursor_agent(ctx: typer.Context) -> None:
                 sys.stdout.buffer.flush()
             except BrokenPipeError:
                 # Keep draining so the child is not blocked and usage is kept.
+                # Point fd 1 at /dev/null: Python retries the failed flush at
+                # exit and would otherwise replace Cursor's status with 120.
                 stdout_open = False
+                with suppress(OSError, ValueError):
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, sys.stdout.fileno())
+                    os.close(devnull)
 
     try:
         with (
-            subprocess.Popen(["cursor-agent", *child_args], stdout=subprocess.PIPE) as child,
+            subprocess.Popen(
+                ["cursor-agent", *child_args], stdout=subprocess.PIPE, env=env
+            ) as child,
             _forwarding_signals(child),
         ):
             assert child.stdout is not None
@@ -7863,17 +7906,20 @@ def cursor_agent(ctx: typer.Context) -> None:
                 except (ValueError, RecursionError):
                     payload = None
                 terminal = isinstance(payload, dict) and payload.get("type") == "result"
-                if output != "text" or not terminal:
-                    emit(line)
-                elif isinstance(payload.get("result"), str):
-                    emit(payload["result"].encode() + b"\n")
                 if terminal:
-                    seen_result = True
-                    _record_cursor_completion(payload, model=model)
+                    result = payload
+                if output == "text" and terminal and isinstance(payload.get("result"), str):
+                    emit(payload["result"].encode(errors="replace") + b"\n")
+                else:
+                    emit(line)
             code = child.wait()
     except OSError:
         _error("cursor-agent could not be started or its output could not be read.")
-    if code == 0 and not seen_result:
+    # Record after Cursor exits and signal handling is restored: a contended
+    # history lock may wait several seconds and must stay interruptible.
+    if result is not None:
+        _record_cursor_completion(result, model=model)
+    elif code == 0:
         print(
             "mm: warning: Cursor usage was not recorded: no result line was found.",
             file=sys.stderr,
@@ -7914,6 +7960,10 @@ def disable_source(
     Strict by default: unknown name errors with a closest-match hint.
     `--force` accepts unknown names so you can pre-disable a source that
     hasn't shipped yet (e.g. `mm disable-source codex --force`).
+
+    `cursor` is a usage-only alias (unless you configured a file source named
+    cursor): it revokes Cursor usage consent first, then removes mm's stop
+    entry from ~/.cursor/hooks.json, warning if that file cannot be edited.
     """
     config = _get_config(read_only=False)
     if _toggle_cursor_usage(name, config, enabled=False):
@@ -7967,6 +8017,11 @@ def enable_source(
     skill link maintained WITHOUT enabling sync or usage reading, use
     `mm install-skills --agent <key>` instead. This command does not
     install the link itself.
+
+    `cursor` is a usage-only alias (unless you configured a file source named
+    cursor): it installs one stop entry in ~/.cursor/hooks.json, preserving
+    other hooks, then sets `[retro] cursor_host_usage = true`. No Cursor
+    files sync; only usage aggregates are published.
     """
     config = _get_config(read_only=False)
     if _toggle_cursor_usage(name, config, enabled=True):

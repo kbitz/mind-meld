@@ -294,6 +294,43 @@ class TestEnableSource:
         assert added == get_default_source(source_name)
 
 
+def _isolated_path(bin_dir) -> str:
+    """Never inherit a PATH entry that could reach the real, logged-in cursor-agent."""
+    return f"{bin_dir}:/usr/bin:/bin"
+
+
+def _cursor_home(tmp_path, *, consent: bool):
+    """A throwaway HOME with a minimal mm config for subprocess wrapper tests."""
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "mind-meld"
+    config_dir.mkdir(parents=True)
+    (home / "storage").mkdir()
+    config = {
+        "device": {"id": "abc123", "name": "MacBook"},
+        "storage": {"path": str(home / "storage")},
+        "sync": {"max_file_size": 52_428_800, "sources": []},
+        "crypto": {"argon2_memory_kb": 1024},
+        "retro": {"cursor_host_usage": consent},
+    }
+    save_config(config, config_dir / "config.toml")
+    return home
+
+
+def _wrapper_process(tmp_path, home, bin_dir, *args, **kwargs):
+    import os
+    import subprocess
+    import sys
+
+    env = {**os.environ, "HOME": str(home), "PATH": _isolated_path(bin_dir)}
+    env.pop("MM_CURSOR_AGENT_ACTIVE", None)
+    return subprocess.Popen(
+        [sys.executable, "-m", "mind_meld.cli", "cursor-agent", *args],
+        env=env,
+        start_new_session=True,
+        **kwargs,
+    )
+
+
 class TestCursorUsageConsent:
     @pytest.mark.parametrize("enabled", [True, False])
     def test_cursor_toggle_changes_only_usage_consent(self, cfg, isolated_seen_sources, enabled):
@@ -374,6 +411,37 @@ class TestCursorUsageConsent:
         assert path.read_bytes() == before
         assert path.is_symlink() is (shape == "symlink")
 
+    def test_redisable_cleans_up_a_leftover_hook(self, cfg, isolated_seen_sources):
+        import tomllib
+
+        from mind_meld import host_usage
+
+        config = tomllib.loads(cfg.read_text())
+        config["retro"] = {"cursor_host_usage": False}
+        save_config(config, cfg)
+        path = host_usage.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"version": 1, "hooks": {"stop": [host_usage.CURSOR_HOOK_ENTRY]}})
+        )
+        result = runner.invoke(app, ["disable-source", "cursor"])
+        assert result.exit_code == 0, result.output
+        assert "already disabled; removed its hook" in " ".join(result.output.split())
+        assert host_usage.cursor_hook_state() == "missing"
+        assert "stop" not in json.loads(path.read_text())["hooks"]
+
+    def test_symlinked_hooks_file_names_where_to_edit(self, cfg, tmp_path, isolated_seen_sources):
+        from mind_meld import host_usage
+
+        target = tmp_path / "dotfiles-hooks.json"
+        target.write_text(json.dumps({"version": 1, "hooks": {}}))
+        host_usage.CURSOR_HOOK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        host_usage.CURSOR_HOOK_CONFIG_PATH.symlink_to(target)
+        result = runner.invoke(app, ["enable-source", "cursor"])
+        assert result.exit_code == 1
+        assert "is a symlink" in " ".join(result.stderr.split())
+        assert json.loads(target.read_text()) == {"version": 1, "hooks": {}}
+
     def test_enable_hook_failure_grants_no_consent(self, cfg, isolated_seen_sources):
         import tomllib
 
@@ -419,6 +487,27 @@ class TestCursorUsageConsent:
         assert result.stdout.strip() == "{}"
         assert "unreadable" in result.stderr
 
+    def test_hook_without_mm_config_is_silent(self, tmp_path, monkeypatch):
+        from mind_meld import config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "absent" / "config.toml")
+        result = runner.invoke(app, ["capture-cursor-usage"], input=json.dumps({"x": 1}))
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "{}"
+        assert result.stderr == ""
+
+    def test_hook_contract_survives_unexpected_errors(self, cfg, monkeypatch):
+        from mind_meld import cli
+
+        def boom(payload, **_kwargs):
+            raise KeyError("boom")
+
+        monkeypatch.setattr(cli, "_record_cursor_completion", boom)
+        result = runner.invoke(app, ["capture-cursor-usage"], input="{}")
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "{}"
+        assert "could not be recorded" in result.stderr
+
     def test_capture_failure_does_not_block_cursor_or_expose_payload(self, cfg):
         import tomllib
 
@@ -454,7 +543,7 @@ class TestCursorUsageConsent:
             "cat <<'JSON'\n" + raw + f"JSON\nexit {exit_code}\n"
         )
         executable.chmod(0o700)
-        monkeypatch.setenv("PATH", str(tmp_path) + ":" + __import__("os").environ["PATH"])
+        monkeypatch.setenv("PATH", _isolated_path(tmp_path))
         monkeypatch.setenv("ARGV_LOG", str(tmp_path / "argv"))
         return raw, lambda: (tmp_path / "argv").read_text().splitlines()
 
@@ -501,6 +590,75 @@ class TestCursorUsageConsent:
         assert argv() == ["-p", "--", "-p"]
         assert not host_usage.CURSOR_CACHE_PATH.exists()
 
+    def test_wrapper_passthrough_guards_under_consent(self, cfg, tmp_path, monkeypatch):
+        self._consent(cfg)
+        _, argv = self._fake_cursor_agent(tmp_path, monkeypatch)
+        result = runner.invoke(app, ["cursor-agent", "-p", "--help"])
+        assert result.exit_code == 0, result.output
+        assert argv() == ["-p", "--help"]
+        assert "no result line" not in result.stderr
+        cfg.write_text("not = [toml")
+        result = runner.invoke(app, ["cursor-agent", "-p", "hello"])
+        assert result.exit_code == 0, result.output
+        assert argv() == ["-p", "hello"]
+        assert "could not be recorded" in result.stderr
+
+    @pytest.mark.parametrize("consent", [False, True])
+    def test_wrapper_reports_a_missing_binary(self, cfg, tmp_path, monkeypatch, consent):
+        if consent:
+            self._consent(cfg)
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        result = runner.invoke(app, ["cursor-agent", "-p", "hello"])
+        assert result.exit_code == 1
+        assert "could not be started" in result.stderr
+
+    @pytest.mark.parametrize("consent", [False, True])
+    def test_wrapper_maps_signal_death_to_128_plus_n(self, cfg, tmp_path, monkeypatch, consent):
+        if consent:
+            self._consent(cfg)
+        fake = tmp_path / "cursor-agent"
+        fake.write_text("#!/bin/sh\nkill -TERM $$\n")
+        fake.chmod(0o700)
+        monkeypatch.setenv("PATH", _isolated_path(tmp_path))
+        assert runner.invoke(app, ["cursor-agent", "-p", "hello"]).exit_code == 143
+
+    def test_wrapper_text_mode_survives_odd_results(self, cfg, tmp_path, monkeypatch):
+        from mind_meld import host_usage
+
+        self._consent(cfg)
+        usage = {"inputTokens": 1, "cacheWriteTokens": 0, "cacheReadTokens": 0, "outputTokens": 1}
+        rendered = '{"type":"result","subtype":"success","is_error":false,'
+        rendered += (
+            f'"request_id":"r1","result":"bad \\ud800 surrogate","usage":{json.dumps(usage)}}}'
+        )
+        fake = tmp_path / "cursor-agent"
+        fake.write_text("#!/bin/sh\ncat <<'JSON'\n" + rendered + "\nJSON\n")
+        fake.chmod(0o700)
+        monkeypatch.setenv("PATH", _isolated_path(tmp_path))
+        result = runner.invoke(app, ["cursor-agent", "-p", "hello", "--model", "grok-4.7-low"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "bad ? surrogate\n"
+        assert json.loads(host_usage.CURSOR_CACHE_PATH.read_text())["runs"]
+        error = '{"type":"result","subtype":"error","is_error":true,"error":"quota exceeded"}'
+        fake.write_text("#!/bin/sh\necho '" + error + "'\nexit 1\n")
+        result = runner.invoke(app, ["cursor-agent", "-p", "hello"])
+        assert result.exit_code == 1
+        assert result.stdout == error + "\n"
+
+    def test_wrapper_refuses_to_run_itself(self, cfg, tmp_path, monkeypatch):
+        raw, argv = self._fake_cursor_agent(tmp_path, monkeypatch)
+        (tmp_path / "cursor-agent").write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$MM_CURSOR_AGENT_ACTIVE" > "$ARGV_LOG"\n'
+        )
+        assert runner.invoke(app, ["cursor-agent", "chat"]).exit_code == 0
+        assert argv() == ["1"]
+        monkeypatch.setenv("MM_CURSOR_AGENT_ACTIVE", "1")
+        result = runner.invoke(app, ["cursor-agent", "chat"])
+        assert result.exit_code == 1
+        assert "running itself" in " ".join(result.stderr.split())
+
     def test_wrapper_warns_when_no_result_is_recorded(self, cfg, tmp_path, monkeypatch):
         from mind_meld import host_usage
 
@@ -508,90 +666,83 @@ class TestCursorUsageConsent:
         executable = tmp_path / "cursor-agent"
         executable.write_text("#!/bin/sh\necho 'plain text'\n")
         executable.chmod(0o700)
-        monkeypatch.setenv("PATH", str(tmp_path) + ":" + __import__("os").environ["PATH"])
+        monkeypatch.setenv("PATH", _isolated_path(tmp_path))
         result = runner.invoke(app, ["cursor-agent", "-p", "hello"])
         assert result.exit_code == 0, result.output
         assert result.stdout == "plain text\n"
         assert "no result line" in result.stderr
         assert not host_usage.CURSOR_CACHE_PATH.exists()
 
-    def test_wrapper_forwards_termination_and_returns_child_status(self, tmp_path):
+    @pytest.mark.parametrize("consent", [False, True])
+    @pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP", "SIGINT"])
+    def test_wrapper_relays_signals_and_returns_child_status(self, tmp_path, consent, signame):
         import os
         import signal
-        import subprocess
-        import sys
         import time
 
-        home = tmp_path / "home"
-        home.mkdir()
+        home = _cursor_home(tmp_path, consent=consent)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        ready, got = tmp_path / "ready", tmp_path / "got-term"
+        ready, got = tmp_path / "ready", tmp_path / "got-signal"
         child = bin_dir / "cursor-agent"
         child.write_text(
-            f"#!/bin/sh\ntrap 'touch {got}; exit 143' TERM\ntouch {ready}\n"
-            "while :; do sleep 0.05; done\n"
+            f"#!/bin/sh\ntrap 'touch {got}; exit 143' TERM HUP INT\ntouch {ready}\n"
+            "i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\n"
         )
         child.chmod(0o700)
-        env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-        wrapper = subprocess.Popen(
-            [sys.executable, "-m", "mind_meld.cli", "cursor-agent", "-p", "hello"], env=env
-        )
+        wrapper = _wrapper_process(tmp_path, home, bin_dir, "-p", "hello")
         try:
             deadline = time.monotonic() + 30
-            while not ready.exists():
+            while not got.exists():
                 assert wrapper.poll() is None and time.monotonic() < deadline
+                if ready.exists():
+                    wrapper.send_signal(getattr(signal, signame))
                 time.sleep(0.05)
-            wrapper.send_signal(signal.SIGTERM)
             assert wrapper.wait(timeout=30) == 143
-            assert got.exists()
         finally:
             if wrapper.poll() is None:
-                wrapper.kill()
+                os.killpg(wrapper.pid, signal.SIGKILL)
+                wrapper.wait()
 
-    def test_print_wrapper_preserves_stdout_and_exit_status(self, cfg, tmp_path, monkeypatch):
-        import tomllib
+    def test_wrapper_closed_stdout_keeps_usage_and_child_status(self, tmp_path):
+        import subprocess
 
-        from mind_meld import host_usage
-
-        config = tomllib.loads(cfg.read_text())
-        config["retro"] = {"cursor_host_usage": True}
-        save_config(config, cfg)
-        payload = {
+        home = _cursor_home(tmp_path, consent=True)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        usage = {"inputTokens": 1, "cacheWriteTokens": 0, "cacheReadTokens": 0, "outputTokens": 1}
+        result = {
             "type": "result",
             "subtype": "success",
             "is_error": False,
-            "request_id": "wrapper-generation",
+            "request_id": "closed-stdout",
             "result": "OK",
-            "usage": {
-                "inputTokens": 100,
-                "cacheWriteTokens": 0,
-                "cacheReadTokens": 200,
-                "outputTokens": 10,
-            },
+            "usage": usage,
         }
-        executable = tmp_path / "cursor-agent"
-        executable.write_text(
-            "#!/bin/sh\ncat <<'JSON'\n" + json.dumps(payload) + "\nJSON\nexit 7\n"
+        fake = bin_dir / "cursor-agent"
+        fake.write_text(
+            "#!/bin/sh\nyes '{}' | head -n 20000\necho '" + json.dumps(result) + "'\nexit 7\n"
         )
-        executable.chmod(0o700)
-        monkeypatch.setenv("PATH", str(tmp_path) + ":" + __import__("os").environ["PATH"])
-        result = runner.invoke(
-            app,
-            [
-                "cursor-agent",
-                "--print",
-                "--model",
-                "grok-4.7-low",
-                "--output-format",
-                "json",
-                "hello",
-            ],
+        fake.chmod(0o700)
+        wrapper = _wrapper_process(
+            tmp_path,
+            home,
+            bin_dir,
+            "-p",
+            "--output-format=stream-json",
+            "--model",
+            "grok-4.7-low",
+            "hi",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        assert result.exit_code == 7, result.output
-        assert result.stdout == json.dumps(payload) + "\n"
-        history = json.loads(host_usage.CURSOR_CACHE_PATH.read_text())
-        assert next(iter(history["runs"].values()))["usage"]["input"] == 100
+        wrapper.stdout.read(1)
+        wrapper.stdout.close()
+        _, err = wrapper.communicate(timeout=60)
+        assert wrapper.returncode == 7, err
+        assert b"Exception ignored" not in err
+        history = home / ".config" / "mind-meld" / "cursor-host-tokens.json"
+        assert json.loads(history.read_text())["runs"]
 
 
 class TestGrokUsageConsent:

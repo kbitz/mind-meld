@@ -234,9 +234,70 @@ class TestCursorStandaloneUsage:
         assert len(json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]) == 1
 
     def test_real_hooks_file_is_refused_under_pytest(self, monkeypatch):
-        monkeypatch.setattr(hu, "CURSOR_HOOK_CONFIG_PATH", hu._REAL_CURSOR_HOOK_CONFIG_PATH)
-        with pytest.raises(PermissionError):
-            hu.configure_cursor_hook(enabled=True)
+        import pwd
+
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cursor" / "hooks.json"
+        for spelling in (real, real.parent / ".." / ".cursor" / "hooks.json"):
+            spelled = Path(str(spelling).replace("/.cursor/", "/.cursor/./"))
+            monkeypatch.setattr(hu, "CURSOR_HOOK_CONFIG_PATH", spelled)
+            with pytest.raises(PermissionError):
+                hu.configure_cursor_hook(enabled=True)
+
+    @pytest.mark.parametrize(
+        "ours",
+        [[{"command": "mm capture-cursor-usage", "timeout": 5}], [hu.CURSOR_HOOK_ENTRY] * 2],
+        ids=["stale", "duplicate"],
+    )
+    def test_hook_install_canonicalizes_stale_or_duplicate_entries(self, ours):
+        path = hu.CURSOR_HOOK_CONFIG_PATH
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            json.dumps({"version": 1, "hooks": {"stop": [{"command": "existing-hook"}, *ours]}})
+        )
+        assert hu.configure_cursor_hook(enabled=True) is True
+        stop = json.loads(path.read_text())["hooks"]["stop"]
+        assert stop == [{"command": "existing-hook"}, hu.CURSOR_HOOK_ENTRY]
+        assert hu.configure_cursor_hook(enabled=True) is False
+
+    def test_hook_state_and_model_reads_never_block_or_raise(self):
+        hu.CURSOR_HOOK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(hu.CURSOR_HOOK_CONFIG_PATH)
+        os.mkfifo(hu.CURSOR_CLI_CONFIG_PATH)
+        assert hu.cursor_hook_state() == "malformed"
+        assert hu.cursor_cli_model(["-p", "x"]) is None
+        deep = "[" * 200_000 + "]" * 200_000
+        for path, key in ((hu.CURSOR_HOOK_CONFIG_PATH, "hooks"), (hu.CURSOR_CLI_CONFIG_PATH, "x")):
+            path.unlink()
+            path.write_text('{"version":1,"' + key + '":' + deep + "}")
+        assert hu.cursor_hook_state() == "malformed"
+        assert hu.cursor_cli_model(["-p", "x"]) is None
+
+    @pytest.mark.parametrize("requests", [{"not-hex": "a" * 64}, {"a" * 64: 7}, []])
+    def test_malformed_alias_map_refuses_without_reset(self, requests):
+        hu.record_cursor_usage(self._hook())
+        data = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())
+        data["requests"] = requests
+        hu.CURSOR_CACHE_PATH.write_text(json.dumps(data))
+        before = hu.CURSOR_CACHE_PATH.read_bytes()
+        assert hu.read_cursor_usage(consented=True).reason == "malformed"
+        with pytest.raises(lockedjson.InvalidJsonCache):
+            hu.record_cursor_usage(self._hook())
+        assert hu.cursor_usage_diag()["cache_state"] == "unreadable"
+        assert hu.CURSOR_CACHE_PATH.read_bytes() == before
+
+    def test_request_alias_conflicts_refuse_within_and_across_scans(self, tmp_path):
+        root = self._conductor(tmp_path, self._conductor_row(runId="run-a"))
+        (root / "other").mkdir()
+        other = root / "other" / "runs.ndjson"
+        other.write_text(json.dumps(self._conductor_row(runId="run-b")) + "\n")
+        assert hu.read_cursor_usage(root, consented=True).reason == "malformed"
+        other.unlink()
+        assert hu.read_cursor_usage(root, consented=True).complete
+        (root / "session" / "runs.ndjson").unlink()
+        other.write_text(json.dumps(self._conductor_row(runId="run-b")) + "\n")
+        before = json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"]
+        assert hu.read_cursor_usage(root, consented=True).reason == "malformed"
+        assert json.loads(hu.CURSOR_CACHE_PATH.read_bytes())["runs"] == before
 
     def test_hook_install_and_removal_preserve_other_hooks_and_keys(self):
         path = hu.CURSOR_HOOK_CONFIG_PATH
@@ -4349,6 +4410,17 @@ class TestCursorUsage67A:
         cached = json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"]
         assert len(cached) == len(kept)
         assert all(run["usage"] is not None for run in cached.values())
+
+    def test_success_then_malformed_store_loss_keeps_the_blocker(self, cursor_store):
+        assert self._read(cursor_store).complete
+        path, row = self._single(cursor_store)
+        row["usage"] = {**row["usage"], "totalTokens": row["usage"]["totalTokens"] + 1}
+        self._write(path, row)
+        assert self._read(cursor_store).reason == "malformed"
+        shutil.rmtree(cursor_store)
+        result = self._read(cursor_store)
+        assert result.reason == "malformed"
+        assert not result.complete
 
     def test_success_then_unsupported_store_loss_keeps_the_blocker(self, cursor_store):
         assert self._read(cursor_store).complete

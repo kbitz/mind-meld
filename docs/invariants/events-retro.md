@@ -337,10 +337,17 @@ selected model without a fast parameter) are recorded as the unpriced
 without inventing a Fast rate. The wrapper reads argv verbatim
 (`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
 text into live Cursor options. Without consent, or outside print mode, it is a
-pure passthrough with no output rewriting. It ignores SIGINT (the terminal
-already delivers it to the child), relays SIGTERM/SIGHUP to the child, keeps
-draining after a closed stdout, and maps signal exits to 128+N. A successful
-run with no result line warns that usage was not recorded.
+pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
+child, and SIGINT too unless it runs in the terminal's foreground process
+group (where Ctrl-C already reaches the child, so relaying would deliver it
+twice). After a closed stdout it points fd 1 at /dev/null and keeps draining,
+so Python's exit-time flush cannot replace the child's status with 120. Signal
+exits map to 128+N. Usage is recorded after the child exits and signal handling
+is restored, so a contended history lock stays interruptible. Text mode renders
+a string `result` (lone surrogates replaced) and forwards any other result line
+raw. A successful run with no result line warns that usage was not recorded.
+`MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
+that points back at mm fail fast instead of recursing.
 
 Both paths require the existing consent bit. The hidden hook command reads
 bounded stdin, returns `{}` and exits zero on malformed input or capture failure
@@ -366,9 +373,10 @@ still stands.
 
 Hook and wrapper completions write the durable history with a bounded lock
 retry (`CURSOR_WRITER_RETRY_INTERVALS`, ~5.2 s inside the 10 s hook timeout);
-a push reader holding the lock for its scan (up to the 5 s attended warm) no
-longer drops a completion that has no other ledger. Readers keep zero retries
-and report `locked`.
+readers keep zero retries and report `locked`. This covers one ordinary reader
+hold, not an attended push whose first-pass Cursor read misses its deadline and
+immediately warms for 5 s: back-to-back holds can exceed the schedule, and that
+completion is then dropped with a stderr warning.
 
 `mm enable-source cursor` installs the hook before granting consent, so a
 failed install grants nothing. `mm disable-source cursor` revokes consent first
@@ -378,8 +386,15 @@ nothing without consent). Re-running enable reports a repaired hook. Hook
 enrollment uses the shared durable JSON primitive (compact rewrite, sibling
 `.lock`, symlinks refused, not replaced). `configure_cursor_hook` refuses the
 real `~/.cursor/hooks.json` under pytest, derived from the account database
-rather than HOME. Status adds a hint when consent is on but the hook is not
-installed; diag prints the hook state.
+rather than HOME, comparing resolved, case-folded paths. A symlinked hooks.json
+is refused with a message naming the entry to add where the file is managed.
+`cursor_hook_state` reads without a lock: bounded, non-blocking, regular files
+only (a FIFO or over-deep JSON is `malformed`, never a hang or a traceback);
+the writer's atomic replace makes old-or-new reads coherent. Status adds the
+enable-source hint only for `missing` and names any other non-installed state;
+diag prints the hook state. A requestId that names a different retained run
+than an earlier scan recorded refuses as `malformed`, like a conflict within
+one scan.
 
 The persisted schema producer is Conductor **0.87.3**, with sessions generated
 by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions

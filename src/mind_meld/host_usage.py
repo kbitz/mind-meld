@@ -124,8 +124,7 @@ CURSOR_HOOK_COMMAND = "mm capture-cursor-usage"
 CURSOR_HOOK_ENTRY = {"command": CURSOR_HOOK_COMMAND, "timeout": 10}
 CURSOR_HOOK_STDIN_MAX_BYTES = 64 * 1024
 """The measured stop payload carries counters and identifiers, never response text."""
-_REAL_CURSOR_HOOK_CONFIG_PATH = Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cursor" / "hooks.json"
-"""Derived from the account database, so test HOME/constant patches cannot blind it."""
+_CURSOR_CONFIG_MAX_BYTES = 1024 * 1024
 CURSOR_WRITER_RETRY_INTERVALS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0)
 """~5.2 s inside the 10 s hook timeout: covers a push reader's longest hold (the
 5 s attended warm) so a completion that has no other ledger is not dropped."""
@@ -763,8 +762,9 @@ def read_cursor_usage(
                 requests.update(learned_requests)
                 for request, canonical in dict(requests).items():
                     if canonical not in runs:
-                        # Running or pruned: the standalone record stays the
-                        # only contribution until the Conductor run finishes.
+                        # Unfinished (queued/running/cancelled/error) or pruned:
+                        # the standalone record stays the only contribution
+                        # unless that Conductor run later finishes with counters.
                         requests.pop(request, None)
                     elif request != canonical and runs[canonical]["usage"] is not None:
                         runs.pop(request, None)
@@ -803,15 +803,18 @@ def read_cursor_usage(
                             conflict = True
                             raise _ReadFailure("malformed")
                         seen.update(staged)
+                        # One requestId may name one run, within a scan and across
+                        # scans while the earlier run is retained.
                         if any(
-                            key in learned_requests and learned_requests[key] != value
+                            (key in learned_requests and learned_requests[key] != value)
+                            or (requests.get(key, value) != value and requests[key] in runs)
                             for key, value in aliases.items()
                         ):
                             conflict = True
                             raise _ReadFailure("malformed")
                         learned_requests.update(aliases)
                         for key, run in staged.items():
-                            # A running revision invalidates a previous terminal
+                            # An unfinished revision invalidates a previous terminal
                             # contribution, just as a changed completion day does.
                             removed.add(key)
                             if run is not None and run["day"] >= cutoff:
@@ -881,6 +884,28 @@ def _cursor_requests(data: dict[str, Any]) -> dict[str, str]:
     return dict(requests)
 
 
+def _is_real_cursor_hook_config(path: Path) -> bool:
+    """Compare against the account database's home, which test patches cannot blind."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        home = Path.home()
+    real = home / ".cursor" / "hooks.json"
+    return str(path.expanduser().resolve()).casefold() == str(real.resolve()).casefold()
+
+
+def _read_bounded_json(path: Path, limit: int) -> Any:
+    """Parse one small regular file without following it into a FIFO or reading unbounded."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as fp:
+        if not stat.S_ISREG(os.fstat(fp.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = fp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("oversized")
+    return json.loads(data)
+
+
 def configure_cursor_hook(*, enabled: bool) -> bool:
     """Install or remove mm's stop entry; return whether hooks.json changed.
 
@@ -889,10 +914,15 @@ def configure_cursor_hook(*, enabled: bool) -> bool:
     file is rewritten as compact JSON; a symlinked hooks.json is refused
     (O_NOFOLLOW) rather than replaced, so a dotfile-managed link survives.
     """
-    if os.environ.get("PYTEST_CURRENT_TEST") and (
-        CURSOR_HOOK_CONFIG_PATH.expanduser().absolute() == _REAL_CURSOR_HOOK_CONFIG_PATH
+    if os.environ.get("PYTEST_CURRENT_TEST") and _is_real_cursor_hook_config(
+        CURSOR_HOOK_CONFIG_PATH
     ):
         raise PermissionError(f"refusing to edit the real {CURSOR_HOOK_CONFIG_PATH} from a test")
+    if CURSOR_HOOK_CONFIG_PATH.is_symlink():
+        raise InvalidJsonCache(
+            f"{CURSOR_HOOK_CONFIG_PATH} is a symlink; edit its stop hooks where that file "
+            f"is managed ({json.dumps(CURSOR_HOOK_ENTRY)})"
+        )
     if not enabled and not CURSOR_HOOK_CONFIG_PATH.exists():
         return False
     with locked_json_durable_rmw(
@@ -930,7 +960,7 @@ def cursor_cli_model(args: list[str]) -> str | None:
         if arg == "--model" and index + 1 < len(args):
             return args[index + 1]
     try:
-        data = json.loads(CURSOR_CLI_CONFIG_PATH.read_bytes())
+        data = _read_bounded_json(CURSOR_CLI_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES)
         model = data.get("selectedModel")
         if not isinstance(model, dict) or not isinstance(model.get("modelId"), str):
             return None
@@ -945,7 +975,8 @@ def cursor_cli_model(args: list[str]) -> str | None:
             # Same policy as an explicit bare --model: recorded, but unpriced.
             return "grok-4.7"
         return name
-    except (OSError, ValueError, AttributeError, TypeError):
+    except (OSError, ValueError, RecursionError, AttributeError, TypeError):
+        # Best effort: model resolution must never stop Cursor from starting.
         return None
 
 
@@ -1009,7 +1040,7 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
             requests = _cursor_requests(locked.data)
         except _ReadFailure as exc:
             raise InvalidJsonCache("unreadable Cursor history; preserved without reset") from exc
-        runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
+        runs = {k: run for k, run in runs.items() if run["day"] >= cutoff}
         canonical = requests.get(key)
         conductor = runs.get(canonical) if canonical is not None else None
         # A matching Conductor run supersedes this generation only once it has
@@ -1074,17 +1105,26 @@ def cursor_usage_diag() -> dict[str, Any]:
 
 
 def cursor_hook_state() -> str:
-    """Read enrollment without creating a hook, lock or directory."""
-    with locked_json_snapshot(CURSOR_HOOK_CONFIG_PATH, blocking=False) as snapshot:
-        if snapshot.state != "valid":
-            return snapshot.state
-        hooks = snapshot.data.get("hooks")
-        if snapshot.data.get("version") != 1 or not isinstance(hooks, dict):
-            return "malformed"
-        stop = hooks.get("stop", [])
-        if not isinstance(stop, list):
-            return "malformed"
-        return "installed" if CURSOR_HOOK_ENTRY in stop else "missing"
+    """Read enrollment without creating, locking or blocking on anything.
+
+    States: installed, missing, malformed, unreadable. The writer replaces the
+    file atomically, so an unlocked read sees the old or the new copy.
+    """
+    try:
+        data = _read_bounded_json(CURSOR_HOOK_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    except (ValueError, RecursionError):
+        return "malformed"
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict) or data.get("version") != 1:
+        return "malformed"
+    stop = hooks.get("stop", [])
+    if not isinstance(stop, list):
+        return "malformed"
+    return "installed" if CURSOR_HOOK_ENTRY in stop else "missing"
 
 
 @dataclass(frozen=True)

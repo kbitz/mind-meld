@@ -1468,6 +1468,24 @@ def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch,
     assert "forged" not in plain
 
 
+@pytest.mark.parametrize("hook_state", ["installed", "missing", "malformed"])
+def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_state):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(host_usage, "cursor_hook_state", lambda: hook_state)
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
+    hint = "not captured until mm enable-source cursor installs the completion hook"
+    assert (hint in status) is (hook_state == "missing")
+    assert ("completion hook file is malformed" in status) is (hook_state == "malformed")
+    assert f"completion hook: {hook_state}" in diag
+    assert "outside coverage" not in diag
+
+
 @pytest.mark.parametrize("reader", ["codex", "grok", "cursor"])
 def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
     from mind_meld import cli, events
