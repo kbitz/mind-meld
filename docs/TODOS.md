@@ -44,6 +44,24 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [ship:files=src/mind_meld/host_usage.py|src/mind_meld/cli.py] Read Conductor 0.90.1's SQLite Cursor run store
+
+- **What:** Add a reader for the `runs` table in Conductor's `cursor-sdk-store/<workspace>/index.db`, reading metadata columns only (request ID, status, model, model parameters, disjoint usage, ISO finished time) and feeding the existing Cursor history.
+- **Why:** Conductor 0.90.1 writes new Cursor runs to that SQLite store instead of `runs.ndjson`, and mm reads only `runs.ndjson`, so those runs are not counted. Conductor-run turns fire no user-level stop hook, so the standalone capture cannot cover them either. `mm status` and `mm diag` report only how many stores are unread.
+- **Context:** User decision D7=C on the standalone Cursor capture PR (#192): ship the unread-store notice now, the reader as a follow-up. `host_usage.unread_cursor_stores` counts the stores without opening them; the live layout is recorded in `tests/fixtures/host_sessions/cursor/CONTRACT.md`. The `runs.ndjson` reader already dedupes on request ID against standalone completions and keeps captured history through Conductor pruning; a SQLite reader should do the same.
+- **Effort:** M
+- **Priority:** P1
+- **Depends on:** None
+
+### [ship:files=src/mind_meld/token_usage.py|src/mind_meld/host_usage.py] Price Cursor models that carry bracketed parameters
+
+- **What:** Resolve Cursor's bracket-parameterized non-Grok model IDs (`claude-…[fast=true]`, `[context=1m]`) to their real rates instead of the base model's.
+- **Why:** They are currently priced at the base Claude rate, so a fast or 1M-context run reads cheaper than it was. The Conductor reader has the same gap, so a fix belongs to both readers.
+- **Context:** User decision D6 on the standalone Cursor capture PR (#192): deferred. Pricing goes through `token_usage.resolve_prices`; the Grok 4.7 fast tokens are already deliberately unpriced (see the 1.2.0 changelog entry).
+- **Effort:** M
+- **Priority:** P2
+- **Depends on:** None
+
 ### [plan-eng-review:severity=medium,files=src/mind_meld/cli.py|src/mind_meld/config.py] Init deletes device registration after a published config save fails
 
 - **What:** Make init's cleanup decision respect config publication before removing the device registration; qualify the current init failure contract.
