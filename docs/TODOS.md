@@ -44,7 +44,31 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-None.
+### [plan-eng-review:severity=medium,files=src/mind_meld/cli.py|src/mind_meld/config.py] Init deletes device registration after a published config save fails
+
+- **What:** Make init's cleanup decision respect config publication before removing the device registration; qualify the current init failure contract.
+- **Why:** A config save can publish its new device_id and then raise on parent-directory durability. `_register_and_save` treats every save exception as an unpublished config and deletes that device's storage entry, leaving the local pointer and registry inconsistent.
+- **Repro:** On HEAD e9e56db, use a temporary LocalBackend and monkeypatch config.CONFIG_PATH to another temporary directory. Run the real `_register_and_save` with a synthetic device config; make fsutil.fsync_dir raise StorageError only for the config parent. Registration succeeds, config.toml contains the new id, the call raises, and backend.exists(device_key(id)) is false. Control: fail the config's file flush before replacement; registration is removed and config remains absent. Both assertions passed under pytest on 2026-10-03. No real config, Keychain or iCloud storage was touched.
+- **Context:** Track 69B autoplan caller audit; branch kbitz/atomic-write-publication-failures-clarify. `cli.py:_register_and_save` calls `save_config` inside an except Exception cleanup that deletes dev_key; `config.py:save_config` uses atomic_write_bytes(fsync=True). Durable review probe: `~/.gstack/projects/kbitz-mind-meld/69b-current-behavior-probe.py` (2 passed). This proves the current helper/caller sequence, not full CLI retry or power-loss behavior. Existing `_ensure_device_registered` may self-heal on a later push; inspect retry/passphrase/guard behavior before choosing a repair. Read docs/invariants/init-devices.md and sync.md first. The contract-only Track 69B must not repair this consumer.
+- **Pros:** Removes a demonstrated wrong cleanup assumption and makes the init failure contract honest.
+- **Cons:** Recovery-policy work must preserve existing pre-publication cleanup and retry behavior; requires isolated caller regression coverage.
+- **Effort:** S
+- **Priority:** P2
+- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
+
+### [review:severity=low,files=src/mind_meld/cli.py] Two handlers catch OSError for helper writes that raise StorageError
+
+- **Description:** `_init_crypto_session`'s config backfill says `except OSError: pass  # non-fatal`, and `patch_config_on_disk` tells backfill callers to swallow failures, but every write failure arrives as `StorageError` (a `MindMeldError`, not an `OSError`), so the crypto-error handler turns it into a command error. `recover` catches `OSError` around `_quarantine_corrupt_manifest` to print "quarantine failed", but a copy failure escapes it uncaught. `seen_sources.write` already fixed this class by catching both. Make both handlers catch the `StorageError` the helper raises and give each the outcome its code already intends.
+- **Repro:**
+  1. On the Track 69B branch (runtime identical to e9e56db), from the repo root run `PYTHONPATH=tests .venv/bin/python -m pytest -p no:cacheprovider -p conftest -q -s ~/.gstack/projects/kbitz-mind-meld/69b-review-backfill-probe.py` (2 passed). A file-flush fault and a config-parent fault both let `StorageError` escape `_init_crypto_session`; after the parent fault, config.toml already holds the backfilled crypto keys.
+  2. Run the same command with `69b-review-quarantine-probe.py` (2 passed). `mm recover --abandon-manifest --yes` exits 1 on an uncaught `StorageError`, without "quarantine failed"; the source manifest stays, a parent fault also leaves a quarantine copy, and a fault-free re-run completes and keeps that copy.
+  3. Keep `-p conftest`: without the repo's isolation an out-of-tree probe reaches real `~/.config/mind-meld` state. With it, all state stays under tmp_path.
+- **Context:** Found by Track 69B's /review (maintainability and adversarial passes) and reproduced there; recorded in docs/invariants/sync.md "Atomic write publication failures". A post-publication failure means the write may already be visible, so the backfill must not assume the old config, and a re-run of recover must not depend on the earlier copy being absent. Read docs/invariants/sync.md and init-devices.md first. Track 69B repairs no consumer.
+- **Pros:** The backfill becomes non-fatal as its comment promises, and recover reports a handled error instead of an uncaught exception.
+- **Cons:** Needs isolated regression tests for both phases; the backfill's always-stderr warning must follow the visible-failure contract.
+- **Effort:** S
+- **Priority:** P3
+- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
 
 ## Drain records
 
