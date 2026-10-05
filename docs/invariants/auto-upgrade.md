@@ -92,7 +92,10 @@ labels and validated numeric counters. pip's interactive spinner ends a step's
 line only when the step finishes, so phase labels are also read from the
 unterminated line; counters wait for their line to end. The hidden PTY has a
 fixed `PTY_COLUMNS` width, also passed to pipx as `COLUMNS`, so a narrow window
-cannot wrap pip's counters. When no PTY can be opened, or its reader is past
+cannot wrap pip's counters, and pipx gets `PYTHONIOENCODING=utf-8`: on a TTY it
+tees pip's output and re-raises a failed write after pip finishes, before it
+records metadata. The parser knows pip's wording; a uv-backed pipx venv streams
+uv's, so the bar shows fewer labels and no counters there. When no PTY can be opened, or its reader is past
 `select()`'s FD_SETSIZE limit, the pipe capture runs without live counters;
 both are decided before pipx starts.
 

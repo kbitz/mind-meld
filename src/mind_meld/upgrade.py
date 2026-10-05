@@ -956,6 +956,9 @@ def _run_pipx(
             env = _pipx_environment(argv)
             if stream is not None:
                 env["COLUMNS"] = str(PTY_COLUMNS)  # pipx passes its width on to pip.
+                # pipx re-raises a failed tee of pip's output after pip finishes,
+                # before recording metadata; the reader decodes UTF-8 anyway.
+                env["PYTHONIOENCODING"] = "utf-8"
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,

@@ -1071,12 +1071,14 @@ class TestPipxSeams:
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
         monkeypatch.setenv("COLUMNS", "40")  # A narrow window wraps pip's counters.
+        monkeypatch.setenv("PYTHONIOENCODING", "latin-1")  # pipx would fail teeing '━'.
         code = (
-            "import os\n"
-            "print('size', os.get_terminal_size(1).columns, os.environ['COLUMNS'], flush=True)\n"
+            "import os, sys\n"
+            "print('size', os.get_terminal_size(1).columns, os.environ['COLUMNS'], "
+            "sys.stdout.encoding, flush=True)\n"
         )
         result = upgrade._run_pipx([sys.executable, "-c", code], on_output=lambda chunk: None)
-        assert f"size {upgrade.PTY_COLUMNS} {upgrade.PTY_COLUMNS}" in result.stdout
+        assert f"size {upgrade.PTY_COLUMNS} {upgrade.PTY_COLUMNS} utf-8" in result.stdout
 
     def test_unavailable_terminal_keeps_the_pipe_capture(self, pipx_install, monkeypatch):
         pipx_install()
