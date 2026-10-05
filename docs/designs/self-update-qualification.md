@@ -169,13 +169,27 @@ and lock identities; fresh exact-binary `--version` exited 0. The selected
 installation remains ineligible. Raw receipts are `inventory-final.json` and
 `target-final.json` in the private preparation directory below.
 
+Later observation (2026-10-05, read-only queries only, not a re-inventory):
+[Release v1.5.0](https://github.com/kbitz/mind-meld/releases/tag/v1.5.0) was
+published 2026-10-04T23:45:59Z, after the 12:03Z target receipt above. Tag
+`v1.5.0`, the `latest` branch and GitHub's latest Release all resolve to
+`fb39f62dff14c9803c9073235b26a5a769081938`. This Mac's `mm` still reports 1.4.0
+and its pipx metadata still records the bare repository URL. The retry event for
+the explicit row (row 5) has therefore occurred; it still needs fresh
+`snapshot.py` and `target.py` receipts, the observer and recovery prerequisites
+and a quiet window before any command, and no trial has run. The four automatic
+rows' dated causes below stand, except that 1.4.0 is no longer the current
+release, so what blocks them now is the classifier pin: they need another
+existing behind exact `@latest` install. The cache fields above were not
+re-read.
+
 | Exact intended invocation (controlled terminal) | S13 family | Status / problem and observed cause | Candidate / target / consumed state | Owner, retry event and next action |
 |---|---|---|---|---|
 | `"$QUAL_MM" push` | 1 attended | REQUIRED / PENDING: current 1.4.0 and classifier-pinned bare spec | Local candidate unusable for automatic trial; other tracking candidates unknown | Karl: inventory an existing naturally-behind exact `@latest` install at a newer agreeing stable release; wait any natural cache/claim gates, confirm sync/observers; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
 | `"$QUAL_MM" pull` | 1 attended sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse old state consumed by push; needs another real old install or later release | Karl: same inventory event; disclose unqualified sibling if push alone supplies family evidence; [automatic policy](../invariants/auto-upgrade.md#self-update-v130). |
 | `"$QUAL_MM" autopull` | 2 detached | REQUIRED / PENDING: same current/pinned prerequisite | Existing tracking candidate unknown; no hook integration observed | Karl: existing behind tracking install + newer agreeing release, quiet window/ready overlap observers and natural gates; [hook behavior](../../README.md#automatic-updates). |
 | `"$QUAL_MM" autopush` | 2 detached sibling | REQUIRED / PENDING: same current/pinned prerequisite | Cannot reuse consumed autopull state; same-Mac/same-target second automatic candidate waits claim+24h | Karl: separate natural old install or later release; preserve origin and disclose sibling coverage; [shared exclusion](../invariants/auto-upgrade.md#self-update-v130). |
-| `"$QUAL_MM" update`, then immediate current rerun | 3 explicit | REQUIRED / PENDING: no newer known target; negative observer capability INCONCLUSIVE | Local 1.4.0 classifier-pin can supply force-reinstall branch at the next newer release; tracking-upgrade sibling unqualified | Karl: newer agreeing stable release, recovery recorded and quiet window; after genuine target-reaching update, same invocation rerun must refresh target successfully with validated complete observer; [explicit update](../../README.md#upgrading). |
+| `"$QUAL_MM" update`, then immediate current rerun | 3 explicit | REQUIRED / PENDING: no newer target in the 12:03Z observation (v1.5.0 followed, see the later observation above; not re-inventoried); negative observer capability INCONCLUSIVE | Local 1.4.0 classifier-pin can supply force-reinstall branch at the next newer release; tracking-upgrade sibling unqualified | Karl: newer agreeing stable release, recovery recorded and quiet window; after genuine target-reaching update, same invocation rerun must refresh target successfully with validated complete observer; [explicit update](../../README.md#upgrading). |
 
 No trial was invoked, so sync outcome, installer outcome/output, parent/child
 lifetime and trial lock evidence are **not observed** for every row. Inventory
