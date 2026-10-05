@@ -88,6 +88,18 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
 
+### [review:severity=low,files=src/mind_meld/upgrade.py|src/mind_meld/cli.py] A paused terminal pauses a streaming mm update
+
+- **Description:** `mm update`'s progress bar draws inside the loop that drains pipx's private PTY (`_PipxOutputStream.communicate` calls the progress callback, which writes to mm's terminal). If that write blocks, mm stops draining, the PTY buffer (about 1 KiB on macOS) fills, and pipx and pip block on their next write. Ctrl-S (XOFF; IXON is on by default) or a stalled SSH session is enough. The `PIPX_TIMEOUT_SECONDS` deadline is checked only between reads, so once output resumes after more than 600 s the next iteration raises `TimeoutExpired` and cleanup SIGINTs an install that was healthy, possibly mid package swap. Before the progress bar, pipx wrote to a pipe nothing displayed.
+- **Repro:**
+  1. Run a fake installer through `upgrade._run_pipx(argv, on_output=...)` that writes a pip-style frame every 10 ms, with mm itself running on an outer PTY and the callback rendering each chunk to it.
+  2. Send `\x13` (XOFF) to the outer PTY's master, wait 3 s, send `\x11` (XON); the installer's writes stall for the whole pause. (Reproduced by the /review red-team pass on 2026-10-05: a 2.74 s stall starting at frame 38; no stalls without XOFF.)
+- **Context:** Found by /review-and-prep on branch `kbitz/cursor-agent-progress-bar` (the `mm update` progress-bar PR). The user explicitly deferred it: it needs a terminal pause longer than 10 minutes to cause damage, and the real fix is a concurrency change. The forced reinstall no longer streams, so a stall there cannot remove the venv; only the in-place `pipx upgrade` is exposed. Read docs/invariants/auto-upgrade.md (explicit-update progress) first.
+- **Hypothesis (untested):** drain the PTY on its own thread (or keep the select loop as the only consumer storing the latest parsed state) and draw from a separate thread that drops frames when the terminal cannot keep up; check the deadline independently of drawing.
+- **Related trigger (same deferral):** Ctrl-Z. A suspended mm stops draining entirely, so pipx blocks on the small PTY buffer; on `fg` after `PIPX_TIMEOUT_SECONDS` the next iteration raises `TimeoutExpired` and cleanup SIGINTs the blocked installer (reproduced by the second adversarial pass with a 3 s timeout and a 5 s SIGSTOP; the pipe path finished). A drain thread cannot fix this one, because the whole process is stopped; the deadline would have to exclude time spent stopped.
+- **Effort:** M
+- **Priority:** P3
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-03
