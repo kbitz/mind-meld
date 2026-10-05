@@ -835,6 +835,12 @@ class _PipxOutputStream:
                 fcntl.ioctl(self.writer, termios.TIOCSWINSZ, dimensions)
             except OSError:
                 pass  # Progress is still readable at the terminal's default width.
+            try:
+                select.select([self.reader], [], [], 0)
+            except ValueError as error:
+                # Past FD_SETSIZE the drain loop could not watch it mid-install;
+                # find out before pipx starts and keep the pipe capture instead.
+                raise OSError("progress terminal cannot be watched") from error
         except BaseException:
             self.close_writer()
             self.close_reader()

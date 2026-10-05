@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from http.client import IncompleteRead
 from io import StringIO
@@ -1091,6 +1092,23 @@ class TestPipxSeams:
             on_output=calls.append,
         )
         assert result.returncode == 0
+        assert "installed False" in result.stdout
+        assert calls == []
+
+    def test_unwatchable_terminal_keeps_the_pipe_capture(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+
+        def past_fd_setsize(*args):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade, "select", types.SimpleNamespace(select=past_fd_setsize))
+        calls = []
+        result = upgrade._run_pipx(
+            [sys.executable, "-c", "import sys; print('installed', sys.stdout.isatty())"],
+            on_output=calls.append,
+        )
+        assert result.returncode == 0  # Never launched on a reader it cannot watch.
         assert "installed False" in result.stdout
         assert calls == []
 

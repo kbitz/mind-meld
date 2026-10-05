@@ -92,8 +92,9 @@ labels and validated numeric counters. pip's interactive spinner ends a step's
 line only when the step finishes, so phase labels are also read from the
 unterminated line; counters wait for their line to end. The hidden PTY has a
 fixed `PTY_COLUMNS` width, also passed to pipx as `COLUMNS`, so a narrow window
-cannot wrap pip's counters. When no PTY can be opened, the pipe capture runs
-without live counters.
+cannot wrap pip's counters. When no PTY can be opened, or its reader is past
+`select()`'s FD_SETSIZE limit, the pipe capture runs without live counters;
+both are decided before pipx starts.
 
 **The display never decides the update.** Parsing human installer output is
 best-effort: the first exception from the display or parser
