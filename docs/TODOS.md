@@ -97,7 +97,16 @@ here by hand, use the H3 form.
 - **Context:** Found by /review-and-prep on branch `kbitz/cursor-agent-progress-bar` (the `mm update` progress-bar PR). The user explicitly deferred it: it needs a terminal pause longer than 10 minutes to cause damage, and the real fix is a concurrency change. The forced reinstall no longer streams, so a stall there cannot remove the venv; only the in-place `pipx upgrade` is exposed. Read docs/invariants/auto-upgrade.md (explicit-update progress) first.
 - **Hypothesis (untested):** drain the PTY on its own thread (or keep the select loop as the only consumer storing the latest parsed state) and draw from a separate thread that drops frames when the terminal cannot keep up; check the deadline independently of drawing.
 - **Related trigger (same deferral):** Ctrl-Z. A suspended mm stops draining entirely, so pipx blocks on the small PTY buffer; on `fg` after `PIPX_TIMEOUT_SECONDS` the next iteration raises `TimeoutExpired` and cleanup SIGINTs the blocked installer (reproduced by the second adversarial pass with a 3 s timeout and a 5 s SIGSTOP; the pipe path finished). A drain thread cannot fix this one, because the whole process is stopped; the deadline would have to exclude time spent stopped.
+- **Related loss (same fix):** when the last PTY slave descriptor closes while the reader lags by more than about 0.6 s, macOS discards the unread output, so pipx's final lines (usually the error) can vanish and the failure detail falls back to `pipx exited N`. Measured by the post-review red-team pass on 2026-10-05 (lag 0.55 s: 4/4 delivered; 0.7 s: 0/4). A drain thread separate from drawing removes it.
 - **Effort:** M
+- **Priority:** P3
+
+### [review:severity=low,files=src/mind_meld/updateprogress.py] Teach the mm update progress parser uv's wording
+
+- **Description:** pipx 1.17.11 picks the uv backend for a new venv when `uv` is on PATH (`backends/__init__.py:resolve_backend_name`, `auto-path`), including mm's own forced reinstall. A uv-backed in-place `pipx upgrade` then streams uv output through the hidden PTY, and `updateprogress` knows only pip's wording: uv's `Updating ...`, `Resolved N packages`, `Building ...`, `Prepared/Installed N packages`, byte counters like `1.20 MiB/4.10 MiB` and `(0/1)` package counters match nothing, so the bar stays on `Starting installer` until pipx's own closing line. uv also redraws several lines with cursor-up moves, which `upgrade._final_frames` does not model.
+- **Context:** Found by the post-review red-team pass on the `mm update` progress-bar PR (2026-10-05). The maintainer's own Mac is pip-backed (`backend: pip`, no `uv` on PATH), so this degrades the display on uv-equipped Macs only; it never affects the install. README and docs/invariants/auto-upgrade.md state the limit.
+- **Hypothesis (untested):** record a real uv-under-pipx PTY transcript as a fixture, then map uv markers onto the existing labels and parse its counters.
+- **Effort:** S
 - **Priority:** P3
 
 ## Drain records
