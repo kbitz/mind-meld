@@ -60,6 +60,7 @@ from mind_meld import (
     seen_sources,
     sidecar,
     skill_link,
+    updateprogress,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -9033,6 +9034,74 @@ def _print_update_current(install: upgrade.InstallInfo) -> None:
         )
 
 
+def _run_update_with_progress(
+    install: upgrade.InstallInfo, pipx: str, *, latest: str | None
+) -> upgrade.UpdateOutcome:
+    """Render one bar from actual installer counters and phase changes.
+
+    The bar is best-effort: a terminal that stops accepting writes never
+    changes the outcome or hides an interruption from `update`. Rich reports
+    a closed pipe as SystemExit, so that counts as a display failure too.
+    """
+    # FORCE_COLOR can make a pipe look like a terminal; only a real one
+    # draws, so a reader that exits early never reaches the installer.
+    if not (console.is_terminal and console.file.isatty()):
+        return upgrade.run_update(install, pipx, latest=latest)
+    progress = Progress(
+        TextColumn("{task.description}", markup=False),
+        BarColumn(bar_width=None),
+        TextColumn("{task.fields[detail]}", markup=False),
+        console=console,
+        expand=True,
+        auto_refresh=False,
+        redirect_stdout=False,
+        redirect_stderr=False,
+    )
+    task = progress.add_task("Starting installer", total=1, detail="")
+
+    def render(state: updateprogress.UpdateProgress) -> None:
+        measured = state.total is not None and state.completed is not None
+        detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
+        progress.update(
+            task,
+            total=state.total if measured else 1,
+            completed=state.completed if measured else 0,
+            description=state.phase,
+            detail=detail.rstrip(),
+            refresh=True,
+        )
+
+    def settle(phase: str, *, complete: bool = False) -> None:
+        with suppress(Exception, SystemExit):
+            render(updateprogress.UpdateProgress(phase, *((1, 1) if complete else ())))
+
+    try:
+        progress.start()
+    except (Exception, SystemExit):
+        with suppress(Exception, SystemExit):
+            progress.stop()
+        with suppress(Exception, SystemExit):
+            console.show_cursor(True)  # A failed start can skip Rich's own restore.
+        return upgrade.run_update(install, pipx, latest=latest)
+    try:
+        try:
+            outcome = upgrade.run_update(install, pipx, latest=latest, on_progress=render)
+        except BaseException as error:
+            settle("Cancelled" if isinstance(error, KeyboardInterrupt) else "Failed")
+            raise
+        complete = outcome.status in ("updated", "unchanged") and (
+            latest is None or Version(outcome.new or "") >= Version(latest)
+        )
+        settle(
+            "Done" if complete else "Not started" if outcome.status == "busy" else "Failed",
+            complete=complete,
+        )
+        return outcome
+    finally:
+        with suppress(Exception, SystemExit):
+            progress.stop()
+
+
 @app.command()
 def update() -> None:
     """Update mm to the latest release.
@@ -9092,7 +9161,7 @@ def update() -> None:
         shown = " ".join(["pipx", *argv[1:]])
         target = f" → {safe_str(latest)}" if latest is not None else ""
         console.print(f"Updating mm {safe_str(install.version)}{target} ({shown})…")
-        outcome = upgrade.run_update(install, pipx, latest=latest)
+        outcome = _run_update_with_progress(install, pipx, latest=latest)
     except KeyboardInterrupt:
         print(
             "Update cancelled. If mm is now missing, reinstall with: "
