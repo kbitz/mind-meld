@@ -225,7 +225,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / Cursor-via-Conductor readers as one additive
+The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -310,28 +310,141 @@ prompt IDs, or conversation bytes. Equal duplicate
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
 
-**Cursor via Conductor (Track 67A, v1.2.0).** Only
+**Cursor usage (Conductor reader: Track 67A, v1.2.0).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
-is read. No bare-CLI billing counters persist; a successful mixed-use Mac scan
-still excludes bare cursor-agent usage. No sync source or skill-link row is
-added. `[retro] cursor_host_usage = true` is the sole consent;
+is read from Conductor. The native standalone CLI has no historical billing
+ledger. Standalone capture now records future completions through the enrolled
+`stop` hook or the `mm cursor-agent --print` wrapper. No sync source or
+skill-link row is added. `[retro] cursor_host_usage = true` is the sole consent;
 `HOST_READER_SOURCE_GATE["cursor"] = None` cannot be satisfied by any source.
-Every capture caller passes that bit. Both enable and disable remedies name
-the config setting, never the nonexistent `mm enable-source cursor` command.
+Every capture caller passes that bit. `mm enable-source cursor` and
+`mm disable-source cursor` are usage-only aliases and install/remove only mm's
+exact completion-hook entry, preserving unrelated hooks and settings. Existing
+custom file sources named `cursor` take precedence and keep their file toggles;
+merely resolving such a source still grants no usage permission.
+
+**Standalone Cursor capture.** The measured CLI is
+**2026.09.26-dd393fe**. Interactive `stop` payloads carry inclusive counters;
+normalize with `_normalize_inclusive_usage` exactly once. Headless result
+`usage` has already been normalized by Cursor and is disjoint, so never subtract
+its cache counters again. A plain native `--print` run does not emit a stop
+hook in this census. The wrapper forwards JSON/stream-JSON unchanged, renders
+text from the final result and retains the exit code. It uses
+the explicit or locally selected model, and retains no transcript content or
+CLI config. The last `--model` and the last `--output-format` before `--` win, as
+in Cursor's parser; otherwise the CLI config's current `model`
+is used, with `selectedModel` parameters applied only while it names the same
+model (it can lag a switch). A print run whose model cannot be resolved is kept
+as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
+Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a current model
+without a fast parameter) are recorded as the unpriced
+`grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
+without inventing a Fast rate. The wrapper reads argv verbatim
+(`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
+text into live Cursor options. Without consent, or outside print mode, it is a
+pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
+child, and SIGINT too unless it runs in the terminal's foreground process
+group (where Ctrl-C already reaches the child, so relaying would deliver it
+twice). After any stdout write failure (closed pipe, hung-up tty, full disk,
+a non-blocking pipe that fills) it points fd 1 at /dev/null and keeps draining,
+so Python's exit-time flush cannot replace the child's status with 120. Signal
+exits map to 128+N. Usage is queued after the child exits, once the result
+line is final and default signal handling is back. Text mode renders
+a string `result` (lone surrogates replaced) and forwards any other result line
+raw. A successful run with no result line warns that usage was not recorded.
+`MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
+that points back at mm fail fast instead of recursing.
+
+Both paths require the existing consent bit. The hidden hook command reads
+bounded stdin, returns `{}` and exits zero on malformed input or capture failure
+so it never controls Cursor's agent loop. Warnings contain no payload details.
+The same private authoritative history holds hashed generation IDs and counters;
+the local capture's UTC date owns standalone runs. Duplicate callbacks keep
+the original completion day and replace counters, rather than adding again,
+whether they fold in one read or across reads.
+Conductor `requestId` hashes map to canonical run-ID hashes in an additive
+private `requests` map: a matching standalone generation is removed only once
+the Conductor run is retained **with counters**. A running run or a usageRef
+placeholder never erases known standalone usage, and later callbacks keep
+updating it until then. Aliases survive pruning of their source files.
+Malformed aliases refuse without resetting history. Measured 2026-10-04
+(Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
+the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
+new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does
+not open; see the Cursor fixture contract's live follow-up. Until a reader
+exists, `unread_cursor_stores` counts store directories holding an `index.db`
+(including ones that still also hold `runs.ndjson`) by `lstat` only, never
+opening a database; any inspection error reports unknown. Diag reports the
+count and status names the undercount, without blocking the read or
+standalone publication.
+
+On a Mac without a Conductor store, history is authoritative once a scan
+completed or a queued standalone completion was folded while no
+`unsupported`/`malformed` blocker stood (`complete_once`); a transient prior
+reason does not block that latch, so a first read that timed out cannot stall
+a store-less Mac. A
+transient persisted reason (`deadline`, `io_error`, `stale`) then does not
+outlive the missing store; only `unsupported`/`malformed` survive it
+(`_CURSOR_STORE_BLOCKERS`). Before history is authoritative, the prior reason
+still stands.
+
+Hook and wrapper completions never touch the history lock. They append one
+sanitized row (hashed generation ID, UTC day, model, counters, partial) to the
+private `cursor-standalone-spool.jsonl` with `fsutil.append_rotatable_jsonl`,
+which writes only after its flock confirms the path still names the locked
+inode, then fsyncs the file and its directory on every append, so a push
+reader's multi-second hold (first-pass read plus an immediate 5 s warm) can
+never drop or delay a completion. Rows carry `"v": 1`. Under the history lock,
+`read_cursor_usage` renames the spool to `.merging` with `fsutil.rotate_jsonl`
+(non-blocking, never sleeping past the read deadline; a busy spool rotates on
+a later read), folds it, writes history durably, and only then unlinks
+`.merging`. A crash in between re-folds the leftover idempotently before the
+live spool rotates again. Torn or invalid rows are skipped with a notice; a
+batch with no valid row is retired at once (including on the early
+`no_metadata_ledger` return), so it can never block later rotations. A row
+from a newer spool version refuses as `unsupported` and keeps the batch for
+the upgraded mm; like any spool read failure it is persisted through
+`_carry_reason`, so status shows the upgrade remedy. The spool is capped at `CURSOR_SPOOL_MAX_BYTES` (16 MiB). Folded rows make
+history authoritative (`complete_once`) when no blocker is outstanding. Diag
+reports `pending_completions` read-only. A corrupt history refuses as before
+and leaves the queue in place.
+
+`mm enable-source cursor` installs the hook before granting consent, so a
+failed install grants nothing. `mm disable-source cursor` revokes consent first
+and then removes the hook best-effort: a symlinked, unsupported or malformed
+hooks.json warns instead of blocking revocation (the leftover entry records
+nothing without consent). Re-running enable reports a repaired hook. Hook
+enrollment uses the shared durable JSON primitive (compact rewrite, sibling
+`.lock`, symlinks refused, not replaced). `configure_cursor_hook` refuses the
+real `~/.cursor/hooks.json` under pytest, derived from the account database
+rather than HOME, comparing resolved, case-folded paths. A symlinked hooks.json
+is refused with a message naming the entry to add where the file is managed.
+`cursor_hook_state` reads without a lock: bounded, non-blocking, regular files
+only (a FIFO or over-deep JSON is `malformed`, never a hang or a traceback);
+the writer's atomic replace makes old-or-new reads coherent. Status adds the
+enable-source hint only for `missing` and names any other non-installed state;
+diag prints the hook state. A requestId that names a different retained run
+than an earlier scan recorded refuses as `malformed`, like a conflict within
+one scan.
 
 The persisted schema producer is Conductor **0.87.3**, with sessions generated
 by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
 and documents the three-run, two-session, one-Mac census. Runtime validation,
 not version pins, detects drift: only `finished` plus non-null usage counts;
-`running` plus null usage is pending. Missing usage, malformed counters and
-unknown statuses (including error/cancelled) refuse the reader. No store and
+`queued`/`running` plus null usage is pending. `cancelled`/`error` rows with
+null usage and no usageRef contribute nothing: Conductor recorded no counters
+for them (2026-10-03 store: 10 cancelled, 1 error, 1 queued across 7 of 16
+files, all null usage), so any spend they incurred is invisible to mm. Counters
+or a usageRef on any unfinished status, missing usage, malformed counters and
+unknown statuses refuse the reader. No store and
 no prior cache is `no_metadata_ledger`; found-but-unreadable data
 is `malformed`/`unsupported`, never invisible source absence.
 A known unreadable store disappearing preserves its blocker rather than
 becoming source absence; previously captured runs survive a missing store.
 
-Counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
-== totalTokens. No inclusive normalization applies. reasoningTokens must be
+Conductor counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
+== totalTokens. No inclusive normalization applies to them (stop-hook counters
+are inclusive; see Standalone Cursor capture above). reasoningTokens must be
 between zero and outputTokens and is not added again. Each whole turn belongs
 to **endedAt's UTC date**; a turn crossing midnight is never split.
 A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
@@ -382,7 +495,8 @@ Existing Codex/Grok forensic caches retain their original write protocol.
 `HOST_READER_DIAGS` dispatches each reader to its own diagnostic and readiness
 predicate, including status, recapture's reminder and diag JSON. Cursor's cache
 inventory reports retained runs, not files still present in Conductor. Status
-names **Cursor via Conductor** and its own standing blocker. No Grok cache state
+names **Cursor (Conductor + enrolled CLI)** and its own standing blocker. Diag
+also reports the read-only completion-hook enrollment state. No Grok cache state
 may supply Cursor's upgrade/reminder decision. Consent, registration and this
 dispatch land together. The token-source tuples append cursor after codex/grok;
 this is MINOR under the 1.x compatibility contract, not a new host family.
@@ -701,8 +815,9 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex, Grok Build and Cursor via Conductor
-  ledgers, never Claude Code's own session jsonls. Cursor offers Claude models;
+  overlap: `host_usage` reads Codex and Grok Build ledgers and Cursor
+  (Conductor runs plus enrolled standalone completions), never Claude Code's
+  own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.
 - **`AGENT_ROW_ORDER` is the only label registry.** The pre-1.1 pair
   (`MODEL_FAMILY_ROWS` + `AGENT_FAMILY_ROWS`, with deliberately different
@@ -1637,7 +1752,7 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok and Cursor via Conductor). Only `deadline` qualifies, including a reader whose
+(today Codex, Grok and Cursor). Only `deadline` qualifies, including a reader whose
 first invocation was prevented by sweep expiry. A healthy empty scan never
 warms. Autopush supplies no warm callback. Codex/Grok continue to converge
 through partial commits; Cursor commits stable-file progress but reparses

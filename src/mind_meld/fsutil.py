@@ -1,23 +1,19 @@
-"""Atomic file-write + directory-fsync primitives.
+"""Atomic file-write, directory-flush and flock-append primitives.
 
-Unifies the "mkstemp → write → fsync → os.replace → fsync parent" pattern
-shared by sidecar.py, storage/local.py, config.py, synclog.py, and the
-pull-apply paths in cli.py. Two invariants matter:
+Atomic writes publish at successful os.replace. Before that boundary this
+invocation preserves the target; afterward, with fsync=True, a parent-directory
+error can leave complete new bytes visible with durability unconfirmed. Failed
+return does not mean rollback. Owned-temp cleanup for caught OSError is
+best-effort.
 
-  1. On any failure (write, fsync, replace), the tmp file is unlinked
-     before we raise. No orphan tmp*.tmp ever remains.
-  2. When fsync=True, durability means BOTH the file contents AND the
-     directory entry pointing at the file have been flushed to physical
-     media. On macOS we use F_FULLFSYNC (Apple's documented primitive
-     per fsync(2)); plain fsync(2) on Darwin only pushes to the disk
-     controller, not through the disk cache. On non-Darwin (or when
-     F_FULLFSYNC is not supported for a given fd), we fall back to
-     os.fsync. FATAL on any fsync failure — "write succeeded but rename
-     isn't durable" is silent data loss on crash.
+With fsync=True, normal return confirms file and parent flushes as reported
+by the platform. Darwin prefers F_FULLFSYNC, falling back to os.fsync on
+unsupported operations; other platforms use os.fsync. This does not certify
+physical power-loss survival, iCloud upload, peer visibility or freedom from
+cloud conflicts. fsync=False provides replacement visibility without fsync calls.
 
-fsync only guarantees LOCAL crash durability. It does not imply iCloud
-upload, peer visibility, or protection from iCloud conflict generation.
-iCloud sync is a separate concurrency boundary, handled elsewhere.
+See docs/invariants/sync.md#atomic-write-publication-failures for the
+"Atomic write publication failures" contract and caller recovery audit.
 """
 
 from __future__ import annotations
@@ -28,7 +24,8 @@ import os
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from mind_meld.errors import StorageError
@@ -48,14 +45,13 @@ def _default_new_file_mode() -> int:
 
 
 def _fsync_fd(fd: int) -> None:
-    """Durably flush fd to physical media.
+    """Request the platform's flush for fd; return when it reports success.
 
-    On Darwin, prefer fcntl(fd, F_FULLFSYNC) — plain fsync on macOS only
-    pushes to the disk controller, not through the disk cache. Falls
-    back to os.fsync when F_FULLFSYNC is not supported (e.g., on some
-    directory fds) or on non-Darwin platforms.
-
-    Raises OSError on real I/O failures; callers translate to StorageError.
+    Darwin prefers F_FULLFSYNC to request flushing through the disk cache.
+    ENOTSUP, EINVAL or EOPNOTSUPP falls back to os.fsync (including unsupported
+    directory fds); non-Darwin uses os.fsync directly. Other F_FULLFSYNC errors
+    and os.fsync errors raise OSError. The fallback does not promise the same
+    physical-media guarantee as a supported F_FULLFSYNC.
     """
     if _IS_DARWIN:
         try:
@@ -75,24 +71,36 @@ def atomic_write_bytes(
     fsync: bool = False,
     mode: int | None = None,
 ) -> None:
-    """Atomically write `data` to `path` via mkstemp + os.replace.
+    """Publish `data` at the `path` pathname via mkstemp + os.replace.
 
     Guarantees:
-      - On success: `path` contains `data`. If fsync=True, both the file
-        contents and the parent directory entry are durably flushed.
-      - On any failure: the target is untouched if it existed, and no
-        stale tmp file remains in the parent directory.
+      - Successful replacement makes complete new bytes visible at `path`.
+        Before it, this invocation leaves an existing target's bytes intact
+        or an absent target absent. Concurrent external writers are not isolated.
+      - With fsync=True, parent-directory open/flush/close runs after
+        replacement and can fail with new bytes already published and
+        durability unconfirmed. No rollback. With fsync=False no fallible
+        step follows replacement, so OSError/StorageError from this call
+        means it did not replace (asynchronous interrupts excepted).
+      - Caught OSError triggers best-effort unlink of only the owned temp;
+        successful replacement consumes that name. Cleanup is not guaranteed
+        across process death, unlink failure or arbitrary uncaught exceptions.
+
+    See docs/invariants/sync.md#atomic-write-publication-failures for caller
+    handlers and next readers; exception types/messages do not identify phase.
 
     Args:
-        path: target file path. The parent directory must already exist.
+        path: pathname to replace, including a symlink itself, not its referent.
+              The parent directory must already exist.
         data: bytes to write.
-        fsync: if True, flush file and parent directory durably before
-               returning. Defaults to False (fast, crash-atomicity only:
-               rename is atomic, but the rename is not durable against
-               kernel crash or power loss without fsync).
+        fsync: if True, flush the temp file before replacement and the parent
+               afterward. Normal return confirms these platform-reported local
+               flushes, not cloud delivery or certified power-loss survival.
+               Defaults to False: no fsync calls or crash-persistence guarantee.
         mode: explicit file permission bits (e.g., 0o600 for secrets,
               0o644 for user-visible text). If None (default):
-                - If the target exists, preserves its current mode.
+                - If the target exists, preserves its stat-observed mode
+                  (stat follows a symlink's referent).
                 - If the target is new, uses (0o666 & ~umask), matching
                   Path.write_bytes() behavior.
               The default exists because `tempfile.mkstemp` creates
@@ -101,8 +109,11 @@ def atomic_write_bytes(
               downgrade every user-visible file this helper writes.
 
     Raises:
-        StorageError: wrapping any OSError encountered. Tmp file is
-        cleaned up before raising.
+        StorageError: wraps OSError inside the temp-write/replacement try,
+            including directory-close errors after publication. StorageError
+            from fsync_dir propagates directly; it is not an OSError subclass.
+        OSError: mode lookup errors other than FileNotFoundError occur before
+            that try and propagate raw. Other uncaught exceptions also escape.
     """
     parent = path.parent
 
@@ -247,20 +258,110 @@ def flock_append_jsonl(
         return  # forensic aid only; never block the calling sync
 
 
-def fsync_dir(path: Path) -> None:
-    """Durably flush directory entries for `path` to physical media.
+def append_rotatable_jsonl(
+    path: Path, line: bytes, *, max_bytes: int, mode: int = 0o600, attempts: int = 8
+) -> None:
+    """Durably append one JSONL row to a spool that a reader rotates by rename.
 
-    After os.replace, the parent directory's new name→inode mapping lives
-    in the kernel dcache. Without this call, a crash can roll back the
-    rename or leave the directory with a stale entry. Used both internally
-    by atomic_write_bytes(fsync=True) and externally by pull-apply
-    end-of-batch durability (deferred-durability pattern: per-file writes
-    skip fsync; one dir fsync at end of pull binds every rename in that
-    directory).
+    ``flock_append_jsonl`` locks a file that is never renamed. Here a reader may
+    rename the spool aside while this writer waits for the lock, so the row is
+    written only once the flock confirms ``path`` still names the locked inode;
+    otherwise the writer reopens. A row can therefore never land in a file the
+    reader already took. Errors raise (``AppendSizeLimit`` for the ceiling):
+    the caller holds the only copy of the row.
+    """
+    payload = line + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for _ in range(attempts):
+        fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, mode)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise OSError(errno.EINVAL, "spool is not a regular file")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                current = os.lstat(path)
+            except FileNotFoundError:
+                continue  # rotated away; the next open creates a fresh spool
+            if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                continue
+            start = os.fstat(fd).st_size
+            data = payload
+            if start and os.pread(fd, 1, start - 1) != b"\n":
+                data = b"\n" + payload  # isolate a torn earlier row
+            if start + len(data) > max_bytes:
+                raise AppendSizeLimit("spool exceeds its size ceiling")
+            if os.write(fd, data) != len(data):
+                os.ftruncate(fd, start)
+                raise OSError("short spool append")
+            _fsync_fd(fd)
+            # Every append: an earlier writer may have died before binding the
+            # spool's directory entry, and this caller is about to report success.
+            fsync_dir(path.parent)
+            return
+        finally:
+            os.close(fd)
+    raise OSError(errno.EAGAIN, "spool kept rotating during the append")
+
+
+def rotate_jsonl(
+    path: Path,
+    destination: Path,
+    *,
+    retry_intervals: Sequence[float] = (0.01, 0.05, 0.1),
+    deadline: float | None = None,
+) -> bool:
+    """Rename a spool aside once no ``append_rotatable_jsonl`` holds it.
+
+    Returns False when there is nothing to rotate or a writer still holds the
+    lock after the short retries (rotate on a later pass). Non-blocking, so a
+    stuck writer can never wedge the caller; no retry sleeps past ``deadline``
+    (a ``time.monotonic()`` value).
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise OSError(errno.EINVAL, "spool is not a regular file")
+        for delay in (0.0, *retry_intervals):
+            if delay and deadline is not None and time.monotonic() + delay > deadline:
+                return False
+            time.sleep(delay)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                continue
+        else:
+            return False
+        current = os.lstat(path)
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            return False
+        os.rename(path, destination)
+        fsync_dir(path.parent)
+        return True
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """Request a platform flush of directory entries for `path`.
+
+    atomic_write_bytes(fsync=True) calls this after publishing; pull-apply
+    also uses it at batch end. It does not flush file contents or undo any
+    rename. Normal return confirms _fsync_fd's platform-reported flush,
+    including its unsupported-F_FULLFSYNC fallback, not cloud delivery.
+    See docs/invariants/sync.md#atomic-write-publication-failures.
 
     Raises:
-        StorageError: wrapping any OSError. Directory fsync failure means
-        recent renames into this directory may not survive a crash.
+        StorageError: wraps OSError from opening or flushing the directory.
+            Recent renames may be visible with durability unconfirmed.
+        OSError: closing the descriptor in finally can fail, including after
+            a successful flush, or mask a flush error. atomic_write_bytes
+            wraps this close error; neither type nor prefix proves rollback.
     """
     try:
         fd = os.open(str(path), os.O_RDONLY)

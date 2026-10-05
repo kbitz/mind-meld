@@ -105,6 +105,11 @@ Each outcome maps to a behavioral test in
 table lists the applicable codes per command. Exit 0 from content sync does
 not prove host usage was captured or published.
 
+`mm cursor-agent` passes through Cursor's exit status (signal exits map to
+128+N; SIGTERM/SIGHUP sent to the wrapper are relayed to Cursor).
+Usage-recording failures warn without changing that status. The completion-hook
+command always exits 0 so it cannot stop the agent loop.
+
 ## Quick Start
 
 ```bash
@@ -470,7 +475,7 @@ publish a usable capture.
 | Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
 ```
 
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `cursor`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
 
 Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
@@ -747,7 +752,7 @@ claim to repair historical attribution.
 
 <a id="host-usage-capture-codex-and-grok"></a>
 
-### Host usage capture (Codex, Grok and Cursor via Conductor)
+### Host usage capture (Codex, Grok and Cursor)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -776,27 +781,65 @@ Capture requires enabled, available `mm-events` and consented readers. Enable
 with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok`;
 Grok also accepts the existing `[retro] grok_host_usage = true` usage-only consent.
 
-Cursor **via Conductor** requires mm v1.2.0+ and uses only local usage consent. In
-`~/.config/mind-meld/config.toml`, add the key to the existing `[retro]` table
-(or create that table if absent):
+Cursor uses local usage consent. Enable capture with:
+
+```sh
+mm enable-source cursor
+mm push
+mm status
+```
+
+This sets the following key in `~/.config/mind-meld/config.toml` and installs
+one `stop` hook in `~/.cursor/hooks.json`, preserving other hooks and settings:
 
 ```toml
 [retro]
 cursor_host_usage = true
 ```
 
-Then run `mm push` and inspect `mm status`; `mm diag --json` includes
-`host_usage.cursor` with its own blocker, retained-run count and last complete
-read. Set the bit to `false` to stop reading. There is no Cursor sync source
-or `mm enable-source cursor` command. Run files remain local; only aggregate
+Conductor capture has been supported since mm v1.2.0. The config bit alone
+continues to enable that reader; standalone interactive capture also needs the
+hook installed by `mm enable-source cursor`; `mm status` says so when the hook
+is missing. Run the command again to repair a missing hook.
+`mm disable-source cursor` stops usage reading and removes mm's hook; if
+hooks.json cannot be edited it warns, and the leftover entry records nothing. An explicitly configured custom file source named `cursor` retains
+its existing file-source toggle behavior instead of using this usage alias.
+
+Run `mm push` and inspect `mm status`; `mm diag --json` includes
+`host_usage.cursor` with its own blocker, retained-run count, last complete
+read, `hook_state`, `pending_completions` and `unread_sqlite_stores`. There is no
+built-in Cursor customization or memory sync source.
+Run files remain local; only aggregate
 usage crosses the encrypted sync boundary.
 
-Coverage is limited to Conductor's Cursor SDK store. Bare cursor-agent usage
-has no persisted billing counters, including on a Mac that also uses Conductor.
-Runs are counted when finished, on endedAt's UTC day. mm retains captured runs
+Standalone interactive `cursor-agent` runs are recorded by the completion hook.
+For print-mode runs, use the wrapper with the same Cursor arguments:
+
+```sh
+mm cursor-agent --print --model grok-4.7-low "Your prompt"
+mm cursor-agent --print --output-format stream-json --model grok-4.7-low "Your prompt"
+```
+
+The wrapper forwards JSON/stream-JSON output unchanged and renders text from the
+final result when the run completes. Arguments after `--` stay positional.
+Without usage consent it runs Cursor unchanged. It preserves Cursor's exit status and records only
+completed result metadata; responses, prompts, email addresses, paths and
+credentials are discarded. Native `cursor-agent --print` does not fire the
+completion hook in the measured CLI and therefore still needs the wrapper.
+Cursor's native chat history has no billing ledger: sessions completed before
+enrollment cannot be backfilled from context-window counts.
+
+Conductor runs are counted on endedAt's UTC day; standalone completions use
+the local capture's UTC day. Repeated callbacks replace the same generation,
+and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
 for 90 days even after Conductor prunes them, using private durable
 `cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
-Do not delete this file to troubleshoot a slow read: it may hold the only copy.
+Standalone completions wait in private `cursor-standalone-spool.jsonl` until
+the next `mm push` folds them in; `mm diag` shows how many are pending.
+Do not delete either file to troubleshoot a slow read: each may hold the only copy.
+Conductor 0.90.1 stores new Cursor runs in a SQLite database that mm does not
+read yet; `mm status` and `mm diag` say how many workspace stores this affects,
+and those runs are not counted until a reader ships.
 Repeated short reads need not converge on a rewritten ledger; attended warming
 or a larger configured read budget may be necessary.
 
@@ -1180,6 +1223,8 @@ Only want `/retro-fleet` gone from one agent, and keeping `mm`? That is not this
 If you remove `~/.local/share/mind-meld` while keeping `~/.config/mind-meld` and continue using or reinstall `mm`, the next push publishes the missing default mm-events files as deletions. Status and other inspection commands do not recreate that data. The skill store shares this root; reinstalling skills does not restore event history.
 
 The link loop below is written to survive the state you are actually in: it needs no `mm` on `PATH`, no config, and no valid config, so it works whether you run it before or after `pipx uninstall`.
+
+If you enabled Cursor usage capture, neither step below touches mm's `stop` hook in `~/.cursor/hooks.json`. Run `mm disable-source cursor` first, or afterwards delete the hook entry whose command is `mm capture-cursor-usage`.
 
 ```bash
 pipx uninstall mind-meld

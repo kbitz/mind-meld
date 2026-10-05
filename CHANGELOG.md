@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.5.0] - 2026-10-04
+
+**`mm enable-source cursor` now records Cursor usage from your own terminal sessions, alongside Conductor's, in the fleet Agents table.** Interactive `cursor-agent` sessions are captured by a completion hook, and print-mode runs go through the new `mm cursor-agent` wrapper.
+
+### Added
+
+- `mm enable-source cursor` and `mm disable-source cursor` turn Cursor usage capture on and off. Enabling grants the existing local usage consent and installs one `stop` hook in `~/.cursor/hooks.json`, preserving your other hooks and settings; disabling revokes consent first and then removes only mm's entry. Running enable again repairs a missing hook. An explicitly configured custom file source named `cursor` keeps its file-source toggle.
+- Interactive `cursor-agent` sessions record each completed turn through the hook. The hook command always exits 0, so it cannot stop Cursor's agent loop, and it keeps only bounded usage metadata: responses, prompts, email addresses, paths and credentials are discarded.
+- `mm cursor-agent` wraps print-mode runs, which do not fire the hook in the measured CLI (2026.09.26). JSON and stream-JSON output pass through unchanged, text mode is rendered from the final result, and Cursor's exit status is preserved (signal exits map to 128+N). SIGTERM and SIGHUP sent to the wrapper are relayed to Cursor, and Ctrl-C reaches Cursor exactly once. Without usage consent it runs Cursor unchanged.
+- Standalone completions wait in a private local queue until the next `mm push` folds them into the durable Cursor history, so the hook never waits on a running push. `mm diag` shows how many are pending. Conductor request IDs deduplicate overlapping captures, and captured history survives Conductor pruning.
+- `mm status` and `mm diag` report the completion hook's state and how many Conductor workspace stores use a newer SQLite layout that mm does not read yet.
+
+### Changed
+
+- The Cursor label in status, diag and retro output now reads "Cursor (Conductor + enrolled CLI)", and the consent remedy points at `mm enable-source cursor`. The `[retro] cursor_host_usage` bit still enables the Conductor reader on its own.
+- Conductor runs that never finished (queued, cancelled or errored, with no counters) now contribute nothing instead of making the Cursor reader refuse.
+
+### Upgrade notes
+
+- No wire or storage format changes: existing 1.x peers read the same Cursor rows. Upgrade the Macs that run `cursor-agent` to capture their usage; rendering Macs need nothing. A downgrade leaves the private standalone queue unread, and the older release's next Conductor read rewrites the Cursor history without the request-ID aliases this release records.
+- Conductor 0.90.1 stores new Cursor runs in a SQLite database that mm does not read yet, and those runs are not counted until a reader ships. Conductor-run turns also fire no stop hook, so the hook cannot cover them.
+- There is no backfill: Cursor's native chat history has no billing ledger, so sessions completed before enrollment cannot be recovered.
+- Cursor models with bracketed parameters, such as `claude-…[fast=true]` or `[context=1m]`, are priced at the base Claude rate, in standalone captures and in Conductor's.
+
 ## [1.4.0] - 2026-10-02
 
 **Mind Meld now has a testable contract for qualifying Codex memory portability, though no route is qualified yet.** Native and Mind Meld-owned routes remain unqualified pending their evidence gates.

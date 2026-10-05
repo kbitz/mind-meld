@@ -462,7 +462,7 @@ def test_cursor_cache_write_is_visible_partial_not_suppressed(cursor_store):
     _, published, data, out = cursor_capture_view(cursor_store, "cache-write")
     assert published["partial_sources"] == ["cursor"]
     assert row(data, "grok").tokens == 25_891_781
-    assert "Cursor via Conductor" in out
+    assert "Cursor (Conductor + enrolled CLI)" in out
     assert entry(out, "cost_floor")
     assert "at most" not in out
 
@@ -471,7 +471,7 @@ def test_cursor_usage_ref_with_known_same_day_usage_publishes_partial(cursor_sto
     _, published, data, out = cursor_capture_view(cursor_store, "usage-ref")
     assert published["partial_sources"] == ["cursor"]
     assert row(data, "grok").tokens == 4_979_350
-    assert "Cursor via Conductor" in out
+    assert "Cursor (Conductor + enrolled CLI)" in out
     assert entry(out, "cost_floor")
 
 
@@ -482,5 +482,5 @@ def test_cursor_usage_ref_only_cannot_disappear_as_completed_empty(cursor_store)
     assert published["degraded_sources"] == ["cursor"]
     assert "cursor" not in published["empty_sources"]
     assert row(data, "grok") is None
-    assert "Cursor via Conductor" in out
+    assert "Cursor (Conductor + enrolled CLI)" in out
     assert entry(out, "cost_floor")

@@ -254,6 +254,7 @@ def test_exit_code_ast_all_modules():
     dynamic = {
         ("cli.py", "retro_fleet_cmd", "_aggregator_main(argv)"),
         ("cli.py", "recapture", "RECAPTURE_EXIT_PARTIAL"),
+        ("cli.py", "cursor_agent", "_cursor_exit_code(code)"),
         ("skills/retro_fleet/aggregator.py", "<module>", "main()"),
     }
     seen = set()

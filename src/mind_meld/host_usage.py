@@ -64,10 +64,11 @@ never finished would drop files that were never absent. ``warm_host_cache_inline
 is the attended-command escape hatch for a deadline miss. Attended callers
 publish that warm read's result; unattended callers keep their short budget.
 
-Track 67A reads only Conductor's Cursor ``runs.ndjson``. Its disjoint counters
-need no normalization. Unlike the forensic caches above, Cursor history is
-authoritative after Conductor pruning: durable atomic writes retain run IDs
-for 90 days. Every file is reparsed, and short passes need not converge.
+Cursor reads Conductor's ``runs.ndjson`` and enrolled standalone completions.
+Conductor and print-mode counters are disjoint; stop-hook counters are inclusive.
+Unlike the forensic caches above, Cursor history is authoritative after source
+pruning: durable atomic writes retain hashed run IDs for 90 days. Every Conductor
+file is reparsed, and short passes need not converge.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ import gc
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import sys
@@ -87,6 +89,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, TypedDict, get_args
 
+from mind_meld import fsutil
 from mind_meld.errors import StorageError
 from mind_meld.lockedjson import (
     InvalidJsonCache,
@@ -116,6 +119,34 @@ CURSOR_STORE_PATH = (
     Path.home() / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
 )
 CURSOR_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "cursor-host-tokens.json"
+CURSOR_HOOK_CONFIG_PATH = Path.home() / ".cursor" / "hooks.json"
+CURSOR_CLI_CONFIG_PATH = Path.home() / ".cursor" / "cli-config.json"
+CURSOR_HOOK_COMMAND = "mm capture-cursor-usage"
+CURSOR_HOOK_ENTRY = {"command": CURSOR_HOOK_COMMAND, "timeout": 10}
+CURSOR_HOOK_STDIN_MAX_BYTES = 64 * 1024
+"""The measured stop payload carries counters and identifiers, never response text."""
+_CURSOR_CONFIG_MAX_BYTES = 1024 * 1024
+CURSOR_SPOOL_PATH = Path.home() / ".config" / "mind-meld" / "cursor-standalone-spool.jsonl"
+"""Private queue of sanitized standalone completions awaiting the next Cursor read.
+
+The hook and wrapper append here under a short lock and never wait for a push
+reader's multi-second hold on the history; the reader rotates the file to
+``<name>.merging``, folds it into history, and unlinks it only after the history
+write is durable. A crash re-folds the leftover idempotently."""
+CURSOR_SPOOL_MAX_BYTES = 16 * 1024 * 1024
+CURSOR_UNKNOWN_MODEL = "cursor-unknown"
+"""Print runs with no resolvable model; host_family 'other', never priced."""
+_CURSOR_SPOOL_VERSION = 1
+
+
+class _SpoolFromNewerMm(Exception):
+    """A queued row written by a newer mm: refuse rather than discard it."""
+
+
+_CURSOR_RUN_STATUSES = frozenset({"queued", "running", "finished", "cancelled", "error"})
+"""Only finished rows contribute; the rest must carry neither usage nor usageRef."""
+_CURSOR_STORE_BLOCKERS: frozenset[str] = frozenset({"unsupported", "malformed"})
+"""Reasons a vanished store cannot resolve; transient reasons do not outlive it."""
 CURSOR_HOST_CACHE_RETENTION_DAYS = 90
 """Reader-owned retention, unrelated to events.CURSOR_SCAN_DAYS (read position)."""
 CURSOR_USAGE_CENSUS_HOST_VERSION = "2026.09.18-9a7762b"
@@ -563,11 +594,13 @@ def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:
         raise _ReadFailure("malformed")
     key = hashlib.sha256(run_id.encode()).hexdigest()
     status = row.get("status")
-    if not isinstance(status, str) or status not in {"running", "finished"}:
-        # Includes renamed terminal states and billable error/cancelled rows.
+    if not isinstance(status, str) or status not in _CURSOR_RUN_STATUSES:
+        # Includes renamed terminal states.
         raise _ReadFailure("unsupported")
     raw = row["usage"]
-    if status == "running":
+    if status != "finished":
+        # Pending (queued/running) and cancelled/error rows carried no counters
+        # in the 2026-10-03 store. Counters or a usageRef on them are unmeasured.
         if raw is not None or row.get("usageRef") is not None:
             raise _ReadFailure("unsupported")
         return key, None
@@ -630,9 +663,11 @@ def _iter_cursor_ledgers(root: Path, deadline: float) -> Iterator[Path]:
                 yield path
 
 
-def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
+def _read_cursor_file(path: Path, deadline: float) -> tuple[dict[str, Any], dict[str, str]]:
+    """Whole-file projection: runs by hashed runId, and requestId aliases."""
     before = _regular_stat(path)
     staged: dict[str, Any] = {}
+    requests: dict[str, str] = {}
     # O_NONBLOCK closes the check-then-open window where a FIFO would block
     # the push lock. A non-regular descriptor is refused before any read.
     try:
@@ -658,12 +693,21 @@ def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
             if len(line) > MAX_JSONL_LINE_BYTES or not line.endswith(b"\n"):
                 raise _ReadFailure("malformed")
             try:
-                key, run = _cursor_run(json.loads(line))
+                row = json.loads(line)
+                key, run = _cursor_run(row)
             except ValueError as exc:
                 raise _ReadFailure("malformed") from exc
             if key in staged:
                 raise _ReadFailure("malformed")
             staged[key] = run
+            request = row.get("requestId")
+            if request is not None:
+                if _validated_table([request], _MAX_PROMPT_ID_BYTES) is None:
+                    raise _ReadFailure("malformed")
+                alias = hashlib.sha256(request.encode()).hexdigest()
+                if alias in requests and requests[alias] != key:
+                    raise _ReadFailure("malformed")
+                requests[alias] = key
         after_fd = os.fstat(fp.fileno())
     after = _regular_stat(path)
     if (
@@ -672,7 +716,7 @@ def _read_cursor_file(path: Path, deadline: float) -> dict[str, Any]:
         or before.st_ctime_ns != after.st_ctime_ns
     ):
         raise _ReadFailure("stale")
-    return staged
+    return staged, requests
 
 
 def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
@@ -693,7 +737,7 @@ def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
 def read_cursor_usage(
     root: Path | None = None, *, deadline: float | None = None, consented: bool = False
 ) -> HostUsageResult:
-    """Cursor via Conductor only. Bare CLI has no persisted billing ledger.
+    """Conductor runs and enrolled standalone CLI completions.
 
     runs.ndjson is rewritten in place: reparse whole files, replace by hashed
     runId, then reduce once (reverses old day/model/counter contributions).
@@ -709,17 +753,35 @@ def read_cursor_usage(
     if _expired(read_deadline):
         return _incomplete("deadline")
     source_root = root if root is not None else CURSOR_STORE_PATH
+    spool_taken = False
     try:
         with locked_json_durable_rmw(
             CURSOR_CACHE_PATH, default_factory=_empty_cursor_cache
         ) as locked:
             # Shape failures propagate without writing the sole surviving copy.
             runs = dict(_cursor_cached_runs(locked.data))
+            requests = _cursor_requests(locked.data)
             prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
+            spool_failure: _ReadFailure | None = None
+            try:
+                spooled, spool_taken = _take_cursor_spool(read_deadline)
+            except _ReadFailure as exc:
+                spooled, spool_failure = [], exc
+            except OSError as exc:
+                spooled, spool_failure = [], _ReadFailure("io_error")
+                spool_failure.__cause__ = exc
+            _fold_cursor_spool(runs, requests, spooled, cutoff)
+            # Standalone captures are complete by construction and make retained
+            # history authoritative. A transient prior reason must not block
+            # this, or a store-less Mac whose first read timed out never recovers.
+            complete_once = locked.data["complete_once"] or (
+                bool(spooled) and prior[0] not in _CURSOR_STORE_BLOCKERS
+            )
             learned: dict[str, Any] = {}
+            learned_requests: dict[str, str] = {}
             removed: set[str] = set()
             conflict = False
 
@@ -728,21 +790,37 @@ def read_cursor_usage(
                     runs.pop(key, None)
                 for key, run in learned.items():
                     runs[key] = run
+                requests.update(learned_requests)
+                for request, canonical in dict(requests).items():
+                    if canonical not in runs:
+                        # Unfinished (queued/running/cancelled/error) or pruned:
+                        # the standalone record stays the only contribution
+                        # unless that Conductor run later finishes with counters.
+                        requests.pop(request, None)
+                    elif request != canonical and runs[canonical]["usage"] is not None:
+                        runs.pop(request, None)
 
             try:
+                if spool_failure is not None:
+                    # Persisted like any blocker, so status names its remedy.
+                    raise spool_failure
                 if _expired(read_deadline):
                     raise _ReadFailure("deadline")
                 try:
                     root_stat = source_root.lstat()
                 except FileNotFoundError:
-                    # An outstanding blocker outranks retained history: a
-                    # later unreadable run must not publish as a clean scan.
-                    if prior[0]:
+                    # An unreadable store's blocker outranks retained history:
+                    # a later unreadable run must not publish as a clean scan.
+                    # Once history is authoritative (complete_once), a transient
+                    # reason (deadline, io_error, stale) cannot be resolved by a
+                    # store that is gone, so it does not stick; otherwise a
+                    # standalone-only Mac would never publish again.
+                    if prior[0] in _CURSOR_STORE_BLOCKERS or (prior[0] and not complete_once):
                         raise _ReadFailure(prior[0])
                     # A finished scan's retained history is authoritative.
                     # A prefix from a deadline is not: publishing it would
                     # latch complete_once on an undercount.
-                    if not locked.data["complete_once"]:
+                    if not complete_once:
                         if not runs and locked.read_state == "missing":
                             locked.write_on_exit = False
                             return _incomplete("no_metadata_ledger")
@@ -752,13 +830,23 @@ def read_cursor_usage(
                         raise _ReadFailure("unsupported")
                     seen: dict[str, Any] = {}
                     for path in _iter_cursor_ledgers(source_root, read_deadline):
-                        staged = _read_cursor_file(path, read_deadline)
+                        staged, aliases = _read_cursor_file(path, read_deadline)
                         if any(key in seen and seen[key] != run for key, run in staged.items()):
                             conflict = True
                             raise _ReadFailure("malformed")
                         seen.update(staged)
+                        # One requestId may name one run, within a scan and across
+                        # scans while the earlier run is retained.
+                        if any(
+                            (key in learned_requests and learned_requests[key] != value)
+                            or (requests.get(key, value) != value and requests[key] in runs)
+                            for key, value in aliases.items()
+                        ):
+                            conflict = True
+                            raise _ReadFailure("malformed")
+                        learned_requests.update(aliases)
                         for key, run in staged.items():
-                            # A running revision invalidates a previous terminal
+                            # An unfinished revision invalidates a previous terminal
                             # contribution, just as a changed completion day does.
                             removed.add(key)
                             if run is not None and run["day"] >= cutoff:
@@ -794,7 +882,8 @@ def read_cursor_usage(
                 **timing,
                 "version": CACHE_VERSION,
                 "runs": runs,
-                "complete_once": locked.data["complete_once"] or result.complete,
+                "requests": requests,
+                "complete_once": complete_once or result.complete,
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
             }
@@ -802,6 +891,10 @@ def read_cursor_usage(
             locked.data = updated
             if over_budget:
                 result = _incomplete("deadline")
+        if spool_taken:
+            # History is durable now; a failed unlink only re-folds next time.
+            with suppress(OSError):
+                _cursor_spool_merging_path().unlink()
         return result
     except LockContended:
         return _incomplete("locked")
@@ -814,8 +907,299 @@ def read_cursor_usage(
         return _incomplete("io_error")
 
 
+def _cursor_requests(data: dict[str, Any]) -> dict[str, str]:
+    requests = data.get("requests", {})
+    if not isinstance(requests, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", key) is None
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+        for key, value in requests.items()
+    ):
+        raise _ReadFailure("malformed")
+    return dict(requests)
+
+
+def _cursor_spool_merging_path() -> Path:
+    return CURSOR_SPOOL_PATH.with_name(CURSOR_SPOOL_PATH.name + ".merging")
+
+
+def _read_bounded_bytes(path: Path, limit: int, *, follow_symlinks: bool = False) -> bytes:
+    """Read one small regular file without blocking on a FIFO or reading unbounded.
+
+    mm-owned files refuse symlinks; Cursor's own config may be a dotfile link.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | (0 if follow_symlinks else os.O_NOFOLLOW)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as fp:
+        if not stat.S_ISREG(os.fstat(fp.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        data = fp.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("oversized")
+    return data
+
+
+def _take_cursor_spool(deadline: float | None = None) -> tuple[list[dict[str, Any]], bool]:
+    """Rotate queued completions aside and parse them; the caller unlinks later.
+
+    A leftover ``.merging`` file (crash after rotation) is folded first; the
+    live spool rotates on a later read. Torn or invalid rows are skipped with a
+    notice rather than wedging every future read, and a batch with no valid row
+    is retired here, since nothing in it awaits a durable history write. A row
+    from a newer spool version refuses as ``unsupported`` and keeps the batch.
+    """
+    merging = _cursor_spool_merging_path()
+    if not os.path.lexists(merging):
+        fsutil.rotate_jsonl(CURSOR_SPOOL_PATH, merging, deadline=deadline)
+    try:
+        data = _read_bounded_bytes(merging, CURSOR_SPOOL_MAX_BYTES)
+    except FileNotFoundError:
+        return [], False
+    except ValueError as exc:
+        raise _ReadFailure("malformed") from exc
+    records: list[dict[str, Any]] = []
+    skipped = 0
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            version = record.pop("v")
+            if type(version) is int and version > _CURSOR_SPOOL_VERSION:
+                raise _SpoolFromNewerMm
+            if version != _CURSOR_SPOOL_VERSION:
+                raise _ReadFailure("malformed")
+            key = record.pop("key")
+            _cursor_cached_runs(
+                {"version": CACHE_VERSION, "runs": {key: record}, "complete_once": False}
+            )
+            if record["usage"] is None:
+                raise _ReadFailure("malformed")
+        except _SpoolFromNewerMm as exc:
+            raise _ReadFailure("unsupported") from exc
+        except (ValueError, RecursionError, AttributeError, KeyError, TypeError, _ReadFailure):
+            skipped += 1
+            continue
+        records.append({"key": key, **record})
+    if skipped:
+        sys.stderr.write(f"mm: notice: skipped {skipped} unreadable Cursor completion record(s)\n")
+    if not records:
+        with suppress(OSError):
+            merging.unlink()
+        return [], False
+    return records, True
+
+
+def _fold_cursor_spool(
+    runs: dict[str, Any], requests: dict[str, str], records: list[dict[str, Any]], cutoff: str
+) -> None:
+    """Apply queued completions in order: replays keep their first day, take new counters."""
+    for record in records:
+        key = record["key"]
+        canonical = requests.get(key)
+        conductor = runs.get(canonical) if canonical is not None else None
+        # A matching Conductor run supersedes this generation only once it has
+        # counters; a usageRef placeholder must not erase known usage.
+        if (conductor is not None and conductor["usage"] is not None) or record["day"] < cutoff:
+            continue
+        previous = runs.get(key)
+        runs[key] = {
+            "day": previous["day"] if previous else record["day"],
+            "model": record["model"],
+            "usage": record["usage"],
+            "partial": record["partial"],
+        }
+
+
+def _is_real_cursor_hook_config(path: Path) -> bool:
+    """Compare against the account database's home, which test patches cannot blind."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        home = Path.home()
+    real = home / ".cursor" / "hooks.json"
+    return str(path.expanduser().resolve()).casefold() == str(real.resolve()).casefold()
+
+
+def configure_cursor_hook(*, enabled: bool) -> bool:
+    """Install or remove mm's stop entry; return whether hooks.json changed.
+
+    Every other hook and top-level key is preserved by value. Any stop entry
+    running mm's command is replaced by the canonical entry (or removed). The
+    file is rewritten as compact JSON; a symlinked hooks.json is refused
+    (O_NOFOLLOW) rather than replaced, so a dotfile-managed link survives.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST") and _is_real_cursor_hook_config(
+        CURSOR_HOOK_CONFIG_PATH
+    ):
+        raise PermissionError(f"refusing to edit the real {CURSOR_HOOK_CONFIG_PATH} from a test")
+    if CURSOR_HOOK_CONFIG_PATH.is_symlink():
+        raise InvalidJsonCache(
+            f"{CURSOR_HOOK_CONFIG_PATH} is a symlink; edit its stop hooks where that file "
+            f"is managed ({json.dumps(CURSOR_HOOK_ENTRY)})"
+        )
+    if not enabled and not CURSOR_HOOK_CONFIG_PATH.exists():
+        return False
+    with locked_json_durable_rmw(
+        CURSOR_HOOK_CONFIG_PATH, default_factory=lambda: {"version": 1, "hooks": {}}
+    ) as locked:
+        data = locked.data
+        hooks = data.get("hooks", {})
+        if data.get("version") != 1 or not isinstance(hooks, dict):
+            raise InvalidJsonCache("unsupported Cursor hooks config")
+        stop = hooks.get("stop", [])
+        if not isinstance(stop, list) or not all(isinstance(hook, dict) for hook in stop):
+            raise InvalidJsonCache("invalid Cursor stop hooks")
+        ours = [hook for hook in stop if hook.get("command") == CURSOR_HOOK_COMMAND]
+        updated = [hook for hook in stop if hook.get("command") != CURSOR_HOOK_COMMAND]
+        if enabled:
+            updated = stop if ours == [CURSOR_HOOK_ENTRY] else [*updated, dict(CURSOR_HOOK_ENTRY)]
+        locked.write_on_exit = updated != stop
+        if locked.write_on_exit:
+            new_hooks = {**hooks}
+            if updated:
+                new_hooks["stop"] = updated
+            else:
+                new_hooks.pop("stop", None)
+            locked.data = {**data, "hooks": new_hooks}
+        return locked.write_on_exit
+
+
+def cursor_cli_model(args: list[str]) -> str | None:
+    """Resolve only the selected model; never retain CLI config or auth fields.
+
+    The last ``--model`` before ``--`` wins, as in Cursor's own option parser.
+    """
+    chosen = None
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg.startswith("--model="):
+            chosen = arg.removeprefix("--model=")
+        elif arg == "--model" and index + 1 < len(args):
+            chosen = args[index + 1]
+    if chosen is not None:
+        return chosen
+    try:
+        raw = _read_bounded_bytes(
+            CURSOR_CLI_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES, follow_symlinks=True
+        )
+        data = json.loads(raw)
+        # As in Cursor: `model` is current; `selectedModel` supplies parameters
+        # only while it names the same model (it can lag a model switch).
+        current, selected = data.get("model"), data.get("selectedModel")
+        name = current.get("modelId") if isinstance(current, dict) else None
+        if not isinstance(name, str):
+            name = selected.get("modelId") if isinstance(selected, dict) else None
+        if not isinstance(name, str) or not name:
+            return None
+        same = isinstance(selected, dict) and selected.get("modelId") == name
+        if name == "grok-4.7":
+            params = selected.get("parameters", []) if same else []
+            fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
+            if fast == ["false"]:
+                return "grok-4.7[fast=false]"
+            if fast == ["true"]:
+                return "grok-4.7[fast=true]"
+            # Same policy as an explicit bare --model: recorded, but unpriced.
+            return "grok-4.7"
+        return name
+    except (OSError, ValueError, RecursionError, AttributeError, TypeError):
+        # Best effort: model resolution must never stop Cursor from starting.
+        return None
+
+
+def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
+    """Durably queue one completed generation for the next Cursor read.
+
+    Hook counters are inclusive; the print result has already normalized its
+    input to disjoint counters. Only the hashed generation ID, UTC day, model
+    and counters are kept; prompts, transcripts and credentials are discarded.
+    Appending never waits for a push reader holding the history lock.
+    """
+    if not isinstance(payload, dict):
+        raise InvalidJsonCache("invalid Cursor usage record")
+    is_hook = payload.get("hook_event_name") == "stop"
+    if is_hook:
+        if payload.get("status") != "completed":
+            return False
+        generation = payload.get("generation_id")
+        selected_model = payload.get("model")
+        names = ("input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens")
+        raw = payload
+    else:
+        if payload.get("type") != "result" or payload.get("subtype") != "success":
+            return False
+        if payload.get("is_error") is not False:
+            return False
+        generation = payload.get("request_id")
+        # A run whose model cannot be resolved is still usage: keep it unpriced.
+        selected_model = model or CURSOR_UNKNOWN_MODEL
+        names = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
+        raw = payload.get("usage")
+    if (
+        _validated_table([generation], _MAX_PROMPT_ID_BYTES) is None
+        or _validated_table([selected_model], _MAX_MODEL_ID_BYTES) is None
+        or not isinstance(raw, dict)
+        or not all(_is_valid_counter(raw.get(name)) for name in names)
+    ):
+        raise InvalidJsonCache("Cursor completion has no valid model, identity or usage")
+    usage = dict(zip(TOKEN_FIELDS, (raw[name] for name in names)))
+    if is_hook:
+        try:
+            usage = _normalize_inclusive_usage(usage)
+        except _ReadFailure as exc:
+            raise InvalidJsonCache("invalid inclusive Cursor counters") from exc
+    if sum(usage.values()) > _MAX_COUNTER:
+        raise InvalidJsonCache("Cursor counters exceed supported bounds")
+    match = re.fullmatch(r"grok-4\.7-(?:low|medium|high|xhigh)(-fast)?", selected_model)
+    if match:
+        selected_model = "grok-4.7-fast" if match[1] else "grok-4.7"
+    elif selected_model in {"grok-4.7[fast=true]", "grok-4.7[fast=false]"}:
+        selected_model = "grok-4.7-fast" if selected_model.endswith("true]") else "grok-4.7"
+    elif selected_model == "grok-4.7":
+        # A bare id does not identify Fast mode, which defaults on for paid plans.
+        selected_model = "grok-4.7-unspecified"
+    record = {
+        "v": _CURSOR_SPOOL_VERSION,
+        "key": hashlib.sha256(generation.encode()).hexdigest(),
+        "day": datetime.now(timezone.utc).date().isoformat(),
+        "model": selected_model,
+        "usage": usage,
+        "partial": usage["cache_create"] > 0,
+    }
+    line = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    fsutil.append_rotatable_jsonl(CURSOR_SPOOL_PATH, line, max_bytes=CURSOR_SPOOL_MAX_BYTES)
+    return True
+
+
+def unread_cursor_stores(root: Path | None = None) -> int | None:
+    """Count Conductor workspace stores holding a SQLite ``index.db`` this reader cannot read.
+
+    Conductor 0.90.1 writes new runs to ``<store>/index.db`` instead of
+    ``runs.ndjson``; a store holding both still has unread runs, so it counts.
+    Only directory entries are inspected (lstat), so no database is ever opened.
+    None means the store could not be inspected.
+    """
+    source_root = root if root is not None else CURSOR_STORE_PATH
+    try:
+        with os.scandir(source_root) as entries:
+            children = list(entries)
+        return sum(
+            1
+            for child in children
+            if child.is_dir(follow_symlinks=False)
+            and os.path.lexists(Path(child.path) / "index.db")
+        )
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+
+
 def cursor_usage_diag() -> dict[str, Any]:
-    """Inspect durable Cursor history only; never open Conductor run files."""
+    """Inspect durable Cursor history; never open Conductor run files or databases."""
     blank = {
         **_cached_read_timing({}),
         "cache_state": "missing",
@@ -825,6 +1209,9 @@ def cursor_usage_diag() -> dict[str, Any]:
         "runs_cached": None,
         "model_count": 0,
         "models": [],
+        "hook_state": cursor_hook_state(),
+        "pending_completions": _pending_cursor_completions(),
+        "unread_sqlite_stores": unread_cursor_stores(),
     }
     with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
         if snap.state == "missing":
@@ -837,6 +1224,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         data = snap.data
     try:
         runs = _cursor_cached_runs(data)
+        _cursor_requests(data)
     except _ReadFailure as exc:
         return {**blank, "cache_state": "unreadable", "last_reason": exc.reason}
     models = sorted({r["model"] for r in runs.values()})
@@ -853,6 +1241,47 @@ def cursor_usage_diag() -> dict[str, Any]:
     }
 
 
+def _pending_cursor_completions() -> int | None:
+    """Count queued completions without rotating, locking or creating anything."""
+    total = 0
+    for path in (CURSOR_SPOOL_PATH, _cursor_spool_merging_path()):
+        try:
+            data = _read_bounded_bytes(path, CURSOR_SPOOL_MAX_BYTES)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            return None
+        total += sum(1 for line in data.splitlines() if line.strip())
+    return total
+
+
+def cursor_hook_state() -> str:
+    """Read enrollment without creating, locking or blocking on anything.
+
+    States: installed, missing, malformed, unreadable. The writer replaces the
+    file atomically, so an unlocked read sees the old or the new copy.
+    """
+    try:
+        data = json.loads(
+            _read_bounded_bytes(
+                CURSOR_HOOK_CONFIG_PATH, _CURSOR_CONFIG_MAX_BYTES, follow_symlinks=True
+            )
+        )
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    except (ValueError, RecursionError):
+        return "malformed"
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict) or data.get("version") != 1:
+        return "malformed"
+    stop = hooks.get("stop", [])
+    if not isinstance(stop, list):
+        return "malformed"
+    return "installed" if CURSOR_HOOK_ENTRY in stop else "missing"
+
+
 @dataclass(frozen=True)
 class HostReaderDiag:
     function: str
@@ -864,7 +1293,9 @@ class HostReaderDiag:
 HOST_READER_DIAGS = {
     "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex"),
     "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "grok"),
-    "cursor": HostReaderDiag("cursor_usage_diag", "complete_once", True, "Cursor via Conductor"),
+    "cursor": HostReaderDiag(
+        "cursor_usage_diag", "complete_once", True, "Cursor (Conductor + enrolled CLI)"
+    ),
 }
 
 

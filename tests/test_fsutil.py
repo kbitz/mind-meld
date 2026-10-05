@@ -210,13 +210,14 @@ class TestFsyncFd:
         assert all(op == fsutil.fcntl.F_FULLFSYNC for _fd, op in fcntl_calls)
         assert fsync_calls == []
 
-    def test_darwin_fullfsync_enotsup_falls_back_to_fsync(self, tmp_path, monkeypatch):
-        """On Darwin, F_FULLFSYNC returning ENOTSUP must fall back to os.fsync."""
+    @pytest.mark.parametrize("code", sorted({errno.ENOTSUP, errno.EINVAL, errno.EOPNOTSUPP}))
+    def test_darwin_fullfsync_unsupported_falls_back_to_fsync(self, tmp_path, monkeypatch, code):
+        """On Darwin, each documented "unsupported" F_FULLFSYNC errno falls back to os.fsync."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
         fsync_calls: list[int] = []
 
         def unsupported_fcntl(fd, op, *args):
-            raise OSError(errno.ENOTSUP, "not supported")
+            raise OSError(code, "not supported")
 
         def spy_os_fsync(fd):
             fsync_calls.append(fd)
@@ -430,3 +431,97 @@ class TestFlockAppendJsonl:
         # Forensic callers keep the never-break-the-sync contract.
         fsutil.flock_append_jsonl(target, [b'{"a":1}'], strict=False)
         assert stat.S_IMODE(target.stat().st_mode) == 0o666
+
+
+class TestRotatableSpool:
+    def test_append_never_lands_in_a_spool_rotated_while_it_waited(self, tmp_path, monkeypatch):
+        import fcntl
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
+        real_flock = fcntl.flock
+        rotated = []
+
+        def reader_rotates_first(fd, op):
+            if not rotated and op == fcntl.LOCK_EX:
+                rotated.append(fsutil.rotate_jsonl(spool, taken))
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(fsutil.fcntl, "flock", reader_rotates_first)
+        fsutil.append_rotatable_jsonl(spool, b'{"n":2}', max_bytes=1024)
+        assert rotated == [True]
+        assert taken.read_bytes() == b'{"n":1}\n'
+        assert spool.read_bytes() == b'{"n":2}\n'
+        assert stat.S_IMODE(spool.stat().st_mode) == 0o600
+
+    def test_append_reopens_when_a_new_spool_replaced_the_locked_one(self, tmp_path, monkeypatch):
+        import fcntl
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
+        real_flock = fcntl.flock
+        raced = []
+
+        def rotate_then_another_writer(fd, op):
+            if not raced and op == fcntl.LOCK_EX:
+                raced.append(fsutil.rotate_jsonl(spool, taken))
+                spool.write_bytes(b'{"n":3}\n')  # a second writer's fresh spool
+            return real_flock(fd, op)
+
+        monkeypatch.setattr(fsutil.fcntl, "flock", rotate_then_another_writer)
+        fsutil.append_rotatable_jsonl(spool, b'{"n":2}', max_bytes=1024)
+        assert taken.read_bytes() == b'{"n":1}\n'
+        assert spool.read_bytes() == b'{"n":3}\n{"n":2}\n'
+
+    def test_every_append_binds_the_directory_entry(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(fsutil, "fsync_dir", calls.append)
+        spool = tmp_path / "spool.jsonl"
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        assert calls == [tmp_path, tmp_path]
+
+    def test_rotation_never_sleeps_past_its_deadline(self, tmp_path, monkeypatch):
+        import fcntl
+        import time
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        fd = os.open(spool, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        slept = []
+        monkeypatch.setattr(fsutil.time, "sleep", slept.append)
+        try:
+            assert fsutil.rotate_jsonl(spool, taken, deadline=time.monotonic()) is False
+        finally:
+            os.close(fd)
+        assert slept == [0.0]
+
+    def test_append_isolates_a_torn_row_and_enforces_its_ceiling(self, tmp_path):
+        spool = tmp_path / "spool.jsonl"
+        spool.write_bytes(b'{"torn')
+        fsutil.append_rotatable_jsonl(spool, b'{"n":1}', max_bytes=1024)
+        assert spool.read_bytes() == b'{"torn\n{"n":1}\n'
+        with pytest.raises(fsutil.AppendSizeLimit):
+            fsutil.append_rotatable_jsonl(spool, b"x" * 2048, max_bytes=1024)
+        assert spool.read_bytes() == b'{"torn\n{"n":1}\n'
+
+    def test_rotation_skips_absent_busy_or_foreign_spools(self, tmp_path):
+        import fcntl
+
+        spool, taken = tmp_path / "spool.jsonl", tmp_path / "spool.jsonl.merging"
+        assert fsutil.rotate_jsonl(spool, taken) is False
+        fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+        fd = os.open(spool, os.O_RDONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # an append in progress
+        try:
+            assert fsutil.rotate_jsonl(spool, taken, retry_intervals=(0.01,)) is False
+        finally:
+            os.close(fd)
+        assert spool.exists() and not taken.exists()
+        spool.unlink()
+        os.mkfifo(spool)
+        with pytest.raises(OSError):
+            fsutil.rotate_jsonl(spool, taken)
+        with pytest.raises(OSError):
+            fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
