@@ -16,7 +16,7 @@ memory entry files, etc.) ``lcs_merge`` offers a 3-way merge using
 LCS(local, remote) as a synthetic ancestor so additive edits on either
 side land cleanly. Driven by the (m)erge prompt option in
 ``_resolve_interactive_loop`` and ``_prompt_conflict_choice`` -- never
-applied silently. See CLAUDE.md "Conflict-prompt UX" for the user-facing
+applied silently. See docs/invariants/conflicts.md "Conflict-prompt UX" for the user-facing
 contract.
 """
 

@@ -1264,6 +1264,11 @@ Your iCloud storage folder is untouched by all of the above. Delete it only when
 
 ## Development
 
+CI uses one job on `macos-latest` with Python 3.13. It runs
+`./bin/check --no-bootstrap` for the portable checks, verifies the real Keychain
+backend, and builds the wheel into a disposable venv for `mm --version` and
+`python -m mind_meld.cli` smokes. The pip cache is keyed on `pyproject.toml`.
+
 From a clone (no environment required):
 
 ```

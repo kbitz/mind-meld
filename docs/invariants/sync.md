@@ -20,6 +20,18 @@ Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatte
 
 ---
 
+## Shared JSON locking
+
+`lockedjson.py` (v0.11.14, extended v0.12.22) — extracted single-file flock R/M/W primitive shared by `upgrade.py`, `token_usage.py`, and `identity.py` (v0.11.17). Its read-only shared-lock snapshot serves dry-run planners without creating, rewriting, re-permissioning, or normalizing a cache; R/M/W remains the exclusive mutation path. `locked_json_snapshot` (v0.14.11) takes an optional `blocking=False` so a caller (Grok's diag read) can report contention as unknown immediately instead of waiting; existing planners keep the blocking default. Three contention modes: `block` / `raise` / `warn`. Do NOT route new flock-guarded JSON caches through ad-hoc fcntl calls; extend `lockedjson` if the contract needs to grow. `devices-write.lock` stays ad-hoc — its multi-file lock-on-sibling shape doesn't fit the single-file R/M/W contract.
+
+## Visible failures in automatic commands
+
+`ConfigError` (bad `config.toml`) surfaces as a one-line stderr message — not a silent exit. This is the visible-failure contract: truly unexpected errors still degrade silently via the generic `except Exception` fallback, but malformed config is loud so users don't wedge their background sync without noticing. Relies on `load_config` normalizing non-`ConfigError` exceptions (e.g. cyclic-symlink `.resolve()` failures) into `ConfigError` at the load boundary — do not bypass that by calling `_validate` / `_apply_defaults` directly from a new call site.
+
+**Load-bearing warnings reach stderr even in quiet mode (v0.8.1).** The visible-failure contract extends beyond `ConfigError` to a curated set of degradation signals that quiet-mode used to swallow: corrupt-manifest sidecar recovery, corrupt-manifest peer-fallback recovery, "no sync sources" misconfig in autopush, durability `fsync_dir` failure on pull, and per-file apply failures. Apply failures print one `mm: warning:` line per failed file plus the count line. Do NOT add a new `if not quiet:` gate around a warning that signals data-at-risk degradation — match the established pattern (always-stderr, prefixed `mm:`).
+
+**`autopush` writes a `no-sources` breadcrumb (v0.8.1)** when `get_sources(config)` returns empty, distinguishing "broken config no-op" from "nothing to push" no-op. Without this, `mm status` only sees `outcome: "success"` forever and monitoring on top of it never catches the wedge.
+
 ## Atomic write publication failures
 
 [`fsutil.py`](../../src/mind_meld/fsutil.py)'s `atomic_write_bytes` publishes at

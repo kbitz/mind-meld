@@ -342,6 +342,8 @@ A version bump merged to `main` triggers a release automatically. Keep
 unfinished release work on the feature branch; omitting a manual tag does not
 prevent publication.
 
+**PROGRESS row convention (load-bearing).** The PROGRESS.md row goes in the SAME PR as the `pyproject.toml` + `CHANGELOG.md` bump — not a workflow side-effect. The original v0.11.24 design tried to auto-append via `git push` from the workflow, which was rejected by branch protection ("Changes must be made through a pull request") on every release where the row wasn't already in the PR. v0.11.23 only "succeeded" because the row was pre-added in the PR and the script's idempotent-skip exited 0 before the push. v0.11.24 and v0.11.27 both hit the wall and shipped without rows. Lesson: a workflow that pushes to a protected branch is broken by definition; don't reintroduce that step. The row format mirrors what the old auto-append produced — CHANGELOG body lead paragraph (text from `## [version]` to first `### Section` or next `## [`), pipes escaped, single line, inserted directly after the `|---|---|---|` separator (newest at top). **The row is now CI-enforced** (Track 16A): `tests/test_docs_routing.py::test_every_changelog_version_has_a_progress_row` fails any PR that bumps the version without adding the row, enforced from 0.11.0 forward. That closes the recurrence the v0.11.24 auto-append design could not — a workflow that pushes to a protected branch is broken by definition, but a test in the PR is not. Still does NOT solve parallel-workspace version collisions (two open PRs both claiming the same version slot) — that remains deferred.
+
 ## Compatibility (1.x)
 
 1.0 freezes the interoperable storage/wire formats, command and flag names,

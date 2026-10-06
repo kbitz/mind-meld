@@ -1,4 +1,4 @@
-"""Doc-integrity pins: CLAUDE.md's invariant pointer table, and the
+"""Doc-integrity pins: the invariant routing table, and the
 hand-written files that must not drift (AGENTS.md, README, .github/).
 
 The table is the first thing an agent reads before editing a load-bearing
@@ -34,6 +34,7 @@ from mind_meld import errors, upgrade
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
 CLAUDE_MD = ROOT / "CLAUDE.md"
+ROUTING_MD = ROOT / "docs" / "invariants" / "README.md"
 
 
 def test_claude_md_is_a_symlink_to_agents_md() -> None:
@@ -42,6 +43,12 @@ def test_claude_md_is_a_symlink_to_agents_md() -> None:
     AGENTS.md; CLAUDE.md must stay the link."""
     assert CLAUDE_MD.is_symlink()
     assert CLAUDE_MD.resolve() == (ROOT / "AGENTS.md").resolve()
+
+
+def test_agents_md_preserves_routing_entrypoint_and_parallelism_cap() -> None:
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "<!-- roadmap:parallelism_cap=8 -->" in text
+    assert "[docs/invariants/README.md](docs/invariants/README.md)" in text
 
 
 def test_readme_uninstall_loop_keeps_the_opencode_skill_path() -> None:
@@ -108,7 +115,7 @@ def _imported_names(path: Path) -> set[str]:
 def _routing_citations() -> list[tuple[str, str]]:
     """(file, symbol) pairs cited in the pointer table."""
     out: list[tuple[str, str]] = []
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = ROUTING_MD.read_text(encoding="utf-8")
     for row in _ROW.finditer(text):
         cell = row.group("cell")
         marks = list(_CITATION.finditer(cell))
@@ -209,7 +216,7 @@ def test_citation_parser_is_not_vacuous(fname: str, rest: str, expected: list) -
 # single failure mode this file exists to prevent, and `_download_and_apply` is
 # a plausible candidate for a later extraction Track.
 #
-# Fix is one edit to CLAUDE.md: put the prose in its own `/`-chunk, i.e.
+# Fix is one edit to docs/invariants/README.md: put the prose in its own `/`-chunk, i.e.
 # ``cli.py:_download_and_apply` / (rel_path + base_path concatenation site)`.
 # This list must shrink to [], never grow.
 # Empty as of v0.12.21: the one offending row was rewritten to
@@ -226,7 +233,7 @@ def test_every_routing_row_resolves_at_least_one_symbol() -> None:
     over what the parser FOUND, so a row it found nothing in simply generates
     no test case and the suite still goes green.
     """
-    text = CLAUDE_MD.read_text(encoding="utf-8")
+    text = ROUTING_MD.read_text(encoding="utf-8")
     unparsed = []
     for row in _ROW.finditer(text):
         cell = row.group("cell")
@@ -584,7 +591,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
     table keyed on source file, so the new modules returned empty for the very
     agents about to edit them.
     """
-    table = CLAUDE_MD.read_text(encoding="utf-8")
+    table = ROUTING_MD.read_text(encoding="utf-8")
     for mod in (
         "resolveflow.py",
         "events_tail.py",

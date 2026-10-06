@@ -1,250 +1,84 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI tool for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, and configurable sync sources.
+Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, Cursor, and configurable sync sources.
 
 <!-- roadmap:parallelism_cap=8 -->
-Raised from the default 4 on 2026-08-14: work runs in parallel Conductor workspaces, so more Tracks can be genuinely in flight than a single-branch workflow assumes.
+Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
 
 ## Stack
-Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich.
+Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich, packaging.
 
 ## Key Principles
-- No API server. CLI talks directly to iCloud Drive via the local filesystem.
-- Single storage backend: local folder at `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, synced by iCloud.
-- **End-to-end encrypted.** All synced data (manifests, artifacts, and allowlisted agent context) is encrypted client-side with AES-256-GCM before touching storage. The storage layer never sees plaintext. This is a hard invariant — no code path may write unencrypted sync data to storage.
-- **Scoped sync.** Built-in sources are allowlisted: Claude Code syncs its `memory/` and `todos/` project data; Codex syncs its documented customizations; Grok syncs only hardcoded `skills/`, `commands/`, and `rules/`. Session databases, credentials, and whole-file settings that may contain credentials stay local.
-- **Truth-based manifests.** Manifests are complete snapshots of local state. Deletions propagate automatically — no separate prune step.
-- **Conflict resolution.** Detects and resolves iCloud and Dropbox-style conflict copies on manifest files. For source files with divergent local edits, INVERTED in v0.9.2: local stays at canonical, REMOTE bytes go to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` (Syncthing convention's actual direction — visible sidecar holds the surprising bytes; `v1` sits AFTER the timestamp, never as a `v0-` prefix). Mtime-skip: if the local file is newer than remote, pull leaves it alone. Pre-v0.9.2 conflict files are migrated to a `v0-` prefix on first lock-protected discovery (mm pull / mm resolve only); resolve dispatches by filename prefix (`v0-` = pre-inversion semantics, no prefix / `v1` = post-inversion). Sidecar `st_mtime` is the peer clock (do not read it as sidecar age); filename timestamp is birth.
-- **Sync log.** After pull, writes `.mind-meld-log.md` per project so Claude Code knows what changed from other machines.
-- Manifest-based diffing: SHA-256 hash every file, only upload/download changes.
-- Content-addressed storage: blobs stored by hash, not by path.
-- Gzip compression before encryption. Versioned blob format (0x02).
+- No API server. The CLI talks directly to iCloud Drive through the local filesystem.
+- Single storage backend: `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`.
+- **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are encrypted client-side with AES-256-GCM before touching storage. No plaintext sync data may reach storage.
+- **Scoped sync.** Built-in sources are allowlisted. Session databases, credentials, and whole-file settings that may contain credentials stay local.
+- **Truth-based manifests.** Complete snapshots of local state propagate deletions automatically; there is no separate prune step.
+- **Conflicts preserve local canonical bytes and remote sidecars.** Newer local files are skipped; legacy direction and clock rules live in the conflict invariants.
+- After pull, `.mind-meld-log.md` records changes from other machines per project.
+- SHA-256 manifest diffing transfers only changes; blobs are content-addressed and gzip-compressed before encryption (format 0x02).
 
 ## Planning
 
-Apply these checks when drafting or draining roadmap work. The admission gates
-live in [docs/ROADMAP.md](docs/ROADMAP.md); their rationale is retained in
-[constraint history](docs/roadmap-shipped.md#planning-constraint-history).
+Admission gates: [docs/ROADMAP.md](docs/ROADMAP.md); rationale: [constraint history](docs/roadmap-shipped.md#planning-constraint-history).
 
-- **Verify premises against current HEAD.** Inspect the cited code or artifact this turn. Discharge an already-delivered approved goal; kill a disproved or obsolete work order rather than emitting it again.
-- **Establish demand before pricing repairs.** Probe current use and artifact liveness. A cold artifact on one Mac establishes only that Mac's inactivity, not that nobody uses the feature; repair or retirement must follow the supported product scope.
-- **Investigate the forward action before adding its inverse.** Fix unwanted automatic behavior at its cause. Removal or revocation controls remain valid when they serve a demonstrated user need.
-- **Name consumers for persisted fields.** A card adding a wire, cache or log field must name its reader or the Track delivering that reader, including the Track's title so a future renumber does not lose the dependency.
-- **Inspect cache shape when changing a reader.** Trace normalization, retained fields and migration gates as well as runtime behavior. A source field that the cache discards cannot reach a downstream consumer.
-- **Prove counter semantics before pricing, summing or trending.** Inspect every contributing reader's source schema and normalization; inclusive/disjoint input semantics belong to the reader, not the model ID. Follow the counter-semantics section of [events/retro invariants](docs/invariants/events-retro.md).
-- **Read current audit limits.** Inspect the roadmap audit's reported effective SIZE limits. To check machine-local file and weight caps, use the installed gstack-extend's `bin/config get roadmap_max_files_per_track` and `bin/config get roadmap_max_session_weight`; environment overrides also affect the effective limits. Historical values from another Mac are not project limits.
+- Verify premises against current HEAD and cited artifacts this turn. Discharge delivered goals; kill disproved or obsolete work orders.
+- Establish demand before pricing repairs. One Mac's cold artifact proves only that Mac's inactivity; repair or retirement must follow supported product scope.
+- Investigate unwanted automatic behavior before adding its inverse; removal controls need demonstrated demand.
+- Name a reader for every persisted field, or the delivering Track and its title.
+- Trace normalization, retained cache fields, and migration gates when changing readers.
+- Prove inclusive/disjoint counter semantics for every reader before pricing, summing, or trending; see [events/retro invariants](docs/invariants/events-retro.md).
+- Read the roadmap audit's effective SIZE limits. Machine-local caps come from installed gstack-extend's `bin/config get roadmap_max_files_per_track` and `bin/config get roadmap_max_session_weight`, with environment overrides. Historical values from another Mac are not project limits.
 
-## Source Layout
+## Before editing code
 
-One line per module, with what lives there. Grep this table for a filename
-before grepping the code. (It used to be a `{a,b,c}.py` brace-expansion
-one-liner, which does not match a search for `resolveflow.py`.)
+Before editing anything under `src/`, read [docs/invariants/README.md](docs/invariants/README.md), find the file or function you're touching, and read every invariant doc it names. This is the authoritative module map and routing table. For multiple areas, read all matching docs. Shortcut: `rg -l '<symbol>' docs/invariants/*.md`.
 
-| Module | Owns |
-|---|---|
-| `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
-| `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
-| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
-| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
-| `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
-| `devices.py` | Device registry, short-id generation and lookup |
-| `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection; (64A) size- and origin-guarded `write_push_event` (`EventAppendSkipped`, `GIT_SNAPSHOT_ORIGIN_INIT`) |
-| `token_usage.py` | Session-jsonl walker, token + skill caches, pricing, incremental resume |
-| `host_usage.py` | Local Codex and Grok (`updates.jsonl` terminal records, opt-in) usage readers, the Cursor reader (Conductor `runs.ndjson` plus standalone completions), strict host-family classifier, and isolated host-token caches; also edits mm's single `stop` entry in the third-party `~/.cursor/hooks.json` (`configure_cursor_hook`) |
-| `host_skill_discovery.py` | Read-only `grok inspect --json` probe for `mm diag` (`host_skill_discovery` sibling key). Not a `skill_link` registry. |
-| `gitenv.py` | Repository-local Git environment scrub and stable message locale |
-| `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
-| `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
-| `upgrade.py` | Release check, nudge, transition hook; (v1.3.0) self-update: install classification (`detect_install`), the two pipx subprocess seams, the one-attempt-per-release gate, `update_or_nudge`; `mm update` progress capture: the private PTY for the in-place upgrade (`_PipxOutputStream`), the best-effort `_ProgressRelay`, the foreground hangup guard and `_final_frames` |
-| `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
-| `pullhistory.py` | Forensic per-file pull log |
-| `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
-| `synclog.py` | Per-project `.mind-meld-log.md` writer |
-| `sidecar.py` | Manifest sidecar read/write |
-| `attemptlog.py` | (65A) Local attended-capture outcome holder, atomic private record, closed-vocabulary validation, and write-free attempt projection/render states |
-| `lockfile.py` | The mm lockfile |
-| `lockedjson.py` | Single-file flock read/modify/write primitive |
-| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), the rotatable spool pair `append_rotatable_jsonl` / `rotate_jsonl` (identity-checked append, rename-aside rotation), `fsync_dir` |
-| `errors.py` | Exception hierarchy |
-| **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
-| **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
-| **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
-| **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the host-usage capture, (61A) shared host-only capture/warm helper, (31A) reader-scoped failure isolation, (30A) git-only recapture, and (57A) the later-reader grace floor with full-reader warm/retry |
-| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
-| **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
-| `safety.py` | Peer-controlled string sanitization |
-| `conflictdiff.py` | Pure leaf renderers for the conflict prompts |
-| `storage/{local,keys}.py` | Local backend + validated storage-key construction |
+## Cross-cutting rules
 
-**Import direction (Track 16A, load-bearing).** `cli` imports the six modules
-above; none of them imports `cli`, at module scope *or* function scope. The
-leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
-`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`, `updateprogress`) import nothing from the CLI layer at all. Enforced by
-`tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
-function-local shadowing, so lint alone will never catch a re-introduced cycle.
-`aggregator.py` reaches the CLI as a **subprocess**
-(`sys.executable -m mind_meld.cli devices --format json`), never as an import.
-
-Call moved symbols module-qualified (`resolveflow.foo(...)`), not via
-from-import. A from-import binds `cli`'s own global, so patching the owner in a
-test would not reach it — the dead-alias trap in reverse.
-
-CONFLICT-TELEMETRY (`conflictlog.py`, the `_conflict_feature_dict` / `_emit_conflict_decision` / `_conflict_rel_path` helpers, and the hidden `mm conflict-log-backfill` command) was **removed in Track 16A**. It shipped 2026-07-30 as a disposable labeled-dataset collector for the deferred Phase 2 auto-resolver. It was ripped out ahead of the `resolveflow.py` extraction rather than moved six weeks before its own deletion. Original design: `~/.gstack/projects/kbitz-mind-meld/kb-kbitz-conflict-resolution-log-design-20260730.md`.
-
-**Correction (v0.12.51).** Track 16A justified the removal by claiming the collector "collected zero decisions" and that `~/.config/mind-meld/conflict-decisions.jsonl` "never existed on the fleet." **Both claims were false** — the file exists and holds 9 decisions from two `mm resolve` sessions on 2026-08-10/11. Nobody looked before deleting. Reading them cancels the Phase 2 auto-resolver far more firmly than the false premise did: `choice: remote` in 9/9 is **tautological**, because mtime-skip means the conflict path only fires when remote is newer-or-equal, so `newer_side` can only ever be `remote`. There is no preference to learn from that field, and 8/9 records were `similarity: 0.0` single-line JSON — the derived-cache noise v0.12.51 excludes from sync outright. **Do NOT reintroduce a collector**, and if a fifth attempt is ever proposed, the bar is not "a trigger that demonstrably fires" but a mechanism whose output is not fixed by construction. See `docs/invariants/sync.md` "Generated files are not sync data" for the analysis that replaced it.
-src/mind_meld/skills/retro_fleet/{SKILL.md,aggregator.py,__init__.py}  (Group 8 v0.11.0 — Claude Code skill orchestrator + Python aggregator. Dir on disk is `retro_fleet` (Python identifier, importable as `mind_meld.skills.retro_fleet`); the symlink installer creates `~/.claude/skills/retro-fleet` (hyphen — Claude Code naming convention). Since v0.12.38 that link points at the mm-owned store `~/.local/share/mind-meld/agent-skills/retro-fleet/`, which holds a COPY of `SKILL.md` only — never at this package dir, whose path dies with the interpreter that ran `mm`. `aggregator.py` stays in the wheel and is reached through `cli.py:retro_fleet_cmd`, so do NOT add it to the store. SKILL.md invokes the aggregator via `mm retro-fleet <window>` (typer wrapper at `cli.py:retro_fleet_cmd`, v0.11.22) — NOT `python -m mind_meld.skills.retro_fleet.aggregator`, because pipx installs hide mind_meld from any interpreter outside the pipx venv and macOS systems often only have `python3` (not `python`) on PATH. Ships via `packages = ["src/mind_meld"]` — do NOT add hatchling `force-include` for this subtree, it would double-ship.)
-
-`safety.py` (v0.11.1, extended v0.14.4 / v0.14.6, Track 52A) — peer-controlled string sanitization (`safe_str`, `safe_text`, `strip_terminal_escapes`, `safe_terminal_str`); cli.py re-exports `safe_str` / `safe_text` / `strip_terminal_escapes` for backwards compat. New tests should import from `mind_meld.safety` directly. Public `strip_terminal_escapes` / `safe_str` / `safe_text` guarantee no residual ESC (U+001B) or C1 (U+0080–U+009F) after grammar stripping; this is not an all-control guarantee (LF/HT remain in diff Text.plain). Use `safe_terminal_str` for single-line plain stderr (printable ASCII notation of residuals). Display text is not a filesystem identity or a shell argument. See `docs/invariants/init-devices.md`.
-
-`conflictdiff.py` (v0.11.1, extended v0.12.10 / v0.12.31 / v0.12.51) — pure leaf primitives for the conflict prompts (`render_prompt`, `render_banner`, `render_capped_diff`, `count_divergent_lines`, plus v0.12.10 timestamp/recency: `format_ts`, `format_age_delta`, `newer_side`, `render_time_line`, `render_verdict`, plus v0.12.51 `merge_has_line_structure` — the `(m)erge` suppression predicate both prompt sites AND into `merge_available`); site-level dispatch stays at each call site. The v0.12.10 `(n)ewer` shortcut is `mm resolve`-only and remaps to the existing `(l)`/`(r)` dispatch (NOT a new apply branch); the inline prompt is display+verdict only because `_apply_incoming_file` already skips when local is newer. See `docs/invariants/conflicts.md`.
-
-`lockedjson.py` (v0.11.14, extended v0.12.22) — extracted single-file flock R/M/W primitive shared by `upgrade.py`, `token_usage.py`, and `identity.py` (v0.11.17). Its read-only shared-lock snapshot serves dry-run planners without creating, rewriting, re-permissioning, or normalizing a cache; R/M/W remains the exclusive mutation path. `locked_json_snapshot` (v0.14.11) takes an optional `blocking=False` so a caller (Grok's diag read) can report contention as unknown immediately instead of waiting; existing planners keep the blocking default. Three contention modes: `block` / `raise` / `warn`. Do NOT route new flock-guarded JSON caches through ad-hoc fcntl calls; extend `lockedjson` if the contract needs to grow. `devices-write.lock` stays ad-hoc — its multi-file lock-on-sibling shape doesn't fit the single-file R/M/W contract.
-
-`token_usage.py` (v0.11.14, extended v0.11.24 / v0.11.27) — walks Claude Code session jsonls (parent + subagents) in ONE I/O pass producing two views: per-jsonl `message.usage` totals AND per-jsonl `tool_use` Skill-name counts. Both views land in the flock-guarded cache at `~/.config/mind-meld/session-tokens.json` (`by_day` + `skills_by_day` per entry). Subagent jsonls contribute to the parent project's token AND skill totals (parent attribution), but do NOT bump `sessions` / `total_kb` / `last_session_at`. The aggregator slices `tokens_by_day` and `skills_by_day` to the retro window. GC hook in `mm gc` reaps cache entries whose underlying jsonl is gone OR whose most recent `by_day` key is more than 90 days old. Mixed-fleet mode: aggregator's field-presence sniff flags pre-v0.11.14 peers OR cold-cache devices into `pre_token_peers`; both pre-v0.11.27 peers AND v0.11.27+ peers whose skill walk was skipped this push (cold cache + autopush, or warn-mode flock contention) land in `pre_skills_peers`. **D4 discriminator (load-bearing):** `pre_skills_peers` uses `"skills_by_day" not in proj` (key-absence), NOT a falsy-check — distinguishes the union "absent on the wire" cases from sessions that simply had no skill activity (KEY-PRESENT-VALUE-EMPTY). Wire genuinely can't tell pre-v0.11.27-peer apart from skipped-walk; the "Skills incomplete" breadcrumb in `aggregator.format_retro` admits the ambiguity, mirroring `pre_token_peers`'s "OR with cold token cache" phrasing (v0.12.4 post-/plan-eng-review 2026-05-10 — alternative "always set `{}` in events.py" fix was rejected because latest-snapshot-wins in `aggregator.aggregate_sessions` — the `latest = filtered_latest` reduction — would silently overwrite populated skill data with synthetic empty on warm-then-cold push ordering). Cache shape upgrade gate (D2): pre-v0.11.27 entries are detected by `"skills_by_day" not in entry` on the size/mtime cache hit and re-walked once; NOT a `CACHE_VERSION` bump (would invalidate token data). Cost estimation (v0.12.13, extended v0.12.52): `resolve_prices` is the ONLY predicate for "is this model priced" — exact `PRICING` entry wins, else the Claude `MODEL_FAMILY_TIERS` fallback, else an exact `PRICING_FAMILY_BY_MODEL` alias resolves through `VENDOR_FAMILY_TIERS`, else unpriced. Both consumers (`estimate_cost` and `aggregator._unpriced_token_summary`) share it; do NOT reintroduce a second `model in PRICING` test. `model_family` matches positionally against a literal allowlist because peer-controlled ids now drive a pricing decision. Public helpers (Track 10A v0.11.24): `TOKEN_FIELDS` constant + `zero_day_bucket` / `zero_model_bucket` factories + `merge_usage_bucket` / `merge_by_model` (single-bucket) + `merge_token_days` / `merge_skill_days` (whole per-day map, v0.12.15) consolidate the bucket-merge sites (token_usage, events, aggregator); `lock_and_get_files` context manager owns cache-shape invariants for the cli's events tail/backfill. Adding a 5th token field is a one-line change to `TOKEN_FIELDS`. Do NOT hand-roll a per-day merge loop at a new call site — `test_events_aggregator_uses_the_shared_helpers` fails the build if `events.py` regrows one. Incremental resume (v0.12.15): `walk_jsonl_segment` is the canonical parser (`walk_jsonl_buckets` is now a trimming full-file shim over it) and reads in BINARY mode so byte offsets are real and a bad UTF-8 byte skips one line instead of raising through the whole events tail. Cache entries carry `offset` / `head` / `tail_msg_ids` so a warm walk costs O(bytes appended since last push), not O(file size) — this is what fixed the recurring `mm: notice: events tail budget exceeded`; the walk budgets were NOT raised. `_resume_plan` is the single gate on using those fields and falls back to a full walk on any doubt. Absence of `offset`/`head` is the pre-v0.12.15 version discriminator (NOT a `CACHE_VERSION` bump, same reasoning as the D2 skills gate). Any change here must keep merged-incremental output identical to a single full walk. See `docs/invariants/events-retro.md`.
-
-`identity.py` (v0.11.17) — owns the running machine's locally-known author-email set behind a flock-protected 7d-TTL cache. Push tail and retro render share state via this cache. `aggregator.gather_author_emails()` is now a thin shim. See `docs/invariants/events-retro.md`.
-
-Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`) which validate components at construction time — a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. Do NOT build storage keys with raw f-strings at new call sites.
-
-Version source of truth: `pyproject.toml` (read by `__init__.py` via `importlib.metadata.version("mind-meld")`, fallback `"0.0.0+dev"` for uninstalled source-tree runs). No `VERSION` file.
+- Imports flow from `cli` to extracted modules, never back; leaves import nothing from the CLI layer. Call moved symbols module-qualified (`resolveflow.foo(...)`), not via from-import, so owner patches reach callers. See the routing README for the exact module list; `tests/test_module_boundaries.py` enforces it.
+- `aggregator.py` reaches the CLI only as a subprocess, never an import.
+- Build storage keys only through validated helpers in `storage/keys.py`, never raw f-strings.
+- Use `lockedjson` for flock-guarded JSON caches; extend it instead of adding ad-hoc fcntl. The multi-file `devices-write.lock` is the exception.
+- Sanitize peer-controlled display strings through `safety`; use `safe_terminal_str` for single-line plain stderr. Display text is not a filesystem identity or shell argument.
+- Never quiet-gate data-at-risk warnings. Normalize config failures at `load_config`; record every events-tail degradation in `PushResult.events_degradations`, not just stderr.
+- Do not reintroduce the conflict collector or its cancelled auto-resolver; see [conflict invariants](docs/invariants/conflicts.md#collector-removal-and-auto-resolver-cancellation).
+- Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml` and `CHANGELOG.md` bump. Never restore workflow pushes to protected main. Row format and release rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade).
+- Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`. Update integration tests' `COMMAND_INTENTS62` for every new command; previews and inspection must preserve their write boundaries.
 
 ## Testing
-`./bin/check` is the verification entry point. It bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest, in that order (cheap gates first). Default pytest scope is `tests/`. pytest. Use tmp_path for local backend.
+
+`./bin/check` is the verification entry point: bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest (default scope `tests/`). Use `tmp_path` for local backends.
 
 ```
 ./bin/check                         # full portable checks
 ./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
 ```
 
-A scoped pytest still lints the whole repo — that is intended (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Cards describe verification *scope*; they must not know where Python lives.
-
-**Card convention:** every roadmap `verify:` field is `./bin/check <scope>`. `/roadmap`'s card template has no `verify:` field, so the drafting agent copies this documented command on every regeneration. Do not write bare `pytest` or `./.venv/bin/...` into cards.
-
-Lint/format enforced via ruff (pinned to `ruff==0.15.12` in `dev` deps). `./bin/check` runs `ruff check .` and `ruff format --check .` before pytest. CI runs those same two as steps inside the single `ci` job (not a separate `lint` job) and will block merges on drift. Rule set: `E`/`F`/`W`/`I` (isort enforcement).
-
-The PYTEST_CURRENT_TEST guard on `crypto.store_passphrase_in_keyring` (v0.11.11) is load-bearing — see `docs/invariants/init-devices.md` for the rationale.
+`--tests` skips lint; `--lint` skips pytest. Ruff is pinned in dev dependencies and enforces E/F/W/I. Every roadmap card's `verify:` field must use `./bin/check <scope>`; cards must not encode where Python lives. The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing; see [init/device invariants](docs/invariants/init-devices.md).
 
 ## CI
-GitHub Actions at `.github/workflows/ci.yml`. Single job on `macos-latest` + Python 3.13 (mind-meld is a macOS tool — multi-OS + multi-Python matrix is theater for this project). Local and CI share one command for the portable checks (`./bin/check`: ruff check, ruff format --check, pytest). They do not run the same complete qualification: CI also asserts the real Keychain backend (macOS-runner provisioning) and builds the wheel into a fresh disposable venv for `mm --version` / `-m` smokes. pip cache keyed on `pyproject.toml`. No `paths:` filter — every PR runs CI (avoids the branch-protection pending-forever footgun for path-skipped required checks).
 
-`.github/workflows/release.yml` (v0.11.24+, PROGRESS auto-append removed v0.11.26) — auto-tag + auto-create-Release on push to main, gated on changes to `pyproject.toml` or `CHANGELOG.md`. Each step independently idempotent (re-run-safe after partial failure). Tag detection branches on `git rev-parse "$tag"` and release detection on `gh release view "$tag"`. Bot identity is `github-actions[bot]`. The "Verify PROGRESS.md row exists" tail step emits a warning (not a failure) when the row is missing, so the release still ships and you see the gap.
-
-**PROGRESS row convention (load-bearing).** The PROGRESS.md row goes in the SAME PR as the `pyproject.toml` + `CHANGELOG.md` bump — not a workflow side-effect. The original v0.11.24 design tried to auto-append via `git push` from the workflow, which was rejected by branch protection ("Changes must be made through a pull request") on every release where the row wasn't already in the PR. v0.11.23 only "succeeded" because the row was pre-added in the PR and the script's idempotent-skip exited 0 before the push. v0.11.24 and v0.11.27 both hit the wall and shipped without rows. Lesson: a workflow that pushes to a protected branch is broken by definition; don't reintroduce that step. The row format mirrors what the old auto-append produced — CHANGELOG body lead paragraph (text from `## [version]` to first `### Section` or next `## [`), pipes escaped, single line, inserted directly after the `|---|---|---|` separator (newest at top). **The row is now CI-enforced** (Track 16A): `tests/test_docs_routing.py::test_every_changelog_version_has_a_progress_row` fails any PR that bumps the version without adding the row, enforced from 0.11.0 forward. That closes the recurrence the v0.11.24 auto-append design could not — a workflow that pushes to a protected branch is broken by definition, but a test in the PR is not. Still does NOT solve parallel-workspace version collisions (two open PRs both claiming the same version slot) — that remains deferred.
+`.github/workflows/ci.yml` runs portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13; see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
 
 ## Commands
+
 mm --version | init | push | pull | status | diag | devices | diff | gc | sources | conflicts | resolve | recover | log | migrate-config | autopull | autopush | enable-source | disable-source | reconfigure-sources | refresh-identity | install-skills | retro-fleet | recapture | update | cursor-agent (plus the hidden `capture-cursor-usage` hook)
 
-Update (v1.3.0): `mm update` installs the latest release through pipx and needs no config or passphrase. `push`, `pull`, `autopull` and `autopush` do the same at their tail when `[upgrade] auto_install` is on (default). The automatic path runs ONLY the in-place `pipx upgrade`, and only on an install recorded at `@latest`; `pipx install --force` deletes the venv when it fails, so it is reachable only from `mm update`. A failed update never changes a sync's exit code. See `docs/invariants/auto-upgrade.md`.
+Attended `mm push` refreshes consented host usage under the lock. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Autopush stays change-gated and never warms; previews never capture. Flags and exit codes: README and SPEC.
 
-Push: attended `mm push` refreshes consented host usage automatically (64A), under the lock after final source resolution. Usage-only publication appends one host row, preserves activity counts/cursor, and skips auto-GC; user-source byte, mtime or selection changes capture activity once. Exit 0 means content sync succeeded regardless of capture outcome; verify recorded capture/publication with `mm status`. Capture failures warn and continue content sync without a second reader attempt. Exit 1 means sync or required maintenance stopped; exit 2 means invalid arguments. Autopush remains change-gated and never warms; previews never capture. See `docs/invariants/events-retro.md`.
+## Auto Commands
 
-Push flag: `--dry-run` (v0.14.10). Changes nothing except the local lock file — no uploads, config writes, pull-history rows, upgrade checks, or new directories; reports the setup a real push would still perform instead of performing it. A missing default mm-events root or event file is previewed as a deletion; a missing custom mm-events root is warned about and skipped for that push without new tombstones. Exit codes: 0 completed, 1 stopped, 2 usage error. See `docs/invariants/sync.md` and `docs/invariants/init-devices.md`.
-Pull flag: `--conflict-mode {prompt|keep-both|fail}` (default `keep-both`). `prompt` asks per-file; `fail` preflights via `pullplan` and exits 3 before applying any file if a conflict or local failure is predicted; combine with `--dry-run` for a write-free CI gate. Replaces the old `--no-prompt` / `--resolve-interactive` pair (v0.6.2 BREAKING).
-GC flags: `--dry-run` (preview orphan blobs plus retention candidates without mutation; each executed reaper reports candidates, repairs, and skips); `--conflicts` (also reap `.sync-conflict-*` copies older than 30 days — reapable ONLY when the conflict converged, i.e. canonical exists and its bytes are identical; live, missing-canonical and unhashable sidecars are never reaped at any age, see `retention.py:_is_live_conflict`).
-Log flags: `--source NAME`, `--since DATE`, `--action {written|merged|skipped|conflicted|excluded|uploaded|failed}`, `--verb {pull|push}`, `--limit N`, `--format {jsonl|table}`.
-Migrate-config flags: `--yes`, `--dry-run`. Idempotent: appends missing recommended `exclude_patterns` to existing `[[sync.sources]]` entries; preserves user-customized globs.
+- `autopull` / `autopush` never prompt, are quiet on the happy path, and exit silently when uninitialized or unchanged.
+- Malformed config emits a one-line stderr error; data-at-risk warnings remain visible in quiet mode. Unexpected errors degrade gracefully.
+- `autopull` reports per-file apply failures and counts. `autopush` records `no-sources` and `degraded` breadcrumbs so `mm status` can expose failures.
+- Detailed failure contracts: [sync invariants](docs/invariants/sync.md) and [events/retro invariants](docs/invariants/events-retro.md). Integration snippets: README.
 
-Previews (62A): `push`, `pull`, `gc`, and `recapture` allow only the local lock;
-`migrate-config --dry-run` and `diff` take no lock. See README’s Previews table.
-Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`.
-`COMMAND_INTENTS62` in integration tests classifies all 26 commands and audits
-every preview/inspection with exact status-seed and author-filtered identity
-cache exemptions. Never add a command without updating that intent table.
+## Where detail lives
 
-## Invariant pointer table
-
-Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant file BEFORE editing the listed code. The tables below are file-path-keyed routing rules — match the file or function you're about to touch and read the named invariant doc(s) first.
-
-| If you're editing… | READ FIRST |
-|---|---|
-| `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `_publication_remedy` / `push` (attempt finally) / `aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
-| `config.py:UsageCaptureReadiness` / `usage_capture_readiness` / `usage_capture_remedy` / `cli.py:_reader_capture_readiness` / `_usage_capture_needs_upgrade` / `_usage_capture_remedy` / `_print_usage_push_mode` / `_push_result_or_none` / `PushResult.content_changed` / `PushResult.content_files` / `PushResult.content_accepted` / `PushResult.host_usage_published` / `events.py:GIT_SNAPSHOT_ORIGIN_INIT` / `write_push_event` (batch origin guard) / `events_tail.py:_capture_event_snapshots` (`origin`) / `_run_events_tail` (`capture_activity`) / `cli.py:_push_core` (`attended`, `host_row_appended`, `capture_activity`, content gate) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
-| `pullplan.py` / `cli.py:_plan_pull` / `_preflight_conflicts` / `_print_pull_prediction` / preview completion/refusal constants / `diff_cmd` exclude filtering | `docs/invariants/sync.md` |
-| `seen_sources.py:read` / `_read_under_lock` / status seed recovery and exemptions | `docs/invariants/sync.md` |
-| `cli.py:_capture_attended_usage` / `_report_usage_publication` / `_read_capture_rows` / `_host_publication` / `_print_host_publication` / `_notice_recapture_host_usage` / `events.py:latest_event_rows` / `project_host_publication` / `capture_revision_in_manifest` / `recorded_row_revision` / `events_tail.py:_capture_host_snapshot` / `skills/retro_fleet/aggregator.py:ATTENDED_USAGE_MIN_VERSION` / `_attended_usage_remedy` / `local_host_capture_candidate` / `_host_row_order_key` / `_accept_host_row_at` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
-| `fsutil.py:flock_append_jsonl` / `AppendSizeLimit` / `events.py:write_push_event` (strict append, `EventAppendSkipped`, size guard) / `cli.py:_push_core` (inline manifest acceptance) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
-| `cli.py:_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests` | `docs/invariants/sync.md` |
-| `cli.py:_download_and_apply` / (rel_path + base_path concatenation site) | `docs/invariants/sync.md` |
-| `cli.py:_ApplyReporter` / `_first_existing_ancestor` / `_pull_one_source` / `_record_source_bookkeeping` / `_fsync_touched_parents` / `_PerSourceResult` / `_print_pull_summary` / `pullplan._predict_pull_outcome` (publication ledger, recovery, and count wording) | `docs/invariants/sync.md` |
-| `cli.py:_warn_apply_failure` / `_print_apply_warning` / `errors.py:PULL_FAILURES_URL` (plain stderr uses `safety.safe_terminal_str` on every dynamic field) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
-| `cli.py:_ApplyReporter` / (publication-time deferred-bump invalidation) | `docs/invariants/conflicts.md` |
-| `cli.py:autopull` / `status` (failed-file count and breadcrumb detail) | `docs/invariants/sync.md` |
-| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` | `docs/invariants/sync.md` |
-| `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
-| `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
-| `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
-| `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
-| `conflictmtime.py:_restore_mtime_best_effort` / `_MTIME_RESTORE_MAX_SKEW_SECONDS` (future-clamp) | `docs/invariants/sync.md` |
-| `cli.py:_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename` / `_filter_excluded_paths` | `docs/invariants/conflicts.md` |
-| `retention.py:_gc_old_conflict_files` / `_is_live_conflict` | `docs/invariants/conflicts.md` |
-| `resolveflow.py:_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
-| `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
-| `cli.py:_record_inline_bump` / `_invalidate_inline_bump` / `_drain_inline_bumps` / `_CANONICAL_WRITE_OUTCOMES` / `pending_inline_bumps` plumbing through `_pull_core` / `_pull_one_source` / `_download_and_apply` (outcome-gated invalidation) | `docs/invariants/conflicts.md` |
-| `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict` / `merge_has_line_structure`) / `merge.py:lcs_merge` / `merge_jsonl` / `_extract_ts` / `manifest.py:_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_v1_conflict_filename` / either prompt site's `merge_available` computation | `docs/invariants/conflicts.md` |
-| `cli.py:_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc` / (its peer-controlled blob-key prints) | `docs/invariants/init-devices.md` |
-| `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
-| `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
-| `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
-| `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
-| `upgrade.py:cached_upgrade_view` / `cli.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |
-| `cli.py:_detect_case_insensitive_fs` / `_detect_pull_case_collisions` | `docs/invariants/sync.md` |
-| `cli.py:_get_config` / `_init_crypto_session` / `_maybe_prompt_migration` (`read_only=` / `dry_run=` gates) / `crypto.py:fetch_crypto_init` / `CryptoInitRepairPlan` (pure fetch and bound repair plan) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
-| `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_prepare_recapture` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |
-| `events_tail.py:_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_GRACE_MS` / `WARMABLE_HOST_READERS` / `events.py:make_host_usage_snapshot` / `HostUsageSnapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES` / `config.py:HOST_USAGE_BUDGET_MAX_MS` | `docs/invariants/events-retro.md` (host-usage-snapshot section) |
-| `cli.py:PushResult.events_degradations` / the `autopush` breadcrumb outcome / `_breadcrumb_staleness_suffix` | `docs/invariants/events-retro.md` |
-| `events.py:_read_cwd_from_latest_jsonl` / `_iter_mm_push_objs` / `_scan_one_project` cwd-scan site / `walk_git_projects` future-collection blocks / `token_usage.is_cache_cold` / `token_usage.iter_bounded_lines` / `pullhistory._yield_lines` | `docs/invariants/events-retro.md` (tolerant-binary-reads + one-cwd-scan sections) |
-| `skill_link.py:SkillTarget` / `SkillInstallResult` / `_ensure_retro_skill_link*` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_marker_dir` / `_marker_exists` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `_refuse_real_home_under_pytest` / `skill_targets` | `docs/invariants/events-retro.md` |
-| `skill_link.py:_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `_store_is_healthy` / `_read_store_meta` / `_reject_payload_symlink` / `_store_publish_lock` / `_legacy_shape` / `_points_at_store` / `_symlink_lives` / `_replace_symlink` | `docs/invariants/events-retro.md` |
-| `skill_link.py:diagnose_skill_links` / `_diagnose_one` / `render_skill_status` / `_emit_status_notice` / `BROKEN_SKILL_STATUSES` / `SkillInstallStatus` | `docs/invariants/events-retro.md` |
-| `skill_link.py:consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` | `docs/invariants/events-retro.md` |
-| `config.py:_validate_skills` / `_validate_str_list` | `docs/invariants/events-retro.md` |
-| `cli.py:install_skills_cmd` / `retro_fleet_cmd` (typer shells only) | `docs/invariants/events-retro.md` |
-| `cli.py:status` / `diag` / `_collect_diag_state` (their `skill_link.diagnose_skill_links` consumers) | `docs/invariants/events-retro.md` |
-| `host_skill_discovery.py:probe_grok_skill_discovery` | `docs/invariants/events-retro.md` |
-| `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
-| `cli.py:cursor_agent` / `capture_cursor_usage` / `_toggle_cursor_usage` / `_RawArgsCommand` / `_forwarding_signals` / `host_usage.py:configure_cursor_hook` / `record_cursor_usage` / `cursor_cli_model` / `cursor_hook_state` / `_take_cursor_spool` / `_fold_cursor_spool` / `fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` | `docs/invariants/events-retro.md` (standalone Cursor capture) and `docs/invariants/sync.md` (atomic write publication failures) |
-| `cli.py:recapture` / `events_tail.py:_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` |
-| `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_is_live_conflict` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
-| `gitenv.py:scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS` / `events.py:_walk_one_repo` / `_origin_remote_url` / `identity.py:_gather_global_email` / `_gather_per_repo_emails` / `read_cached_identities` / `_normalize_cache` | `docs/invariants/events-retro.md` |
-| `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
-| `host_usage.py` (incl. `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `_count_two_level_ledgers` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry`) | `docs/invariants/events-retro.md` |
-| `host_usage.py:_grok_turns_from_record` / `_classify_grok_update` / `_validate_grok_counters` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION` / `_validated_grok_entry` / `_grok_file_entry` / `_validated_grok_partial_days` / `_grok_partial_days` / `HostUsageResult.partial_days` | `tests/fixtures/host_sessions/grok/CONTRACT.md` and `docs/invariants/events-retro.md` (coverage states) |
-| `host_usage.py:PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `events_tail.py:_HOST_PERMANENT_REASONS` | `docs/invariants/events-retro.md` (standing read blockers) |
-| `host_usage.py:_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `_cached_last_reason` / `_cached_reason_since` / (both cache roots' last_reason and last_reason_since fields) / `cli.py:status` / `diag` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line` | `docs/invariants/events-retro.md` (standing read blockers) |
-| `events.py:make_host_usage_snapshot` (`partial_sources` / `degraded_sources` disjointness / `COUNTER_SEMANTICS_DISJOINT_V1`) / `events_tail.py:HostUsageCapture` / `_merge_partial_days` / `_canonical_partial` / `_merge_warm_retry_capture` | `docs/invariants/events-retro.md` (coverage states) |
-| `skills/retro_fleet/aggregator.py:_accept_optional_source_list` / `_sibling_tie_key` / `_agent_coverage_notes` / `_host_reader_coverage_notes` / `_dump_host_inventory` / `_project_git_capture` / `_uncovered_intervals` / `aggregate_git` (`origin` guard) | `docs/invariants/events-retro.md` (coverage states) |
-| `token_usage.py:PRICING` / `MODEL_FAMILY_TIERS` / `PRICING_FAMILY_BY_MODEL` / `VENDOR_FAMILY_TIERS` / `VENDOR_LONG_CONTEXT_TIERS` / `resolve_prices` / `resolve_long_context_prices` / `model_family` / `estimate_cost` / `_cost_under` / `_CACHE_WRITE_MULT` | `docs/invariants/events-retro.md` (cost-estimation section) |
-| `token_usage.py:walk_jsonl_segment` / `walk_jsonl_buckets` / `iter_bounded_lines` / `_drain_to_newline` / `get_or_compute` / `_resume_plan` / `head_fingerprint` / `head_probe_len` / `_carry_tail_ids` / `merge_token_days` / `merge_skill_days` / `TAIL_MSG_ID_LOOKBACK` / `_HEAD_PROBE_BYTES` / `_MAX_TAIL_MSG_ID_LEN` | `docs/invariants/events-retro.md` (incremental-resume section) |
-| `aggregator.py:_agent_row_cost` / `agent_row_floor_causes` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` / `_format_usd_short` / `_long_context_cause` | `docs/invariants/events-retro.md` (cost-estimation section) |
-| `events.py:_cap_by_model` / `_model_rank` / `_copy_tokens_by_day` / `MAX_HOST_MODELS_PER_DAY` / `MAX_HOST_MODELS_PER_ROW` (cap runs AFTER the day trim; mirrors the aggregator constants) | `docs/invariants/events-retro.md` |
-| `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_aggregate_git_period_pair` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
-| `skills/retro_fleet/aggregator.py` unified-agents surface (`FleetAgentRow` / `FleetAgentUsage` / `aggregate_agent_usage` / `_detect_duplicate_ledgers` / `_host_family_day_tuples` / `_render_agents_table` / `_render_agents_card_block` / `AGENT_ROW_ORDER` / `AgentRhythmView` / `_agent_rhythm_view` / `_agent_coverage_notes` / `_window_day_keys` / `device_labels` / `device_label`) and `token_usage.sum_bucket` | `docs/invariants/events-retro.md` (unified-agents renderer contract) |
-| `skills/retro_fleet/aggregator.py:_render_health_block` / `_health_summary_line` / every `note(<code>, …)` call in `format_retro` / `SKILL_MIN_VERSION` | `docs/invariants/events-retro.md` (health-payload contract) |
-| `skills/retro_fleet/SKILL.md` (two-pass card flow; `## Step 0: preflight` and its terminal rule) | `docs/invariants/events-retro.md` |
-| `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `_preview_mm_events_bootstrap` / `resolve_sources` / `get_sources` (`bootstrap=` gate, `SourceResolution.would_create`) / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
-| `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
-| `cli.py:update` / `_update_refusal` / `_run_update_with_progress` / `upgrade.py:update_or_nudge` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_attempt_state` / `_run_pipx` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `auto_install_enabled` / `updateprogress.py:PipxProgressParser` / `config.py:_apply_defaults` (the `[upgrade]` keys) | `docs/invariants/auto-upgrade.md` (self-update section) |
-| Command/option names, positional arguments, exit codes, format constants, host families, token fields/order, device-registry fields, machine-readable output | `docs/invariants/auto-upgrade.md` “Compatibility (1.x)” |
-| `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
-
-If you're touching multiple areas (e.g., adding a new field to mm-push event that also flows through aggregator + adds a CLI flag), read every applicable invariant file. They're short; bulk-reading is cheap. The cost of skipping one and breaking a load-bearing invariant is much higher.
-
-## Auto Commands (for Claude Code integration)
-- `mm autopull` — silent on the happy path, never prompts, graceful on errors. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count.
-- `mm autopush` — silent push, one-line output, never prompts, graceful on errors
-- Both exit silently if mm is not initialized (no config) or no changes exist
-- `ConfigError` (bad `config.toml`) surfaces as a one-line stderr message — not a silent exit. This is the visible-failure contract: truly unexpected errors still degrade silently via the generic `except Exception` fallback, but malformed config is loud so users don't wedge their background sync without noticing. Relies on `load_config` normalizing non-`ConfigError` exceptions (e.g. cyclic-symlink `.resolve()` failures) into `ConfigError` at the load boundary — do not bypass that by calling `_validate` / `_apply_defaults` directly from a new call site.
-- **Load-bearing warnings reach stderr even in quiet mode (v0.8.1).** The visible-failure contract extends beyond `ConfigError` to a curated set of degradation signals that quiet-mode used to swallow: corrupt-manifest sidecar recovery, corrupt-manifest peer-fallback recovery, "no sync sources" misconfig in autopush, durability `fsync_dir` failure on pull, and per-file apply failures. Apply failures print one `mm: warning:` line per failed file plus the count line. Do NOT add a new `if not quiet:` gate around a warning that signals data-at-risk degradation — match the established pattern (always-stderr, prefixed `mm:`).
-- **`autopush` writes a `no-sources` breadcrumb (v0.8.1)** when `get_sources(config)` returns empty, distinguishing "broken config no-op" from "nothing to push" no-op. Without this, `mm status` only sees `outcome: "success"` forever and monitoring on top of it never catches the wedge.
-- **`autopush` writes a `degraded` breadcrumb (v0.12.16)** when the events tail lost data on an otherwise-successful push: tail raised, walk budget exceeded, or no token/skill data published (cold or flock-contended cache). `_run_events_tail` returns `list[str]` of reasons, `_push_core` carries them on `PushResult.events_degradations`, `autopush` joins them into `detail`. Same argument as the `no-sources` breadcrumb, applied to the other silent path — the tail is forensic-only and its `mm: notice:` lines go to an unattended hook's stderr. **Any new degradation detected in the tail MUST be appended to that list, not merely printed.** Note `_decide_token_walk_policy` returning `False` does NOT by itself mean degradation — it also returns `False` when no `claude` source is enabled, which is a config shape; the append is gated on `claude_paths`. See `docs/invariants/events-retro.md`.
-- See README.md "Claude Code Integration" section for CLAUDE.md snippet
-
-## Spec
-See SPEC.md for full architecture and data model. Three sections are deliberately historical and say so inline: `## Project Structure`, `## Implementation Order`, and the original algorithm under `### mm push`. Current push behavior lives in README's command/capture reference and `docs/invariants/sync.md` / `events-retro.md`. **The Source Layout table above is the authoritative current module map**, not SPEC's tree or its `### Module Architecture` diagram (core sync path only).
-See docs/designs/mind-meld-v1.md for design decisions from spec review.
-See docs/designs/sync-gstack-context.md for multi-source sync design (gstack support).
-See docs/designs/host-parity.md for Claude / Codex / Grok interchangeability (usage display vs sync vs sessions snapshot). The current retro shape is the v1.1 `## Agents` table, documented in README and `docs/invariants/events-retro.md`.
-See docs/designs/grok-build-usage-reader.md for the Grok v1 usage reader and 21A consent bit.
-See docs/invariants/ for per-topic load-bearing invariants (sync, conflicts, init-devices, events-retro, auto-upgrade).
-See docs/ROADMAP.md for the state-organized execution plan, docs/TODOS.md for the deferred-work inbox, and docs/PROGRESS.md for the per-release row (CI-enforced — see the PROGRESS row convention above). docs/archive/ holds superseded design docs.
+- [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
+- [README](README.md): commands, configuration, previews, integration, and development.
+- [SPEC](SPEC.md): architecture and data model; Project Structure, Implementation Order, and original push algorithm are historical.
+- Design decisions: [v1](docs/designs/mind-meld-v1.md), [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md). Current retro shape is the v1.1 Agents table in README and events/retro invariants.
+- [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.

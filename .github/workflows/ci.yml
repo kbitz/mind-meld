@@ -1,5 +1,6 @@
 name: CI
 
+# No paths filter: skipped required checks can leave branch protection pending forever.
 on:
   push:
     branches: [main]

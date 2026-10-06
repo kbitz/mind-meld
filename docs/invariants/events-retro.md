@@ -1888,6 +1888,9 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 
 ## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0; store, v0.12.38)
 
+The subtree ships via `packages = ["src/mind_meld"]`; do not add hatchling
+`force-include` for it, which would double-ship the same files.
+
 Agent links point at an mm-owned **constant** store, not at the running
 package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`.
 `MM_SKILLS_DIR` is a test-only override, gated on `PYTEST_CURRENT_TEST`.
@@ -2567,7 +2570,7 @@ reports wrong token counts:
    `merge_skill_days`, NOT hand-rolled loops. `events.py`'s
    `_aggregate_jsonl_views_for_project` does the identical merge and
    was the second copy; the incremental merge would have been the
-   fifth site CLAUDE.md claims are "consolidated". This module has
+   fifth copy of the shared helpers documented here. This module has
    already shipped the
    `mirrored-predicate-drifts-when-one-side-gains-logic` bug twice
    (v0.11.23, v0.12.13). Pinned by

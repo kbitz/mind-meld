@@ -945,7 +945,7 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     `_fetch_remote_manifest`. Same hazard as `_filter_excluded_paths`:
     `mm gc` reads raw manifests via that path to compute referenced blobs,
     and a filtered manifest there would mark live peer blobs as orphans.
-    Mirror of the exclude_patterns invariant (CLAUDE.md, 2026-04-24
+    Mirror of the exclude_patterns invariant (docs/invariants/sync.md, 2026-04-24
     first-pull regression).
 
     Without this filter at `_push_core`: disabling a source on machine A
