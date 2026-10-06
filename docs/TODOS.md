@@ -44,95 +44,29 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:severity=medium] Replace unsafe lock-removal contention advice
-- **What:** Make LockError contention guidance consistent with kernel flock ownership.
-- **Why:** The current message tells users to remove a live lock; unlinking can allow concurrent mm operations on different inodes.
-- **Repro:** Hold lockfile.acquire_lock on a temporary path, invoke acquire_lock from an independent child, inspect its “Wait ... or remove” message; compare release_lock's no-unlink invariant.
-- **Context:** Track69A autoplan, 2026-10-03, branch kbitz/track-69a-self-updates-qualify, HEAD e9e56db. Reproduced safely using installed1.4.0 and a disposable .context lock; actual production lock untouched. Existing diagnostic defect, not a live self-update failure.
-- **Pros:** Removes advice that can break mutual exclusion; keeps crash recovery tied to kernel lifetime.
-- **Cons:** Requires a separate diagnostic change and meaningful contention-message regression assertion.
-- **Effort:** S
-- **Priority:** P2
-- **Depends on:** None; repair separately from69A qualification.
-
-### [plan-eng-review:severity=medium] Clarify broad pinned-install invariant wording
-- **What:** Distinguish frozen tag pins, moving refs and bare own repository URLs in auto-upgrade.md.
-- **Why:** The invariant says every classifier-pinned install cannot move via pipx upgrade, while the classifier also includes bare URLs and arbitrary own refs.
-- **Repro:** Compare docs/invariants/auto-upgrade.md “pinned” definition with upgrade.detect_install exact own URL/other-ref classification and update_argv behavior.
-- **Context:** Track69A autoplan, 2026-10-03, HEAD e9e56db. This Mac's bare URL is classified pinned despite pipx hold=false. Pure pipx1.17.9 parsing preserves @latest; no metadata-loss bug or actual pipx update is established. Preserve runtime policy and qualify the prose only.
-- **Pros:** Stops conflating mm's conservative install category with a guaranteed frozen Git ref; clearer recovery reasoning.
-- **Cons:** Separate small documentation follow-up; do not expand this into classifier redesign.
-- **Effort:** S
-- **Priority:** P2
-- **Depends on:** None; runtime policy unchanged.
-
-
-### [ship:files=src/mind_meld/host_usage.py|src/mind_meld/cli.py] Read Conductor 0.90.1's SQLite Cursor run store
-
-- **What:** Add a reader for the `runs` table in Conductor's `cursor-sdk-store/<workspace>/index.db`, reading metadata columns only (request ID, status, model, model parameters, disjoint usage, ISO finished time) and feeding the existing Cursor history.
-- **Why:** Conductor 0.90.1 writes new Cursor runs to that SQLite store instead of `runs.ndjson`, and mm reads only `runs.ndjson`, so those runs are not counted. Conductor-run turns fire no user-level stop hook, so the standalone capture cannot cover them either. `mm status` and `mm diag` report only how many stores are unread.
-- **Context:** User decision D7=C on the standalone Cursor capture PR (#192): ship the unread-store notice now, the reader as a follow-up. `host_usage.unread_cursor_stores` counts the stores without opening them; the live layout is recorded in `tests/fixtures/host_sessions/cursor/CONTRACT.md`. The `runs.ndjson` reader already dedupes on request ID against standalone completions and keeps captured history through Conductor pruning; a SQLite reader should do the same.
-- **Effort:** M
-- **Priority:** P1
-- **Depends on:** None
-
-### [ship:files=src/mind_meld/token_usage.py|src/mind_meld/host_usage.py] Price Cursor models that carry bracketed parameters
-
-- **What:** Resolve Cursor's bracket-parameterized non-Grok model IDs (`claude-…[fast=true]`, `[context=1m]`) to their real rates instead of the base model's.
-- **Why:** They are currently priced at the base Claude rate, so a fast or 1M-context run reads cheaper than it was. The Conductor reader has the same gap, so a fix belongs to both readers.
-- **Context:** User decision D6 on the standalone Cursor capture PR (#192): deferred. Pricing goes through `token_usage.resolve_prices`; the Grok 4.7 fast tokens are already deliberately unpriced (see the 1.2.0 changelog entry).
-- **Effort:** M
-- **Priority:** P2
-- **Depends on:** None
-
-### [plan-eng-review:severity=medium,files=src/mind_meld/cli.py|src/mind_meld/config.py] Init deletes device registration after a published config save fails
-
-- **What:** Make init's cleanup decision respect config publication before removing the device registration; qualify the current init failure contract.
-- **Why:** A config save can publish its new device_id and then raise on parent-directory durability. `_register_and_save` treats every save exception as an unpublished config and deletes that device's storage entry, leaving the local pointer and registry inconsistent.
-- **Repro:** On HEAD e9e56db, use a temporary LocalBackend and monkeypatch config.CONFIG_PATH to another temporary directory. Run the real `_register_and_save` with a synthetic device config; make fsutil.fsync_dir raise StorageError only for the config parent. Registration succeeds, config.toml contains the new id, the call raises, and backend.exists(device_key(id)) is false. Control: fail the config's file flush before replacement; registration is removed and config remains absent. Both assertions passed under pytest on 2026-10-03. No real config, Keychain or iCloud storage was touched.
-- **Context:** Track 69B autoplan caller audit; branch kbitz/atomic-write-publication-failures-clarify. `cli.py:_register_and_save` calls `save_config` inside an except Exception cleanup that deletes dev_key; `config.py:save_config` uses atomic_write_bytes(fsync=True). Durable review probe: `~/.gstack/projects/kbitz-mind-meld/69b-current-behavior-probe.py` (2 passed). This proves the current helper/caller sequence, not full CLI retry or power-loss behavior. Existing `_ensure_device_registered` may self-heal on a later push; inspect retry/passphrase/guard behavior before choosing a repair. Read docs/invariants/init-devices.md and sync.md first. The contract-only Track 69B must not repair this consumer.
-- **Pros:** Removes a demonstrated wrong cleanup assumption and makes the init failure contract honest.
-- **Cons:** Recovery-policy work must preserve existing pre-publication cleanup and retry behavior; requires isolated caller regression coverage.
-- **Effort:** S
-- **Priority:** P2
-- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
-
-### [review:severity=low,files=src/mind_meld/cli.py] Two handlers catch OSError for helper writes that raise StorageError
-
-- **Description:** `_init_crypto_session`'s config backfill says `except OSError: pass  # non-fatal`, and `patch_config_on_disk` tells backfill callers to swallow failures, but every write failure arrives as `StorageError` (a `MindMeldError`, not an `OSError`), so the crypto-error handler turns it into a command error. `recover` catches `OSError` around `_quarantine_corrupt_manifest` to print "quarantine failed", but a copy failure escapes it uncaught. `seen_sources.write` already fixed this class by catching both. Make both handlers catch the `StorageError` the helper raises and give each the outcome its code already intends.
-- **Repro:**
-  1. On the Track 69B branch (runtime identical to e9e56db), from the repo root run `PYTHONPATH=tests .venv/bin/python -m pytest -p no:cacheprovider -p conftest -q -s ~/.gstack/projects/kbitz-mind-meld/69b-review-backfill-probe.py` (2 passed). A file-flush fault and a config-parent fault both let `StorageError` escape `_init_crypto_session`; after the parent fault, config.toml already holds the backfilled crypto keys.
-  2. Run the same command with `69b-review-quarantine-probe.py` (2 passed). `mm recover --abandon-manifest --yes` exits 1 on an uncaught `StorageError`, without "quarantine failed"; the source manifest stays, a parent fault also leaves a quarantine copy, and a fault-free re-run completes and keeps that copy.
-  3. Keep `-p conftest`: without the repo's isolation an out-of-tree probe reaches real `~/.config/mind-meld` state. With it, all state stays under tmp_path.
-- **Context:** Found by Track 69B's /review (maintainability and adversarial passes) and reproduced there; recorded in docs/invariants/sync.md "Atomic write publication failures". A post-publication failure means the write may already be visible, so the backfill must not assume the old config, and a re-run of recover must not depend on the earlier copy being absent. Read docs/invariants/sync.md and init-devices.md first. Track 69B repairs no consumer.
-- **Pros:** The backfill becomes non-fatal as its comment promises, and recover reports a handled error instead of an uncaught exception.
-- **Cons:** Needs isolated regression tests for both phases; the backfill's always-stderr warning must follow the visible-failure contract.
-- **Effort:** S
-- **Priority:** P3
-- **Depends on:** Track 69B: Clarify atomic-write publication failures (contract and audit evidence).
-
-### [review:severity=low,files=src/mind_meld/upgrade.py|src/mind_meld/cli.py] A paused terminal pauses a streaming mm update
-
-- **Description:** `mm update`'s progress bar draws inside the loop that drains pipx's private PTY (`_PipxOutputStream.communicate` calls the progress callback, which writes to mm's terminal). If that write blocks, mm stops draining, the PTY buffer (about 1 KiB on macOS) fills, and pipx and pip block on their next write. Ctrl-S (XOFF; IXON is on by default) or a stalled SSH session is enough. The `PIPX_TIMEOUT_SECONDS` deadline is checked only between reads, so once output resumes after more than 600 s the next iteration raises `TimeoutExpired` and cleanup SIGINTs an install that was healthy, possibly mid package swap. Before the progress bar, pipx wrote to a pipe nothing displayed.
-- **Repro:**
-  1. Run a fake installer through `upgrade._run_pipx(argv, on_output=...)` that writes a pip-style frame every 10 ms, with mm itself running on an outer PTY and the callback rendering each chunk to it.
-  2. Send `\x13` (XOFF) to the outer PTY's master, wait 3 s, send `\x11` (XON); the installer's writes stall for the whole pause. (Reproduced by the /review red-team pass on 2026-10-05: a 2.74 s stall starting at frame 38; no stalls without XOFF.)
-- **Context:** Found by /review-and-prep on branch `kbitz/cursor-agent-progress-bar` (the `mm update` progress-bar PR). The user explicitly deferred it: it needs a terminal pause longer than 10 minutes to cause damage, and the real fix is a concurrency change. The forced reinstall no longer streams, so a stall there cannot remove the venv; only the in-place `pipx upgrade` is exposed. Read docs/invariants/auto-upgrade.md (explicit-update progress) first.
-- **Hypothesis (untested):** drain the PTY on its own thread (or keep the select loop as the only consumer storing the latest parsed state) and draw from a separate thread that drops frames when the terminal cannot keep up; check the deadline independently of drawing.
-- **Related trigger (same deferral):** Ctrl-Z. A suspended mm stops draining entirely, so pipx blocks on the small PTY buffer; on `fg` after `PIPX_TIMEOUT_SECONDS` the next iteration raises `TimeoutExpired` and cleanup SIGINTs the blocked installer (reproduced by the second adversarial pass with a 3 s timeout and a 5 s SIGSTOP; the pipe path finished). A drain thread cannot fix this one, because the whole process is stopped; the deadline would have to exclude time spent stopped.
-- **Related loss (same fix):** when the last PTY slave descriptor closes while the reader lags by more than about 0.6 s, macOS discards the unread output, so pipx's final lines (usually the error) can vanish and the failure detail falls back to `pipx exited N`. Measured by the post-review red-team pass on 2026-10-05 (lag 0.55 s: 4/4 delivered; 0.7 s: 0/4). A drain thread separate from drawing removes it.
-- **Effort:** M
-- **Priority:** P3
-
-### [review:severity=low,files=src/mind_meld/updateprogress.py] Teach the mm update progress parser uv's wording
-
-- **Description:** pipx 1.17.11 picks the uv backend for a new venv when `uv` is on PATH (`backends/__init__.py:resolve_backend_name`, `auto-path`), including mm's own forced reinstall. A uv-backed in-place `pipx upgrade` then streams uv output through the hidden PTY, and `updateprogress` knows only pip's wording: uv's `Updating ...`, `Resolved N packages`, `Building ...`, `Prepared/Installed N packages`, byte counters like `1.20 MiB/4.10 MiB` and `(0/1)` package counters match nothing, so the bar stays on `Starting installer` until pipx's own closing line. uv also redraws several lines with cursor-up moves, which `upgrade._final_frames` does not model.
-- **Context:** Found by the post-review red-team pass on the `mm update` progress-bar PR (2026-10-05). The maintainer's own Mac is pip-backed (`backend: pip`, no `uv` on PATH), so this degrades the display on uv-equipped Macs only; it never affects the install. README and docs/invariants/auto-upgrade.md state the limit.
-- **Hypothesis (untested):** record a real uv-under-pipx PTY transcript as a fixture, then map uv markers onto the existing labels and parse its counters.
-- **Effort:** S
-- **Priority:** P3
+None.
 
 ## Drain records
+
+### Roadmap drain — 2026-10-06
+
+8 inbox items: **5 placed, 3 deferred, 0 killed, 0 discharged**. Authored-false rate: 0 / (5 + 0) = 0%. Verification baseline: `b70f70d`. Tracks 69A/69B discharged independently against approved scope and attributable merged receipts; 69A's pending fallback closes its guide deliverable, while S13 remains REQUIRED / PENDING, 0/3 in Future. Two new Groups contain three Tracks. No active pins declared. All 96 prior Future bullets remain byte-identical; the three deferred inbox entries and required S13 execution follow-up make 100.
+
+| Inbox item | Disposition |
+|---|---|
+| Replace unsafe lock-removal contention advice | place → Track 70B |
+| Clarify broad pinned-install invariant wording | place → Track 70B |
+| Read Conductor 0.90.1's SQLite Cursor run store | place → Track 70A |
+| Price Cursor models that carry bracketed parameters | defer → Future |
+| Init deletes device registration after a published config save fails | place → Track 71A |
+| Two handlers catch OSError for helper writes that raise StorageError | place → Track 71A |
+| A paused terminal pauses a streaming mm update | defer → Future |
+| Teach the mm update progress parser uv's wording | defer → Future |
+
+Current source confirms the five placed defects/gaps. SQLite source demand is the live observation and explicit follow-up decision in PR #192; no remaining SQLite stores were found locally on 2026-10-06, so fresh real-corpus/live qualification remains an implementation gate. Deferred pricing and terminal concurrency preserve the user's decisions; uv progress awaits a real backend transcript/use. Existing Future triggers were reviewed against the index and changes since `e9e56db`; no other promotion or completion was established. The inherited memory evidence remains NO QUALIFIED ROUTE, native 0/48 UNSTARTED/INCONCLUSIVE.
+
+Both former Track IDs remain frozen in independent history, Group 69 is retired, and new work starts at 70. No existing unfinished ID is renamed. The same-file sequence is SQLite reader before durable CLI repair. The archive suggestions refer to host versions, historical baselines or documents with live obligations; none is moved. PROGRESS covers every tagged/changelog version. Documentation-only regeneration needs no version bump.
+
 
 ### Roadmap drain — 2026-10-03
 
@@ -532,4 +466,4 @@ Track 25A `/autoplan` drain, 1 item on 2026-08-22:
   the packer re-roomed the old 26A with 25A as Track 25B.
 - 0 placed from the inbox: `## Unprocessed` was already empty.
 
-_Last updated 2026-10-03 by /roadmap: inbox drained; accepted Track 68A scope archived; S13 and the atomic-write contract are current work. Prior drain records are historical._
+_Last updated 2026-10-06 by /roadmap: eight inbox items drained; approved 69A/69B deliverables archived; S13 remains required and unpassed. Prior drain records are historical._

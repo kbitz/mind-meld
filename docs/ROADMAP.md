@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm reports usage for Claude Code, Codex, Grok Build, and Cursor via Conductor.** Cursor usage capture adds no Cursor customization or memory source. Memory capture, recall and sync parity are planned separately in [the memory continuity design](designs/memory-continuity.md).
+**mm reports usage for Claude Code, Codex, Grok Build, and Cursor.** Cursor supports standalone completed runs and legacy Conductor `runs.ndjson`; the SQLite reader is planned below. Cursor usage capture adds no Cursor customization or memory source. Memory capture, recall and sync parity are planned separately in [the memory continuity design](designs/memory-continuity.md).
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -23,35 +23,51 @@ No active branches, sessions or PRs were declared for this regeneration.
 
 _tombstone: 27_
 
-#### Group 69: Self-update qualification and atomic-write contract
+### Group 70: Cursor usage and operator guidance
 
 _Depends on: none_
 
-##### Track 69A: Qualify real mm-driven self-updates
-_2 tasks . ~120 LOC . medium risk . 1 documentation file_
-_touches: docs/designs/self-update-qualification.md (new)_
-_out: 69B_
-_read-first: docs/invariants/auto-upgrade.md, README.md, tests/test_self_update.py_
-_produces: attributable S13 evidence for foreground, detached and explicit upgrades, or an exact pending prerequisite without crediting a simulated update_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_self_update.py tests/test_docs_routing.py_
+#### Track 70A: Read Cursor usage from Conductor SQLite
+_1 task . ~500 LOC . medium risk . 10 files_
+_touches: src/mind_meld/host_usage.py, src/mind_meld/cli.py, tests/test_host_usage.py, tests/test_diag.py, tests/test_integration.py, tests/fixtures/host_sessions/cursor/, docs/invariants/events-retro.md, docs/invariants/sync.md, README.md, AGENTS.md_
+_out: 70B_
+_read-first: tests/fixtures/host_sessions/cursor/CONTRACT.md, docs/invariants/events-retro.md, docs/invariants/sync.md_
+_produces: qualified SQLite completion metadata in the existing Cursor history and fleet usage, with legacy and standalone deduplication preserved_
+_session: fresh · effort: high · verify: ./bin/check tests/test_host_usage.py tests/test_diag.py tests/test_integration.py tests/test_retro_usage_presentation.py tests/test_docs_routing.py_
 
-_Source: PR #189's approved S13 post-release obligation and preparation receipt https://github.com/kbitz/mind-meld/pull/189#issuecomment-5919279593, 2026-09-30; released 2026-10-01. v1.4.0 is the following release. The 2026-10-03 read-only local inventory reports mm 1.4.0 with pipx's bare repository URL, so this installation is neither behind the target nor an exact @latest automatic-update candidate. That observation proves no S13 outcome._
+_Source: [ship:files=src/mind_meld/host_usage.py|src/mind_meld/cli.py], PR #192 user decision D7=C, 2026-10-04; tests/fixtures/host_sessions/cursor/CONTRACT.md records the live Conductor 0.90.1 schema. At b70f70d, _iter_cursor_ledgers selects only runs.ndjson and unread_cursor_stores only counts index.db entries. A 2026-10-06 local directory inventory found no remaining index.db stores on this Mac; this does not overturn the recorded user-observed gap or qualify a new reader._
 
-- **Prepare and verify the real trial prerequisites** -- Retain all three S13 checks from the receipt. Identify updater-enabled installs genuinely behind a newer released target, verify the recorded exact own @latest spec for automatic arms, and prepare bounded attended runs with install, lock, command, log and next-invocation receipts. An already-current install, bootstrap install, changed metadata or fake installer does not prove self-update. If no suitable install is available, record the prerequisite as pending and the retry at a following release; S13 stays required and unpassed. _docs/designs/self-update-qualification.md, ~70 lines._ (M)
-- **Run each eligible update arm and preserve the outcome** -- For attended push/pull, observe sync completion and foreground pipx under the mm lock; for autopull/autopush, observe prompt hook return, detached output and independent mm-lock availability; for explicit mm update, verify the known target and the current-version no-installer rerun. Each arm needs an eligible starting install and records the installed metadata plus the next mm --version. Keep unavailable arms pending; synthetic checks and an already-current version cannot fill them. File reproduced defects separately with their evidence. _docs/designs/self-update-qualification.md, ~50 lines._ (S)
+- **Count qualified SQLite completions through the existing Cursor reader** -- Obtain a real, version-pinned corpus of the `runs` table before accepting its schema, statuses, disjoint counters and completion timestamps. Read only the required usage metadata through a bounded, read-only SQLite connection; never fetch transcripts, blobs, credentials, agent stores or copy databases into fixtures/sync. Feed stable completed observations into the existing authoritative history, preserving request-ID dedup against legacy and standalone records, retention through source pruning, consent, deadlines and honest malformed/unsupported outcomes. Inspect cache normalization and migration so request identity and model parameters survive to their existing consumers; do not add unused wire fields or change the deferred pricing policy. Replace the unread-store notice only where the store is actually supported. Verify redacted real-schema fixtures, overlapping identities, live/pruned stores, failed reads and consent refusal; record live acceptance separately from deterministic checks. Update the source contract and command/invariant documentation. _src/mind_meld/host_usage.py, src/mind_meld/cli.py and declared tests/docs, ~500 lines._ (L)
 
-##### Track 69B: Clarify atomic-write publication failures
-_2 tasks . ~80 LOC . low risk . 3 files_
-_touches: src/mind_meld/fsutil.py, tests/test_fsutil.py, docs/invariants/sync.md_
-_out: 69A_
-_read-first: docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, docs/invariants/auto-upgrade.md, tests/test_fsutil.py, tests/test_memory_contract.py_
-_produces: a truthful atomic-write failure contract and a symbol-based audit of durable callers; any reproduced caller defect is filed separately_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_fsutil.py tests/test_lockedjson.py tests/test_storage_local.py tests/test_attemptlog.py tests/test_memory_contract.py tests/test_docs_routing.py_
+#### Track 70B: Correct lock and install guidance
+_2 tasks . ~70 LOC . low risk . 3 files_
+_touches: src/mind_meld/lockfile.py, tests/test_lockfile.py, docs/invariants/auto-upgrade.md_
+_out: 70A_
+_read-first: docs/invariants/auto-upgrade.md, docs/designs/self-update-qualification.md_
+_produces: contention guidance that preserves the lock inode and an accurate distinction between mm install policy and Git ref movement_
+_session: fresh · effort: low · verify: ./bin/check tests/test_lockfile.py tests/test_self_update.py tests/test_docs_routing.py_
 
-_Source: [review:severity=informational,files=src/mind_meld/fsutil.py], docs/TODOS.md, Track 68A review decision D3, 2026-10-02; verified at a3c5050. fsutil.atomic_write_bytes calls os.replace before fsync_dir; tests/test_fsutil.py::TestAtomicWriteBytes.test_parent_fsync_failure_is_fatal and tests/test_memory_contract.py::test_C2_real_atomic_helper_failure_reopens_actual_coherent_bytes already exercise publication followed by an error._
+_Source: [plan-eng-review:severity=medium], the two diagnostic follow-ups filed by Track 69A, 2026-10-03. At b70f70d, acquire_lock still says to remove the lock, while release_lock documents why unlinking defeats inode-based exclusion; auto-upgrade.md says pipx upgrade can never move a classifier-pinned install, although detect_install includes bare own URLs and moving refs._
 
-- **Correct the failure guarantee** -- Document the publication boundary in atomic_write_bytes: failures before replacement preserve the old target; a parent-directory fsync failure after replacement leaves published bytes with unconfirmed durability. Cleanup does not roll back publication. Keep the existing regression coverage; add a case only for a concrete gap discovered by the caller audit. _src/mind_meld/fsutil.py, ~30 lines._ (S)
-- **Audit durable callers before proposing repairs** -- Trace explicit and conditional fsync=True consumers, including LocalBackend.put, sidecar.write, locked_json_durable_rmw, attemptlog and the CLI durable copy helper, through their StorageError handlers. Record whether each handler reopens current bytes, stops, or assumes the old state remains. Cite paths and symbols in the sync invariant; file any demonstrated stale-state/rewrite defect in TODOS with its reproduction instead of expanding this contract card across the consumers. _docs/invariants/sync.md, ~50 lines._ (S)
+- **Replace unsafe contention advice** -- Tell the operator to wait for the holder or resolve that process, without recommending removal of a live lock. Preserve acquisition/release behavior and crash recovery by kernel flock lifetime. Exercise contention from an independent child on a temporary lock and assert that the diagnostic keeps the inode safe. _src/mind_meld/lockfile.py, tests/test_lockfile.py, ~50 lines._ (S)
+- **Qualify pinned-install prose** -- Distinguish an immutable tag pin, an arbitrary moving ref, a bare repository URL and pipx's own hold flag. State that mm's conservative automatic-update policy selects only its exact @latest spec; it does not prove every other own spec is immovable by pipx. Preserve detect_install, update_argv and explicit recovery policy. _docs/invariants/auto-upgrade.md, ~20 lines._ (S)
+
+### Group 71: Durable-write failure handling
+
+_Depends on: Group 70_
+
+#### Track 71A: Preserve coherent state after config publication failures
+_2 tasks . ~250 LOC . medium risk . 9 files_
+_touches: src/mind_meld/cli.py, src/mind_meld/config.py, tests/test_config.py, tests/test_integration.py, tests/test_recover.py, tests/test_crypto.py, tests/test_silent_failure_contract.py, docs/invariants/sync.md, docs/invariants/init-devices.md_
+_blocked-by: Track 69B, Track 70A_
+_read-first: docs/invariants/sync.md, docs/invariants/init-devices.md, src/mind_meld/fsutil.py_
+_produces: init cleanup consistent with visible config, non-fatal crypto backfill failures, and handled recover failures without losing prior evidence_
+_session: fresh · effort: high · verify: ./bin/check tests/test_config.py tests/test_integration.py tests/test_recover.py tests/test_crypto.py tests/test_silent_failure_contract.py tests/test_fsutil.py tests/test_docs_routing.py_
+
+_Source: [plan-eng-review:severity=medium,files=src/mind_meld/cli.py|src/mind_meld/config.py] and [review:severity=low,files=src/mind_meld/cli.py], Track 69B's separately filed caller defects, 2026-10-03/04. At b70f70d, _register_and_save still deletes dev_key on every save exception; _init_crypto_session and recover still miss StorageError at the backfill/quarantine seams. Track 69B's completed audit is a satisfied prerequisite. Track 70A precedes this repair to serialize their shared CLI, integration-test and sync-invariant edits._
+
+- **Preserve registration when config may already be published** -- Reproduce pre-replacement file-flush and post-replacement parent-flush failures in isolated state. Make the cleanup decision reflect publication instead of treating every save exception as proof that the local pointer is absent; preserve existing pre-publication cleanup and the original failure. Define conservative handling for unreadable/ambiguous current state without claiming durability or rolling back published bytes. Verify init retry, storage guard and later registration self-heal with isolated Keychain substitutes, then correct the affected failure contract. _src/mind_meld/cli.py, src/mind_meld/config.py and declared tests/docs, ~170 lines._ (M)
+- **Handle helper write errors at their intended boundaries** -- Make crypto backfill tolerate the helper's StorageError with an always-stderr warning, and make recover report its handled quarantine failure. Cover both pre/post-publication faults and a retry after a visible quarantine copy; preserve source bytes, prior copies and exit semantics. Do not infer publication phase from exception messages or claim that a raised write restored old state. _src/mind_meld/cli.py and declared tests/docs, ~80 lines._ (M)
 
 ### Execution Map
 
@@ -61,29 +77,33 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 69 ← {}
+- Group 70 ← {}
+- Group 71 ← {70}
 ```
 
 Track detail per group:
 
 ```
-Group 69: Self-update qualification and atomic-write contract
-  +-- Track 69B ........... ~M . 2 tasks
-  +-- Track 69A ........... ~M . 2 tasks
+Group 70: Cursor usage and operator guidance
+  +-- Track 70A ........... ~L . 1 task
+  +-- Track 70B ........... ~S . 2 tasks
+Group 71: Durable-write failure handling
+  +-- Track 71A ........... ~L . 2 tasks
 ```
 
-**Total: 1 group . 2 tracks remaining.**
+**Total: 2 groups . 3 tracks remaining.**
 
-Memory transport remains deferred. Track 68A shipped an accepted tests-only
-no-route result; native trials remain 0/48 UNSTARTED/INCONCLUSIVE. Complete
-live qualification and retain the contract's model limits and Q1–Q18 gates
-before promoting transport, fleet parity, sharing or Cursor integration.
+Real self-update qualification remains **S13 REQUIRED / PENDING, 0/3**.
+The completed Track 69A guide owns the run recipes; its next-release execution
+obligation is retained in Future with an owner and retry event. Memory transport
+also remains deferred: Track 68A delivered the accepted tests-only no-route
+result, with native trials **0/48 UNSTARTED/INCONCLUSIVE**.
 
 ---
 
 ## Future
 
-Deferred: docs/roadmap-future.md (96 items)
+Deferred: docs/roadmap-future.md (100 items)
 
 ## Shipped
 

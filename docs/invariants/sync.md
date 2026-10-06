@@ -95,9 +95,11 @@ policy, not physical crash survival or every CLI retry.
 ran the real `_register_and_save` against temporary config and LocalBackend paths,
 with Keychain access forbidden. A config-parent `StorageError` left the new
 device id in config.toml but deleted its registry entry; the file-flush control
-left config absent and removed registration. Both cases passed. The P2 entry
-"Init deletes device registration after a published config save fails" in
-[TODOS.md](../TODOS.md) owns repair under the init/CLI maintainer. Preserve
+left config absent and removed registration. Both cases passed. The roadmap card
+"Preserve coherent state after config publication failures" (Track 71A in
+[ROADMAP.md](../ROADMAP.md), drained from the TODOS entry "Init deletes device
+registration after a published config save fails") owns repair under the
+init/CLI maintainer. Preserve
 pre-publication cleanup and investigate `_ensure_device_registered` self-heal,
 full CLI retry and passphrase/guard behavior before choosing a repair. Do not
 assume the registration is durable or was reported accurately: its
@@ -115,8 +117,9 @@ which its callers turn into a command error; after the parent fault the
 backfilled keys were already on disk. `mm recover --abandon-manifest --yes`
 exited 1 on an uncaught `StorageError` rather than "quarantine failed"; the
 source stayed, and after the parent fault a quarantine copy existed too. A
-fault-free re-run completed and left that copy. The TODOS.md entry "Two
-handlers catch OSError for helper writes that raise StorageError" owns repair.
+fault-free re-run completed and left that copy. The same roadmap card (Track
+71A, drained from the TODOS entry "Two handlers catch OSError for helper writes
+that raise StorageError") owns repair.
 
 **Exclusions.** Explicit False calls are `cli.py:_apply_write`, `_apply_merge`,
 `_apply_conflict`, both writes in `_apply_incoming_file`,
