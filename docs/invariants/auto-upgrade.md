@@ -121,7 +121,7 @@ disposition. SIGTERM or SIGKILL of mm itself remains a risk on both paths, as
 before the progress bar: the in-place upgrade then completes with stale
 metadata that the next update repairs. A terminal paused by Ctrl-S, or mm
 suspended past the timeout, stalls the streaming reader (deferred in
-`docs/TODOS.md`).
+`docs/roadmap-future.md`, "A paused terminal pauses a streaming mm update").
 
 **Streamed failure output and cleanup.** A streamed capture is reduced to what
 its terminal finally showed (`_final_frames`: erased frames dropped, the last
