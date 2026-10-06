@@ -44,7 +44,12 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-None.
+### [manual] Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade
+- **Why:** Cursor sessions run through `cursor-agent acp`, which is how Paseo runs Cursor, are not counted. The ACP front-end fires no `stop` hook and sends no usage, and its session stores hold no billed counters. See the "ACP sessions are uncaptured" paragraph in [events/retro invariants](invariants/events-retro.md).
+- **Repro:** with a logging hook registered for `sessionStart`/`stop`/`sessionEnd` in `~/.cursor/hooks.json` that saves each payload, run one prompt through a minimal ACP client (`session/new`, then `session/prompt`). Check whether `stop` fires, whether its payload has `status: completed`, `generation_id`, `model` and the four counters (`input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`), and whether any ACP message carries usage or token fields.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** measured 2026-10-06 on cursor-agent 2026.10.01-e373342. If a later cursor-agent fires a `stop` payload of that shape under ACP, mm's existing hook captures these sessions with no code change; update the README and the invariant paragraph then. Do not estimate usage from the stores' context-window gauge or add an ACP proxy.
 
 ## Drain records
 

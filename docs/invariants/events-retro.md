@@ -355,7 +355,26 @@ raw. A successful run with no result line warns that usage was not recorded.
 `MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
 that points back at mm fail fast instead of recursing.
 
-Both paths require the existing consent bit. The hidden hook command reads
+**ACP sessions are uncaptured (measured 2026-10-06, cursor-agent
+2026.10.01-e373342).** `cursor-agent acp`, Paseo's Cursor runtime, fires no
+lifecycle hook (`sessionStart`, `stop`, `sessionEnd`), though tool hooks still
+run. Its ACP messages carry no usage or token fields. Its session stores
+(`~/.cursor/acp-sessions/<id>/store.db`, the same `blobs`/`meta` schema as
+`~/.cursor/chats/`) hold the model, per-turn request IDs, millisecond
+timestamps and a context-window gauge. They hold no billed input, output,
+cache-read or cache-write counters. CLI stores lack them too; CLI tokens come
+only from the `stop` payload or the `mm cursor-agent` wrapper's result line.
+Do not sweep the stores to estimate usage. The gauge is a snapshot of the current context, not billing: a turn re-sends
+the context once per model request, cache reads are not split out, and
+reasoning output never enters the context, so a number derived from it can be
+off by multiples. Do not add a wrapper or ACP proxy either, because ACP sends
+no usage to intercept. If cursor-agent starts firing a `stop` payload under ACP
+with `status: completed`, `generation_id`, `model` and all four inclusive
+counters, the existing hook captures these sessions unchanged. Re-check after
+each cursor-agent upgrade.
+
+Both capture paths (hook and wrapper) require the existing consent bit. The
+hidden hook command reads
 bounded stdin, returns `{}` and exits zero on malformed input or capture failure
 so it never controls Cursor's agent loop. Warnings contain no payload details.
 The same private authoritative history holds hashed generation IDs and counters;

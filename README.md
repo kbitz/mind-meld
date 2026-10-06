@@ -831,6 +831,12 @@ completion hook in the measured CLI and therefore still needs the wrapper.
 Cursor's native chat history has no billing ledger: sessions completed before
 enrollment cannot be backfilled from context-window counts.
 
+Cursor sessions run through ACP (`cursor-agent acp`, which Paseo uses) are not
+counted. In cursor-agent 2026.10.01 the ACP front-end fires no `stop` hook and
+sends no usage. Its session stores under `~/.cursor/acp-sessions/` hold the
+model and a context-window gauge but no billed token counters, so mm has
+nothing to read. Interactive and wrapped print sessions are unaffected.
+
 Conductor runs are counted on endedAt's UTC day; standalone completions use
 the local capture's UTC day. Repeated callbacks replace the same generation,
 and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
