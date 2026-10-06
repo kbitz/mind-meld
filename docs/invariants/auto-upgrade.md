@@ -2,15 +2,16 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
-- `src/mind_meld/cli.py` — the 3 transition-detection hook seams (`_get_config`, `_auto_command_setup`, `init_cmd`); the 4 self-update seams (tail of `push` / `pull` / `autopull` / `autopush`) and `recapture`'s nudge-only tail; the `update` command; `mm status` upgrade surfacing
+- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
+- `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
+- `src/mind_meld/cli.py` — the 3 transition-detection hook seams (`_get_config`, `_auto_command_setup`, `init_cmd`); the 4 self-update seams (tail of `push` / `pull` / `autopull` / `autopush`) and `recapture`'s nudge-only tail; the `update` command and `_run_update_with_progress`; `mm status` upgrade surfacing
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
 - `.github/workflows/release.yml` — the "Advance latest branch" step (moving ref for upgrades)
 - `README.md` — Install / Upgrading sections (must stay `@latest`, never `@vX.Y.Z`)
 
-Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_pullhistory.py` (self-upgrade row class).
+Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class).
 
 ---
 
@@ -73,6 +74,64 @@ spec moved from a pin to `@latest`. `mm update` exits 1 and automatic updates
 record failure; neither reports that intermediate version as completion.
 Comparisons use installed metadata rather than the process's imported version;
 an install another updater has already advanced is current, not a failure.
+
+**Explicit-update progress represents installer output and is terminal-only.**
+`mm update` renders one Rich bar from `updateprogress.PipxProgressParser`, and
+only when stdout is a real terminal: `FORCE_COLOR` can make Rich treat a pipe
+as one, so the bar also requires `isatty()`. Redirected output and automatic
+updates keep their existing pipe capture and messages. For the in-place
+`pipx upgrade` (and no other command shape), `_run_pipx(on_output=...)`
+captures a private PTY so pipx reports native counters without writing raw
+output to the user's terminal. Percentages belong to the current download,
+Git operation or package batch. pip clones quietly and draws counters only for
+larger uncached downloads and multi-package installs, so most updates show
+phase labels alone. Build phases have a fixed label with no invented fraction.
+Repeated/unknown lines do not advance the bar; no timer advances it. The parser
+handles split ANSI frames, bounds its partial-line buffer and emits only fixed
+labels and validated numeric counters. pip's interactive spinner ends a step's
+line only when the step finishes, so phase labels are also read from the
+unterminated line; counters wait for their line to end. The hidden PTY has a
+fixed `PTY_COLUMNS` width, also passed to pipx as `COLUMNS`, so a narrow window
+cannot wrap pip's counters, and pipx gets `PYTHONIOENCODING=utf-8`: on a TTY it
+tees pip's output and re-raises a failed write after pip finishes, before it
+records metadata. The parser knows pip's wording; a uv-backed pipx venv streams
+uv's, so the bar shows fewer labels and no counters there. When no PTY can be opened, or its reader is past
+`select()`'s FD_SETSIZE limit, the pipe capture runs without live counters;
+both are decided before pipx starts.
+
+**The display never decides the update.** Parsing human installer output is
+best-effort: the first exception from the display or parser
+(`upgrade._ProgressRelay`) turns the display off while pipx keeps running and
+the metadata is still verified. Rich reports a closed pipe as `SystemExit`, so
+that counts as a display failure too. Only `KeyboardInterrupt` (Ctrl-C while
+drawing) reaches pipx cleanup. A bar that cannot start falls back to a plain
+update, and neither its final label nor stopping it can replace an
+interruption or the outcome. Only verified metadata completes the bar.
+
+**Only the in-place upgrade is tied to mm's terminal (load-bearing).** On a
+TTY, pipx 1.17 streams pip's output and re-raises a failed write after pip
+finishes; its install handler then removes the venv. So the forced reinstall
+for a pinned install keeps the pipe capture and shows a fixed `Reinstalling`
+label. Even with a pipe, pipx writes `<step>...` lines to stderr, which fail
+inside that same transaction once nothing reads them. Every foreground
+`_run_pipx` therefore survives a terminal hangup (`_hangup_ignored`): the
+display stops drawing and mm keeps reading until pipx exits. It installs a
+no-op handler, not `SIG_IGN`, so pipx and its children keep the default SIGHUP
+disposition. SIGTERM or SIGKILL of mm itself remains a risk on both paths, as
+before the progress bar: the in-place upgrade then completes with stale
+metadata that the next update repairs. A terminal paused by Ctrl-S, or mm
+suspended past the timeout, stalls the streaming reader (deferred in
+`docs/TODOS.md`).
+
+**Streamed failure output and cleanup.** A streamed capture is reduced to what
+its terminal finally showed (`_final_frames`: erased frames dropped, the last
+frame of each redrawn line, spinner backspaces applied, no control characters)
+before failure diagnostics and the one-line detail use it. The existing
+bounded process-group cleanup applies to PTYs as well as pipes; any drain
+failure escalates like a timeout, so the SIGKILL and group check never depend
+on reading output, and `run_update` reports it as a failed update. Both PTY
+descriptors close on every exit, and cleanup disables UI callbacks before
+draining remaining output.
 
 **One attempt per release per day (`_claim_install_attempt`).** The claim is a
 single read-modify-write under the upgrade-state flock, stamped **before**

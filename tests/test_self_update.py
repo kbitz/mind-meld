@@ -16,18 +16,24 @@ pytest, and the tests replace them wholesale.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import pty
+import select
 import shlex
 import signal
 import subprocess
 import sys
 import threading
 import time
+import types
 from datetime import datetime, timedelta, timezone
 from http.client import IncompleteRead
+from io import StringIO
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from mind_meld import config as config_module
@@ -103,6 +109,21 @@ def _fake_run(monkeypatch, venv, *, lands=None, spec=upgrade.INSTALL_SPEC, retur
 
     monkeypatch.setattr(upgrade, "_run_pipx", run)
     return calls
+
+
+def _fake_pipx(tmp_path, body: str) -> str:
+    """An executable standing in for pipx, so `upgrade` argv reaches a real child."""
+    script = tmp_path / "fake-pipx"
+    script.write_text(f"#!{sys.executable}\n{body}")
+    script.chmod(0o755)
+    return str(script)
+
+
+class _TerminalBuffer(StringIO):
+    """Captured output that reports itself as a real terminal."""
+
+    def isatty(self) -> bool:
+        return True
 
 
 def _fake_spawn(monkeypatch, *, raises=None):
@@ -242,7 +263,70 @@ class TestUpdateArgv:
 
 
 class TestPipxSeams:
-    def test_launch_phase_cancellation_stops_the_created_installer(self, tmp_path):
+    def test_progress_callback_arrives_before_exit_without_forwarding_raw_output(self, tmp_path):
+        release = tmp_path / "release-installer"
+        child_code = (
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "assert sys.stdout.isatty() and sys.stderr.isatty()\n"
+            "print('Downloading 17%', flush=True)\n"
+            "while not Path(sys.argv[1]).exists(): time.sleep(0.01)\n"
+            "print('Building wheel', flush=True)\n"
+        )
+        runner_code = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from mind_meld import upgrade\n"
+            "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade.CACHE_DIR = Path(sys.argv[1]) / 'config'\n"
+            "upgrade._install_prefix = lambda: Path(sys.argv[1]) / 'pipx/venvs/mind-meld'\n"
+            "chunks = []\n"
+            "def receive(chunk):\n"
+            "    chunks.append(chunk)\n"
+            "    if 'Downloading 17%' in ''.join(chunks): print('progress received', flush=True)\n"
+            f"result = upgrade._run_pipx([sys.executable, '-c', {child_code!r}, sys.argv[2]], "
+            "on_output=receive)\n"
+            "print('result', result.returncode, 'Downloading 17%' in result.stdout, "
+            "'Building wheel' in result.stdout, flush=True)\n"
+        )
+        reader, writer = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", runner_code, str(tmp_path), str(release)],
+            stdin=subprocess.DEVNULL,
+            stdout=writer,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        os.close(writer)
+        output = b""
+
+        def read_until(expected):
+            nonlocal output
+            deadline = time.monotonic() + 60  # Interpreter start-up under load.
+            while expected not in output:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, output.decode(errors="replace")
+                readable, _, _ = select.select([reader], [], [], remaining)
+                assert readable, output.decode(errors="replace")
+                output += os.read(reader, 4096)
+
+        try:
+            read_until(b"progress received")
+            assert proc.poll() is None, "output was held until the installer finished"
+            assert b"Building wheel" not in output
+            release.touch()
+            read_until(b"result 0 True True")
+            assert b"Downloading 17%" not in output and b"Building wheel" not in output
+            assert proc.wait(timeout=5) == 0
+        finally:
+            release.touch()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+            os.close(reader)
+
+    @pytest.mark.parametrize("progress_output", [False, True])
+    def test_launch_phase_cancellation_stops_the_created_installer(self, tmp_path, progress_output):
         code = (
             "import os, signal, subprocess, sys\n"
             "from pathlib import Path\n"
@@ -263,7 +347,8 @@ class TestPipxSeams:
             "    return proc\n"
             "upgrade.subprocess.Popen = cancelled_launch\n"
             "try:\n"
-            "    upgrade._run_pipx([sys.executable, '-c', 'import time\\ntime.sleep(30)'])\n"
+            "    upgrade._run_pipx([sys.executable, '-c', 'import time\\ntime.sleep(30)'], "
+            f"on_output={'(lambda chunk: None)' if progress_output else 'None'})\n"
             "except KeyboardInterrupt:\n"
             "    print('cancelled', created[0].poll() is not None, "
             "signal.getsignal(signal.SIGINT) is interrupt)\n"
@@ -428,8 +513,9 @@ class TestPipxSeams:
                 except ProcessLookupError:
                     pass
 
+    @pytest.mark.parametrize("progress_output", [False, True])
     def test_completed_installer_with_retained_pipe_is_not_a_failed_update(
-        self, pipx_install, monkeypatch, tmp_path
+        self, pipx_install, monkeypatch, tmp_path, progress_output
     ):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
@@ -455,7 +541,10 @@ class TestPipxSeams:
         # time must not decide whether this exercises live-installer timeout.
         monkeypatch.setattr(upgrade.subprocess, "Popen", completed_parent)
         try:
-            result = upgrade._run_pipx([sys.executable, "-c", code, str(pid_file)])
+            result = upgrade._run_pipx(
+                [sys.executable, "-c", code, str(pid_file)],
+                on_output=(lambda chunk: None) if progress_output else None,
+            )
             assert result.returncode == 0
             assert "completed" in result.stdout
         finally:
@@ -465,7 +554,10 @@ class TestPipxSeams:
                 except ProcessLookupError:
                     pass
 
-    def test_repeated_interrupt_stops_the_installer_before_returning(self, tmp_path):
+    @pytest.mark.parametrize("progress_output", [False, True])
+    def test_repeated_interrupt_stops_the_installer_before_returning(
+        self, tmp_path, progress_output
+    ):
         pid_file = tmp_path / "installer-pid"
         cleanup_started = tmp_path / "cleanup-started"
         child_code = (
@@ -490,7 +582,8 @@ class TestPipxSeams:
             "signal.signal(signal.SIGINT, interrupt)\n"
             "try:\n"
             f"    upgrade._run_pipx([sys.executable, '-c', {child_code!r}, "
-            "sys.argv[2], sys.argv[3]])\n"
+            "sys.argv[2], sys.argv[3]], "
+            f"on_output={'(lambda chunk: None)' if progress_output else 'None'})\n"
             "except KeyboardInterrupt:\n"
             "    print('interrupted', signal.getsignal(signal.SIGINT) is interrupt)\n"
         )
@@ -532,8 +625,9 @@ class TestPipxSeams:
                 except ProcessLookupError:
                     pass
 
+    @pytest.mark.parametrize("progress_output", [False, True])
     def test_timeout_is_bounded_when_an_escaped_child_retains_the_output_pipe(
-        self, pipx_install, monkeypatch, tmp_path
+        self, pipx_install, monkeypatch, tmp_path, progress_output
     ):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
@@ -553,7 +647,10 @@ class TestPipxSeams:
         started = time.monotonic()
         try:
             with pytest.raises(subprocess.TimeoutExpired) as caught:
-                upgrade._run_pipx([sys.executable, "-c", code, str(pid_file)])
+                upgrade._run_pipx(
+                    [sys.executable, "-c", code, str(pid_file)],
+                    on_output=(lambda chunk: None) if progress_output else None,
+                )
             assert caught.value.timeout == 1
             assert "installer started" in caught.value.output
             # The child keeps stdout open for ten seconds; cleanup must return
@@ -673,7 +770,10 @@ class TestPipxSeams:
         assert outcome.status == "failed"
         assert expected in outcome.detail
 
-    def test_timeout_allows_graceful_installer_cleanup(self, pipx_install, monkeypatch):
+    @pytest.mark.parametrize("progress_output", [False, True])
+    def test_timeout_allows_graceful_installer_cleanup(
+        self, pipx_install, monkeypatch, progress_output
+    ):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
         monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 1)
@@ -687,8 +787,462 @@ class TestPipxSeams:
             "time.sleep(30)\n"
         )
         with pytest.raises(subprocess.TimeoutExpired) as caught:
-            upgrade._run_pipx([sys.executable, "-c", code])
+            upgrade._run_pipx(
+                [sys.executable, "-c", code],
+                on_output=(lambda chunk: None) if progress_output else None,
+            )
         assert "cleanly stopped" in caught.value.output
+
+    def test_interrupt_while_drawing_stops_installer_without_reentering_callback(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        stopped = tmp_path / "stopped"
+        code = (
+            "import signal, sys, time\n"
+            "from pathlib import Path\n"
+            "def stop(signum, frame):\n"
+            "    Path(sys.argv[1]).touch()\n"
+            "    print('cleanly stopped', flush=True)\n"
+            "    raise SystemExit(0)\n"
+            "signal.signal(signal.SIGINT, stop)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        calls = []
+
+        def interrupted_progress(chunk):
+            calls.append(chunk)
+            raise KeyboardInterrupt  # Ctrl-C delivered while the bar draws.
+
+        with pytest.raises(KeyboardInterrupt):
+            upgrade._run_pipx(
+                [sys.executable, "-c", code, str(stopped)], on_output=interrupted_progress
+            )
+        assert stopped.exists()
+        assert len(calls) == 1
+        with upgrade._pipx_install_lock():
+            pass  # Cleanup released the install exclusion after stopping the child.
+
+    @pytest.mark.parametrize(
+        "display_error",
+        [
+            BlockingIOError(35, "write could not complete without blocking"),
+            SystemExit(1),  # Rich's answer to a closed output pipe
+            KeyboardInterrupt(),  # Ctrl-C while drawing still cancels the install.
+        ],
+    )
+    def test_display_failure_lets_the_installer_finish_and_still_verifies(
+        self, pipx_install, monkeypatch, tmp_path, display_error
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        finished = tmp_path / "finished"
+        pipx = _fake_pipx(
+            tmp_path,
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "assert sys.argv[1:] == ['upgrade', 'mind-meld'] and sys.stdout.isatty()\n"
+            "print('Downloading mind-meld', flush=True)\n"
+            "time.sleep(0.5)\n"
+            f"Path({str(finished)!r}).touch()\n"
+            "print('Successfully installed mind-meld', flush=True)\n",
+        )
+        calls = []
+
+        def broken_display(state):
+            calls.append(state)
+            raise display_error
+
+        if isinstance(display_error, KeyboardInterrupt):
+            with pytest.raises(KeyboardInterrupt):
+                upgrade.run_update(
+                    upgrade.detect_install(), pipx, latest="1.3.0", on_progress=broken_display
+                )
+            assert not finished.exists() and len(calls) == 1
+            return
+        outcome = upgrade.run_update(
+            upgrade.detect_install(), pipx, latest="1.3.0", on_progress=broken_display
+        )
+        assert finished.exists(), "a display failure stopped the installer"
+        assert outcome.status == "unchanged" and outcome.new == "1.2.0"  # metadata was read
+        assert len(calls) == 1
+
+    def test_only_the_in_place_upgrade_streams(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "update_argv", lambda pipx, install: [pipx, "reinstall", "x"])
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(kwargs)
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        upgrade.run_update(upgrade.detect_install(), PIPX, on_progress=lambda state: None)
+        assert calls == [{}]  # An unknown command shape keeps the pipe capture.
+
+    def test_drain_failure_is_a_failed_update_not_a_traceback(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        pipx = _fake_pipx(tmp_path, "import time\nprint('ready', flush=True)\ntime.sleep(30)\n")
+
+        def failing_drain(self, proc, timeout):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        outcome = upgrade.run_update(
+            upgrade.detect_install(), pipx, latest="1.3.0", on_progress=lambda state: None
+        )
+        assert outcome.status == "failed"
+        assert "out of range" in outcome.detail
+
+    def test_streamed_timeout_keeps_what_the_terminal_finally_showed(
+        self, pipx_install, monkeypatch
+    ):
+        pipx_install()
+        raw = "\r\x1b[2K 133.4/784.7 kB\r\x1b[2K 600.0/784.7 kB\r\n  Building wheel ... |\b/"
+
+        def run(argv, *, on_output=None):
+            on_output(raw)
+            raise subprocess.TimeoutExpired(argv, 600, output=raw)
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        outcome = upgrade.run_update(
+            upgrade.detect_install(), PIPX, latest="1.3.0", on_progress=lambda state: None
+        )
+        assert "did not finish within" in outcome.detail
+        assert outcome.output == " 600.0/784.7 kB\n  Building wheel ... /"
+
+    def test_forced_reinstall_is_not_tied_to_the_terminal(self, pipx_install, monkeypatch):
+        venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0")
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((list(argv), kwargs))
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="installed package mind-meld")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        states = []
+        outcome = upgrade.run_update(
+            upgrade.detect_install(), PIPX, latest="1.3.0", on_progress=states.append
+        )
+        assert outcome.status == "updated" and outcome.now_tracking
+        assert calls == [([PIPX, "install", "--force", upgrade.INSTALL_SPEC], {})]
+        assert [state.phase for state in states] == ["Reinstalling", "Verifying"]
+
+    @pytest.mark.parametrize("progress_output", [False, True])
+    def test_terminal_hangup_does_not_stop_a_foreground_install(self, tmp_path, progress_output):
+        ready, release = tmp_path / "ready", tmp_path / "release"
+        child_code = (
+            "import signal, sys, time\n"
+            "from pathlib import Path\n"
+            "print('Downloading mind-meld', flush=True)\n"
+            "Path(sys.argv[1]).touch()\n"
+            "while not Path(sys.argv[2]).exists(): time.sleep(0.01)\n"
+            "print('Successfully installed mind-meld', "
+            "signal.getsignal(signal.SIGHUP) is signal.SIG_DFL, flush=True)\n"
+        )
+        runner_code = (
+            "import signal, sys\n"
+            "from pathlib import Path\n"
+            "from mind_meld import upgrade\n"
+            "upgrade._refuse_under_pytest = lambda: None\n"
+            "upgrade.CACHE_DIR = Path(sys.argv[1]) / 'config'\n"
+            "upgrade._install_prefix = lambda: Path(sys.argv[1]) / 'pipx/venvs/mind-meld'\n"
+            f"result = upgrade._run_pipx([sys.executable, '-c', {child_code!r}, sys.argv[2], "
+            f"sys.argv[3]], on_output={'(lambda chunk: None)' if progress_output else 'None'})\n"
+            "print('result', result.returncode, 'Successfully installed mind-meld True' in "
+            "result.stdout, signal.getsignal(signal.SIGHUP) is signal.SIG_DFL, flush=True)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", runner_code, str(tmp_path), str(ready), str(release)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while not ready.exists():
+                assert proc.poll() is None and time.monotonic() < deadline
+                time.sleep(0.01)
+            proc.send_signal(signal.SIGHUP)  # The user's terminal closed.
+            time.sleep(0.2)
+            release.touch()
+            output, _ = proc.communicate(timeout=10)
+            assert proc.returncode == 0, output
+            assert "result 0 True True" in output
+        finally:
+            release.touch()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+
+    def test_cleanup_kills_the_installer_when_draining_fails(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        pid_file = tmp_path / "installer-pid"
+        code = (
+            "import os, signal, sys, time\n"
+            "from pathlib import Path\n"
+            "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "time.sleep(30)\n"
+        )
+
+        ready_at = []
+
+        def failing_drain(self, proc, timeout):
+            # The first drain fails only once the installer ignores SIGINT, however
+            # long interpreter start-up takes under load.
+            deadline = time.monotonic() + 60
+            while not ready_at:
+                assert time.monotonic() < deadline, "installer never started"
+                if pid_file.exists() and pid_file.read_text():
+                    ready_at.append(time.monotonic())
+                time.sleep(0.01)
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        try:
+            with pytest.raises(ValueError, match="out of range"):
+                upgrade._run_pipx(
+                    [sys.executable, "-c", code, str(pid_file)], on_output=lambda chunk: None
+                )
+            assert time.monotonic() - ready_at[0] < 8
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 0)  # Killed and reaped, not left running.
+        finally:
+            if pid_file.exists():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @pytest.mark.parametrize("mode", ["success", "timeout", "interrupt"])
+    def test_progress_terminal_descriptors_close_on_every_exit(
+        self, pipx_install, monkeypatch, mode
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        if mode == "timeout":  # Others must not race the installer's start-up.
+            monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 1)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        opened = []
+        real_openpty = upgrade.pty.openpty
+
+        def tracking_openpty():
+            pair = real_openpty()
+            opened.extend(pair)
+            return pair
+
+        monkeypatch.setattr(upgrade.pty, "openpty", tracking_openpty)
+        code = "print('ready', flush=True)\n" + (
+            "import time\ntime.sleep(30)\n" if mode != "success" else ""
+        )
+
+        def on_output(chunk):
+            if mode == "interrupt":
+                raise KeyboardInterrupt
+
+        expected = {
+            "success": None,
+            "timeout": subprocess.TimeoutExpired,
+            "interrupt": KeyboardInterrupt,
+        }[mode]
+        if expected is None:
+            upgrade._run_pipx([sys.executable, "-c", code], on_output=on_output)
+        else:
+            with pytest.raises(expected):
+                upgrade._run_pipx([sys.executable, "-c", code], on_output=on_output)
+        assert len(opened) == 2
+        for fd in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)
+
+    def test_hidden_terminal_has_a_fixed_width_for_the_installer(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setenv("COLUMNS", "40")  # A narrow window wraps pip's counters.
+        monkeypatch.setenv("PYTHONIOENCODING", "latin-1")  # pipx would fail teeing '━'.
+        code = (
+            "import os, sys\n"
+            "print('size', os.get_terminal_size(1).columns, os.environ['COLUMNS'], "
+            "sys.stdout.encoding, flush=True)\n"
+        )
+        result = upgrade._run_pipx([sys.executable, "-c", code], on_output=lambda chunk: None)
+        assert f"size {upgrade.PTY_COLUMNS} {upgrade.PTY_COLUMNS} utf-8" in result.stdout
+
+    def test_unavailable_terminal_keeps_the_pipe_capture(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+
+        def no_free_terminal():
+            raise OSError(35, "out of pseudo-terminals")
+
+        monkeypatch.setattr(upgrade.pty, "openpty", no_free_terminal)
+        calls = []
+        result = upgrade._run_pipx(
+            [sys.executable, "-c", "import sys; print('installed', sys.stdout.isatty())"],
+            on_output=calls.append,
+        )
+        assert result.returncode == 0
+        assert "installed False" in result.stdout
+        assert calls == []
+
+    # Extended by the /ship test coverage audit (pass 1).
+    # Value: protects=a terminal rejected by the readiness probe leaks no descriptors before the
+    # pipe fallback; fails_when=the constructor stops closing its pair when it raises;
+    # why_new=the close-on-every-exit test only covers streams that were constructed; seam=none
+    def test_unwatchable_terminal_keeps_the_pipe_capture(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+
+        def past_fd_setsize(*args):
+            raise ValueError("filedescriptor out of range in select()")
+
+        opened = []
+        real_openpty = upgrade.pty.openpty
+
+        def tracking_openpty():
+            pair = real_openpty()
+            opened.extend(pair)
+            return pair
+
+        monkeypatch.setattr(upgrade.pty, "openpty", tracking_openpty)
+        monkeypatch.setattr(upgrade, "select", types.SimpleNamespace(select=past_fd_setsize))
+        calls = []
+        result = upgrade._run_pipx(
+            [sys.executable, "-c", "import sys; print('installed', sys.stdout.isatty())"],
+            on_output=calls.append,
+        )
+        assert result.returncode == 0  # Never launched on a reader it cannot watch.
+        assert "installed False" in result.stdout
+        assert calls == []
+        assert len(opened) == 2
+        for fd in opened:
+            with pytest.raises(OSError):
+                os.fstat(fd)  # The rejected pair was closed, not leaked.
+
+    # Generated by the /ship test coverage audit (pass 1).
+    # Value: protects=a multibyte installer glyph cut across two terminal reads reaches the
+    # parser and the failure dump intact; fails_when=the stream decodes each read on its own
+    # instead of incrementally; why_new=parser tests feed str and none splits a character
+    # across reads; seam=none
+    def test_multibyte_output_split_across_terminal_reads_stays_intact(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 30)
+        release = tmp_path / "release"
+        code = (
+            "import os, sys, time\n"
+            "from pathlib import Path\n"
+            "os.write(1, b'before \\xe2\\x94')\n"  # The first two bytes of the glyph U+2501.
+            "deadline = time.monotonic() + 25\n"
+            "while not Path(sys.argv[1]).exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "os.write(1, b'\\x81 after\\n')\n"
+        )
+        seen = []
+
+        def on_output(chunk):
+            seen.append(chunk)
+            if "before" in "".join(seen):
+                release.touch()  # The first read is delivered; only now send the rest.
+
+        result = upgrade._run_pipx([sys.executable, "-c", code, str(release)], on_output=on_output)
+        assert "before ━ after" in result.stdout
+        assert "�" not in result.stdout
+        assert "�" not in "".join(seen)
+
+    # Generated by the /ship test coverage audit (pass 1).
+    # Value: protects=a read error on the progress terminal other than macOS EIO ends the update
+    # as failed with the installer killed; fails_when=communicate swallows every OSError from
+    # os.read as EOF; why_new=drain-failure tests replace communicate wholesale; seam=none
+    def test_read_error_on_the_progress_terminal_fails_the_update_and_stops_the_installer(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 30)  # Bounded if the error is eaten.
+        pid_file = tmp_path / "installer-pid"
+        pipx = _fake_pipx(
+            tmp_path,
+            "import os, signal, time\n"
+            "from pathlib import Path\n"
+            "signal.signal(signal.SIGINT, signal.SIG_IGN)\n"  # Only SIGKILL stops it, at once.
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(60)\n",
+        )
+        opened = []
+        real_openpty = upgrade.pty.openpty
+
+        def tracking_openpty():
+            pair = real_openpty()
+            opened.extend(pair)
+            return pair
+
+        real_read = os.read
+
+        def failing_read(fd, size):
+            if opened and fd == opened[0]:
+                raise OSError(errno.EBADF, "Bad file descriptor")
+            return real_read(fd, size)
+
+        monkeypatch.setattr(upgrade.pty, "openpty", tracking_openpty)
+        monkeypatch.setattr(upgrade.os, "read", failing_read)
+        try:
+            outcome = upgrade.run_update(
+                upgrade.detect_install(), pipx, latest="1.3.0", on_progress=lambda state: None
+            )
+            assert outcome.status == "failed"
+            assert "could not run pipx" in outcome.detail
+            assert "Bad file descriptor" in outcome.detail
+            with pytest.raises(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 0)  # Killed and reaped, not left running.
+        finally:
+            if pid_file.exists() and pid_file.read_text():
+                try:
+                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    # Generated by the /ship test coverage audit (pass 1).
+    # Value: protects=an installer that closes its terminal yet keeps running is still cut off at
+    # the install timeout; fails_when=communicate stops bounding proc.wait after EOF;
+    # why_new=timeout tests hold the terminal open, so the post-EOF wait is never reached;
+    # seam=none
+    def test_installer_that_closes_its_terminal_but_lingers_is_still_bounded(
+        self, pipx_install, monkeypatch
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 3)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 1)
+        code = (
+            "import os, time\n"
+            "print('terminal closing', flush=True)\n"
+            "os.close(1)\n"
+            "os.close(2)\n"
+            "time.sleep(60)\n"
+        )
+        started = time.monotonic()
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            upgrade._run_pipx([sys.executable, "-c", code], on_output=lambda chunk: None)
+        assert "terminal closing" in caught.value.output
+        assert time.monotonic() - started < 20
 
     def test_real_run_refuses_under_pytest(self):
         with pytest.raises(OSError, match="under pytest"):
@@ -1341,6 +1895,194 @@ def _flat(text: str) -> str:
 
 
 class TestUpdateCommand:
+    @pytest.mark.parametrize(
+        "scenario",
+        [
+            "updated",
+            "failed",
+            "unchanged",
+            "intermediate",
+            "unverifiable",
+            "cancelled",
+            "busy",
+        ],
+    )
+    def test_terminal_bar_tracks_installer_counters_without_forwarding_raw_output(
+        self, pipx_install, monkeypatch, scenario
+    ):
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+
+        raw_output = (
+            "Downloading PRIVATE_INSTALLER_DETAIL\n"
+            "\x1b[32m133.4/784.7 kB\x1b[0m\r"
+            "532.5/784.7 kB\r"
+            "Building wheel for mind-meld\nInstalling collected packages: mind-meld\n"
+            "1/3 [hypothesis]\r2/3 [mind-meld]\r"
+        )
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            if scenario == "busy":
+                raise upgrade._PipxBusy("another mm update is still running")
+            on_output(raw_output)
+            if scenario == "cancelled":
+                raise KeyboardInterrupt
+            if scenario in ("updated", "intermediate"):
+                version = "1.3.0" if scenario == "updated" else "1.2.5"
+                _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version=version)
+            if scenario == "unverifiable":
+                (venv / upgrade.PIPX_METADATA_NAME).write_text("not json")
+            return subprocess.CompletedProcess(argv, int(scenario == "failed"), stdout=raw_output)
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert (result.exit_code == 0) == (scenario == "updated"), result.output
+        output = terminal.getvalue()
+        assert ("Updated mm" in output) == (scenario == "updated")
+        assert result.stdout == ""
+        assert "PRIVATE_INSTALLER_DETAIL" not in output
+        if scenario != "busy":
+            assert "17.0%" in output and "67.9%" in output
+            assert "33.3%" in output and "66.7%" in output
+            assert "1/3 packages" in output and "2/3 packages" in output
+            assert output.index("17.0%") < output.index("67.9%")
+        final = {
+            "updated": "Done",
+            "failed": "Failed",
+            "unchanged": "Failed",  # pipx saw nothing newer than the tagged release
+            "intermediate": "Failed",
+            "unverifiable": "Failed",
+            "cancelled": "Cancelled",
+            "busy": "Not started",
+        }[scenario]
+        assert final in output
+        if scenario != "busy":
+            assert output.rindex(final) > output.rindex("2/3 packages")
+        verified = scenario in ("updated", "unchanged", "intermediate", "unverifiable")
+        assert ("Verifying" in output) == verified
+        if verified:
+            assert output.rindex(final) > output.rindex("Verifying")
+        assert ("Done" in output) == (scenario == "updated")
+        assert "\x1b[?25h" in output
+        lockfile.acquire_lock()
+        lockfile.release_lock()
+
+    def test_failed_update_prints_what_the_terminal_finally_showed(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=_TerminalBuffer(), force_terminal=True, color_system=None, width=80),
+        )
+        raw = (
+            "\x1b[?25l\r\x1b[2K   133.4/784.7 kB\r\x1b[2K   784.7/784.7 kB\x1b[?25h\r\n"
+            "  Installing build dependencies ... |\b \b/\b \bdone\r\n"
+            "\x07ERROR: no matching distribution\r\n"
+            "\r\x1b[K\u28f7 upgrading shared libraries\r\x1b[K"  # erased before exit
+        )
+
+        def run(argv, *, on_output=None):
+            on_output(raw)
+            return subprocess.CompletedProcess(argv, 1, stdout=raw)
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 1
+        dump = result.stderr
+        for control in ("\r", "\b", "\x07", "\x1b"):
+            assert control not in dump
+        assert "   784.7/784.7 kB\n" in dump and "133.4" not in dump
+        assert "  Installing build dependencies ... done\n" in dump
+        assert "Update did not complete: ERROR: no matching distribution." in _flat(dump)
+        assert "upgrading shared libraries" not in dump
+
+    def test_forced_color_on_a_pipe_runs_without_the_bar(self, pipx_install, monkeypatch):
+        venv = pipx_install()
+        piped = StringIO()  # FORCE_COLOR / TTY_COMPATIBLE make Rich call this a terminal.
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=piped, force_terminal=True, color_system=None, width=80),
+        )
+
+        def run(argv, *, on_output=None):
+            assert on_output is None
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert "Starting installer" not in piped.getvalue()
+        assert "Updated mm 1.2.0 → 1.3.0." in piped.getvalue()
+
+    def test_bar_that_cannot_start_falls_back_to_a_plain_update(self, pipx_install, monkeypatch):
+        venv = pipx_install()
+
+        class FlakyTerminal(_TerminalBuffer):
+            failed = False
+
+            def write(self, text):
+                # EAGAIN is transient: Rich keeps the text and retries it later.
+                if "\x1b[?25l" in text and not self.failed:  # The bar hides the cursor.
+                    self.failed = True
+                    raise BlockingIOError(35, "Resource temporarily unavailable")
+                return super().write(text)
+
+        terminal = FlakyTerminal()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+        calls = []
+
+        def run(argv, *, on_output=None):
+            calls.append(on_output)
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert calls == [None]
+        assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
+
+    def test_bar_completes_when_github_is_unreachable_and_pipx_decides(
+        self, pipx_install, monkeypatch
+    ):
+        pipx_install()
+
+        def offline(*a):
+            raise OSError("offline")
+
+        monkeypatch.setattr(upgrade, "_fetch_tags", offline)
+        upgrade.CACHE_PATH.write_text(
+            json.dumps({"latest_version": "1.2.0", "checked_at": "2026-01-01T00:00:00+00:00"})
+        )
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+
+        def run(argv, *, on_output=None):
+            on_output("Requirement already satisfied: mind-meld\r\n")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        output = terminal.getvalue()
+        assert output.rindex("Done") > output.rindex("Verifying")
+        assert "already the latest release pipx can see" in _flat(output)
+
     def test_busy_installer_refuses_without_a_forced_reinstall_remedy(
         self, pipx_install, monkeypatch
     ):
@@ -1457,12 +2199,15 @@ class TestUpdateCommand:
 
     def test_updates_a_tracking_install(self, pipx_install, monkeypatch):
         venv = pipx_install()
+        monkeypatch.setattr("mind_meld.cli.console", Console(force_terminal=False))
         calls = _fake_run(monkeypatch, venv, lands="1.3.0")
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == [[PIPX, "upgrade", "mind-meld"]]
         assert "Updating mm 1.2.0 → 1.3.0 (pipx upgrade mind-meld)" in _flat(result.stdout)
         assert "Updated mm 1.2.0 → 1.3.0." in result.stdout
+        assert "Installing" not in result.stdout
+        assert "\x1b" not in result.stdout
         lockfile.acquire_lock()
         lockfile.release_lock()
 

@@ -2,6 +2,27 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.5.1] - 2026-10-05
+
+**`mm update` now shows a compact progress bar in a terminal, driven only by what the installer reports.** You can see which phase an update is in and, when pip measures it, how far along a download or a multi-package install is.
+
+### Added
+
+- In a terminal, `mm update` draws one progress bar. It names the current phase (fetching source, preparing the build, building the wheel, installing, verifying) and shows measured download bytes or package-install counts when pip reports them. pip reports counters only for larger uncached downloads and multi-package installs, so an update that changes only mm usually shows phase labels alone. Percentages describe the current phase, build phases show a label without an estimated percentage, nothing moves on a timer, and raw pipx output stays hidden.
+- When mm knows which release it is updating to, the bar reads "Done" only after the installed release, read back from pipx's metadata, is at least that version. Otherwise the update is reported as failed instead of done.
+
+### Changed
+
+- `mm update` runs the in-place `pipx upgrade` in a private terminal so pipx prints its native progress, which mm reads and summarizes. Redirected output (including `FORCE_COLOR` pipes) and the automatic updates at the end of `mm push`, `mm pull`, `autopull` and `autopush` keep their existing plain behavior.
+- During a pinned install's forced reinstall the bar shows a "Reinstalling" label without counters, and that command keeps the previous output capture: pipx removes the install if the command cannot finish, so it is never tied to the terminal.
+- A display problem never stops the installer, and closing the terminal mid-update lets pipx finish. Ctrl-C still cancels, and pressing it repeatedly stops the installer before mm returns.
+
+### Upgrade notes
+
+- No command, flag, wire or storage format changes.
+- A pipx venv created with the uv backend shows fewer phase labels, with no effect on the install.
+- A terminal paused longer than the 10-minute update timeout (for example with Ctrl-S) can leave the in-place upgrade blocked, and mm then cancels it once output resumes, which can interrupt an install that was healthy.
+
 ## [1.5.0] - 2026-10-04
 
 **`mm enable-source cursor` now records Cursor usage from your own terminal sessions, alongside Conductor's, in the fleet Agents table.** Interactive `cursor-agent` sessions are captured by a completion hook, and print-mode runs go through the new `mm cursor-agent` wrapper.

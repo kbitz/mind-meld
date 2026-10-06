@@ -45,6 +45,7 @@ LEAVES = [
     "fsutil",
     "host_skill_discovery",
     "gitenv",
+    "updateprogress",
 ]
 
 

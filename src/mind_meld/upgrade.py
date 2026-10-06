@@ -42,18 +42,26 @@ so the warning-class reader trust stays focused on data-at-risk signals only.
 
 from __future__ import annotations
 
+import codecs
+import errno
 import fcntl
 import json
 import os
+import pty
+import re
+import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
+import termios
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -64,10 +72,10 @@ from typing import Any, Iterator
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from mind_meld import __version__, lockfile, pullhistory
+from mind_meld import __version__, lockfile, pullhistory, updateprogress
 from mind_meld.errors import LockError
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
-from mind_meld.safety import safe_terminal_str
+from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
 
 CACHE_DIR = Path.home() / ".config" / "mind-meld"
 CACHE_PATH = CACHE_DIR / "upgrade-state.json"
@@ -104,6 +112,10 @@ DEFAULT_INSTALL_RETRY_GAP = timedelta(hours=24)
 INSTALL_GRACE = timedelta(minutes=10)
 PIPX_TIMEOUT_SECONDS = 600
 PIPX_STOP_GRACE_SECONDS = 5
+# The progress capture is parsed, never shown. pip lays its counters out for
+# this width, so a narrow window cannot wrap them out of the parser's reach.
+PTY_ROWS = 50
+PTY_COLUMNS = 200
 PIPX_METADATA_NAME = "pipx_metadata.json"
 PACKAGE_NAME = "mind-meld"
 UPDATE_LOG_NAME = "auto-update.log"
@@ -808,10 +820,125 @@ def _refuse_under_pytest() -> None:
         raise OSError("refusing to run pipx under pytest")
 
 
-def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
-    """Foreground pipx. Subprocess seam: tests monkeypatch THIS function."""
+class _PipxOutputStream:
+    """Capture a terminal without forwarding its raw output to the user."""
+
+    def __init__(self, on_output: Callable[[str], None]) -> None:
+        self.on_output: Callable[[str], None] | None = on_output
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self.chunks: list[str] = []
+        self.eof = False
+        self.reader, self.writer = pty.openpty()
+        try:
+            dimensions = struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0)
+            try:
+                fcntl.ioctl(self.writer, termios.TIOCSWINSZ, dimensions)
+            except OSError:
+                pass  # Progress is still readable at the terminal's default width.
+            try:
+                select.select([self.reader], [], [], 0)
+            except ValueError as error:
+                # Past FD_SETSIZE the drain loop could not watch it mid-install;
+                # find out before pipx starts and keep the pipe capture instead.
+                raise OSError("progress terminal cannot be watched") from error
+        except BaseException:
+            self.close_writer()
+            self.close_reader()
+            raise
+
+    def close_writer(self) -> None:
+        if self.writer != -1:
+            os.close(self.writer)
+            self.writer = -1
+
+    def close_reader(self) -> None:
+        if self.reader != -1:
+            os.close(self.reader)
+            self.reader = -1
+
+    def captured(self) -> str:
+        return "".join(self.chunks)
+
+    def communicate(self, proc: subprocess.Popen[str], timeout: float) -> tuple[str, None]:
+        deadline = time.monotonic() + timeout
+        while not self.eof:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, timeout, output=self.captured())
+            readable, _, _ = select.select([self.reader], [], [], min(remaining, 0.1))
+            if not readable:
+                continue
+            try:
+                data = os.read(self.reader, 65536)
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+                data = b""  # macOS PTYs report EOF as EIO.
+            self.eof = not data
+            decoded = self.decoder.decode(data, final=self.eof)
+            if decoded:
+                self.chunks.append(decoded)
+                if self.on_output is not None:
+                    self.on_output(decoded)
+        try:
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as error:
+            error.output = self.captured()
+            raise
+        return self.captured(), None
+
+
+@contextmanager
+def _pipx_output_stream(
+    on_output: Callable[[str], None] | None,
+) -> Iterator[_PipxOutputStream | None]:
+    stream = None
+    if on_output is not None:
+        try:
+            stream = _PipxOutputStream(on_output)
+        except OSError:
+            pass  # No free PTY: the pipe capture still installs, without live counters.
+    try:
+        yield stream
+    finally:
+        if stream is not None:
+            stream.close_writer()
+            stream.close_reader()
+
+
+@contextmanager
+def _hangup_ignored() -> Iterator[None]:
+    """Keep the reader alive when the user's terminal closes mid-install.
+
+    pipx fails once nothing reads its output: a streaming upgrade cannot write
+    to its PTY, and a piped reinstall's step messages hit a closed pipe inside
+    the transaction that removes the venv. The display stops drawing; mm keeps
+    reading until pipx exits. A no-op handler, unlike SIG_IGN, is not inherited
+    across exec, so pipx and its children keep the default disposition.
+    """
+    handled = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGHUP, lambda signum, frame: None) if handled else None
+    try:
+        yield
+    finally:
+        if handled:
+            signal.signal(signal.SIGHUP, previous if previous is not None else signal.SIG_DFL)
+
+
+def _run_pipx(
+    argv: list[str], *, on_output: Callable[[str], None] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Foreground pipx. Progress callbacks receive captured terminal chunks.
+
+    Subprocess seam: tests monkeypatch THIS function. Without a callback the
+    existing pipe capture remains unchanged, including automatic updates.
+    """
     _refuse_under_pytest()
-    with _pipx_install_lock() as install_fd:
+    with (
+        _pipx_install_lock() as install_fd,
+        _pipx_output_stream(on_output) as stream,
+        _hangup_ignored(),
+    ):
         # Popen can be interrupted after creating the isolated child but before
         # returning its handle. Defer launch-phase Ctrl-C until cleanup owns it.
         launch_interrupted = False
@@ -826,14 +953,20 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
             if launch_sigint != signal.SIG_IGN:
                 signal.signal(signal.SIGINT, defer_interrupt)
         try:
+            env = _pipx_environment(argv)
+            if stream is not None:
+                env["COLUMNS"] = str(PTY_COLUMNS)  # pipx passes its width on to pip.
+                # pipx re-raises a failed tee of pip's output after pip finishes,
+                # before recording metadata; the reader decodes UTF-8 anyway.
+                env["PYTHONIOENCODING"] = "utf-8"
             proc = subprocess.Popen(
                 argv,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
+                stdout=stream.writer if stream is not None else subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="replace",
-                env=_pipx_environment(argv),
+                env=env,
                 start_new_session=True,
                 pass_fds=(install_fd,),
             )
@@ -841,13 +974,23 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
             if launch_sigint is not None:
                 signal.signal(signal.SIGINT, launch_sigint)
             raise
+
+        def communicate(timeout: float) -> tuple[str, None]:
+            if stream is not None:
+                return stream.communicate(proc, timeout)
+            return proc.communicate(timeout=timeout)
+
         try:
+            if stream is not None:
+                stream.close_writer()  # pipx holds the only writer now; EOF needs that.
             if launch_sigint is not None:
                 signal.signal(signal.SIGINT, launch_sigint)
             if launch_interrupted:
                 raise KeyboardInterrupt
-            output, _ = proc.communicate(timeout=PIPX_TIMEOUT_SECONDS)
+            output, _ = communicate(PIPX_TIMEOUT_SECONDS)
         except BaseException as error:
+            if stream is not None:
+                stream.on_output = None  # Cleanup captures bytes without re-entering a failed UI.
             # A second Ctrl-C must not release the mm lock with pipx still running.
             # Python dispatches signals only on the main thread.
             previous_sigint = None
@@ -864,24 +1007,30 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
                     os.killpg(proc.pid, signal.SIGINT)
                 except ProcessLookupError:
                     pass
+                # Any drain failure escalates like a timeout: the kill and the group
+                # check below must not depend on reading the installer's output.
                 try:
-                    output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
+                    output, _ = communicate(PIPX_STOP_GRACE_SECONDS)
+                except (subprocess.TimeoutExpired, OSError, ValueError):
                     proc.poll()
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
                     try:
-                        output, _ = proc.communicate(timeout=PIPX_STOP_GRACE_SECONDS)
-                    except subprocess.TimeoutExpired as lingering:
+                        output, _ = communicate(PIPX_STOP_GRACE_SECONDS)
+                    except (subprocess.TimeoutExpired, OSError, ValueError) as lingering:
                         # A descendant outside our group can retain the pipe. Do not
                         # let that extend cleanup indefinitely after killing pipx.
-                        output = lingering.output or ""
+                        output = getattr(lingering, "output", None) or (
+                            stream.captured() if stream is not None else ""
+                        )
                         if isinstance(output, bytes):
                             output = output.decode("utf-8", errors="replace")
                         if proc.stdout is not None:
                             proc.stdout.close()
+                        if stream is not None:
+                            stream.close_reader()
                         proc.wait(timeout=PIPX_STOP_GRACE_SECONDS)
                 # Closed pipes and a reaped parent do not prove its children stopped:
                 # a child can ignore SIGINT and redirect its output. Check the group
@@ -889,8 +1038,8 @@ def _run_pipx(argv: list[str]) -> subprocess.CompletedProcess[str]:
                 while True:
                     try:
                         os.killpg(proc.pid, 0)
-                    except ProcessLookupError:
-                        break
+                    except (ProcessLookupError, PermissionError):
+                        break  # macOS reports a group of only zombies as EPERM.
                     if time.monotonic() >= stop_deadline:
                         try:
                             os.killpg(proc.pid, signal.SIGKILL)
@@ -988,28 +1137,102 @@ def _last_line(output: str) -> str:
     return safe_terminal_str(lines[-1]) if lines else ""
 
 
-def run_update(install: InstallInfo, pipx: str, *, latest: str | None = None) -> UpdateOutcome:
+_ERASED_LINE = re.compile(r"\r\x1b\[[02]?K|\x1b\[2K")
+
+
+def _final_frames(output: str) -> str:
+    """What a terminal capture finally showed: the last frame of each redrawn
+    line, erased frames dropped, spinner backspaces applied, no remaining
+    control characters."""
+    lines = []
+    for raw in output.split("\n"):
+        line = strip_terminal_escapes(_ERASED_LINE.split(raw)[-1])
+        shown: list[str] = []
+        for char in line.rstrip("\r").rsplit("\r", 1)[-1]:
+            if char == "\b":
+                if shown:
+                    shown.pop()
+            elif char == "\t" or (char >= " " and char != "\x7f"):
+                shown.append(char)
+        lines.append("".join(shown))
+    return "\n".join(lines)
+
+
+class _ProgressRelay:
+    """Best-effort display: its first failure turns it off, never the installer.
+
+    KeyboardInterrupt (Ctrl-C while drawing) still propagates to pipx cleanup;
+    SystemExit is a display failure, because Rich reports a closed pipe that way.
+    """
+
+    def __init__(self, on_progress: Callable[[updateprogress.UpdateProgress], None]) -> None:
+        self._on_progress: Callable[[updateprogress.UpdateProgress], None] | None = on_progress
+        self._parser = updateprogress.PipxProgressParser()
+
+    def feed(self, chunk: str) -> None:
+        self._relay(lambda: self._parser.feed(chunk))
+
+    def finish(self) -> None:
+        self._relay(self._parser.finish)
+
+    def show(self, phase: str) -> None:
+        self._relay(lambda: [updateprogress.UpdateProgress(phase)])
+
+    def _relay(self, states: Callable[[], list[updateprogress.UpdateProgress]]) -> None:
+        if self._on_progress is None:
+            return
+        try:
+            for state in states():
+                self._on_progress(state)
+        except (Exception, SystemExit):  # Rich reports a closed pipe as SystemExit.
+            self._on_progress = None
+
+
+def run_update(
+    install: InstallInfo,
+    pipx: str,
+    *,
+    latest: str | None = None,
+    on_progress: Callable[[updateprogress.UpdateProgress], None] | None = None,
+) -> UpdateOutcome:
     """Run pipx in the foreground and read the result back from its metadata.
 
     Never raises for a pipx failure. The caller owns the mm lock and all
     user-facing output; this only runs the command and classifies it.
+    on_progress receives measured installer progress and phase changes on a
+    best-effort basis; raw output stays captured for failure diagnostics.
+    Only the in-place upgrade streams: pipx removes the venv when a forced
+    reinstall fails, and streaming pipx fails once nothing reads its terminal.
     """
     argv = update_argv(pipx, install)
     old = install.version
+    relay = _ProgressRelay(on_progress) if on_progress is not None else None
+    streamed = relay is not None and argv[1:2] == ["upgrade"]
     try:
-        proc = _run_pipx(argv)
+        if streamed:
+            assert relay is not None
+            proc = _run_pipx(argv, on_output=relay.feed)
+            relay.finish()
+        else:
+            if relay is not None:
+                relay.show("Reinstalling")
+            proc = _run_pipx(argv)
     except _PipxBusy as error:
         return UpdateOutcome("busy", old, None, str(error))
     except subprocess.TimeoutExpired as e:
         output = e.output if isinstance(e.output, str) else ""
+        output = _final_frames(output) if streamed else output
         detail = f"pipx did not finish within {PIPX_TIMEOUT_SECONDS}s"
         return UpdateOutcome("failed", old, None, detail, output)
-    except OSError as e:
+    except (OSError, ValueError) as e:
         return UpdateOutcome("failed", old, None, f"could not run pipx: {e}")
     output = proc.stdout or ""
+    output = _final_frames(output) if streamed else output
     if proc.returncode != 0:
         detail = _last_line(output) or f"pipx exited {proc.returncode}"
         return UpdateOutcome("failed", old, None, detail, output)
+    if relay is not None:
+        relay.show("Verifying")
     after = detect_install()
     if after.kind != "tracking" or after.version is None:
         return UpdateOutcome(

@@ -56,7 +56,8 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `gitenv.py` | Repository-local Git environment scrub and stable message locale |
 | `identity.py` | Author-email set behind a flock-guarded 7d-TTL cache |
 | `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
-| `upgrade.py` | Release check, nudge, transition hook; (v1.3.0) self-update: install classification (`detect_install`), the two pipx subprocess seams, the one-attempt-per-release gate, `update_or_nudge` |
+| `upgrade.py` | Release check, nudge, transition hook; (v1.3.0) self-update: install classification (`detect_install`), the two pipx subprocess seams, the one-attempt-per-release gate, `update_or_nudge`; `mm update` progress capture: the private PTY for the in-place upgrade (`_PipxOutputStream`), the best-effort `_ProgressRelay`, the foreground hangup guard and `_final_frames` |
+| `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
 | `pullhistory.py` | Forensic per-file pull log |
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |
@@ -79,7 +80,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
 leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
-`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`) import nothing from the CLI layer at all. Enforced by
+`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`, `updateprogress`) import nothing from the CLI layer at all. Enforced by
 `tests/test_module_boundaries.py` and a CI grep gate — ruff's F811 cannot see
 function-local shadowing, so lint alone will never catch a re-introduced cycle.
 `aggregator.py` reaches the CLI as a **subprocess**
@@ -223,7 +224,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `skills/retro_fleet/SKILL.md` (two-pass card flow; `## Step 0: preflight` and its terminal rule) | `docs/invariants/events-retro.md` |
 | `config.py:MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `_preview_mm_events_bootstrap` / `resolve_sources` / `get_sources` (`bootstrap=` gate, `SourceResolution.would_create`) / `DEFAULT_SOURCES` mm-events entry | `docs/invariants/events-retro.md` |
 | `upgrade.py` / `cli.py` upgrade hook seams / `pullhistory.py:append_self_upgrade` | `docs/invariants/auto-upgrade.md` |
-| `cli.py:update` / `_update_refusal` / `upgrade.py:update_or_nudge` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_attempt_state` / `_run_pipx` / `_spawn_pipx` / `auto_install_enabled` / `config.py:_apply_defaults` (the `[upgrade]` keys) | `docs/invariants/auto-upgrade.md` (self-update section) |
+| `cli.py:update` / `_update_refusal` / `_run_update_with_progress` / `upgrade.py:update_or_nudge` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_attempt_state` / `_run_pipx` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `auto_install_enabled` / `updateprogress.py:PipxProgressParser` / `config.py:_apply_defaults` (the `[upgrade]` keys) | `docs/invariants/auto-upgrade.md` (self-update section) |
 | Command/option names, positional arguments, exit codes, format constants, host families, token fields/order, device-registry fields, machine-readable output | `docs/invariants/auto-upgrade.md` “Compatibility (1.x)” |
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
 
