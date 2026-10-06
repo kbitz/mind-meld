@@ -1,7 +1,8 @@
 # Module map and invariant routing
 
-Module paths below are relative to `src/mind_meld/`; invariant docs, tests,
-fixtures and other repository files are relative to the repository root. Before editing code, find its file or
+Module paths below are relative to `src/mind_meld/` (a bare `aggregator.py` is
+`skills/retro_fleet/aggregator.py`); invariant docs, tests, fixtures and other
+repository files are relative to the repository root. Before editing code, find its file or
 function here and read every invariant doc named by the matching rows.
 
 ## Source Layout
@@ -67,7 +68,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 
 | If you're editing… | READ FIRST |
 |---|---|
-| `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `_publication_remedy` / `push` (attempt finally) / `skills/retro_fleet/aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
+| `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `_publication_remedy` / `push` (attempt finally) / `aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `config.py:UsageCaptureReadiness` / `usage_capture_readiness` / `usage_capture_remedy` / `cli.py:_reader_capture_readiness` / `_usage_capture_needs_upgrade` / `_usage_capture_remedy` / `_print_usage_push_mode` / `_push_result_or_none` / `PushResult.content_changed` / `PushResult.content_files` / `PushResult.content_accepted` / `PushResult.host_usage_published` / `events.py:GIT_SNAPSHOT_ORIGIN_INIT` / `write_push_event` (batch origin guard) / `events_tail.py:_capture_event_snapshots` (`origin`) / `_run_events_tail` (`capture_activity`) / `cli.py:_push_core` (`attended`, `host_row_appended`, `capture_activity`, content gate) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `pullplan.py` / `cli.py:_plan_pull` / `_preflight_conflicts` / `_print_pull_prediction` / preview completion/refusal constants / `diff_cmd` exclude filtering | `docs/invariants/sync.md` |
 | `seen_sources.py:read` / `_read_under_lock` / status seed recovery and exemptions | `docs/invariants/sync.md` |
@@ -130,7 +131,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `skills/retro_fleet/aggregator.py:_accept_optional_source_list` / `_sibling_tie_key` / `_agent_coverage_notes` / `_host_reader_coverage_notes` / `_dump_host_inventory` / `_project_git_capture` / `_uncovered_intervals` / `aggregate_git` (`origin` guard) | `docs/invariants/events-retro.md` (coverage states) |
 | `token_usage.py:PRICING` / `MODEL_FAMILY_TIERS` / `PRICING_FAMILY_BY_MODEL` / `VENDOR_FAMILY_TIERS` / `VENDOR_LONG_CONTEXT_TIERS` / `resolve_prices` / `resolve_long_context_prices` / `model_family` / `estimate_cost` / `_cost_under` / `_CACHE_WRITE_MULT` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `token_usage.py:walk_jsonl_segment` / `walk_jsonl_buckets` / `iter_bounded_lines` / `_drain_to_newline` / `get_or_compute` / `_resume_plan` / `head_fingerprint` / `head_probe_len` / `_carry_tail_ids` / `merge_token_days` / `merge_skill_days` / `TAIL_MSG_ID_LOOKBACK` / `_HEAD_PROBE_BYTES` / `_MAX_TAIL_MSG_ID_LEN` | `docs/invariants/events-retro.md` (incremental-resume section) |
-| `skills/retro_fleet/aggregator.py:_agent_row_cost` / `agent_row_floor_causes` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` / `_format_usd_short` / `_long_context_cause` | `docs/invariants/events-retro.md` (cost-estimation section) |
+| `aggregator.py:_agent_row_cost` / `agent_row_floor_causes` / `_unpriced_token_summary` / `_short_model_name` / `_format_usd` / `_format_usd_short` / `_long_context_cause` | `docs/invariants/events-retro.md` (cost-estimation section) |
 | `events.py:_cap_by_model` / `_model_rank` / `_copy_tokens_by_day` / `MAX_HOST_MODELS_PER_DAY` / `MAX_HOST_MODELS_PER_ROW` (cap runs AFTER the day trim; mirrors the aggregator constants) | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` (incl. `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_render_ascii_card` / `_aggregate_git_period_pair` / `_classify_commit_subject` / `_detect_bursts` / `_safe_prose`) | `docs/invariants/events-retro.md` |
 | `skills/retro_fleet/aggregator.py` unified-agents surface (`FleetAgentRow` / `FleetAgentUsage` / `aggregate_agent_usage` / `_detect_duplicate_ledgers` / `_host_family_day_tuples` / `_render_agents_table` / `_render_agents_card_block` / `AGENT_ROW_ORDER` / `AgentRhythmView` / `_agent_rhythm_view` / `_agent_coverage_notes` / `_window_day_keys` / `device_labels` / `device_label`) and `token_usage.sum_bucket` | `docs/invariants/events-retro.md` (unified-agents renderer contract) |

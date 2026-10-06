@@ -79,18 +79,29 @@ def _markdown_tokens(text: str) -> list[Token]:
 
 
 def _exists_exact(path: Path) -> bool:
-    """`path` exists with exactly this spelling. macOS (local and CI) is
-    case-insensitive, but a miscased link 404s on GitHub."""
+    """`path` exists with exactly this spelling, checked part by part on the
+    lexically normalized path before any symlink is followed. macOS (local and
+    CI) is case-insensitive, but a miscased link 404s on GitHub."""
+    normalized = Path(os.path.normpath(path))
     try:
-        parts = path.resolve().relative_to(ROOT).parts
+        parts = normalized.relative_to(ROOT).parts
     except ValueError:
-        return path.exists()
+        return normalized.exists()
     current = ROOT
     for part in parts:
         if not current.is_dir() or part not in os.listdir(current):
             return False
         current = current / part
-    return True
+    return current.exists()
+
+
+def test_exact_case_check_runs_before_symlinks_resolve() -> None:
+    """`claude.md` must not pass by resolving through the real `CLAUDE.md`
+    symlink to `AGENTS.md` on a case-insensitive filesystem."""
+    assert _exists_exact(ROOT / "CLAUDE.md")
+    assert _exists_exact(ROOT / "docs" / "invariants" / ".." / ".." / "AGENTS.md")
+    assert not _exists_exact(ROOT / "claude.md")
+    assert not _exists_exact(ROOT / "docs" / "Invariants" / "README.md")
 
 
 def _heading_anchors(path: Path) -> set[str]:
@@ -152,7 +163,7 @@ def test_relative_doc_links_and_anchors_resolve(doc: str) -> None:
     source = ROOT / doc
     broken = []
     for target, anchor in _relative_links(source.read_text(encoding="utf-8")):
-        path = (source.parent / target).resolve() if target else source
+        path = Path(os.path.normpath(source.parent / target)) if target else source
         if not _exists_exact(path):
             broken.append(f"{target} (missing file)")
         elif anchor and path.suffix == ".md" and anchor not in _heading_anchors(path):
@@ -214,8 +225,8 @@ def _cited_doc(name: str, citing: Path) -> Path | None:
     if citing.suffix == ".md":  # a doc's bare `README.md` means its sibling
         bases.reverse()
     for base in [*bases, ROOT / "docs" / "invariants", ROOT / "docs"]:
-        candidate = (base / name).resolve()
-        if candidate.is_file() and _exists_exact(candidate):
+        candidate = Path(os.path.normpath(base / name))
+        if _exists_exact(candidate) and candidate.is_file():
             return candidate
     return None
 
