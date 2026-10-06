@@ -380,8 +380,8 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
 
     Loss of a peer's device entry is load-bearing during corrupt-manifest
     recovery: the peer's tombstones are unreachable without its device_id,
-    so silent drops can mask a recoverable manifest (see TODOS.md
-    "Blob-directory as secondary peer-discovery path"). Emitting a warning
+    so silent drops can mask a recoverable manifest (see docs/roadmap-future.md
+    "Blob-directory peer recovery"). Emitting a warning
     per dropped entry at least makes the gap visible to support triage.
 
     Library callers (and direct tests) should continue to call
@@ -545,7 +545,7 @@ def _init_crypto_session(
     # is NOT written back over the user's hand-edited paths. Without this,
     # a user's `storage.path = "~/Library/..."` silently becomes the resolved
     # absolute form on the first run after upgrade, and symlinks get
-    # dereferenced. See ROADMAP.md Track 2B / CLAUDE.md for the contract.
+    # dereferenced. See Track 2B (v0.8.8) in docs/roadmap-shipped.md.
     if not local_fp:
         crypto_patch = {
             "root_salt_fp": storage_fp,
@@ -561,7 +561,7 @@ def _init_crypto_session(
         except ConfigError as e:
             # ConfigError here signals on-disk TOML became malformed between
             # load_config and this call (concurrent editor crash, disk issue).
-            # Per CLAUDE.md v0.8.1 visible-failure contract: data-at-risk
+            # Per the v0.8.1 visible-failure contract (docs/invariants/sync.md): data-at-risk
             # signals reach stderr even in quiet mode.
             print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
 
@@ -3218,7 +3218,7 @@ def _register_and_save(
         try:
             backend.delete(dev_key)
         except Exception as cleanup_exc:
-            # Per CLAUDE.md visible-failure contract: load-bearing warnings
+            # Per the visible-failure contract (docs/invariants/sync.md): load-bearing warnings
             # signal data-at-risk degradation and must reach stderr even in
             # quiet mode. Original save error wins via bare `raise` below —
             # surfacing the cleanup failure but not letting it mask the
@@ -5120,7 +5120,7 @@ def _print_pull_summary(
     Load-bearing warnings (corrupt peers, unknown sources, fsync
     failures, per-source conflicts/failures) ALWAYS to stderr — they
     survive quiet mode because silent suppression would mask
-    data-at-risk conditions (see CLAUDE.md "Load-bearing warnings").
+    data-at-risk conditions (see docs/invariants/sync.md "Load-bearing warnings").
 
     Cosmetic summary (totals, bytes transferred, elapsed, per-source
     verbose lines) goes to console only when !quiet.
@@ -9911,7 +9911,7 @@ def _write_autorun_breadcrumb(verb: str, outcome: str, detail: str = "") -> None
     see 'last auto-sync attempt: 3h ago, skipped (lock held)' instead of
     wondering why sync appears wedged.
 
-    Keyed per verb so the documented CLAUDE.md lifecycle (autopull at
+    Keyed per verb so README's documented lifecycle (autopull at
     conversation start, autopush at end) cannot erase the other verb's
     crumb. The shared JSON lock serializes concurrent sibling hooks, so a
     lock-held pull cannot replace a degraded push read from a stale payload.
@@ -10331,7 +10331,7 @@ def autopush() -> None:
         # but autopush runs unattended from a Claude Code hook — that stderr
         # reaches nobody, so pre-v0.12.16 the breadcrumb said `success` while
         # the retro pipeline was dead, and `mm status` repeated it. Same
-        # argument CLAUDE.md already makes for the `no-sources` breadcrumb:
+        # argument docs/invariants/sync.md makes for the `no-sources` breadcrumb:
         # without this, `mm status` only ever sees `success` and monitoring
         # built on top of it never catches the wedge.
         events_degradations = result.events_degradations if result else []

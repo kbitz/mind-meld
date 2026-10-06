@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
 CLAUDE_MD = ROOT / "CLAUDE.md"
 ROUTING_MD = ROOT / "docs" / "invariants" / "README.md"
+ROUTING_MD_REL = ROUTING_MD.relative_to(ROOT)
 
 
 def test_claude_md_is_a_symlink_to_agents_md() -> None:
@@ -49,6 +50,189 @@ def test_agents_md_preserves_routing_entrypoint_and_parallelism_cap() -> None:
     text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- roadmap:parallelism_cap=8 -->" in text
     assert "[docs/invariants/README.md](docs/invariants/README.md)" in text
+
+
+def test_agents_md_stays_inside_the_project_doc_budget() -> None:
+    """AGENTS.md loads into every agent session (twice under Cursor, via the
+    CLAUDE.md link), and Codex reads at most 32 KiB of project docs by default.
+    The 49 KB pre-2026-10-06 file lost its Auto Commands section and most of the
+    pointer table to that cut. The 8 KiB budget is the 2026-10-06 slimming
+    target: lookup material belongs in the routing README, not here."""
+    size = len((ROOT / "AGENTS.md").read_bytes())
+    assert size < 8 * 1024, f"AGENTS.md is {size} bytes; move lookup detail to {ROUTING_MD_REL}"
+
+
+def _strip_fences(text: str) -> str:
+    """Drop fenced code blocks: their `#` lines are not headings, nor their
+    `](...)` text links."""
+    kept, fence = [], None
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if fence is None and stripped.startswith(("```", "~~~")):
+            fence = stripped[:3]
+        elif fence is not None:
+            if stripped.startswith(fence):
+                fence = None
+        else:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _heading_anchors(path: Path) -> set[str]:
+    """GitHub's anchors for `path`: heading slugs, with `-N` suffixes for
+    repeated headings, plus explicit `<a id>` / `<a name>` anchors."""
+    text = path.read_text(encoding="utf-8")
+    seen: dict[str, int] = {}
+    anchors: set[str] = set()
+    for heading in re.findall(r"^#{1,6} (.+?)(?: +#+)?$", _strip_fences(text), re.M):
+        slug = re.sub(r"[^\w -]", "", heading.strip().lower()).replace(" ", "-")
+        count = seen.get(slug, 0)
+        anchors.add(slug if count == 0 else f"{slug}-{count}")
+        seen[slug] = count + 1
+    return anchors | set(re.findall(r'<a (?:id|name)="([^"]+)"', text))
+
+
+_INLINE_LINK = re.compile(r"\]\(<?([^)\s>]*)>?(?:\s+\"[^\"]*\")?\)")
+_REFERENCE_LINK = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?", re.M)
+_LINK_DOCS = sorted(
+    {
+        str(path.relative_to(ROOT))
+        for path in [
+            ROOT / "AGENTS.md",
+            ROOT / "README.md",
+            ROOT / "SPEC.md",
+            *(ROOT / "docs").rglob("*.md"),
+        ]
+        if "archive" not in path.relative_to(ROOT).parts
+    }
+)
+
+
+def _relative_links(text: str) -> list[tuple[str, str]]:
+    """(path, anchor) for every inline or reference-style relative link outside
+    code fences and code spans."""
+    body = re.sub(r"`[^`\n]*`", "", _strip_fences(text))
+    out = []
+    for target in [*_INLINE_LINK.findall(body), *_REFERENCE_LINK.findall(body)]:
+        if not target or re.match(r"[A-Za-z][\w+.-]*:", target):
+            continue
+        path, _, anchor = target.partition("#")
+        out.append((path, anchor))
+    return out
+
+
+@pytest.mark.parametrize("doc", _LINK_DOCS)
+def test_relative_doc_links_and_anchors_resolve(doc: str) -> None:
+    """The slim AGENTS.md reaches relocated rules (the collector ban, release
+    discipline) only through relative links, and the invariant docs cross-link
+    each other. Renaming a target heading must fail here instead of silently
+    cutting that route."""
+    source = ROOT / doc
+    broken = []
+    for target, anchor in _relative_links(source.read_text(encoding="utf-8")):
+        path = (source.parent / target).resolve() if target else source
+        if not path.exists():
+            broken.append(f"{target} (missing file)")
+        elif anchor and path.suffix == ".md" and anchor not in _heading_anchors(path):
+            broken.append(f"{target}#{anchor} (missing heading)")
+    assert broken == [], f"{doc}: " + ", ".join(broken)
+
+
+def test_link_gate_parses_the_link_shapes_it_must_check() -> None:
+    text = (
+        '[a](x.md#one) [b](<y.md>) [c](z.md "title") [d](https://e.com) `[f](code.md)`\n'
+        "[ref]: w.md#two\n```\n[g](fenced.md)\n# not a heading\n```\n"
+    )
+    assert _relative_links(text) == [("x.md", "one"), ("y.md", ""), ("z.md", ""), ("w.md", "two")]
+
+
+def test_heading_anchors_follow_github_rules(tmp_path: Path) -> None:
+    doc = tmp_path / "doc.md"
+    doc.write_text(
+        '## Rules\n## Rules\n## Closed ##\n```sh\n# only in code\n```\n<a id="pinned"></a>\n',
+        encoding="utf-8",
+    )
+    assert _heading_anchors(doc) == {"rules", "rules-1", "closed", "pinned"}
+
+
+_QUOTED_DOC_CITATION = re.compile(
+    r"(?<![\w./~-])([\w./-]*\w\.md)(?:'s)?:?\s+(?:#\s+)?[\"\u201c]([^\"\u201d]{3,160})[\"\u201d]"
+)
+
+
+def _citation_text(text: str) -> str:
+    return " ".join(re.sub(r"[`\"\u201c\u201d]", "", text).split()).lower()
+
+
+def _cited_doc(name: str, citing: Path) -> Path | None:
+    if name in ("CLAUDE.md", "AGENTS.md"):
+        return ROOT / "AGENTS.md"
+    for base in (ROOT, citing.parent, ROOT / "docs" / "invariants", ROOT / "docs"):
+        candidate = (base / name).resolve()
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _stale_doc_citations(paths: list[Path]) -> list[str]:
+    stale = []
+    for path in paths:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for m in _QUOTED_DOC_CITATION.finditer(text):
+            doc = _cited_doc(m.group(1), path)
+            section = _citation_text(m.group(2)).rstrip(".,;:")
+            if doc is None or section not in _citation_text(doc.read_text(encoding="utf-8")):
+                stale.append(f'{path}: {m.group(1)} "{m.group(2)}"')
+    return stale
+
+
+def test_quoted_doc_section_citations_resolve() -> None:
+    """A comment citing `<doc>.md "<section>"` must name text that doc still
+    has. Track 16A and the 2026-10-06 slimming both moved sections out of
+    CLAUDE.md and stranded such pointers; cite the doc that now owns the rule."""
+    paths = [*SRC.rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
+    paths.extend((ROOT / "docs" / "invariants").glob("*.md"))
+    here = Path(__file__).resolve()
+    assert (hits := _stale_doc_citations([p for p in paths if p.resolve() != here])) == [], (
+        "\n".join(hits)
+    )
+
+
+def test_doc_citation_scanner_catches_stale_and_wrapped_forms(tmp_path: Path) -> None:
+    stale = tmp_path / "stale.py"
+    stale.write_text(
+        '# See CLAUDE.md "Gone Section".\n# Per AGENTS.md: "Also gone".\n'
+        '# See docs/invariants/sync.md\n#   "Not a sync heading" for the rule.\n',
+        encoding="utf-8",
+    )
+    fresh = tmp_path / "fresh.py"
+    fresh.write_text(
+        '# See docs/invariants/sync.md "Atomic write publication failures".\n',
+        encoding="utf-8",
+    )
+    assert len(_stale_doc_citations([stale])) == 3
+    assert _stale_doc_citations([fresh]) == []
+
+
+def _source_layout_modules() -> set[str]:
+    section = ROUTING_MD.read_text(encoding="utf-8").split("## Source Layout", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    return set(re.findall(r"^\| \**`([^`]+)`", section, re.M))
+
+
+def test_source_layout_lists_every_module() -> None:
+    """The routing gates read symbol citations, so deleting the whole Source
+    Layout table used to pass them. Every module needs its own greppable row,
+    and no row may name a module that is gone."""
+    covered = _source_layout_modules()
+    assert len(covered) > 30, "Source Layout parse found suspiciously few rows"
+    modules = {
+        str(path.relative_to(SRC)) for path in SRC.rglob("*.py") if path.name != "__init__.py"
+    }
+    assert sorted(modules - covered) == [], f"add Source Layout rows in {ROUTING_MD_REL}"
+    assert sorted(m for m in covered - modules if not (SRC / m).exists()) == [], (
+        f"remove Source Layout rows for deleted modules in {ROUTING_MD_REL}"
+    )
 
 
 def test_readme_uninstall_loop_keeps_the_opencode_skill_path() -> None:
@@ -265,12 +449,12 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     """Every `<file>.py:<symbol>` in the table names a real definition."""
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
-    assert path is not None, f"CLAUDE.md routes to {fname}, which does not exist"
+    assert path is not None, f"{ROUTING_MD_REL} routes to {fname}, which does not exist"
 
     if symbol.endswith("*"):  # wildcard family, e.g. `_ensure_retro_skill_link*`
         stem = symbol.rstrip("*")
         assert any(n.startswith(stem) for n in _defined_names(path)), (
-            f"CLAUDE.md routes {fname}:{symbol} but nothing there starts with {stem!r}"
+            f"{ROUTING_MD_REL} routes {fname}:{symbol} but nothing there starts with {stem!r}"
         )
         return
     if symbol in _defined_names(path):
@@ -281,7 +465,7 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
         else ""
     )
     raise AssertionError(
-        f"CLAUDE.md routes {fname}:{symbol}, which is not defined there{hint}. "
+        f"{ROUTING_MD_REL} routes {fname}:{symbol}, which is not defined there{hint}. "
         f"The symbol moved, or the row is stale."
     )
 
@@ -290,14 +474,16 @@ def test_every_changelog_version_has_a_progress_row() -> None:
     """Every released version appears in docs/PROGRESS.md.
 
     Fourth occurrence of this gap: v0.11.24 and v0.11.27 are already named in
-    CLAUDE.md, and v0.12.12 and v0.12.18 were found missing during Track 16A.
-    The v0.11.24 design tried to auto-append the row from `release.yml` via
+    docs/invariants/auto-upgrade.md, and v0.12.12 and v0.12.18 were found
+    missing during Track 16A. The v0.11.24 design tried to auto-append the
+    row from `release.yml` via
     `git push`, which branch protection rejects on every release where the row
     was not already in the PR -- so the workflow is not the place to fix this.
 
     A test is: the row goes in the SAME PR as the pyproject + CHANGELOG bump,
-    and CI fails the PR if it does not. That is the durable fix CLAUDE.md's
-    PROGRESS-row convention asks for, and it costs nothing at release time.
+    and CI fails the PR if it does not. That is the durable fix the
+    PROGRESS-row convention in docs/invariants/auto-upgrade.md asks for, and
+    it costs nothing at release time.
     """
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     progress = (ROOT / "docs" / "PROGRESS.md").read_text(encoding="utf-8")
@@ -310,7 +496,7 @@ def test_every_changelog_version_has_a_progress_row() -> None:
     # Enforced from 0.11.0 forward. Running this gate for the first time turned
     # up nine OLDER gaps too -- 0.10.3, 0.10.2, 0.10.0, 0.9.6, 0.9.5, 0.8.8,
     # 0.8.7, 0.8.6, 0.1.0 -- so the problem is considerably older than the two
-    # occurrences CLAUDE.md names. They are listed here rather than silently
+    # occurrences auto-upgrade.md names. They are listed here rather than silently
     # excluded: backfilling pre-0.11 prose is a separate call, and the point of
     # this gate is to stop the RECURRENCE, not to relitigate history.
     def _key(v: str) -> tuple[int, ...]:
@@ -530,6 +716,7 @@ def test_attended_push_contract_on_live_surfaces() -> None:
         "README.md",
         "SPEC.md",
         "AGENTS.md",
+        "docs/invariants/README.md",
         "docs/invariants/events-retro.md",
         "src/mind_meld/skills/retro_fleet/SKILL.md",
     ]
@@ -606,7 +793,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
 
 # ---------------------------------------------------------------------------
 # The invariant docs carry their OWN routing header, and it drifted where
-# CLAUDE.md's table did not.
+# the routing table did not.
 # ---------------------------------------------------------------------------
 
 _INVARIANT_ROW = re.compile(r"^- `src/mind_meld/(?P<file>[\w/]+\.py)` — (?P<rest>.+)$", re.M)
@@ -647,10 +834,7 @@ def test_removed_helper_scanner_catches_a_stale_citation(tmp_path):
 
 
 def test_error_url_anchors_resolve():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    headings = re.findall(r"^#{2,3} (.+)$", readme, re.M)
-    anchors = {re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-") for heading in headings}
-    anchors.update(re.findall(r'<a id="([^"]+)"\s*>', readme))
+    anchors = _heading_anchors(ROOT / "README.md")
     for name, url in vars(errors).items():
         if name.endswith("_URL") and isinstance(url, str) and "#" in url:
             assert url.split("#", 1)[1] in anchors, f"{name} has no README anchor: {url}"
@@ -674,12 +858,12 @@ def test_invariant_docs_have_citations() -> None:
 def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> None:
     """Each invariant doc's own "Read BEFORE editing" list must resolve too.
 
-    CLAUDE.md's table routes an agent to the right DOC; that doc's first lines
+    The routing table routes an agent to the right DOC; that doc's first lines
     then route them to the right CODE. Track 16A re-anchored the table but not
     these, so `conflicts.md` still filed `_resolve_interactive_loop` and
     `_find_conflict_files` under `cli.py`, and `events-retro.md` filed seven
     moved symbols there plus `_devices_json_cmd`, which never existed. The
-    gate that only read CLAUDE.md could not see any of it — an agent would be
+    gate that only read the routing table could not see any of it — an agent would be
     routed correctly and then sent straight back to the wrong file.
     """
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]

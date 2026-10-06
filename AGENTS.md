@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, Cursor, and configurable sync sources.
+Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, and configurable sync sources, plus Cursor usage capture.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -33,7 +33,7 @@ Admission gates: [docs/ROADMAP.md](docs/ROADMAP.md); rationale: [constraint hist
 
 ## Before editing code
 
-Before editing anything under `src/`, read [docs/invariants/README.md](docs/invariants/README.md), find the file or function you're touching, and read every invariant doc it names. This is the authoritative module map and routing table. For multiple areas, read all matching docs. Shortcut: `rg -l '<symbol>' docs/invariants/*.md`.
+Before editing anything under `src/`, read [docs/invariants/README.md](docs/invariants/README.md), find the file or function you're touching, and read every invariant doc it names. This is the authoritative module map and routing table. Shortcut: `rg -n '<symbol>' docs/invariants/`, then read every doc named by matching README rows and every doc whose header lists it.
 
 ## Cross-cutting rules
 
@@ -72,13 +72,14 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 
 - `autopull` / `autopush` never prompt, are quiet on the happy path, and exit silently when uninitialized or unchanged.
 - Malformed config emits a one-line stderr error; data-at-risk warnings remain visible in quiet mode. Unexpected errors degrade gracefully.
+- `push`/`pull`/`autopull`/`autopush` self-update via pipx at their tail (`auto_install`, default on); failures never change the exit code.
 - `autopull` reports per-file apply failures and counts. `autopush` records `no-sources` and `degraded` breadcrumbs so `mm status` can expose failures.
-- Detailed failure contracts: [sync invariants](docs/invariants/sync.md) and [events/retro invariants](docs/invariants/events-retro.md). Integration snippets: README.
+- Detailed contracts: [sync](docs/invariants/sync.md), [events/retro](docs/invariants/events-retro.md) and [auto-upgrade](docs/invariants/auto-upgrade.md) invariants. Integration snippets: README.
 
 ## Where detail lives
 
 - [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
 - [README](README.md): commands, configuration, previews, integration, and development.
 - [SPEC](SPEC.md): architecture and data model; Project Structure, Implementation Order, and original push algorithm are historical.
-- Design decisions: [v1](docs/designs/mind-meld-v1.md), [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md). Current retro shape is the v1.1 Agents table in README and events/retro invariants.
+- Design decisions: [v1](docs/designs/mind-meld-v1.md), [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md).
 - [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.

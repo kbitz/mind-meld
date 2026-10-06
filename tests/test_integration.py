@@ -4981,7 +4981,7 @@ def test_enable_default_from_explicit_empty_sources(capture61, monkeypatch, tmp_
 class TestTrack7BEventsTail:
     """Track 7B (v0.10.3): per-push events tail at HEAD of ``_push_core``.
 
-    See CLAUDE.md "Events tail in _push_core (load-bearing, v0.10.3)" for
+    See docs/invariants/events-retro.md "Events tail in `_push_core`" for
     the four invariants. These tests pin the wiring shape — the tail must
     fire on every push attempt past the no-sources guard, never on
     ``--dry-run``, never on un-migrated configs lacking ``mm-events``,

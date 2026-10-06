@@ -1,7 +1,8 @@
 # Module map and invariant routing
 
-Paths below are relative to the repository root. Before editing code, find its
-file or function here and read every invariant doc named by the matching rows.
+Module paths below are relative to `src/mind_meld/`; invariant-doc and fixture
+paths are relative to the repository root. Before editing code, find its file or
+function here and read every invariant doc named by the matching rows.
 
 ## Source Layout
 
@@ -43,7 +44,9 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
 | `safety.py` | Peer-controlled string sanitization |
 | `conflictdiff.py` | Pure leaf renderers for the conflict prompts |
-| `storage/{local,keys}.py` | Local backend + validated storage-key construction |
+| `storage/local.py` | Local backend |
+| `storage/keys.py` | Validated storage-key construction |
+| `skills/retro_fleet/aggregator.py` | Fleet-retro aggregator and its `SKILL.md`; documented invocations use `mm retro-fleet` (`cli.py:retro_fleet_cmd`), with `python -m` only as a dev-checkout fallback. Store, installer and packaging rules: `docs/invariants/events-retro.md` |
 
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
@@ -76,6 +79,9 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:_warn_apply_failure` / `_print_apply_warning` / `errors.py:PULL_FAILURES_URL` (plain stderr uses `safety.safe_terminal_str` on every dynamic field) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
 | `cli.py:_ApplyReporter` / (publication-time deferred-bump invalidation) | `docs/invariants/conflicts.md` |
 | `cli.py:autopull` / `status` (failed-file count and breadcrumb detail) | `docs/invariants/sync.md` |
+| `cli.py:autopull` / `autopush` / `_auto_command_setup` / (tail self-update via `upgrade.update_or_nudge`, unattended) | `docs/invariants/auto-upgrade.md` |
+| `config.py:load_config` / `_validate` / `_apply_defaults` / `cli.py:autopush` / (`ConfigError` normalization, `no-sources` breadcrumb) | `docs/invariants/sync.md` (Visible failures in automatic commands) |
+| `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` / `locked_json_snapshot` | `docs/invariants/sync.md` (Shared JSON locking) |
 | `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |

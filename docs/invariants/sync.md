@@ -5,13 +5,13 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
-- `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw`
+- `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
 - `src/mind_meld/host_usage.py` — `read_cursor_usage` / `configure_cursor_hook`
 - `src/mind_meld/cli.py` — `_register_and_save` / `_quarantine_corrupt_manifest` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
-- `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
+- `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`

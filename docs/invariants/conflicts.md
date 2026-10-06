@@ -104,7 +104,7 @@ fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1
 
 **Trailing-newline preservation.** `lcs_merge` splits without `keepends` (so trailing-newline variations don't trip the LCS into a spurious `replace` on the only line of a file) and re-attaches a `\n` terminator on output if either input had one. Memory entry files routinely end with `\n`; the merged result matches.
 
-**Historical graduation proposal (cancelled below).** The user-confirmed (m) prompt is the conservative ship for the dogfood window. If clean-merge accepts dominate during dogfood, the dispatch in `_apply_incoming_file` can flip to "silently apply lcs_merge result at pull time when conflict_count == 0" (Approach A in the /plan-ceo-review). Same `lcs_merge` primitive, no new module.
+**Graduation path (superseded).** The user-confirmed (m) prompt is the conservative ship for the dogfood window. If clean-merge accepts dominate during dogfood, the dispatch in `_apply_incoming_file` can flip to "silently apply lcs_merge result at pull time when conflict_count == 0" (Approach A in the /plan-ceo-review). Same `lcs_merge` primitive, no new module. **Superseded by "Default key is always `(s)kip`" below:** a clean `lcs_merge` with zero conflict markers can still be a Frankenstein concatenation of two different documents, or bring back a line one side deliberately deleted (LCS treats the deletion as the other side's addition). `conflict_count == 0` is not a correctness signal, so silent pull-time application is not a graduation path.
 
 ## JSONL line-union ordering (load-bearing, Track 51A)
 
@@ -201,6 +201,8 @@ Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi
 **Sync-surface warning (`_promote_target_will_sync`).** A promoted file is a NEW filename, so it only syncs if it lands inside one of the source's `_synced_scan_dirs` (recursive `include_dirs` surface). Under an `include_files`-only source, the `from-`/`local-` name will never match an exact configured filename → it will not sync. `_resolve_interactive_loop` warns (one `mm: warning:` stderr line) when this is detected; promote still succeeds (it never silently half-fails, and mm does NOT auto-mutate user config). Requires the `sources_by_name` arg threaded from `resolve()`; when that arg is None (unit tests, library callers) the warning is skipped.
 
 Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, `include_files` warning vs `include_dirs` no-warning, no-base promote unchanged), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
+
+**Phase 2 classifier: not built, cancelled.** The LCS-similarity classifier (`classify_divergence`, a `DivergenceClass` enum, a `Class` column on `mm conflicts`, similarity-gated silent merge) is NOT built; the v0.12.51 analysis below cancelled it (see the refusal in `TODOS.md`).
 
 ## Collector removal and auto-resolver cancellation
 

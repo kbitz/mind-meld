@@ -4876,8 +4876,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_save:
         # stderr, not stdout: the documented recipe redirects stdout
         # (``mm retro-fleet 30d --no-save > /tmp/retro.md``). Tier is
-        # ``mm: notice:`` — CLAUDE.md reserves ``warning`` for data-at-risk
-        # degradation and a no-op flag is not that.
+        # ``mm: notice:`` — docs/invariants/auto-upgrade.md reserves ``warning``
+        # for data-at-risk degradation and a no-op flag is not that.
         sys.stderr.write(
             f"mm: notice: --no-save is a no-op as of {NO_SAVE_REMOVED_IN} "
             "(trends are computed from the events corpus; snapshots are gone) "
