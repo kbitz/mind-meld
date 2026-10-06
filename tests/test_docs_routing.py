@@ -26,8 +26,11 @@ import re
 import stat
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
+from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from mind_meld import errors, upgrade
 
@@ -56,67 +59,86 @@ def test_agents_md_stays_inside_the_project_doc_budget() -> None:
     """AGENTS.md loads into every agent session (twice under Cursor, via the
     CLAUDE.md link), and Codex reads at most 32 KiB of project docs by default.
     The 49 KB pre-2026-10-06 file lost its Auto Commands section and most of the
-    pointer table to that cut. The 8 KiB budget is the 2026-10-06 slimming
-    target: lookup material belongs in the routing README, not here."""
+    pointer table to that cut. The 2026-10-06 slimming targets 8 KiB; the hard
+    limit leaves room for sections gstack tools append to CLAUDE.md. Lookup
+    material belongs in the routing README, not here."""
     size = len((ROOT / "AGENTS.md").read_bytes())
-    assert size < 8 * 1024, f"AGENTS.md is {size} bytes; move lookup detail to {ROUTING_MD_REL}"
+    assert size < 12 * 1024, f"AGENTS.md is {size} bytes; move lookup detail to {ROUTING_MD_REL}"
 
 
-def _strip_fences(text: str) -> str:
-    """Drop fenced code blocks: their `#` lines are not headings, nor their
-    `](...)` text links."""
-    kept, fence = [], None
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        if fence is None and stripped.startswith(("```", "~~~")):
-            fence = stripped[:3]
-        elif fence is not None:
-            if stripped.startswith(fence):
-                fence = None
-        else:
-            kept.append(line)
-    return "\n".join(kept)
+_MARKDOWN = MarkdownIt("commonmark")
+_FOOTNOTE_DEFINITION = re.compile(r"^ {0,3}\[\^[^\]]+\]:.*$", re.M)
+_HTML_ANCHOR = re.compile(r"<a\s+(?:id|name)=\"([^\"]+)\"")
+
+
+def _markdown_tokens(text: str) -> list[Token]:
+    """Block tokens followed by every inline child. Footnote definitions are
+    dropped first: CommonMark would read `[^1]: text` as a link reference."""
+    tokens = _MARKDOWN.parse(_FOOTNOTE_DEFINITION.sub("", text))
+    return tokens + [child for token in tokens for child in token.children or []]
+
+
+def _exists_exact(path: Path) -> bool:
+    """`path` exists with exactly this spelling. macOS (local and CI) is
+    case-insensitive, but a miscased link 404s on GitHub."""
+    try:
+        parts = path.resolve().relative_to(ROOT).parts
+    except ValueError:
+        return path.exists()
+    current = ROOT
+    for part in parts:
+        if not current.is_dir() or part not in os.listdir(current):
+            return False
+        current = current / part
+    return True
 
 
 def _heading_anchors(path: Path) -> set[str]:
-    """GitHub's anchors for `path`: heading slugs, with `-N` suffixes for
-    repeated headings, plus explicit `<a id>` / `<a name>` anchors."""
-    text = path.read_text(encoding="utf-8")
-    seen: dict[str, int] = {}
+    """GitHub's anchors for `path`: heading slugs, numbered the way
+    github-slugger numbers repeats, plus explicit `<a id>` / `<a name>`."""
+    tokens = _MARKDOWN.parse(path.read_text(encoding="utf-8"))
+    occurrences: dict[str, int] = {}
     anchors: set[str] = set()
-    for heading in re.findall(r"^#{1,6} (.+?)(?: +#+)?$", _strip_fences(text), re.M):
-        slug = re.sub(r"[^\w -]", "", heading.strip().lower()).replace(" ", "-")
-        count = seen.get(slug, 0)
-        anchors.add(slug if count == 0 else f"{slug}-{count}")
-        seen[slug] = count + 1
-    return anchors | set(re.findall(r'<a (?:id|name)="([^"]+)"', text))
+    for i, token in enumerate(tokens):
+        if token.type == "heading_open":
+            parts = tokens[i + 1].children or []
+            text = "".join(c.content for c in parts if c.type in ("text", "code_inline"))
+            base = slug = re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-")
+            while slug in occurrences:
+                occurrences[base] += 1
+                slug = f"{base}-{occurrences[base]}"
+            occurrences[slug] = 0
+            anchors.add(slug)
+    for token in _markdown_tokens(path.read_text(encoding="utf-8")):
+        if token.type in ("html_block", "html_inline"):
+            anchors.update(_HTML_ANCHOR.findall(token.content))
+    return anchors
 
 
-_INLINE_LINK = re.compile(r"\]\(<?([^)\s>]*)>?(?:\s+\"[^\"]*\")?\)")
-_REFERENCE_LINK = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?", re.M)
+# Generator-owned or frozen files (ROADMAP, roadmap-future/shipped, PROGRESS,
+# TODOS drain records) stay link TARGETS but are not checked as sources: their
+# repair would be a hand edit /roadmap forbids.
 _LINK_DOCS = sorted(
-    {
-        str(path.relative_to(ROOT))
-        for path in [
-            ROOT / "AGENTS.md",
-            ROOT / "README.md",
-            ROOT / "SPEC.md",
-            *(ROOT / "docs").rglob("*.md"),
-        ]
-        if "archive" not in path.relative_to(ROOT).parts
-    }
+    [
+        "AGENTS.md",
+        "README.md",
+        "SPEC.md",
+        *(str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "invariants").glob("*.md")),
+        *(str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "designs").glob("*.md")),
+    ]
 )
 
 
 def _relative_links(text: str) -> list[tuple[str, str]]:
-    """(path, anchor) for every inline or reference-style relative link outside
-    code fences and code spans."""
-    body = re.sub(r"`[^`\n]*`", "", _strip_fences(text))
+    """(path, anchor) for every relative link or image CommonMark renders."""
     out = []
-    for target in [*_INLINE_LINK.findall(body), *_REFERENCE_LINK.findall(body)]:
+    for token in _markdown_tokens(text):
+        target = token.attrs.get("href") or token.attrs.get("src")
+        if token.type not in ("link_open", "image") or not isinstance(target, str):
+            continue
         if not target or re.match(r"[A-Za-z][\w+.-]*:", target):
             continue
-        path, _, anchor = target.partition("#")
+        path, _, anchor = unquote(target).partition("#")
         out.append((path, anchor))
     return out
 
@@ -131,7 +153,7 @@ def test_relative_doc_links_and_anchors_resolve(doc: str) -> None:
     broken = []
     for target, anchor in _relative_links(source.read_text(encoding="utf-8")):
         path = (source.parent / target).resolve() if target else source
-        if not path.exists():
+        if not _exists_exact(path):
             broken.append(f"{target} (missing file)")
         elif anchor and path.suffix == ".md" and anchor not in _heading_anchors(path):
             broken.append(f"{target}#{anchor} (missing heading)")
@@ -140,50 +162,77 @@ def test_relative_doc_links_and_anchors_resolve(doc: str) -> None:
 
 def test_link_gate_parses_the_link_shapes_it_must_check() -> None:
     text = (
-        '[a](x.md#one) [b](<y.md>) [c](z.md "title") [d](https://e.com) `[f](code.md)`\n'
-        "[ref]: w.md#two\n```\n[g](fenced.md)\n# not a heading\n```\n"
+        "[a](x.md#one) [b](<y.md>) [c](z.md \"t\") [d](q.md 't') [e](r.md (t))\n"
+        "[f](https://e.com) `[g](code.md)` ![h](img.png) [ref] claim.[^1]\n\n"
+        "[ref]: w.md#two\n[^1]: Measured note.\n\n"
+        "````\n```\n[i](fenced.md)\n```\n````\n\n~~~\n[j](tilde.md)\n~~~\n"
     )
-    assert _relative_links(text) == [("x.md", "one"), ("y.md", ""), ("z.md", ""), ("w.md", "two")]
+    assert _relative_links(text) == [
+        ("x.md", "one"),
+        ("y.md", ""),
+        ("z.md", ""),
+        ("q.md", ""),
+        ("r.md", ""),
+        ("img.png", ""),
+        ("w.md", "two"),
+    ]
 
 
 def test_heading_anchors_follow_github_rules(tmp_path: Path) -> None:
     doc = tmp_path / "doc.md"
     doc.write_text(
-        '## Rules\n## Rules\n## Closed ##\n```sh\n# only in code\n```\n<a id="pinned"></a>\n',
+        "## Rules\n## Rules\n## Rules-1\n## Closed ##\n## Run `mm push`\n"
+        '````md\n```\n# only in code\n<a id="ghost"></a>\n```\n````\n'
+        '<a id="pinned"></a>\n<a name="named"></a>\n',
         encoding="utf-8",
     )
-    assert _heading_anchors(doc) == {"rules", "rules-1", "closed", "pinned"}
+    assert _heading_anchors(doc) == {
+        "rules",
+        "rules-1",
+        "rules-1-1",
+        "closed",
+        "run-mm-push",
+        "pinned",
+        "named",
+    }
 
 
 _QUOTED_DOC_CITATION = re.compile(
-    r"(?<![\w./~-])([\w./-]*\w\.md)(?:'s)?:?\s+(?:#\s+)?[\"\u201c]([^\"\u201d]{3,160})[\"\u201d]"
+    r"(?<![\w./~-])`?([\w./-]*\w\.md)`?(?:['’]s)?:?\s+[\"“]([^\"”]{3,160})[\"”]"
 )
+_COMMENT_CONTINUATION = re.compile(r"^[ \t]*(?:#+|//|\*|>)[ \t]?", re.M)
 
 
 def _citation_text(text: str) -> str:
-    return " ".join(re.sub(r"[`\"\u201c\u201d]", "", text).split()).lower()
+    return " ".join(re.sub(r"[`\"“”]", "", text).split()).lower()
 
 
 def _cited_doc(name: str, citing: Path) -> Path | None:
     if name in ("CLAUDE.md", "AGENTS.md"):
         return ROOT / "AGENTS.md"
-    for base in (ROOT, citing.parent, ROOT / "docs" / "invariants", ROOT / "docs"):
+    bases = [ROOT, citing.parent]
+    if citing.suffix == ".md":  # a doc's bare `README.md` means its sibling
+        bases.reverse()
+    for base in [*bases, ROOT / "docs" / "invariants", ROOT / "docs"]:
         candidate = (base / name).resolve()
-        if candidate.is_file():
+        if candidate.is_file() and _exists_exact(candidate):
             return candidate
     return None
 
 
-def _stale_doc_citations(paths: list[Path]) -> list[str]:
-    stale = []
+def _doc_citations(paths: list[Path]) -> list[tuple[str, bool]]:
+    """(label, resolves) for each `<doc>.md "<section>"` citation, including
+    `'s` and colon forms, backticked names, and citations wrapped across
+    comment lines."""
+    found = []
     for path in paths:
-        text = " ".join(path.read_text(encoding="utf-8").split())
-        for m in _QUOTED_DOC_CITATION.finditer(text):
+        text = _COMMENT_CONTINUATION.sub(" ", path.read_text(encoding="utf-8"))
+        for m in _QUOTED_DOC_CITATION.finditer(" ".join(text.split())):
             doc = _cited_doc(m.group(1), path)
             section = _citation_text(m.group(2)).rstrip(".,;:")
-            if doc is None or section not in _citation_text(doc.read_text(encoding="utf-8")):
-                stale.append(f'{path}: {m.group(1)} "{m.group(2)}"')
-    return stale
+            ok = doc is not None and section in _citation_text(doc.read_text(encoding="utf-8"))
+            found.append((f'{path}: {m.group(1)} "{m.group(2)}"', ok))
+    return found
 
 
 def test_quoted_doc_section_citations_resolve() -> None:
@@ -193,25 +242,27 @@ def test_quoted_doc_section_citations_resolve() -> None:
     paths = [*SRC.rglob("*.py"), *(ROOT / "tests").rglob("*.py")]
     paths.extend((ROOT / "docs" / "invariants").glob("*.md"))
     here = Path(__file__).resolve()
-    assert (hits := _stale_doc_citations([p for p in paths if p.resolve() != here])) == [], (
-        "\n".join(hits)
-    )
+    found = _doc_citations([p for p in paths if p.resolve() != here])
+    assert len(found) >= 15, "citation scan found suspiciously few citations"
+    assert [label for label, ok in found if not ok] == []
 
 
 def test_doc_citation_scanner_catches_stale_and_wrapped_forms(tmp_path: Path) -> None:
     stale = tmp_path / "stale.py"
     stale.write_text(
-        '# See CLAUDE.md "Gone Section".\n# Per AGENTS.md: "Also gone".\n'
+        '# See CLAUDE.md "Gone A".\n# Per AGENTS.md: "Gone B".\n'
+        '# CLAUDE.md\'s "Gone C". `CLAUDE.md` "Gone D".\n'
+        "# CLAUDE.md’s “Gone E”.\n"
         '# See docs/invariants/sync.md\n#   "Not a sync heading" for the rule.\n',
         encoding="utf-8",
     )
     fresh = tmp_path / "fresh.py"
     fresh.write_text(
-        '# See docs/invariants/sync.md "Atomic write publication failures".\n',
+        '# See docs/invariants/sync.md "Atomic write\n# publication failures".\n',
         encoding="utf-8",
     )
-    assert len(_stale_doc_citations([stale])) == 3
-    assert _stale_doc_citations([fresh]) == []
+    assert [ok for _, ok in _doc_citations([stale])] == [False] * 6
+    assert [ok for _, ok in _doc_citations([fresh])] == [True]
 
 
 def _source_layout_modules() -> set[str]:

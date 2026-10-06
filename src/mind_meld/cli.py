@@ -380,8 +380,9 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
 
     Loss of a peer's device entry is load-bearing during corrupt-manifest
     recovery: the peer's tombstones are unreachable without its device_id,
-    so silent drops can mask a recoverable manifest (see docs/roadmap-future.md
-    "Blob-directory peer recovery"). Emitting a warning
+    so silent drops can mask a recoverable manifest (see docs/invariants/sync.md
+    "Corrupt-manifest recovery"; blob-directory peer discovery is deferred in
+    the roadmap). Emitting a warning
     per dropped entry at least makes the gap visible to support triage.
 
     Library callers (and direct tests) should continue to call

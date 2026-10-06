@@ -363,39 +363,38 @@ run. Its ACP messages carry no usage or token fields. Its session stores
 `~/.cursor/chats/`) hold the model, per-turn request IDs, millisecond
 timestamps and a context-window gauge. They hold no billed input, output,
 cache-read or cache-write counters. CLI stores lack them too; CLI tokens come
-only from the `stop` payload or the `mm cursor-agent` wrapper's result line.
-Do not sweep the stores to estimate usage. The gauge is a snapshot of the current context, not billing: a turn re-sends
-the context once per model request, cache reads are not split out, and
-reasoning output never enters the context, so a number derived from it can be
-off by multiples. Do not add a wrapper or ACP proxy either, because ACP sends
-no usage to intercept. If cursor-agent starts firing a `stop` payload under ACP
-with `status: completed`, `generation_id`, `model` and all four inclusive
-counters, the existing hook captures these sessions unchanged. Re-check after
-each cursor-agent upgrade.
+only from the `stop` payload or the `mm cursor-agent` wrapper's result line. Do
+not sweep the stores to estimate usage. The gauge is a snapshot of the current
+context, not billing: a turn re-sends the context once per model request, cache
+reads are not split out, and reasoning output never enters the context, so a
+number derived from it can be off by multiples. Do not add a wrapper or ACP
+proxy either, because ACP sends no usage to intercept. If cursor-agent starts
+firing a `stop` payload under ACP with `status: completed`, `generation_id`,
+`model` and all four inclusive counters, the existing hook captures these
+sessions unchanged. Re-check after each cursor-agent upgrade.
 
 Both capture paths (hook and wrapper) require the existing consent bit. The
-hidden hook command reads
-bounded stdin, returns `{}` and exits zero on malformed input or capture failure
-so it never controls Cursor's agent loop. Warnings contain no payload details.
-The same private authoritative history holds hashed generation IDs and counters;
-the local capture's UTC date owns standalone runs. Duplicate callbacks keep
-the original completion day and replace counters, rather than adding again,
-whether they fold in one read or across reads.
-Conductor `requestId` hashes map to canonical run-ID hashes in an additive
-private `requests` map: a matching standalone generation is removed only once
-the Conductor run is retained **with counters**. A running run or a usageRef
-placeholder never erases known standalone usage, and later callbacks keep
-updating it until then. Aliases survive pruning of their source files.
+hidden hook command reads bounded stdin, returns `{}` and exits zero on
+malformed input or capture failure so it never controls Cursor's agent loop.
+Warnings contain no payload details. The same private authoritative history
+holds hashed generation IDs and counters; the local capture's UTC date owns
+standalone runs. Duplicate callbacks keep the original completion day and
+replace counters, rather than adding again, whether they fold in one read or
+across reads. Conductor `requestId` hashes map to canonical run-ID hashes in an
+additive private `requests` map: a matching standalone generation is removed
+only once the Conductor run is retained **with counters**. A running run or a
+usageRef placeholder never erases known standalone usage, and later callbacks
+keep updating it until then. Aliases survive pruning of their source files.
 Malformed aliases refuse without resetting history. Measured 2026-10-04
 (Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
 the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
-new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does
-not open; see the Cursor fixture contract's live follow-up. Until a reader
-exists, `unread_cursor_stores` counts store directories holding an `index.db`
+new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does not
+open; see the Cursor fixture contract's live follow-up. Until a reader exists,
+`unread_cursor_stores` counts store directories holding an `index.db`
 (including ones that still also hold `runs.ndjson`) by `lstat` only, never
 opening a database; any inspection error reports unknown. Diag reports the
-count and status names the undercount, without blocking the read or
-standalone publication.
+count and status names the undercount, without blocking the read or standalone
+publication.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no
@@ -2920,7 +2919,7 @@ nobody saw it. The load-bearing signals are the rendered ones — the `≥`
 marker and its `MM_HEALTH` issue.
 
 **Invariant 5 — `PRICING_LAST_UPDATED` is provenance, not a
-threshold.** mm has no network by design (CLAUDE.md: "No API server"), so
+threshold.** mm fetches no pricing data (AGENTS.md: "No API server"), so
 this table can never self-update and **stale is the steady state, not the
 exception**. The old docstring said "refresh if more than ~6 months old";
 nothing read it, and it would not have helped — the table was three

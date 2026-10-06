@@ -72,7 +72,7 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 
 - `autopull` / `autopush` never prompt, are quiet on the happy path, and exit silently when uninitialized or unchanged.
 - Malformed config emits a one-line stderr error; data-at-risk warnings remain visible in quiet mode. Unexpected errors degrade gracefully.
-- `push`/`pull`/`autopull`/`autopush` self-update via pipx at their tail (`auto_install`, default on); failures never change the exit code.
+- `push`/`pull`/`autopull`/`autopush` upgrade a pipx `@latest` install at their tail (`auto_install`, default on; previews skip it); failures never change the exit code.
 - `autopull` reports per-file apply failures and counts. `autopush` records `no-sources` and `degraded` breadcrumbs so `mm status` can expose failures.
 - Detailed contracts: [sync](docs/invariants/sync.md), [events/retro](docs/invariants/events-retro.md) and [auto-upgrade](docs/invariants/auto-upgrade.md) invariants. Integration snippets: README.
 

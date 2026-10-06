@@ -44,12 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:severity=minor] Track 70A card still routes its doc edits to AGENTS.md
+- **Description:** Track 70A's `_touches:` lists `AGENTS.md` for its command and invariant documentation update. Since the 2026-10-06 AGENTS.md slimming, Source Layout and invariant routing rows live in `docs/invariants/README.md`, which the card names in neither `_touches:` nor read-first. The packer and collision check cannot see that file, and AGENTS.md now carries a size budget (`test_agents_md_stays_inside_the_project_doc_budget`).
+- **Effort:** S
+- **Priority:** P2
+- **Context:** found by the /review red-team pass on the AGENTS.md slimming PR. Fix the card through /roadmap (or the /ship card-fix path with a roadmap-audit pass) before 70A starts; check 71A the same way.
+
 ### [manual] Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade
 - **Why:** Cursor sessions run through `cursor-agent acp`, which is how Paseo runs Cursor, are not counted. The ACP front-end fires no `stop` hook and sends no usage, and its session stores hold no billed counters. See the "ACP sessions are uncaptured" paragraph in [events/retro invariants](invariants/events-retro.md).
-- **Repro:** with a logging hook registered for `sessionStart`/`stop`/`sessionEnd` in `~/.cursor/hooks.json` that saves each payload, run one prompt through a minimal ACP client (`session/new`, then `session/prompt`). Check whether `stop` fires, whether its payload has `status: completed`, `generation_id`, `model` and the four counters (`input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`), and whether any ACP message carries usage or token fields.
+- **Repro:** back up `~/.cursor/hooks.json`, then register a temporary `sessionStart`/`stop`/`sessionEnd` hook that records only `hook_event_name`, `status`, whether `generation_id` and `model` are present, and the four counter values (`input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`) to a 0600 file under `~/scratch`, never the repo or a synced path. Run one prompt through a minimal ACP client (`session/new`, then `session/prompt`) and one interactive `cursor-agent` turn as a control, and note whether any ACP message carries usage or token fields. Then restore the backup, delete the capture, and confirm mm's own `stop` entry with `mm diag --json` (`hook_state`).
 - **Effort:** S
 - **Priority:** P3
-- **Context:** measured 2026-10-06 on cursor-agent 2026.10.01-e373342. If a later cursor-agent fires a `stop` payload of that shape under ACP, mm's existing hook captures these sessions with no code change; update the README and the invariant paragraph then. Do not estimate usage from the stores' context-window gauge or add an ACP proxy.
+- **Context:** measured 2026-10-06 on cursor-agent 2026.10.01-e373342. If a later cursor-agent fires a `stop` payload of that shape under ACP, confirm its counters are inclusive like the control turn's before relying on mm's existing hook, which normalizes inclusive counters exactly once (disjoint counters would be undercounted); then update the README and the invariant paragraph. If ACP messages start carrying usage instead, revisit the no-proxy rule with that evidence. Do not estimate usage from the stores' context-window gauge.
 
 ## Drain records
 
