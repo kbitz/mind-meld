@@ -44,6 +44,29 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:severity=medium] Replace unsafe lock-removal contention advice
+- **What:** Make LockError contention guidance consistent with kernel flock ownership.
+- **Why:** The current message tells users to remove a live lock; unlinking can allow concurrent mm operations on different inodes.
+- **Repro:** Hold lockfile.acquire_lock on a temporary path, invoke acquire_lock from an independent child, inspect its “Wait ... or remove” message; compare release_lock's no-unlink invariant.
+- **Context:** Track69A autoplan, 2026-10-03, branch kbitz/track-69a-self-updates-qualify, HEAD e9e56db. Reproduced safely using installed1.4.0 and a disposable .context lock; actual production lock untouched. Existing diagnostic defect, not a live self-update failure.
+- **Pros:** Removes advice that can break mutual exclusion; keeps crash recovery tied to kernel lifetime.
+- **Cons:** Requires a separate diagnostic change and meaningful contention-message regression assertion.
+- **Effort:** S
+- **Priority:** P2
+- **Depends on:** None; repair separately from69A qualification.
+
+### [plan-eng-review:severity=medium] Clarify broad pinned-install invariant wording
+- **What:** Distinguish frozen tag pins, moving refs and bare own repository URLs in auto-upgrade.md.
+- **Why:** The invariant says every classifier-pinned install cannot move via pipx upgrade, while the classifier also includes bare URLs and arbitrary own refs.
+- **Repro:** Compare docs/invariants/auto-upgrade.md “pinned” definition with upgrade.detect_install exact own URL/other-ref classification and update_argv behavior.
+- **Context:** Track69A autoplan, 2026-10-03, HEAD e9e56db. This Mac's bare URL is classified pinned despite pipx hold=false. Pure pipx1.17.9 parsing preserves @latest; no metadata-loss bug or actual pipx update is established. Preserve runtime policy and qualify the prose only.
+- **Pros:** Stops conflating mm's conservative install category with a guaranteed frozen Git ref; clearer recovery reasoning.
+- **Cons:** Separate small documentation follow-up; do not expand this into classifier redesign.
+- **Effort:** S
+- **Priority:** P2
+- **Depends on:** None; runtime policy unchanged.
+
+
 ### [ship:files=src/mind_meld/host_usage.py|src/mind_meld/cli.py] Read Conductor 0.90.1's SQLite Cursor run store
 
 - **What:** Add a reader for the `runs` table in Conductor's `cursor-sdk-store/<workspace>/index.db`, reading metadata columns only (request ID, status, model, model parameters, disjoint usage, ISO finished time) and feeding the existing Cursor history.
