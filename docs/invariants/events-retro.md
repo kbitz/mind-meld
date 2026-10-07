@@ -8,7 +8,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
@@ -1706,6 +1706,66 @@ entry below for how it is stored). Post-fix on the same corpus: 440 OK, 15
 no-ledger, 0 failures, 6.4B tokens across 37 active days. Pinned by
 `test_host_usage.py::TestOrdinaryCodexShapesAreNotRefused`.
 
+**Archived Codex rollouts are part of the same pass.** Codex `thread/archive`
+moves a rollout from the date tree to the flat `~/.codex/archived_sessions/`.
+Paseo archives on merge, and the Codex app and VS Code can archive too. Before
+this, an archived rollout dropped out of the next complete pass, and the
+complete-pass REPLACE pruned usage that had already been counted. Census
+(Codex 0.160.0, 2026-10-07): 29 archived rollouts on one Mac, all flat, none
+compressed. `_iter_archived_rollouts` lists direct children only. It never
+recurses or follows a descendant symlink, so a future nested layout would be
+missed; re-check this census on a Codex upgrade. `.zst` rollouts (Codex ships
+a `rollout_compression` pass) match neither root's `_ROLLOUT_NAME` and stay
+unread.
+
+- **One pass, one verdict.** `read_codex_usage()` with no `root` lists the live
+  tree, then the archive, into one staged map. The pass is complete only when
+  both roots are; otherwise the REPLACE below would prune the unfinished
+  root's entries. When the archive existed at scan start, a closing live
+  enumeration under the same deadline rejects new paths between inventories,
+  including an unarchive that the two initial listings would otherwise miss.
+  There is still one cache transaction and completeness verdict. An explicit
+  `root` reads that root alone.
+- **Missing is different from unreadable.** `_archive_root_exists` uses an
+  explicit `stat()` and treats only `FileNotFoundError` as an empty archive.
+  Other root errors fail the reader with `io_error` and make diag's inventory
+  unknown. Do not use `Path.exists()` here: Python 3.14 suppresses every
+  `OSError`, which could turn an unreadable archive into a complete empty pass
+  and prune its cached usage. Root symlinks remain allowed and use canonical keys.
+- **No new dedup layer.** Copies with shared named turn ids count once through
+  `_aggregate`'s lineage keys. A hard link or rename preserves the per-file
+  `own` id (`dev:ino:size:mtime_ns`), so it also counts once without a turn id.
+  Separate-inode copies without turn ids retain distinct lineages; this change
+  adds no content-based deduplication. Cache keys stay per-root, so an archived
+  file costs one re-parse under its new key, and the next complete pass prunes
+  the old one.
+- **A move between listings is not a failure, and the rule is asymmetric.**
+  When a live path's `lstat` fails with `FileNotFoundError` and the archive
+  listing holds the same filename, the live path is skipped, because its
+  archived copy is read in this pass. Every other stat error, a listed archive
+  path that vanishes during discovery or reading, and a new live path found by
+  closing validation keep today's transient `io_error`. A live-to-archive move
+  after the archive listing also fails until the next pass. These ordered
+  inventories and per-file checks do not provide an atomic filesystem snapshot.
+- **Discovery respects the reader deadline.** Archive discovery checks the
+  shared cooperative deadline before each candidate stat. It starts no later
+  candidate after expiration; an already-running filesystem call may finish.
+- **Closing validation has a measured cost.** A missing archive at scan start
+  needs no closing live walk. On one Mac (2026-10-07, Python 3.13.16, disposable
+  caches), five warm reads of 1,739 live files had a median total elapsed time
+  of 287.004 ms; the default inventory of those files plus 29 archives was
+  311.982 ms. Both missed a 250 ms deadline and completed with 500 ms. The
+  extra enumeration preserves the planned reverse-move failure contract;
+  no budget changes are included here. These are local observations, not a
+  performance floor: remeasure on each producing Mac and use the existing
+  per-Mac host-read budget when its corpus outgrows the default.
+- **Diag counts both roots.** `codex_usage_diag` adds the flat archive count to
+  `files_on_disk`, with the reader's predicates and no deadline. Otherwise
+  cached archived entries would exceed the count and `pending` would clamp
+  to 0. A listed archive candidate that disappears makes the count unknown.
+
+Pinned by `test_host_usage.py::TestCodexArchivedRollouts`.
+
 **Cache persistence is DECOUPLED from result validity.** "May this scan be
 published?" and "did we learn something durable about individual files?" are
 different questions, and conflating them made a large corpus unable to
@@ -1856,9 +1916,10 @@ The budget lever ships, so these measurements document headroom rather than
 gate merge. Remeasure on each producing Mac/version before changing its budget.
 
 **Tests must never read a real host store.** `conftest._isolate_host_usage`
-redirects all three reader roots and all three caches per test; tests needing
-data monkeypatch the reader functions. Without it the suite's result would
-depend on which agents are installed on the machine running it — a developer
+redirects every reader root (Codex live and archived, Grok, Cursor) and all three
+caches per test; tests needing data monkeypatch the reader functions. Without
+it the suite's result would depend on which agents are installed on the machine
+running it — a developer
 with `~/.grok/sessions` would see the healthy-tail control pin in
 `test_silent_failure_contract.py` fail locally while CI stayed green.
 

@@ -1,7 +1,9 @@
 """Private, local-only host-usage readers.
 
 Track 17C supports Codex rollout logs at
-``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``. Track 18D adds a consented
+``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl``, plus the flat
+``~/.codex/archived_sessions/rollout-*.jsonl`` that Codex moves a rollout to
+when a thread is archived. Track 18D adds a consented
 Grok reader for ``updates.jsonl`` terminal records under ``GROK_HOME/sessions``
 (else ``~/.grok/sessions``). A ``token_count`` record is a CUMULATIVE reading
 of the host's own counter. The reader differences consecutive readings and
@@ -113,6 +115,9 @@ CACHE_PATH = Path.home() / ".config" / "mind-meld" / "host-tokens.json"
 """Forensic host-reader cache. Deliberately separate from Claude's cache."""
 
 CODEX_SESSIONS_PATH = Path.home() / ".codex" / "sessions"
+CODEX_ARCHIVED_SESSIONS_PATH = Path.home() / ".codex" / "archived_sessions"
+"""Flat archive (Codex 0.160.0). ``thread/archive`` moves a rollout here from the
+date tree; Paseo archives on merge, and the Codex app and VS Code can too."""
 GROK_SESSIONS_PATH = Path.home() / ".grok" / "sessions"
 GROK_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "grok-host-tokens.json"
 CURSOR_STORE_PATH = (
@@ -428,9 +433,14 @@ def read_codex_usage(
     checks it before discovery, per file, per bounded line, and persistence.
     Cache contention is a single non-blocking attempt, never the normal
     750ms locked-json retry budget.
+
+    The default pass also reads ``CODEX_ARCHIVED_SESSIONS_PATH``, with one
+    completeness verdict over both roots. An explicit ``root`` reads that
+    root alone.
     """
     started = time.monotonic()
     source_root = root if root is not None else CODEX_SESSIONS_PATH
+    archived_root = CODEX_ARCHIVED_SESSIONS_PATH if root is None else None
     read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
     if _expired(read_deadline):
         return _incomplete("deadline")
@@ -453,7 +463,7 @@ def read_codex_usage(
                 result, staged_files, learned = _incomplete("deadline"), {}, False
             else:
                 result, staged_files, learned = _scan_codex_root(
-                    source_root, cached_files, read_deadline
+                    source_root, cached_files, read_deadline, archived_root=archived_root
                 )
             ready = time.monotonic()
             over_budget = result.complete and _expired(read_deadline)
@@ -1378,7 +1388,18 @@ def codex_usage_diag() -> dict[str, Any]:
         on_disk = sum(
             1 for path in CODEX_SESSIONS_PATH.rglob("*") if _ROLLOUT_NAME.fullmatch(path.name)
         )
-    except OSError:
+        # Same predicates as `_iter_archived_rollouts`, without its deadline.
+        # Without this, cached archived entries exceed the count and `pending`
+        # clamps to 0.
+        archive = CODEX_ARCHIVED_SESSIONS_PATH
+        if _archive_root_exists(archive):
+            on_disk += sum(
+                1
+                for path in archive.iterdir()
+                if _ROLLOUT_NAME.fullmatch(path.name)
+                and _is_regular_non_symlink(path, missing_ok=False)
+            )
+    except (OSError, _ReadFailure):
         on_disk = None
     cached = migrated + pre_track
     if not cached:
@@ -2332,6 +2353,8 @@ def _scan_codex_root(
     root: Path,
     cached_files: dict[str, Any],
     deadline: float,
+    *,
+    archived_root: Path | None = None,
 ) -> tuple[HostUsageResult, dict[str, _CacheEntry], bool]:
     """Returns ``(result, staged, learned)``.
 
@@ -2340,21 +2363,62 @@ def _scan_codex_root(
     discovered anything — on a fully-warm machine with one permanently
     unreadable rollout, committing on ``staged`` alone would rewrite the entire
     cache with byte-identical content on every single push.
+
+    ``archived_root`` joins the same pass: one staged map, one verdict. The
+    pass is complete only when both roots are, because the complete-pass
+    REPLACE would otherwise prune the unfinished root's entries. A rollout
+    moved between paths needs no dedup here; ``_aggregate``'s lineage keys
+    already collapse it. If the archive exists at scan start, validate after
+    archive discovery that no new live path appeared; an unarchive between
+    inventories must not silently shrink the complete snapshot.
     """
     try:
-        rollouts = list(_iter_rollouts(root, deadline))
+        if _expired(deadline):
+            raise _ReadFailure("deadline")
+        archive_was_present = archived_root is not None and _archive_root_exists(archived_root)
+        rollouts = [(path, root) for path in _iter_rollouts(root, deadline)]
+        if archived_root is not None:
+            live_paths = {path for path, _ in rollouts}
+            rollouts += [
+                (path, archived_root) for path in _iter_archived_rollouts(archived_root, deadline)
+            ]
+            # A reverse move before archive discovery can miss both listings.
+            # Revalidate the live inventory under the same deadline; removals
+            # are allowed for forward moves, but a new path requires a retry.
+            if archive_was_present and any(
+                path not in live_paths for path in _iter_rollouts(root, deadline)
+            ):
+                raise _ReadFailure("io_error")
     except _ReadFailure as failure:
         return _incomplete(failure.reason), {}, False
 
-    canonical_root = root.resolve()
+    canonical_roots = {root: root.resolve()}
+    if archived_root is not None:
+        canonical_roots[archived_root] = archived_root.resolve()
+    # Listed live-first, so a rollout archived between the two listings has
+    # its name here; see the vanished-live-path skip below.
+    archived_names = {path.name for path, base in rollouts if base is archived_root}
     staged: dict[str, _CacheEntry] = {}
     learned = False
-    for path in rollouts:
+    for path, base in rollouts:
         if _expired(deadline):
             return _incomplete("deadline"), staged, learned
-        key = _cache_key(path, root=root, canonical_root=canonical_root)
+        key = _cache_key(path, root=base, canonical_root=canonical_roots[base])
         try:
-            before = _regular_stat(path)
+            try:
+                before = _regular_stat(path)
+            except _ReadFailure as failure:
+                if (
+                    base is root
+                    and isinstance(failure.__cause__, FileNotFoundError)
+                    and path.name in archived_names
+                ):
+                    # Codex archived it after the live listing. The archived
+                    # copy is read in this pass, so the move is not a failure.
+                    # Any other stat error, or an archived path that vanished,
+                    # stays io_error.
+                    continue
+                raise
             existing = _validated_entry(cached_files.get(key))
             entry = _cache_hit(path, before, existing, deadline)
             if entry is None:  # cache miss
@@ -2410,6 +2474,44 @@ def _iter_rollouts(root: Path, deadline: float):
         raise _ReadFailure("io_error") from exc
 
 
+def _archive_root_exists(root: Path) -> bool:
+    """Only a missing archive is empty; root I/O errors must remain visible.
+
+    ``Path.exists()`` suppresses every OSError on Python 3.14. ``stat()`` also
+    preserves the allowed root-symlink behavior without hiding those failures.
+    """
+    try:
+        root.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+    return True
+
+
+def _iter_archived_rollouts(root: Path, deadline: float):
+    """Yield regular non-symlink rollouts directly under Codex's flat archive.
+
+    Census (Codex 0.160.0): every archived rollout sits flat in the root.
+    Subdirectories are ignored, so a future nested layout would be missed;
+    re-check the census on a Codex upgrade (events-retro.md).
+    """
+    if _expired(deadline):
+        raise _ReadFailure("deadline")
+    try:
+        if not _archive_root_exists(root):
+            return
+        for candidate in _sorted_children(root, deadline):
+            if _expired(deadline):
+                raise _ReadFailure("deadline")
+            if _ROLLOUT_NAME.fullmatch(candidate.name) and _is_regular_non_symlink(
+                candidate, missing_ok=False
+            ):
+                yield candidate
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+
+
 def _sorted_children(path: Path, deadline: float) -> list[Path]:
     if _expired(deadline):
         raise _ReadFailure("deadline")
@@ -2426,19 +2528,23 @@ def _is_directory(path: Path) -> bool:
         raise _ReadFailure("io_error") from exc
 
 
-def _is_regular_non_symlink(path: Path) -> bool:
-    """True for a regular, non-symlink file. Absence is not an I/O error.
+def _is_regular_non_symlink(path: Path, *, missing_ok: bool = True) -> bool:
+    """True for a regular, non-symlink file. Absence is tolerated by default.
 
     Shared by the Grok walker (speculative ``session / "updates.jsonl"``)
     and the Codex walker (``iterdir()`` then ``lstat()``). ``FileNotFoundError``
     and ``NotADirectoryError`` mean the candidate is gone — skip it.
+    Archive discovery and diag pass ``missing_ok=False``: a listed candidate
+    that disappeared makes their inventory incomplete rather than silently empty.
     Every other ``OSError`` (a permission error on a file that exists) stays
     fatal so the all-or-nothing reader contract still sees a real failure.
     """
     try:
         st = path.lstat()
         return not stat.S_ISLNK(st.st_mode) and stat.S_ISREG(st.st_mode)
-    except (FileNotFoundError, NotADirectoryError):
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if not missing_ok:
+            raise _ReadFailure("io_error") from exc
         return False
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
@@ -3425,6 +3531,7 @@ __all__ = [
     "read_cursor_usage",
     "CACHE_PATH",
     "CACHE_VERSION",
+    "CODEX_ARCHIVED_SESSIONS_PATH",
     "CODEX_SESSIONS_PATH",
     "DEFAULT_READ_BUDGET_S",
     "GROK_CACHE_PATH",

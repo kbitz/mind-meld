@@ -1652,8 +1652,8 @@ class TestCacheLifecycle:
         blown = {"on": False}
         real_expired = hu._expired
 
-        def scan_then_blow_the_budget(source_root, cached_files, deadline):
-            outcome = real_scan(source_root, cached_files, deadline)
+        def scan_then_blow_the_budget(source_root, cached_files, deadline, **kwargs):
+            outcome = real_scan(source_root, cached_files, deadline, **kwargs)
             blown["on"] = True
             return outcome
 
@@ -3371,6 +3371,374 @@ class TestCodexTurnDedup:
         assert day["input"] == 100
 
 
+def _write_archived(name: str, records: list[dict]) -> Path:
+    path = hu.CODEX_ARCHIVED_SESSIONS_PATH / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(json.dumps(record).encode("utf-8") + b"\n" for record in records))
+    return path
+
+
+def _codex_key(path: Path, base: Path) -> str:
+    return hu._cache_key(path, root=base, canonical_root=base.resolve())
+
+
+class TestCodexArchivedRollouts:
+    """Codex ``thread/archive`` moves a rollout to the flat ``archived_sessions``.
+
+    Paseo archives on merge, so without this root its Codex usage drops out of
+    the next complete pass. The autouse isolation points both roots at
+    per-test directories; ``root=None`` reads both.
+    """
+
+    def test_archived_only_rollout_is_counted(self) -> None:
+        _write_archived("rollout-archived.jsonl", [_context(), _token(100)])
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_rollout_copied_to_both_roots_is_counted_once(self) -> None:
+        records = [_context(turn="turn-a"), _token(40, last=40), _token(100)]
+        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
+        _write_archived("rollout-a.jsonl", records)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert len(json.loads(hu.CACHE_PATH.read_text())["files"]) == 2, "both paths were read"
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_hard_link_without_turn_id_is_counted_once(self) -> None:
+        """The per-file ``own`` lineage (dev:ino:size:mtime) is what collapses a
+        rename seen at both paths when no turn names the session."""
+        records = [_context(), _token(40, last=40), _token(100)]
+        live = _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
+        hu.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
+        os.link(live, hu.CODEX_ARCHIVED_SESSIONS_PATH / live.name)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert len(json.loads(hu.CACHE_PATH.read_text())["files"]) == 2, "both paths were read"
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_archive_reads_only_flat_regular_rollouts(self, tmp_path: Path) -> None:
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        _write_archived("rollout-real.jsonl", [_context(), _token(100)])
+        _write_archived("notes.jsonl", [_context(), _token(1_000)])
+        _write_archived("nested/rollout-nested.jsonl", [_context(), _token(10_000)])
+        outside = tmp_path / "outside.jsonl"
+        outside.write_bytes(
+            b"".join(json.dumps(r).encode() + b"\n" for r in [_context(), _token(100_000)])
+        )
+        (archive / "rollout-link.jsonl").symlink_to(outside)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_partial_pass_merges_and_complete_pass_prunes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        live_root = hu.CODEX_SESSIONS_PATH
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        live = _write_rollout(live_root, "rollout-a.jsonl", [_context(), _token(100)])
+        kept = _write_archived("rollout-b1.jsonl", [_context(), _token(10)])
+        gone = _write_archived("rollout-b2.jsonl", [_context(), _token(1)])
+        assert hu.read_codex_usage().complete is True
+        keys = {
+            "live": _codex_key(live, live_root),
+            "kept": _codex_key(kept, archive),
+            "gone": _codex_key(gone, archive),
+        }
+        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == set(keys.values())
+
+        # Learn something on the live root, then expire on reaching the archive.
+        with live.open("ab") as fp:
+            fp.write(json.dumps(_token(200)).encode("utf-8") + b"\n")
+        gone.unlink()
+        real_key, real_expired = hu._cache_key, hu._expired
+        blown = {"on": False}
+
+        def key_then_blow_at_archive(path, **kwargs):
+            blown["on"] = blown["on"] or path.parent == archive
+            return real_key(path, **kwargs)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(hu, "_cache_key", key_then_blow_at_archive)
+            patched.setattr(hu, "_expired", lambda d: blown["on"] or real_expired(d))
+            assert hu.read_codex_usage().reason == "deadline"
+
+        files = json.loads(hu.CACHE_PATH.read_text())["files"]
+        assert files[keys["live"]]["size"] == live.stat().st_size, "the partial pass was written"
+        assert set(files) == set(keys.values()), "a partial pass must merge, not replace"
+
+        result = hu.read_codex_usage()
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 210
+        files = json.loads(hu.CACHE_PATH.read_text())["files"]
+        assert set(files) == {keys["live"], keys["kept"]}
+
+    def test_rollout_moved_between_passes_keeps_its_total(self) -> None:
+        live = _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
+        assert hu.read_codex_usage().hosts["codex"]["2026-08-15"]["input"] == 100
+        live_key = _codex_key(live, hu.CODEX_SESSIONS_PATH)
+        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {live_key}
+
+        hu.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
+        archived = hu.CODEX_ARCHIVED_SESSIONS_PATH / live.name
+        os.rename(live, archived)
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+        files = json.loads(hu.CACHE_PATH.read_text())["files"]
+        assert set(files) == {_codex_key(archived, hu.CODEX_ARCHIVED_SESSIONS_PATH)}
+
+    def test_rollout_archived_between_listings_is_read_from_the_archive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
+        _write_archived(listed.name, [_context(), _token(100)])
+        monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    @pytest.mark.parametrize(
+        "case", ["no-archive-match", "archived-path-vanished", "live-permission-denied"]
+    )
+    def test_other_rollout_stat_failures_stay_io_error(
+        self, case: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if case == "no-archive-match":
+            listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
+            _write_archived("rollout-other.jsonl", [_context(), _token(100)])
+            monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+        elif case == "archived-path-vanished":
+            listed = hu.CODEX_ARCHIVED_SESSIONS_PATH / "rollout-gone.jsonl"
+            monkeypatch.setattr(
+                hu, "_iter_archived_rollouts", lambda root, deadline: iter([listed])
+            )
+        else:
+            listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-denied.jsonl"
+            _write_archived(listed.name, [_context(), _token(100)])
+            monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+            real_stat = hu._regular_stat
+
+            def denied_live_stat(path):
+                if path == listed:
+                    try:
+                        raise PermissionError("denied")
+                    except PermissionError as exc:
+                        raise hu._ReadFailure("io_error") from exc
+                return real_stat(path)
+
+            monkeypatch.setattr(hu, "_regular_stat", denied_live_stat)
+
+        result = hu.read_codex_usage()
+        assert result.complete is False
+        assert result.reason == "io_error"
+        assert result.hosts == {}
+
+    def test_archive_discovery_stops_after_expiration(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = tmp_path / "archive"
+        archive.mkdir()
+        (archive / "rollout-a.jsonl").write_text("")
+        (archive / "rollout-b.jsonl").write_text("")
+        expired = {"value": False}
+        calls: list[str] = []
+        real_regular = hu._is_regular_non_symlink
+
+        def stat_then_expire(path, **kwargs):
+            calls.append(path.name)
+            found = real_regular(path, **kwargs)
+            expired["value"] = True
+            return found
+
+        monkeypatch.setattr(hu, "_expired", lambda deadline: expired["value"])
+        monkeypatch.setattr(hu, "_is_regular_non_symlink", stat_then_expire)
+
+        with pytest.raises(hu._ReadFailure) as caught:
+            list(hu._iter_archived_rollouts(archive, float("inf")))
+
+        assert caught.value.reason == "deadline"
+        assert calls == ["rollout-a.jsonl"]
+
+    def test_unarchive_during_discovery_refuses_partial_totals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
+        assert hu.read_codex_usage().complete is True
+        key = _codex_key(archived, archive)
+        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        real_children = hu._sorted_children
+
+        def unarchive_after_listing(path, deadline):
+            children = real_children(path, deadline)
+            if path == archive and archived in children:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                archived.rename(target)
+            return children
+
+        monkeypatch.setattr(hu, "_sorted_children", unarchive_after_listing)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is False
+        assert result.reason == "io_error"
+        assert result.hosts == {}
+        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
+
+    def test_diag_listed_archive_disappearance_is_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
+        assert hu.read_codex_usage().complete is True
+        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        real_children = Path.iterdir
+
+        def unarchive_after_listing(path):
+            children = list(real_children(path))
+            if path == archive and archived in children:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                archived.rename(target)
+            return iter(children)
+
+        monkeypatch.setattr(Path, "iterdir", unarchive_after_listing)
+
+        diag = hu.codex_usage_diag()
+        assert diag["cache_state"] == "ok"
+        assert diag["files_on_disk"] is None
+
+    def test_unarchive_between_inventories_refuses_partial_totals(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
+        assert hu.read_codex_usage().complete is True
+        key = _codex_key(archived, archive)
+        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        real_archive = hu._iter_archived_rollouts
+
+        def unarchive_before_listing(root, deadline):
+            if archived.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                archived.rename(target)
+            return real_archive(root, deadline)
+
+        monkeypatch.setattr(hu, "_iter_archived_rollouts", unarchive_before_listing)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is False
+        assert result.reason == "io_error"
+        assert result.hosts == {}
+        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
+
+        retried = hu.read_codex_usage()
+        assert retried.complete is True
+        assert retried.hosts["codex"]["2026-08-15"]["input"] == 100
+        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {
+            _codex_key(target, hu.CODEX_SESSIONS_PATH)
+        }
+
+    @pytest.mark.parametrize("error", [errno.EACCES, errno.EIO])
+    @pytest.mark.parametrize("symlink_root", [False, True])
+    def test_archive_root_stat_error_is_incomplete_not_absent(
+        self, error: int, symlink_root: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        if symlink_root:
+            actual = tmp_path / "archive-target"
+            actual.mkdir()
+            archive.parent.mkdir(parents=True)
+            archive.symlink_to(actual, target_is_directory=True)
+        archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
+        assert hu.read_codex_usage().complete is True
+        key = _codex_key(archived, archive)
+        real_stat = Path.stat
+
+        def failed_archive_stat(path, *args, **kwargs):
+            if path == archive:
+                raise OSError(error, "archive root stat failed")
+            return real_stat(path, *args, **kwargs)
+
+        def python314_exists(path, *, follow_symlinks=True):
+            # Python 3.14 suppresses every OSError in Path.exists(). Keep
+            # this contract reproducible on the suite's Python 3.11+ floor.
+            try:
+                path.stat(follow_symlinks=follow_symlinks)
+            except (OSError, ValueError):
+                return False
+            return True
+
+        monkeypatch.setattr(Path, "stat", failed_archive_stat)
+        monkeypatch.setattr(Path, "exists", python314_exists)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is False
+        assert result.reason == "io_error"
+        assert result.hosts == {}
+        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
+        diag = hu.codex_usage_diag()
+        assert diag["cache_state"] == "ok"
+        assert diag["files_on_disk"] is None
+
+    def test_missing_archive_needs_only_one_live_inventory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
+        real_live = hu._iter_rollouts
+        calls: list[Path] = []
+
+        def counted_live(root, deadline):
+            calls.append(root)
+            return real_live(root, deadline)
+
+        monkeypatch.setattr(hu, "_iter_rollouts", counted_live)
+
+        result = hu.read_codex_usage()
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+        assert calls == [hu.CODEX_SESSIONS_PATH]
+
+    def test_explicit_root_ignores_the_archive(self, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        _write_rollout(root, "rollout-live.jsonl", [_context(), _token(100)])
+        _write_archived("rollout-archived.jsonl", [_context(), _token(1_000)])
+
+        result = hu.read_codex_usage(root)
+
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_diag_counts_archived_rollouts_on_disk(self) -> None:
+        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-live.jsonl", [_context(), _token(100)])
+        _write_archived("rollout-b1.jsonl", [_context(), _token(10)])
+        _write_archived("rollout-b2.jsonl", [_context(), _token(1)])
+        _write_archived("notes.jsonl", [_context(), _token(1)])
+        _write_archived("nested/rollout-nested.jsonl", [_context(), _token(1)])
+        assert hu.read_codex_usage().complete is True
+
+        diag = hu.codex_usage_diag()
+
+        assert diag["files_on_disk"] == 3
+        assert diag["files_cached"] == 3
+        assert diag["pending"] == 0
+        assert diag["state"] == "ready"
+
+
 class TestCodexPreContextBuffer:
     """Ledgers seen before the first `turn_context` are buffered, not dropped.
 
@@ -4118,7 +4486,7 @@ def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, er
         if phase == "start":
             starts.append(info)
 
-    def scan(*args):
+    def scan(*args, **kwargs):
         assert not gc.isenabled()
         before = len(starts)
         cycles = []
