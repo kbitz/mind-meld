@@ -101,9 +101,9 @@ Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs a
                    └─────────────────┘
 ```
 
-**This diagram is the core sync path only, not the full module list.** `src/mind_meld/` has grown well past it — notably the fleet-retro stack (`events.py`, `events_tail.py`, `token_usage.py`, `identity.py`), the conflict stack (`resolveflow.py`, `conflictdiff.py`, `conflictmtime.py`), and the shared leaves (`consoles.py`, `safety.py`, `fsutil.py`, `lockedjson.py`, `retention.py`, `skill_link.py`). **CLAUDE.md's Source Layout table is the authoritative one-line-per-module map** and is kept current per release; grep it for a filename before grepping the code.
+**This diagram is the core sync path only, not the full module list.** `src/mind_meld/` has grown well past it — notably the fleet-retro stack (`events.py`, `events_tail.py`, `token_usage.py`, `identity.py`), the conflict stack (`resolveflow.py`, `conflictdiff.py`, `conflictmtime.py`), and the shared leaves (`consoles.py`, `safety.py`, `fsutil.py`, `lockedjson.py`, `retention.py`, `skill_link.py`). **[Source Layout table](docs/invariants/README.md#source-layout) is the authoritative one-line-per-module map** and is kept current per release; grep it for a filename before grepping the code.
 
-Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that came with them: `cli` imports those modules, and **none of them imports `cli`** — at module scope or function scope. `aggregator.py` reaches the CLI as a subprocess, never as an import. Enforced by `tests/test_module_boundaries.py` plus a CI grep gate, because ruff's F811 cannot see function-local shadowing.
+Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that came with them: `cli` imports those modules, and **none of them imports `cli`** — at module scope or function scope. `aggregator.py` reaches the CLI as a subprocess, never as an import. Enforced by `tests/test_module_boundaries.py`, because ruff's F811 cannot see function-local shadowing.
 
 ### No API Server
 
@@ -878,7 +878,7 @@ rich >= 13.0          # pretty terminal output
 
 ## Project Structure
 
-> **Historical: this is the original v1 build plan, not the current tree.** It is kept alongside the Implementation Order below as a record of what was scoped up front. Several entries were never built (`CONTRIBUTING.md`, `docs/quickstart.md`, `docs/encryption.md`, `docs/troubleshooting.md`), and `src/mind_meld/` has roughly tripled since — Track 16A (v0.12.21) alone added `consoles.py`, `conflictmtime.py`, `skill_link.py`, `events_tail.py`, `resolveflow.py`, and `retention.py`. For the current tree, read **CLAUDE.md's Source Layout table** (one line per module, kept current per release) and `docs/invariants/` for the per-topic load-bearing rules.
+> **Historical: this is the original v1 build plan, not the current tree.** It is kept alongside the Implementation Order below as a record of what was scoped up front. Several entries were never built (`CONTRIBUTING.md`, `docs/quickstart.md`, `docs/encryption.md`, `docs/troubleshooting.md`), and `src/mind_meld/` has roughly tripled since — Track 16A (v0.12.21) alone added `consoles.py`, `conflictmtime.py`, `skill_link.py`, `events_tail.py`, `resolveflow.py`, and `retention.py`. For the current tree, read **[Source Layout table](docs/invariants/README.md#source-layout)** (one line per module, kept current per release) and `docs/invariants/` for the per-topic load-bearing rules.
 
 ```
 mind-meld/

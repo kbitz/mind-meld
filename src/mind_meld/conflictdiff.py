@@ -5,7 +5,7 @@ Two prompt sites consume these helpers:
 * ``_resolve_interactive_loop`` (cli.py) -- the post-pull ``mm resolve`` walk
 
 Each site keeps its own dispatch over the canonical-exists / canonical-missing
-and pre-inversion / post-inversion modes (CLAUDE.md flags filename-prefix
+and pre-inversion / post-inversion modes (docs/invariants/conflicts.md flags filename-prefix
 dispatch as load-bearing). These helpers handle only the rendering: prompt
 copy, color banners above the diff, and a divergence-line counter.
 
@@ -50,7 +50,7 @@ def render_prompt(
     -- this helper composes them into Rich-markup-bearing strings via
     f-string interpolation.
 
-    Mode semantics (CLAUDE.md "Conflict-direction inversion"):
+    Mode semantics (docs/invariants/conflicts.md "Conflict-direction inversion"):
       * ``post_inversion`` -- canonical holds LOCAL bytes (the everyday
         case for files produced by mm v0.9.2+).
       * ``pre_inversion`` -- canonical holds REMOTE bytes (legacy

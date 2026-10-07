@@ -3,6 +3,10 @@
 > Written 2026-08-17 after Track 21A review feedback. Supplements
 > `SPEC.md` and `docs/designs/grok-build-usage-reader.md`. Does not
 > reopen Tracks 18D or 21A.
+>
+> **Superseded in part (v1.1):** retro-fleet now renders one `## Agents` table,
+> not the MODELS card described below. See README and
+> `docs/invariants/events-retro.md`.
 
 ## Outcome
 

@@ -1582,7 +1582,7 @@ class TestMmEventsSource:
     def test_bootstrap_failure_emits_warning_and_drops_source(self, tmp_path, monkeypatch, capsys):
         """Permission denied on mkdir → mm: warning: stderr breadcrumb,
         source dropped via path-existence filter. Visible-failure contract
-        per CLAUDE.md curated stderr taxonomy."""
+        per the curated stderr taxonomy in docs/invariants/auto-upgrade.md."""
         # Reset module-level warned-paths cache so this test is robust to
         # ordering against test_bootstrap_warns_once_per_process.
         from mind_meld import config as _config_module

@@ -831,6 +831,12 @@ completion hook in the measured CLI and therefore still needs the wrapper.
 Cursor's native chat history has no billing ledger: sessions completed before
 enrollment cannot be backfilled from context-window counts.
 
+Cursor sessions run through ACP (`cursor-agent acp`, which Paseo uses) are not
+counted. In cursor-agent 2026.10.01 the ACP front-end fires no `stop` hook and
+sends no usage. Its session stores under `~/.cursor/acp-sessions/` hold the
+model and a context-window gauge but no billed token counters, so mm has
+nothing to read. Interactive and wrapped print sessions are unaffected.
+
 Conductor runs are counted on endedAt's UTC day; standalone completions use
 the local capture's UTC day. Repeated callbacks replace the same generation,
 and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
@@ -1263,6 +1269,11 @@ security delete-generic-password -s mind-meld -a passphrase
 Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
+
+CI uses one job on `macos-latest` with Python 3.13. It runs
+`./bin/check --no-bootstrap` for the portable checks, verifies the real Keychain
+backend, and builds the wheel into a disposable venv for `mm --version` and
+`python -m mind_meld.cli` smokes. The pip cache is keyed on `pyproject.toml`.
 
 From a clone (no environment required):
 

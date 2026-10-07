@@ -81,7 +81,7 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 **Forensic-only invariant, and why stderr is NOT the load-bearing signal (v0.12.16).** The whole block is wrapped in `try / except Exception`; failures emit `mm: notice: events tail failed: <type>: <safe_str(msg)>` to stderr and the push continues. `safe_str(e)` defangs peer-controlled escapes per the v0.10.1 sanitization invariant (a corrupt peer manifest could otherwise smuggle ANSI through an exception's `__str__`).
 
-That stderr line is the *interactive* signal only. `_run_events_tail` runs from `mm autopush`, which fires unattended from a Claude Code hook, so its stderr reaches nobody — and pre-v0.12.16 `autopush` wrote `_write_autorun_breadcrumb("push", "success")` unconditionally, so `mm status` reported success no matter how badly the retro pipeline had degraded. **`_run_events_tail` therefore RETURNS `list[str]`** — one human-readable phrase per degradation, empty when healthy — which `_push_core` carries on `PushResult.events_degradations` and `autopush` turns into `_write_autorun_breadcrumb("push", "degraded", "; ".join(reasons))`. This mirrors the `degradations` list `autopull` has carried since v0.8.1, and it is the same argument CLAUDE.md already makes for the `no-sources` breadcrumb: without it, `mm status` only ever sees `success` and monitoring built on top of it never catches the wedge. Conditions that populate the list: whole-tail exception, session-walk budget exceeded, token cache cold (tokens + skills omitted), root discovery time-budget expiry, a prober exception (`errors and not exceeded`), and complete discovery that found zero repositories (a prober ran). The budget phrase is fixed: `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; it contains no paths or raw probe errors or the `; ` separator used between breadcrumb reasons. Do not widen the exceeded gate to `bool(errors)` — the budget phrase would then be a lie. An ordinary rejected candidate stays silent. Init backfill has no `mm-push` row or autorun breadcrumb, so it prints the equivalent `initial retro capture` notice only. **Any new degradation detected in the tail MUST be appended to the returned list as well as printed** — a `mm: notice:` with no corresponding entry is invisible to the only surface the user actually reads. CHANGELOG v0.12.13 records the cost of getting this wrong: the unpriced-model breadcrumb "fired for four unpriced models across the whole v0.12.x line and nobody saw it." Pinned by `test_silent_failure_contract.py::test_autopush_breadcrumb_degraded_when_events_tail_fails`. `last-autorun.json` is keyed per verb (`{"push": {...}, "pull": {...}}`) so the documented autopull-at-start / autopush-at-end lifecycle cannot erase a degraded push crumb.
+That stderr line is the *interactive* signal only. `_run_events_tail` runs from `mm autopush`, which fires unattended from a Claude Code hook, so its stderr reaches nobody — and pre-v0.12.16 `autopush` wrote `_write_autorun_breadcrumb("push", "success")` unconditionally, so `mm status` reported success no matter how badly the retro pipeline had degraded. **`_run_events_tail` therefore RETURNS `list[str]`** — one human-readable phrase per degradation, empty when healthy — which `_push_core` carries on `PushResult.events_degradations` and `autopush` turns into `_write_autorun_breadcrumb("push", "degraded", "; ".join(reasons))`. This mirrors the `degradations` list `autopull` has carried since v0.8.1, and it is the same argument [sync.md](sync.md#visible-failures-in-automatic-commands) makes for the `no-sources` breadcrumb: without it, `mm status` only ever sees `success` and monitoring built on top of it never catches the wedge. Conditions that populate the list: whole-tail exception, session-walk budget exceeded, token cache cold (tokens + skills omitted), root discovery time-budget expiry, a prober exception (`errors and not exceeded`), and complete discovery that found zero repositories (a prober ran). The budget phrase is fixed: `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; it contains no paths or raw probe errors or the `; ` separator used between breadcrumb reasons. Do not widen the exceeded gate to `bool(errors)` — the budget phrase would then be a lie. An ordinary rejected candidate stays silent. Init backfill has no `mm-push` row or autorun breadcrumb, so it prints the equivalent `initial retro capture` notice only. **Any new degradation detected in the tail MUST be appended to the returned list as well as printed** — a `mm: notice:` with no corresponding entry is invisible to the only surface the user actually reads. CHANGELOG v0.12.13 records the cost of getting this wrong: the unpriced-model breadcrumb "fired for four unpriced models across the whole v0.12.x line and nobody saw it." Pinned by `test_silent_failure_contract.py::test_autopush_breadcrumb_degraded_when_events_tail_fails`. `last-autorun.json` is keyed per verb (`{"push": {...}, "pull": {...}}`) so the documented autopull-at-start / autopush-at-end lifecycle cannot erase a degraded push crumb.
 
 **Tolerant binary reads across every jsonl reader on the push path (load-bearing, v0.12.16).** `_read_cwd_from_latest_jsonl`, `_iter_mm_push_objs`, `token_usage.is_cache_cold`, and `pullhistory._yield_lines` all read BINARY and tolerate a bad line rather than a bad file. Text mode decodes in ~8 KB **chunks**, not per line, and `UnicodeDecodeError` is a `ValueError` — NOT an `OSError` — so the `except OSError` these functions carried never caught it and one invalid byte took down the entire events tail on every push. (Chunked decoding is also why a `cwd` on line 1 did not protect against a bad byte on line 2; measured, it raises at 2 lines apart and returns cleanly at 80 KB apart.) `json.loads` accepts bytes, and both malformed JSON and invalid UTF-8 surface as `ValueError`, so the guard is `except ValueError: continue` per line. Two traps:
 
@@ -355,28 +355,46 @@ raw. A successful run with no result line warns that usage was not recorded.
 `MM_CURSOR_AGENT_ACTIVE` in the child environment makes a `cursor-agent` shim
 that points back at mm fail fast instead of recursing.
 
-Both paths require the existing consent bit. The hidden hook command reads
-bounded stdin, returns `{}` and exits zero on malformed input or capture failure
-so it never controls Cursor's agent loop. Warnings contain no payload details.
-The same private authoritative history holds hashed generation IDs and counters;
-the local capture's UTC date owns standalone runs. Duplicate callbacks keep
-the original completion day and replace counters, rather than adding again,
-whether they fold in one read or across reads.
-Conductor `requestId` hashes map to canonical run-ID hashes in an additive
-private `requests` map: a matching standalone generation is removed only once
-the Conductor run is retained **with counters**. A running run or a usageRef
-placeholder never erases known standalone usage, and later callbacks keep
-updating it until then. Aliases survive pruning of their source files.
+**ACP sessions are uncaptured (measured 2026-10-06, cursor-agent
+2026.10.01-e373342).** `cursor-agent acp`, Paseo's Cursor runtime, fires no
+lifecycle hook (`sessionStart`, `stop`, `sessionEnd`), though tool hooks still
+run. Its ACP messages carry no usage or token fields. Its session stores
+(`~/.cursor/acp-sessions/<id>/store.db`, the same `blobs`/`meta` schema as
+`~/.cursor/chats/`) hold the model, per-turn request IDs, millisecond
+timestamps and a context-window gauge. They hold no billed input, output,
+cache-read or cache-write counters. CLI stores lack them too; CLI tokens come
+only from the `stop` payload or the `mm cursor-agent` wrapper's result line. Do
+not sweep the stores to estimate usage. The gauge is a snapshot of the current
+context, not billing: a turn re-sends the context once per model request, cache
+reads are not split out, and reasoning output never enters the context, so a
+number derived from it can be off by multiples. Do not add a wrapper or ACP
+proxy either, because ACP sends no usage to intercept. If cursor-agent starts
+firing a `stop` payload under ACP with `status: completed`, `generation_id`,
+`model` and all four inclusive counters, the existing hook captures these
+sessions unchanged. Re-check after each cursor-agent upgrade.
+
+Both capture paths (hook and wrapper) require the existing consent bit. The
+hidden hook command reads bounded stdin, returns `{}` and exits zero on
+malformed input or capture failure so it never controls Cursor's agent loop.
+Warnings contain no payload details. The same private authoritative history
+holds hashed generation IDs and counters; the local capture's UTC date owns
+standalone runs. Duplicate callbacks keep the original completion day and
+replace counters, rather than adding again, whether they fold in one read or
+across reads. Conductor `requestId` hashes map to canonical run-ID hashes in an
+additive private `requests` map: a matching standalone generation is removed
+only once the Conductor run is retained **with counters**. A running run or a
+usageRef placeholder never erases known standalone usage, and later callbacks
+keep updating it until then. Aliases survive pruning of their source files.
 Malformed aliases refuse without resetting history. Measured 2026-10-04
 (Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
 the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
-new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does
-not open; see the Cursor fixture contract's live follow-up. Until a reader
-exists, `unread_cursor_stores` counts store directories holding an `index.db`
+new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does not
+open; see the Cursor fixture contract's live follow-up. Until a reader exists,
+`unread_cursor_stores` counts store directories holding an `index.db`
 (including ones that still also hold `runs.ndjson`) by `lstat` only, never
 opening a database; any inspection error reports unknown. Diag reports the
-count and status names the undercount, without blocking the read or
-standalone publication.
+count and status names the undercount, without blocking the read or standalone
+publication.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no
@@ -1888,6 +1906,9 @@ v=2 sessions-snapshot is FULL INVENTORY: every jsonl in the projects tree is cou
 
 ## Group 8 retro-fleet skill — symlink installer (load-bearing, v0.11.0; store, v0.12.38)
 
+`src/mind_meld/skills/retro_fleet/` ships via `packages = ["src/mind_meld"]`;
+do not add hatchling `force-include` for it, which would double-ship the same files.
+
 Agent links point at an mm-owned **constant** store, not at the running
 package. `_skill_store_dir()` is `~/.local/share/mind-meld/agent-skills/retro-fleet/`.
 `MM_SKILLS_DIR` is a test-only override, gated on `PYTEST_CURRENT_TEST`.
@@ -2567,7 +2588,7 @@ reports wrong token counts:
    `merge_skill_days`, NOT hand-rolled loops. `events.py`'s
    `_aggregate_jsonl_views_for_project` does the identical merge and
    was the second copy; the incremental merge would have been the
-   fifth site CLAUDE.md claims are "consolidated". This module has
+   fifth copy of the shared helpers documented here. This module has
    already shipped the
    `mirrored-predicate-drifts-when-one-side-gains-logic` bug twice
    (v0.11.23, v0.12.13). Pinned by
@@ -2898,7 +2919,7 @@ nobody saw it. The load-bearing signals are the rendered ones — the `≥`
 marker and its `MM_HEALTH` issue.
 
 **Invariant 5 — `PRICING_LAST_UPDATED` is provenance, not a
-threshold.** mm has no network by design (CLAUDE.md: "No API server"), so
+threshold.** mm fetches no pricing data (AGENTS.md: "No API server"), so
 this table can never self-update and **stale is the steady state, not the
 exception**. The old docstring said "refresh if more than ~6 months old";
 nothing read it, and it would not have helped — the table was three

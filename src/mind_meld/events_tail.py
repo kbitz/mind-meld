@@ -327,8 +327,8 @@ def _default_host_readers(
     ``consented=True``. Cursor has no sync source: ``cursor_consented`` is its
     only gate (``HOST_USAGE_ONLY_CONSENT``).
 
-    Module-qualified lookups on purpose (CLAUDE.md's dead-alias rule in
-    reverse): a from-import would bind this module's own global, so a test
+    Module-qualified lookups on purpose (docs/invariants/README.md's
+    dead-alias rule in reverse): a from-import would bind this module's own global, so a test
     patching ``host_usage.read_codex_usage`` would never reach it.
     """
     enabled = {s.get("name") for s in sources if isinstance(s.get("name"), str)}

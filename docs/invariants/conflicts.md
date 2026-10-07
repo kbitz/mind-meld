@@ -104,7 +104,7 @@ fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1
 
 **Trailing-newline preservation.** `lcs_merge` splits without `keepends` (so trailing-newline variations don't trip the LCS into a spurious `replace` on the only line of a file) and re-attaches a `\n` terminator on output if either input had one. Memory entry files routinely end with `\n`; the merged result matches.
 
-**Future graduation path.** The user-confirmed (m) prompt is the conservative ship for the dogfood window. If clean-merge accepts dominate during dogfood, the dispatch in `_apply_incoming_file` can flip to "silently apply lcs_merge result at pull time when conflict_count == 0" (Approach A in the /plan-ceo-review). Same `lcs_merge` primitive, no new module.
+**Graduation path (superseded).** The user-confirmed (m) prompt is the conservative ship for the dogfood window. If clean-merge accepts dominate during dogfood, the dispatch in `_apply_incoming_file` can flip to "silently apply lcs_merge result at pull time when conflict_count == 0" (Approach A in the /plan-ceo-review). Same `lcs_merge` primitive, no new module. **Superseded by "Default key is always `(s)kip`" below:** a clean `lcs_merge` with zero conflict markers can still be a Frankenstein concatenation of two different documents, or bring back a line one side deliberately deleted (LCS treats the deletion as the other side's addition). `conflict_count == 0` is not a correctness signal, so silent pull-time application is not a graduation path.
 
 ## JSONL line-union ordering (load-bearing, Track 51A)
 
@@ -202,7 +202,13 @@ Keep it narrow: the suppression is `<= 1` line, NOT "no shared lines." Two multi
 
 Pinned by `tests/test_conflict_copy.py::TestNeverDefaultToMerge` (default `s` at both sites on a clean merge, `(m)erge` still works when typed), `::TestPromoteHelpers` (per-mode naming, none-peer fallback, collision → `-<4hex>`, `os.link` no-clobber, happy path), `::TestResolvePromote` (post-inversion + pre-inversion promote, link `OSError` → failed, `include_files` warning vs `include_dirs` no-warning, no-base promote unchanged), and `tests/test_conflictdiff.py::TestRenderPrompt` (`promote_available` line).
 
-**Deferred to Phase 2.** The LCS-similarity classifier (`classify_divergence`, a `DivergenceClass` enum, a `Class` column on `mm conflicts`, similarity-gated silent merge) is NOT built — see the `[plan-eng-review]` entry in `TODOS.md`. The "Future graduation path" paragraph above remains genuinely future.
+**Phase 2 classifier: not built, cancelled.** The LCS-similarity classifier (`classify_divergence`, a `DivergenceClass` enum, a `Class` column on `mm conflicts`, similarity-gated silent merge) is NOT built; the v0.12.51 analysis below cancelled it (see the refusal in `TODOS.md`).
+
+## Collector removal and auto-resolver cancellation
+
+CONFLICT-TELEMETRY (`conflictlog.py`, the `_conflict_feature_dict` / `_emit_conflict_decision` / `_conflict_rel_path` helpers, and the hidden `mm conflict-log-backfill` command) was **removed in Track 16A**. It shipped 2026-07-30 as a disposable labeled-dataset collector for the deferred Phase 2 auto-resolver. It was ripped out ahead of the `resolveflow.py` extraction rather than moved six weeks before its own deletion. Original design: `~/.gstack/projects/kbitz-mind-meld/kb-kbitz-conflict-resolution-log-design-20260730.md`.
+
+**Correction (v0.12.51).** Track 16A justified the removal by claiming the collector "collected zero decisions" and that `~/.config/mind-meld/conflict-decisions.jsonl` "never existed on the fleet." **Both claims were false** — the file exists and holds 9 decisions from two `mm resolve` sessions on 2026-08-10/11. Nobody looked before deleting. Reading them cancels the Phase 2 auto-resolver far more firmly than the false premise did: `choice: remote` in 9/9 is **tautological**, because mtime-skip means the conflict path only fires when remote is newer-or-equal, so `newer_side` can only ever be `remote`. There is no preference to learn from that field, and 8/9 records were `similarity: 0.0` single-line JSON — the derived-cache noise v0.12.51 excludes from sync outright. **Do NOT reintroduce a collector**, and if a fifth attempt is ever proposed, the bar is not "a trigger that demonstrably fires" but a mechanism whose output is not fixed by construction. See `docs/invariants/sync.md` "Generated files are not sync data" for the analysis that replaced it.
 
 ## Conflict-prompt timestamps + `(n)ewer` shortcut (load-bearing, v0.12.10)
 

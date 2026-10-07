@@ -45,7 +45,8 @@ _DROPBOX_CONFLICT_RE = re.compile(
 
 # Key prefixes whose writes must be durably flushed (F_FULLFSYNC on Darwin).
 # data/ blobs are hash-addressed and re-uploadable, so they skip fsync for
-# latency. See CLAUDE.md "truth-based manifests" for the durability model.
+# latency. See docs/invariants/sync.md "Atomic write publication failures"
+# for the durability model.
 _DURABLE_PREFIXES = ("manifests/", "devices/", "mm-crypto-init")
 
 
