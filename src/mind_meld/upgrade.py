@@ -634,9 +634,23 @@ class InstallInfo:
                        editable checkout, a stale Homebrew copy).
       "tracking"     — pipx install recorded at `INSTALL_SPEC`. The only kind
                        the automatic path touches.
-      "pinned"       — pipx install of this repo at another ref, usually a
-                       frozen tag. `pipx upgrade` can never move it; `mm
-                       update` reinstalls it onto the release branch.
+      "pinned"       — pipx install of this repo at a ref other than
+                       INSTALL_SPEC. A fixed ref (a release tag, which this
+                       repo's release workflow never moves; any other tag,
+                       fixed by convention; a commit SHA, immutable) is
+                       re-resolved to the same commit by `pipx upgrade`. An
+                       arbitrary branch ref, or a bare repository URL (the
+                       default branch `main`, which may carry untagged WIP),
+                       can move under `pipx upgrade` or `pipx upgrade-all`
+                       (observed 2026-10-07 in pipx 1.17.11
+                       commands/upgrade.py: `_upgrade_package` returns PINNED
+                       for a `pipx pin` hold and otherwise passes
+                       `parse_specifier_for_upgrade`, which keeps a Git
+                       `@ref` verbatim). That hold is the separate
+                       "pipx-pinned" kind, checked first by `detect_install`,
+                       which pipx refuses to upgrade. The automatic path acts
+                       only on the exact INSTALL_SPEC by policy. `mm update`
+                       still reinstalls this kind onto the release branch.
       "pipx-pinned"  — held by `pipx pin`; pipx itself refuses to upgrade it.
       "foreign"      — pipx install from anywhere else (a fork, a local path),
                        or metadata this mm cannot read. Left alone.

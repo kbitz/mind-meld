@@ -1,9 +1,10 @@
 """Kernel-enforced lockfile for Mind Meld concurrency safety.
 
-Prevents concurrent push/pull/gc operations on the same device via
-fcntl.flock. The lock is auto-released on process exit (or any fd
-close), so crashed processes never strand the lock — no PID scanning,
-no stale-lock detection needed.
+Prevents concurrent commands that change sync state or the installation,
+plus the attended update tail, on the same device via fcntl.flock. The
+lock is auto-released on process exit (or any fd close), so crashed
+processes never strand the lock — no PID scanning, no stale-lock
+detection needed.
 
 The lockfile body carries the owning PID as a human-readable hint so
 `LockError` can tell users "PID 12345 holds the lock". Correctness is
@@ -53,6 +54,22 @@ def _read_pid(path: Path) -> int | None:
         return None
 
 
+def _contention_message(pid: int | None) -> str:
+    """Text for a lock held by another process. The PID hint is diagnostic."""
+    advice = (
+        "Wait for it to finish, then run this command again. If that operation is "
+        "waiting for input in another terminal, answer it there; if its output says "
+        "it is updating mm, let it finish, which can take several minutes. Do not "
+        "delete the mm lockfile or kill the process; the lock is released when it exits."
+    )
+    if isinstance(pid, int) and pid > 0:
+        return (
+            f"Another mm operation is running (PID {pid}). {advice} "
+            f"To see the process, run:\n  ps -p {pid} -o etime=,tty=,command="
+        )
+    return f"Another mm operation is running (PID unknown). {advice}"
+
+
 def acquire_lock(path: Path | None = None) -> None:
     """Acquire exclusive lock on `path` (default LOCK_PATH).
 
@@ -88,13 +105,10 @@ def acquire_lock(path: Path | None = None) -> None:
                 raise LockError(f"flock on {lock_path} interrupted repeatedly.")
             continue
         except BlockingIOError:
-            stored_pid = _read_pid(lock_path)
+            # docs/invariants/auto-upgrade.md "The mm lockfile"
+            pid = _read_pid(lock_path)
             os.close(fd)
-            pid_hint = f"PID {stored_pid}" if stored_pid else "PID unknown"
-            raise LockError(
-                f"Another mm operation is running ({pid_hint}). "
-                f"Wait for it to finish or remove {lock_path}."
-            )
+            raise LockError(_contention_message(pid))
         except OSError as e:
             os.close(fd)
             raise LockError(f"flock on {lock_path} failed: {e}") from e

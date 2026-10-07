@@ -605,12 +605,11 @@ The shared leaf renderers (`render_prompt`, `render_banner`, `render_capped_diff
 
 ## Concurrency Safety
 
-**Lockfile:** `~/.config/mind-meld/mind-meld.lock` — PID-based.
+**Lockfile:** `~/.config/mind-meld/mind-meld.lock` — kernel `fcntl.flock`. The file body may contain the holding process's PID; that body is diagnostic only. The lock is released when the holding process exits and is never unlinked (unlinking races the inode; see `release_lock`).
 
-- Acquired at the start of `push`, `pull`, and `gc`.
-- Contains the PID of the holding process.
-- Stale locks (PID no longer running) are cleaned up automatically.
-- If lock is held by a running process, fail with: "Another mm operation is running (PID {pid}). Wait for it to finish or remove ~/.config/mind-meld/mind-meld.lock."
+Commands that change sync state or the installation, plus the attended update tail, acquire it. That set is whatever `rg -n '\bacquire_lock\(' src/` lists, not a list frozen in this section.
+
+When the lock is held, the command fails with a message whose stable prefix is `Another mm operation is running`. Wait, then rerun. If the holder is waiting for input, answer that prompt in the holder's own terminal. If its output says it is updating mm, let it finish (pipx is capped at `PIPX_TIMEOUT_SECONDS`, 600 s). Never delete the lockfile. Never send SIGTERM or SIGKILL to the holder: mm has no handler for those signals, so they skip the bounded pipx cleanup. SIGINT triggers mm's bounded cancellation cleanup, and it can still leave mm missing during a forced reinstall, because inspecting output cannot prove the holder is not about to enter an update. During foreground pipx, mm absorbs SIGHUP so the reader can keep the installer running after a terminal hangup. Versions before this release printed "remove <path>", which is unsafe.
 
 **GC safety:** `mm gc` checks ALL device manifests before deleting any blob. A blob is only deleted if it is referenced by zero manifests. This is safe even if another device pushes concurrently — the new blob won't be in any manifest yet, but it also won't be in the delete set (it was just uploaded, not listed during the gc scan).
 
