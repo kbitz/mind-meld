@@ -332,9 +332,10 @@ those entries: after disabling and re-enabling the source, `mm recover
 --abandon-manifest`, or recovery from a peer or a manifest whose blobs are gone.
 Pull never writes peer files into a local checkout (and, being additive, never
 deletes local files anywhere), and `mm diff` previews the same view. Both check
-only the local folders above incoming paths. Pull records one `excluded` log
-entry per checkout root and peer, whether that peer advertised files or only
-deletion records there. (Conflict-copy discovery for `mm conflicts`
+only the local folders above incoming paths. An attended `mm pull` (not
+`--dry-run` or `autopull`) records one `excluded` log entry per checkout root
+and peer, whether that peer advertised files or only deletion records there.
+(Conflict-copy discovery for `mm conflicts`
 still scans inside checkouts.) Pull also ignores peer paths with a `.git` segment in
 any letter case, or with `.` or empty segments. Older writers may still publish
 checkout files; upgrade those Macs to apply the same default.

@@ -218,7 +218,7 @@ only reader-name `empty_sources` evidence, scoped to retained days.
 ## exclude_patterns + consumer-boundary filter (load-bearing, v0.9.1, v0.9.3, v0.11.13)
 Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the relative path. Default `gstack` source ships with `["config.yaml", "projects/*/repo-mode.json", "projects/*/land-deploy-confirmed", "analytics/.last-sync-*"]` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking added in v0.9.3; `analytics/.last-sync-*` are per-machine cursor files that track each device's progress through gstack's local analytics jsonls, added in v0.11.13). The walker drops excluded paths from the local manifest at push time.
 
-`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path to compute referenced blobs, and a filtered manifest there would mark live peer blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
+`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path to compute referenced blobs, and a filtered manifest there would mark live peer blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
@@ -286,10 +286,11 @@ amount to.
 
 Attended push and preview print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
-is not a data-at-risk warning), and status/diag list roots. Pull logs one
-`excluded` record per root and device manifest, not per file; a peer with only
-tombstones there is logged too (informational: pull is additive and never
-deletes local files). Pull's probe treats a peer path the filesystem cannot
+is not a data-at-risk warning), and status/diag list roots. Attended pull (not
+`--dry-run` or autopull, which write no `excluded` history) logs one `excluded`
+record per root and device manifest, not per file; a peer with only tombstones
+there is logged too (informational: pull is additive and never deletes local
+files). Pull's probe treats a peer path the filesystem cannot
 encode as a stop, never an exception. Conflict-copy discovery (`resolveflow`)
 still walks inside checkouts; pull's no-write guarantee covers peer files.
 `marker_skip_globs` checks `nested_repo_root` and parent links before its first
