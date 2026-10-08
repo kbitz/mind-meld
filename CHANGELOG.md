@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.5.3] - 2026-10-07
+
+**Archiving a Codex thread no longer drops its past usage from the fleet Agents table.** mm now reads Codex's archived rollouts (`~/.codex/archived_sessions/`) together with the live sessions, so threads archived in Codex, the Codex app or an orchestrator such as Paseo stay counted. After upgrading, days with archived threads rise; that is the correction, not double counting.
+
+### Fixed
+
+- Codex usage now includes archived threads. Codex moves a thread's rollout out of `~/.codex/sessions/` when you archive it, and the next complete inventory used to prune that thread's usage. The default reader now scans both locations in one pass with one completeness verdict. A thread archived between mm's two directory listings is read from the archive in the same pass; one that moves after the archive listing and before mm has finished reading it makes that pass incomplete, and the next read picks it up. An incomplete pass prunes nothing from the cache, so the next complete read resumes from the full prior inventory.
+- An unreadable archive folder (a permission or I/O error) or an archived rollout that disappears mid-read is reported as an incomplete read, never as an empty archive. `mm diag` counts rollouts in both locations and reports the on-disk file count as unknown when the archive cannot be listed.
+
+### Upgrade notes
+
+- No command, flag, wire or storage format changes.
+
 ## [1.5.2] - 2026-10-07
 
 **mm no longer tells you to delete its lockfile when another mm operation is running.** It now tells you to wait and run the command again, and the note `mm update` prints for an up-to-date install made from a tag, branch or bare repository URL is now accurate. If an older mm told you to remove the lockfile, do not.
