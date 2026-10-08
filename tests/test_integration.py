@@ -10610,6 +10610,28 @@ def test_pull_logs_a_checkout_root_for_skipped_deletions(tmp_path, monkeypatch):
     assert ("dev-b", "claude", root) in {(r["device"], r["source"], r["rel_path"]) for r in records}
 
 
+def test_pull_logs_each_checkout_root_once_per_peer(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture = memory_a / "fixture"
+    fixture.mkdir()
+    (fixture / "edited.md").write_text("published")
+    (fixture / "deleted.md").write_text("published")
+    run("a", "push")
+    run("b", "pull")
+    run("b", "push")
+    (memory_b / "fixture" / "edited.md").write_text("peer edit")
+    (memory_b / "fixture" / "deleted.md").unlink()
+    run("b", "push")
+    (fixture / ".git").mkdir()
+    run("a", "pull")
+    logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
+    records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
+    root = "projects/-Users-kb-myapp/memory/fixture"
+    from_b = [(r["source"], r["rel_path"]) for r in records if r["device"] == "dev-b"]
+    # dev-b advertises a file and a tombstone under the root: still one record.
+    assert from_b == [("claude", root)]
+
+
 def test_growth_warning_skips_a_macs_first_push_of_fleet_content(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_module, "_PUSH_GROWTH_WARNING_FILES", 1)
     run, _memory_a, _memory_b = _two_macs(tmp_path, monkeypatch)

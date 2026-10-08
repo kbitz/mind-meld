@@ -564,6 +564,14 @@ def marker_skip_globs(
     seen: set[str] = set()
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        # A checkout covering this include is reported and frozen by the
+        # walker; never probe beneath it or through a link above the include.
+        if nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+            continue
+        if path_has_descendant_symlink(
+            scan_dir.parent, base, strict=strict, source_name=source_name
+        ):
+            continue
         try:
             st = scan_dir.lstat()
         except FileNotFoundError:

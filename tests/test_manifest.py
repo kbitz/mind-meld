@@ -620,6 +620,45 @@ class TestNestedRepositories:
         assert walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)[1] == {}
         assert set(skipped) == {("repo", "nested git repository")}
 
+    @pytest.mark.parametrize("blocked", ["unsearchable", "link"])
+    def test_strict_include_below_a_blocked_path_inside_a_checkout_freezes(self, tmp_path, blocked):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        if blocked == "unsearchable":
+            (tmp_path / "repo" / "sub").mkdir()
+            locked = tmp_path / "repo" / "sub"
+        else:
+            (tmp_path / "repo" / "sub").symlink_to(locked, target_is_directory=True)
+        cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
+        cfg["include_dirs"] = ["repo/sub/x"]
+        skipped = []
+        locked.chmod(0)
+        try:
+            files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)[1]
+            prefixes = nested_repo_skip_prefixes(cfg, strict=True)
+        finally:
+            locked.chmod(0o700)
+        assert files == {}
+        assert skipped == [("repo", "nested git repository")]
+        assert prefixes == ["repo"]
+
+    def test_link_to_a_checkout_is_a_symlink_not_a_checkout(self, tmp_path):
+        (tmp_path / "real" / ".git").mkdir(parents=True)
+        (tmp_path / "real" / "notes").mkdir()
+        (tmp_path / "real" / "notes" / "a.md").write_text("a")
+        (tmp_path / "real" / "f.md").write_text("f")
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+        cfg = {"name": "g", "type": "generic", "path": str(base)}
+        cfg["include_dirs"] = ["link/notes"]
+        cfg["include_files"] = ["link/f.md"]
+        seen = []
+        assert walk_source(cfg, on_skip=lambda path, reason: seen.append(reason))[1] == {}
+        assert seen and set(seen) == {"symlink"}
+        assert nested_repo_skip_prefixes(cfg, strict=True) == []
+
     def test_incoming_path_probe_stops_at_unencodable_peer_paths(self, tmp_path):
         cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
         assert nested_repo_roots_for_paths(cfg, ["a\ud800/x.md", "b\ud800c/d/e.md"]) == []

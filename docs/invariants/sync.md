@@ -287,11 +287,15 @@ amount to.
 Attended push and preview print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
 is not a data-at-risk warning), and status/diag list roots. Pull logs one
-`excluded` record per root and device manifest, not per file, covering skipped
-files and skipped tombstones. Pull's probe treats a peer path the filesystem
-cannot encode as a stop, never an exception. Conflict-copy discovery
-(`resolveflow`) still walks inside checkouts; pull's no-write guarantee covers
-applied peer files and deletions. Only sanitized
+`excluded` record per root and device manifest, not per file; a peer with only
+tombstones there is logged too (informational: pull is additive and never
+deletes local files). Pull's probe treats a peer path the filesystem cannot
+encode as a stop, never an exception. Conflict-copy discovery (`resolveflow`)
+still walks inside checkouts; pull's no-write guarantee covers peer files.
+`marker_skip_globs` checks `nested_repo_root` and parent links before its first
+lstat of an include, so marker discovery never probes inside a checkout. Status
+filters its freeze candidates by exclude globs only (`markers=False`): marker
+prefixes never fall inside a reported checkout. Only sanitized
 display copies reach terminals; exclusion keys keep their original bytes.
 
 `.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`
