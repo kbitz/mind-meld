@@ -10256,6 +10256,127 @@ def test_tombstoned_checkout_entry_still_on_disk_does_not_wedge_push(tmp_path):
     assert set(tombstones) == {"g:repo/a.md"}
 
 
+def _gstack_source(capture61, **extra) -> tuple[Path, dict]:
+    root = capture61["path"].parent / "gstack"
+    root.mkdir(exist_ok=True)
+    src = {"name": "gstack", "type": "generic", "path": str(root), **extra}
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    return root, src
+
+
+def _accepted(capture61) -> dict:
+    key = storage_keys.manifest_key("dev-a")
+    return load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+
+
+def test_linked_explicit_include_inside_a_checkout_still_freezes(capture61):
+    root, _src = _gstack_source(capture61, include_files=["repo/note.md"])
+    (root / "repo").mkdir()
+    (root / "repo" / "note.md").write_text("published")
+    (root / "target.md").write_text("elsewhere")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (root / "repo" / ".git").mkdir()
+    (root / "repo" / "note.md").unlink()
+    (root / "repo" / "note.md").symlink_to(root / "target.md")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert "repo/note.md" in _accepted(capture61)["sources"]["gstack"]["files"]
+    shutil.rmtree(root / "repo")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert "gstack:repo/note.md" in _accepted(capture61)["tombstones"]
+
+
+def test_frozen_checkout_contents_are_never_probed(capture61):
+    root, _src = _gstack_source(capture61, include_dirs=["repo"])
+    (root / "repo" / "locked").mkdir(parents=True)
+    (root / "repo" / "locked" / "f.md").write_text("published")
+    (root / "repo" / "gone.md").write_text("published then deleted")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (root / "repo" / "gone.md").unlink()
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert "gstack:repo/gone.md" in _accepted(capture61)["tombstones"]
+    (root / "repo" / ".git").mkdir()
+    (root / "repo" / "gone.md").symlink_to(root / "repo" / "locked")
+    (root / "repo" / "locked").chmod(0)
+    try:
+        # An unrelated change forces a manifest upload.
+        (capture61["claude"] / "projects/-Users-kb-myapp/memory/x.md").write_text("change")
+        result = runner.invoke(app, ["push"])
+    finally:
+        (root / "repo" / "locked").chmod(0o700)
+    assert result.exit_code == 0, result.output
+    accepted = _accepted(capture61)
+    assert "repo/locked/f.md" in accepted["sources"]["gstack"]["files"]
+    assert "gstack:repo/gone.md" in accepted["tombstones"]
+
+
+def test_exclude_glob_retires_frozen_entries_without_tombstones(capture61):
+    root, src = _gstack_source(capture61, include_dirs=["proj"])
+    (root / "proj").mkdir()
+    (root / "proj" / "note.md").write_text("published")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (root / "proj" / ".git").mkdir()
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert "proj/note.md" in _accepted(capture61)["sources"]["gstack"]["files"]
+    src["exclude_patterns"] = ["proj/*"]
+    save_config(capture61["cfg"], capture61["path"])
+    status = runner.invoke(app, ["status", "--source", "gstack"])
+    assert status.exit_code == 0, status.output
+    assert "deleted" in status.stdout
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    accepted = _accepted(capture61)
+    assert "proj/note.md" not in accepted["sources"]["gstack"]["files"]
+    assert "gstack:proj/note.md" not in accepted["tombstones"]
+
+
+def test_merged_conflict_copy_tombstone_inside_a_checkout_does_not_wedge_push(capture61):
+    root, _src = _gstack_source(capture61, include_dirs=["proj"])
+    (root / "proj").mkdir()
+    (root / "proj" / "x.md").write_text("deleted later")
+    (root / "proj" / "y.md").write_text("kept")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    key = storage_keys.manifest_key("dev-a")
+    stale = capture61["backend"].get(key)
+    (root / "proj" / "x.md").unlink()
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    # An iCloud conflict copy carries the stale entry next to the tombstone.
+    copy = capture61["backend"].root / key.replace("manifest.json.enc", "manifest.json 2.enc")
+    copy.write_bytes(stale)
+    (root / "proj" / ".git").mkdir()
+    (root / "proj" / "x.md").write_text("recreated inside the checkout")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "still present but was omitted" not in " ".join(result.output.split())
+    accepted = _accepted(capture61)
+    assert "gstack:proj/x.md" in accepted["tombstones"]
+    assert "proj/x.md" not in accepted["sources"]["gstack"]["files"]
+    assert "proj/y.md" in accepted["sources"]["gstack"]["files"]
+
+
+def test_mm_events_rescan_uploads_a_path_whose_checkout_vanished(capture61, monkeypatch):
+    nested = capture61["path"].parent / "events_root" / "events" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "old.md").write_text("published")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (nested / ".git").mkdir()
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/x.md").write_text("change")
+    original = cli_module.build_manifest_v2
+
+    def rescan(device_id, device_name, sources, *args, **kwargs):
+        if [src["name"] for src in sources] == ["mm-events"]:
+            # The checkout disappears between the first scan and the rescan.
+            shutil.rmtree(nested / ".git")
+            (nested / "old.md").write_text("changed after the first scan")
+        return original(device_id, device_name, sources, *args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", rescan)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    info = _accepted(capture61)["sources"]["mm-events"]["files"]["events/nested/old.md"]
+    assert info["sha256"] == hashlib.sha256(b"changed after the first scan").hexdigest()
+    assert capture61["backend"].exists(storage_keys.blob_key("dev-a", info["sha256"]))
+
+
 def test_freeze_never_revives_a_tombstoned_path():
     info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
     prior = {
@@ -10467,6 +10588,26 @@ def test_pull_never_writes_or_deletes_inside_a_local_checkout(tmp_path, monkeypa
         ("dev-a", "claude", root),
         ("dev-b", "claude", root),
     ]
+
+
+def test_pull_logs_a_checkout_root_for_skipped_deletions(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture = memory_a / "fixture"
+    fixture.mkdir()
+    (fixture / "tracked.md").write_text("published")
+    run("a", "push")
+    run("b", "pull")
+    run("b", "push")
+    (memory_b / "fixture" / "tracked.md").unlink()
+    run("b", "push")
+    (fixture / ".git").mkdir()
+    run("a", "pull")
+    assert (fixture / "tracked.md").read_text() == "published"
+    logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
+    records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
+    root = "projects/-Users-kb-myapp/memory/fixture"
+    # dev-b advertises only a tombstone under the checkout; it is still logged once.
+    assert ("dev-b", "claude", root) in {(r["device"], r["source"], r["rel_path"]) for r in records}
 
 
 def test_growth_warning_skips_a_macs_first_push_of_fleet_content(tmp_path, monkeypatch):

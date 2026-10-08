@@ -229,9 +229,12 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 Every source walker prunes a directory with a regular `.git` file or `.git`
 directory strictly below its source root, before enumerating or hashing checkout
 contents. The source root itself remains exempt. Check ancestors of configured
-includes so a direct include inside a checkout cannot bypass the rule. Descendant
-symlinks retain their existing omission policy. Strict publishing refuses an
-unreadable checkout-marker probe; diagnostic scans remain permissive.
+includes so a direct include inside a checkout cannot bypass the rule.
+`nested_repo_root` probes components in order and stops at the first missing,
+non-directory or symlinked one, so a checkout above a descendant link is still
+found and nothing is probed through a link; callers check it before the
+descendant-symlink omission. Strict publishing refuses an unreadable component
+or checkout-marker probe; diagnostic scans remain permissive.
 
 **One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
 roots its own walk skipped. Push, status and diff never re-walk for them, and
@@ -259,9 +262,13 @@ blob still exists under this device's key; the rest are excluded (their only
 loss is convergence on a later delete). `_drop_unfrozen_checkout_files` then
 drops every unfrozen prior file entry under a root (tombstoned or blob-less),
 keeping tombstones, so the omission guard never probes checkout contents. The
-mm-events rescan carries frozen entries across its source replacement. Walkers
-report a checkout above an absent include too. Status freezes the same way so
-frozen entries never show as pending deletions.
+mm-events rescan carries frozen entries across its source replacement, except
+paths it sees again (their `.git` vanished mid-push), which upload normally.
+The symlink filter then exempts every root (`exempt_roots`), keeping their
+entries and tombstones without probing beneath a frozen checkout. Walkers
+report a checkout above an absent or linked include too. Status freezes from
+the same exclusion-filtered prior so frozen entries never show as pending
+deletions, while an excluded one still does.
 
 `_prove_omitted_paths_absent` has no checkout exemption. Frozen entries are
 present in the local manifest; anything else still on disk but omitted (for
@@ -269,14 +276,22 @@ example an include deselected while its folder became a checkout, unless another
 include still reaches that checkout root) refuses as it always did. An
 exemption there minted tombstones for files still on disk.
 
-Frozen entries retire only when the checkout is deleted (tombstones everywhere)
-or an `exclude_patterns` glob such as `<folder>/*` covers them (dropped without
-tombstones; peer copies stay).
+Frozen entries retire when the checkout is deleted (tombstones everywhere) or an
+`exclude_patterns` glob such as `<folder>/*` covers them (dropped without
+tombstones; peer copies stay). The freeze also ends silently whenever the prior
+no longer lists them: disable then enable of the source, `mm recover
+--abandon-manifest`, peer-fallback recovery, blob-less recovery, or adding then
+removing a glob. Those paths lose delete convergence like the exclusion they
+amount to.
 
 Attended push and preview print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
 is not a data-at-risk warning), and status/diag list roots. Pull logs one
-`excluded` record per root and device manifest, not per file. Only sanitized
+`excluded` record per root and device manifest, not per file, covering skipped
+files and skipped tombstones. Pull's probe treats a peer path the filesystem
+cannot encode as a stop, never an exception. Conflict-copy discovery
+(`resolveflow`) still walks inside checkouts; pull's no-write guarantee covers
+applied peer files and deletions. Only sanitized
 display copies reach terminals; exclusion keys keep their original bytes.
 
 `.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`

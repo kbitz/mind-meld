@@ -330,9 +330,11 @@ def nested_repo_root(
 ) -> str | None:
     """Find the outermost checkout ancestor strictly below the source root.
 
-    Check ancestors too: an include_dir or include_file can point directly
-    into a checkout. The source root's own .git never changes its selection.
-    Callers guard descendant symlinks before probing local paths.
+    Probe components in order and stop at the first missing, non-directory or
+    symlinked one: a checkout above a descendant link is still found, and
+    nothing is probed through a link. Check ancestors too, since an include_dir
+    or include_file can point directly into a checkout. The source root's own
+    .git never changes its selection.
     """
     try:
         parts = directory.relative_to(base).parts
@@ -341,6 +343,24 @@ def nested_repo_root(
     current = base
     for part in parts:
         current /= part
+        try:
+            st = current.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(current, base),
+                        problem="could not check for a nested git repository",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            return None
         if _directory_is_git_repo(current, base, strict=strict, source_name=source_name):
             return current.relative_to(base).as_posix()
     return None
@@ -407,19 +427,17 @@ def nested_repo_skip_prefixes(
         scan_dirs = [base / name for name in dirs]
         include_files = source_config.get("include_files") or [] if source_type == "generic" else []
         for name in include_files:
-            path = base / name
             if _under_skip_prefix(name, skip_prefixes):
                 continue
-            if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
-                continue
+            path = base / name
             if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
                 roots.add(root)
     for directory in scan_dirs:
-        if path_has_descendant_symlink(directory, base, strict=strict, source_name=source_name):
-            continue
-        # An absent include inside a checkout still excludes that checkout on pull.
+        # An absent or linked include inside a checkout still excludes that checkout.
         if root := nested_repo_root(directory, base, strict=strict, source_name=source_name):
             roots.add(root)
+            continue
+        if path_has_descendant_symlink(directory, base, strict=strict, source_name=source_name):
             continue
         st = _lstat_or_none(
             directory,
@@ -468,7 +486,8 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
                 directory = base / current
                 try:
                     st = directory.lstat()
-                except OSError:
+                except (OSError, ValueError):
+                    # ValueError: a peer path the filesystem cannot encode.
                     state = "stop"
                 else:
                     if not stat.S_ISDIR(st.st_mode):
@@ -1136,12 +1155,12 @@ def _collect_regular_files_scandir(
         if on_skip:
             on_skip(root, NESTED_REPO_SKIP_REASON)
 
+    if root := nested_repo_root(start, base, strict=strict, source_name=source_name):
+        skip_repo(root)
+        return collected
     if path_has_descendant_symlink(start, base, strict=strict, source_name=source_name):
         if on_skip and collect_files:
             on_skip(str(start), "symlink")
-        return collected
-    if root := nested_repo_root(start, base, strict=strict, source_name=source_name):
-        skip_repo(root)
         return collected
 
     def walk(directory: Path, *, discovered: bool) -> None:
@@ -1677,13 +1696,12 @@ def walk_generic_source(
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
-        # Report a checkout above an include even when the include is absent,
-        # so push freezes its published entries instead of tombstoning them.
-        if not path_has_descendant_symlink(scan_dir, base, strict=strict, source_name=source_name):
-            if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
-                if on_skip:
-                    on_skip(root, NESTED_REPO_SKIP_REASON)
-                continue
+        # Report a checkout above an include even when the include is absent or
+        # linked, so push freezes its published entries instead of dropping them.
+        if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+            if on_skip:
+                on_skip(root, NESTED_REPO_SKIP_REASON)
+            continue
         st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
         if st is None:
             continue
@@ -1706,12 +1724,10 @@ def walk_generic_source(
 
     for filename in include_files:
         path = base / filename
-        if not path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
-            root = nested_repo_root(path.parent, base, strict=strict, source_name=source_name)
-            if root:
-                if on_skip:
-                    on_skip(root, NESTED_REPO_SKIP_REASON)
-                continue
+        if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
+            if on_skip:
+                on_skip(root, NESTED_REPO_SKIP_REASON)
+            continue
         st = _lstat_or_none(path, strict=strict, source_name=source_name, rel_path=filename)
         if st is None:
             continue

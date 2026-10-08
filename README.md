@@ -326,10 +326,15 @@ unchanged: nothing is uploaded or deleted, and peer copies stay in place. Edits
 and new files inside the checkout stay local. Deleting the checkout later
 deletes those entries like any other deletion, so peers converge instead of
 sending the files back. To stop advertising them without deleting anything,
-add an `exclude_patterns` glob such as `<folder>/*` instead. Pull never writes into or
-deletes from a local checkout, and `mm diff` previews the same view. Both check
-only the local folders above incoming paths; pull records one `excluded` log
-entry per checkout root. Pull also ignores peer paths with a `.git` segment in
+add an `exclude_patterns` glob such as `<folder>/*` instead. The freeze also
+ends, with the same effect, when this Mac's previous manifest no longer lists
+those entries: after disabling and re-enabling the source, `mm recover
+--abandon-manifest`, or recovery from a peer or a manifest whose blobs are gone.
+Pull never applies peer files or deletions inside a local checkout, and
+`mm diff` previews the same view. Both check only the local folders above
+incoming paths; pull records one `excluded` log entry per checkout root, for
+skipped files and deletions alike. (Conflict-copy discovery for `mm conflicts`
+still scans inside checkouts.) Pull also ignores peer paths with a `.git` segment in
 any letter case, or with `.` or empty segments. Older writers may still publish
 checkout files; upgrade those Macs to apply the same default.
 
@@ -337,7 +342,9 @@ A push adding more than 1,000 new files in a subtree prints a nonblocking growth
 warning naming up to three subtrees and their observed counts. Groups use the
 first two directory components under each source; modified files do not count.
 The first push without an accepted manifest of this Mac's own (a new Mac, or
-recovery from a corrupt one) skips the warning.
+recovery from a corrupt one) skips the warning. It is printed to stderr only,
+including by autopush, whose hook output you may never see; `mm status` does
+not record it.
 
 ### Syncing gstack
 

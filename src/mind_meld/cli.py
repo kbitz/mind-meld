@@ -883,6 +883,7 @@ def _filter_symlinked_paths(
     sources: list[dict[str, Any]],
     *,
     strict: bool = False,
+    exempt_roots: Mapping[str, Iterable[str]] | None = None,
 ) -> dict:
     """Remove locally-symlinked paths from a prior manifest before tombstones.
 
@@ -890,8 +891,10 @@ def _filter_symlinked_paths(
     manifest at this consumer boundary prevents that omission from minting a
     fleet-wide deletion tombstone, including for pre-migration explicit source
     configurations that do not yet carry the new default exclude globs.
-    Applies to Claude, generic, and Grok sources.
+    Applies to Claude, generic, and Grok sources. Entries and tombstones under
+    ``exempt_roots`` (frozen nested checkouts) are kept without probing.
     """
+    exempt = {name: sorted(roots) for name, roots in (exempt_roots or {}).items()}
     source_roots = {
         source["name"]: Path(source["path"]).expanduser()
         for source in sources
@@ -902,7 +905,7 @@ def _filter_symlinked_paths(
 
     def _symlinked(source_name: str, rel_path: str) -> bool:
         base_path = source_roots.get(source_name)
-        if base_path is None:
+        if base_path is None or _under_skip_prefix(rel_path, exempt.get(source_name)):
             return False
         try:
             _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
@@ -4362,7 +4365,10 @@ def _push_core(
             else lambda info: backend.exists(blob_key(device_id, info["sha256"])),
         )
         remote_manifest = _drop_unfrozen_checkout_files(remote_manifest, nested_roots, frozen)
-        remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
+        # Frozen checkouts are kept as published: never probe beneath their roots.
+        remote_manifest = _filter_symlinked_paths(
+            remote_manifest, sources, strict=True, exempt_roots=nested_roots
+        )
         proof_sources = sources
         if dry_run and resolution.would_create:
             # Missing default roots truthfully preview deletions.
@@ -4479,11 +4485,14 @@ def _push_core(
                 nested_roots=nested_roots,
             )
             # The rescan replaces these sources' files; carry their frozen entries.
+            # A path the rescan sees again (its .git vanished) uploads normally.
             for name, data in events_manifest["sources"].items():
                 previous = local_manifest["sources"].get(name, {}).get("files", {})
-                for rel in frozen.get(name, ()):
-                    if rel in previous:
-                        data["files"].setdefault(rel, previous[rel])
+                for rel in list(frozen.get(name, ())):
+                    if rel in data["files"]:
+                        frozen[name].discard(rel)
+                    elif rel in previous:
+                        data["files"][rel] = previous[rel]
             local_manifest["sources"].update(events_manifest["sources"])
             if remote_manifest is not None:
                 _prove_omitted_paths_absent(
@@ -5632,26 +5641,35 @@ def _pull_core(
         # conflicted / failed` records to `.1`. The forensic-aid
         # contract becomes useless. Interactive `mm pull` still
         # logs the full set so users can audit their excludes.
-        # A nested checkout logs one record per root and peer, not per file.
+        # A nested checkout logs one record per root and peer, not per file,
+        # whether files or deletions under it were skipped.
         if not quiet and not dry_run:
+            logged_roots: set[tuple[str, str]] = set()
+
+            def checkout_root(src_name: str, rel_path: str) -> str | None:
+                return next(
+                    (
+                        r
+                        for r in nested_roots.get(src_name, [])
+                        if _under_skip_prefix(rel_path, [r])
+                    ),
+                    None,
+                )
+
+            def log_root(src_name: str, root: str) -> None:
+                if (src_name, root) not in logged_roots:
+                    logged_roots.add((src_name, root))
+                    pullhistory.append(
+                        verb="pull", device=did, source=src_name, rel_path=root, action="excluded"
+                    )
+
             for src_name, src_data in m.get("sources", {}).items():
                 kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
-                roots = nested_roots.get(src_name, [])
-                logged_roots: set[str] = set()
                 for rel_path, info in src_data.get("files", {}).items():
                     if rel_path in kept:
                         continue
-                    root = next((r for r in roots if _under_skip_prefix(rel_path, [r])), None)
-                    if root is not None:
-                        if root not in logged_roots:
-                            logged_roots.add(root)
-                            pullhistory.append(
-                                verb="pull",
-                                device=did,
-                                source=src_name,
-                                rel_path=root,
-                                action="excluded",
-                            )
+                    if root := checkout_root(src_name, rel_path):
+                        log_root(src_name, root)
                         continue
                     pullhistory.append(
                         verb="pull",
@@ -5661,6 +5679,12 @@ def _pull_core(
                         action="excluded",
                         remote_sha=info.get("sha256"),
                     )
+            for key in m.get("tombstones", {}):
+                if not isinstance(key, str) or key in filtered.get("tombstones", {}):
+                    continue
+                src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
+                if root := checkout_root(src_name, rel_path):
+                    log_root(src_name, root)
         filtered_cache[did] = filtered
     manifest_cache = filtered_cache
 
@@ -6037,9 +6061,15 @@ def status(
     # fetch.manifest is pre-normalized via load_manifest.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     remote_manifest = fetch.manifest if fetch.is_ok else None
-    if remote_manifest is not None:
-        # Match what push publishes: entries frozen under a checkout are unchanged.
-        _freeze_nested_checkout_entries(local_manifest, remote_manifest, nested_roots)
+    if remote_manifest is not None and nested_roots:
+        # Match what push publishes: freeze from the same filtered prior, so an
+        # excluded entry under a checkout still shows as a pending removal.
+        exclude_map, skip_prefixes = _build_exclude_map(config, sources_configs)
+        _freeze_nested_checkout_entries(
+            local_manifest,
+            _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes),
+            nested_roots,
+        )
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 

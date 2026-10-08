@@ -609,6 +609,21 @@ class TestNestedRepositories:
         assert walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)[1] == {}
         assert skipped == [("repo", "nested git repository")]
 
+    def test_linked_include_inside_a_checkout_reports_the_checkout(self, tmp_path):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / "repo" / "link").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
+        cfg["include_dirs"] = ["repo/link"]
+        cfg["include_files"] = ["repo/link/f.md"]
+        skipped = []
+        assert walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)[1] == {}
+        assert set(skipped) == {("repo", "nested git repository")}
+
+    def test_incoming_path_probe_stops_at_unencodable_peer_paths(self, tmp_path):
+        cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
+        assert nested_repo_roots_for_paths(cfg, ["a\ud800/x.md", "b\ud800c/d/e.md"]) == []
+
     def test_include_below_symlinked_parent_reports_one_symlink_skip(self, tmp_path):
         (tmp_path / "real" / "notes").mkdir(parents=True)
         (tmp_path / "real" / "notes" / "a.md").write_text("a")
