@@ -10098,9 +10098,7 @@ def test_upload_stop_cause_is_private_and_visible_in_status_diag(
     assert publication["latest_attempt_errno"] == number
 
 
-def test_nested_checkout_transition_is_visible_tombstone_safe_and_never_wedges_push(
-    capture61, monkeypatch
-):
+def test_nested_checkout_freezes_published_entries_and_converges_on_delete(capture61, monkeypatch):
     root = capture61["path"].parent / "gstack"
     checkout = root / "projects" / "literal*" / "checkout"
     checkout.mkdir(parents=True)
@@ -10122,32 +10120,137 @@ def test_nested_checkout_transition_is_visible_tombstone_safe_and_never_wedges_p
     assert first.exit_code == 0, first.output
     prior = cli_module.sidecar.read("dev-a")
     rel = "projects/literal*/checkout/note.md"
-    assert rel in prior["sources"]["gstack"]["files"]
+    published = prior["sources"]["gstack"]["files"][rel]
+
+    def accepted() -> dict:
+        key = storage_keys.manifest_key("dev-a")
+        return load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+
     (checkout / ".git").write_text("gitdir: elsewhere")
-    local = cli_module.build_manifest_v2("dev-a", "A", [src], strict=True)
-    # Exercise the guard directly too, with unfiltered previously-published input.
-    cli_module._prove_omitted_paths_absent(local, prior, [src], max_file_size=52_428_800)
+    published_file.write_text("edited inside the checkout")
+    (checkout / "new.md").write_text("never published")
     expected = "skipped: nested git repository gstack:projects/literal*/checkout"
-    for command in (["push", "--dry-run"], ["push", "-v"], ["autopush"]):
+    # Autopush stays silent; attended push and its preview report the root once.
+    for command, count in ((["push", "--dry-run"], 1), (["push", "-v"], 1), (["autopush"], 0)):
         result = runner.invoke(app, command)
         assert result.exit_code == 0, result.output
-        assert " ".join(result.stderr.split()).count(expected) == 1
+        assert " ".join(result.stderr.split()).count(expected) == count
         assert "still present but was omitted" not in result.output
-    accepted = load_manifest(
-        decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
-    )
-    assert set(accepted["sources"]["gstack"]["files"]) == {"projects/other/note.md"}
-    assert f"gstack:{rel}" not in accepted["tombstones"]
-    assert published_file.read_text() == "published before this folder became a checkout"
+    files = accepted()["sources"]["gstack"]["files"]
+    assert set(files) == {"projects/other/note.md", rel}
+    assert files[rel]["sha256"] == published["sha256"]
+    assert f"gstack:{rel}" not in accepted()["tombstones"]
+    assert published_file.read_text() == "edited inside the checkout"
     for command in (["status"], ["diag"]):
         shown = runner.invoke(app, command)
         assert shown.exit_code == 0, shown.output
         assert " ".join(shown.stdout.split()).count(expected) == 1
+        if command == ["status"]:
+            assert "deleted" not in shown.stdout
     shown = runner.invoke(app, ["diag", "--json"])
     assert shown.exit_code == 0, shown.output
     assert json.loads(shown.stdout)["sync_scope"]["skipped_nested_repositories"]["gstack"] == [
         "projects/literal*/checkout"
     ]
+    # Deleting the checkout tombstones the frozen entry, like any deletion.
+    shutil.rmtree(checkout)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert rel not in accepted()["sources"]["gstack"]["files"]
+    assert f"gstack:{rel}" in accepted()["tombstones"]
+
+
+def test_deselecting_an_include_inside_a_checkout_still_refuses_like_before(capture61):
+    root = capture61["path"].parent / "gstack"
+    notes = root / "checkout" / "notes"
+    notes.mkdir(parents=True)
+    (notes / "keep.md").write_text("still on disk")
+    (root / "other").mkdir()
+    (root / "other" / "a.md").write_text("ordinary")
+    src = {"name": "gstack", "type": "generic", "path": str(root)}
+    src["include_dirs"] = ["other", "checkout/notes"]
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    key = storage_keys.manifest_key("dev-a")
+    before = capture61["backend"].get(key)
+    (root / "checkout" / ".git").mkdir()
+    src["include_dirs"] = ["other"]
+    save_config(capture61["cfg"], capture61["path"])
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1
+    assert "still present but was omitted" in " ".join(result.output.split())
+    assert capture61["backend"].get(key) == before
+
+
+def test_interrupt_inside_storage_failure_handler_keeps_a_valid_record(capture61, monkeypatch):
+    original_put = LocalBackend.put
+    original_error = cli_module._error
+
+    def put(backend, key, data):
+        if key.startswith("data/"):
+            raise OSError(errno.ENOSPC, "no space")
+        return original_put(backend, key, data)
+
+    def interrupted_error(message, *args, **kwargs):
+        if "push-failed" in message:
+            raise KeyboardInterrupt()
+        return original_error(message, *args, **kwargs)
+
+    monkeypatch.setattr(LocalBackend, "put", put)
+    monkeypatch.setattr(cli_module, "_error", interrupted_error)
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code != 0
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None
+    assert (record["class"], record["cause"], record["errno"]) == (
+        "push-failed",
+        "interrupted",
+        None,
+    )
+
+
+def test_peer_git_segments_are_stripped_before_they_can_mark_a_checkout():
+    info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
+    peer = {
+        "sources": {
+            "claude": {
+                "files": {
+                    "projects/p/memory/sub/.git": info,
+                    "projects/p/memory/sub/.git/config": info,
+                    "projects/p/memory/ok.md": info,
+                }
+            }
+        },
+        "tombstones": {"claude:projects/p/memory/x/.git": {"deleted_at": info["mtime"]}},
+    }
+    out = cli_module._filter_excluded_paths(peer, {}, {})
+    assert list(out["sources"]["claude"]["files"]) == ["projects/p/memory/ok.md"]
+    assert out["tombstones"] == {}
+
+
+def test_growth_warning_threshold_grouping_and_top_three(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cli_module, "_PUSH_GROWTH_WARNING_FILES", 2)
+
+    def diff(*rels):
+        return SimpleNamespace(new=list(rels))
+
+    cli_module._warn_push_growth([("a", None, None, diff("x/y/1", "x/y/2"))])
+    assert capsys.readouterr().err == ""
+    cli_module._warn_push_growth(
+        [
+            ("a", None, None, diff("r1", "r2", "r3")),
+            ("b", None, None, diff(*[f"p/q/{i}" for i in range(4)])),
+            ("c", None, None, diff(*[f"p/q/{i}" for i in range(3)])),
+            ("d", None, None, diff(*[f"p/q/{i}" for i in range(3)])),
+        ]
+    )
+    err = " ".join(capsys.readouterr().err.split())
+    assert "b:p/q (4 new files); a:. (3 new files); c:p/q (3 new files)" in err
+    assert "d:p/q" not in err
 
 
 def test_growth_warning_is_nonblocking_and_only_counts_new_files(capture61, monkeypatch):
@@ -10165,6 +10268,84 @@ def test_growth_warning_is_nonblocking_and_only_counts_new_files(capture61, monk
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "large sync growth" not in result.stderr
+
+
+def _two_macs(tmp_path, monkeypatch):
+    helpers = TestPushPullRoundTrip()
+    storage = tmp_path / "storage"
+    claude_a = tmp_path / "machine_a" / ".claude"
+    claude_b = tmp_path / "machine_b" / ".claude"
+    helpers._populate_claude(claude_a)
+    claude_b.mkdir(parents=True)
+    backend = helpers._bootstrap(storage)
+    register_device(backend, "dev-a", "A")
+    register_device(backend, "dev-b", "B")
+    configs = {
+        "a": helpers._make_config(tmp_path, storage, claude_a, "dev-a", "A"),
+        "b": helpers._make_config(tmp_path, storage, claude_b, "dev-b", "B"),
+    }
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+    def run(mac, *argv):
+        helpers._activate(monkeypatch, configs[mac])
+        result = runner.invoke(app, list(argv))
+        assert result.exit_code == 0, result.output
+        return result
+
+    memory = Path("projects") / "-Users-kb-myapp" / "memory"
+    return run, claude_a / memory, claude_b / memory
+
+
+def test_deleting_formerly_published_checkout_does_not_resurrect_from_peers(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture = memory_a / "fixture"
+    fixture.mkdir()
+    (fixture / "README.md").write_text("scratch")
+    run("a", "push")
+    run("b", "pull")
+    run("b", "push")
+    assert (memory_b / "fixture" / "README.md").read_text() == "scratch"
+    (fixture / ".git").mkdir()
+    run("a", "push")
+    shutil.rmtree(fixture)
+    run("a", "push")
+    run("b", "pull")
+    run("b", "push")
+    run("a", "pull")
+    assert not fixture.exists()
+
+
+def test_pull_never_writes_or_deletes_inside_a_local_checkout(tmp_path, monkeypatch):
+    run, memory_a, memory_b = _two_macs(tmp_path, monkeypatch)
+    fixture = memory_a / "fixture"
+    fixture.mkdir()
+    (fixture / "tracked.md").write_text("published")
+    run("a", "push")
+    run("b", "pull")
+    (memory_b / "fixture" / "new.md").write_text("peer addition")
+    (memory_b / "fixture" / "tracked.md").unlink()
+    run("b", "push")
+    (fixture / ".git").mkdir()
+    (fixture / "tracked.md").write_text("uncommitted local work")
+    run("a", "pull")
+    assert (fixture / "tracked.md").read_text() == "uncommitted local work"
+    assert not (fixture / "new.md").exists()
+    logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
+    records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
+    root = "projects/-Users-kb-myapp/memory/fixture"
+    # One aggregated record per root and advertising manifest, never one per file.
+    assert sorted((r["device"], r["source"], r["rel_path"]) for r in records) == [
+        ("dev-a", "claude", root),
+        ("dev-b", "claude", root),
+    ]
+
+
+def test_growth_warning_skips_a_macs_first_push_of_fleet_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_module, "_PUSH_GROWTH_WARNING_FILES", 1)
+    run, _memory_a, _memory_b = _two_macs(tmp_path, monkeypatch)
+    run("a", "push")
+    run("b", "pull")
+    assert "large sync growth" not in run("b", "push").stderr
 
 
 def test_interrupt_after_acceptance_before_verdict_records_unverified(capture61, monkeypatch):

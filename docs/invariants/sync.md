@@ -13,8 +13,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
-- `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes`
-- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth`
+- `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
+- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_incoming_nested_roots` / `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
@@ -224,7 +224,7 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
 
-## Nested git checkouts are selection exclusions
+## Nested git checkouts are frozen, never published
 
 Every source walker prunes a directory with a regular `.git` file or `.git`
 directory strictly below its source root, before enumerating or hashing checkout
@@ -233,23 +233,48 @@ includes so a direct include inside a checkout cannot bypass the rule. Descendan
 symlinks retain their existing omission policy. Strict publishing refuses an
 unreadable checkout-marker probe; diagnostic scans remain permissive.
 
-`nested_repo_root` shares this classification with `_prove_omitted_paths_absent`.
-`nested_repo_skip_prefixes` supplies literal prefixes to `_build_exclude_map`,
-alongside generated-file markers. Push filters recovered prior entries and
-tombstones through these prefixes before deletion proof/generation; pull and
-diff use the same consumer filter. Adding `.git` over previously advertised files
-must not refuse or mint tombstones. Keep `_fetch_remote_manifest` and GC raw.
+**One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
+roots its own walk skipped. Push, status and diff never re-walk for them, and
+`_build_exclude_map` takes roots only from its caller. Pull (and `mm diff`'s
+remote filter) uses `_incoming_nested_roots` / `nested_repo_roots_for_paths`:
+it lstats only the local ancestors of incoming peer files and tombstones, once
+per directory, stopping at missing, non-directory or symlinked components. Never
+reintroduce a local tree walk into pull/autopull. diag's
+`nested_repo_skip_prefixes` is the only inventory walk: write-free, best-effort,
+not persisted sync state.
 
-Build callbacks qualify each root as `source:rel`, and push deduplicates reports
-across all scans/rescans. Each is an always-visible `mm: notice: skipped: nested
-git repository ...` line, including quiet autopush and preview. Status reports
-walker skips; diag's `sync_scope.skipped_nested_repositories` is a write-free,
-best-effort directory inventory, not persisted sync state. Only sanitized display
-copies reach terminals; exclusion keys keep their original bytes.
+**Freeze, do not exclude, on push.** `_freeze_nested_checkout_entries` copies this
+Mac's accepted remote entries under each walker-reported root into the local
+manifest unchanged, and the push prior filter leaves those roots' tombstones in
+place. Adding `.git` over published files therefore uploads nothing, mints no
+tombstones and keeps peer copies; deleting the checkout later tombstones them
+like any deletion. Filtering the prior instead (exclusion) made deletion stop
+converging: peers kept republishing their plain copies and the next pull
+resurrected them. Freeze only from `fetch.is_ok`: upload re-reads every entry it
+treats as new, and a recovered prior was never accepted. Recovery falls back to
+exclusion through the nested prefixes. Status freezes the same way so frozen
+entries never show as pending deletions.
+
+`_prove_omitted_paths_absent` has no checkout exemption. Frozen entries are
+present in the local manifest; anything else still on disk but omitted (for
+example an include deselected while its folder became a checkout) refuses as it
+always did. An exemption there minted tombstones for files still on disk.
+
+Attended push and preview print one `mm: notice: skipped: nested git repository
+source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
+is not a data-at-risk warning), and status/diag list roots. Pull logs one
+`excluded` record per root and device manifest, not per file. Only sanitized
+display copies reach terminals; exclusion keys keep their original bytes.
+
+`.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`
+drops any peer path or tombstone with a `.git` segment, so a peer cannot plant one
+to switch off sync of a subtree. Honest writers never publish one (EXCLUDED
+matches every path part).
 
 `_warn_push_growth` uses already-materialized new-file diffs, counts groups by
 source and first two directory components, and names up to three groups exceeding
-1,000 new files. Its warning never refuses a push and includes no modified files.
+1,000 new files. Its warning never refuses a push, includes no modified files and
+is skipped without an accepted manifest of this Mac's own (`fetch.is_ok` false).
 
 ## Generated files are not sync data (load-bearing, v0.12.51)
 
@@ -351,7 +376,7 @@ the same key-presence test. A new `sync.sources` consumer should use it too.
 ## `walk_generic_source` filesystem-identity dedup (load-bearing, v0.10.1)
 Mirror of `_find_conflict_files`'s dedup at the manifest-walk layer. When `include_files` overlaps `include_dirs`, the same on-disk file lands in `collected_paths` twice. Pre-v0.10.1, the second pass got hashed and overwrote the first manifest entry — wasted CPU on identical bytes. On case-insensitive volumes (APFS default) with case-mismatched config, two distinct rel-keys could be created for one inode — a real correctness bug producing phantom add/delete fleet churn.
 
-Dedup uses `set[tuple[int, int]]` keyed on `(st_dev, st_ino)`. Sort `collected_paths` by relative-to-base path BEFORE the dedup pass so the rel-key kept on hardlink/symlink overlap is deterministic across runs and across machines (rglob iteration order is FS-dependent on macOS APFS). Without the sort, two peers walking the same tree could pick different rel keys for the same inode and generate phantom add/delete churn in the manifest diff. Sites: `manifest.py:walk_generic_source` (the pre-hash loop). Stat failures silently skip (consistent with `_record_file`'s race tolerance).
+Dedup uses `set[tuple[int, int]]` keyed on `(st_dev, st_ino)`. Sort `collected_paths` by relative-to-base path BEFORE the dedup pass so the rel-key kept on hardlink/symlink overlap is deterministic across runs and across machines (include_files entries follow include_dirs results in config order, and enumeration order varies across machines). Without the sort, two peers walking the same tree could pick different rel keys for the same inode and generate phantom add/delete churn in the manifest diff. Sites: `manifest.py:walk_generic_source` (the pre-hash loop). Stat failures silently skip (consistent with `_record_file`'s race tolerance).
 
 ## Pull-time case-collision detection (load-bearing, v0.10.1)
 A Linux peer can legitimately have BOTH `Projects/x.md` AND `projects/x.md` (case-sensitive ext4). A macOS APFS puller can only represent one — the second WRITE would silently alias / overwrite the first via inode collision. Pre-v0.10.1, this was a silent data-loss hazard.

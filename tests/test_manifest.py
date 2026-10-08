@@ -28,6 +28,7 @@ from mind_meld.manifest import (
     is_v1_conflict_filename,
     load_manifest,
     marker_skip_globs,
+    nested_repo_roots_for_paths,
     nested_repo_skip_prefixes,
     normalize_manifest,
     parse_conflict_created_at,
@@ -562,6 +563,78 @@ class TestNestedRepositories:
         assert files == {}
         assert skipped == [("projects/app", "nested git repository")]
         assert nested_repo_skip_prefixes(cfg, strict=strict) == ["projects/app"]
+
+    @pytest.mark.parametrize("kind", ["file", "symlink"])
+    def test_inventory_agrees_with_walker_for_non_directory_projects(self, tmp_path, kind):
+        base = tmp_path / "claude"
+        base.mkdir()
+        if kind == "file":
+            (base / "projects").write_text("not a dir")
+        else:
+            (tmp_path / "elsewhere" / "app" / ".git").mkdir(parents=True)
+            (base / "projects").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+        cfg = {"name": "claude", "type": "claude", "path": str(base)}
+        assert walk_source(cfg, strict=True)[1] == {}
+        assert nested_repo_skip_prefixes(cfg, strict=True) == []
+
+    def test_inventory_reports_checkout_above_absent_include(self, tmp_path):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        cfg = {
+            "name": "g",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["repo/notes"],
+        }
+        assert nested_repo_skip_prefixes(cfg, strict=True) == ["repo"]
+
+    @pytest.mark.parametrize("strict", [False, True])
+    def test_claude_walker_omits_leaf_and_project_symlinks_in_both_modes(self, tmp_path, strict):
+        base = tmp_path / "claude"
+        memory = base / "projects" / "p" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "real.md").write_text("r")
+        (tmp_path / "t.md").write_text("t")
+        (memory / "leaf.md").symlink_to(tmp_path / "t.md")
+        (tmp_path / "ext" / "memory").mkdir(parents=True)
+        (tmp_path / "ext" / "memory" / "x.md").write_text("x")
+        (base / "projects" / "linked").symlink_to(tmp_path / "ext", target_is_directory=True)
+        cfg = {"name": "claude", "type": "claude", "path": str(base)}
+        assert sorted(walk_source(cfg, strict=strict)[1]) == ["projects/p/memory/real.md"]
+
+    def test_incoming_path_probe_finds_checkouts_once_without_listing(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as manifest_module
+
+        (tmp_path / "a" / "repo" / ".git").mkdir(parents=True)
+        (tmp_path / "a" / "plain").mkdir()
+        (tmp_path / "linked" / ".git").mkdir(parents=True)
+        (tmp_path / "a" / "via").symlink_to(tmp_path / "linked", target_is_directory=True)
+        (tmp_path / "gitlink").mkdir()
+        (tmp_path / "gitlink" / ".git").write_text("gitdir: elsewhere")
+        probes: list[Path] = []
+        original = manifest_module._directory_is_git_repo
+
+        def counted(directory, *args, **kwargs):
+            probes.append(directory)
+            return original(directory, *args, **kwargs)
+
+        monkeypatch.setattr(manifest_module, "_directory_is_git_repo", counted)
+        monkeypatch.setattr(
+            os, "scandir", lambda *a: pytest.fail("the probe must not list directories")
+        )
+        cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
+        paths = [
+            "a/repo/x.md",
+            "a/repo/deep/y.md",
+            "a/plain/z.md",
+            "a/plain/new/w.md",
+            "a/via/inside.md",
+            "gitlink/f.md",
+            "missing/dir/f.md",
+            "top.md",
+            "../escape/f.md",
+        ]
+        assert nested_repo_roots_for_paths(cfg, paths) == ["a/repo", "gitlink"]
+        assert len(probes) == len(set(probes))
 
 
 class TestWalkGenericSource:

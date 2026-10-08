@@ -1441,6 +1441,9 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
     assert "host read sweep estimate: unknown (config unavailable)" in plain
     assert "codex last complete read: unknown" in plain
     assert "grok last complete read: unknown" in plain
+    assert "nested repository skips: unknown (config unavailable)" in plain
+    result = runner.invoke(app, ["diag", "--json"])
+    assert json.loads(result.stdout)["sync_scope"] == {"skipped_nested_repositories": None}
 
 
 @pytest.mark.parametrize("reader", ["codex", "grok"])

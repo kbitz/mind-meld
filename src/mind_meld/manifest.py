@@ -349,10 +349,11 @@ def nested_repo_root(
 def nested_repo_skip_prefixes(
     source_config: dict[str, Any], *, strict: bool = False, skip_prefixes: list[str] | None = None
 ) -> list[str]:
-    """Inspect selected directories only; prune checkouts without reading their files.
+    """Inventory selected directories for diag; prune checkouts without reading their files.
 
-    These are literal path prefixes for the consumer exclusion filter and
-    status/diag, never fnmatch patterns or persisted manifest metadata.
+    Returns literal relative roots, never fnmatch patterns or persisted
+    manifest metadata. Push, status and diff take roots from their own walk;
+    pull probes incoming paths with ``nested_repo_roots_for_paths``.
     """
     source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()
@@ -367,6 +368,12 @@ def nested_repo_skip_prefixes(
             return []
         if root := nested_repo_root(projects, base, strict=strict, source_name=source_name):
             return [root]
+        projects_st = _lstat_or_none(
+            projects, strict=strict, source_name=source_name, rel_path="projects"
+        )
+        # Mirror walk_claude_source: a missing or non-directory projects is empty.
+        if projects_st is None or not stat.S_ISDIR(projects_st.st_mode):
+            return []
         try:
             with os.scandir(projects) as entries:
                 for entry in entries:
@@ -408,6 +415,12 @@ def nested_repo_skip_prefixes(
             if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
                 roots.add(root)
     for directory in scan_dirs:
+        if path_has_descendant_symlink(directory, base, strict=strict, source_name=source_name):
+            continue
+        # An absent include inside a checkout still excludes that checkout on pull.
+        if root := nested_repo_root(directory, base, strict=strict, source_name=source_name):
+            roots.add(root)
+            continue
         st = _lstat_or_none(
             directory,
             strict=strict,
@@ -425,6 +438,53 @@ def nested_repo_skip_prefixes(
             nested_repos=roots,
             collect_files=False,
         )
+    return sorted(roots)
+
+
+def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -> list[str]:
+    """Find local checkout roots above incoming peer paths without walking local trees.
+
+    Probes each local ancestor directory at most once. A missing, non-directory
+    or symlinked component ends that path's probe: pull never writes through
+    it, and descendant symlinks keep their own policy. Best-effort, like any
+    permissive inspection; an unreadable probe is not a checkout.
+    """
+    source_name = source_config.get("name")
+    try:
+        base = Path(source_config["path"]).expanduser().resolve()
+    except (KeyError, TypeError, OSError):
+        return []
+    roots: set[str] = set()
+    probed: dict[str, str] = {}
+    for rel_path in rel_paths:
+        if not isinstance(rel_path, str):
+            continue
+        current = ""
+        for part in rel_path.split("/")[:-1]:
+            if part in ("", ".", ".."):
+                break
+            current = f"{current}/{part}" if current else part
+            state = probed.get(current)
+            if state is None:
+                directory = base / current
+                try:
+                    st = directory.lstat()
+                except OSError:
+                    state = "stop"
+                else:
+                    if not stat.S_ISDIR(st.st_mode):
+                        state = "stop"
+                    elif _directory_is_git_repo(
+                        directory, base, strict=False, source_name=source_name
+                    ):
+                        state = "checkout"
+                    else:
+                        state = "dir"
+                probed[current] = state
+            if state == "checkout":
+                roots.add(current)
+            if state != "dir":
+                break
     return sorted(roots)
 
 
@@ -1062,7 +1122,13 @@ def _collect_regular_files_scandir(
     nested_repos: set[str] | None = None,
     collect_files: bool = True,
 ) -> list[Path]:
-    """Explicit ``os.scandir`` walk that never follows descendant symlinks."""
+    """Explicit ``os.scandir`` walk that never follows descendant symlinks.
+
+    Prunes nested checkouts (a ``start`` inside one, or any directory below
+    it with ``.git``) before listing their contents, reporting each root to
+    ``on_skip`` with NESTED_REPO_SKIP_REASON and to ``nested_repos``.
+    ``collect_files=False`` runs that inventory without collecting files.
+    """
     collected: list[Path] = []
 
     def skip_repo(root: str) -> None:
@@ -1072,6 +1138,8 @@ def _collect_regular_files_scandir(
             on_skip(root, NESTED_REPO_SKIP_REASON)
 
     if path_has_descendant_symlink(start, base, strict=strict, source_name=source_name):
+        if on_skip and collect_files:
+            on_skip(str(start), "symlink")
         return collected
     if root := nested_repo_root(start, base, strict=strict, source_name=source_name):
         skip_repo(root)
@@ -1295,7 +1363,9 @@ def walk_claude_source(
     Args:
         base_dir: Root directory to walk (e.g., ~/.claude)
         max_file_size: Skip files larger than this (bytes). Default 50MB.
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root once with
+            NESTED_REPO_SKIP_REASON.
         exclude_patterns: Optional per-source fnmatch globs that extend the
             hardcoded EXCLUDED list. Matched against the relative path.
         strict: Publishing scans refuse incomplete observations.
@@ -1563,7 +1633,9 @@ def walk_generic_source(
                 `marker_skip_globs`); that skip is a path-prefix match so
                 it does not generate deletion tombstones.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root once with
+            NESTED_REPO_SKIP_REASON.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
@@ -1656,7 +1728,8 @@ def walk_generic_source(
     #
     # Sort by relative-to-base path before dedup so the rel-key kept on
     # hardlink/symlink overlap is deterministic across runs and across
-    # machines (rglob iteration order is FS-dependent on macOS APFS).
+    # machines (include_files entries follow include_dirs results in config
+    # order, and filesystem enumeration order varies across machines).
     # Without this sort, two peers walking the same tree could pick
     # different rel keys for the same inode, generating phantom
     # add/delete churn in the manifest diff.
@@ -1729,7 +1802,9 @@ def walk_source(
             type="grok" -> walk_grok_source
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root once with
+            NESTED_REPO_SKIP_REASON.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
@@ -1774,6 +1849,7 @@ def build_manifest_v2(
     *,
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
+    nested_roots: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -1783,10 +1859,14 @@ def build_manifest_v2(
         sources_configs: List of source config dicts, each with at least
             "name", "type", and "path" keys.
         max_file_size: Skip files larger than this (bytes).
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. For
+            NESTED_REPO_SKIP_REASON the path is a checkout directory root
+            qualified as ``source:rel``, reported once per source.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
+        nested_roots: Optional out-parameter receiving each source's
+            skipped checkout roots (bare relative paths) from this same walk.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -1798,14 +1878,15 @@ def build_manifest_v2(
         reported_repos: set[str] = set()
 
         def source_skip(path: str, reason: str) -> None:
-            if on_skip is None:
-                return
             if reason == NESTED_REPO_SKIP_REASON:
                 if path in reported_repos:
                     return
                 reported_repos.add(path)
+                if nested_roots is not None:
+                    nested_roots.setdefault(name, set()).add(path)
                 path = f"{name}:{path}"
-            on_skip(path, reason)
+            if on_skip is not None:
+                on_skip(path, reason)
 
         base_path, files = walk_source(
             src_cfg,

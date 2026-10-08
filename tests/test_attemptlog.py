@@ -187,19 +187,60 @@ def test_errno_rejects_numbers_messages_and_unknown_names(number):
     assert attemptlog.read() == (None, "corrupt")
 
 
-def test_errno_only_belongs_to_storage_failure():
-    save(record(errno="ENOSPC"))
+@pytest.mark.parametrize(
+    "kind,cause",
+    [
+        ("published", None),
+        ("push-failed", None),
+        ("push-failed", "interrupted"),
+        ("push-failed", "snapshot-refused"),
+        ("push-failed", "error"),
+    ],
+)
+def test_errno_only_belongs_to_storage_failure(kind, cause):
+    save(record(**{"class": kind, "cause": cause, "errno": "ENOSPC"}))
     assert attemptlog.read() == (None, "corrupt")
 
 
-def test_legacy_reader_rejects_new_causes_without_crashing(monkeypatch):
-    save(record(**{"class": "push-failed", "cause": "storage-error", "errno": "ENOSPC"}))
-    # The old validator uses the same closed-cause gate and ignores new fields.
-    monkeypatch.setitem(attemptlog.CAUSES, "push-failed", {None})
-    state = attemptlog.project([], None)
-    assert state["latest_attempt"] == "unknown"
-    assert state["latest_attempt_reason"] == "corrupt"
-    assert "record corrupt" in attemptlog.render(state, age="unknown", path="local")[0]
+def _released_1_5_valid(record: object) -> bool:
+    """attemptlog._valid frozen as released in 1.5.2, when push-failed took only None."""
+    causes = {**attemptlog.CAUSES, "push-failed": {None}}
+    if not isinstance(record, dict):
+        return False
+    kind, readers = record.get("class"), record.get("readers")
+    if "cause" not in record or not isinstance(kind, str) or kind not in causes:
+        return False
+    cause = record["cause"]
+    if cause is not None and not isinstance(cause, str):
+        return False
+    if cause not in causes[kind] or attemptlog._timestamp(record.get("attempted_at")) is None:
+        return False
+    if record.get("row_ts") is not None and attemptlog._timestamp(record["row_ts"]) is None:
+        return False
+    return isinstance(readers, dict) and all(
+        isinstance(outcome, str) and outcome in attemptlog.READER_OUTCOMES
+        for outcome in readers.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,cause,accepted",
+    [
+        ("published", None, True),
+        ("push-failed", None, True),
+        ("push-failed", "interrupted", False),
+        ("push-failed", "storage-error", False),
+        ("push-failed", "snapshot-refused", False),
+        ("push-failed", "error", False),
+    ],
+)
+def test_released_reader_tolerates_new_records_without_crashing(kind, cause, accepted):
+    outcome = attemptlog.CaptureOutcome(attempted_at=NOW.isoformat())
+    number = "ENOSPC" if cause == "storage-error" else None
+    attemptlog.write(outcome.finish(kind, cause, errno_name=number))
+    written = json.loads(attemptlog.record_path().read_text())
+    # 1.5.2 ignores the added errno key and reports a new cause as corrupt.
+    assert _released_1_5_valid(written) is accepted
 
 
 def test_storage_errno_uses_explicit_os_cause_without_persisting_messages():
