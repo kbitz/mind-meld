@@ -69,6 +69,7 @@ CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGIT
 # gstack-extend drops this file in every directory it renders. The walker
 # skips the containing directory; see marker_skip_globs.
 MARKER_SKIP_NAME = ".extend-root"
+NESTED_REPO_SKIP_REASON = "nested git repository"
 
 
 def is_conflict_filename(name: str) -> bool:
@@ -302,6 +303,131 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
     return False
 
 
+def _directory_is_git_repo(
+    directory: Path, base: Path, *, strict: bool, source_name: str | None
+) -> bool:
+    try:
+        marker = (directory / ".git").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(directory, base),
+                    problem="could not check for a nested git repository",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return False
+    return stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+
+
+def nested_repo_root(
+    directory: Path, base: Path, *, strict: bool = False, source_name: str | None = None
+) -> str | None:
+    """Find the outermost checkout ancestor strictly below the source root.
+
+    Check ancestors too: an include_dir or include_file can point directly
+    into a checkout. The source root's own .git never changes its selection.
+    Callers guard descendant symlinks before probing local paths.
+    """
+    try:
+        parts = directory.relative_to(base).parts
+    except ValueError:
+        return None
+    current = base
+    for part in parts:
+        current /= part
+        if _directory_is_git_repo(current, base, strict=strict, source_name=source_name):
+            return current.relative_to(base).as_posix()
+    return None
+
+
+def nested_repo_skip_prefixes(
+    source_config: dict[str, Any], *, strict: bool = False, skip_prefixes: list[str] | None = None
+) -> list[str]:
+    """Inspect selected directories only; prune checkouts without reading their files.
+
+    These are literal path prefixes for the consumer exclusion filter and
+    status/diag, never fnmatch patterns or persisted manifest metadata.
+    """
+    source_name = source_config.get("name")
+    base = Path(source_config["path"]).expanduser().resolve()
+    source_type = source_config.get("type", "claude")
+    roots: set[str] = set()
+    scan_dirs: list[Path] = []
+    if source_type == "generic" and skip_prefixes is None:
+        skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if source_type == "claude":
+        projects = base / "projects"
+        if path_has_descendant_symlink(projects, base, strict=strict, source_name=source_name):
+            return []
+        if root := nested_repo_root(projects, base, strict=strict, source_name=source_name):
+            return [root]
+        try:
+            with os.scandir(projects) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        project = Path(entry.path)
+                        if _directory_is_git_repo(
+                            project, base, strict=strict, source_name=source_name
+                        ):
+                            roots.add(project.relative_to(base).as_posix())
+                        else:
+                            scan_dirs.extend(project / subdir for subdir in SYNCED_SUBDIRS)
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path="projects",
+                        problem="could not be enumerated",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+    else:
+        dirs = (
+            GROK_SYNCED_SUBDIRS
+            if source_type == "grok"
+            else source_config.get("include_dirs") or []
+        )
+        scan_dirs = [base / name for name in dirs]
+        include_files = source_config.get("include_files") or [] if source_type == "generic" else []
+        for name in include_files:
+            path = base / name
+            if _under_skip_prefix(name, skip_prefixes):
+                continue
+            if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
+                continue
+            if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
+                roots.add(root)
+    for directory in scan_dirs:
+        st = _lstat_or_none(
+            directory,
+            strict=strict,
+            source_name=source_name,
+            rel_path=_rel_or_name(directory, base),
+        )
+        if st is None or not stat.S_ISDIR(st.st_mode):
+            continue
+        _collect_regular_files_scandir(
+            directory,
+            base,
+            strict=strict,
+            source_name=source_name,
+            skip_prefixes=skip_prefixes,
+            nested_repos=roots,
+            collect_files=False,
+        )
+    return sorted(roots)
+
+
 def marker_skip_globs(
     source_config: dict[str, Any],
     *,
@@ -449,6 +575,10 @@ def _collect_marker_files(
 ) -> list[Path]:
     """Find ``.extend-root`` markers under ``scan_dir`` without following links."""
     found: list[Path] = []
+    if path_has_descendant_symlink(
+        scan_dir, base, strict=strict, source_name=source_name
+    ) or nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+        return found
 
     def walk(directory: Path, *, discovered: bool) -> None:
         try:
@@ -456,6 +586,10 @@ def _collect_marker_files(
         except ValueError:
             rel_dir = directory.name
         if rel_dir and _dir_is_policy_skipped(rel_dir, None):
+            return
+        if directory != base and _directory_is_git_repo(
+            directory, base, strict=strict, source_name=source_name
+        ):
             return
         try:
             with os.scandir(directory) as iterator:
@@ -924,9 +1058,24 @@ def _collect_regular_files_scandir(
     strict: bool,
     source_name: str | None,
     skip_prefixes: list[str] | None = None,
+    on_skip: Any = None,
+    nested_repos: set[str] | None = None,
+    collect_files: bool = True,
 ) -> list[Path]:
     """Explicit ``os.scandir`` walk that never follows descendant symlinks."""
     collected: list[Path] = []
+
+    def skip_repo(root: str) -> None:
+        if nested_repos is not None:
+            nested_repos.add(root)
+        if on_skip:
+            on_skip(root, NESTED_REPO_SKIP_REASON)
+
+    if path_has_descendant_symlink(start, base, strict=strict, source_name=source_name):
+        return collected
+    if root := nested_repo_root(start, base, strict=strict, source_name=source_name):
+        skip_repo(root)
+        return collected
 
     def walk(directory: Path, *, discovered: bool) -> None:
         try:
@@ -934,6 +1083,11 @@ def _collect_regular_files_scandir(
         except ValueError:
             rel_dir = directory.name
         if rel_dir and _dir_is_policy_skipped(rel_dir, skip_prefixes):
+            return
+        if directory != base and _directory_is_git_repo(
+            directory, base, strict=strict, source_name=source_name
+        ):
+            skip_repo(rel_dir)
             return
         try:
             with os.scandir(directory) as iterator:
@@ -993,7 +1147,7 @@ def _collect_regular_files_scandir(
                 continue
             if stat.S_ISDIR(st.st_mode):
                 walk(child, discovered=True)
-            elif stat.S_ISREG(st.st_mode):
+            elif collect_files and stat.S_ISREG(st.st_mode):
                 collected.append(child)
 
     walk(start, discovered=False)
@@ -1172,6 +1326,10 @@ def walk_claude_source(
         return {}
     if not stat.S_ISDIR(projects_st.st_mode):
         return {}
+    if root := nested_repo_root(projects_dir, base, strict=strict, source_name=source_name):
+        if on_skip:
+            on_skip(root, NESTED_REPO_SKIP_REASON)
+        return {}
 
     files: dict[str, dict[str, Any]] = {}
     scan_dirs: list[Path] = []
@@ -1215,6 +1373,10 @@ def walk_claude_source(
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                 continue
             project_dir = Path(entry.path)
+            if _directory_is_git_repo(project_dir, base, strict=True, source_name=source_name):
+                if on_skip:
+                    on_skip(project_dir.relative_to(base).as_posix(), NESTED_REPO_SKIP_REASON)
+                continue
             for subdir_name in SYNCED_SUBDIRS:
                 subdir = project_dir / subdir_name
                 sub_st = _lstat_or_none(
@@ -1232,7 +1394,7 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
         for scan_dir in scan_dirs:
             for path in _collect_regular_files_scandir(
-                scan_dir, base, strict=True, source_name=source_name
+                scan_dir, base, strict=True, source_name=source_name, on_skip=on_skip
             ):
                 if result := _record_file(
                     path,
@@ -1249,7 +1411,11 @@ def walk_claude_source(
         return files
 
     for project_dir in projects_dir.iterdir():
-        if not project_dir.is_dir():
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            continue
+        if _directory_is_git_repo(project_dir, base, strict=False, source_name=source_name):
+            if on_skip:
+                on_skip(project_dir.relative_to(base).as_posix(), NESTED_REPO_SKIP_REASON)
             continue
         for subdir_name in SYNCED_SUBDIRS:
             subdir = project_dir / subdir_name
@@ -1257,9 +1423,9 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
 
     for scan_dir in scan_dirs:
-        for path in scan_dir.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in _collect_regular_files_scandir(
+            scan_dir, base, strict=False, source_name=source_name, on_skip=on_skip
+        ):
             if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
                 rel, info = result
                 files[rel] = info
@@ -1315,14 +1481,11 @@ def walk_grok_source(
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
-        if strict:
-            collected_paths.extend(
-                _collect_regular_files_scandir(scan_dir, base, strict=True, source_name=source_name)
+        collected_paths.extend(
+            _collect_regular_files_scandir(
+                scan_dir, base, strict=strict, source_name=source_name, on_skip=on_skip
             )
-        else:
-            for path in scan_dir.rglob("*"):
-                if path.is_file():
-                    collected_paths.append(path)
+        )
 
     collected_paths.sort(
         key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
@@ -1450,23 +1613,25 @@ def walk_generic_source(
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
-        if strict:
-            collected_paths.extend(
-                _collect_regular_files_scandir(
-                    scan_dir,
-                    base,
-                    strict=True,
-                    source_name=source_name,
-                    skip_prefixes=skip_prefixes,
-                )
+        collected_paths.extend(
+            _collect_regular_files_scandir(
+                scan_dir,
+                base,
+                strict=strict,
+                source_name=source_name,
+                skip_prefixes=skip_prefixes,
+                on_skip=on_skip,
             )
-        else:
-            for path in scan_dir.rglob("*"):
-                if path.is_file():
-                    collected_paths.append(path)
+        )
 
     for filename in include_files:
         path = base / filename
+        if not path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
+            root = nested_repo_root(path.parent, base, strict=strict, source_name=source_name)
+            if root:
+                if on_skip:
+                    on_skip(root, NESTED_REPO_SKIP_REASON)
+                continue
         st = _lstat_or_none(path, strict=strict, source_name=source_name, rel_path=filename)
         if st is None:
             continue
@@ -1630,10 +1795,22 @@ def build_manifest_v2(
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
+        reported_repos: set[str] = set()
+
+        def source_skip(path: str, reason: str) -> None:
+            if on_skip is None:
+                return
+            if reason == NESTED_REPO_SKIP_REASON:
+                if path in reported_repos:
+                    return
+                reported_repos.add(path)
+                path = f"{name}:{path}"
+            on_skip(path, reason)
+
         base_path, files = walk_source(
             src_cfg,
             max_file_size,
-            on_skip,
+            source_skip,
             strict=strict,
             diagnostic_hash=diagnostic_hash,
         )

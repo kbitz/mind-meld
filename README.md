@@ -306,6 +306,30 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. |
 | `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
 
+### Nested git repositories
+
+Sync walkers skip nested directories containing a `.git` directory or gitlink
+file by default. This applies to every source type, including explicit includes
+that point inside a checkout. The source root's own `.git` keeps its existing
+behavior. Ordinary directories still sync; there is no opt-out setting.
+
+Each skipped root is reported once per push, including previews and autopush:
+`skipped: nested git repository <source>:<relative-root>`. Status and diag report
+the current skips too. `mm diag --json` adds `sync_scope`, whose
+`skipped_nested_repositories` maps source names to relative roots (empty lists
+mean none found; null means config unavailable). Inspection is best-effort and
+never reads checkout contents to discover these roots.
+
+Adding `.git` to a previously synced directory acts like an exclusion: its paths
+drop out of the published snapshot without deletion tombstones or an omitted-path
+refusal. Existing local and peer files stay in place. Pull also excludes paths
+under checkouts already present on this Mac. Older writers may still publish
+checkout files; upgrade those Macs to apply the same default.
+
+A push adding more than 1,000 new files in a subtree prints a nonblocking growth
+warning naming up to three subtrees and their observed counts. Groups use the
+first two directory components under each source; modified files do not count.
+
 ### Syncing gstack
 
 If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack uses a **whitelist walker** — unlike the Claude source (which has hardcoded subdirs), the gstack source only syncs the directories and files you explicitly list.
@@ -949,6 +973,12 @@ a failed attempt may write no row. The local attempt record is
 `~/.config/mind-meld/last-attended-capture.json` (mode 0600, never synced).
 It records the capture start, appended row timestamp when present, class/cause
 and reader outcomes, including a push failure before manifest acceptance.
+`push-failed` causes are `interrupted` (Ctrl-C or abort), `storage-error`,
+`snapshot-refused`, and `error`. Storage failures also record `errno` as an OS
+name such as `ENOSPC`, when available, including through backend wrappers.
+No exception message or path is stored. Legacy failures with a null cause remain
+readable; older mm treats the new causes as an unknown/corrupt record without
+crashing, and its next attended push rewrites the local record.
 A later GC failure preserves a computed publication verdict. Dry-run and
 autopush leave the record alone. A failed durable record write prints a notice;
 status may show the previous or new record. A later capture is noted beside a
@@ -977,7 +1007,8 @@ refresh reminder in status.
 `empty` boolean (`hosts == {}`). Additive `empty_readers` is `null` when no
 per-reader claim is possible, otherwise a list (possibly `[]`). `publication`
 adds `unverified` and `publication_reason` names its cause. Attempt fields are
-`latest_attempt` (class or `unknown`), `latest_attempt_cause`, `latest_attempt_at`,
+`latest_attempt` (class or `unknown`), `latest_attempt_cause`, `latest_attempt_errno`
+(errno name or null), `latest_attempt_at`,
 `latest_attempt_readers`, `latest_attempt_reason` (`missing`, `unreadable`, or
 `corrupt` for an unknown record), and `latest_attempt_superseded`. Attempt reader
 values are `contributed`, `empty`, `partial`, `dropped:<reason>`, or `absent`.

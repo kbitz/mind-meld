@@ -1,5 +1,6 @@
 """Private attempt-record validation and write-free rendering states."""
 
+import errno
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from mind_meld import attemptlog, sidecar
+from mind_meld.errors import StorageError
 from tests.test_reader_publication import NOW
 
 
@@ -162,3 +164,50 @@ def test_healthy_attended_attempt_does_not_claim_superseded_by_autopush():
     assert attemptlog.render(state, age="1 d ago", path="local") == [
         f"Last recorded attended attempt: {NOW.isoformat()} (1 d ago) — published"
     ]
+
+
+@pytest.mark.parametrize(
+    "cause", [None, "interrupted", "storage-error", "snapshot-refused", "error"]
+)
+def test_push_failure_causes_and_errno_roundtrip(cause):
+    outcome = attemptlog.CaptureOutcome(attempted_at=NOW.isoformat())
+    number = "ENOSPC" if cause == "storage-error" else None
+    attemptlog.write(outcome.finish("push-failed", cause, errno_name=number))
+    state = attemptlog.project([], None)
+    assert state["latest_attempt"] == "push-failed"
+    assert state["latest_attempt_cause"] == cause
+    assert state["latest_attempt_errno"] == number
+    if number:
+        assert "(storage-error: ENOSPC)" in attemptlog.render(state, age="0 s ago", path="local")[0]
+
+
+@pytest.mark.parametrize("number", [28, [], "ENOSPC /private/sensitive", "EINVENTED"])
+def test_errno_rejects_numbers_messages_and_unknown_names(number):
+    save(record(**{"class": "push-failed", "cause": "storage-error", "errno": number}))
+    assert attemptlog.read() == (None, "corrupt")
+
+
+def test_errno_only_belongs_to_storage_failure():
+    save(record(errno="ENOSPC"))
+    assert attemptlog.read() == (None, "corrupt")
+
+
+def test_legacy_reader_rejects_new_causes_without_crashing(monkeypatch):
+    save(record(**{"class": "push-failed", "cause": "storage-error", "errno": "ENOSPC"}))
+    # The old validator uses the same closed-cause gate and ignores new fields.
+    monkeypatch.setitem(attemptlog.CAUSES, "push-failed", {None})
+    state = attemptlog.project([], None)
+    assert state["latest_attempt"] == "unknown"
+    assert state["latest_attempt_reason"] == "corrupt"
+    assert "record corrupt" in attemptlog.render(state, age="unknown", path="local")[0]
+
+
+def test_storage_errno_uses_explicit_os_cause_without_persisting_messages():
+    try:
+        try:
+            raise OSError(errno.ENOSPC, "sensitive message", "/private/sensitive")
+        except OSError as exc:
+            raise StorageError("backend wrapper") from exc
+    except StorageError as exc:
+        assert attemptlog.storage_errno(exc) == "ENOSPC"
+    assert attemptlog.storage_errno(OSError("ENOSPC is just message text")) is None

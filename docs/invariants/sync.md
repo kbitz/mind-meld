@@ -13,6 +13,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
+- `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes`
+- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
@@ -221,6 +223,33 @@ Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
+
+## Nested git checkouts are selection exclusions
+
+Every source walker prunes a directory with a regular `.git` file or `.git`
+directory strictly below its source root, before enumerating or hashing checkout
+contents. The source root itself remains exempt. Check ancestors of configured
+includes so a direct include inside a checkout cannot bypass the rule. Descendant
+symlinks retain their existing omission policy. Strict publishing refuses an
+unreadable checkout-marker probe; diagnostic scans remain permissive.
+
+`nested_repo_root` shares this classification with `_prove_omitted_paths_absent`.
+`nested_repo_skip_prefixes` supplies literal prefixes to `_build_exclude_map`,
+alongside generated-file markers. Push filters recovered prior entries and
+tombstones through these prefixes before deletion proof/generation; pull and
+diff use the same consumer filter. Adding `.git` over previously advertised files
+must not refuse or mint tombstones. Keep `_fetch_remote_manifest` and GC raw.
+
+Build callbacks qualify each root as `source:rel`, and push deduplicates reports
+across all scans/rescans. Each is an always-visible `mm: notice: skipped: nested
+git repository ...` line, including quiet autopush and preview. Status reports
+walker skips; diag's `sync_scope.skipped_nested_repositories` is a write-free,
+best-effort directory inventory, not persisted sync state. Only sanitized display
+copies reach terminals; exclusion keys keep their original bytes.
+
+`_warn_push_growth` uses already-materialized new-file diffs, counts groups by
+source and first two directory components, and names up to three groups exceeding
+1,000 new files. Its warning never refuses a push and includes no modified files.
 
 ## Generated files are not sync data (load-bearing, v0.12.51)
 

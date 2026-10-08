@@ -1,6 +1,7 @@
 """Integration tests for Mind Meld — full push/pull round-trips."""
 
 import ast
+import errno
 import hashlib
 import inspect
 import json
@@ -10019,6 +10020,7 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     assert aborted.exit_code != 0
     record, reason = cli_module.attemptlog.read()
     assert reason is None and record["class"] == "push-failed"
+    assert record["cause"] == "interrupted"
     assert record["row_ts"] is None
     assert env["dayfile"].read_bytes() == before
     rel = "projects/-Users-kb-myapp/memory/new.md"
@@ -10028,6 +10030,141 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     assert retry.exit_code == 0, retry.output
     assert "holds the lock" not in retry.output
     assert rel in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
+
+
+@pytest.mark.parametrize(
+    "failure,cause,number",
+    [
+        ("interrupt", "interrupted", None),
+        ("abort", "interrupted", None),
+        ("os", "storage-error", "ENOSPC"),
+        ("wrapped-os", "storage-error", "EIO"),
+        ("storage", "storage-error", None),
+        ("snapshot", "snapshot-refused", None),
+        ("mindmeld", "error", None),
+    ],
+)
+def test_upload_stop_cause_is_private_and_visible_in_status_diag(
+    capture61, monkeypatch, failure, cause, number
+):
+    from mind_meld.errors import MindMeldError, SnapshotError, StorageError
+
+    original = LocalBackend.put
+    marker = "/private/sensitive-source-path"
+    before = capture61["backend"].get(storage_keys.manifest_key("dev-a"))
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+
+    def stop(backend, key, data):
+        if key.startswith("data/"):
+            if failure == "interrupt":
+                raise KeyboardInterrupt()
+            if failure == "abort":
+                raise typer.Abort()
+            if failure == "os":
+                raise OSError(errno.ENOSPC, "sensitive storage message", marker)
+            if failure == "wrapped-os":
+                try:
+                    raise OSError(errno.EIO, "sensitive storage message", marker)
+                except OSError as exc:
+                    raise StorageError(marker) from exc
+            if failure == "storage":
+                raise StorageError(marker)
+            if failure == "snapshot":
+                raise SnapshotError(marker)
+            raise MindMeldError(marker)
+        return original(backend, key, data)
+
+    monkeypatch.setattr(LocalBackend, "put", stop)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == (130 if failure == "interrupt" else 1), result.output
+    record, reason = cli_module.attemptlog.read()
+    assert reason is None
+    assert (record["class"], record["cause"], record["errno"]) == ("push-failed", cause, number)
+    assert record["row_ts"] is not None
+    raw = cli_module.attemptlog.record_path().read_text()
+    assert marker not in raw and "sensitive storage message" not in raw
+    assert capture61["backend"].get(storage_keys.manifest_key("dev-a")) == before
+    cli_module.acquire_lock()
+    cli_module.release_lock()
+    for command in (["status"], ["diag"]):
+        shown = runner.invoke(app, command)
+        assert shown.exit_code == 0, shown.output
+        expected = f"push-failed ({cause}{': ' + number if number else ''})"
+        assert expected in " ".join(shown.stdout.split())
+    shown = runner.invoke(app, ["diag", "--json"])
+    assert shown.exit_code == 0, shown.output
+    publication = json.loads(shown.stdout)["host_publication"]
+    assert publication["latest_attempt_cause"] == cause
+    assert publication["latest_attempt_errno"] == number
+
+
+def test_nested_checkout_transition_is_visible_tombstone_safe_and_never_wedges_push(
+    capture61, monkeypatch
+):
+    root = capture61["path"].parent / "gstack"
+    checkout = root / "projects" / "literal*" / "checkout"
+    checkout.mkdir(parents=True)
+    published_file = checkout / "note.md"
+    published_file.write_text("published before this folder became a checkout")
+    sibling = root / "projects" / "other" / "note.md"
+    sibling.parent.mkdir()
+    sibling.write_text("ordinary content")
+    src = {
+        "name": "gstack",
+        "type": "generic",
+        "path": str(root),
+        "include_dirs": ["projects", "projects/literal*/checkout"],
+        "include_files": ["projects/literal*/checkout/note.md"],
+    }
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    first = runner.invoke(app, ["push"])
+    assert first.exit_code == 0, first.output
+    prior = cli_module.sidecar.read("dev-a")
+    rel = "projects/literal*/checkout/note.md"
+    assert rel in prior["sources"]["gstack"]["files"]
+    (checkout / ".git").write_text("gitdir: elsewhere")
+    local = cli_module.build_manifest_v2("dev-a", "A", [src], strict=True)
+    # Exercise the guard directly too, with unfiltered previously-published input.
+    cli_module._prove_omitted_paths_absent(local, prior, [src], max_file_size=52_428_800)
+    expected = "skipped: nested git repository gstack:projects/literal*/checkout"
+    for command in (["push", "--dry-run"], ["push", "-v"], ["autopush"]):
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+        assert " ".join(result.stderr.split()).count(expected) == 1
+        assert "still present but was omitted" not in result.output
+    accepted = load_manifest(
+        decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
+    )
+    assert set(accepted["sources"]["gstack"]["files"]) == {"projects/other/note.md"}
+    assert f"gstack:{rel}" not in accepted["tombstones"]
+    assert published_file.read_text() == "published before this folder became a checkout"
+    for command in (["status"], ["diag"]):
+        shown = runner.invoke(app, command)
+        assert shown.exit_code == 0, shown.output
+        assert " ".join(shown.stdout.split()).count(expected) == 1
+    shown = runner.invoke(app, ["diag", "--json"])
+    assert shown.exit_code == 0, shown.output
+    assert json.loads(shown.stdout)["sync_scope"]["skipped_nested_repositories"]["gstack"] == [
+        "projects/literal*/checkout"
+    ]
+
+
+def test_growth_warning_is_nonblocking_and_only_counts_new_files(capture61, monkeypatch):
+    monkeypatch.setattr(cli_module, "_PUSH_GROWTH_WARNING_FILES", 2)
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    for name in ("a.md", "b.md", "c.md"):
+        (memory / name).write_text("new file")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "large sync growth: claude:projects/-Users-kb-myapp (3 new files)" in " ".join(
+        result.stderr.split()
+    )
+    for name in ("a.md", "b.md", "c.md"):
+        (memory / name).write_text("modified file")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "large sync growth" not in result.stderr
 
 
 def test_interrupt_after_acceptance_before_verdict_records_unverified(capture61, monkeypatch):

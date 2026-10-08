@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -743,7 +744,7 @@ def _build_exclude_map(
     *,
     strict: bool = False,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Map source name -> exclude_patterns and marker-skip prefixes.
+    """Map source name -> exclude_patterns and directory-skip prefixes.
 
     Empty glob entries are pruned. Marker-skip prefixes (directories
     containing `.extend-root`) are returned separately so the consumer-
@@ -762,6 +763,10 @@ def _build_exclude_map(
         if src.get("type") == "grok":
             patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
+        prefs = [
+            *prefs,
+            *manifest.nested_repo_skip_prefixes(src, strict=strict, skip_prefixes=prefs),
+        ]
         if patterns:
             out[src["name"]] = patterns
         if prefs:
@@ -1049,6 +1054,10 @@ def _prove_omitted_paths_absent(
             if _manifest_is_excluded(rel_path, extra):
                 continue
             path = base / rel_path
+            if manifest.path_has_descendant_symlink(
+                path, base, strict=True, source_name=src_name
+            ) or manifest.nested_repo_root(path.parent, base, strict=True, source_name=src_name):
+                continue
             try:
                 st = path.lstat()
             except FileNotFoundError:
@@ -3769,6 +3778,8 @@ def push(
     refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     attempt = attemptlog.Attempt()
     core_finished = False
+    stop_cause = "error"
+    stop_errno = None
 
     try:
         acquire_lock()
@@ -3796,8 +3807,12 @@ def push(
             )
             core_finished = True
         except SnapshotError as e:
+            stop_cause = "snapshot-refused"
             _error(str(e) + refusal_suffix)
         except (OSError, MindMeldError) as e:
+            if isinstance(e, (OSError, StorageError)):
+                stop_cause = "storage-error"
+                stop_errno = attemptlog.storage_errno(e)
             if dry_run:
                 _error(str(e) + refusal_suffix)
             _error(
@@ -3839,11 +3854,14 @@ def push(
                 stderr_console.print(
                     f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
                 )
+    except (KeyboardInterrupt, typer.Abort):
+        stop_cause = "interrupted"
+        raise
     finally:
         try:
             if not dry_run and attempt.outcome is not None:
                 if not core_finished:
-                    attempt.stopped()
+                    attempt.stopped(stop_cause, errno_name=stop_errno)
                 try:
                     attemptlog.write(attempt.outcome)
                 except Exception as e:
@@ -4002,6 +4020,30 @@ def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> PushR
     return None
 
 
+_PUSH_GROWTH_WARNING_FILES = 1000
+
+
+def _warn_push_growth(source_diffs: list) -> None:
+    """Warn once about large additions, using observed counts before uploads."""
+    counts: Counter[str] = Counter()
+    for name, _local, _remote, diff in source_diffs:
+        for rel in diff.new:
+            subtree = "/".join(PurePosixPath(rel).parent.parts[:2]) or "."
+            counts[f"{name}:{subtree}"] += 1
+    large = sorted(
+        ((path, count) for path, count in counts.items() if count > _PUSH_GROWTH_WARNING_FILES),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if large:
+        detail = "; ".join(f"{path} ({count} new files)" for path, count in large[:3])
+        print(
+            "mm: warning: large sync growth: "
+            + safety.safe_terminal_str(detail)
+            + ". Check these subtrees before adding more files to sync.",
+            file=sys.stderr,
+        )
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -4141,8 +4183,17 @@ def _push_core(
         )
     host_row_appended = captured is not None and captured.appended is not None
     skipped: list[tuple[str, str]] = []
+    skipped_repos: set[str] = set()
 
     def on_skip(path: str, reason: str) -> None:
+        if reason == manifest.NESTED_REPO_SKIP_REASON:
+            if path not in skipped_repos:
+                skipped_repos.add(path)
+                print(
+                    f"mm: notice: skipped: nested git repository {safety.safe_terminal_str(path)}",
+                    file=sys.stderr,
+                )
+            return
         skipped.append((path, reason))
         if verbose and not quiet:
             console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
@@ -4215,6 +4266,7 @@ def _push_core(
     # the events-file modification.
     recovering_from_corrupt = fetch.status == "corrupt"
     source_diffs = list(iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
+    _warn_push_growth(source_diffs)
     has_substantive = bool(source_diffs)
     # mtime-only republish leg (v0.12.6): sha256-equal files with drifted
     # mtime must still trigger a manifest upload so peers see authoritative-
@@ -5814,11 +5866,18 @@ def status(
     source_resolution = resolve_sources(config, strict=False, bootstrap=False)
     sources_configs = source_resolution.available
     capture_rows = _read_capture_rows(sources_configs, device_id)
+    skipped_repos: set[str] = set()
+
+    def on_skip(path: str, reason: str) -> None:
+        if reason == manifest.NESTED_REPO_SKIP_REASON:
+            skipped_repos.add(path)
+
     local_manifest = build_manifest_v2(
         device_id,
         device_name,
         sources_configs,
         max_file_size,
+        on_skip,
         diagnostic_hash=lambda path, stat: capture_rows.cached_hash(path, stat) or hash_file(path),
     )
 
@@ -5834,6 +5893,11 @@ def status(
 
     console.print("\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
+    for path in sorted(skipped_repos):
+        if source is None or path.partition(":")[0] == source:
+            console.print(
+                safe_str(f"  skipped: nested git repository {safety.safe_terminal_str(path)}")
+            )
 
     # Surface the last autopull/autopush breadcrumb so a wedged sync
     # (silent lock contention, missing passphrase, bad config) is visible.
@@ -6820,6 +6884,13 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
+        "sync_scope": {
+            "skipped_nested_repositories": {
+                src["name"]: manifest.nested_repo_skip_prefixes(src) for src in resolved_sources
+            }
+            if config_state == "ok"
+            else None,
+        },
         "last_autorun": breadcrumb,
         "skill_links": skill_link.diagnose_skill_links(
             may_create=skill_may_create, config_error=skill_config_error
@@ -6879,6 +6950,18 @@ def diag(
     console.print(f"  device_name:   {cfg_state['device_name'] or '(none)'}")
     console.print(f"  storage_path:  {cfg_state['storage_path'] or '(default)'}")
     console.print(f"  root_salt_fp:  {cfg_state['root_salt_fp'] or '(unset)'}")
+    scope = state["sync_scope"]["skipped_nested_repositories"]
+    if scope is None:
+        console.print("  nested repository skips: unknown (config unavailable)")
+    else:
+        for name, roots in scope.items():
+            for root in roots:
+                console.print(
+                    safe_str(
+                        "  skipped: nested git repository "
+                        + safety.safe_terminal_str(f"{name}:{root}")
+                    )
+                )
 
     ci = state["crypto_init"]
     console.print("\n[bold]mm-crypto-init[/bold]")

@@ -28,6 +28,7 @@ from mind_meld.manifest import (
     is_v1_conflict_filename,
     load_manifest,
     marker_skip_globs,
+    nested_repo_skip_prefixes,
     normalize_manifest,
     parse_conflict_created_at,
     parse_conflict_device_short,
@@ -438,6 +439,129 @@ class TestReadAndHash:
         data, digest = read_and_hash(f)
         assert data == b""
         assert digest == hashlib.sha256(b"").hexdigest()
+
+
+class TestNestedRepositories:
+    def test_nested_inventory_preserves_generated_subtree_exclusions(self, tmp_path, monkeypatch):
+        generated = tmp_path / "skills" / "generated"
+        private = generated / "private"
+        private.mkdir(parents=True)
+        (generated / ".extend-root").write_text("generated")
+        original = os.scandir
+
+        def guard(path):
+            assert Path(path) != private, "entered an already-excluded generated subtree"
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", guard)
+        cfg = {
+            "name": "codex",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["skills"],
+        }
+        assert nested_repo_skip_prefixes(cfg, strict=True) == []
+        assert walk_generic_source(cfg, strict=True) == {}
+
+    def test_unreadable_git_marker_refuses_publishing_and_diagnostics_do_not_write(
+        self, tmp_path, monkeypatch
+    ):
+        directory = tmp_path / "docs"
+        directory.mkdir()
+        (directory / "note.md").write_text("content")
+        original = Path.lstat
+
+        def denied(path):
+            if path == directory / ".git":
+                raise PermissionError(errno.EACCES, "denied")
+            return original(path)
+
+        monkeypatch.setattr(Path, "lstat", denied)
+        cfg = {"name": "notes", "type": "generic", "path": str(tmp_path), "include_dirs": ["docs"]}
+        with pytest.raises(SnapshotError, match="could not check for a nested git repository"):
+            walk_generic_source(cfg, strict=True)
+        assert nested_repo_skip_prefixes(cfg) == []
+        assert list(walk_generic_source(cfg)) == ["docs/note.md"]
+        assert not (directory / ".git").exists()
+
+    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok"])
+    @pytest.mark.parametrize("gitlink", [False, True])
+    def test_checkout_is_pruned_and_plain_content_and_source_root_repo_survive(
+        self, tmp_path, monkeypatch, strict, source_type, gitlink
+    ):
+        base = tmp_path / "source"
+        parent = "projects/app/memory" if source_type == "claude" else "skills"
+        repo = base / parent / "checkout"
+        repo.mkdir(parents=True)
+        if gitlink:
+            (repo / ".git").write_text("gitdir: /private/git-worktree")
+        else:
+            (repo / ".git").mkdir()
+        (repo / "bulk.txt").write_text("must not read or hash this")
+        plain = base / parent / "plain" / "note.md"
+        plain.parent.mkdir()
+        plain.write_text("sync me")
+        (base / ".git").mkdir()
+        cfg = {"name": "source", "type": source_type, "path": str(base), "include_dirs": ["skills"]}
+        original = os.scandir
+
+        def guard(path):
+            assert not Path(path).is_relative_to(repo), "entered an excluded checkout"
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", guard)
+        skipped = []
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=strict)
+        assert list(files) == [f"{parent}/plain/note.md"]
+        assert skipped == [(f"{parent}/checkout", "nested git repository")]
+        assert nested_repo_skip_prefixes(cfg, strict=strict) == [f"{parent}/checkout"]
+
+    @pytest.mark.parametrize("strict", [False, True])
+    def test_explicit_includes_inside_checkout_cannot_bypass_policy_and_report_once(
+        self, tmp_path, strict
+    ):
+        repo = tmp_path / "projects" / "checkout"
+        notes = repo / "notes"
+        notes.mkdir(parents=True)
+        (repo / ".git").write_text("gitdir: elsewhere")
+        (notes / "note.md").write_text("private checkout content")
+        (repo / "README.md").write_text("private checkout content")
+        cfg = {
+            "name": "gstack",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["projects", "projects/checkout/notes"],
+            "include_files": ["projects/checkout/README.md"],
+        }
+        skipped = []
+        built = build_manifest_v2(
+            "device", "Mac", [cfg], on_skip=lambda *item: skipped.append(item), strict=strict
+        )
+        assert built["sources"]["gstack"]["files"] == {}
+        assert skipped == [("gstack:projects/checkout", "nested git repository")]
+        assert nested_repo_skip_prefixes(cfg, strict=strict) == ["projects/checkout"]
+
+    @pytest.mark.parametrize("strict", [False, True])
+    def test_claude_project_checkout_is_pruned_before_entering_memory(
+        self, tmp_path, monkeypatch, strict
+    ):
+        project = tmp_path / "projects" / "app"
+        (project / "memory").mkdir(parents=True)
+        (project / ".git").mkdir()
+        original = os.scandir
+
+        def guard(path):
+            assert not Path(path).is_relative_to(project)
+            return original(path)
+
+        monkeypatch.setattr(os, "scandir", guard)
+        cfg = {"name": "claude", "type": "claude", "path": str(tmp_path)}
+        skipped = []
+        _, files = walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=strict)
+        assert files == {}
+        assert skipped == [("projects/app", "nested git repository")]
+        assert nested_repo_skip_prefixes(cfg, strict=strict) == ["projects/app"]
 
 
 class TestWalkGenericSource:
@@ -2315,8 +2439,11 @@ class TestStrictWalkers:
 
         root = tmp_path / "src"
         docs = root / "docs"
-        git = docs / ".git"
+        # Exercise the source-root exemption: docs/.git now excludes docs
+        # itself under the nested-checkout policy.
+        git = root / ".git"
         git.mkdir(parents=True)
+        docs.mkdir()
         (docs / "ok.md").write_text("ok")
         (git / "objects").mkdir()
         scanned = []
@@ -2333,7 +2460,7 @@ class TestStrictWalkers:
             "name": "gstack",
             "path": str(root),
             "type": "generic",
-            "include_dirs": ["docs"],
+            "include_dirs": ["."],
         }
         files = walk_generic_source(cfg, strict=True)
         assert "docs/ok.md" in files
