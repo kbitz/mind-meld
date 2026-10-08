@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.6.0 | 2026-10-08 | **Git repositories cloned inside a synced folder no longer flood the sync, and `mm push` now records why an attended push stopped, which `mm status` and `mm diag` show.** A nested checkout is skipped and listed instead of uploaded, and an attended push that stops before its manifest is accepted now records its cause. |
 | 1.5.3 | 2026-10-07 | **Archiving a Codex thread no longer drops its past usage from the fleet Agents table.** mm now reads Codex's archived rollouts (`~/.codex/archived_sessions/`) together with the live sessions, so threads archived in Codex, the Codex app or an orchestrator such as Paseo stay counted. After upgrading, days with archived threads rise; that is the correction, not double counting. |
 | 1.5.2 | 2026-10-07 | **mm no longer tells you to delete its lockfile when another mm operation is running.** It now tells you to wait and run the command again, and the note `mm update` prints for an up-to-date install made from a tag, branch or bare repository URL is now accurate. If an older mm told you to remove the lockfile, do not. |
 | 1.5.1 | 2026-10-05 | **`mm update` now shows a compact progress bar in a terminal, driven only by what the installer reports.** You can see which phase an update is in and, when pip measures it, how far along a download or a multi-package install is. |
