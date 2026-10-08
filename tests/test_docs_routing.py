@@ -958,6 +958,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "root_salt_drift",
     "sidecar",
     "storage_inventory",
+    "sync_scope",
     "last_autorun",
     "skill_links",
     "host_skill_discovery",

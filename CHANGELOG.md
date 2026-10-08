@@ -2,6 +2,30 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.6.0] - 2026-10-08
+
+**Git repositories cloned inside a synced folder no longer flood the sync, and `mm push` now records why an attended push stopped, which `mm status` and `mm diag` show.** A nested checkout is skipped and listed instead of uploaded, and an attended push that stops before its manifest is accepted now records its cause.
+
+### Added
+
+- Every sync source skips nested git checkouts: a directory containing a `.git` directory or gitlink file is not synced, including when an explicit include points inside it. The source root's own `.git` keeps its existing behavior, ordinary directories still sync, and there is no opt-out setting.
+- Attended `mm push` and its `--dry-run` preview print a `skipped: nested git repository <source>:<relative-root>` notice on stderr once per skipped root. `mm status` and `mm diag` list the current skips too, and `mm autopush` stays silent about them. `mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps source names to relative roots (null when the config is unavailable).
+- A push that adds more than 1,000 new files within one source subtree (the source plus its first two directory levels) prints a nonblocking warning to stderr, autopush included, naming up to three subtrees and their counts. The first push without an accepted manifest of this Mac's own (a new Mac, or recovery from a corrupt one) skips the warning.
+- An attended push that reaches usage capture and then stops before its manifest is accepted records why: `interrupted` (Ctrl-C or abort), `storage-error`, `snapshot-refused` or `error`. A storage failure also records the OS error name, such as `ENOSPC`, when the OS reports one, and `mm diag --json` adds `latest_attempt_errno` under `host_publication`. No exception message or path is stored. A push that stops earlier (for example on the lock) writes no record.
+
+### Changed
+
+- A folder that was already published and later becomes a checkout is frozen while this Mac's accepted manifest, or a recovered one whose blobs still exist, lists its entries: this Mac keeps advertising them unchanged, nothing is uploaded or deleted, and edits and new files inside the checkout stay local. Deleting the checkout later deletes those entries like any other deletion. To stop advertising them without deleting anything, add an `exclude_patterns` glob such as `<folder>/*`.
+- `mm pull` never writes a peer's files into a local checkout, and `mm diff` previews the same view. An attended `mm pull` (not `--dry-run` or `autopull`) records one `excluded` log entry per checkout root and per peer that advertises files or deletions there. Pull also ignores peer paths that have a `.git` segment in any letter case, or a `.` or empty segment.
+
+### Upgrade notes
+
+- No wire or storage format changes.
+- Every attended `mm push` after upgrading prints a skipped notice for each repository already cloned inside a synced folder; `mm autopush` stays silent. Files already published under those folders stay frozen as described above.
+- Older writers may still publish checkout files; upgrade those Macs to apply the same default.
+- mm versions before 1.6.0 read the new `push-failed` causes as an unknown or corrupt attempt record without crashing, and their next attended push that reaches usage capture rewrites the local record.
+- Conflict-copy discovery for `mm conflicts` still scans inside checkouts.
+
 ## [1.5.3] - 2026-10-07
 
 **Archiving a Codex thread no longer drops its past usage from the fleet Agents table.** mm now reads Codex's archived rollouts (`~/.codex/archived_sessions/`) together with the live sessions, so threads archived in Codex, the Codex app or an orchestrator such as Paseo stay counted. After upgrading, days with archived threads rise; that is the correction, not double counting.

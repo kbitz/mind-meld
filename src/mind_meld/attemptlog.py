@@ -7,6 +7,7 @@ promise about whether the previous or the new record is visible.
 
 from __future__ import annotations
 
+import errno
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -34,7 +35,8 @@ CAUSES = {
     "append-failed": {None},
     "max-file-size": {None},
     "prerequisites": set(get_args(config.UsageCaptureReadiness)) - {"ready"},
-    "push-failed": {None},
+    # None remains readable for records written before stop causes existed.
+    "push-failed": {None, "interrupted", "storage-error", "snapshot-refused", "error"},
 }
 READER_OUTCOMES = frozenset({"contributed", "empty", "partial", "absent"}) | {
     f"dropped:{reason}"
@@ -50,9 +52,13 @@ class CaptureOutcome:
     cause: str | None = None
     readers: dict[str, str] = field(default_factory=dict)
     appended: tuple[Path, dict] | None = None
+    errno_name: str | None = None
 
-    def finish(self, kind: str, cause: str | None = None) -> CaptureOutcome:
+    def finish(
+        self, kind: str, cause: str | None = None, *, errno_name: str | None = None
+    ) -> CaptureOutcome:
         self.kind, self.cause = kind, cause
+        self.errno_name = errno_name
         return self
 
 
@@ -61,15 +67,26 @@ class Attempt:
     outcome: CaptureOutcome | None = None
     content_accepted: bool = False
 
-    def stopped(self) -> None:
+    def stopped(self, cause: str = "error", *, errno_name: str | None = None) -> None:
         if self.outcome is None or self.outcome.kind in PUBLICATION_CLASSES:
             return
         if not self.content_accepted:
-            self.outcome.finish("push-failed")
+            self.outcome.finish("push-failed", cause, errno_name=errno_name)
         elif self.outcome.appended is not None:
             # An interrupt after acceptance but before the verdict cannot
             # retroactively make either capture or content publication fail.
             self.outcome.finish("unverified", "evidence-error")
+
+
+def storage_errno(exc: BaseException) -> str | None:
+    """Extract an errno name through backend wrappers, never exception text."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError):
+            return errno.errorcode.get(exc.errno)
+        exc = exc.__cause__
+    return None
 
 
 def record_path() -> Path:
@@ -84,6 +101,7 @@ def write(outcome: CaptureOutcome) -> None:
         "cause": outcome.cause,
         "readers": outcome.readers,
         "row_ts": outcome.appended[1]["ts"] if outcome.appended is not None else None,
+        "errno": outcome.errno_name,
     }
     sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
     fsutil.atomic_write_bytes(
@@ -113,6 +131,14 @@ def _valid(record: object) -> bool:
     if cause not in CAUSES[kind] or _timestamp(record.get("attempted_at")) is None:
         return False
     if record.get("row_ts") is not None and _timestamp(record["row_ts"]) is None:
+        return False
+    errno_name = record.get("errno")
+    if errno_name is not None and (
+        kind != "push-failed"
+        or cause != "storage-error"
+        or not isinstance(errno_name, str)
+        or errno_name not in errno.errorcode.values()
+    ):
         return False
     return isinstance(readers, dict) and all(
         name in events.HOST_USAGE_TOKEN_SOURCES
@@ -145,6 +171,7 @@ def project(readers: list[str], recorded_ts: str | None) -> dict:
     out = {
         "latest_attempt": "unknown",
         "latest_attempt_cause": None,
+        "latest_attempt_errno": None,
         "latest_attempt_at": None,
         "latest_attempt_readers": {},
         "latest_attempt_reason": reason,
@@ -158,6 +185,7 @@ def project(readers: list[str], recorded_ts: str | None) -> dict:
     out.update(
         latest_attempt=record["class"],
         latest_attempt_cause=record.get("cause"),
+        latest_attempt_errno=record.get("errno"),
         latest_attempt_at=attempted.isoformat(),
         latest_attempt_readers={
             name: record["readers"][name]
@@ -186,7 +214,10 @@ def render(state: dict, *, age: str, path: str, refresh_ready: bool = True) -> l
             "corrupt": "record corrupt — the next attended mm push rewrites it",
         }[reason]
         return [f"Last recorded attended attempt: unknown ({detail})"]
-    cause = f" ({state['latest_attempt_cause']})" if state.get("latest_attempt_cause") else ""
+    detail = state.get("latest_attempt_cause")
+    if detail and state.get("latest_attempt_errno"):
+        detail += f": {state['latest_attempt_errno']}"
+    cause = f" ({detail})" if detail else ""
     note = (
         "; a later capture has since been recorded"
         if state.get("latest_attempt_superseded")

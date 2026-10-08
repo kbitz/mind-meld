@@ -1,12 +1,14 @@
 """Private attempt-record validation and write-free rendering states."""
 
+import errno
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from mind_meld import attemptlog, sidecar
+from mind_meld.errors import StorageError
 from tests.test_reader_publication import NOW
 
 
@@ -162,3 +164,139 @@ def test_healthy_attended_attempt_does_not_claim_superseded_by_autopush():
     assert attemptlog.render(state, age="1 d ago", path="local") == [
         f"Last recorded attended attempt: {NOW.isoformat()} (1 d ago) — published"
     ]
+
+
+@pytest.mark.parametrize(
+    "cause", [None, "interrupted", "storage-error", "snapshot-refused", "error"]
+)
+def test_push_failure_causes_and_errno_roundtrip(cause):
+    outcome = attemptlog.CaptureOutcome(attempted_at=NOW.isoformat())
+    number = "ENOSPC" if cause == "storage-error" else None
+    attemptlog.write(outcome.finish("push-failed", cause, errno_name=number))
+    state = attemptlog.project([], None)
+    assert state["latest_attempt"] == "push-failed"
+    assert state["latest_attempt_cause"] == cause
+    assert state["latest_attempt_errno"] == number
+    if number:
+        assert "(storage-error: ENOSPC)" in attemptlog.render(state, age="0 s ago", path="local")[0]
+
+
+@pytest.mark.parametrize("number", [28, [], "ENOSPC /private/sensitive", "EINVENTED"])
+def test_errno_rejects_numbers_messages_and_unknown_names(number):
+    save(record(**{"class": "push-failed", "cause": "storage-error", "errno": number}))
+    assert attemptlog.read() == (None, "corrupt")
+
+
+@pytest.mark.parametrize(
+    "kind,cause",
+    [
+        ("published", None),
+        ("push-failed", None),
+        ("push-failed", "interrupted"),
+        ("push-failed", "snapshot-refused"),
+        ("push-failed", "error"),
+    ],
+)
+def test_errno_only_belongs_to_storage_failure(kind, cause):
+    save(record(**{"class": kind, "cause": cause, "errno": "ENOSPC"}))
+    assert attemptlog.read() == (None, "corrupt")
+
+
+# attemptlog._valid tables as released in 1.5.2, pinned so later edits cannot
+# change what the released reader accepts.
+_RELEASED_1_5_CAUSES = {
+    "published": {None},
+    "not-published": {"exclude-patterns", "include-dirs", "file-absent", "row-missing"},
+    "unverified": {
+        "missing",
+        "unreadable",
+        "oversized-line",
+        "changed",
+        "revision-mismatch",
+        "evidence-error",
+    },
+    "no-row": {None},
+    "capture-failed": {None},
+    "append-failed": {None},
+    "max-file-size": {None},
+    "prerequisites": {"disabled", "no-reader", "unavailable", "unknown"},
+    "push-failed": {None},
+}
+_RELEASED_1_5_READERS = ("codex", "grok", "cursor")
+_RELEASED_1_5_OUTCOMES = {"contributed", "empty", "partial", "absent"} | {
+    f"dropped:{reason}"
+    for reason in (
+        "deadline",
+        "io_error",
+        "locked",
+        "malformed",
+        "partial",
+        "stale",
+        "unavailable",
+        "unsupported",
+    )
+}
+
+
+def _released_1_5_timestamp(raw: object) -> bool:
+    if not isinstance(raw, str) or len(raw) > 64:
+        return False
+    try:
+        return datetime.fromisoformat(raw).utcoffset() is not None
+    except (ValueError, OverflowError):
+        return False
+
+
+def _released_1_5_valid(record: object) -> bool:
+    """attemptlog._valid as released in 1.5.2, when push-failed took only None."""
+    if not isinstance(record, dict):
+        return False
+    kind, readers = record.get("class"), record.get("readers")
+    if "cause" not in record or not isinstance(kind, str) or kind not in _RELEASED_1_5_CAUSES:
+        return False
+    cause = record["cause"]
+    if cause is not None and not isinstance(cause, str):
+        return False
+    if cause not in _RELEASED_1_5_CAUSES[kind]:
+        return False
+    if not _released_1_5_timestamp(record.get("attempted_at")):
+        return False
+    if record.get("row_ts") is not None and not _released_1_5_timestamp(record["row_ts"]):
+        return False
+    return isinstance(readers, dict) and all(
+        name in _RELEASED_1_5_READERS
+        and isinstance(outcome, str)
+        and outcome in _RELEASED_1_5_OUTCOMES
+        for name, outcome in readers.items()
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,cause,accepted",
+    [
+        ("published", None, True),
+        ("push-failed", None, True),
+        ("push-failed", "interrupted", False),
+        ("push-failed", "storage-error", False),
+        ("push-failed", "snapshot-refused", False),
+        ("push-failed", "error", False),
+    ],
+)
+def test_released_reader_tolerates_new_records_without_crashing(kind, cause, accepted):
+    outcome = attemptlog.CaptureOutcome(attempted_at=NOW.isoformat())
+    number = "ENOSPC" if cause == "storage-error" else None
+    attemptlog.write(outcome.finish(kind, cause, errno_name=number))
+    written = json.loads(attemptlog.record_path().read_text())
+    # 1.5.2 ignores the added errno key and reports a new cause as corrupt.
+    assert _released_1_5_valid(written) is accepted
+
+
+def test_storage_errno_uses_explicit_os_cause_without_persisting_messages():
+    try:
+        try:
+            raise OSError(errno.ENOSPC, "sensitive message", "/private/sensitive")
+        except OSError as exc:
+            raise StorageError("backend wrapper") from exc
+    except StorageError as exc:
+        assert attemptlog.storage_errno(exc) == "ENOSPC"
+    assert attemptlog.storage_errno(OSError("ENOSPC is just message text")) is None

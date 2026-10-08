@@ -23,7 +23,8 @@ import subprocess
 import sys
 import time
 import traceback
-from collections.abc import Callable, Iterator
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -742,14 +743,19 @@ def _build_exclude_map(
     sources: list[dict[str, Any]] | None = None,
     *,
     strict: bool = False,
+    nested_roots: Mapping[str, Iterable[str]] | None = None,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-    """Map source name -> exclude_patterns and marker-skip prefixes.
+    """Map source name -> exclude_patterns and directory-skip prefixes.
 
     Empty glob entries are pruned. Marker-skip prefixes (directories
     containing `.extend-root`) are returned separately so the consumer-
     boundary filter can prefix-match rather than fnmatch. Without that
     merge, a walker-only skip would emit deletion tombstones for
     previously-synced generated files.
+
+    ``nested_roots`` adds nested-checkout roots the caller already observed
+    (pull's and diff's probe of incoming paths); this helper never walks for
+    them. Push freezes entries under its walk's roots instead.
 
     Publishing supplies the already-resolved source list and strict mode
     so this helper does not re-enter a permissive ``get_sources``.
@@ -762,6 +768,7 @@ def _build_exclude_map(
         if src.get("type") == "grok":
             patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
+        prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
         if patterns:
             out[src["name"]] = patterns
         if prefs:
@@ -778,7 +785,9 @@ def _filter_excluded_paths(
 
     Drops entries from `sources.<name>.files` and `tombstones` whose relative
     path matches any glob in `exclude_map[name]`, AND any conflict-shaped
-    basename (mirroring the push-side ``manifest._is_excluded`` gate). A
+    basename, `.extend-root` marker, `.git` segment in any letter case, or `.`
+    or empty segment. That is intentionally stricter than the push-side
+    ``manifest._is_excluded`` gate, whose `.git/` check is case-sensitive. A
     peer-chosen ``foo.sync-conflict-19700101-000000-deadbeef.md`` must not
     materialize — after the gc bar reads the filename timestamp, that
     string would drive the reap age directly.
@@ -800,8 +809,17 @@ def _filter_excluded_paths(
     """
 
     def _conflict_shaped(rel_path: str) -> bool:
-        filename = rel_path.rsplit("/", 1)[-1]
-        return is_conflict_filename(filename) or filename == MARKER_SKIP_NAME
+        # `.extend-root` and `.git` are local selection markers: a peer-planted
+        # one would silently narrow what this Mac syncs. `.git` is found by a
+        # case-insensitive lstat on APFS, so match any case. Honest writers
+        # never publish a `.git` segment (EXCLUDED matches every path part),
+        # nor `.`/empty segments, which would dodge literal prefix matching.
+        parts = rel_path.split("/")
+        return (
+            is_conflict_filename(parts[-1])
+            or parts[-1] == MARKER_SKIP_NAME
+            or any(part.casefold() == ".git" or part in ("", ".") for part in parts)
+        )
 
     def _excluded(src_name: str, rel_path: str) -> bool:
         if _conflict_shaped(rel_path):
@@ -865,6 +883,7 @@ def _filter_symlinked_paths(
     sources: list[dict[str, Any]],
     *,
     strict: bool = False,
+    exempt_roots: Mapping[str, Iterable[str]] | None = None,
 ) -> dict:
     """Remove locally-symlinked paths from a prior manifest before tombstones.
 
@@ -872,8 +891,10 @@ def _filter_symlinked_paths(
     manifest at this consumer boundary prevents that omission from minting a
     fleet-wide deletion tombstone, including for pre-migration explicit source
     configurations that do not yet carry the new default exclude globs.
-    Applies to Claude, generic, and Grok sources.
+    Applies to Claude, generic, and Grok sources. Entries and tombstones under
+    ``exempt_roots`` (frozen nested checkouts) are kept without probing.
     """
+    exempt = {name: sorted(roots) for name, roots in (exempt_roots or {}).items()}
     source_roots = {
         source["name"]: Path(source["path"]).expanduser()
         for source in sources
@@ -884,7 +905,7 @@ def _filter_symlinked_paths(
 
     def _symlinked(source_name: str, rel_path: str) -> bool:
         base_path = source_roots.get(source_name)
-        if base_path is None:
+        if base_path is None or _under_skip_prefix(rel_path, exempt.get(source_name)):
             return False
         try:
             _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
@@ -984,6 +1005,97 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     # the asymmetric-filter rationale in the docstring above.
 
     return out
+
+
+def _incoming_nested_roots(
+    sources: list[dict[str, Any]], manifests: Iterable[dict | None]
+) -> dict[str, list[str]]:
+    """Map source name -> local checkout roots above incoming peer files and tombstones."""
+    incoming: dict[str, set[str]] = {}
+    for peer in manifests:
+        if peer is None:
+            continue
+        for name, data in peer.get("sources", {}).items():
+            incoming.setdefault(name, set()).update(data.get("files", {}))
+        for key in peer.get("tombstones", {}):
+            if not isinstance(key, str):
+                continue
+            name, rel = key.split(":", 1) if ":" in key else ("claude", key)
+            incoming.setdefault(name, set()).add(rel)
+    out: dict[str, list[str]] = {}
+    for src in sources:
+        if roots := manifest.nested_repo_roots_for_paths(src, incoming.get(src["name"], ())):
+            out[src["name"]] = roots
+    return out
+
+
+def _freeze_nested_checkout_entries(
+    local_manifest: dict,
+    prior_manifest: dict,
+    nested_roots: Mapping[str, Iterable[str]],
+    *,
+    keep: Callable[[dict], bool] | None = None,
+) -> dict[str, set[str]]:
+    """Keep this Mac's last published entries under its current nested checkouts.
+
+    A checkout's contents stop publishing, but entries advertised before it
+    appeared stay unchanged: no upload, no tombstone, and its prior
+    tombstones carry forward. Deleting the checkout later tombstones them like
+    any deletion, so peer copies converge instead of returning on pull.
+    A tombstoned path is never revived (merged conflict copies can carry both).
+    ``keep`` gates recovered entries on a stored blob. Returns the frozen paths
+    per source; upload must never re-read them.
+    """
+    frozen: dict[str, set[str]] = {}
+    tombstones = prior_manifest.get("tombstones", {})
+    for name, roots in nested_roots.items():
+        prefixes = sorted(roots)
+        local_src = local_manifest.get("sources", {}).get(name)
+        prior_files = prior_manifest.get("sources", {}).get(name, {}).get("files", {})
+        if local_src is None or not prefixes:
+            continue
+        files = local_src["files"]
+        for rel_path, info in prior_files.items():
+            if (
+                rel_path not in files
+                and _under_skip_prefix(rel_path, prefixes)
+                and not is_tombstoned(name, rel_path, tombstones)
+                and (keep is None or keep(info))
+            ):
+                files[rel_path] = dict(info)
+                frozen.setdefault(name, set()).add(rel_path)
+    return frozen
+
+
+def _drop_unfrozen_checkout_files(
+    prior_manifest: dict,
+    nested_roots: Mapping[str, Iterable[str]],
+    frozen: Mapping[str, set[str]],
+) -> dict:
+    """Drop prior file entries under checkout roots that were not frozen; keep tombstones.
+
+    A tombstoned path stays deleted, and a recovered entry without a stored blob
+    is excluded. Neither is this push's to prove: the omission guard would
+    refuse a file still on disk inside the checkout.
+    """
+    sources = dict(prior_manifest.get("sources", {}))
+    changed = False
+    for name, roots in nested_roots.items():
+        data = sources.get(name)
+        if not data:
+            continue
+        prefixes = sorted(roots)
+        keep = frozen.get(name, set())
+        files = data.get("files", {})
+        kept = {
+            rel: info
+            for rel, info in files.items()
+            if rel in keep or not _under_skip_prefix(rel, prefixes)
+        }
+        if len(kept) != len(files):
+            sources[name] = {**data, "files": kept}
+            changed = True
+    return {**prior_manifest, "sources": sources} if changed else prior_manifest
 
 
 def _prove_omitted_paths_absent(
@@ -3769,6 +3881,8 @@ def push(
     refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
     attempt = attemptlog.Attempt()
     core_finished = False
+    stop_cause = "error"
+    stop_errno = None
 
     try:
         acquire_lock()
@@ -3796,8 +3910,12 @@ def push(
             )
             core_finished = True
         except SnapshotError as e:
+            stop_cause = "snapshot-refused"
             _error(str(e) + refusal_suffix)
         except (OSError, MindMeldError) as e:
+            if isinstance(e, (OSError, StorageError)):
+                stop_cause = "storage-error"
+                stop_errno = attemptlog.storage_errno(e)
             if dry_run:
                 _error(str(e) + refusal_suffix)
             _error(
@@ -3839,11 +3957,15 @@ def push(
                 stderr_console.print(
                     f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
                 )
+    except (KeyboardInterrupt, typer.Abort):
+        # Only a storage-error record may carry errno.
+        stop_cause, stop_errno = "interrupted", None
+        raise
     finally:
         try:
             if not dry_run and attempt.outcome is not None:
                 if not core_finished:
-                    attempt.stopped()
+                    attempt.stopped(stop_cause, errno_name=stop_errno)
                 try:
                     attemptlog.write(attempt.outcome)
                 except Exception as e:
@@ -4002,6 +4124,30 @@ def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> PushR
     return None
 
 
+_PUSH_GROWTH_WARNING_FILES = 1000
+
+
+def _warn_push_growth(source_diffs: list) -> None:
+    """Warn once about large additions, using observed counts before uploads."""
+    counts: Counter[str] = Counter()
+    for name, _local, _remote, diff in source_diffs:
+        for rel in diff.new:
+            subtree = "/".join(PurePosixPath(rel).parent.parts[:2]) or "."
+            counts[f"{name}:{subtree}"] += 1
+    large = sorted(
+        ((path, count) for path, count in counts.items() if count > _PUSH_GROWTH_WARNING_FILES),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if large:
+        detail = "; ".join(f"{path} ({count} new files)" for path, count in large[:3])
+        print(
+            "mm: warning: large sync growth: "
+            + safety.safe_terminal_str(detail)
+            + ". Check these subtrees before adding more files to sync.",
+            file=sys.stderr,
+        )
+
+
 def _push_core(
     config: dict,
     passphrase: str,
@@ -4141,8 +4287,19 @@ def _push_core(
         )
     host_row_appended = captured is not None and captured.appended is not None
     skipped: list[tuple[str, str]] = []
+    skipped_repos: set[str] = set()
+    nested_roots: dict[str, set[str]] = {}
 
     def on_skip(path: str, reason: str) -> None:
+        if reason == manifest.NESTED_REPO_SKIP_REASON:
+            # Autopush stays silent; attended push, preview, status and diag report it.
+            if not quiet and path not in skipped_repos:
+                skipped_repos.add(path)
+                print(
+                    f"mm: notice: skipped: nested git repository {safety.safe_terminal_str(path)}",
+                    file=sys.stderr,
+                )
+            return
         skipped.append((path, reason))
         if verbose and not quiet:
             console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
@@ -4153,7 +4310,13 @@ def _push_core(
     if not quiet:
         console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(
-        device_id, device_name, sources, max_file_size, on_skip, strict=True
+        device_id,
+        device_name,
+        sources,
+        max_file_size,
+        on_skip,
+        strict=True,
+        nested_roots=nested_roots,
     )
 
     total_file_count = sum(
@@ -4185,10 +4348,27 @@ def _push_core(
     # whole source first avoids walking a soon-to-be-dropped source's
     # exclude_patterns for nothing. Tombstones stay (asymmetric filter).
     exclude_map, skip_prefixes = _build_exclude_map(config, sources, strict=True)
+    frozen: dict[str, set[str]] = {}
     if remote_manifest is not None:
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
-        remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
+        # Freeze before the symlink filter: entries below a checkout root are
+        # kept as published without inspecting what replaced them on disk.
+        frozen = _freeze_nested_checkout_entries(
+            local_manifest,
+            remote_manifest,
+            nested_roots,
+            # A recovered prior was never accepted as-is: freeze only entries
+            # whose blob is still stored, and exclude the rest.
+            keep=None
+            if fetch.is_ok
+            else lambda info: backend.exists(blob_key(device_id, info["sha256"])),
+        )
+        remote_manifest = _drop_unfrozen_checkout_files(remote_manifest, nested_roots, frozen)
+        # Frozen checkouts are kept as published: never probe beneath their roots.
+        remote_manifest = _filter_symlinked_paths(
+            remote_manifest, sources, strict=True, exempt_roots=nested_roots
+        )
         proof_sources = sources
         if dry_run and resolution.would_create:
             # Missing default roots truthfully preview deletions.
@@ -4215,6 +4395,10 @@ def _push_core(
     # the events-file modification.
     recovering_from_corrupt = fetch.status == "corrupt"
     source_diffs = list(iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
+    if fetch.is_ok:
+        # Without an accepted manifest of our own, everything (including
+        # content already fleet-wide) counts as new.
+        _warn_push_growth(source_diffs)
     has_substantive = bool(source_diffs)
     # mtime-only republish leg (v0.12.6): sha256-equal files with drifted
     # mtime must still trigger a manifest upload so peers see authoritative-
@@ -4298,7 +4482,17 @@ def _push_core(
                 max_file_size,
                 on_skip,
                 strict=True,
+                nested_roots=nested_roots,
             )
+            # The rescan replaces these sources' files; carry their frozen entries.
+            # A path the rescan sees again (its .git vanished) uploads normally.
+            for name, data in events_manifest["sources"].items():
+                previous = local_manifest["sources"].get(name, {}).get("files", {})
+                for rel in list(frozen.get(name, ())):
+                    if rel in data["files"]:
+                        frozen[name].discard(rel)
+                    elif rel in previous:
+                        data["files"][rel] = previous[rel]
             local_manifest["sources"].update(events_manifest["sources"])
             if remote_manifest is not None:
                 _prove_omitted_paths_absent(
@@ -4326,7 +4520,12 @@ def _push_core(
                 _print_diff_summary(diff, 0)
             continue
 
-        to_upload = {**diff.new, **diff.modified}
+        # Frozen checkout entries are already stored; their local bytes may differ.
+        to_upload = {
+            rel: info
+            for rel, info in {**diff.new, **diff.modified}.items()
+            if rel not in frozen.get(src_name, ())
+        }
         base_path = Path(src_data["base_path"])
         src_cfg = source_by_name.get(src_name, {})
 
@@ -5413,13 +5612,16 @@ def _pull_core(
     # filter strips entire `sources.<name>` entries so the per-peer
     # download loop never tries to land a disabled source's files locally.
     # P0 invariant — see _filter_disabled_sources docstring.
-    exclude_map, skip_prefixes = _build_exclude_map(config)
     disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
     if disabled_sources:
         manifest_cache = {
             did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
             for did, m in manifest_cache.items()
         }
+    # Pull never walks local trees for nested checkouts: it probes only the
+    # local ancestors of incoming peer paths, so it never writes into one.
+    nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
+    exclude_map, skip_prefixes = _build_exclude_map(config, nested_roots=nested_roots)
     # Always run: conflict-shaped names and `.extend-root` are stripped even
     # when no source declares exclude_patterns (claude-only installs).
     filtered_cache: dict[str, dict | None] = {}
@@ -5439,19 +5641,50 @@ def _pull_core(
         # conflicted / failed` records to `.1`. The forensic-aid
         # contract becomes useless. Interactive `mm pull` still
         # logs the full set so users can audit their excludes.
+        # A nested checkout logs one record per root and peer, not per file,
+        # whether files or deletions under it were skipped.
         if not quiet and not dry_run:
+            logged_roots: set[tuple[str, str]] = set()
+
+            def checkout_root(src_name: str, rel_path: str) -> str | None:
+                return next(
+                    (
+                        r
+                        for r in nested_roots.get(src_name, [])
+                        if _under_skip_prefix(rel_path, [r])
+                    ),
+                    None,
+                )
+
+            def log_root(src_name: str, root: str) -> None:
+                if (src_name, root) not in logged_roots:
+                    logged_roots.add((src_name, root))
+                    pullhistory.append(
+                        verb="pull", device=did, source=src_name, rel_path=root, action="excluded"
+                    )
+
             for src_name, src_data in m.get("sources", {}).items():
                 kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
                 for rel_path, info in src_data.get("files", {}).items():
-                    if rel_path not in kept:
-                        pullhistory.append(
-                            verb="pull",
-                            device=did,
-                            source=src_name,
-                            rel_path=rel_path,
-                            action="excluded",
-                            remote_sha=info.get("sha256"),
-                        )
+                    if rel_path in kept:
+                        continue
+                    if root := checkout_root(src_name, rel_path):
+                        log_root(src_name, root)
+                        continue
+                    pullhistory.append(
+                        verb="pull",
+                        device=did,
+                        source=src_name,
+                        rel_path=rel_path,
+                        action="excluded",
+                        remote_sha=info.get("sha256"),
+                    )
+            for key in m.get("tombstones", {}):
+                if not isinstance(key, str) or key in filtered.get("tombstones", {}):
+                    continue
+                src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
+                if root := checkout_root(src_name, rel_path):
+                    log_root(src_name, root)
         filtered_cache[did] = filtered
     manifest_cache = filtered_cache
 
@@ -5814,18 +6047,30 @@ def status(
     source_resolution = resolve_sources(config, strict=False, bootstrap=False)
     sources_configs = source_resolution.available
     capture_rows = _read_capture_rows(sources_configs, device_id)
+    nested_roots: dict[str, set[str]] = {}
     local_manifest = build_manifest_v2(
         device_id,
         device_name,
         sources_configs,
         max_file_size,
         diagnostic_hash=lambda path, stat: capture_rows.cached_hash(path, stat) or hash_file(path),
+        nested_roots=nested_roots,
     )
 
     # Fetch remote manifest (tri-state — surface missing/corrupt to user).
     # fetch.manifest is pre-normalized via load_manifest.
     fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     remote_manifest = fetch.manifest if fetch.is_ok else None
+    if remote_manifest is not None and nested_roots:
+        # Match what push publishes: freeze from the same filtered prior, so an
+        # excluded entry under a checkout still shows as a pending removal. Keep
+        # the marker prefixes: a reported checkout can sit below a marker dir.
+        exclude_map, skip_prefixes = _build_exclude_map(config, sources_configs)
+        _freeze_nested_checkout_entries(
+            local_manifest,
+            _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes),
+            nested_roots,
+        )
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
@@ -5834,6 +6079,15 @@ def status(
 
     console.print("\n[bold]Mind Meld Status[/bold]")
     console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
+    for name in sorted(nested_roots):
+        if source is not None and name != source:
+            continue
+        for root in sorted(nested_roots[name]):
+            console.print(
+                safe_str(
+                    "  skipped: nested git repository " + safety.safe_terminal_str(f"{name}:{root}")
+                )
+            )
 
     # Surface the last autopull/autopush breadcrumb so a wedged sync
     # (silent lock contention, missing passphrase, bad config) is visible.
@@ -6820,6 +7074,13 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
+        "sync_scope": {
+            "skipped_nested_repositories": {
+                src["name"]: manifest.nested_repo_skip_prefixes(src) for src in resolved_sources
+            }
+            if config_state == "ok"
+            else None,
+        },
         "last_autorun": breadcrumb,
         "skill_links": skill_link.diagnose_skill_links(
             may_create=skill_may_create, config_error=skill_config_error
@@ -6879,6 +7140,18 @@ def diag(
     console.print(f"  device_name:   {cfg_state['device_name'] or '(none)'}")
     console.print(f"  storage_path:  {cfg_state['storage_path'] or '(default)'}")
     console.print(f"  root_salt_fp:  {cfg_state['root_salt_fp'] or '(unset)'}")
+    scope = state["sync_scope"]["skipped_nested_repositories"]
+    if scope is None:
+        console.print("  nested repository skips: unknown (config unavailable)")
+    else:
+        for name, roots in scope.items():
+            for root in roots:
+                console.print(
+                    safe_str(
+                        "  skipped: nested git repository "
+                        + safety.safe_terminal_str(f"{name}:{root}")
+                    )
+                )
 
     ci = state["crypto_init"]
     console.print("\n[bold]mm-crypto-init[/bold]")
@@ -7284,7 +7557,12 @@ def diff_cmd(
     remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
 
     if remote_manifest is not None:
-        exclude_map, skip_prefixes = _build_exclude_map(config)
+        # Same checkout probe as pull, so the diff predicts what pull applies.
+        exclude_map, skip_prefixes = _build_exclude_map(
+            config,
+            sources_configs,
+            nested_roots=_incoming_nested_roots(sources_configs, [remote_manifest]),
+        )
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}

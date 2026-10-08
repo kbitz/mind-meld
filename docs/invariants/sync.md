@@ -13,6 +13,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
+- `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
+- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
@@ -216,11 +218,101 @@ only reader-name `empty_sources` evidence, scoped to retained days.
 ## exclude_patterns + consumer-boundary filter (load-bearing, v0.9.1, v0.9.3, v0.11.13)
 Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the relative path. Default `gstack` source ships with `["config.yaml", "projects/*/repo-mode.json", "projects/*/land-deploy-confirmed", "analytics/.last-sync-*"]` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking added in v0.9.3; `analytics/.last-sync-*` are per-machine cursor files that track each device's progress through gstack's local analytics jsonls, added in v0.11.13). The walker drops excluded paths from the local manifest at push time.
 
-`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path to compute referenced blobs, and a filtered manifest there would mark live peer blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
+`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path to compute referenced blobs, and a filtered manifest there would mark live peer blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
+
+## Nested git checkouts are frozen, never published
+
+Every source walker prunes a directory with a regular `.git` file or `.git`
+directory strictly below its source root, before enumerating or hashing checkout
+contents. The source root itself remains exempt. Check ancestors of configured
+includes so a direct include inside a checkout cannot bypass the rule.
+`nested_repo_root` probes components in order and stops at the first missing,
+non-directory or symlinked one, so a checkout above a descendant link is still
+found and nothing is probed through a link; callers check it before the
+descendant-symlink omission. Strict publishing refuses an unreadable component
+or checkout-marker probe; diagnostic scans remain permissive.
+
+**One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
+roots its own walk skipped. Push, status and diff never re-walk for them, and
+`_build_exclude_map` takes roots only from its caller. Pull (and `mm diff`'s
+remote filter) uses `_incoming_nested_roots` / `nested_repo_roots_for_paths`:
+it lstats only the local ancestors of incoming peer files and tombstones, once
+per directory, stopping at missing, non-directory or symlinked components. Never
+reintroduce a local tree walk into pull/autopull. diag's
+`nested_repo_skip_prefixes` is the only inventory walk: write-free, best-effort,
+not persisted sync state.
+
+**Freeze, do not exclude, on push.** `_freeze_nested_checkout_entries` copies this
+Mac's prior entries under each walker-reported root into the local manifest
+unchanged, before the symlink filter and without inspecting what replaced them
+on disk. The push prior filter leaves those roots' tombstones in place, and a
+path with a prior tombstone is never frozen (merged conflict copies can carry
+both; reviving it would advertise a reaped blob). Adding `.git` over published
+files therefore uploads nothing, mints no tombstones and keeps peer copies;
+deleting the checkout later tombstones them like any deletion. Filtering the
+prior instead (exclusion) made deletion stop converging: peers kept republishing
+their plain copies and the next pull resurrected them. Upload skips every frozen
+path, so their changed local bytes are never read. With `fetch.is_ok` the prior
+is this Mac's accepted manifest. A recovered prior freezes only entries whose
+blob still exists under this device's key; the rest are excluded (their only
+loss is convergence on a later delete). `_drop_unfrozen_checkout_files` then
+drops every unfrozen prior file entry under a root (tombstoned or blob-less),
+keeping tombstones, so the omission guard never probes checkout contents. The
+mm-events rescan carries frozen entries across its source replacement, except
+paths it sees again (their `.git` vanished mid-push), which upload normally.
+The symlink filter then exempts every root (`exempt_roots`), keeping their
+entries and tombstones without probing beneath a frozen checkout. Walkers
+report a checkout above an absent or linked include too. Status freezes from
+the same exclusion-filtered prior so frozen entries never show as pending
+deletions, while an excluded one still does.
+
+`_prove_omitted_paths_absent` has no checkout exemption. Frozen entries are
+present in the local manifest; anything else still on disk but omitted (for
+example an include deselected while its folder became a checkout, unless another
+include still reaches that checkout root) refuses as it always did. An
+exemption there minted tombstones for files still on disk.
+
+Frozen entries retire when the checkout is deleted (tombstones everywhere), or
+without tombstones (peer copies stay) when an `exclude_patterns` glob such as
+`<folder>/*` or a new `.extend-root` marker above the checkout covers them. The freeze also ends silently whenever the prior
+no longer lists them: disable then enable of the source, `mm recover
+--abandon-manifest`, peer-fallback recovery, blob-less recovery, or adding then
+removing a glob. Those paths lose delete convergence like the exclusion they
+amount to.
+
+Attended push and preview print one `mm: notice: skipped: nested git repository
+source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
+is not a data-at-risk warning), and status/diag list roots. Attended pull (not
+`--dry-run` or autopull, which write no `excluded` history) logs one `excluded`
+record per root and device manifest, not per file; a peer with only tombstones
+there is logged too (informational: pull is additive and never deletes local
+files). Pull's probe treats a peer path the filesystem cannot
+encode as a stop, never an exception. Conflict-copy discovery (`resolveflow`)
+still walks inside checkouts; pull's no-write guarantee covers peer files.
+`marker_skip_globs` checks `nested_repo_root` and parent links before its first
+lstat of an include, so marker discovery never probes inside a checkout. Status
+filters its freeze candidates through the full exclude map, marker prefixes
+included: a checkout reached directly by an `include_dirs` or `include_files`
+entry can sit below a marker directory, and push drops (never freezes) its prior
+entries. Only sanitized
+display copies reach terminals; exclusion keys keep their original bytes.
+
+`.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`
+drops any peer path or tombstone with a `.git` segment in any letter case (APFS
+lstat matches `.GIT`), so a peer cannot plant one to switch off sync of a
+subtree. It also drops `.` and empty segments, which `Path` would normalize away
+after literal prefix matching. This is intentionally stricter than push's
+case-sensitive `.git/` exclusion; honest walkers never produce these paths below
+a source root.
+
+`_warn_push_growth` uses already-materialized new-file diffs, counts groups by
+source and first two directory components, and names up to three groups exceeding
+1,000 new files. Its warning never refuses a push, includes no modified files and
+is skipped without an accepted manifest of this Mac's own (`fetch.is_ok` false).
 
 ## Generated files are not sync data (load-bearing, v0.12.51)
 
@@ -322,7 +414,7 @@ the same key-presence test. A new `sync.sources` consumer should use it too.
 ## `walk_generic_source` filesystem-identity dedup (load-bearing, v0.10.1)
 Mirror of `_find_conflict_files`'s dedup at the manifest-walk layer. When `include_files` overlaps `include_dirs`, the same on-disk file lands in `collected_paths` twice. Pre-v0.10.1, the second pass got hashed and overwrote the first manifest entry — wasted CPU on identical bytes. On case-insensitive volumes (APFS default) with case-mismatched config, two distinct rel-keys could be created for one inode — a real correctness bug producing phantom add/delete fleet churn.
 
-Dedup uses `set[tuple[int, int]]` keyed on `(st_dev, st_ino)`. Sort `collected_paths` by relative-to-base path BEFORE the dedup pass so the rel-key kept on hardlink/symlink overlap is deterministic across runs and across machines (rglob iteration order is FS-dependent on macOS APFS). Without the sort, two peers walking the same tree could pick different rel keys for the same inode and generate phantom add/delete churn in the manifest diff. Sites: `manifest.py:walk_generic_source` (the pre-hash loop). Stat failures silently skip (consistent with `_record_file`'s race tolerance).
+Dedup uses `set[tuple[int, int]]` keyed on `(st_dev, st_ino)`. Sort `collected_paths` by relative-to-base path BEFORE the dedup pass so the rel-key kept on hardlink/symlink overlap is deterministic across runs and across machines (include_files entries follow include_dirs results in config order, and enumeration order varies across machines). Without the sort, two peers walking the same tree could pick different rel keys for the same inode and generate phantom add/delete churn in the manifest diff. Sites: `manifest.py:walk_generic_source` (the pre-hash loop). Stat failures silently skip (consistent with `_record_file`'s race tolerance).
 
 ## Pull-time case-collision detection (load-bearing, v0.10.1)
 A Linux peer can legitimately have BOTH `Projects/x.md` AND `projects/x.md` (case-sensitive ext4). A macOS APFS puller can only represent one — the second WRITE would silently alias / overwrite the first via inode collision. Pre-v0.10.1, this was a silent data-loss hazard.

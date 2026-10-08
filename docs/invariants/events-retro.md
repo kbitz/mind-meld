@@ -1657,7 +1657,13 @@ outcome holder before invoking it. All four CLI capture gates test `appended`,
 not the existence of that outcome: no-row/prerequisite outcomes must preserve
 the ordinary activity walk and cursor advance. The holder records capture-start
 UTC `attempted_at`, `row_ts` if appended, separate class/cause, and allowlisted
-reader outcomes. Computed publication verdicts win over `push-failed`; the latter
+reader outcomes. A `push-failed` record carries `interrupted`, `storage-error`,
+`snapshot-refused`, or `error`; legacy null causes remain readable. Only a
+`storage-error` may carry `errno`, an OS errno name or null, extracted through
+explicit exception causes without storing paths or messages. Status/diag project
+it as `latest_attempt_errno` and render it beside the cause. Older closed-cause
+validators reject a new cause as corrupt/unknown without crashing; the record is
+local, not a wire-format change. Computed publication verdicts win over `push-failed`; the latter
 applies only to a core failure before manifest acceptance. Post-acceptance GC
 retains the verdict; evidence exceptions set `unverified: evidence-error` before
 printing so stderr and the record agree.

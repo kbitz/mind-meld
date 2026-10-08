@@ -15,7 +15,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 |---|---|
 | `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
-| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones |
+| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
 | `devices.py` | Device registry, short-id generation and lookup |
@@ -85,7 +85,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `lockedjson.py:locked_json_rmw` / `locked_json_snapshot` | `docs/invariants/sync.md` (Shared JSON locking) |
 | `lockedjson.py:locked_json_durable_rmw` | `docs/invariants/sync.md` (Atomic write publication failures) |
 | `storage/keys.py:manifest_key` / `blob_key` / `device_key` / `parse_blob_key` / `_validate_component` / `_validate_hex_sha` | `docs/invariants/sync.md` (Validated storage keys) |
-| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` | `docs/invariants/sync.md` |
+| `manifest.py:walk_generic_source` / `walk_grok_source` / `walk_claude_source` / `build_manifest_v2` / (`nested_roots` out-parameter) / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `_directory_is_git_repo` / `_collect_regular_files_scandir` / `cli.py:_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_collect_diag_state` / (diag `sync_scope`) | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
@@ -145,4 +145,3 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `pyproject.toml` version bump / tagging | `docs/invariants/auto-upgrade.md` |
 
 If you're touching multiple areas (e.g., adding a new field to mm-push event that also flows through aggregator + adds a CLI flag), read every applicable invariant file. They're short; bulk-reading is cheap. The cost of skipping one and breaking a load-bearing invariant is much higher.
-

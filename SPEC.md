@@ -340,7 +340,7 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -631,6 +631,8 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **`grok` type** — Claude-shaped walker for `~/.grok`. Hardcodes `skills/`, `commands/`, and `rules/` at the source root. Sessions, credentials, and `config.toml` are never entered. See [Host Interchangeability](#host-interchangeability).
 
+**Nested git checkouts (all types).** Every walker skips a directory strictly below the source root that contains a `.git` directory or file, so a repository cloned inside a synced folder is not published. A folder that was already published and later becomes a checkout is frozen, not deleted. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
+
 ### Excluded Patterns
 
 Hardcoded global list (universal junk; not configurable):
@@ -744,7 +746,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`grok`** — Claude-shaped walker. Scans `skills/`, `commands/`, and `rules/` at `~/.grok`. Sessions and `auth.json` are never synced.
-- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
 

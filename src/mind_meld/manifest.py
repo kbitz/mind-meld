@@ -69,6 +69,7 @@ CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGIT
 # gstack-extend drops this file in every directory it renders. The walker
 # skips the containing directory; see marker_skip_globs.
 MARKER_SKIP_NAME = ".extend-root"
+NESTED_REPO_SKIP_REASON = "nested git repository"
 
 
 def is_conflict_filename(name: str) -> bool:
@@ -302,6 +303,209 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
     return False
 
 
+def _directory_is_git_repo(
+    directory: Path, base: Path, *, strict: bool, source_name: str | None
+) -> bool:
+    try:
+        marker = (directory / ".git").lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as e:
+        if strict:
+            raise SnapshotError(
+                snapshot_refusal(
+                    source=source_name,
+                    rel_path=_rel_or_name(directory, base),
+                    problem="could not check for a nested git repository",
+                    cause=os_error_cause(e),
+                    next_action="Restore read access, then run mm push.",
+                )
+            ) from e
+        return False
+    return stat.S_ISDIR(marker.st_mode) or stat.S_ISREG(marker.st_mode)
+
+
+def nested_repo_root(
+    directory: Path, base: Path, *, strict: bool = False, source_name: str | None = None
+) -> str | None:
+    """Find the outermost checkout ancestor strictly below the source root.
+
+    Probe components in order and stop at the first missing, non-directory or
+    symlinked one: a checkout above a descendant link is still found, and
+    nothing is probed through a link. Check ancestors too, since an include_dir
+    or include_file can point directly into a checkout. The source root's own
+    .git never changes its selection.
+    """
+    try:
+        parts = directory.relative_to(base).parts
+    except ValueError:
+        return None
+    current = base
+    for part in parts:
+        current /= part
+        try:
+            st = current.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(current, base),
+                        problem="could not check for a nested git repository",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            return None
+        if _directory_is_git_repo(current, base, strict=strict, source_name=source_name):
+            return current.relative_to(base).as_posix()
+    return None
+
+
+def nested_repo_skip_prefixes(
+    source_config: dict[str, Any], *, strict: bool = False, skip_prefixes: list[str] | None = None
+) -> list[str]:
+    """Inventory selected directories for diag; prune checkouts without reading their files.
+
+    Returns literal relative roots, never fnmatch patterns or persisted
+    manifest metadata. Push and status take roots from their own walk; pull
+    and diff probe incoming paths with ``nested_repo_roots_for_paths``.
+    """
+    source_name = source_config.get("name")
+    base = Path(source_config["path"]).expanduser().resolve()
+    source_type = source_config.get("type", "claude")
+    roots: set[str] = set()
+    scan_dirs: list[Path] = []
+    if source_type == "generic" and skip_prefixes is None:
+        skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if source_type == "claude":
+        projects = base / "projects"
+        if path_has_descendant_symlink(projects, base, strict=strict, source_name=source_name):
+            return []
+        if root := nested_repo_root(projects, base, strict=strict, source_name=source_name):
+            return [root]
+        projects_st = _lstat_or_none(
+            projects, strict=strict, source_name=source_name, rel_path="projects"
+        )
+        # Mirror walk_claude_source: a missing or non-directory projects is empty.
+        if projects_st is None or not stat.S_ISDIR(projects_st.st_mode):
+            return []
+        try:
+            with os.scandir(projects) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        project = Path(entry.path)
+                        if _directory_is_git_repo(
+                            project, base, strict=strict, source_name=source_name
+                        ):
+                            roots.add(project.relative_to(base).as_posix())
+                        else:
+                            scan_dirs.extend(project / subdir for subdir in SYNCED_SUBDIRS)
+        except FileNotFoundError:
+            return []
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path="projects",
+                        problem="could not be enumerated",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+    else:
+        dirs = (
+            GROK_SYNCED_SUBDIRS
+            if source_type == "grok"
+            else source_config.get("include_dirs") or []
+        )
+        scan_dirs = [base / name for name in dirs]
+        include_files = source_config.get("include_files") or [] if source_type == "generic" else []
+        for name in include_files:
+            if _under_skip_prefix(name, skip_prefixes):
+                continue
+            path = base / name
+            if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
+                roots.add(root)
+    for directory in scan_dirs:
+        # An absent or linked include inside a checkout still excludes that checkout.
+        if root := nested_repo_root(directory, base, strict=strict, source_name=source_name):
+            roots.add(root)
+            continue
+        if path_has_descendant_symlink(directory, base, strict=strict, source_name=source_name):
+            continue
+        st = _lstat_or_none(
+            directory,
+            strict=strict,
+            source_name=source_name,
+            rel_path=_rel_or_name(directory, base),
+        )
+        if st is None or not stat.S_ISDIR(st.st_mode):
+            continue
+        _collect_regular_files_scandir(
+            directory,
+            base,
+            strict=strict,
+            source_name=source_name,
+            skip_prefixes=skip_prefixes,
+            nested_repos=roots,
+            collect_files=False,
+        )
+    return sorted(roots)
+
+
+def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -> list[str]:
+    """Find local checkout roots above incoming peer paths without walking local trees.
+
+    Probes each local ancestor directory at most once. A missing, non-directory
+    or symlinked component ends that path's probe: pull never writes through
+    it, and descendant symlinks keep their own policy. Best-effort, like any
+    permissive inspection; an unreadable probe is not a checkout.
+    """
+    source_name = source_config.get("name")
+    try:
+        base = Path(source_config["path"]).expanduser().resolve()
+    except (KeyError, TypeError, OSError):
+        return []
+    roots: set[str] = set()
+    probed: dict[str, str] = {}
+    parents = {rel.rpartition("/")[0] for rel in rel_paths if isinstance(rel, str) and "/" in rel}
+    for parent in parents:
+        current = ""
+        for part in parent.split("/"):
+            if part in ("", ".", ".."):
+                break
+            current = f"{current}/{part}" if current else part
+            state = probed.get(current)
+            if state is None:
+                directory = base / current
+                try:
+                    st = directory.lstat()
+                except (OSError, ValueError):
+                    # ValueError: a peer path the filesystem cannot encode.
+                    state = "stop"
+                else:
+                    if not stat.S_ISDIR(st.st_mode):
+                        state = "stop"
+                    elif _directory_is_git_repo(
+                        directory, base, strict=False, source_name=source_name
+                    ):
+                        state = "checkout"
+                    else:
+                        state = "dir"
+                probed[current] = state
+            if state == "checkout":
+                roots.add(current)
+            if state != "dir":
+                break
+    return sorted(roots)
+
+
 def marker_skip_globs(
     source_config: dict[str, Any],
     *,
@@ -360,6 +564,14 @@ def marker_skip_globs(
     seen: set[str] = set()
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        # A checkout covering this include is reported and frozen by the
+        # walker; never probe beneath it or through a link above the include.
+        if nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+            continue
+        if path_has_descendant_symlink(
+            scan_dir.parent, base, strict=strict, source_name=source_name
+        ):
+            continue
         try:
             st = scan_dir.lstat()
         except FileNotFoundError:
@@ -449,6 +661,10 @@ def _collect_marker_files(
 ) -> list[Path]:
     """Find ``.extend-root`` markers under ``scan_dir`` without following links."""
     found: list[Path] = []
+    if path_has_descendant_symlink(
+        scan_dir, base, strict=strict, source_name=source_name
+    ) or nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+        return found
 
     def walk(directory: Path, *, discovered: bool) -> None:
         try:
@@ -456,6 +672,10 @@ def _collect_marker_files(
         except ValueError:
             rel_dir = directory.name
         if rel_dir and _dir_is_policy_skipped(rel_dir, None):
+            return
+        if directory != base and _directory_is_git_repo(
+            directory, base, strict=strict, source_name=source_name
+        ):
             return
         try:
             with os.scandir(directory) as iterator:
@@ -924,9 +1144,32 @@ def _collect_regular_files_scandir(
     strict: bool,
     source_name: str | None,
     skip_prefixes: list[str] | None = None,
+    on_skip: Any = None,
+    nested_repos: set[str] | None = None,
+    collect_files: bool = True,
 ) -> list[Path]:
-    """Explicit ``os.scandir`` walk that never follows descendant symlinks."""
+    """Explicit ``os.scandir`` walk that never follows descendant symlinks.
+
+    Prunes nested checkouts (a ``start`` inside one, or any directory below
+    it with ``.git``) before listing their contents, reporting each root to
+    ``on_skip`` with NESTED_REPO_SKIP_REASON and to ``nested_repos``.
+    ``collect_files=False`` runs that inventory without collecting files.
+    """
     collected: list[Path] = []
+
+    def skip_repo(root: str) -> None:
+        if nested_repos is not None:
+            nested_repos.add(root)
+        if on_skip:
+            on_skip(root, NESTED_REPO_SKIP_REASON)
+
+    if root := nested_repo_root(start, base, strict=strict, source_name=source_name):
+        skip_repo(root)
+        return collected
+    if path_has_descendant_symlink(start, base, strict=strict, source_name=source_name):
+        if on_skip and collect_files:
+            on_skip(str(start), "symlink")
+        return collected
 
     def walk(directory: Path, *, discovered: bool) -> None:
         try:
@@ -934,6 +1177,11 @@ def _collect_regular_files_scandir(
         except ValueError:
             rel_dir = directory.name
         if rel_dir and _dir_is_policy_skipped(rel_dir, skip_prefixes):
+            return
+        if directory != base and _directory_is_git_repo(
+            directory, base, strict=strict, source_name=source_name
+        ):
+            skip_repo(rel_dir)
             return
         try:
             with os.scandir(directory) as iterator:
@@ -993,7 +1241,7 @@ def _collect_regular_files_scandir(
                 continue
             if stat.S_ISDIR(st.st_mode):
                 walk(child, discovered=True)
-            elif stat.S_ISREG(st.st_mode):
+            elif collect_files and stat.S_ISREG(st.st_mode):
                 collected.append(child)
 
     walk(start, discovered=False)
@@ -1141,7 +1389,10 @@ def walk_claude_source(
     Args:
         base_dir: Root directory to walk (e.g., ~/.claude)
         max_file_size: Skip files larger than this (bytes). Default 50MB.
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         exclude_patterns: Optional per-source fnmatch globs that extend the
             hardcoded EXCLUDED list. Matched against the relative path.
         strict: Publishing scans refuse incomplete observations.
@@ -1171,6 +1422,10 @@ def walk_claude_source(
     if stat.S_ISLNK(projects_st.st_mode):
         return {}
     if not stat.S_ISDIR(projects_st.st_mode):
+        return {}
+    if root := nested_repo_root(projects_dir, base, strict=strict, source_name=source_name):
+        if on_skip:
+            on_skip(root, NESTED_REPO_SKIP_REASON)
         return {}
 
     files: dict[str, dict[str, Any]] = {}
@@ -1215,6 +1470,10 @@ def walk_claude_source(
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                 continue
             project_dir = Path(entry.path)
+            if _directory_is_git_repo(project_dir, base, strict=True, source_name=source_name):
+                if on_skip:
+                    on_skip(project_dir.relative_to(base).as_posix(), NESTED_REPO_SKIP_REASON)
+                continue
             for subdir_name in SYNCED_SUBDIRS:
                 subdir = project_dir / subdir_name
                 sub_st = _lstat_or_none(
@@ -1232,7 +1491,7 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
         for scan_dir in scan_dirs:
             for path in _collect_regular_files_scandir(
-                scan_dir, base, strict=True, source_name=source_name
+                scan_dir, base, strict=True, source_name=source_name, on_skip=on_skip
             ):
                 if result := _record_file(
                     path,
@@ -1249,7 +1508,11 @@ def walk_claude_source(
         return files
 
     for project_dir in projects_dir.iterdir():
-        if not project_dir.is_dir():
+        if project_dir.is_symlink() or not project_dir.is_dir():
+            continue
+        if _directory_is_git_repo(project_dir, base, strict=False, source_name=source_name):
+            if on_skip:
+                on_skip(project_dir.relative_to(base).as_posix(), NESTED_REPO_SKIP_REASON)
             continue
         for subdir_name in SYNCED_SUBDIRS:
             subdir = project_dir / subdir_name
@@ -1257,9 +1520,9 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
 
     for scan_dir in scan_dirs:
-        for path in scan_dir.rglob("*"):
-            if not path.is_file():
-                continue
+        for path in _collect_regular_files_scandir(
+            scan_dir, base, strict=False, source_name=source_name, on_skip=on_skip
+        ):
             if result := _record_file(path, base, max_file_size, on_skip, exclude_patterns):
                 rel, info = result
                 files[rel] = info
@@ -1315,14 +1578,11 @@ def walk_grok_source(
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
-        if strict:
-            collected_paths.extend(
-                _collect_regular_files_scandir(scan_dir, base, strict=True, source_name=source_name)
+        collected_paths.extend(
+            _collect_regular_files_scandir(
+                scan_dir, base, strict=strict, source_name=source_name, on_skip=on_skip
             )
-        else:
-            for path in scan_dir.rglob("*"):
-                if path.is_file():
-                    collected_paths.append(path)
+        )
 
     collected_paths.sort(
         key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
@@ -1400,7 +1660,10 @@ def walk_generic_source(
                 `marker_skip_globs`); that skip is a path-prefix match so
                 it does not generate deletion tombstones.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
@@ -1441,6 +1704,12 @@ def walk_generic_source(
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        # Report a checkout above an include even when the include is absent or
+        # linked, so push freezes its published entries instead of dropping them.
+        if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+            if on_skip:
+                on_skip(root, NESTED_REPO_SKIP_REASON)
+            continue
         st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
         if st is None:
             continue
@@ -1450,23 +1719,23 @@ def walk_generic_source(
             continue
         if not stat.S_ISDIR(st.st_mode):
             continue
-        if strict:
-            collected_paths.extend(
-                _collect_regular_files_scandir(
-                    scan_dir,
-                    base,
-                    strict=True,
-                    source_name=source_name,
-                    skip_prefixes=skip_prefixes,
-                )
+        collected_paths.extend(
+            _collect_regular_files_scandir(
+                scan_dir,
+                base,
+                strict=strict,
+                source_name=source_name,
+                skip_prefixes=skip_prefixes,
+                on_skip=on_skip,
             )
-        else:
-            for path in scan_dir.rglob("*"):
-                if path.is_file():
-                    collected_paths.append(path)
+        )
 
     for filename in include_files:
         path = base / filename
+        if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
+            if on_skip:
+                on_skip(root, NESTED_REPO_SKIP_REASON)
+            continue
         st = _lstat_or_none(path, strict=strict, source_name=source_name, rel_path=filename)
         if st is None:
             continue
@@ -1491,7 +1760,8 @@ def walk_generic_source(
     #
     # Sort by relative-to-base path before dedup so the rel-key kept on
     # hardlink/symlink overlap is deterministic across runs and across
-    # machines (rglob iteration order is FS-dependent on macOS APFS).
+    # machines (include_files entries follow include_dirs results in config
+    # order, and filesystem enumeration order varies across machines).
     # Without this sort, two peers walking the same tree could pick
     # different rel keys for the same inode, generating phantom
     # add/delete churn in the manifest diff.
@@ -1564,7 +1834,10 @@ def walk_source(
             type="grok" -> walk_grok_source
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. Nested
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
@@ -1609,6 +1882,7 @@ def build_manifest_v2(
     *,
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
+    nested_roots: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -1618,10 +1892,14 @@ def build_manifest_v2(
         sources_configs: List of source config dicts, each with at least
             "name", "type", and "path" keys.
         max_file_size: Skip files larger than this (bytes).
-        on_skip: Optional callback(path, reason) for skipped files.
+        on_skip: Optional callback(path, reason) for skipped files. For
+            NESTED_REPO_SKIP_REASON the path is a checkout directory root
+            qualified as ``source:rel``, reported once per source.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
+        nested_roots: Optional out-parameter receiving each source's
+            skipped checkout roots (bare relative paths) from this same walk.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -1630,10 +1908,23 @@ def build_manifest_v2(
 
     for src_cfg in sources_configs:
         name = src_cfg["name"]
+        reported_repos: set[str] = set()
+
+        def source_skip(path: str, reason: str) -> None:
+            if reason == NESTED_REPO_SKIP_REASON:
+                if path in reported_repos:
+                    return
+                reported_repos.add(path)
+                if nested_roots is not None:
+                    nested_roots.setdefault(name, set()).add(path)
+                path = f"{name}:{path}"
+            if on_skip is not None:
+                on_skip(path, reason)
+
         base_path, files = walk_source(
             src_cfg,
             max_file_size,
-            on_skip,
+            source_skip,
             strict=strict,
             diagnostic_hash=diagnostic_hash,
         )
