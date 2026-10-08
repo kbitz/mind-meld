@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import io
 import os
 import signal
 import subprocess
@@ -18,10 +19,31 @@ import time
 from pathlib import Path
 
 import pytest
+import typer
+from rich.console import Console
 
-from mind_meld import lockfile
+from mind_meld import cli, lockfile
 from mind_meld.errors import LockError
 from mind_meld.lockfile import acquire_lock, release_lock
+
+_WAIT = (
+    "Wait for it to finish, then run this command again. If that operation is "
+    "waiting for input in another terminal, answer it there; if its output says "
+    "it is updating mm, let it finish, which can take several minutes. Do not "
+    "delete the mm lockfile or kill the process; the lock is released when it exits."
+)
+
+
+def _pid_message(pid: int) -> str:
+    return (
+        f"Another mm operation is running (PID {pid}). {_WAIT} "
+        f"To see the process, run:\n  ps -p {pid} -o etime=,tty=,command="
+    )
+
+
+def _unknown_message() -> str:
+    return f"Another mm operation is running (PID unknown). {_WAIT}"
+
 
 # Repo root for subprocess children to import from.
 _REPO_SRC = str(Path(__file__).parent.parent / "src")
@@ -291,3 +313,79 @@ class TestStatePostRelease:
             assert lock_path.read_text().strip() == str(os.getpid())
         finally:
             release_lock(lock_path)
+
+
+class TestContentionGuidance:
+    def test_held_lock_names_the_child_and_keeps_the_inode(self, tmp_path):
+        lock_path = tmp_path / "mind-meld.lock"
+        ready_marker = tmp_path / "ready"
+        script = TestCrossProcess()._child_script(lock_path, ready_marker)
+        child = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert _wait_for(lambda: ready_marker.exists()), "child never signaled ready"
+            inode = os.stat(lock_path).st_ino
+            with pytest.raises(LockError) as exc_info:
+                acquire_lock(lock_path)
+            assert str(exc_info.value) == _pid_message(child.pid)
+            assert lock_path.exists()
+            assert os.stat(lock_path).st_ino == inode
+            with pytest.raises(LockError):
+                acquire_lock(lock_path)
+        finally:
+            if child.stdin:
+                child.stdin.close()
+            child.wait(timeout=5)
+
+        acquire_lock(lock_path)
+        try:
+            assert os.stat(lock_path).st_ino == inode
+        finally:
+            release_lock(lock_path)
+
+    @pytest.mark.parametrize("body", ["", "0", "-1", "abc"])
+    def test_unusable_body_says_pid_unknown(self, tmp_path, body):
+        lock_path = tmp_path / "mind-meld.lock"
+        script = textwrap.dedent(
+            """
+            import fcntl, sys
+            path, body = sys.argv[1], sys.argv[2]
+            handle = open(path, "w")
+            handle.write(body)
+            handle.flush()
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            print("locked", flush=True)
+            sys.stdin.read()
+            """
+        ).strip()
+        child = subprocess.Popen(
+            [sys.executable, "-c", script, str(lock_path), body],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "locked"
+            with pytest.raises(LockError) as exc_info:
+                acquire_lock(lock_path)
+            assert str(exc_info.value) == _unknown_message()
+        finally:
+            if child.stdin:
+                child.stdin.close()
+            child.wait(timeout=5)
+
+    @pytest.mark.parametrize("width", [80, 60])
+    def test_error_render_keeps_the_ps_line(self, monkeypatch, width):
+        pid = 424242
+        text = _pid_message(pid)
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "stderr_console", Console(file=buf, width=width))
+        with pytest.raises(typer.Exit):
+            cli._error(text)
+        wanted = f"ps -p {pid} -o etime=,tty=,command="
+        assert [line.strip() for line in buf.getvalue().splitlines()].count(wanted) == 1

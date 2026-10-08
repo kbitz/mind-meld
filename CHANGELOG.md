@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.5.2] - 2026-10-07
+
+**mm no longer tells you to delete its lockfile when another mm operation is running.** It now tells you to wait and run the command again, and the note `mm update` prints for an up-to-date install made from a tag, branch or bare repository URL is now accurate. If an older mm told you to remove the lockfile, do not.
+
+### Fixed
+
+- The "Another mm operation is running" message no longer says to remove the lockfile. It says to wait for the other operation to finish and run the command again, to answer a prompt that operation is waiting on in its own terminal, and to let an update finish (it can take several minutes). It warns against deleting the mm lockfile or killing the process. When the holder's PID is known, the message names it and ends with a copyable `ps -p <PID> -o etime=,tty=,command=` line; otherwise it says the PID is unknown. The lock itself is unchanged: it is released when the holding process exits.
+- When `mm update` finds an install made from a tag, a branch ref or the bare repository URL already up to date, it now says "This install was made from <spec>, so mm will not update it automatically" instead of calling the install pinned, and prints the reinstall command on its own line so it can be copied intact, including when your pipx home path contains square brackets. Other `mm update` messages, such as the refusal when GitHub is unreachable, keep their existing wording.
+
+### Changed
+
+- Automatic updates still act only on the exact `@latest` install. The documentation now spells out that an install made from a branch ref or the bare repository URL can be moved by running `pipx upgrade` yourself, while an install made from a release tag or commit stays on that commit.
+
+### Upgrade notes
+
+- No command, flag, wire or storage format changes.
+- Releases before 1.5.2 print the old advice to remove the lockfile. Do not follow it: deleting the file can let a second mm operation start while the first still holds the lock. Wait for the other operation to finish instead.
+
 ## [1.5.1] - 2026-10-05
 
 **`mm update` now shows a compact progress bar in a terminal, driven only by what the installer reports.** You can see which phase an update is in and, when pip measures it, how far along a download or a multi-package install is.
