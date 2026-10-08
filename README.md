@@ -1132,7 +1132,8 @@ and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
 `warm_ms` (5000). Timings exclude cache serialization. Dates are normalized
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
-opening host logs or needing a passphrase; Codex counts rollout paths and Grok
+opening host logs or needing a passphrase; Codex counts rollout paths under both
+its live and archived roots and Grok
 counts two-level `*/*/updates.jsonl` paths under its resolved sessions root.
 `cache_state: missing` or `unreadable` leaves the blocker unknown.
 

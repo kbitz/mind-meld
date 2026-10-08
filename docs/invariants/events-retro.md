@@ -277,7 +277,8 @@ tuple (same names, same order). Unknown inbound names (retired `opencode`,
 or a future reader) are retained by the aggregator, not listed here.
 `_default_host_readers(sources, grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
-parsed — matching `_enabled_claude_paths`. Grok is a scoped sync source
+(or the archive, `~/.codex/archived_sessions`) parsed — matching
+`_enabled_claude_paths`. Grok is a scoped sync source
 (`type: "grok"`, hardcoded `skills/` / `commands/` / `rules/`).
 `HOST_READER_SOURCE_GATE["grok"]` is `"grok"`. The 21A `[retro].grok_host_usage`
 bit remains an OR so a prior usage-only opt-in does not go dark.
@@ -727,7 +728,7 @@ across that boundary shows a large fake decline.
 
 **Migration remains a disclosure condition.** ``device_id`` lives in local
 ``config.toml`` while the host stores (``~/.codex/sessions``,
-``~/.grok/sessions``) sit outside every mm sync source. Migrating a home
+``~/.codex/archived_sessions``, ``~/.grok/sessions``) sit outside every mm sync source. Migrating a home
 directory and running ``mm init`` fresh can put copied history under two
 device ids. The renderer sums the reported usage and detects matching daily
 counter tuples; ``duplicate_ledger`` warns that affected token and cost totals
@@ -1381,7 +1382,8 @@ Healthy Codex stays silent. Diag labels inventory and blocker separately:
 healthy caches say `none`, and a valid date renders
 `(first observed YYYY-MM-DD UTC)`. Inventory `ready` plus blocker `none`
 still does not prove totals were published. Diag reads cache metadata without
-opening host logs or requiring a passphrase; Codex counts rollout paths and
+opening host logs or requiring a passphrase; Codex counts rollout paths under
+both its live and archived roots (see "Archived Codex rollouts" below) and
 Grok counts two-level `*/*/updates.jsonl` paths under `grok_sessions_root()`
 via `os.scandir` (not `Path.glob`, which swallows scan errors on Python 3.13).
 `grok_usage_diag.files_cached` counts entries only in a valid current-version
