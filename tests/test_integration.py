@@ -10329,6 +10329,24 @@ def test_exclude_glob_retires_frozen_entries_without_tombstones(capture61):
     assert "gstack:proj/note.md" not in accepted["tombstones"]
 
 
+def test_status_agrees_with_push_for_a_checkout_below_a_marker_dir(capture61):
+    root, _src = _gstack_source(capture61, include_dirs=["proj", "proj/r/c"])
+    (root / "proj" / "r" / "c").mkdir(parents=True)
+    (root / "proj" / "r" / "c" / "note.md").write_text("published")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (root / "proj" / "r" / "c" / ".git").mkdir()
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert "proj/r/c/note.md" in _accepted(capture61)["sources"]["gstack"]["files"]
+    (root / "proj" / "r" / ".extend-root").write_text("generated")
+    status = runner.invoke(app, ["status", "--source", "gstack"])
+    assert status.exit_code == 0, status.output
+    assert "deleted" in status.stdout
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    accepted = _accepted(capture61)
+    assert "proj/r/c/note.md" not in accepted["sources"]["gstack"]["files"]
+    assert "gstack:proj/r/c/note.md" not in accepted["tombstones"]
+
+
 def test_merged_conflict_copy_tombstone_inside_a_checkout_does_not_wedge_push(capture61):
     root, _src = _gstack_source(capture61, include_dirs=["proj"])
     (root / "proj").mkdir()

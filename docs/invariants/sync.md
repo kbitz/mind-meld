@@ -294,8 +294,9 @@ encode as a stop, never an exception. Conflict-copy discovery (`resolveflow`)
 still walks inside checkouts; pull's no-write guarantee covers peer files.
 `marker_skip_globs` checks `nested_repo_root` and parent links before its first
 lstat of an include, so marker discovery never probes inside a checkout. Status
-filters its freeze candidates by exclude globs only (`markers=False`): marker
-prefixes never fall inside a reported checkout. Only sanitized
+filters its freeze candidates through the full exclude map, marker prefixes
+included: a directly included checkout can sit below a marker directory, and
+push drops (never freezes) its prior entries. Only sanitized
 display copies reach terminals; exclusion keys keep their original bytes.
 
 `.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`

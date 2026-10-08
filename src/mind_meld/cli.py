@@ -744,7 +744,6 @@ def _build_exclude_map(
     *,
     strict: bool = False,
     nested_roots: Mapping[str, Iterable[str]] | None = None,
-    markers: bool = True,
 ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
     """Map source name -> exclude_patterns and directory-skip prefixes.
 
@@ -756,8 +755,7 @@ def _build_exclude_map(
 
     ``nested_roots`` adds nested-checkout roots the caller already observed
     (pull's and diff's probe of incoming paths); this helper never walks for
-    them. Push freezes entries under its walk's roots instead. ``markers=False``
-    skips the `.extend-root` walk for callers that only filter checkout entries.
+    them. Push freezes entries under its walk's roots instead.
 
     Publishing supplies the already-resolved source list and strict mode
     so this helper does not re-enter a permissive ``get_sources``.
@@ -769,7 +767,7 @@ def _build_exclude_map(
         patterns = list(src.get("exclude_patterns") or [])
         if src.get("type") == "grok":
             patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
-        prefs = marker_skip_globs(src, strict=strict) if markers else []
+        prefs = marker_skip_globs(src, strict=strict)
         prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
         if patterns:
             out[src["name"]] = patterns
@@ -6065,10 +6063,9 @@ def status(
     remote_manifest = fetch.manifest if fetch.is_ok else None
     if remote_manifest is not None and nested_roots:
         # Match what push publishes: freeze from the same filtered prior, so an
-        # excluded entry under a checkout still shows as a pending removal.
-        # Marker prefixes never fall inside a reported checkout (the marker scan
-        # never enters one), so the glob filter alone yields push's freeze set.
-        exclude_map, skip_prefixes = _build_exclude_map(config, sources_configs, markers=False)
+        # excluded entry under a checkout still shows as a pending removal. Keep
+        # the marker prefixes: a reported checkout can sit below a marker dir.
+        exclude_map, skip_prefixes = _build_exclude_map(config, sources_configs)
         _freeze_nested_checkout_entries(
             local_manifest,
             _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes),
