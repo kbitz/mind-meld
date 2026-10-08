@@ -276,9 +276,9 @@ example an include deselected while its folder became a checkout, unless another
 include still reaches that checkout root) refuses as it always did. An
 exemption there minted tombstones for files still on disk.
 
-Frozen entries retire when the checkout is deleted (tombstones everywhere) or an
-`exclude_patterns` glob such as `<folder>/*` covers them (dropped without
-tombstones; peer copies stay). The freeze also ends silently whenever the prior
+Frozen entries retire when the checkout is deleted (tombstones everywhere), or
+without tombstones (peer copies stay) when an `exclude_patterns` glob such as
+`<folder>/*` or a new `.extend-root` marker above the checkout covers them. The freeze also ends silently whenever the prior
 no longer lists them: disable then enable of the source, `mm recover
 --abandon-manifest`, peer-fallback recovery, blob-less recovery, or adding then
 removing a glob. Those paths lose delete convergence like the exclusion they
@@ -295,8 +295,9 @@ still walks inside checkouts; pull's no-write guarantee covers peer files.
 `marker_skip_globs` checks `nested_repo_root` and parent links before its first
 lstat of an include, so marker discovery never probes inside a checkout. Status
 filters its freeze candidates through the full exclude map, marker prefixes
-included: a directly included checkout can sit below a marker directory, and
-push drops (never freezes) its prior entries. Only sanitized
+included: a checkout reached directly by an `include_dirs` or `include_files`
+entry can sit below a marker directory, and push drops (never freezes) its prior
+entries. Only sanitized
 display copies reach terminals; exclusion keys keep their original bytes.
 
 `.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`

@@ -10322,7 +10322,8 @@ def test_exclude_glob_retires_frozen_entries_without_tombstones(capture61):
     save_config(capture61["cfg"], capture61["path"])
     status = runner.invoke(app, ["status", "--source", "gstack"])
     assert status.exit_code == 0, status.output
-    assert "deleted" in status.stdout
+    block = status.stdout.split("Source 'gstack':", 1)[1].split("\n\n", 1)[0]
+    assert "- 1 deleted" in block
     assert runner.invoke(app, ["push"]).exit_code == 0
     accepted = _accepted(capture61)
     assert "proj/note.md" not in accepted["sources"]["gstack"]["files"]
@@ -10340,7 +10341,8 @@ def test_status_agrees_with_push_for_a_checkout_below_a_marker_dir(capture61):
     (root / "proj" / "r" / ".extend-root").write_text("generated")
     status = runner.invoke(app, ["status", "--source", "gstack"])
     assert status.exit_code == 0, status.output
-    assert "deleted" in status.stdout
+    block = status.stdout.split("Source 'gstack':", 1)[1].split("\n\n", 1)[0]
+    assert "- 1 deleted" in block
     assert runner.invoke(app, ["push"]).exit_code == 0
     accepted = _accepted(capture61)
     assert "proj/r/c/note.md" not in accepted["sources"]["gstack"]["files"]
