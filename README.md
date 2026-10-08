@@ -325,11 +325,13 @@ already published, this Mac keeps advertising those last-published entries
 unchanged: nothing is uploaded or deleted, and peer copies stay in place. Edits
 and new files inside the checkout stay local. Deleting the checkout later
 deletes those entries like any other deletion, so peers converge instead of
-sending the files back. Pull never writes into or deletes from a local
-checkout, and `mm diff` previews the same view. Both check only the local
-folders above incoming paths; pull records one `excluded` log entry per checkout
-root. Pull also ignores peer paths containing a `.git` segment. Older writers may still publish checkout files;
-upgrade those Macs to apply the same default.
+sending the files back. To stop advertising them without deleting anything,
+add an `exclude_patterns` glob such as `<folder>/*` instead. Pull never writes into or
+deletes from a local checkout, and `mm diff` previews the same view. Both check
+only the local folders above incoming paths; pull records one `excluded` log
+entry per checkout root. Pull also ignores peer paths with a `.git` segment in
+any letter case, or with `.` or empty segments. Older writers may still publish
+checkout files; upgrade those Macs to apply the same default.
 
 A push adding more than 1,000 new files in a subtree prints a nonblocking growth
 warning naming up to three subtrees and their observed counts. Groups use the

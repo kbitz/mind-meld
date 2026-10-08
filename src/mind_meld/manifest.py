@@ -352,8 +352,8 @@ def nested_repo_skip_prefixes(
     """Inventory selected directories for diag; prune checkouts without reading their files.
 
     Returns literal relative roots, never fnmatch patterns or persisted
-    manifest metadata. Push, status and diff take roots from their own walk;
-    pull probes incoming paths with ``nested_repo_roots_for_paths``.
+    manifest metadata. Push and status take roots from their own walk; pull
+    and diff probe incoming paths with ``nested_repo_roots_for_paths``.
     """
     source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()
@@ -456,11 +456,10 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
         return []
     roots: set[str] = set()
     probed: dict[str, str] = {}
-    for rel_path in rel_paths:
-        if not isinstance(rel_path, str):
-            continue
+    parents = {rel.rpartition("/")[0] for rel in rel_paths if isinstance(rel, str) and "/" in rel}
+    for parent in parents:
         current = ""
-        for part in rel_path.split("/")[:-1]:
+        for part in parent.split("/"):
             if part in ("", ".", ".."):
                 break
             current = f"{current}/{part}" if current else part
@@ -1364,8 +1363,9 @@ def walk_claude_source(
         base_dir: Root directory to walk (e.g., ~/.claude)
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files. Nested
-            checkouts report their bare relative directory root once with
-            NESTED_REPO_SKIP_REASON.
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         exclude_patterns: Optional per-source fnmatch globs that extend the
             hardcoded EXCLUDED list. Matched against the relative path.
         strict: Publishing scans refuse incomplete observations.
@@ -1634,8 +1634,9 @@ def walk_generic_source(
                 it does not generate deletion tombstones.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files. Nested
-            checkouts report their bare relative directory root once with
-            NESTED_REPO_SKIP_REASON.
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
@@ -1676,6 +1677,13 @@ def walk_generic_source(
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        # Report a checkout above an include even when the include is absent,
+        # so push freezes its published entries instead of tombstoning them.
+        if not path_has_descendant_symlink(scan_dir, base, strict=strict, source_name=source_name):
+            if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
+                if on_skip:
+                    on_skip(root, NESTED_REPO_SKIP_REASON)
+                continue
         st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
         if st is None:
             continue
@@ -1803,8 +1811,9 @@ def walk_source(
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
         on_skip: Optional callback(path, reason) for skipped files. Nested
-            checkouts report their bare relative directory root once with
-            NESTED_REPO_SKIP_REASON.
+            checkouts report their bare relative directory root with
+            NESTED_REPO_SKIP_REASON, possibly once per include that reaches
+            them; build_manifest_v2 deduplicates.
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.

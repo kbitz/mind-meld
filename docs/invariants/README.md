@@ -85,7 +85,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `lockedjson.py:locked_json_rmw` / `locked_json_snapshot` | `docs/invariants/sync.md` (Shared JSON locking) |
 | `lockedjson.py:locked_json_durable_rmw` | `docs/invariants/sync.md` (Atomic write publication failures) |
 | `storage/keys.py:manifest_key` / `blob_key` / `device_key` / `parse_blob_key` / `_validate_component` / `_validate_hex_sha` | `docs/invariants/sync.md` (Validated storage keys) |
-| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `cli.py:_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_incoming_nested_roots` | `docs/invariants/sync.md` |
+| `manifest.py:walk_generic_source` / `walk_grok_source` / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `cli.py:_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |

@@ -306,6 +306,21 @@ def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_seen_sources(monkeypatch, tmp_path) -> None:
+    """Redirect seen_sources.SEEN_DIR to a per-test path.
+
+    Source-enable flows acknowledge sources in
+    `~/.config/mind-meld/seen-sources.json`. Without this autouse, CLI-driven
+    tests rewrite the user's real tracker (observed 2026-10-08), and a
+    sandboxed run fails with PermissionError instead. `seen_sources` reads
+    `SEEN_DIR` at call time; per-test overrides still win.
+    """
+    from mind_meld import seen_sources as _seen_sources
+
+    monkeypatch.setattr(_seen_sources, "SEEN_DIR", tmp_path / "seen_sources")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
     """Redirect DEFAULT_SOURCES['mm-events'].path to a per-test directory.
 

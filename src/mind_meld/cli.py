@@ -754,8 +754,8 @@ def _build_exclude_map(
     previously-synced generated files.
 
     ``nested_roots`` adds nested-checkout roots the caller already observed
-    (its own walk, or pull's probe of incoming paths); this helper never
-    walks for them.
+    (pull's and diff's probe of incoming paths); this helper never walks for
+    them. Push freezes entries under its walk's roots instead.
 
     Publishing supplies the already-resolved source list and strict mode
     so this helper does not re-enter a permissive ``get_sources``.
@@ -785,8 +785,9 @@ def _filter_excluded_paths(
 
     Drops entries from `sources.<name>.files` and `tombstones` whose relative
     path matches any glob in `exclude_map[name]`, AND any conflict-shaped
-    basename, `.extend-root` marker or `.git` path segment (mirroring the
-    push-side ``manifest._is_excluded`` gate). A
+    basename, `.extend-root` marker, `.git` segment in any letter case, or `.`
+    or empty segment. That is intentionally stricter than the push-side
+    ``manifest._is_excluded`` gate, whose `.git/` check is case-sensitive. A
     peer-chosen ``foo.sync-conflict-19700101-000000-deadbeef.md`` must not
     materialize — after the gc bar reads the filename timestamp, that
     string would drive the reap age directly.
@@ -809,10 +810,16 @@ def _filter_excluded_paths(
 
     def _conflict_shaped(rel_path: str) -> bool:
         # `.extend-root` and `.git` are local selection markers: a peer-planted
-        # one would silently narrow what this Mac syncs. Honest writers never
-        # publish a `.git` segment (EXCLUDED matches every path part).
+        # one would silently narrow what this Mac syncs. `.git` is found by a
+        # case-insensitive lstat on APFS, so match any case. Honest writers
+        # never publish a `.git` segment (EXCLUDED matches every path part),
+        # nor `.`/empty segments, which would dodge literal prefix matching.
         parts = rel_path.split("/")
-        return is_conflict_filename(parts[-1]) or parts[-1] == MARKER_SKIP_NAME or ".git" in parts
+        return (
+            is_conflict_filename(parts[-1])
+            or parts[-1] == MARKER_SKIP_NAME
+            or any(part.casefold() == ".git" or part in ("", ".") for part in parts)
+        )
 
     def _excluded(src_name: str, rel_path: str) -> bool:
         if _conflict_shaped(rel_path):
@@ -1023,15 +1030,21 @@ def _freeze_nested_checkout_entries(
     local_manifest: dict,
     prior_manifest: dict,
     nested_roots: Mapping[str, Iterable[str]],
-) -> None:
-    """Keep this Mac's last accepted entries under its current nested checkouts.
+    *,
+    keep: Callable[[dict], bool] | None = None,
+) -> dict[str, set[str]]:
+    """Keep this Mac's last published entries under its current nested checkouts.
 
     A checkout's contents stop publishing, but entries advertised before it
     appeared stay unchanged: no upload, no tombstone, and its prior
     tombstones carry forward. Deleting the checkout later tombstones them like
-    any deletion, so peer copies converge instead of returning on pull. Pass
-    only this Mac's accepted remote manifest: upload never re-reads these paths.
+    any deletion, so peer copies converge instead of returning on pull.
+    A tombstoned path is never revived (merged conflict copies can carry both).
+    ``keep`` gates recovered entries on a stored blob. Returns the frozen paths
+    per source; upload must never re-read them.
     """
+    frozen: dict[str, set[str]] = {}
+    tombstones = prior_manifest.get("tombstones", {})
     for name, roots in nested_roots.items():
         prefixes = sorted(roots)
         local_src = local_manifest.get("sources", {}).get(name)
@@ -1040,8 +1053,46 @@ def _freeze_nested_checkout_entries(
             continue
         files = local_src["files"]
         for rel_path, info in prior_files.items():
-            if rel_path not in files and _under_skip_prefix(rel_path, prefixes):
+            if (
+                rel_path not in files
+                and _under_skip_prefix(rel_path, prefixes)
+                and not is_tombstoned(name, rel_path, tombstones)
+                and (keep is None or keep(info))
+            ):
                 files[rel_path] = dict(info)
+                frozen.setdefault(name, set()).add(rel_path)
+    return frozen
+
+
+def _drop_unfrozen_checkout_files(
+    prior_manifest: dict,
+    nested_roots: Mapping[str, Iterable[str]],
+    frozen: Mapping[str, set[str]],
+) -> dict:
+    """Drop prior file entries under checkout roots that were not frozen; keep tombstones.
+
+    A tombstoned path stays deleted, and a recovered entry without a stored blob
+    is excluded. Neither is this push's to prove: the omission guard would
+    refuse a file still on disk inside the checkout.
+    """
+    sources = dict(prior_manifest.get("sources", {}))
+    changed = False
+    for name, roots in nested_roots.items():
+        data = sources.get(name)
+        if not data:
+            continue
+        prefixes = sorted(roots)
+        keep = frozen.get(name, set())
+        files = data.get("files", {})
+        kept = {
+            rel: info
+            for rel, info in files.items()
+            if rel in keep or not _under_skip_prefix(rel, prefixes)
+        }
+        if len(kept) != len(files):
+            sources[name] = {**data, "files": kept}
+            changed = True
+    return {**prior_manifest, "sources": sources} if changed else prior_manifest
 
 
 def _prove_omitted_paths_absent(
@@ -4294,18 +4345,24 @@ def _push_core(
     # whole source first avoids walking a soon-to-be-dropped source's
     # exclude_patterns for nothing. Tombstones stay (asymmetric filter).
     exclude_map, skip_prefixes = _build_exclude_map(config, sources, strict=True)
+    frozen: dict[str, set[str]] = {}
     if remote_manifest is not None:
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
+        # Freeze before the symlink filter: entries below a checkout root are
+        # kept as published without inspecting what replaced them on disk.
+        frozen = _freeze_nested_checkout_entries(
+            local_manifest,
+            remote_manifest,
+            nested_roots,
+            # A recovered prior was never accepted as-is: freeze only entries
+            # whose blob is still stored, and exclude the rest.
+            keep=None
+            if fetch.is_ok
+            else lambda info: backend.exists(blob_key(device_id, info["sha256"])),
+        )
+        remote_manifest = _drop_unfrozen_checkout_files(remote_manifest, nested_roots, frozen)
         remote_manifest = _filter_symlinked_paths(remote_manifest, sources, strict=True)
-        if fetch.is_ok:
-            _freeze_nested_checkout_entries(local_manifest, remote_manifest, nested_roots)
-        else:
-            # Recovered prior state is not this Mac's accepted manifest, and
-            # upload would re-read frozen paths; exclude them instead.
-            remote_manifest = _filter_excluded_paths(
-                remote_manifest, {}, {name: sorted(roots) for name, roots in nested_roots.items()}
-            )
         proof_sources = sources
         if dry_run and resolution.would_create:
             # Missing default roots truthfully preview deletions.
@@ -4421,9 +4478,13 @@ def _push_core(
                 strict=True,
                 nested_roots=nested_roots,
             )
+            # The rescan replaces these sources' files; carry their frozen entries.
+            for name, data in events_manifest["sources"].items():
+                previous = local_manifest["sources"].get(name, {}).get("files", {})
+                for rel in frozen.get(name, ()):
+                    if rel in previous:
+                        data["files"].setdefault(rel, previous[rel])
             local_manifest["sources"].update(events_manifest["sources"])
-            if remote_manifest is not None and fetch.is_ok:
-                _freeze_nested_checkout_entries(local_manifest, remote_manifest, nested_roots)
             if remote_manifest is not None:
                 _prove_omitted_paths_absent(
                     local_manifest, remote_manifest, sources, max_file_size=max_file_size
@@ -4450,7 +4511,12 @@ def _push_core(
                 _print_diff_summary(diff, 0)
             continue
 
-        to_upload = {**diff.new, **diff.modified}
+        # Frozen checkout entries are already stored; their local bytes may differ.
+        to_upload = {
+            rel: info
+            for rel, info in {**diff.new, **diff.modified}.items()
+            if rel not in frozen.get(src_name, ())
+        }
         base_path = Path(src_data["base_path"])
         src_cfg = source_by_name.get(src_name, {})
 
@@ -5545,9 +5611,8 @@ def _pull_core(
         }
     # Pull never walks local trees for nested checkouts: it probes only the
     # local ancestors of incoming peer paths, so it never writes into one.
-    pull_sources = get_sources(config)
     nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
-    exclude_map, skip_prefixes = _build_exclude_map(config, pull_sources, nested_roots=nested_roots)
+    exclude_map, skip_prefixes = _build_exclude_map(config, nested_roots=nested_roots)
     # Always run: conflict-shaped names and `.extend-root` are stripped even
     # when no source declares exclude_patterns (claude-only installs).
     filtered_cache: dict[str, dict | None] = {}

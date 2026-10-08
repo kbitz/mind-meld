@@ -10104,6 +10104,7 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
     checkout.mkdir(parents=True)
     published_file = checkout / "note.md"
     published_file.write_text("published before this folder became a checkout")
+    (checkout / "linked.md").write_text("becomes a symlink inside the checkout")
     sibling = root / "projects" / "other" / "note.md"
     sibling.parent.mkdir()
     sibling.write_text("ordinary content")
@@ -10126,9 +10127,12 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
         key = storage_keys.manifest_key("dev-a")
         return load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
 
+    linked = "projects/literal*/checkout/linked.md"
     (checkout / ".git").write_text("gitdir: elsewhere")
     published_file.write_text("edited inside the checkout")
     (checkout / "new.md").write_text("never published")
+    (checkout / "linked.md").unlink()
+    (checkout / "linked.md").symlink_to(published_file)
     expected = "skipped: nested git repository gstack:projects/literal*/checkout"
     # Autopush stays silent; attended push and its preview report the root once.
     for command, count in ((["push", "--dry-run"], 1), (["push", "-v"], 1), (["autopush"], 0)):
@@ -10136,10 +10140,17 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
         assert result.exit_code == 0, result.output
         assert " ".join(result.stderr.split()).count(expected) == count
         assert "still present but was omitted" not in result.output
+    # An ordinary change forces a manifest upload; frozen entries ride along unchanged.
+    (root / "projects" / "other" / "fresh.md").write_text("ordinary change")
+    assert runner.invoke(app, ["push"]).exit_code == 0
     files = accepted()["sources"]["gstack"]["files"]
-    assert set(files) == {"projects/other/note.md", rel}
+    assert set(files) == {"projects/other/note.md", "projects/other/fresh.md", rel, linked}
     assert files[rel]["sha256"] == published["sha256"]
+    assert files[linked]["sha256"] == prior["sources"]["gstack"]["files"][linked]["sha256"]
     assert f"gstack:{rel}" not in accepted()["tombstones"]
+    shown = runner.invoke(app, ["diff"])
+    assert shown.exit_code == 0, shown.output
+    assert "checkout" not in shown.stdout
     assert published_file.read_text() == "edited inside the checkout"
     for command in (["status"], ["diag"]):
         shown = runner.invoke(app, command)
@@ -10157,7 +10168,105 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert rel not in accepted()["sources"]["gstack"]["files"]
-    assert f"gstack:{rel}" in accepted()["tombstones"]
+    assert {f"gstack:{rel}", f"gstack:{linked}"} <= set(accepted()["tombstones"])
+
+
+def test_corrupt_manifest_recovery_keeps_frozen_entries_that_have_blobs(capture61):
+    root = capture61["path"].parent / "gstack"
+    (root / "proj").mkdir(parents=True)
+    (root / "proj" / "note.md").write_text("published")
+    src = {"name": "gstack", "type": "generic", "path": str(root), "include_dirs": ["proj"]}
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    key = storage_keys.manifest_key("dev-a")
+    published = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    (root / "proj" / ".git").mkdir()
+    (root / "proj" / "note.md").write_text("edited inside the checkout")
+    capture61["backend"].put(key, b"not a manifest")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "still present but was omitted" not in " ".join(result.output.split())
+    healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    files = healed["sources"]["gstack"]["files"]
+    # Recovery freezes the stored entry and never re-reads the edited file.
+    assert files["proj/note.md"] == published["sources"]["gstack"]["files"]["proj/note.md"]
+    assert "gstack:proj/note.md" not in healed["tombstones"]
+    shutil.rmtree(root / "proj")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    assert "gstack:proj/note.md" in healed["tombstones"]
+
+
+def test_corrupt_manifest_recovery_excludes_checkout_entries_without_blobs(capture61):
+    root = capture61["path"].parent / "gstack"
+    (root / "proj").mkdir(parents=True)
+    (root / "proj" / "note.md").write_text("published")
+    src = {"name": "gstack", "type": "generic", "path": str(root), "include_dirs": ["proj"]}
+    capture61["cfg"]["sync"]["sources"].append(src)
+    save_config(capture61["cfg"], capture61["path"])
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    key = storage_keys.manifest_key("dev-a")
+    published = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    sha = published["sources"]["gstack"]["files"]["proj/note.md"]["sha256"]
+    capture61["backend"].delete(storage_keys.blob_key("dev-a", sha))
+    (root / "proj" / ".git").mkdir()
+    capture61["backend"].put(key, b"not a manifest")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "still present but was omitted" not in " ".join(result.output.split())
+    healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    assert "proj/note.md" not in healed["sources"]["gstack"]["files"]
+    assert "gstack:proj/note.md" not in healed["tombstones"]
+
+
+def test_recovery_keeps_frozen_mm_events_entries_across_the_rescan(capture61):
+    events = capture61["path"].parent / "events_root" / "events" / "nested"
+    events.mkdir(parents=True)
+    (events / "old.md").write_text("published before the checkout")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    (events / ".git").mkdir()
+    key = storage_keys.manifest_key("dev-a")
+    capture61["backend"].put(key, b"not a manifest")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
+    assert "events/nested/old.md" in healed["sources"]["mm-events"]["files"]
+    assert "mm-events:events/nested/old.md" not in healed["tombstones"]
+
+
+def test_tombstoned_checkout_entry_still_on_disk_does_not_wedge_push(tmp_path):
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    (tmp_path / "repo" / "a.md").write_text("recreated inside the checkout")
+    (tmp_path / "repo" / "b.md").write_text("published")
+    info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
+    src = {"name": "g", "type": "generic", "path": str(tmp_path), "include_dirs": ["repo"]}
+    tombstone = {"deleted_at": datetime.now(timezone.utc).isoformat(), "device_id": "dev-a"}
+    prior = {
+        "sources": {"g": {"files": {"repo/a.md": info, "repo/b.md": info}}},
+        "tombstones": {"g:repo/a.md": tombstone},
+    }
+    roots: dict[str, set[str]] = {}
+    local = cli_module.build_manifest_v2("dev-a", "A", [src], strict=True, nested_roots=roots)
+    frozen = cli_module._freeze_nested_checkout_entries(local, prior, roots)
+    prior = cli_module._drop_unfrozen_checkout_files(prior, roots, frozen)
+    cli_module._prove_omitted_paths_absent(local, prior, [src], max_file_size=52_428_800)
+    tombstones = cli_module.generate_tombstones(local, prior, "dev-a")
+    assert set(local["sources"]["g"]["files"]) == {"repo/b.md"}
+    assert set(tombstones) == {"g:repo/a.md"}
+
+
+def test_freeze_never_revives_a_tombstoned_path():
+    info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
+    prior = {
+        "sources": {"g": {"files": {"repo/kept.md": info, "repo/deleted.md": info}}},
+        # A merged conflict copy can carry a file entry and its tombstone.
+        "tombstones": {"g:repo/deleted.md": {"deleted_at": info["mtime"]}},
+    }
+    local = {"sources": {"g": {"files": {}}}}
+    frozen = cli_module._freeze_nested_checkout_entries(local, prior, {"g": {"repo"}})
+    assert frozen == {"g": {"repo/kept.md"}}
+    assert list(local["sources"]["g"]["files"]) == ["repo/kept.md"]
 
 
 def test_deselecting_an_include_inside_a_checkout_still_refuses_like_before(capture61):
@@ -10227,6 +10336,25 @@ def test_peer_git_segments_are_stripped_before_they_can_mark_a_checkout():
     }
     out = cli_module._filter_excluded_paths(peer, {}, {})
     assert list(out["sources"]["claude"]["files"]) == ["projects/p/memory/ok.md"]
+    assert out["tombstones"] == {}
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "projects/p/memory/.Git",
+        "projects/p/memory/.GIT/HEAD",
+        "./repo/new.md",
+        "repo/./new.md",
+        "repo//new.md",
+        "repo/new.md/",
+    ],
+)
+def test_peer_case_variant_or_noncanonical_paths_are_stripped(rel):
+    info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-10-07T00:00:00+00:00"}
+    peer = {"sources": {"claude": {"files": {rel: info}}}, "tombstones": {f"claude:{rel}": {}}}
+    out = cli_module._filter_excluded_paths(peer, {}, {})
+    assert out["sources"]["claude"]["files"] == {}
     assert out["tombstones"] == {}
 
 
@@ -10323,13 +10451,14 @@ def test_pull_never_writes_or_deletes_inside_a_local_checkout(tmp_path, monkeypa
     run("a", "push")
     run("b", "pull")
     (memory_b / "fixture" / "new.md").write_text("peer addition")
-    (memory_b / "fixture" / "tracked.md").unlink()
+    (memory_b / "fixture" / "tracked.md").write_text("peer edit")
     run("b", "push")
     (fixture / ".git").mkdir()
     (fixture / "tracked.md").write_text("uncommitted local work")
     run("a", "pull")
     assert (fixture / "tracked.md").read_text() == "uncommitted local work"
     assert not (fixture / "new.md").exists()
+    assert not [path for path in fixture.iterdir() if "sync-conflict" in path.name]
     logged = run("a", "log", "--action", "excluded", "--format", "jsonl")
     records = [json.loads(line) for line in logged.output.splitlines() if line.startswith("{")]
     root = "projects/-Users-kb-myapp/memory/fixture"

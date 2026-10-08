@@ -601,6 +601,25 @@ class TestNestedRepositories:
         cfg = {"name": "claude", "type": "claude", "path": str(base)}
         assert sorted(walk_source(cfg, strict=strict)[1]) == ["projects/p/memory/real.md"]
 
+    def test_walker_reports_checkout_above_an_absent_include(self, tmp_path):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        cfg = {"name": "g", "type": "generic", "path": str(tmp_path)}
+        cfg["include_dirs"] = ["repo/notes"]
+        skipped = []
+        assert walk_source(cfg, on_skip=lambda *item: skipped.append(item), strict=True)[1] == {}
+        assert skipped == [("repo", "nested git repository")]
+
+    def test_include_below_symlinked_parent_reports_one_symlink_skip(self, tmp_path):
+        (tmp_path / "real" / "notes").mkdir(parents=True)
+        (tmp_path / "real" / "notes" / "a.md").write_text("a")
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+        cfg = {"name": "g", "type": "generic", "path": str(base), "include_dirs": ["link/notes"]}
+        seen = []
+        assert walk_source(cfg, on_skip=lambda path, reason: seen.append(reason))[1] == {}
+        assert seen == ["symlink"]
+
     def test_incoming_path_probe_finds_checkouts_once_without_listing(self, tmp_path, monkeypatch):
         import mind_meld.manifest as manifest_module
 

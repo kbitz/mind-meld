@@ -2,7 +2,7 @@
 
 import errno
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -202,24 +202,72 @@ def test_errno_only_belongs_to_storage_failure(kind, cause):
     assert attemptlog.read() == (None, "corrupt")
 
 
+# attemptlog._valid tables as released in 1.5.2, pinned so later edits cannot
+# change what the released reader accepts.
+_RELEASED_1_5_CAUSES = {
+    "published": {None},
+    "not-published": {"exclude-patterns", "include-dirs", "file-absent", "row-missing"},
+    "unverified": {
+        "missing",
+        "unreadable",
+        "oversized-line",
+        "changed",
+        "revision-mismatch",
+        "evidence-error",
+    },
+    "no-row": {None},
+    "capture-failed": {None},
+    "append-failed": {None},
+    "max-file-size": {None},
+    "prerequisites": {"disabled", "no-reader", "unavailable", "unknown"},
+    "push-failed": {None},
+}
+_RELEASED_1_5_READERS = ("codex", "grok", "cursor")
+_RELEASED_1_5_OUTCOMES = {"contributed", "empty", "partial", "absent"} | {
+    f"dropped:{reason}"
+    for reason in (
+        "deadline",
+        "io_error",
+        "locked",
+        "malformed",
+        "partial",
+        "stale",
+        "unavailable",
+        "unsupported",
+    )
+}
+
+
+def _released_1_5_timestamp(raw: object) -> bool:
+    if not isinstance(raw, str) or len(raw) > 64:
+        return False
+    try:
+        return datetime.fromisoformat(raw).utcoffset() is not None
+    except (ValueError, OverflowError):
+        return False
+
+
 def _released_1_5_valid(record: object) -> bool:
-    """attemptlog._valid frozen as released in 1.5.2, when push-failed took only None."""
-    causes = {**attemptlog.CAUSES, "push-failed": {None}}
+    """attemptlog._valid as released in 1.5.2, when push-failed took only None."""
     if not isinstance(record, dict):
         return False
     kind, readers = record.get("class"), record.get("readers")
-    if "cause" not in record or not isinstance(kind, str) or kind not in causes:
+    if "cause" not in record or not isinstance(kind, str) or kind not in _RELEASED_1_5_CAUSES:
         return False
     cause = record["cause"]
     if cause is not None and not isinstance(cause, str):
         return False
-    if cause not in causes[kind] or attemptlog._timestamp(record.get("attempted_at")) is None:
+    if cause not in _RELEASED_1_5_CAUSES[kind]:
         return False
-    if record.get("row_ts") is not None and attemptlog._timestamp(record["row_ts"]) is None:
+    if not _released_1_5_timestamp(record.get("attempted_at")):
+        return False
+    if record.get("row_ts") is not None and not _released_1_5_timestamp(record["row_ts"]):
         return False
     return isinstance(readers, dict) and all(
-        isinstance(outcome, str) and outcome in attemptlog.READER_OUTCOMES
-        for outcome in readers.values()
+        name in _RELEASED_1_5_READERS
+        and isinstance(outcome, str)
+        and outcome in _RELEASED_1_5_OUTCOMES
+        for name, outcome in readers.items()
     )
 
 

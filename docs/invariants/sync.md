@@ -14,7 +14,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
 - `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
-- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_incoming_nested_roots` / `_filter_excluded_paths`
+- `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
@@ -244,21 +244,34 @@ reintroduce a local tree walk into pull/autopull. diag's
 not persisted sync state.
 
 **Freeze, do not exclude, on push.** `_freeze_nested_checkout_entries` copies this
-Mac's accepted remote entries under each walker-reported root into the local
-manifest unchanged, and the push prior filter leaves those roots' tombstones in
-place. Adding `.git` over published files therefore uploads nothing, mints no
-tombstones and keeps peer copies; deleting the checkout later tombstones them
-like any deletion. Filtering the prior instead (exclusion) made deletion stop
-converging: peers kept republishing their plain copies and the next pull
-resurrected them. Freeze only from `fetch.is_ok`: upload re-reads every entry it
-treats as new, and a recovered prior was never accepted. Recovery falls back to
-exclusion through the nested prefixes. Status freezes the same way so frozen
-entries never show as pending deletions.
+Mac's prior entries under each walker-reported root into the local manifest
+unchanged, before the symlink filter and without inspecting what replaced them
+on disk. The push prior filter leaves those roots' tombstones in place, and a
+path with a prior tombstone is never frozen (merged conflict copies can carry
+both; reviving it would advertise a reaped blob). Adding `.git` over published
+files therefore uploads nothing, mints no tombstones and keeps peer copies;
+deleting the checkout later tombstones them like any deletion. Filtering the
+prior instead (exclusion) made deletion stop converging: peers kept republishing
+their plain copies and the next pull resurrected them. Upload skips every frozen
+path, so their changed local bytes are never read. With `fetch.is_ok` the prior
+is this Mac's accepted manifest. A recovered prior freezes only entries whose
+blob still exists under this device's key; the rest are excluded (their only
+loss is convergence on a later delete). `_drop_unfrozen_checkout_files` then
+drops every unfrozen prior file entry under a root (tombstoned or blob-less),
+keeping tombstones, so the omission guard never probes checkout contents. The
+mm-events rescan carries frozen entries across its source replacement. Walkers
+report a checkout above an absent include too. Status freezes the same way so
+frozen entries never show as pending deletions.
 
 `_prove_omitted_paths_absent` has no checkout exemption. Frozen entries are
 present in the local manifest; anything else still on disk but omitted (for
-example an include deselected while its folder became a checkout) refuses as it
-always did. An exemption there minted tombstones for files still on disk.
+example an include deselected while its folder became a checkout, unless another
+include still reaches that checkout root) refuses as it always did. An
+exemption there minted tombstones for files still on disk.
+
+Frozen entries retire only when the checkout is deleted (tombstones everywhere)
+or an `exclude_patterns` glob such as `<folder>/*` covers them (dropped without
+tombstones; peer copies stay).
 
 Attended push and preview print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
@@ -267,9 +280,12 @@ is not a data-at-risk warning), and status/diag list roots. Pull logs one
 display copies reach terminals; exclusion keys keep their original bytes.
 
 `.git` is a local selection marker like `.extend-root`: `_filter_excluded_paths`
-drops any peer path or tombstone with a `.git` segment, so a peer cannot plant one
-to switch off sync of a subtree. Honest writers never publish one (EXCLUDED
-matches every path part).
+drops any peer path or tombstone with a `.git` segment in any letter case (APFS
+lstat matches `.GIT`), so a peer cannot plant one to switch off sync of a
+subtree. It also drops `.` and empty segments, which `Path` would normalize away
+after literal prefix matching. This is intentionally stricter than push's
+case-sensitive `.git/` exclusion; honest walkers never produce these paths below
+a source root.
 
 `_warn_push_growth` uses already-materialized new-file diffs, counts groups by
 source and first two directory components, and names up to three groups exceeding
