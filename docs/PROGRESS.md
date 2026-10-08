@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.5.3 | 2026-10-07 | **Archiving a Codex thread no longer drops its past usage from the fleet Agents table.** mm now reads Codex's archived rollouts (`~/.codex/archived_sessions/`) together with the live sessions, so threads archived in Codex, the Codex app or an orchestrator such as Paseo stay counted. After upgrading, days with archived threads rise; that is the correction, not double counting. |
 | 1.5.2 | 2026-10-07 | **mm no longer tells you to delete its lockfile when another mm operation is running.** It now tells you to wait and run the command again, and the note `mm update` prints for an up-to-date install made from a tag, branch or bare repository URL is now accurate. If an older mm told you to remove the lockfile, do not. |
 | 1.5.1 | 2026-10-05 | **`mm update` now shows a compact progress bar in a terminal, driven only by what the installer reports.** You can see which phase an update is in and, when pip measures it, how far along a download or a multi-package install is. |
 | 1.5.0 | 2026-10-04 | **`mm enable-source cursor` now records Cursor usage from your own terminal sessions, alongside Conductor's, in the fleet Agents table.** Interactive `cursor-agent` sessions are captured by a completion hook, and print-mode runs go through the new `mm cursor-agent` wrapper. |
