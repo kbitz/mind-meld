@@ -31,13 +31,14 @@ import types
 from datetime import datetime, timedelta, timezone
 from http.client import IncompleteRead
 from io import StringIO
+from pathlib import Path
 
 import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+from mind_meld import cli, lockedjson, lockfile, upgrade
 from mind_meld import config as config_module
-from mind_meld import lockedjson, lockfile, upgrade
 from mind_meld.cli import app
 from tests.conftest import _setup_real_config
 
@@ -2266,18 +2267,45 @@ class TestUpdateCommand:
         assert "Updated mm 1.2.0 → 1.3.0." in text
         assert "now tracks the release branch" in text
 
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            f"{upgrade.REPO_SPEC}@v1.2.0",
+            f"{upgrade.REPO_SPEC}@main",
+            upgrade.REPO_SPEC,
+        ],
+    )
     def test_pinned_and_current_explains_the_pin_without_reinstalling(
-        self, pipx_install, monkeypatch
+        self, pipx_install, monkeypatch, spec
     ):
-        venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0", latest="1.2.0")
+        venv = pipx_install(spec=spec, latest="1.2.0")
         calls = _fake_run(monkeypatch, venv)
         result = runner.invoke(app, ["update"])
         assert result.exit_code == 0, result.output
         assert calls == []
         text = _flat(result.stdout)
         assert "mm 1.2.0 is up to date." in text
-        assert f"pinned to {upgrade.REPO_SPEC}@v1.2.0" in text
+        assert f"made from {spec}" in text
+        assert "mm will not update it automatically" in text
         assert upgrade.INSTALL_CMD in text
+
+    @pytest.mark.parametrize("width", [60, 80])
+    def test_pinned_current_reinstall_command_is_one_line(self, monkeypatch, width):
+        monkeypatch.setattr(
+            upgrade, "_install_prefix", lambda: Path("/tmp/pipx[home]/venvs/mind-meld")
+        )
+        install = upgrade.InstallInfo(
+            "pinned",
+            "mind-meld",
+            f"{upgrade.REPO_SPEC}@v1.2.0",
+            "1.2.0",
+        )
+        buf = StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=width))
+        cli._print_update_current(install)
+        expected = "    " + upgrade.reinstall_cmd(install)
+        assert "[" in expected
+        assert [line for line in buf.getvalue().splitlines() if line == expected] == [expected]
 
     def test_pinned_install_is_never_force_reinstalled_on_a_guess(self, pipx_install, monkeypatch):
         venv = pipx_install(spec=f"{upgrade.REPO_SPEC}@v1.2.0")

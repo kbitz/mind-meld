@@ -10,8 +10,13 @@ Read BEFORE editing any of these:
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
 - `.github/workflows/release.yml` — the "Advance latest branch" step (moving ref for upgrades)
 - `README.md` — Install / Upgrading sections (must stay `@latest`, never `@vX.Y.Z`)
+- `src/mind_meld/lockfile.py` — `acquire_lock` / `release_lock`
 
-Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class).
+Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class), `tests/test_lockfile.py`.
+
+## The mm lockfile
+
+`~/.config/mind-meld/mind-meld.lock` is the mm lockfile. It is distinct from the installer `install.lock`. Never unlink the mm lockfile: `release_lock` keeps the inode so two processes cannot flock different files at the same path. Contention text never advises deleting the lockfile or killing the holder. `tests/test_lockfile.py` pins that text.
 
 ---
 
@@ -42,13 +47,25 @@ paths onto one command.
 
 - `tracking` — recorded spec is exactly `INSTALL_SPEC`. The only kind the
   automatic path acts on.
-- `pinned` — this repo at another ref (the README rollback recipe pins a tag
-  on purpose). `pipx upgrade` can never move it. The automatic path leaves it
-  alone and nudges, so a deliberate rollback is never undone behind the
-  user's back. `mm update` is the documented "resume upgrades" step and
-  reinstalls it onto the release branch, but only when the forced check
+- `pinned` — this repo at a ref other than the exact `INSTALL_SPEC`.
+  Sub-shapes, cited as observed 2026-10-07 in pipx 1.17.11
+  `commands/upgrade.py` (`_upgrade_package` returns PINNED for held
+  packages, else passes `parse_specifier_for_upgrade(package_or_url)`,
+  which keeps a Git `@ref` verbatim): (a) fixed refs (a release tag, which
+  this repo's release workflow never moves; any other tag, fixed by
+  convention; a commit SHA, immutable), which `pipx upgrade` re-resolves to
+  the same commit; (b) an arbitrary branch ref and (c) a bare repository
+  URL (follows the default branch `main`, which may carry untagged WIP),
+  which `pipx upgrade` or `pipx upgrade-all` can move to that branch's
+  current head. A `pipx pin` hold is the separate `pipx-pinned` kind,
+  checked first by `detect_install`, which pipx refuses to upgrade. mm's
+  automatic path acts only on the exact `INSTALL_SPEC` by policy: it leaves
+  a `pinned` install alone and nudges, so a deliberate rollback is never
+  undone behind the user's back. `mm update` is the documented resume step
+  and reinstalls onto the release branch, but only when the forced check
   proves a newer release exists: on an unreachable GitHub it refuses rather
-  than force-reinstall on a guess.
+  than force-reinstall on a guess. `detect_install`, `update_argv`, and
+  `mm update` recovery are unchanged.
 - `pipx-pinned`, `foreign`, `not-pipx`, `dev` — never touched by either path.
   `mm update` exits 1 and names the reason.
 

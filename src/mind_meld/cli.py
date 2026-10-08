@@ -9030,8 +9030,14 @@ def _print_update_current(install: upgrade.InstallInfo) -> None:
     console.print(f"mm {safe_str(install.version)} is up to date.")
     if install.kind == "pinned":
         console.print(
-            f"  This install is pinned to {safe_str(install.spec)}, so it will not follow "
-            f"later releases. To track them run: {upgrade.reinstall_cmd(install)}"
+            f"  This install was made from {safe_str(install.spec)}, so mm will not "
+            "update it automatically. To follow releases, run:"
+        )
+        console.print(
+            "    " + upgrade.reinstall_cmd(install),
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
         )
 
 
