@@ -893,7 +893,11 @@ standard in long context. Cache-write price is unpublished. Sources:
 
 Restore an unavailable custom mm-events folder before retrying. Enabling Codex
 sync now authorizes reading its local rollouts on **every attended push**, including
-converged pushes; its session transcripts remain local.
+converged pushes; its session transcripts remain local. Codex usage includes
+archived threads (`~/.codex/archived_sessions/`), so archiving a thread in Codex,
+the Codex app or an orchestrator such as Paseo no longer drops its past usage.
+After upgrading, days with archived threads rise; that is the correction, not
+double counting.
 
 Capture and source bootstrap run under the mm lock before the manifest scan.
 There is one bounded sweep and at most one warm read per cold reader; that warm
@@ -1166,7 +1170,8 @@ and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
 `warm_ms` (5000). Timings exclude cache serialization. Dates are normalized
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
-opening host logs or needing a passphrase; Codex counts rollout paths and Grok
+opening host logs or needing a passphrase; Codex counts rollout paths under both
+its live and archived roots and Grok
 counts two-level `*/*/updates.jsonl` paths under its resolved sessions root.
 `cache_state: missing` or `unreadable` leaves the blocker unknown.
 

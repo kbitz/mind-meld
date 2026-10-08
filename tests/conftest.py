@@ -271,6 +271,9 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     root = tmp_path / "_isolated_hosts"
     monkeypatch.delenv("GROK_HOME", raising=False)
     monkeypatch.setattr(_host_usage, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
+    monkeypatch.setattr(
+        _host_usage, "CODEX_ARCHIVED_SESSIONS_PATH", root / "codex" / "archived_sessions"
+    )
     monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
     monkeypatch.setattr(_host_usage, "CACHE_PATH", root / "host-tokens.json")
     monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
