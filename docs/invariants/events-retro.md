@@ -311,9 +311,10 @@ prompt IDs, or conversation bytes. Equal duplicate
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
 
-**Cursor usage (Conductor reader: Track 67A, v1.2.0).** Only
+**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
-is read from Conductor. The native standalone CLI has no historical billing
+and each `[0-9a-f]{16}` workspace's `index.db` (see Conductor SQLite stores below)
+are read from Conductor. The native standalone CLI has no historical billing
 ledger. Standalone capture now records future completions through the enrolled
 `stop` hook or the `mm cursor-agent --print` wrapper. No sync source or
 skill-link row is added. `[retro] cursor_host_usage = true` is the sole consent;
@@ -389,13 +390,8 @@ keep updating it until then. Aliases survive pruning of their source files.
 Malformed aliases refuse without resetting history. Measured 2026-10-04
 (Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
 the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
-new runs from `runs.ndjson` to a SQLite `index.db`, which this reader does not
-open; see the Cursor fixture contract's live follow-up. Until a reader exists,
-`unread_cursor_stores` counts store directories holding an `index.db`
-(including ones that still also hold `runs.ndjson`) by `lstat` only, never
-opening a database; any inspection error reports unknown. Diag reports the
-count and status names the undercount, without blocking the read or standalone
-publication.
+new runs from `runs.ndjson` to a SQLite `index.db`; Track 70A reads it, and its
+rules are in the next section.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no
@@ -465,7 +461,9 @@ Conductor counters are disjoint and must satisfy input + output + cacheRead + ca
 == totalTokens. No inclusive normalization applies to them (stop-hook counters
 are inclusive; see Standalone Cursor capture above). reasoningTokens must be
 between zero and outputTokens and is not added again. Each whole turn belongs
-to **endedAt's UTC date**; a turn crossing midnight is never split.
+to **endedAt's UTC date** in the legacy ledger, or to its terminal stamp in
+SQLite (`finished_at`, `cancelled_at`, `expired_at`; an `ERROR` run uses
+`updated_at`); a turn crossing midnight is never split.
 A timestamp below 2020-01-01 UTC is malformed, so a seconds-scale clock
 cannot be reaped as ancient history and still report a successful scan.
 A timestamp more than one day after the read is malformed, so a far-future
@@ -478,6 +476,157 @@ day, the row carries partial_sources. If the day has no token bucket, the reader
 returns incomplete `partial`, since the existing writer trims that warning away.
 This fail-closed resolution was accepted during implementation; it invents no
 zero tokens and changes no wire shape.
+
+**Conductor SQLite stores (Track 70A, Conductor 0.90.1).** The adapter reads one
+workspace store's `index.db` and nothing else of it. Its fixture contract is the
+SQLite census section of `tests/fixtures/host_sessions/cursor/CONTRACT.md`; items
+labeled producer-source-only there are exercised by mutation, not census.
+
+*Open rule.* Only a directory named `[0-9a-f]{16}` (Conductor's
+`sha256(workspaceDir)[:16]`) is a SQLite store; another name holding an `index.db`
+is ignored and not counted as unread. All four files (`index.db`, `-wal`, `-shm`,
+`-journal`) are lstat-ed first and must be regular, non-symlink files, else
+`io_error/non_regular_path` with the file's name, before anything is opened. A
+non-empty `-journal` is `stale/hot_journal`. With no `-wal` the database opens
+`mode=ro&immutable=1` (a plain read-only open would create `-shm`/`-wal`), pinned
+by (dev, ino, size, mtime_ns) plus the `-wal`'s continued absence; with a `-wal`
+it opens `mode=ro`, pinned by (dev, ino, type) of the files present, and the
+`-shm` SQLite itself creates is exempt. A change across the read is
+`stale/identity_changed`. mm never writes, checkpoints or copies a store file,
+never opens a per-agent `store.db`, never reads `result`, `error_code`, `agents`,
+`run_events` or a blob table, and never `os.open`s a database file while
+connected. Footprint-free holds only in steady states, and means no file is created
+or removed and `index.db` and `-wal` stay byte-identical: SQLite itself updates the
+`-shm` wal-index (read marks with a live writer; its mtime alone when it re-validates
+a quit writer's residue, observed live 2026-10-09 with content unchanged), so the
+`-shm` is exempt from the post-read check beyond (dev, ino, type). A close race or a
+crash can leave SQLite-valid `-wal`/`-shm` files, which Conductor recovers on its next
+open.
+That is a known departure from the codex-memory owned-tree rule; the README says
+so in one sentence. The same-user race between lstat and open is accepted, and the
+legacy JSONL reader keeps its skip-if-non-regular behavior, an asymmetry that is
+intentional. Under `PYTEST_CURRENT_TEST` opening any store under the account's
+real Conductor path (resolved through the account database, not `HOME`) raises
+`RuntimeError`, which is not a read failure and propagates.
+
+*Connection discipline.* `sqlite3` is imported lazily (an ImportError is
+reader-wide `io_error/sqlite_unavailable`). The connection is `isolation_level=None`
+with a busy wait of `min(remaining, 100 ms)` (then `locked`, never persisted), a
+progress handler enforcing the read deadline (`SQLITE_INTERRUPT` is `deadline`),
+`setlimit(LENGTH, 65536)` (an oversize cell is `TOOBIG`, so `oversize_or_type`
+without materializing that value in Python), `text_factory=bytes` with strict UTF-8, and
+`trusted_schema=OFF`, `query_only=ON`, `cell_size_check=ON`, `mmap_size=0`; the
+first two are read back and a mismatch is `io_error/sqlite_pragma`. These run only
+when a store is opened. An explicit `BEGIN` makes `sqlite_master`,
+`table_info(runs)` and the row read one snapshot. The SQL is built from constant
+identifiers only, over exactly `run_id`, `request_id`, `status`, `model`,
+`model_params_json`, `usage_json`, `usage_ref` (presence only), `finished_at`,
+`cancelled_at`, `expired_at`, `updated_at`; every selected value is paired with `typeof`.
+`run_id`, `request_id`, `status`, `usage_json` and `usage_ref` must be text or null
+on every row; contributing rows also follow the model and timestamp rules below.
+There is deliberately no SQLite authorizer: a test pins the
+SQL instead. Errors are classified by `sqlite_errorcode & 0xFF`; no
+`sqlite3.Error` escapes and there is no publishing catch-all.
+
+*Row policy.* Check order: unknown status (store-scoped `unknown_status`); a
+non-terminal row carrying `usage_json` or `usage_ref` (also `unknown_status`,
+otherwise it contributes nothing); then what a terminal row contributes: any
+terminal row with `usage_json` counts on its terminal UTC day, a `FINISHED` row
+with only a `usage_ref` is the existing partial placeholder, and every other row
+(including a `usage_ref`-only `CANCELLED`/`ERROR`/`EXPIRED`) contributes nothing.
+**A row that contributes nothing skips timestamp and model validation.** Shared
+identity, type and SQLite size guards still apply. A contributing row's terminal stamp must fullmatch
+`YYYY-MM-DDTHH:MM:SS.mmmZ`, parse, and sit inside the 2020 floor and the one-day
+future slack (else `bad_timestamp`). A NULL model is `cursor-unknown`; a non-text,
+empty or oversize one is `bad_model`. Only `grok-4.7` consults
+`model_params_json`: no fast param (NULL, `[]` or none) is the unpriced
+`grok-4.7-unspecified`, `fast=true` is `grok-4.7-fast`, `fast=false` is `grok-4.7`;
+more than one fast param, a value other than true/false, or a non-list is
+store-scoped `model_params`. Counters follow the shared rules (valid counters, the
+disjoint identity, `reasoningTokens <= outputTokens` when present), but a missing
+`reasoningTokens` is accepted (the property is optional), unlike the legacy ledger.
+The shared validators live in `_cursor_entry` / `_cursor_placeholder` /
+`_cursor_bounded_day`; `_cursor_run` and `_sqlite_run` are the per-format adapters,
+and a golden test pins the JSONL projection byte for byte across that split.
+
+*Store-scoped drift versus reader-wide failure.* A store whose layout this mm
+cannot read contributes nothing, keeps its retained history, is recorded in
+`sqlite_read.stores[id]`, and does not stop the pass: `unknown_status`,
+`missing_required_column` (pre-ALTER included), `schema_object` (no `runs` table, a
+view, or `SQLITE_AUTH`), `model_params`, `column_type`, and `schema_unreadable`
+(CORRUPT on the first schema read). These never set a reader-wide reason, so they
+never set `unsupported`, never reach `_usage_capture_needs_upgrade`, and never
+print the shared "pipx upgrade" remedy. Data and IO failures are reader-wide and
+stop the pass: `malformed` (`bad_json`, `oversize_or_type`, `bad_timestamp`,
+`bad_utf8`, `bad_counters`, `bad_model`, `corrupt_database`, `duplicate_request`,
+`conflict`), `io_error` (`non_regular_path`, `cannot_open`, `sqlite_pragma`,
+`sqlite_unavailable`) and `stale` (`hot_journal`, `identity_changed`); `locked` and
+`deadline` carry no cause. One unreadable store therefore pauses all Cursor usage on
+that Mac; per-store isolation is deferred until a real blackout is observed. A
+store that vanishes (a missing `index.db` at the lstat, or `CANTOPEN` followed by
+`ENOENT`) is skipped with its retained history intact.
+
+*Retention: SQLite never retracts.* A non-contributing SQLite row never removes a
+retained run, counted rows replace by key, and a SQLite placeholder never replaces
+retained counters (also after an alias dedup). Persisted SQLite keys protect those
+counters from legacy empty/placeholder copies after pruning, drift, disappearance
+or an incomplete pass. Pure JSONL keys keep their revision semantics. Within one workspace
+directory both formats are read and reconciled per `run_id`: counted beats
+placeholder beats non-contributing, and SQLite wins a tie. A vanished
+`runs.ndjson` is dropped when `index.db` exists (Conductor's migration deletes
+it); otherwise it is still a failure. `_stage_cursor_directory` owns both formats
+and the reconciliation; `read_cursor_usage` keeps only commit, conflict and carry.
+The first failing directory stops the pass: earlier directories commit history and
+read-set entries, the failing one contributes nothing and later ones are not read.
+A cross-directory conflict is `malformed/conflict` and commits nothing. SQLite stages
+`request_id` aliases only for contributing rows, so a counterless cancellation
+does not claim an alias. A duplicate is `malformed/duplicate_request`. No fingerprint skip:
+every store is read every pass, so short passes need not converge.
+
+*Persisted metadata.* Three additive top-level keys, carried explicitly through the
+`updated = {...}` rebuild, with no per-run field and no `CACHE_VERSION` bump.
+`sqlite_read = {stores: {<16-hex>: "read" | <store-scoped cause>}}` is written when a
+directory commits (nothing on a conflict) and entries for vanished directories are
+dropped only after a complete enumeration; it is read per entry, so garbage
+entries are dropped individually, and an older mm that rewrites the cache without
+the key degrades to "all unread" and recovers on the next pass.
+`sqlite_retained` is a sorted list of 64-hex run hashes that have received SQLite
+retention protection. The reader carries it across passes, adds keys only when
+their stage commits, and removes keys when cutoff or alias dedup removes the
+retained entry. Missing means a legacy cache; a malformed present value refuses
+the cache without rewriting it. Unlike diagnostic metadata, dropping it could
+lose history. An older mm may drop the field and cannot preserve this guarantee;
+all active capture entrypoints must use the upgraded build.
+`last_reason_detail = {cause, store, file?, code?}` explains a standing reader-wide
+reason: `store` is a 16-hex id or null (null for cross-directory `duplicate_request`,
+`conflict`, `sqlite_pragma`,
+`sqlite_unavailable`), `file` one of the four store file names, `code` a SQLite or OS
+error name matching `[A-Z_]{1,40}` (rendered "unknown SQLite error" when absent or
+invalid after a reload). Lifecycle, `_carry_reason_detail`: a non-persistable pass
+(`locked`), or a transient one while a permanent prior reason stands, keeps the
+prior detail; otherwise the carried reason is this pass's and so is its detail,
+even None (a persistable `deadline`, and every JSONL, spool or cache-write
+failure, persist none); it clears with the reason. A detail is honored only beside
+the reason its cause maps to, and an invalid one is absent, never an error.
+
+*Diag and status.* `unread_sqlite_stores` is the 16-hex `index.db` stores absent
+from `sqlite_read.stores`: a valid snapshot uses its read set, a missing cache is an
+empty read set (all unread), an unreadable or lock-failed snapshot or an unlistable
+root is unknown. A running push does not make the count unknown: writers lock the
+sibling `.lock`, so the unlocked snapshot is the last committed state.
+`unsupported_sqlite_stores` is `{count, causes}` over the recorded drift.
+Status appends "not yet read" and "use a layout this mm cannot read ... Run
+`mm update`" clauses to the existing Cursor usage narrative, and a store-detail
+clause (and the diag `store detail:` line) rendered in `cli.py` from
+`last_reason_detail` through `safety` follows the unchanged shared blocker line;
+`events_tail._host_skip_phrase` and push output are untouched. The closed catalog
+covers every reader-wide cause in `CURSOR_SQLITE_READER_CAUSES` or marks it
+explicitly clause-less (`hot_journal`, `identity_changed`: transient), and never
+advises deleting retained history or the spool. The shared "pipx upgrade" phrase
+remains the other readers' remedy; switching it to `mm update` is deferred.
+Retirement: on the next Conductor store change the adapter is retired by default
+(status reverts to "not counted"), unless Conductor Cursor runs fall on three or
+more distinct days of the prior thirty fleet-wide, when the user decides.
 
 The private `cursor-host-tokens.json` is **authoritative history after pruning**,
 not a disposable parse cache. It uses shared `host_usage.CACHE_VERSION` and

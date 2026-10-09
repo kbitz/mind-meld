@@ -841,6 +841,12 @@ one `stop` hook in `~/.cursor/hooks.json`, preserving other hooks and settings:
 cursor_host_usage = true
 ```
 
+What is counted: Conductor runs, from both its legacy `runs.ndjson` and (since
+Conductor 0.90.1) its SQLite `index.db`; interactive `cursor-agent` runs through
+the completion hook; and `mm cursor-agent --print` runs through the wrapper. Not
+counted: a native `cursor-agent --print` run, which fires no hook, and Paseo's
+Cursor sessions (ACP), which send no usage.
+
 Conductor capture has been supported since mm v1.2.0. The config bit alone
 continues to enable that reader; standalone interactive capture also needs the
 hook installed by `mm enable-source cursor`; `mm status` says so when the hook
@@ -851,8 +857,11 @@ its existing file-source toggle behavior instead of using this usage alias.
 
 Run `mm push` and inspect `mm status`; `mm diag --json` includes
 `host_usage.cursor` with its own blocker, retained-run count, last complete
-read, `hook_state`, `pending_completions` and `unread_sqlite_stores`. There is no
-built-in Cursor customization or memory sync source.
+read, `hook_state`, `pending_completions`, `unread_sqlite_stores` (Conductor
+workspace stores never read by an SQLite-capable mm), `unsupported_sqlite_stores`
+(`{count, causes}`: stores whose layout this mm cannot read) and
+`last_reason_detail` (`{cause, store, file?, code?}`, the closed cause behind a
+standing blocker). There is no built-in Cursor customization or memory sync source.
 Run files remain local; only aggregate
 usage crosses the encrypted sync boundary.
 
@@ -879,19 +888,77 @@ sends no usage. Its session stores under `~/.cursor/acp-sessions/` hold the
 model and a context-window gauge but no billed token counters, so mm has
 nothing to read. Interactive and wrapped print sessions are unaffected.
 
-Conductor runs are counted on endedAt's UTC day; standalone completions use
-the local capture's UTC day. Repeated callbacks replace the same generation,
+Conductor runs are counted on their terminal UTC day (`endedAt` in the legacy
+ledger; `finished_at`, `cancelled_at` or `expired_at` in SQLite, and `updated_at`
+for an errored run); standalone completions use the local capture's UTC day. Repeated callbacks replace the same generation,
 and Conductor request IDs deduplicate overlapping captures. mm retains captured runs
 for 90 days even after Conductor prunes them, using private durable
 `cursor-host-tokens.json`; runs pruned before the first capture cannot be recovered.
 Standalone completions wait in private `cursor-standalone-spool.jsonl` until
 the next `mm push` folds them in; `mm diag` shows how many are pending.
 Do not delete either file to troubleshoot a slow read: each may hold the only copy.
-Conductor 0.90.1 stores new Cursor runs in a SQLite database that mm does not
-read yet; `mm status` and `mm diag` say how many workspace stores this affects,
-and those runs are not counted until a reader ships.
 Repeated short reads need not converge on a rewritten ledger; attended warming
 or a larger configured read budget may be necessary.
+
+<a id="cursor-sqlite-stores"></a>
+
+**Conductor SQLite stores (Conductor 0.90.1+).** Conductor keeps one store per
+workspace at `~/Library/Application Support/com.conductor.app/cursor-sdk-store/<id>`,
+where `<id>` is the first 16 hex digits of `sha256(workspace path)`. mm opens only
+each store's `index.db`, read-only, and selects run identity, status, model, the
+terminal timestamp and the token counters; it never reads prompts, results or
+events, and never writes, checkpoints or copies a store file. In the steady
+states it creates and removes nothing there and leaves `index.db` and `-wal`
+byte-identical; SQLite may still advance the modification time of the `-shm`
+wal-index, as for any reader of a WAL database. A crash or a close race can
+leave SQLite-valid `-wal`/`-shm` files that Conductor recovers on its next open.
+Each run is counted once whichever format it was first seen in, and a run mm has
+retained stays counted even if Conductor later prunes it or reports it without
+counters. Totals can rise after you update: mm now also counts backfilled and
+migrated runs and counter-bearing cancelled, errored or expired runs.
+
+Older mm versions cannot read these stores and may discard the local metadata
+that protects retained SQLite counters from stale JSONL copies. Keep every active
+`mm` entrypoint, including autopush, on the upgraded build. If `mm status` says a store is "not
+yet read", or a Cursor row is missing runs from a Conductor 0.90.1+ Mac, update
+that Mac and confirm the version fleet-wide:
+
+```sh
+mm update
+mm --version
+mm devices
+```
+
+Then verify on the producing Mac. A cleared notice alone is not proof:
+
+```sh
+mm push
+mm status | grep -i cursor
+mm retro-fleet 1d
+```
+
+Expect no "not yet read" clause, a completed Cursor scan, and today's tokens in
+the Cursor row. The status clauses mean:
+
+- **"not yet read"**: this mm has not read the store yet; `mm push` attempts to read it.
+- **"use a layout this mm cannot read"**: Conductor's schema drifted. Those runs
+  contribute nothing, other stores and standalone captures still publish, and
+  history already retained is kept. This is "unsupported by this installed mm":
+  `mm update` may help. If you are current, the schema changed again; report
+  `mm diag --json` `host_usage.cursor` (`unsupported_sqlite_stores`).
+  "Support retired" is different: mm drops the SQLite adapter when Conductor's
+  store changes again and no update helps. Cursor's dashboard can export per-event
+  usage as a CSV by hand (a community-reported feature,
+  [not verified by mm](https://forum.cursor.com/t/dashboard-export-usage-events-csv-no-longer-exports-cost/167193)).
+- **A standing blocker with a store detail** (`malformed` or `io_error` named after
+  a Conductor workspace store): one store mm cannot read pauses **all** Cursor
+  usage on that Mac until it reads cleanly. If it persists, stop Cursor usage
+  reading with `mm disable-source cursor` or `[retro] cursor_host_usage = false`.
+  Never delete `cursor-host-tokens.json` or the spool to clear it.
+- **`deadline`**: the read ran out of budget. After two attended pushes still at
+  `deadline`, report `mm diag --json` `host_usage.cursor`. The budgets are
+  `[retro] host_usage_autopush_budget_ms` and `host_usage_interactive_budget_ms`
+  (100 to 5,000 ms).
 
 Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
 read / $6 output per million tokens), with an unknown per-request long-context

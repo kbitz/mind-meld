@@ -4791,31 +4791,31 @@ class TestCursorUsage67A:
         assert not result.complete
         assert json.loads(hu.CURSOR_CACHE_PATH.read_text())["runs"] == {}
 
-    def test_sqlite_layout_stores_are_counted_never_opened(self, cursor_store, tmp_path):
-        baseline = self._read(cursor_store)
-        sqlite_store = cursor_store / "newer-conductor"
+    def test_sqlite_store_listing_counts_only_hex_directories_by_name(self, cursor_store, tmp_path):
+        sqlite_store = cursor_store / "0123456789abcdef"
         sqlite_store.mkdir()
         (sqlite_store / "index.db").write_bytes(b"SQLite format 3\x00")
-        (sqlite_store / "index.db").chmod(0)  # any open would fail
-        both = cursor_store / "migrating"
+        both = cursor_store / "fedcba9876543210"
         both.mkdir()
         (both / "index.db").touch()
         (both / "runs.ndjson").touch()
+        not_conductors = cursor_store / "newer-conductor"  # not a sha256(workspace)[:16] name
+        not_conductors.mkdir()
+        (not_conductors / "index.db").touch()
         (cursor_store / "stray-file").touch()
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         (elsewhere / "index.db").touch()
-        (cursor_store / "linked").symlink_to(elsewhere)
-        try:
-            assert hu.unread_cursor_stores(cursor_store) == 2  # SQLite-only and migrating
-            assert self._read(cursor_store).hosts == baseline.hosts
-        finally:
-            (sqlite_store / "index.db").chmod(0o600)
-        assert hu.unread_cursor_stores(tmp_path / "absent") == 0
+        (cursor_store / "0000000000000000").symlink_to(elsewhere)
+        assert hu.cursor_sqlite_stores(cursor_store) == ["0123456789abcdef", "fedcba9876543210"]
+        assert hu.unread_sqlite_stores(cursor_store) == 2  # SQLite-only and migrating
+        assert hu.unread_sqlite_stores(cursor_store, {"0123456789abcdef": "read"}) == 1
+        assert hu.unread_sqlite_stores(tmp_path / "absent") == 0
 
     def test_store_scan_errors_report_unknown(self, cursor_store, monkeypatch):
         class Entry:
-            path = str(cursor_store / "vanishing")
+            name = "0123456789abcdef"
+            path = str(cursor_store / "0123456789abcdef")
 
             def is_dir(self, follow_symlinks=True):
                 raise PermissionError("stat failed")
@@ -4828,7 +4828,7 @@ class TestCursorUsage67A:
                 return False
 
         monkeypatch.setattr(hu.os, "scandir", lambda root: Entries([Entry()]))
-        assert hu.unread_cursor_stores(cursor_store) is None
+        assert hu.unread_sqlite_stores(cursor_store) is None
 
     @pytest.mark.parametrize("status", ["cancelled", "error", "queued"])
     def test_counterless_unfinished_rows_contribute_nothing(self, cursor_store, status):
@@ -5233,3 +5233,280 @@ class TestCursorUsage67A:
         row["model"]["id"] = "auto"
         self._write(path, row)
         assert set(self._read(cursor_store).hosts) == {"other"}
+
+
+# Captured from the pre-70A reader (HEAD 98e9a69) by running ``_read_cursor_file``
+# over the real redacted census rows and synthetic mutations of one of them.
+# Splitting ``_cursor_run`` into shared validators plus per-format adapters must
+# not move a byte of the legacy JSONL projection: ``staged`` is run key -> day,
+# model, counters and partial flag (or None for a non-contributing row),
+# ``aliases`` is requestId hash -> run key, ``failure`` is the refusal reason.
+_CURSOR_JSONL_GOLDEN = json.loads(
+    r"""
+{
+ "cache-write-partial": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "grok-4.7",
+    "partial": true,
+    "usage": {
+     "cache_create": 10,
+     "cache_read": 12505856,
+     "input": 13345729,
+     "output": 40186
+    }
+   }
+  }
+ },
+ "cancelled": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": null
+  }
+ },
+ "error": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": null
+  }
+ },
+ "fail-bool-counter": {
+  "failure": "malformed"
+ },
+ "fail-cancelled-counters": {
+  "failure": "unsupported"
+ },
+ "fail-cancelled-usage-ref": {
+  "failure": "unsupported"
+ },
+ "fail-empty-run-id": {
+  "failure": "malformed"
+ },
+ "fail-fast-odd": {
+  "failure": "unsupported"
+ },
+ "fail-fast-two": {
+  "failure": "unsupported"
+ },
+ "fail-grok-no-fast": {
+  "failure": "unsupported"
+ },
+ "fail-identity": {
+  "failure": "malformed"
+ },
+ "fail-missing-usage": {
+  "failure": "malformed"
+ },
+ "fail-null-usage-no-ref": {
+  "failure": "malformed"
+ },
+ "fail-params-not-list": {
+  "failure": "malformed"
+ },
+ "fail-reasoning": {
+  "failure": "malformed"
+ },
+ "fail-renamed-status": {
+  "failure": "unsupported"
+ },
+ "fail-seconds-ended-at": {
+  "failure": "malformed"
+ },
+ "fast-true": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "grok-4.7-fast",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 12505856,
+     "input": 13345729,
+     "output": 40186
+    }
+   }
+  }
+ },
+ "non-grok-no-fast": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "gpt-6-astra",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 12505856,
+     "input": 13345729,
+     "output": 40186
+    }
+   }
+  }
+ },
+ "queued": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": null
+  }
+ },
+ "request-alias": {
+  "aliases": {
+   "9456bdfa12ea76959c94a3572f5d91c73d838622df0a8d9b4e815c276c6b7880":
+    "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320"
+  },
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "grok-4.7",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 12505856,
+     "input": 13345729,
+     "output": 40186
+    }
+   }
+  }
+ },
+ "session-1": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "grok-4.7",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 12505856,
+     "input": 13345729,
+     "output": 40186
+    }
+   },
+   "f80ff27cb7faf413f94fd827200bfdeac81cf456bf0dcc2d41383f5c6abb7821": {
+    "day": "2026-09-23",
+    "model": "grok-4.7",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 2343424,
+     "input": 2618647,
+     "output": 17279
+    }
+   }
+  }
+ },
+ "session-3": {
+  "aliases": {},
+  "staged": {
+   "b127355d22419f6e560369bb6c311c94425c7f8b2d67bf926fc879067cd75d3f": {
+    "day": "2026-09-23",
+    "model": "grok-4.7",
+    "partial": false,
+    "usage": {
+     "cache_create": 0,
+     "cache_read": 825088,
+     "input": 1006863,
+     "output": 26568
+    }
+   }
+  }
+ },
+ "usage-ref-placeholder": {
+  "aliases": {},
+  "staged": {
+   "bf7eda23e0443b077627f712759c4bc415f850d60c5219925f8026eed5f37320": {
+    "day": "2026-09-22",
+    "model": "grok-4.7",
+    "partial": true,
+    "usage": null
+   }
+  }
+ }
+}
+"""
+)
+
+
+class TestCursorJsonlGolden70A:
+    """The CRITICAL regression gate for the 70A shared-validator split."""
+
+    @staticmethod
+    def _cases():
+        fixtures = FIXTURES / "cursor"
+        base = json.loads((fixtures / "session-1/runs.ndjson").read_text().splitlines()[0])
+
+        def variant(**changes):
+            row = json.loads(json.dumps(base))
+            for name, value in changes.items():
+                if value is KeyError:
+                    row.pop(name, None)
+                else:
+                    row[name] = value
+            return row
+
+        def usage(**changes):
+            return {**base["usage"], **changes}
+
+        total = base["usage"]["totalTokens"]
+        grok = {"id": "grok-4.7", "params": [{"id": "fast", "value": "true"}]}
+        return {
+            "session-1": None,
+            "session-3": None,
+            "queued": variant(status="queued", usage=None, endedAt=KeyError),
+            "cancelled": variant(status="cancelled", usage=None),
+            "error": variant(status="error", usage=None),
+            "usage-ref-placeholder": variant(usage=None, usageRef="ref-1"),
+            "fast-true": variant(model=grok),
+            "cache-write-partial": variant(
+                usage=usage(cacheWriteTokens=10, totalTokens=total + 10)
+            ),
+            "request-alias": variant(requestId="req-1"),
+            "non-grok-no-fast": variant(model={"id": "gpt-6-astra", "params": []}),
+            "fail-renamed-status": variant(status="renamed"),
+            "fail-grok-no-fast": variant(model={"id": "grok-4.7", "params": []}),
+            "fail-params-not-list": variant(model={"id": "grok-4.7", "params": None}),
+            "fail-fast-two": variant(
+                model={
+                    "id": "grok-4.7",
+                    "params": [
+                        {"id": "fast", "value": "true"},
+                        {"id": "fast", "value": "false"},
+                    ],
+                }
+            ),
+            "fail-fast-odd": variant(
+                model={"id": "grok-4.7", "params": [{"id": "fast", "value": "maybe"}]}
+            ),
+            "fail-identity": variant(usage=usage(totalTokens=total + 1)),
+            "fail-reasoning": variant(
+                usage=usage(reasoningTokens=base["usage"]["outputTokens"] + 1)
+            ),
+            "fail-missing-usage": variant(usage=KeyError),
+            "fail-null-usage-no-ref": variant(usage=None),
+            "fail-cancelled-usage-ref": variant(status="cancelled", usage=None, usageRef="ref"),
+            "fail-cancelled-counters": variant(status="cancelled"),
+            "fail-seconds-ended-at": variant(endedAt=1_790_109_894),
+            "fail-bool-counter": variant(usage=usage(inputTokens=True)),
+            "fail-empty-run-id": variant(runId=""),
+        }
+
+    def test_jsonl_projections_are_byte_identical_to_the_pre_split_reader(self, tmp_path):
+        actual = {}
+        for name, row in self._cases().items():
+            path = tmp_path / f"{name}.ndjson"
+            if row is None:
+                path.write_bytes((FIXTURES / "cursor" / name / "runs.ndjson").read_bytes())
+            else:
+                path.write_text(json.dumps(row) + "\n")
+            try:
+                staged, aliases = hu._read_cursor_file(path, time.monotonic() + 5)
+                actual[name] = {"staged": staged, "aliases": aliases}
+            except hu._ReadFailure as exc:
+                actual[name] = {"failure": exc.reason}
+        assert set(actual) == set(_CURSOR_JSONL_GOLDEN)
+        assert json.dumps(actual, sort_keys=True) == json.dumps(
+            _CURSOR_JSONL_GOLDEN, sort_keys=True
+        )
