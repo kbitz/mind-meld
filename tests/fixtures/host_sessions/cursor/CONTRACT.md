@@ -195,10 +195,25 @@ its mtime did not. The `-shm` is SQLite's own wal-index, so the open rule exempt
 beyond (dev, ino, type); a reader that avoided even that would need `immutable=1`
 against a WAL that a live writer might extend, which this adapter does not do.
 
-**Not yet measured (attended step).** Quit Conductor, record `ls -l index.db*` for
-both stores, and attempt to interrupt a streaming turn to see whether a cancelled
-run carries counters. This file records only what was measured; fill this in with
-the result.
+**Attended follow-up (2026-10-09, Conductor 0.90.1).** Two user-interrupted
+`grok-4.7` turns in store `ef1e666541566c2e` ended at 18:46:58.200Z and
+18:47:21.769Z. Both were `CANCELLED` with NULL `usage_json`, distinct `run_id` and
+`request_id` values, and `updated_at == cancelled_at`. The first attempt showed
+no answer text before interruption; the second showed agent activity. This
+attempt did not produce a counter-bearing cancelled row, so that case remains
+producer-source only, not census.
+
+After the user quit Conductor, `ls -l index.db*` at 18:49:13Z showed:
+
+| store | `index.db` | `index.db-wal` | `index.db-shm` |
+|---|---|---|---|
+| `6a0374c100b4e8c8` | 958,464 B | 0 B | 32,768 B |
+| `a12bae7f256784c5` | 61,440 B | 0 B | 32,768 B |
+| `ef1e666541566c2e` | 495,616 B | 0 B | 32,768 B |
+
+No Conductor process was found. The quit-state capture listed files without
+opening SQLite; the new store's WAL had been 708,672 B before quitting. The
+original four counted rows and their 598,589-token total were unchanged.
 
 ### Open rule (minimal footprint)
 
