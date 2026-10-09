@@ -2,7 +2,7 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
+- `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
 - `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
 - `src/mind_meld/cli.py` — the 3 transition-detection hook seams (`_get_config`, `_auto_command_setup`, `init_cmd`); the 4 self-update seams (tail of `push` / `pull` / `autopull` / `autopush`) and `recapture`'s nudge-only tail; the `update` command and `_run_update_with_progress`; `mm status` upgrade surfacing
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
@@ -148,7 +148,10 @@ bounded process-group cleanup applies to PTYs as well as pipes; any drain
 failure escalates like a timeout, so the SIGKILL and group check never depend
 on reading output, and `run_update` reports it as a failed update. Both PTY
 descriptors close on every exit, and cleanup disables UI callbacks before
-draining remaining output.
+draining remaining output. `_signal_pipx_group` handles macOS rejecting a signal
+to an exited, unreaped installer: reap the parent and retry once. Permission
+errors with a live parent or on the retry still propagate; only a missing
+process group is ignored.
 
 **One attempt per release per day (`_claim_install_attempt`).** The claim is a
 single read-modify-write under the upgrade-state flock, stamped **before**

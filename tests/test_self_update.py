@@ -901,6 +901,95 @@ class TestPipxSeams:
         assert outcome.status == "failed"
         assert "out of range" in outcome.detail
 
+    @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGKILL])
+    def test_exit_during_stop_preserves_the_drain_error(
+        self, pipx_install, monkeypatch, tmp_path, stop_signal
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        pipx = _fake_pipx(tmp_path, "import time\ntime.sleep(30)\n")
+        children = []
+        popen = subprocess.Popen
+        killpg = os.killpg
+        injected = False
+
+        def capture_child(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            children.append(proc)
+            return proc
+
+        def exit_before_signal(pid, sig):
+            nonlocal injected
+            if sig == stop_signal and not injected:
+                injected = True
+                proc = children[0]
+                try:
+                    killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    assert proc.poll() is not None
+                proc.wait(timeout=2)
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            return killpg(pid, sig)
+
+        def failing_drain(self, proc, timeout):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade.subprocess, "Popen", capture_child)
+        monkeypatch.setattr(upgrade.os, "killpg", exit_before_signal)
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        try:
+            outcome = upgrade.run_update(
+                upgrade.detect_install(), pipx, on_progress=lambda state: None
+            )
+            assert injected
+            assert outcome.status == "failed"
+            assert "out of range" in outcome.detail
+            assert children[0].returncode is not None
+        finally:
+            for proc in children:
+                if proc.poll() is None:
+                    killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+
+    def test_stop_permission_error_with_live_parent_is_not_ignored(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        pipx = _fake_pipx(tmp_path, "import time\ntime.sleep(30)\n")
+        children = []
+        popen = subprocess.Popen
+        killpg = os.killpg
+
+        def capture_child(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            children.append(proc)
+            return proc
+
+        def refuse_signal(pid, sig):
+            assert children[0].poll() is None
+            raise PermissionError(errno.EPERM, "live child signal refused")
+
+        def failing_drain(self, proc, timeout):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade.subprocess, "Popen", capture_child)
+        monkeypatch.setattr(upgrade.os, "killpg", refuse_signal)
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        try:
+            outcome = upgrade.run_update(
+                upgrade.detect_install(), pipx, on_progress=lambda state: None
+            )
+            assert outcome.status == "failed"
+            assert "live child signal refused" in outcome.detail
+        finally:
+            for proc in children:
+                killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+
     def test_streamed_timeout_keeps_what_the_terminal_finally_showed(
         self, pipx_install, monkeypatch
     ):

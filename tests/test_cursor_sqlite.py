@@ -13,10 +13,13 @@ import hashlib
 import json
 import os
 import re
+import select
 import sqlite3
 import subprocess
 import sys
+import time
 import tracemalloc
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -895,22 +898,56 @@ class Writer:
             stdout=subprocess.PIPE,
             text=True,
         )
-        assert self.proc.stdout.readline().strip() == "ready"
+        try:
+            assert self._reply() == "ready"
+        except BaseException:
+            self._cleanup()
+            raise
+
+    def _cleanup(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(timeout=30)
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            with suppress(OSError):
+                pipe.close()
+
+    def _reply(self):
+        deadline = time.monotonic() + 30
+        reply = bytearray()
+        try:
+            while not reply.endswith(b"\n"):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([self.proc.stdout], [], [], remaining)[0]:
+                    raise TimeoutError("SQLite writer did not reply within 30 seconds")
+                chunk = os.read(self.proc.stdout.fileno(), 1)
+                if not chunk:
+                    raise EOFError("SQLite writer exited before replying")
+                reply.extend(chunk)
+            return reply.decode().strip()
+        except BaseException:
+            self._cleanup()
+            raise
 
     def tell(self, *words):
         self.proc.stdin.write(" ".join(words) + "\n")
         self.proc.stdin.flush()
-        return self.proc.stdout.readline().strip()
+        return self._reply()
+
+    def _finish(self, command):
+        try:
+            if self.proc.poll() is None:
+                self.proc.stdin.write(command + "\n")
+                self.proc.stdin.flush()
+            self.proc.wait(timeout=30)
+        finally:
+            self._cleanup()
 
     def crash(self):
-        self.proc.stdin.write("crash\n")
-        self.proc.stdin.flush()
-        self.proc.wait(timeout=30)
+        self._finish("crash")
 
     def close(self):
-        self.proc.stdin.write("quit\n")
-        self.proc.stdin.flush()
-        self.proc.wait(timeout=30)
+        self._finish("quit")
 
 
 def test_row1_no_wal_opens_immutable_and_leaves_no_footprint():

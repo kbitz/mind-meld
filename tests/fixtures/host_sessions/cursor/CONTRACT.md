@@ -245,25 +245,36 @@ mm may drop this additive field; it cannot preserve that guarantee. The per-run
 cache and synced event shapes are unchanged.
 
 **Re-check recipe** (run by hand after a Conductor update; it only reads). Pick the
-mode from fresh filesystem state, check first that `-journal`, if present, is a
-regular file, report `CANTOPEN` as-is and never retry in another mode:
+mode from fresh filesystem state, refuse non-regular files and a non-empty
+journal, report `CANTOPEN` as-is and never retry in another mode:
 
 ```sh
 S="$HOME/Library/Application Support/com.conductor.app/cursor-sdk-store/<id>"
 ls -l "$S"/index.db*
 python3 -I - "$S" <<'PY'
-import sqlite3, sys
+import sqlite3, stat, sys
+from contextlib import closing
 from pathlib import Path
 
 store = Path(sys.argv[1])
-journal = store / "index.db-journal"
-if journal.is_symlink() or (journal.exists() and not journal.is_file()):
-    sys.exit("index.db-journal is not a regular file")
-mode = "mode=ro" if (store / "index.db-wal").exists() else "mode=ro&immutable=1"
-conn = sqlite3.connect((store / "index.db").as_uri() + "?" + mode, uri=True)
-conn.execute("PRAGMA query_only=ON")
-for row in conn.execute("PRAGMA table_info(runs)"):
-    print(row)
+files = {}
+for name in ("index.db", "index.db-wal", "index.db-shm", "index.db-journal"):
+    try:
+        info = (store / name).lstat()
+    except FileNotFoundError:
+        if name == "index.db":
+            raise
+        continue
+    if not stat.S_ISREG(info.st_mode):
+        sys.exit(f"{name} is not a regular file")
+    files[name] = info
+if "index.db-journal" in files and files["index.db-journal"].st_size:
+    sys.exit("index.db-journal is non-empty; stop and let Conductor recover it")
+mode = "mode=ro" if "index.db-wal" in files else "mode=ro&immutable=1"
+with closing(sqlite3.connect((store / "index.db").as_uri() + "?" + mode, uri=True)) as conn:
+    conn.execute("PRAGMA query_only=ON")
+    for row in conn.execute("PRAGMA table_info(runs)"):
+        print(row)
 PY
 ls -l "$S"/index.db*
 ```

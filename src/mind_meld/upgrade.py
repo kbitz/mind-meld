@@ -939,6 +939,21 @@ def _hangup_ignored() -> Iterator[None]:
             signal.signal(signal.SIGHUP, previous if previous is not None else signal.SIG_DFL)
 
 
+def _signal_pipx_group(proc: subprocess.Popen[str], sig: int) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # macOS can reject a group containing only an unreaped child.
+        if proc.poll() is None:
+            raise
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+
+
 def _run_pipx(
     argv: list[str], *, on_output: Callable[[str], None] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -1017,20 +1032,14 @@ def _run_pipx(
                 # Reap an exited parent even when an escaped child keeps stdout open.
                 # macOS can reject signaling a group containing only the zombie parent.
                 finished_returncode = proc.poll()
-                try:
-                    os.killpg(proc.pid, signal.SIGINT)
-                except ProcessLookupError:
-                    pass
+                _signal_pipx_group(proc, signal.SIGINT)
                 # Any drain failure escalates like a timeout: the kill and the group
                 # check below must not depend on reading the installer's output.
                 try:
                     output, _ = communicate(PIPX_STOP_GRACE_SECONDS)
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     proc.poll()
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    _signal_pipx_group(proc, signal.SIGKILL)
                     try:
                         output, _ = communicate(PIPX_STOP_GRACE_SECONDS)
                     except (subprocess.TimeoutExpired, OSError, ValueError) as lingering:
@@ -1055,10 +1064,7 @@ def _run_pipx(
                     except (ProcessLookupError, PermissionError):
                         break  # macOS reports a group of only zombies as EPERM.
                     if time.monotonic() >= stop_deadline:
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
+                        _signal_pipx_group(proc, signal.SIGKILL)
                         break
                     time.sleep(min(0.05, max(0, stop_deadline - time.monotonic())))
                 if isinstance(error, subprocess.TimeoutExpired):
