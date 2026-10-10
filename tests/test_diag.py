@@ -1523,6 +1523,11 @@ def test_unread_conductor_sqlite_stores_reach_status_and_diag(tmp_path, monkeypa
     assert f"Conductor workspace stores not yet read: {expected}" in diag
     assert "newer Conductor stores" not in status + diag
     assert "pipx upgrade" not in status + diag
+    # Value: protects=status and diag omit the unreadable-layout notice when no
+    # store is drifted; fails_when=a zero count still tells the user to run mm
+    # update; why_new=the unread notice test never forbids the layout sentence;
+    # seam=none
+    assert "use a layout this mm cannot read" not in status + diag
 
 
 def test_cursor_sqlite_drift_and_failure_clauses_come_from_a_real_pass(tmp_path, monkeypatch):
@@ -1569,6 +1574,60 @@ def test_cursor_sqlite_drift_and_failure_clauses_come_from_a_real_pass(tmp_path,
     assert state["last_reason"] == "malformed"
     assert state["last_reason_detail"] == {"cause": "corrupt_database", "store": store}
     assert "pipx upgrade" not in status + diag
+
+
+def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monkeypatch):
+    # Value: protects=status and diag name this Python's SQLite version only when
+    # unsupported drift includes schema_unreadable; fails_when=the version suffix is
+    # dropped or attached to every drift cause; why_new=the layout notice test uses
+    # missing_required_column and stops before the suffix; seam=none
+    import sqlite3
+
+    from mind_meld import errors
+    from tests.test_cursor_sqlite import RUNS_DDL, fin, make_store
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    root = host_usage.CURSOR_STORE_PATH
+    drifted = "1111111111111111"
+    pre_alter = RUNS_DDL.replace(" usage_ref TEXT,", "")
+    make_store(root, drifted, [fin("run-a")], ddl=pre_alter)
+    assert host_usage.read_cursor_usage(root, consented=True).complete
+
+    def shown(command):
+        return " ".join(runner.invoke(app, command).output.split())
+
+    status, diag = shown(["status"]), shown(["diag"])
+    assert "(missing_required_column)" in status and "(missing_required_column)" in diag
+    assert "links SQLite" not in status and "links SQLite" not in diag
+
+    store_dir = root / drifted
+    for child in store_dir.iterdir():
+        child.unlink()
+    store_dir.rmdir()
+
+    def break_schema(conn):
+        conn.execute("PRAGMA writable_schema=ON")
+        conn.execute("UPDATE sqlite_master SET sql='CREATE TABLE runs (' WHERE name='runs'")
+
+    broken = "2222222222222222"
+    make_store(root, broken, setup=break_schema)
+    assert host_usage.read_cursor_usage(root, consented=True).complete
+    status, diag = shown(["status"]), shown(["diag"])
+    version = f"links SQLite {sqlite3.sqlite_version}"
+    assert "(schema_unreadable)" in status and version in status
+    assert errors.CURSOR_SQLITE_URL in status
+    assert "(schema_unreadable)" in diag and version in diag
+    assert "missing_required_column" not in status + diag
+    assert "pipx upgrade" not in status + diag
+    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
+    assert state["unsupported_sqlite_stores"] == {"count": 1, "causes": ["schema_unreadable"]}
+    assert state["unread_sqlite_stores"] == 0
+    assert state["last_reason"] is None and state["last_reason_detail"] is None
 
 
 @pytest.mark.parametrize("reader", ["codex", "grok", "cursor"])

@@ -8,6 +8,7 @@ raises under pytest if a test reaches the account's real store.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -839,6 +840,25 @@ def test_non_regular_store_files_refuse_before_any_open(tmp_path, name):
     refused(read(), "io_error", "non_regular_path", S1, file=name)
 
 
+def test_lstat_permission_error_is_cannot_open_with_the_os_name(monkeypatch):
+    # Value: protects=an OS error while stating a store file is cannot_open with
+    # that errno name; fails_when=EACCES escapes as a bare io_error with no store
+    # detail; why_new=sqlite error codes are classified but lstat OSError is not;
+    # seam=none
+    directory = make_store(hu.CURSOR_STORE_PATH, S1, [fin("run-a")])
+    before = footprint(directory)
+    real = Path.lstat
+
+    def lstat(self, *args, **kwargs):
+        if self.name == "index.db":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    refused(read(), "io_error", "cannot_open", S1, file="index.db", code="EACCES")
+    assert footprint(directory) == before
+
+
 @pytest.mark.parametrize("name", PATHS)
 def test_fifo_store_files_never_hang_the_reader(tmp_path, name):
     directory = make_store(tmp_path / "stores", S1, [fin("run-a")])
@@ -1367,6 +1387,19 @@ def test_detail_is_read_tolerantly_and_the_code_falls_back_after_a_reload():
         "cause": "cannot_open",
         "store": None,
     }
+    # Value: protects=a rejected store id renders as (unknown store) and a missing
+    # non_regular file name falls back to index.db; fails_when=the notice crashes
+    # or prints the forged path, None, or an empty file name; why_new=tolerant
+    # detail checks store is None but never renders the clause; seam=none
+    rendered = cli._cursor_store_detail_clause(
+        hu._cursor_reason_detail({**base, "last_reason_detail": forged})
+    )
+    assert rendered is not None
+    assert "(unknown store)" in rendered
+    assert "passwd" not in rendered and "../" not in rendered
+    bare = cli._cursor_store_detail_clause({"cause": "non_regular_path", "store": None})
+    assert bare is not None
+    assert "(unknown store)" in bare and "index.db" in bare
 
 
 # ── diag and status ───────────────────────────────────────────────────────
