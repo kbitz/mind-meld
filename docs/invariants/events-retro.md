@@ -391,7 +391,7 @@ Malformed aliases refuse without resetting history. Measured 2026-10-04
 (Conductor 0.90.1): a Conductor Cursor run fires no user-level stop hook, so
 the two never overlap and this dedup is defensive. Conductor 0.90.1 also moved
 new runs from `runs.ndjson` to a SQLite `index.db`; Track 70A reads it, and its
-rules are in the next section.
+rules are in Conductor SQLite stores below.
 
 On a Mac without a Conductor store, history is authoritative once a scan
 completed or a queued standalone completion was folded while no
@@ -445,15 +445,17 @@ one scan.
 The persisted schema producer is Conductor **0.87.3**, with sessions generated
 by Cursor CLI **2026.09.18-9a7762b**. The fixture contract pins both versions
 and documents the three-run, two-session, one-Mac census. Runtime validation,
-not version pins, detects drift: only `finished` plus non-null usage counts;
-`queued`/`running` plus null usage is pending. `cancelled`/`error` rows with
-null usage and no usageRef contribute nothing: Conductor recorded no counters
+not version pins, detects drift. In the legacy `runs.ndjson` ledger only
+`finished` plus non-null usage counts (SQLite rows follow the row policy in
+Conductor SQLite stores below); `queued`/`running` plus null usage is pending.
+`cancelled`/`error` rows with null usage and no usageRef contribute nothing: Conductor recorded no counters
 for them (2026-10-03 store: 10 cancelled, 1 error, 1 queued across 7 of 16
 files, all null usage), so any spend they incurred is invisible to mm. Counters
 or a usageRef on any unfinished status, missing usage, malformed counters and
 unknown statuses refuse the reader. No store and
 no prior cache is `no_metadata_ledger`; found-but-unreadable data
-is `malformed`/`unsupported`, never invisible source absence.
+is `malformed`/`unsupported`, never invisible source absence (a SQLite layout this
+mm cannot read is store-scoped drift instead, never `unsupported`; see below).
 A known unreadable store disappearing preserves its blocker rather than
 becoming source absence; previously captured runs survive a missing store.
 
@@ -598,9 +600,9 @@ the cache without rewriting it. Unlike diagnostic metadata, dropping it could
 lose history. An older mm may drop the field and cannot preserve this guarantee;
 all active capture entrypoints must use the upgraded build.
 `last_reason_detail = {cause, store, file?, code?}` explains a standing reader-wide
-reason: `store` is a 16-hex id or null (null for cross-directory `duplicate_request`,
-`conflict`, `sqlite_pragma`,
-`sqlite_unavailable`), `file` one of the four store file names, `code` a SQLite or OS
+reason: `store` is a 16-hex id or null (null for `conflict`, `sqlite_pragma`,
+`sqlite_unavailable`, and a cross-directory `duplicate_request` raised while staging a
+directory that holds no SQLite store), `file` one of the four store file names, `code` a SQLite or OS
 error name matching `[A-Z_]{1,40}` (rendered "unknown SQLite error" when absent or
 invalid after a reload). Lifecycle, `_carry_reason_detail`: a non-persistable pass
 (`locked`), or a transient one while a permanent prior reason stands, keeps the

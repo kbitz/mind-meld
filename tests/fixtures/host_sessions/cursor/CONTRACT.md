@@ -51,10 +51,12 @@ refuse without replacing it. This bounds future loss, not historical backlog.
 
 The original corpus covers **Cursor via Conductor**. Bare cursor-agent
 persists no historical billing ledger; context-window token counts are not usage.
-No Conductor store and no prior cache returns no_metadata_ledger; format drift
-returns malformed/unsupported. Since Track 70A the SQLite `index.db` is read under
-the open rule below; no content-bearing sibling (`agents`, `run_events`, the blob
-tables, a per-agent `store.db`) is ever opened.
+No Conductor store and no prior cache returns no_metadata_ledger; `runs.ndjson`
+format drift returns malformed/unsupported. Since Track 70A the SQLite `index.db` is
+read under the open rule below; no content-bearing sibling (`agents`, `run_events`,
+the blob tables, a per-agent `store.db`) is ever opened. The finished-only counting
+and refusal rules above describe the legacy ledger; SQLite rows follow the row policy
+and store-scoped drift rules in events-retro.md, "Conductor SQLite stores".
 
 ## Standalone completion census (2026-10-03)
 

@@ -912,12 +912,13 @@ states it creates and removes nothing there and leaves `index.db` and `-wal`
 byte-identical; SQLite may still advance the modification time of the `-shm`
 wal-index, as for any reader of a WAL database. A crash or a close race can
 leave SQLite-valid `-wal`/`-shm` files that Conductor recovers on its next open.
-Each run is counted once whichever format it was first seen in, and a run mm has
-retained stays counted even if Conductor later prunes it or reports it without
-counters. Totals can rise after you update: mm now also counts backfilled and
+Each run is counted once. If the legacy ledger and SQLite both have it, a row
+with token counters beats a placeholder, and SQLite wins when they tie. A run
+mm has retained stays counted even if Conductor later prunes it or reports it
+without counters. Totals can rise after you update: mm now also counts backfilled and
 migrated runs and counter-bearing cancelled, errored or expired runs.
 
-Older mm versions cannot read these stores and may discard the local metadata
+Older mm versions (before v1.7.0) cannot read these stores and may discard the local metadata
 that protects retained SQLite counters from stale JSONL copies. Keep every active
 `mm` entrypoint, including autopush, on the upgraded build. If `mm status` says a store is "not
 yet read", or a Cursor row is missing runs from a Conductor 0.90.1+ Mac, update
@@ -957,8 +958,8 @@ the Cursor row. The status clauses mean:
   Never delete `cursor-host-tokens.json` or the spool to clear it.
 - **`deadline`**: the read ran out of budget. After two attended pushes still at
   `deadline`, report `mm diag --json` `host_usage.cursor`. The budgets are
-  `[retro] host_usage_autopush_budget_ms` and `host_usage_interactive_budget_ms`
-  (100 to 5,000 ms).
+  `[retro] host_usage_autopush_budget_ms` (100 to 5,000 ms) and
+  `host_usage_interactive_budget_ms` (250 to 5,000 ms).
 
 Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
 read / $6 output per million tokens), with an unknown per-request long-context
