@@ -926,10 +926,9 @@ class TestPipxSeams:
                 proc = children[0]
                 try:
                     killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
+                    # macOS can refuse while the child is still exiting; wait() proves it exits
                     pass
-                except PermissionError:
-                    assert proc.poll() is not None
                 proc.wait(timeout=2)
                 raise PermissionError(errno.EPERM, "Operation not permitted")
             return killpg(pid, sig)
