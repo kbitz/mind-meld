@@ -2,6 +2,26 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.7.0] - 2026-10-09
+
+**Cursor runs that Conductor 0.90.1 keeps in SQLite now show up in the fleet Agents table, and `mm status` and `mm diag` name stores this mm cannot read.** After `mm update`, those runs are counted once alongside legacy Conductor JSONL and standalone CLI runs. Totals can rise: backfilled and migrated runs, and counter-bearing cancelled, errored, or expired runs, come in, and an errored run is dated by its update time. An older mm still cannot read the stores and may drop the local metadata that protects retained SQLite counters.
+
+### Added
+
+- Conductor 0.90.1+ workspace stores (`index.db`) are read with the existing Cursor reader. Each run is counted once across SQLite, legacy `runs.ndjson`, and standalone CLI captures. Counter-bearing cancelled, errored, and expired rows count; an errored run uses `updated_at` for its day.
+- `mm status` and `mm diag` report Conductor stores not yet read and stores whose layout this mm cannot read. A layout this mm cannot read contributes nothing from that store; other stores and standalone captures still publish, and history already retained is kept. A malformed row or an I/O failure is different: that standing blocker pauses Cursor usage on that Mac until the store reads cleanly. `mm diag --json` adds `unsupported_sqlite_stores` (`{count, causes}`) and `last_reason_detail` under `host_usage.cursor`, and `unread_sqlite_stores` now counts the stores this mm has not read yet.
+
+### Fixed
+
+- `mm update` on macOS no longer fails cleanup when the installer has already exited but has not been reaped. mm reaps that process and retries the group signal once. A still-running installer, or a second permission error, still fails the update, and the original installer error is kept when the process group is already gone.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes. The new nested `mm diag --json` fields under `host_usage.cursor` are additive; older status readers ignore unfamiliar keys.
+- Upgrade every Mac running Conductor 0.90.1 or newer with `mm update`, including autopush hooks. Until you do, those SQLite runs stay uncounted. Afterward, Cursor totals can rise for the reasons above.
+- Older mm versions cannot read these stores. They may also discard `sqlite_retained`, the local cache field that stops a stale JSONL copy from erasing counters SQLite already contributed. Keep every active `mm` on 1.7.0 or newer.
+- The next Conductor store-layout change retires this SQLite adapter unless Cursor runs appear on 3 or more distinct days in the prior 30 days fleet-wide. "Unsupported by this installed mm" can be fixed by `mm update`. "Support retired" cannot.
+
 ## [1.6.0] - 2026-10-08
 
 **Git repositories cloned inside a synced folder no longer flood the sync, and `mm push` now records why an attended push stopped, which `mm status` and `mm diag` show.** A nested checkout is skipped and listed instead of uploaded, and an attended push that stops before its manifest is accepted now records its cause.

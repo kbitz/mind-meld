@@ -66,11 +66,13 @@ never finished would drop files that were never absent. ``warm_host_cache_inline
 is the attended-command escape hatch for a deadline miss. Attended callers
 publish that warm read's result; unattended callers keep their short budget.
 
-Cursor reads Conductor's ``runs.ndjson`` and enrolled standalone completions.
-Conductor and print-mode counters are disjoint; stop-hook counters are inclusive.
-Unlike the forensic caches above, Cursor history is authoritative after source
-pruning: durable atomic writes retain hashed run IDs for 90 days. Every Conductor
-file is reparsed, and short passes need not converge.
+Cursor reads Conductor's legacy ``runs.ndjson``, its SQLite ``index.db`` (Conductor
+0.90.1+), and enrolled standalone completions. Conductor and print-mode counters
+are disjoint; stop-hook counters are inclusive. Unlike the forensic caches above,
+Cursor history is authoritative after source pruning: durable atomic writes retain
+hashed run IDs for 90 days. Every Conductor store is re-read, and short passes
+need not converge. The SQLite adapter opens only ``index.db`` read-only under the
+rule in docs/invariants/events-retro.md and never retracts a retained run.
 """
 
 from __future__ import annotations
@@ -85,11 +87,11 @@ import re
 import stat
 import sys
 import time
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator, Literal, TypedDict, get_args
+from typing import Any, BinaryIO, Iterator, Literal, NamedTuple, TypedDict, get_args
 
 from mind_meld import fsutil
 from mind_meld.errors import StorageError
@@ -157,6 +159,92 @@ CURSOR_HOST_CACHE_RETENTION_DAYS = 90
 CURSOR_USAGE_CENSUS_HOST_VERSION = "2026.09.18-9a7762b"
 CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION = "0.87.3"
 """CLI generating the sessions and app producing the persisted schema, respectively."""
+CURSOR_SQLITE_CENSUS_CONDUCTOR_VERSION = "0.90.1"
+"""Conductor whose ``index.db`` the SQLite adapter was censused against.
+
+Bound to ``tests/fixtures/host_sessions/cursor/CONTRACT.md`` by
+``test_census_pin_matches_the_contract``. Like the JSONL pins it documents
+provenance, not compatibility with another release."""
+_CURSOR_STORE_ID = re.compile(r"[0-9a-f]{16}")
+"""Conductor names a workspace store ``sha256(workspaceDir)[:16]``; only such directories
+are SQLite stores. Another name holding an ``index.db`` is not Conductor's."""
+CURSOR_SQLITE_STORE_CAUSES = (
+    "unknown_status",
+    "missing_required_column",
+    "schema_object",
+    "model_params",
+    "column_type",
+    "schema_unreadable",
+)
+"""Store-scoped drift: one store contributes nothing, the pass continues, and the
+store is recorded in ``sqlite_read``. Never a reader-wide reason, so it can never
+set ``unsupported`` or print the shared upgrade phrase."""
+CURSOR_SQLITE_READER_CAUSES: dict[str, Reason] = {
+    "bad_json": "malformed",
+    "oversize_or_type": "malformed",
+    "bad_timestamp": "malformed",
+    "bad_utf8": "malformed",
+    "bad_counters": "malformed",
+    "bad_model": "malformed",
+    "corrupt_database": "malformed",
+    "duplicate_request": "malformed",
+    "conflict": "malformed",
+    "non_regular_path": "io_error",
+    "cannot_open": "io_error",
+    "sqlite_pragma": "io_error",
+    "sqlite_unavailable": "io_error",
+    "hot_journal": "stale",
+    "identity_changed": "stale",
+}
+"""Every persisted ``last_reason_detail.cause`` and the reader-wide reason it explains.
+``locked`` (never persisted) and ``deadline`` (detail cleared) have no entry."""
+_CURSOR_SQLITE_FILES = ("index.db", "index.db-wal", "index.db-shm", "index.db-journal")
+_CURSOR_SQLITE_BUSY_S = 0.1
+_CURSOR_SQLITE_LENGTH_LIMIT = 65536
+_CURSOR_SQLITE_TIMESTAMP_BYTES = 32
+_CURSOR_SQLITE_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z"
+)
+_CURSOR_SQLITE_DETAIL_CODE = re.compile(r"[A-Z_]{1,40}")
+_CURSOR_SQLITE_NONTERMINAL = frozenset({"QUEUED", "CREATING", "RUNNING"})
+_CURSOR_SQLITE_TERMINAL_TIME = {
+    "FINISHED": "finished_at",
+    "CANCELLED": "cancelled_at",
+    "EXPIRED": "expired_at",
+    "ERROR": "updated_at",  # ERROR rows carry no terminal stamp of their own
+}
+_CURSOR_SQLITE_COLUMNS = (
+    # (column, selected as a value). ``usage_ref`` is read only for presence, so
+    # its content is never selected.
+    ("run_id", True),
+    ("request_id", True),
+    ("status", True),
+    ("model", True),
+    ("model_params_json", True),
+    ("usage_json", True),
+    ("usage_ref", False),
+    ("finished_at", True),
+    ("cancelled_at", True),
+    ("expired_at", True),
+    ("updated_at", True),
+)
+_CURSOR_SQLITE_REQUIRED = frozenset(
+    {
+        "run_id",
+        "status",
+        "model",
+        "usage_json",
+        "usage_ref",
+        "finished_at",
+        "cancelled_at",
+        "expired_at",
+        "updated_at",
+    }
+)
+# SQLite primary result codes, stable across releases.
+_SQLITE_BUSY, _SQLITE_LOCKED, _SQLITE_INTERRUPT = 5, 6, 9
+_SQLITE_CORRUPT, _SQLITE_CANTOPEN, _SQLITE_TOOBIG = 11, 14, 18
+_SQLITE_AUTH, _SQLITE_NOTADB = 23, 26
 _CURSOR_ENDED_AT_MIN_MS = 1_577_836_800_000
 """2020-01-01 UTC. A seconds-scale clock cannot pass; older millisecond days still reap."""
 _CURSOR_ENDED_AT_FUTURE_SLACK = timedelta(days=1)
@@ -380,8 +468,41 @@ class _TurnState:
 
 
 class _ReadFailure(RuntimeError):
-    def __init__(self, reason: Reason) -> None:
+    """A read that cannot complete. ``cause`` and friends are set only by the Cursor
+    SQLite adapter; every other reader (and JSONL) persists no detail."""
+
+    def __init__(
+        self,
+        reason: Reason,
+        *,
+        cause: str | None = None,
+        store: str | None = None,
+        file: str | None = None,
+        code: str | None = None,
+    ) -> None:
         self.reason = reason
+        self.cause = cause
+        self.store = store
+        self.file = file
+        self.code = code
+
+    @property
+    def detail(self) -> dict[str, str | None] | None:
+        if self.cause is None:
+            return None
+        detail: dict[str, str | None] = {"cause": self.cause, "store": self.store}
+        if self.file is not None:
+            detail["file"] = self.file
+        if self.code is not None and _CURSOR_SQLITE_DETAIL_CODE.fullmatch(self.code):
+            detail["code"] = self.code
+        return detail
+
+
+class _SqliteDrift(Exception):
+    """Store-scoped format drift: this store contributes nothing; the pass continues."""
+
+    def __init__(self, cause: str) -> None:
+        self.cause = cause
 
 
 class _NoCacheCommit(RuntimeError):
@@ -560,6 +681,11 @@ def _cursor_cached_runs(data: dict[str, Any]) -> dict[str, Any]:
     runs = data.get("runs")
     if not isinstance(runs, dict) or type(data.get("complete_once")) is not bool:
         raise _ReadFailure("malformed")
+    retained = data.get("sqlite_retained", [])
+    if not isinstance(retained, list) or any(
+        not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None for key in retained
+    ):
+        raise _ReadFailure("malformed")
     for key, run in runs.items():
         if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
             raise _ReadFailure("malformed")
@@ -590,13 +716,61 @@ def _cursor_day(value: Any) -> str:
         when = datetime.fromtimestamp(value / 1000, timezone.utc)
     except (ValueError, OverflowError, OSError) as exc:
         raise _ReadFailure("malformed") from exc
-    if when > datetime.now(timezone.utc) + _CURSOR_ENDED_AT_FUTURE_SLACK:
+    day = _cursor_bounded_day(when)
+    if day is None:
         raise _ReadFailure("malformed")
+    return day
+
+
+def _cursor_bounded_day(when: datetime) -> str | None:
+    """The UTC day of a completion time, or None when it is outside the shared bounds.
+
+    The 2020 floor is the caller's (JSONL checks its integer before converting; the
+    SQLite adapter checks the parsed time); the future slack is common to both."""
+    if when > datetime.now(timezone.utc) + _CURSOR_ENDED_AT_FUTURE_SLACK:
+        return None
     return when.date().isoformat()
 
 
+_CURSOR_COUNTER_NAMES = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
+
+
+def _cursor_entry(
+    day: str, model_id: str, raw: dict[str, Any], *, reasoning_required: bool
+) -> dict[str, Any] | None:
+    """Shared counter rules: valid counters, the disjoint identity, reasoning a subset
+    of output. ``None`` means the counters are malformed; callers choose the refusal."""
+    names = _CURSOR_COUNTER_NAMES
+    checked = (*names, "totalTokens", *(("reasoningTokens",) if reasoning_required else ()))
+    if not all(_is_valid_counter(raw.get(n)) for n in checked):
+        return None
+    if sum(raw[n] for n in names) != raw["totalTokens"]:
+        return None
+    if "reasoningTokens" in raw and not (
+        _is_valid_counter(raw["reasoningTokens"]) and raw["reasoningTokens"] <= raw["outputTokens"]
+    ):
+        return None
+    usage: Usage = {
+        "input": raw["inputTokens"],
+        "cache_create": raw["cacheWriteTokens"],
+        "cache_read": raw["cacheReadTokens"],
+        "output": raw["outputTokens"],
+    }
+    return {
+        "day": day,
+        "model": model_id,
+        "usage": usage,
+        "partial": raw["cacheWriteTokens"] > 0,
+    }
+
+
+def _cursor_placeholder(day: str, model_id: str) -> dict[str, Any]:
+    """An unresolved usageRef: a partial day with no invented zero tokens."""
+    return {"day": day, "model": model_id, "usage": None, "partial": True}
+
+
 def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:
-    """Project only run identity, model, completion day and disjoint counters."""
+    """JSONL adapter: project only run identity, model, completion day and counters."""
     if not isinstance(row, dict) or "usage" not in row:
         raise _ReadFailure("malformed")
     run_id = row.get("runId")
@@ -638,39 +812,22 @@ def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:
     if raw is None:
         if row.get("usageRef") is None:
             raise _ReadFailure("malformed")
-        return key, {"day": day, "model": model_id, "usage": None, "partial": True}
+        return key, _cursor_placeholder(day, model_id)
     if not isinstance(raw, dict):
         raise _ReadFailure("malformed")
-    names = ("inputTokens", "cacheWriteTokens", "cacheReadTokens", "outputTokens")
-    if not all(_is_valid_counter(raw.get(n)) for n in (*names, "totalTokens", "reasoningTokens")):
+    entry = _cursor_entry(day, model_id, raw, reasoning_required=True)
+    if entry is None:
         raise _ReadFailure("malformed")
-    if sum(raw[n] for n in names) != raw["totalTokens"]:
-        raise _ReadFailure("malformed")
-    if raw["reasoningTokens"] > raw["outputTokens"]:
-        raise _ReadFailure("malformed")
-    usage: Usage = {
-        "input": raw["inputTokens"],
-        "cache_create": raw["cacheWriteTokens"],
-        "cache_read": raw["cacheReadTokens"],
-        "output": raw["outputTokens"],
-    }
-    return key, {
-        "day": day,
-        "model": model_id,
-        "usage": usage,
-        "partial": raw["cacheWriteTokens"] > 0,
-    }
+    return key, entry
 
 
-def _iter_cursor_ledgers(root: Path, deadline: float) -> Iterator[Path]:
-    """Only immediate workspace runs.ndjson files; never any content-bearing sibling."""
+def _iter_cursor_directories(root: Path, deadline: float) -> Iterator[Path]:
+    """Immediate workspace directories, sorted; symlinked directories are not followed."""
     for directory in _sorted_children(root, deadline):
         if _expired(deadline):
             raise _ReadFailure("deadline")
         if _is_directory(directory):
-            path = directory / "runs.ndjson"
-            if _is_regular_non_symlink(path):
-                yield path
+            yield directory
 
 
 def _read_cursor_file(path: Path, deadline: float) -> tuple[dict[str, Any], dict[str, str]]:
@@ -705,7 +862,7 @@ def _read_cursor_file(path: Path, deadline: float) -> tuple[dict[str, Any], dict
             try:
                 row = json.loads(line)
                 key, run = _cursor_run(row)
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise _ReadFailure("malformed") from exc
             if key in staged:
                 raise _ReadFailure("malformed")
@@ -729,6 +886,492 @@ def _read_cursor_file(path: Path, deadline: float) -> tuple[dict[str, Any], dict
     return staged, requests
 
 
+class _SqliteRead(NamedTuple):
+    staged: dict[str, dict[str, Any] | None]
+    aliases: dict[str, str]
+    state: str
+    """``"read"`` or a store-scoped drift cause from ``CURSOR_SQLITE_STORE_CAUSES``."""
+
+
+class _CursorStage(NamedTuple):
+    """One workspace directory, both formats reconciled."""
+
+    staged: dict[str, dict[str, Any] | None]
+    aliases: dict[str, str]
+    retract: frozenset[str]
+    """Keys whose winning copy is JSONL: a staged revision replaces or retracts the
+    retained run. SQLite never retracts, so its keys are absent here."""
+    sqlite_keys: frozenset[str]
+    store: tuple[str, str] | None
+    """``(store id, "read" | drift cause)`` when the directory held a readable index.db."""
+
+
+def _sqlite_error_name(exc: BaseException) -> str | None:
+    name = getattr(exc, "sqlite_errorname", None)
+    return name if isinstance(name, str) and _CURSOR_SQLITE_DETAIL_CODE.fullmatch(name) else None
+
+
+def _is_real_cursor_store(path: Path) -> bool:
+    """Compare against the account database's home, which test patches cannot blind."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        home = Path.home()
+    real = home / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
+    candidate = str(path.expanduser().resolve()).casefold()
+    root = str(real.resolve()).casefold()
+    return candidate == root or candidate.startswith(root + os.sep)
+
+
+def _malformed(cause: str, store: str | None) -> _ReadFailure:
+    """A reader-wide data refusal from the SQLite adapter, with its closed cause."""
+    return _ReadFailure("malformed", cause=cause, store=store)
+
+
+def _sqlite_text(cell: tuple[str, Any], limit: int, store: str) -> str | None:
+    """A TEXT cell as strict UTF-8, or None for SQL NULL. Over-limit or non-text refuses."""
+    kind, value = cell
+    if kind == "null":
+        return None
+    if kind != "text" or len(value) > limit:
+        raise _malformed("oversize_or_type", store)
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _malformed("bad_utf8", store) from exc
+
+
+def _sqlite_json(text: str, store: str) -> Any:
+    try:
+        value = json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise _malformed("bad_json", store) from exc
+    if value is None:
+        raise _malformed("bad_json", store)
+    return value
+
+
+def _sqlite_day(cell: tuple[str, Any], store: str) -> str:
+    kind, value = cell
+    if kind == "text" and len(value) > _CURSOR_SQLITE_TIMESTAMP_BYTES:
+        raise _malformed("oversize_or_type", store)
+    if kind != "text":
+        raise _malformed("bad_timestamp", store)
+    try:
+        text = value.decode("ascii")
+        if _CURSOR_SQLITE_TIMESTAMP.fullmatch(text) is None:
+            raise ValueError(text)
+        when = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise _malformed("bad_timestamp", store) from exc
+    day = _cursor_bounded_day(when) if when.timestamp() * 1000 >= _CURSOR_ENDED_AT_MIN_MS else None
+    if day is None:
+        raise _malformed("bad_timestamp", store)
+    return day
+
+
+def _sqlite_model(cells: dict[str, tuple[str, Any]], store: str) -> str:
+    """Model id for a contributing row; only ``grok-4.7`` is refined by its fast param."""
+    kind, value = cells["model"]
+    if kind == "null":
+        return CURSOR_UNKNOWN_MODEL
+    if kind != "text" or not value or len(value) > _MAX_MODEL_ID_BYTES:
+        raise _malformed("bad_model", store)
+    try:
+        model_id = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _malformed("bad_utf8", store) from exc
+    if model_id != "grok-4.7":
+        return model_id
+    kind, value = cells["model_params_json"]
+    if kind == "null":
+        return "grok-4.7-unspecified"
+    if kind != "text":
+        raise _SqliteDrift("model_params")
+    params_text = _sqlite_text((kind, value), _CURSOR_SQLITE_LENGTH_LIMIT, store) or ""
+    params = _sqlite_json(params_text, store)
+    if not isinstance(params, list):
+        raise _SqliteDrift("model_params")
+    fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
+    if len(fast) > 1 or (fast and fast[0] not in ("true", "false")):
+        raise _SqliteDrift("model_params")
+    if not fast:
+        return "grok-4.7-unspecified"
+    return "grok-4.7-fast" if fast[0] == "true" else "grok-4.7"
+
+
+def _sqlite_run(
+    cells: dict[str, tuple[str, Any]], store: str
+) -> tuple[str, dict[str, Any] | None, str | None]:
+    """One ``runs`` row as (run key, staged run or None, request alias for contributing rows).
+
+    Check order is the spec's: status, then non-terminal usage, then what the row
+    contributes, and only a contributing row has its timestamp, model and counters
+    judged. Shared identity, type and SQLite size guards still apply to every row."""
+    for column in ("run_id", "request_id", "status", "usage_json", "usage_ref"):
+        if cells[column][0] not in ("text", "null"):
+            raise _SqliteDrift("column_type")
+    run_id = _sqlite_text(cells["run_id"], _MAX_PROMPT_ID_BYTES, store)
+    if not run_id:
+        raise _malformed("oversize_or_type", store)
+    key = hashlib.sha256(run_id.encode()).hexdigest()
+    status = _sqlite_text(cells["status"], _MAX_MODEL_ID_BYTES, store)
+    has_usage = cells["usage_json"][0] == "text"
+    has_ref = cells["usage_ref"][0] == "text"
+    if status in _CURSOR_SQLITE_NONTERMINAL:
+        if has_usage or has_ref:
+            raise _SqliteDrift("unknown_status")
+        return key, None, None
+    if status not in _CURSOR_SQLITE_TERMINAL_TIME:
+        raise _SqliteDrift("unknown_status")
+    placeholder = status == "FINISHED" and not has_usage and has_ref
+    if not has_usage and not placeholder:
+        return key, None, None
+    day = _sqlite_day(cells[_CURSOR_SQLITE_TERMINAL_TIME[status]], store)
+    model_id = _sqlite_model(cells, store)
+    alias = None
+    request = _sqlite_text(cells["request_id"], _MAX_PROMPT_ID_BYTES, store)
+    if request is not None:
+        if not request:
+            raise _malformed("oversize_or_type", store)
+        alias = hashlib.sha256(request.encode()).hexdigest()
+    if placeholder:
+        return key, _cursor_placeholder(day, model_id), alias
+    usage_text = _sqlite_text(cells["usage_json"], _CURSOR_SQLITE_LENGTH_LIMIT, store) or ""
+    raw = _sqlite_json(usage_text, store)
+    entry = None
+    if isinstance(raw, dict):
+        entry = _cursor_entry(day, model_id, raw, reasoning_required=False)
+    if entry is None:
+        raise _malformed("bad_counters", store)
+    return key, entry, alias
+
+
+def _cursor_sqlite_select(columns: frozenset[str]) -> str:
+    """Constant SQL over the allowed columns that exist; ``usage_ref`` is read for presence only.
+
+    Every selected value is paired with ``typeof`` because ``text_factory=bytes`` hands
+    back TEXT and BLOB alike."""
+    parts = [
+        f"typeof({column}), {column}" if value else f"typeof({column})"
+        for column, value in _CURSOR_SQLITE_COLUMNS
+        if column in columns
+    ]
+    return "SELECT " + ", ".join(parts) + " FROM runs"
+
+
+def _sqlite_cells(row: tuple[Any, ...], columns: frozenset[str]) -> dict[str, tuple[str, Any]]:
+    cells: dict[str, tuple[str, Any]] = {}
+    index = 0
+    for column, value in _CURSOR_SQLITE_COLUMNS:
+        if column not in columns:
+            cells[column] = ("null", None)
+            continue
+        kind = row[index].decode("ascii")
+        index += 1
+        if value:
+            cells[column] = (kind, row[index])
+            index += 1
+        else:
+            cells[column] = (kind, None)
+    return cells
+
+
+def _query_cursor_sqlite(conn: Any, sqlite3: Any, store: str, deadline: float) -> _SqliteRead:
+    """Run the constant reads inside one snapshot. Raises ``sqlite3.Error``, ``_SqliteDrift``
+    or ``_ReadFailure``; the caller classifies, after closing the connection."""
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _CURSOR_SQLITE_LENGTH_LIMIT)
+    conn.text_factory = bytes
+    for pragma in ("trusted_schema=OFF", "query_only=ON", "cell_size_check=ON", "mmap_size=0"):
+        conn.execute(f"PRAGMA {pragma}").fetchall()
+    if conn.execute("PRAGMA trusted_schema").fetchone() != (0,) or conn.execute(
+        "PRAGMA query_only"
+    ).fetchone() != (1,):
+        raise _ReadFailure("io_error", cause="sqlite_pragma")
+    conn.set_progress_handler(lambda: 1 if _expired(deadline) else 0, 1000)
+    conn.execute("BEGIN")
+    try:
+        objects = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", 0) & 0xFF == _SQLITE_CORRUPT:
+            raise _SqliteDrift("schema_unreadable") from exc
+        raise
+    if objects == 0:
+        return _SqliteRead({}, {}, "read")  # a database Conductor has not created tables in yet
+    kinds = conn.execute("SELECT type FROM sqlite_master WHERE name = 'runs' COLLATE NOCASE")
+    if [kind for (kind,) in kinds.fetchall()] != [b"table"]:
+        raise _SqliteDrift("schema_object")
+    columns = frozenset(
+        name.decode("utf-8", "replace").casefold()
+        for (_, name, *_rest) in conn.execute("PRAGMA table_info(runs)").fetchall()
+    )
+    if not _CURSOR_SQLITE_REQUIRED <= columns:
+        raise _SqliteDrift("missing_required_column")
+    staged: dict[str, dict[str, Any] | None] = {}
+    aliases: dict[str, str] = {}
+    cursor = conn.execute(_cursor_sqlite_select(columns))
+    while batch := cursor.fetchmany(256):
+        if _expired(deadline):
+            raise _ReadFailure("deadline")
+        for row in batch:
+            key, run, alias = _sqlite_run(_sqlite_cells(row, columns), store)
+            if key in staged:
+                raise _ReadFailure("malformed", cause="conflict")
+            staged[key] = run
+            if alias is not None:
+                if aliases.get(alias, key) != key:
+                    raise _malformed("duplicate_request", store)
+                aliases[alias] = key
+    return _SqliteRead(staged, aliases, "read")
+
+
+def _lstat_sqlite_files(directory: Path, store: str) -> dict[str, os.stat_result]:
+    """Lstat every store file first; a symlink or special file refuses before any open."""
+    present: dict[str, os.stat_result] = {}
+    for name in _CURSOR_SQLITE_FILES:
+        try:
+            info = (directory / name).lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            code = errno.errorcode.get(exc.errno or 0)
+            raise _ReadFailure(
+                "io_error", cause="cannot_open", store=store, file=name, code=code
+            ) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise _ReadFailure("io_error", cause="non_regular_path", store=store, file=name)
+        present[name] = info
+    return present
+
+
+def _sqlite_identity(
+    directory: Path, names: tuple[str, ...], immutable: bool
+) -> dict[str, tuple[int, ...] | None]:
+    """What must not change while a store is read. An immutable open also pins
+    the main file's size and mtime and the continued absence of a ``-wal``."""
+    identity: dict[str, tuple[int, ...] | None] = {}
+    for name in names:
+        try:
+            info = (directory / name).lstat()
+        except OSError:
+            identity[name] = None
+            continue
+        identity[name] = (
+            (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+            if immutable
+            else (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+        )
+    return identity
+
+
+def _read_cursor_sqlite(directory: Path, deadline: float) -> _SqliteRead | None:
+    """Read one Conductor workspace store's ``runs``; ``None`` when the store vanished.
+
+    The open rule minimizes the footprint: no ``-wal`` means an
+    immutable open (a plain read-only open would create ``-shm``/``-wal``), a ``-wal``
+    means a read-only open that joins the writer's WAL index. Only ``index.db`` is
+    ever opened, never written, checkpointed or copied."""
+    store = directory.name
+    if os.environ.get("PYTEST_CURRENT_TEST") and _is_real_cursor_store(directory):
+        raise RuntimeError(f"refusing to open the real Conductor store {directory} from a test")
+    present = _lstat_sqlite_files(directory, store)
+    if "index.db" not in present:
+        return None
+    journal = present.get("index.db-journal")
+    if journal is not None and journal.st_size > 0:
+        raise _ReadFailure("stale", cause="hot_journal", store=store, file="index.db-journal")
+    immutable = "index.db-wal" not in present
+    names = (
+        ("index.db", "index.db-wal")
+        if immutable
+        else tuple(name for name in present if name != "index.db-journal")
+    )
+    before = _sqlite_identity(directory, names, immutable)
+    if immutable and before["index.db-wal"] is not None:
+        raise _ReadFailure("stale", cause="identity_changed", store=store)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ReadFailure("deadline")
+    try:
+        import sqlite3
+    except ImportError as exc:
+        raise _ReadFailure("io_error", cause="sqlite_unavailable") from exc
+    uri = (directory / "index.db").absolute().as_uri() + (
+        "?mode=ro&immutable=1" if immutable else "?mode=ro"
+    )
+    read: _SqliteRead | None = None
+    failure: BaseException | None = None
+    try:
+        with closing(
+            sqlite3.connect(
+                uri, uri=True, isolation_level=None, timeout=min(remaining, _CURSOR_SQLITE_BUSY_S)
+            )
+        ) as conn:
+            read = _query_cursor_sqlite(conn, sqlite3, store, deadline)
+    except (sqlite3.Error, _SqliteDrift, _ReadFailure) as exc:
+        failure = exc
+    # The connection is closed: judge identity without a descriptor of ours in the way.
+    code = getattr(failure, "sqlite_errorcode", None)
+    primary = code & 0xFF if isinstance(code, int) else None
+    if isinstance(failure, _ReadFailure) and failure.reason in {"deadline", "locked"}:
+        raise failure
+    if isinstance(failure, _ReadFailure) and failure.cause == "sqlite_pragma":
+        raise failure
+    if primary in {_SQLITE_BUSY, _SQLITE_LOCKED}:
+        raise _ReadFailure("locked") from failure
+    if primary == _SQLITE_INTERRUPT:
+        raise _ReadFailure("deadline") from failure
+    if primary == _SQLITE_CANTOPEN:
+        try:
+            (directory / "index.db").lstat()
+        except FileNotFoundError:
+            return None  # the store vanished between listing and open
+        except OSError:
+            pass
+    if _sqlite_identity(directory, names, immutable) != before:
+        raise _ReadFailure("stale", cause="identity_changed", store=store)
+    if isinstance(failure, _SqliteDrift):
+        return _SqliteRead({}, {}, failure.cause)
+    if isinstance(failure, _ReadFailure):
+        raise failure
+    if failure is not None:
+        if primary == _SQLITE_AUTH:
+            return _SqliteRead({}, {}, "schema_object")
+        if primary == _SQLITE_TOOBIG:
+            raise _malformed("oversize_or_type", store) from failure
+        if primary in {_SQLITE_CORRUPT, _SQLITE_NOTADB}:
+            raise _malformed("corrupt_database", store) from failure
+        raise _ReadFailure(
+            "io_error",
+            cause="cannot_open",
+            store=store,
+            code=_sqlite_error_name(failure),
+        ) from failure
+    assert read is not None
+    return read
+
+
+def _stage_cursor_directory(directory: Path, deadline: float) -> _CursorStage | None:
+    """Read one workspace directory's legacy ledger and SQLite store and reconcile them.
+
+    Per run, counted beats placeholder beats non-contributing; SQLite wins a tie. A
+    vanished ``runs.ndjson`` is dropped when ``index.db`` exists (Conductor's migration
+    deletes it); otherwise it is a failure as before."""
+    store_id = directory.name if _CURSOR_STORE_ID.fullmatch(directory.name) else None
+    ledger = directory / "runs.ndjson"
+    has_db = store_id is not None and os.path.lexists(directory / "index.db")
+    jsonl: tuple[dict[str, Any], dict[str, str]] | None = None
+    if _is_regular_non_symlink(ledger):
+        try:
+            jsonl = _read_cursor_file(ledger, deadline)
+        except _ReadFailure:
+            if not (has_db and not os.path.lexists(ledger)):
+                raise
+    sqlite_read = _read_cursor_sqlite(directory, deadline) if has_db else None
+    if jsonl is None and sqlite_read is None:
+        return None
+    staged: dict[str, dict[str, Any] | None] = {}
+    aliases: dict[str, str] = {}
+    retract: set[str] = set()
+    sqlite_keys: set[str] = set()
+    if jsonl is not None:
+        staged.update(jsonl[0])
+        aliases.update(jsonl[1])
+        retract.update(jsonl[0])
+    if sqlite_read is not None:
+        for key, run in sqlite_read.staged.items():
+            if key in staged and _cursor_rank(run) < _cursor_rank(staged[key]):
+                continue  # the JSONL copy outranks it and keeps JSONL's revision semantics
+            staged[key] = run
+            retract.discard(key)
+            sqlite_keys.add(key)
+        for alias, key in sqlite_read.aliases.items():
+            if aliases.get(alias, key) != key:
+                raise _ReadFailure("malformed", cause="duplicate_request", store=store_id)
+            aliases[alias] = key
+    return _CursorStage(
+        staged,
+        aliases,
+        frozenset(retract),
+        frozenset(sqlite_keys),
+        (store_id, sqlite_read.state) if store_id is not None and sqlite_read is not None else None,
+    )
+
+
+def _cursor_rank(run: dict[str, Any] | None) -> int:
+    """counted > placeholder > contributes nothing."""
+    if run is None:
+        return 0
+    return 1 if run["usage"] is None else 2
+
+
+def _cursor_read_set(data: dict[str, Any]) -> dict[str, str]:
+    """Tolerant per-entry read of ``sqlite_read.stores``; garbage entries are dropped.
+
+    A missing or version-mismatched map is an empty read set, so every store reads as
+    never read and a pass recovers it."""
+    if data.get("version") != CACHE_VERSION:
+        return {}
+    block = data.get("sqlite_read")
+    stores = block.get("stores") if isinstance(block, dict) else None
+    if not isinstance(stores, dict):
+        return {}
+    valid = {"read", *CURSOR_SQLITE_STORE_CAUSES}
+    return {
+        key: value
+        for key, value in stores.items()
+        if isinstance(key, str)
+        and _CURSOR_STORE_ID.fullmatch(key)
+        and isinstance(value, str)
+        and value in valid
+    }
+
+
+def _cursor_reason_detail(data: dict[str, Any]) -> dict[str, str | None] | None:
+    """Tolerant read of ``last_reason_detail``; invalid fields are absent, never fatal.
+
+    It is meaningful only beside the reason it explains, and only when its cause maps
+    to that reason, so a hand-edited cache cannot forge diagnostic text."""
+    reason = _cached_last_reason(data)
+    raw = data.get("last_reason_detail")
+    if reason is None or not isinstance(raw, dict):
+        return None
+    cause = raw.get("cause")
+    if not isinstance(cause, str) or CURSOR_SQLITE_READER_CAUSES.get(cause) != reason:
+        return None
+    store = raw.get("store")
+    file = raw.get("file")
+    code = raw.get("code")
+    detail: dict[str, str | None] = {
+        "cause": cause,
+        "store": store if isinstance(store, str) and _CURSOR_STORE_ID.fullmatch(store) else None,
+    }
+    if isinstance(file, str) and file in _CURSOR_SQLITE_FILES:
+        detail["file"] = file
+    if isinstance(code, str) and _CURSOR_SQLITE_DETAIL_CODE.fullmatch(code):
+        detail["code"] = code
+    return detail
+
+
+def _carry_reason_detail(
+    prior: dict[str, str | None] | None,
+    this_pass: dict[str, str | None] | None,
+    result: HostUsageResult,
+    carried: Reason | None,
+) -> dict[str, str | None] | None:
+    """The detail travels with the reason ``_carry_reason`` kept.
+
+    A non-persistable pass (``locked``), or a transient one while a permanent prior
+    reason stands, keeps the prior detail. Otherwise the carried reason is this pass's
+    own and so is its detail, even when that is None (a persistable ``deadline``, or
+    any JSONL, spool or cache-write failure). A clean read clears both."""
+    if carried is None or result.complete:
+        return None
+    if result.reason not in PERSISTABLE_REASONS or carried != result.reason:
+        return prior
+    return this_pass
+
+
 def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
     buckets = HostUsageBuckets()
     for run in runs.values():
@@ -747,7 +1390,8 @@ def _cursor_buckets(runs: dict[str, Any]) -> HostUsageResult:
 def read_cursor_usage(
     root: Path | None = None, *, deadline: float | None = None, consented: bool = False
 ) -> HostUsageResult:
-    """Conductor runs and enrolled standalone CLI completions.
+    """Conductor runs (legacy ``runs.ndjson`` and SQLite ``index.db``) and enrolled
+    standalone CLI completions.
 
     runs.ndjson is rewritten in place: reparse whole files, replace by hashed
     runId, then reduce once (reverses old day/model/counter contributions).
@@ -755,6 +1399,11 @@ def read_cursor_usage(
     file's prefix. Repeated short passes need NOT converge: cached ids do not
     avoid reparsing. Attended warming / a larger budget is the escape hatch.
     Pruned runs survive for 90 days; runs pruned before any read are unrecoverable.
+
+    Every SQLite store is re-read each pass and its rows replace by key, but a
+    SQLite row never retracts a retained run: a store that loses a row, reports a
+    counterless one, or drifts to a layout this mm cannot read keeps its history.
+    The first failing directory stops the pass; earlier directories commit.
     """
     if not consented:
         return _incomplete("no_metadata_ledger")
@@ -770,8 +1419,14 @@ def read_cursor_usage(
         ) as locked:
             # Shape failures propagate without writing the sole surviving copy.
             runs = dict(_cursor_cached_runs(locked.data))
+            retained_sqlite = set(locked.data.get("sqlite_retained", [])) & runs.keys()
             requests = _cursor_requests(locked.data)
             prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
+            prior_detail = _cursor_reason_detail(locked.data)
+            prior_states = _cursor_read_set(locked.data)
+            pass_states: dict[str, str] = {}
+            this_detail: dict[str, str | None] | None = None
+            enumerated = False
             now = datetime.now(timezone.utc)
             cutoff = (now - timedelta(days=CURSOR_HOST_CACHE_RETENTION_DAYS)).date().isoformat()
             runs = {key: run for key, run in runs.items() if run["day"] >= cutoff}
@@ -793,12 +1448,22 @@ def read_cursor_usage(
             learned: dict[str, Any] = {}
             learned_requests: dict[str, str] = {}
             removed: set[str] = set()
+            seen_sqlite: set[str] = set()
             conflict = False
 
             def _commit_learned() -> None:
-                for key in removed:
+                retained_sqlite.update(seen_sqlite)
+                for key in removed - retained_sqlite:
                     runs.pop(key, None)
                 for key, run in learned.items():
+                    held = runs.get(key)
+                    if (
+                        key in retained_sqlite
+                        and run["usage"] is None
+                        and held is not None
+                        and held["usage"] is not None
+                    ):
+                        continue  # stale legacy placeholders cannot undo SQLite retention
                     runs[key] = run
                 requests.update(learned_requests)
                 for request, canonical in dict(requests).items():
@@ -835,39 +1500,74 @@ def read_cursor_usage(
                             locked.write_on_exit = False
                             return _incomplete("no_metadata_ledger")
                         raise _ReadFailure("stale")
+                    enumerated = True  # no store exists, so no store was left unread
                 else:
                     if not stat.S_ISDIR(root_stat.st_mode):
                         raise _ReadFailure("unsupported")
                     seen: dict[str, Any] = {}
-                    for path in _iter_cursor_ledgers(source_root, read_deadline):
-                        staged, aliases = _read_cursor_file(path, read_deadline)
-                        if any(key in seen and seen[key] != run for key, run in staged.items()):
+                    for directory in _iter_cursor_directories(source_root, read_deadline):
+                        stage = _stage_cursor_directory(directory, read_deadline)
+                        if stage is None:
+                            continue
+                        store_id = stage.store[0] if stage.store is not None else None
+                        clash = [
+                            key
+                            for key, run in stage.staged.items()
+                            if key in seen and seen[key] != run
+                        ]
+                        if clash:
                             conflict = True
-                            raise _ReadFailure("malformed")
-                        seen.update(staged)
+                            sqlite_involved = any(
+                                key in stage.sqlite_keys or key in seen_sqlite for key in clash
+                            )
+                            raise _ReadFailure(
+                                "malformed", cause="conflict" if sqlite_involved else None
+                            )
+                        seen.update(stage.staged)
+                        seen_sqlite.update(stage.sqlite_keys)
                         # One requestId may name one run, within a scan and across
                         # scans while the earlier run is retained.
-                        if any(
-                            (key in learned_requests and learned_requests[key] != value)
+                        alias_clashes = [
+                            (key, value)
+                            for key, value in stage.aliases.items()
+                            if (key in learned_requests and learned_requests[key] != value)
                             or (requests.get(key, value) != value and requests[key] in runs)
-                            for key, value in aliases.items()
-                        ):
+                        ]
+                        if alias_clashes:
                             conflict = True
-                            raise _ReadFailure("malformed")
-                        learned_requests.update(aliases)
-                        for key, run in staged.items():
-                            # An unfinished revision invalidates a previous terminal
-                            # contribution, just as a changed completion day does.
-                            removed.add(key)
+                            raise _ReadFailure(
+                                "malformed",
+                                cause=(
+                                    "duplicate_request"
+                                    if any(
+                                        value in seen_sqlite
+                                        or learned_requests.get(key) in seen_sqlite
+                                        or requests.get(key) in seen_sqlite
+                                        for key, value in alias_clashes
+                                    )
+                                    else None
+                                ),
+                                store=store_id,
+                            )
+                        learned_requests.update(stage.aliases)
+                        # An unfinished JSONL revision invalidates a previous terminal
+                        # contribution, just as a changed completion day does. SQLite
+                        # keys are never in ``retract``: a store only adds or replaces.
+                        removed.update(stage.retract)
+                        for key, run in stage.staged.items():
                             if run is not None and run["day"] >= cutoff:
                                 learned[key] = run
                             else:
                                 learned.pop(key, None)
-                    # A rejected file must not erase history already learned.
+                        if stage.store is not None:
+                            pass_states[stage.store[0]] = stage.store[1]
+                    # A rejected directory must not erase history already learned.
                     _commit_learned()
+                    enumerated = True
                 result = _cursor_buckets(runs)
             except _ReadFailure as exc:
                 result = _incomplete(exc.reason)
+                this_detail = exc.detail
                 # Keep files fully read before a later tear or refusal.
                 # A cross-file conflict does not: committing the first copy
                 # would erase retained history with an arbitrary winner.
@@ -897,6 +1597,23 @@ def read_cursor_usage(
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
             }
+            # Additive keys are carried explicitly, since this dict is rebuilt: a
+            # conflict commits nothing, a failed pass keeps earlier entries, and only
+            # a pass that enumerated every directory may drop a vanished store's.
+            if conflict:
+                states = prior_states
+            elif enumerated:
+                states = pass_states
+            else:
+                states = {**prior_states, **pass_states}
+            if states:
+                updated["sqlite_read"] = {"stores": dict(sorted(states.items()))}
+            retained_sqlite.intersection_update(runs)
+            if retained_sqlite:
+                updated["sqlite_retained"] = sorted(retained_sqlite)
+            detail = _carry_reason_detail(prior_detail, this_detail, result, carried[0])
+            if detail is not None:
+                updated["last_reason_detail"] = detail
             locked.write_on_exit = result.complete or updated != locked.data
             locked.data = updated
             if over_budget:
@@ -1184,48 +1901,79 @@ def record_cursor_usage(payload: Any, *, model: str | None = None) -> bool:
     return True
 
 
-def unread_cursor_stores(root: Path | None = None) -> int | None:
-    """Count Conductor workspace stores holding a SQLite ``index.db`` this reader cannot read.
+def cursor_sqlite_stores(root: Path | None = None) -> list[str] | None:
+    """Ids of the workspace directories holding an ``index.db``, by ``lstat`` only.
 
-    Conductor 0.90.1 writes new runs to ``<store>/index.db`` instead of
-    ``runs.ndjson``; a store holding both still has unread runs, so it counts.
-    Only directory entries are inspected (lstat), so no database is ever opened.
-    None means the store could not be inspected.
-    """
+    Only ``[0-9a-f]{16}`` directories are Conductor's SQLite stores; another name that
+    happens to hold an ``index.db`` is ignored. A store holding a ``runs.ndjson`` too
+    still counts. None means the root could not be listed; an absent root has none."""
     source_root = root if root is not None else CURSOR_STORE_PATH
     try:
         with os.scandir(source_root) as entries:
             children = list(entries)
-        return sum(
-            1
+        return sorted(
+            child.name
             for child in children
-            if child.is_dir(follow_symlinks=False)
+            if _CURSOR_STORE_ID.fullmatch(child.name)
+            and child.is_dir(follow_symlinks=False)
             and os.path.lexists(Path(child.path) / "index.db")
         )
     except FileNotFoundError:
-        return 0
+        return []
     except OSError:
         return None
 
 
+def _cursor_store_counts(stores: list[str], read_set: dict[str, str]) -> dict[str, Any]:
+    """Unread and unsupported counts over the stores that exist now.
+
+    A store recorded in ``read_set`` (read, or recorded as drift) is not unread; one
+    recorded as drift is unsupported. An empty read set leaves every store unread."""
+    drifted = {store: read_set[store] for store in stores if read_set.get(store, "read") != "read"}
+    return {
+        "unread_sqlite_stores": sum(1 for store in stores if store not in read_set),
+        "unsupported_sqlite_stores": {
+            "count": len(drifted),
+            "causes": sorted(set(drifted.values())),
+        },
+    }
+
+
+def unread_sqlite_stores(
+    root: Path | None = None, read_set: dict[str, str] | None = None
+) -> int | None:
+    """Conductor workspace stores never read by an SQLite-capable mm, or None if unlistable."""
+    stores = cursor_sqlite_stores(root)
+    if stores is None:
+        return None
+    return _cursor_store_counts(stores, read_set or {})["unread_sqlite_stores"]
+
+
 def cursor_usage_diag() -> dict[str, Any]:
-    """Inspect durable Cursor history; never open Conductor run files or databases."""
+    """Inspect durable Cursor history and store names; never open a Conductor database."""
+    stores = cursor_sqlite_stores()
     blank = {
         **_cached_read_timing({}),
         "cache_state": "missing",
         "complete_once": False,
         "last_reason": None,
         "last_reason_since": None,
+        "last_reason_detail": None,
         "runs_cached": None,
         "model_count": 0,
         "models": [],
         "hook_state": cursor_hook_state(),
         "pending_completions": _pending_cursor_completions(),
-        "unread_sqlite_stores": unread_cursor_stores(),
+        "unread_sqlite_stores": None,
+        "unsupported_sqlite_stores": None,
     }
+
+    def store_counts(read_set: dict[str, str]) -> dict[str, Any]:
+        return {} if stores is None else _cursor_store_counts(stores, read_set)
+
     with locked_json_snapshot(CURSOR_CACHE_PATH, blocking=False) as snap:
         if snap.state == "missing":
-            return blank
+            return {**blank, **store_counts({})}
         if snap.state != "valid":
             reason = {"unreadable": "io_error", "lock_failed": "locked"}.get(
                 snap.state, "malformed"
@@ -1241,6 +1989,7 @@ def cursor_usage_diag() -> dict[str, Any]:
     return {
         **blank,
         **_cached_read_timing(data),
+        **store_counts(_cursor_read_set(data)),
         "cache_state": "ok",
         "complete_once": data["complete_once"],
         "runs_cached": len(runs),
@@ -1248,6 +1997,7 @@ def cursor_usage_diag() -> dict[str, Any]:
         "models": models[:_DIAG_MODEL_CAP],
         "last_reason": _cached_last_reason(data),
         "last_reason_since": _cached_reason_since(data),
+        "last_reason_detail": _cursor_reason_detail(data),
     }
 
 
@@ -3524,7 +4274,12 @@ __all__ = [
     "CURSOR_HOST_CACHE_RETENTION_DAYS",
     "CURSOR_USAGE_CENSUS_HOST_VERSION",
     "CURSOR_USAGE_CENSUS_CONDUCTOR_VERSION",
+    "CURSOR_SQLITE_CENSUS_CONDUCTOR_VERSION",
+    "CURSOR_SQLITE_READER_CAUSES",
+    "CURSOR_SQLITE_STORE_CAUSES",
     "HOST_READER_DIAGS",
+    "cursor_sqlite_stores",
+    "unread_sqlite_stores",
     "cursor_usage_diag",
     "reader_usage_diag",
     "reader_cache_cold",
