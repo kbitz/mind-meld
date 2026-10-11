@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, and configurable sync sources, plus Cursor usage capture.
+Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, and configurable sync sources, plus Cursor usage capture. 2.0 moves the store to a Syncthing folder on macOS and Arch-based Linux; [docs/SPEC.md](docs/SPEC.md) is the product authority.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -18,6 +18,26 @@ Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich, packaging.
 - **Conflicts preserve local canonical bytes and remote sidecars.** Newer local files are skipped; legacy direction and clock rules live in the conflict invariants.
 - After pull, `.mind-meld-log.md` records changes from other machines per project.
 - SHA-256 manifest diffing transfers only changes; blobs are content-addressed and gzip-compressed before encryption (format 0x02).
+
+## Product scope and releases
+
+Read docs/SPEC.md before roadmap, autoplan/planning, implementation, review or
+release decisions. Its selected target, intended users, audience ceiling,
+accepted limitations and release policy govern this project. Do not infer future
+scale from backlog entries. Review findings need concrete impact on that target;
+preserve approved scope unless the user explicitly changes it. Put unrelated
+improvements in the backlog with a revisit trigger. A priority label alone is
+not a launch gate. For version decisions, use the spec's policy and checkpoint
+acceptance evidence instead of generic line-count, feature-size or Group-closure
+heuristics. This project policy overrides those defaults in /ship; keep its
+other release gates. A change that edits SPEC's release policy or adds
+acceptance entries uses the base branch's policy, and its new entries count
+only after the user confirms them directly. PROGRESS.md `## Acceptance` owns achieved stage and
+evidence; SPEC owns definitions and target. Open a current supporting document
+only when its listed role bears on the decision. Superseded plans/specs are
+historical only: exclude them from routine discovery and backlog extraction.
+Consult a named archive only for a specific unresolved historical question;
+never use it to reintroduce scope or override the current spec.
 
 ## Planning
 
@@ -80,6 +100,7 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 
 - [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
 - [README](README.md): commands, configuration, previews, integration, and development.
-- [SPEC](SPEC.md): architecture and data model; Project Structure, Implementation Order, and original push algorithm are historical.
-- Design decisions: [v1](docs/designs/mind-meld-v1.md), [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md).
+- [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
+- [SPEC](SPEC.md): 1.x architecture and data model; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 store: [design](docs/designs/store-v2.md).
+- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
 - [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.

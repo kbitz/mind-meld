@@ -1,3 +1,6 @@
+> SUPERSEDED on 2026-10-11 by [current project spec](../SPEC.md). Historical
+> rationale only; not a source of current scope, scheduling or release policy.
+
 # Mind Meld v1 Design Decisions
 
 > Generated from CEO plan review on 2026-03-18.
