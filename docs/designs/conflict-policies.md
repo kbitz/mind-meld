@@ -158,9 +158,15 @@ applied files.
 | n | bucket | policy it seeds |
 |---|---|---|
 | 29 | derived caches (`decisions.active.json` 18, `brain-cache/_meta.json` 7, `analytics/.last-sync-*` 4) | `local` (already excluded) |
-| 17 | host-regenerated tree (`~/.codex/skills/.system/**`) | `local` (already excluded) |
-| 31 | per-machine session state (`pair-review/`, `full-review/` `session.yaml`) | `local` |
-| 11 | authored prose (6 were one file repeating a pre-v0.11.4 dedup bug) | `merge`, fallback `newest` |
+| 16 | host-regenerated tree (`~/.codex/skills/.system/**`) | `local` (already excluded) |
+| 2 | per-host rendered skills | `local` (already excluded) |
+| 9 | per-machine session state (`pair-review/session.yaml`, `full-review/session.yaml`) | `local` |
+| 32 | remaining sync data, including cross-machine resume prose | classify by content; prose uses `merge`, fallback `newest` |
+
+The first three buckets total 47 generator conflicts (53%); session state
+takes it to 56 (64%). Resume prose such as `deploy.md`, `report.md` and
+`parked-bugs.md` stays in scope; the corpus does not justify a directory-wide
+`local` rule for `pair-review/` or `full-review/`.
 
 Two cautions carry over. `union` is wrong for bounded snapshots such as
 `decisions.active.json`, which omits superseded records on purpose; only

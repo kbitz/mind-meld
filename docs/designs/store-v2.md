@@ -1,7 +1,7 @@
 # mm 2.0 store: per-device encrypted logs over Syncthing
 
-> Written 2026-10-09/10 against `98e9a69` (v1.6.0). Not yet admitted to the
-> roadmap; `/roadmap` turns the Tracks below into cards. This design replaces
+> Written 2026-10-09/10 against `98e9a69` (v1.6.0). Admitted to
+> [the roadmap](../ROADMAP.md) as Phase 4 on 2026-10-11. This design replaces
 > the 1.x storage format and moves mm from iCloud Drive to Syncthing.
 > Conflict policies, three-way merge and the resolver UI build on it: see
 > [conflict policies](conflict-policies.md).

@@ -148,8 +148,10 @@ Interchangeability).
   cutover is a fresh start; 2.1 is conflict policies; 2.2 is the resolver.
 - Stage versions: MVP-1 (iCloud, macOS) = 1.0.0, achieved; MVP-1 (Syncthing,
   macOS + Linux) = 2.0.0.
-- Compatibility surface: the 1.x contract until cutover. Both sides of the
-  format change refuse safely through the crypto-init version byte.
+- Compatibility surface: the 1.x contract until cutover. 1.x retains its
+  crypto-init version-byte gate. 2.0 uses a separate `fleet.json` format gate
+  in a fresh Syncthing folder and never reads 1.x storage. Each format must
+  refuse incompatible input safely.
 - Version format: three components in `pyproject.toml`; there is no `VERSION`
   file, so the release baseline is the last commit that changed
   `pyproject.toml` on the base branch.

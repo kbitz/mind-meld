@@ -442,6 +442,6 @@ _tombstone: 70_
 
 ### Track 70B: Correct lock and install guidance ✓ Shipped (v1.5.2)
 
-- 2026-10-07: merged [PR #199](https://github.com/kbitz/mind-meld/pull/199) (commit `b9af1edc`); verified land-time Track 70B, original/current Group 70. Introduced by `6763dd1` on 2026-10-06; no intervening ID rename. PATCH release.
+- 2026-10-07: merged [PR #199](https://github.com/kbitz/mind-meld/pull/199) (commit `b9af1eda`); verified land-time Track 70B, original/current Group 70. Introduced by `6763dd1` on 2026-10-06; no intervening ID rename. PATCH release.
 - Closure evidence: both card tasks are present at `a8afa88`: `lockfile._contention_message` tells the operator to wait or resolve the holder and never to remove the lockfile, with the `ps -p` line, pinned by the inode-preserving contention test in `tests/test_lockfile.py`; `docs/invariants/auto-upgrade.md` distinguishes an immutable tag pin, a moving ref, a bare repository URL and pipx's own hold flag, and `cli._print_update_current` says which spec mm will not move. The README troubleshooting anchor the DX review asked for was filed separately and is now part of the regenerated remedy Track.
 - Delivered: safe contention guidance and accurate pinned-install prose. Group 70 is retired.
