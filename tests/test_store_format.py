@@ -184,7 +184,7 @@ class TestFleet71C:
             # One RFC 3339 profile: no control/bidi separators or version-dependent forms.
             ("created_at", "2026-10-11\x1b12:00:00+00:00", "invalid_fleet"),
             ("created_at", "2026-10-11\n12:00:00+00:00", "invalid_fleet"),
-            ("created_at", "2026-10-11‮12:00:00+00:00", "invalid_fleet"),
+            ("created_at", "2026-10-11\u202e12:00:00+00:00", "invalid_fleet"),
             ("created_at", "2026-10-11 12:00:00+00:00", "invalid_fleet"),
             ("created_at", "2026-10-11t12:00:00z", "invalid_fleet"),
             ("created_at", "2026-10-11T24:00:00+00:00", "invalid_fleet"),
@@ -1004,7 +1004,7 @@ class TestPathsAndPresence71C:
             ("2026-10-11T23:59:59.999999+14:00", True),
             ("2026-10-11T24:00:00+00:00", False),
             ("2026-10-11\x1b12:00:00+00:00", False),
-            ("2026-10-11‮12:00:00+00:00", False),
+            ("2026-10-11\u202e12:00:00+00:00", False),
             ("2026-W41-7T12:00:00Z", False),
             ("2026-10-11T12:00:60Z", False),
         ],

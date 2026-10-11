@@ -75,7 +75,9 @@ uppercase `T`, hours 00–23 and a mandatory offset; the calendar date must be
 valid. The pattern is checked before `datetime.fromisoformat`, whose accepted
 set differs by Python version (3.14 takes `T24:00`) and admits any separator
 character, so every supported reader reaches the same verdict.
-`datetime.isoformat()` on an aware value emits this profile.
+`datetime.now(timezone.utc).isoformat()` (default separator and timespec)
+emits this profile; offsets with seconds and `timespec="minutes"`/`"hours"`
+do not, so writers must normalize before encoding.
 
 Writer defaults: 65536 KiB memory, time cost 3, parallelism 1. Reader bounds:
 memory 1024..262144 KiB, time 1..10, parallelism 1..16, and memory at least
