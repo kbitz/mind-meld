@@ -13,6 +13,8 @@
 > - 2026-10-10: end-to-end encryption stays.
 > - 2026-10-10: local sync state moves to SQLite; the existing usage caches
 >   stay as they are.
+> - 2026-10-11: trim the sync scope before 2.0. Generator output (venvs, app
+>   bundles, archives, QA evidence) is not sync data; see P1.
 
 ## Outcome
 
@@ -59,7 +61,7 @@ v2.1.6 on 2026-10-09:
 | **Brief ENOENT while Syncthing replaces a file.** Syncthing deletes the old file, then renames the new one into place. | Syncthing `performFinish` | Commits are never replaced. |
 | **Foreign files in listings** (temp files, conflict copies), and conflict copies counted as devices | `storage/local.py:121-134`, `devices.py:296-324` | A strict layout parser; everything else is counted as foreign in `mm diag`. |
 | **Restored or cloned machine** | `devices.py:231` | Commit headers carry a hashed machine fingerprint and a hash chain (§9). |
-| **Plaintext content hashes in blob names** | `cli.py:2803`, `storage/keys.py` | Filenames are sequence numbers. |
+| **Plaintext content hashes in blob names** | `cli.py:2805`, `storage/keys.py` | Filenames are sequence numbers. |
 | **Claude project folders named after the absolute path** (`-Users-<name>-*` on macOS vs `-home-<name>-*` on Linux) | `manifest.py:1405`, `cli.py:5105` | Wire paths are relative to the home folder (§7). |
 | **Every peer edit to an untouched file is a conflict**, because there is no last-synced base | `cli.py:2006-2021`, `cli.py:5101-5122`, `merge.py:185` | Fast-forward by version vector (§4). |
 | **Line deletions in `MEMORY.md` and `.jsonl` never stick.** Union merge runs on every update, even one-sided ones. | `cli.py:2592-2593`, `merge.py:46-53` | Union runs only on concurrent versions. |
@@ -104,14 +106,17 @@ authentication.
   into parts. A commit is applicable only when all `nparts` are present.
 
 **Snapshot payload.** The same framing. The header adds
-`cursors: {peer: seq}`, the peers' commits it reflects. Entries are this
-device's full state:
+`cursors: {peer: seq}`, the peers' commits it reflects, and `prev`, the
+payload hash of commit `seq`, so the chain stays checkable after compaction.
+Entries are this device's full state:
 - every live path with its content;
 - every tombstone;
 - concurrent versions it holds unresolved (marked `held`).
 
 Tombstones are path plus vv and are never dropped, so there is no
-resurrection horizon.
+resurrection horizon. This Mac's last-push sidecar holds 15,415 today, a few
+MB sealed; a horizon keyed to every peer's snapshot cursors can follow if
+that ever matters.
 
 **Presence payload.** `{device_id, device_name, os, mm_version, host, syncthing_id, registered, last_active, published_seq, snapshot_seq, applied: {peer: seq}}`.
 It is rewritten atomically (temp file plus rename) at the end of push and
@@ -136,7 +141,7 @@ step atomic.
 | `cursors` | `peer → applied_seq, gap_seq, gap_since` | pull, status, presence |
 | `own_log` | `seq → prev, parts, bytes, created_at` | push, compaction, restore detection |
 | `displaced` | replaced local versions (bytes, reason, time), kept 30 days | `mm displaced`, gc |
-| `history` | per-file push/pull outcomes; imported once from `pull-history.jsonl{,.1}` | `mm log`, `mm conflicts --suggest` |
+| `history` | per-file push/pull outcomes; imported once from `pull-history.jsonl{,.1}`, best effort: the 1 MB rotation usually leaves only the last push's rows | `mm log`, `mm conflicts --suggest` |
 
 [Conflict policies](conflict-policies.md) adds `base` (three-way merge bases)
 and `conflicts` (held versions). Usage, identity, upgrade and token caches
@@ -178,6 +183,11 @@ version `L`, which is `ledger.vv`, plus `me` if the local bytes differ from
 - `MEMORY.md`: `merge_lines`;
 - anything else: **newest** (higher mtime; ties broken by higher sha). The
   loser goes to `displaced`.
+- **live versus tombstone:** the live version wins. A tombstone has no
+  mtime, so `newest` cannot apply, and an edit concurrent with a delete is
+  the one case where silent loss is possible. The deleter sees the file
+  return as a fast-forward and may delete it again; that delete then
+  dominates. Bootstrap below is the only exception.
 
 Per-path rules, three-way merge and `ask` arrive with conflict policies (2.1).
 
@@ -189,7 +199,12 @@ resolver that prefers "local" would ping-pong forever.
 
 **Bootstrap.** With no ledger (a fresh 2.0 device), every file is authored
 as `{me: 1}` in the first snapshot. Identical files across devices collapse
-through the same-sha rule; only real differences resolve, once.
+through the same-sha rule; only real differences resolve, once. One rule is
+inverted at bootstrap: a peer tombstone beats a never-ledgered local file,
+whose bytes go to `displaced`. Without it, every file still lingering on a
+joiner would resurrect fleet-wide against the fleet's 15k tombstones. A
+machine that missed the final 1.x round (§13) therefore joins only after its
+sources are wiped, or is retired instead.
 
 ## 5. Publish (push)
 
@@ -203,15 +218,21 @@ through the same-sha rule; only real differences resolve, once.
    `.mm-tmp-*`). The commit exists once its last part exists.
 5. In one transaction: ledger updates, `own_log` row, history rows. A crash
    between steps 4 and 5 is recovered by §9's own-log replay.
-6. Best effort: ask Syncthing to rescan `dev/<me>`. Write presence. Take a
-   snapshot and compact if due (§6).
+6. Best effort: ask Syncthing to rescan `dev/<me>`. Write presence. In an
+   attended push only, take a snapshot and compact if due (§6); `autopush`
+   never snapshots.
 
 ## 6. Snapshots and compaction
 
-A device writes a snapshot when 200 commits, 7 days or 64 MiB of log have
-accumulated since its last one. It deletes its own commits at or below its
-**previous** snapshot's seq once they are 14 days old, and keeps its two
-newest snapshots.
+A device writes a snapshot when the log since its last snapshot outgrows
+that snapshot, or after 200 commits, and only from an attended `mm push` or
+`mm push --snapshot`. There is no time trigger: a snapshot is this device's
+whole state (about 330 MB sealed for this Mac's 33k files), Syncthing gets no
+block deltas from sealed files, and at this fleet's cadence of roughly two
+pushes a day a weekly trigger would ship that to every peer every week. Nor
+does a hook snapshot: sealing 33k files under the lock would blow the
+`autopush` budget. It deletes its own commits at or below its **previous**
+snapshot's seq once they are 14 days old, and keeps its two newest snapshots.
 
 **Reader rule** for peer `P`, with `next = cursor[P] + 1`:
 
@@ -223,6 +244,10 @@ newest snapshots.
 | `next` is complete but unreadable (authentication or parse failure) | stop at it with an always-visible warning; skip to a later snapshot when one appears |
 
 The owner's remedy for an unreadable commit is `mm push --snapshot`.
+
+Chain checks run only inside the retained window: the oldest surviving
+commit's `prev` is compared with the newest snapshot's `prev` at that seq,
+never with a compacted file.
 
 This rule needs no cross-device acknowledgements and never confuses
 "compacted" with "in flight". Presence `applied` cursors exist only for
@@ -274,7 +299,8 @@ presence from storage.
 
 | Observation | Meaning | Action |
 |---|---|---|
-| Own commits beyond `own_log`, same `host` | Crash after publication, restore from backup, or lost `state.db` | Apply own commits like a peer's, via `cursor[me]`: local files fast-forward to this device's own newer state; then continue |
+| Own commits beyond `own_log`, same `host` | Crash after publication, restore from backup, or lost `state.db` | Apply own commits like a peer's, via `cursor[me]`: local files fast-forward to this device's own newer state; then continue, with `seq` resuming after the newest commit in storage and `prev` chained from it |
+| `dev/<me>/` absent while `own_log` is non-empty | This device was retired (§8) and Syncthing applied the deletion, or the folder was lost | Refuse; `mm rejoin` |
 | Own commits with a different `host` | Two machines share this device id (copied config or a migrated Mac) | Refuse; `mm rejoin` mints a new device id in the same fleet |
 | `prev` chain broken, or a conflict copy of a commit or `fleet.json` | Fork | Refuse with `mm diag` detail; no automatic repair |
 
@@ -370,9 +396,10 @@ week before cutover, with real hooks.
 
 ## 13. Cutover (operator, after the 2.0 release candidate soaks)
 
-1. **Final 1.x round.** On every Mac, still on iCloud, `mm pull && mm push`,
-   and resolve until `mm conflicts` is empty. Run the
-   [conflict census](conflict-policies.md#appendix-c0-census-script) first.
+1. **Final 1.x round.** On every Mac, still on iCloud and with P1's scope
+   trim installed, `mm pull && mm push`, and resolve until `mm conflicts` is
+   empty. A Mac that skips this round joins later only with wiped sources,
+   or is retired (§4 Bootstrap).
 2. **Install Syncthing.** Version ≥ 2.1 everywhere.
    - Linux: the distribution package or Syncthing's own apt repository
      (for example `pacman -S syncthing`), then
@@ -420,6 +447,7 @@ SIZE limits when it turns these into cards.
 | Track | Delivers | Main files | Release | Size |
 |---|---|---|---|---|
 | **P0** Stop today's two hazards | `_do_gc` reaps only `data/<me>/`; the root-salt drift remedy stops saying "Re-run `mm init`" | `cli.py`, tests | 1.6.1 | S |
+| **P1** Trim sync scope | Default gstack `exclude_patterns` for generator trees (`*/venv/*`, `*/.venv/*`, `*/node_modules/*`, `*.app/*`, `*/tools/*`, `*/fixture/*`, `*/fixtures/*`, `*/.qa-evidence/*`) and archives or binaries (`*.zip`, `*.tar*`, `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`); `migrate-config` appends them; README | `config.py`, `cli.py`, README, tests | 1.6.x | S |
 | **T1** Replication simulator | Fake Syncthing transport, device harness, state machine with invariants 1–6 (against stubs until T3–T5 land) | `tests/sim/` | 2.0 | M |
 | **T2** Local state DB | `statedb.py`: schema, migrations, history import, `mm log` on SQLite | `statedb.py`, `pullhistory.py`, `cli.py:log` | 2.0 | M |
 | **T3** Store format | `fleet.json`, envelope 0x03 with associated data, commit/snapshot/presence codecs, parts, strict layout parser | new `store/` package, `crypto.py` | 2.0 | M |
@@ -431,8 +459,18 @@ SIZE limits when it turns these into cards.
 | **T9** Remove 1.x store and rewrite docs | "What 2.0 deletes"; rewrite `sync.md`, `init-devices.md`, `conflicts.md`, SPEC, AGENTS.md; update `docs/invariants/README.md` routing | many | 2.0 | L |
 | **T10** Soak and cutover | §12 live soak and §13 runbook (operator) | none | after 2.0 RC | S |
 
+**P1 demand** (this Mac, 2026-10-11): gstack is 32,615 of 33,518 synced
+files and 1.22 of 1.26 GB. Venvs hold 62 MB, app bundles 59 MB, `tools/`
+43 MB, archives and binaries 106 MB, QA evidence 19 MB. Beyond those, 178
+files over 1 MiB hold 690 MB, 455 MB of it JSON receipts under
+`review-and-prep/`, mostly `compact-snapshots/` and `ranking-summaries/`;
+see decision 6. Lowering `max_file_size` is not a lever: an oversize
+selected file refuses the whole push (README, "Snapshot failures").
+Exclusion globs author no tombstones, so peers keep their copies (sync
+invariants, tombstone suppression).
+
 **Order:**
-- P0 now.
+- P0 and P1 now, P1 before the first 2.0 snapshot.
 - T1 and T2 in parallel.
 - Then T3 → T4 → T5 → T6 → T7. T8 runs anytime. T9 comes last before
   release. Then T10.
@@ -455,6 +493,11 @@ landings.
    *Recommended: yes.*
 5. **Relay** as a plain `receiveonly` Syncthing peer, not an untrusted
    device. *Recommended: yes*, when an always-on machine is available.
+6. **gstack review receipts.** The 455 MB of JSON receipts over 1 MiB are
+   machine-written, but a skill may read them on another Mac. Exclude
+   `*/compact-snapshots/*` and `*/ranking-summaries/*` in P1 only if no
+   skill resumes from them cross-machine. *Recommended: check the reader
+   first, then exclude.*
 
 ## Considered and rejected
 

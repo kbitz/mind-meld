@@ -67,7 +67,7 @@ conflict_fallback = "newest"   # or "ask"
 
 | Policy | Meaning | Built-in default for |
 |---|---|---|
-| `local` | Never published or pulled. Switching a path to or from `local` authors no tombstones, the same as today's exclusion invariant. | every current `exclude_patterns` glob; generated host skills |
+| `local` | Never published or pulled. Switching a path to or from `local` authors no tombstones, the same as today's exclusion invariant. | every current `exclude_patterns` glob, including P1's generator trees; generated host skills |
 | `union` | Line-set union in deterministic order (`merge_jsonl`, `merge_lines`) | `*.jsonl` |
 | `merge` | Three-way merge against the real base. A clean merge applies; overlapping hunks go to the fallback. | other text, including `MEMORY.md` |
 | `newest` | Higher mtime wins; ties go to the higher sha | binary |
@@ -116,14 +116,14 @@ conflict_fallback = "newest"   # or "ask"
   it propagates once, with no mtime bump.
 - **`mm conflicts --suggest`** reads `history` and lists paths with repeated
   concurrent conflicts over the last 30 days. Each comes with the rule line to
-  add. It is a frequency report over data mm already records; the user
-  chooses.
+  add. It is a frequency report over data mm records from 2.0 on; the
+  imported 1.x rows are too few to seed it. The user chooses.
 
 ## Tracks
 
 | Track | Delivers | Main files | Release | Size |
 |---|---|---|---|---|
-| **C0** Conflict census (no code) | Run the appendix script on each Mac before cutover. Record per-category counts and the top 30 paths here; they seed C2's defaults. | this doc | now | S |
+| **C0** Conflict corpus (no code) | Seed C2's defaults from the appendix: the 2026-09-01 forensic pass over 88 conflicts. A fresh census cannot run: `pull-history.jsonl` rotates at 1 MB, and on 2026-10-11 this Mac's two files held 20 seconds of one push, all `uploaded` rows. | this doc | done | S |
 | **C2** Policies and three-way merge | `rules` config, the `migrate-config` rewrite, `union`/`merge`/`newest`/`ask`, `base` table, `git merge-file`, fallback | `config.py`, `merge.py`, new `policy.py`, `statedb.py`, `store/` apply | 2.1 | L |
 | **C3** Resolver | `conflicts` table, `mm conflicts` and `mm resolve` rewrite, `--suggest`, status counts | `resolveflow.py`, `conflictdiff.py`, `cli.py`, README | 2.2 | L |
 
@@ -146,52 +146,24 @@ Keep the collector ban and add: "Declared deterministic per-path policies are
 not the cancelled resolver (maintainer decision, 2026-10-09). Every automatic policy must be
 symmetric."
 
-## Appendix: C0 census script
+## Appendix: the conflict corpus
 
-Read-only. Run on each 1.x Mac before cutover with `python3 -I census.py`.
-It reads `~/.config/mind-meld/pull-history.jsonl` and its `.1` rotation.
+The only corpus is the 2026-09-01 forensic pass over all 88 `conflicted`
+rows then in `pull-history.jsonl{,.1}` (2026-05-01 to 2026-09-01); the
+[sync invariants](../invariants/sync.md#generated-files-are-not-sync-data-load-bearing-v01251)
+record the rule it produced. It is not re-derivable: the history has since
+rotated away, and `mm gc` reaps old sidecars. Conflict rate was 88 of 2,153
+applied files.
 
-```python
-import collections, json, pathlib
+| n | bucket | policy it seeds |
+|---|---|---|
+| 29 | derived caches (`decisions.active.json` 18, `brain-cache/_meta.json` 7, `analytics/.last-sync-*` 4) | `local` (already excluded) |
+| 17 | host-regenerated tree (`~/.codex/skills/.system/**`) | `local` (already excluded) |
+| 31 | per-machine session state (`pair-review/`, `full-review/` `session.yaml`) | `local` |
+| 11 | authored prose (6 were one file repeating a pre-v0.11.4 dedup bug) | `merge`, fallback `newest` |
 
-root = pathlib.Path.home() / ".config/mind-meld"
-rows = []
-for name in ("pull-history.jsonl.1", "pull-history.jsonl"):
-    path = root / name
-    if path.exists():
-        for line in path.read_text(errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if row.get("verb") in ("pull", "push") and row.get("rel_path"):
-                rows.append(row)
-rows.sort(key=lambda r: r["ts"])
-
-last_touch = {}  # (source, path) -> "pull" | "push"
-verdict, by_path = collections.Counter(), collections.Counter()
-for row in rows:
-    key, action = (row["source"], row["rel_path"]), row["action"]
-    if action in ("written", "merged", "merged-via-lcs"):
-        last_touch[key] = "pull"
-    elif action == "uploaded":
-        last_touch[key] = "push"
-    elif action == "conflicted":
-        by_path[key] += 1
-        verdict[{
-            "pull": "last touch was a pull write: likely fast-forward",
-            "push": "last touch was our upload: ambiguous",
-        }.get(last_touch.get(key), "no prior history")] += 1
-
-print(f"{sum(by_path.values())} conflicts across {len(by_path)} paths")
-for label, n in verdict.most_common():
-    print(f"  {n:5d}  {label}")
-print("top paths:")
-for (source, rel), n in by_path.most_common(30):
-    print(f"  {n:4d}  {source}:{rel}")
-```
-
-"Likely fast-forward" means this Mac uploaded nothing between mm's last write
-of the file and the conflict. A local edit that was never pushed is invisible
-to the heuristic, so treat the count as an estimate; the code path cited in
-"Why" is the proof.
+Two cautions carry over. `union` is wrong for bounded snapshots such as
+`decisions.active.json`, which omits superseded records on purpose; only
+append-only logs union. And the nine surviving `conflict-decisions.jsonl`
+rows all chose `remote` because the 1.x mtime gate only fires when remote is
+newer, so they say nothing about preference.
