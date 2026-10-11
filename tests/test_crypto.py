@@ -178,6 +178,33 @@ class TestNewerFormats66A:
 
 
 class TestDeriveKey:
+    def test_explicit_parameters_and_unchanged_defaults(self, monkeypatch):
+        """T03/T15: v3 kwargs participate; legacy defaults stay byte-identical."""
+        salt = bytes(range(16))
+        default = derive_key(PASSPHRASE, salt, memory_kb=MEMORY_KB)
+        assert default == derive_key(
+            PASSPHRASE, salt, memory_kb=MEMORY_KB, time_cost=3, parallelism=1
+        )
+        assert default != derive_key(
+            PASSPHRASE, salt, memory_kb=MEMORY_KB, time_cost=1, parallelism=1
+        )
+        assert default != derive_key(
+            PASSPHRASE, salt, memory_kb=MEMORY_KB, time_cost=3, parallelism=2
+        )
+        calls = []
+
+        def primitive(**kwargs):
+            calls.append(kwargs)
+            return bytes(32)
+
+        monkeypatch.setattr(crypto, "hash_secret_raw", primitive)
+        derive_key(PASSPHRASE, salt)
+        derive_key(PASSPHRASE, salt, 262144, time_cost=10, parallelism=16)
+        assert [(c["memory_cost"], c["time_cost"], c["parallelism"]) for c in calls] == [
+            (65536, 3, 1),
+            (262144, 10, 16),
+        ]
+
     def test_produces_32_bytes(self):
         key = derive_key(PASSPHRASE, os.urandom(16), memory_kb=MEMORY_KB)
         assert len(key) == 32
