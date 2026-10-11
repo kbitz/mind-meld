@@ -249,9 +249,13 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 in part:** `mm enable-source cursor` now enrolls a `stop` hook and
 `mm cursor-agent` wraps print runs, so future standalone completions are
 captured (see `docs/invariants/events-retro.md`, "Standalone Cursor capture");
-sessions before enrollment remain outside coverage. The reader never reads
-Conductor's Claude/Codex copy (would double-count existing corpora), SQLite,
-transcripts, agents.ndjson, checkpoints or usage APIs.
+sessions before enrollment remain outside coverage. **Superseded for
+stores:** since Conductor 0.90.1 the same reader opens each workspace
+`index.db` read-only and selects run identity, status, model, the terminal
+timestamp and the token counters (see README "Conductor SQLite stores"). It
+still never reads Conductor's Claude/Codex copy (would double-count existing
+corpora), prompts, results, transcripts, agents.ndjson, checkpoints or usage
+APIs, and it never writes a store file.
 
 No Cursor sync source: the measured skills directory contains generated links,
 not user files. Revisit only when a user-authored skill or command exists.

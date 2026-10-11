@@ -119,6 +119,7 @@ from mind_meld.devices import (
     update_last_seen,
 )
 from mind_meld.errors import (
+    CURSOR_SQLITE_URL,
     GIT_WALK_FAILURES_URL,
     HOST_USAGE_CAPTURE_URL,
     NEWER_STORAGE_URL,
@@ -6342,6 +6343,9 @@ def status(
                 readiness=_reader_capture_readiness(publication, "cursor"),
                 upgrade_required=upgrade_required,
             )
+            detail_clause = _cursor_store_detail_clause(cursor_diag.get("last_reason_detail"))
+            if detail_clause:
+                narrative += "; " + safe_str(detail_clause)
         elif cursor_diag.get("complete_once") is True:
             narrative = "enabled; a prior scan completed successfully"
         else:
@@ -6357,9 +6361,12 @@ def status(
         unread = cursor_diag.get("unread_sqlite_stores")
         if isinstance(unread, int) and unread > 0:
             narrative += (
-                f"; {unread} Conductor workspace store(s) use Conductor's newer SQLite "
-                "format, which mm does not read yet, so those runs are not counted"
+                f"; {unread} Conductor workspace store(s) not yet read; "
+                "mm push attempts to read them"
             )
+        unsupported = cursor_diag.get("unsupported_sqlite_stores")
+        if isinstance(unsupported, dict) and unsupported.get("count"):
+            narrative += "; " + safe_str(_cursor_unsupported_clause(unsupported))
         console.print(
             f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
         )
@@ -6464,6 +6471,108 @@ def _reader_capture_readiness(
     if readiness == "ready" and reader not in publication["readers"]:
         return "no-reader"
     return readiness
+
+
+_CURSOR_DETAIL_NO_CLAUSE = frozenset({"hot_journal", "identity_changed"})
+"""Transient causes: the next read retries, so there is nothing for the user to do."""
+_CURSOR_ROW_CAUSES = frozenset(
+    {
+        "bad_json",
+        "oversize_or_type",
+        "bad_timestamp",
+        "bad_utf8",
+        "bad_counters",
+        "bad_model",
+        "corrupt_database",
+    }
+)
+_CURSOR_DISABLE = "`mm disable-source cursor`"
+
+
+def _sqlite_version() -> str:
+    try:
+        import sqlite3
+
+        return sqlite3.sqlite_version
+    except ImportError:
+        return "unavailable"
+
+
+def _cursor_unsupported_clause(unsupported: dict) -> str:
+    """Store-scoped drift: these stores contribute nothing until a newer mm reads them."""
+    count = unsupported["count"]
+    causes = [str(cause) for cause in unsupported.get("causes") or []]
+    clause = (
+        f"{count} Conductor workspace store(s) use a layout this mm cannot read "
+        f"({', '.join(causes)}); their runs are not counted. Run `mm update`; "
+        f"if you are current, see {CURSOR_SQLITE_URL}"
+    )
+    if "schema_unreadable" in causes:
+        clause += f" (this mm's Python links SQLite {_sqlite_version()})"
+    return clause
+
+
+def _cursor_store_detail_clause(detail: dict | None) -> str | None:
+    """Closed-catalog remedy for the persisted Cursor SQLite cause, or None.
+
+    Rendered from ``last_reason_detail`` only; the store id is the one persisted
+    field behind the path. Never advises deleting retained history or the spool."""
+    if not isinstance(detail, dict):
+        return None
+    cause = detail.get("cause")
+    if cause in _CURSOR_DETAIL_NO_CLAUSE or not isinstance(cause, str):
+        return None
+    store = detail.get("store")
+    path = (
+        _home_relative_path(_host_usage_module().CURSOR_STORE_PATH / store)
+        if isinstance(store, str)
+        else "(unknown store)"
+    )
+    if cause in _CURSOR_ROW_CAUSES:
+        clause = (
+            f"Conductor workspace store {path} holds a row mm cannot read ({cause}); mm "
+            "withholds Cursor usage on this Mac until it reads cleanly. If it persists, "
+            f"{_CURSOR_DISABLE} (or `[retro] cursor_host_usage = false`) stops Cursor usage "
+            f"reading. See {CURSOR_SQLITE_URL}"
+        )
+        if cause == "corrupt_database":
+            clause += f" (this mm's Python links SQLite {_sqlite_version()})"
+        return clause
+    if cause in {"duplicate_request", "conflict"}:
+        return (
+            f"Conductor run records conflict ({cause}); mm withholds "
+            f"Cursor usage until they agree. If it persists, {_CURSOR_DISABLE} stops Cursor "
+            "usage reading"
+        )
+    if cause == "non_regular_path":
+        shown = detail.get("file") or "index.db"
+        return (
+            f"{shown} in Conductor workspace store {path} is a symlink or special file; "
+            f"replace it with Conductor's own file, or {_CURSOR_DISABLE}"
+        )
+    if cause == "cannot_open":
+        code = detail.get("code") or "unknown SQLite error"
+        return (
+            f"mm cannot open Conductor workspace store {path} ({code}); restore read access "
+            f"to Conductor's cursor-sdk-store, or {_CURSOR_DISABLE}"
+        )
+    if cause == "sqlite_unavailable":
+        return (
+            "mm's Python has no usable sqlite3 module; "
+            "reinstall mm as described in the README Install section"
+        )
+    if cause == "sqlite_pragma":
+        return (
+            f"mm's Python links SQLite {_sqlite_version()}, which lacks a required "
+            "capability; reinstall mm as described in the README Install section"
+        )
+    return None
+
+
+def _host_usage_module():
+    from mind_meld import host_usage
+
+    return host_usage
 
 
 def _host_usage_blocker(
@@ -6910,7 +7019,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         pending / model_count / models / last_reason / last_reason_since, and
         Cursor's consented / complete_once / cache_state / runs_cached /
         model_count / models / last_reason / last_reason_since / hook_state /
-        pending_completions / unread_sqlite_stores;
+        pending_completions / unread_sqlite_stores / unsupported_sqlite_stores
+        ({count, causes}) / last_reason_detail ({cause, store, file?, code?}: a
+        closed cause vocabulary, a 16-hex store id, a store file name and an
+        SQLite or OS error name; never a path, a row or an identifier of a run);
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
         autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
@@ -7338,9 +7450,12 @@ def diag(
     )
     unread = cursor_state.get("unread_sqlite_stores")
     console.print(
-        "    newer Conductor stores not read: "
-        + ("unknown" if unread is None else f"{unread} (SQLite format; runs there are not counted)")
+        "    Conductor workspace stores not yet read: "
+        + ("unknown" if unread is None else str(unread))
     )
+    unsupported = cursor_state.get("unsupported_sqlite_stores")
+    if isinstance(unsupported, dict) and unsupported.get("count"):
+        console.print("    " + safe_str(_cursor_unsupported_clause(unsupported)))
     console.print("    cache inventory: " + safe_str(cursor_state.get("cache_state", "unknown")))
     if cursor_state.get("cache_state") == "ok" or cursor_state.get("last_reason"):
         console.print(
@@ -7353,6 +7468,9 @@ def diag(
                 upgrade_required=upgrade_required,
             )
         )
+        detail_clause = _cursor_store_detail_clause(cursor_state.get("last_reason_detail"))
+        if detail_clause:
+            console.print("    store detail: " + safe_str(detail_clause))
     retained = cursor_state.get("runs_cached")
     console.print(f"    runs retained: {'unknown' if retained is None else retained}")
     console.print("    models cached: " + _diag_models_line(cursor_state))
