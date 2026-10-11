@@ -44,56 +44,27 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:severity=minor] Check Track 71A's invariant documentation routing
-- **Description:** Check 71A's card and effective plan route documentation edits to `docs/invariants/README.md`, where module and invariant routing moved during the AGENTS.md slimming.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Retained follow-up from the closed 70A routing item. Check through `/roadmap` before 71A starts; 70A's effective plan and implementation now name the routing README.
-
-### [manual] Read Conductor's tmpdir/env-override Cursor stores if one is ever observed
-- **Why:** the SQLite adapter reads only `~/Library/Application Support/com.conductor.app/cursor-sdk-store/<16-hex>/index.db`. Conductor's producer code can also place a store at `$TMPDIR/conductor-cursor-sdk-store/<hash>` or under `CONDUCTOR_CURSOR_STORE_DIR`; no such store has been observed, so reading one would be speculative.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 70A /autoplan (E4), 2026-10-09. Trigger: one observed store at either location. Reuse the same adapter with an extra root rather than a second reader.
-
-### [manual] Switch every reader's permanent-reason remedy to `mm update`
-- **Why:** `events_tail._host_skip_phrase` and `cli._usage_capture_remedy` still tell a user to run `pipx upgrade mind-meld` for an `unsupported` record format, but the README's Install section says a tag-pinned install never moves, and `mm update` is the supported path. Track 70A's new Cursor text already says `mm update`; the two older phrases are the inconsistent ones.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 70A /autoplan (T-REMEDY), 2026-10-09. Update the tests that assert the old text (`tests/test_diag.py::test_registered_reader_remedy_uses_own_diag67a` and the events-tail phrase pins) in the same change.
-
-### [manual] Per-store failure isolation for malformed or io_error Cursor stores
-- **Why:** store-scoped drift (an unknown layout) already leaves other stores publishing, but a data or IO failure in one Conductor store (`bad_json`, `corrupt_database`, `non_regular_path`, `cannot_open`, ...) still stops the pass and pauses all Cursor usage on that Mac until it reads cleanly. The README gives the `mm disable-source cursor` lever; isolation would keep the healthy stores counting.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Track 70A /autoplan (T-ISOLATION), 2026-10-09. Trigger: a real user-observed blackout. Per-store results already exist (`_stage_cursor_directory`); the work is deciding which causes may be isolated without hiding data-at-risk warnings.
-
-### [manual] Structural guard: integration tests must never write real `~/.config/mind-meld` state
-- **Why:** the 2026-10-08 star-import leak ran integration tests against the real config directory and wrote `last-autorun.json` (a phantom `crypto-error` breadcrumb) and probably `upgrade-state.json` (`last_seen_self_version` 1.5.3 against an installed 1.5.1). A per-test fixture is not a guard: it silently skips when a conftest is star-imported.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** Track 70A /autoplan, 2026-10-09. Investigate whether the leaked `upgrade-state.json` suppressed auto-update on 889e42c0. The pattern to copy is the `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` and the Cursor store guard `_is_real_cursor_store`: fail loudly at the write site, derived from the account database rather than `HOME`.
-
-### [manual] Overdue counterless-FINISHED tracking and an SQLite authorizer for the Cursor adapter
-- **Why:** cut at the Track 70A gate (D2, trim but keep the cause detail). A `FINISHED` run with neither `usage_json` nor `usage_ref` contributes nothing and is replaced by key when counters land; nothing flags one that never gets them. The adapter also relies on a constant-SQL test rather than an SQLite authorizer to keep content columns unread.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** triggers: the first real counterless `FINISHED` row older than an hour, or any regression that reads a content column. Pre-ALTER tracking is already subsumed by store-scoped drift (`missing_required_column`).
-
-### [manual] Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade
-- **Why:** Cursor sessions run through `cursor-agent acp`, which is how Paseo runs Cursor, are not counted. The ACP front-end fires no `stop` hook and sends no usage, and its session stores hold no billed counters. See the "ACP sessions are uncaptured" paragraph in [events/retro invariants](invariants/events-retro.md).
-- **Repro:** back up `~/.cursor/hooks.json`, then register a temporary `sessionStart`/`stop`/`sessionEnd` hook that records only `hook_event_name`, `status`, whether `generation_id` and `model` are present, and the four counter values (`input_tokens`, `cache_write_tokens`, `cache_read_tokens`, `output_tokens`) to a 0600 file under `~/scratch`, never the repo or a synced path. Run one prompt through a minimal ACP client (`session/new`, then `session/prompt`) and one interactive `cursor-agent` turn as a control, and note whether any ACP message carries usage or token fields. Then restore the backup, delete the capture, and confirm mm's own `stop` entry with `mm diag --json` (`hook_state`).
-- **Effort:** S
-- **Priority:** P3
-- **Context:** measured 2026-10-06 on cursor-agent 2026.10.01-e373342. If a later cursor-agent fires a `stop` payload of that shape under ACP, confirm its counters are inclusive like the control turn's before relying on mm's existing hook, which normalizes inclusive counters exactly once (disjoint counters would be undercounted); then update the README and the invariant paragraph. If ACP messages start carrying usage instead, revisit the no-proxy rule with that evidence. Do not estimate usage from the stores' context-window gauge.
-
-### [plan-devex-review:severity=medium,files=src/mind_meld/lockfile.py|src/mind_meld/errors.py|README.md] Link the mm lock-contention error to a README troubleshooting anchor
-- **Why:** every other user-facing failure family in `errors.py` links a README anchor; the contention text is the only remedy surface without one. After Track 70A lands (README.md is in its touch set), add a README troubleshooting entry for "Another mm operation is running": wait and rerun; answer a waiting prompt in the holder's terminal; let an mm update finish (pipx is capped at 600 s); never delete the lockfile or SIGTERM/SIGKILL the holder (no handler; it skips mm's bounded pipx cleanup); SIGINT triggers mm's bounded cancellation cleanup and can still leave mm missing mid-reinstall, while foreground pipx's reader absorbs SIGHUP to keep the installer running after a terminal hangup; how to read `ps -p <pid> -o etime=,tty=,command=`; and that an mm older than 1.5.2 printed "remove <path>": do not. Add an `errors.LOCK_HELD_URL` constant to the `LockError` text placed BEFORE the final "To see the process, run:" line so the copyable command still ends the message; extend the exact-text and render tests and `tests/test_docs_routing.py::test_error_url_anchors_resolve`.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 70B /autoplan DX + Eng phases, 2026-10-07. Depends on Track 70A (README ownership).
-
 ## Drain records
+
+### Roadmap drain — 2026-10-11
+
+8 inbox items: **4 placed, 4 deferred, 0 killed, 0 discharged**. Authored-false rate: 0 / (4 + 0) = 0%. Verification baseline: `a8afa88` (v1.7.0). This regeneration composed with `/project-spec`: docs/SPEC.md now selects MVP-1 on the 2.0 Syncthing store for macOS and Arch-based Linux, 1.x is frozen at cutover, and the two store designs supply 17 new Tracks. Tracks 70A (v1.7.0, PR #201) and 70B (v1.5.2, PR #199) were recorded independently in shipped history; 70A's two-Mac acceptance (14B) stays REQUIRED / PENDING in Future, not waived. Former Track 71A was re-verified at HEAD and renamed 74A. No active pins were declared.
+
+| Inbox item | Disposition |
+|---|---|
+| Check Track 71A's invariant documentation routing | place → Track 74A read-first (`docs/invariants/README.md`) |
+| Read Conductor's tmpdir/env-override Cursor stores if one is ever observed | defer → Future |
+| Switch every reader's permanent-reason remedy to `mm update` | place → Track 71A |
+| Per-store failure isolation for malformed or io_error Cursor stores | defer → Future |
+| Structural guard: integration tests must never write real `~/.config/mind-meld` state | place → Track 71B (manifested 2026-10-08; still visible in `mm status` on 889e42c0 on 2026-10-11) |
+| Overdue counterless-FINISHED tracking and an SQLite authorizer | defer → Future |
+| Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade | defer → Future |
+| [plan-devex-review] Link the mm lock-contention error to a README troubleshooting anchor | place → Track 71A (the unknown `plan-devex-review` source tag is drained with it) |
+
+**Future membership against the new target:** 100 → 93. Twelve bullets killed because the 1.x store, mtime-ordered apply and conflict sidecars are retired at 2.0 by the spec decision of 2026-10-11 (Future-clamped peer mtime; `_promote_target_will_sync` exclude miss; mtime-skipped peers; parallel blob fetch; blob-directory peer recovery; devices-write-lock coupling; machine-readable GC outcomes; pull-history `sidecar=` plumbing; conflict GC retention age; stale conflict-copy cleanup on unchanged pulls; historical blob integrity inventory; and "Three-way merge base", absorbed by the 2.1 policies deferral). Two promoted into Tracks: "Deregister/prune retired devices" → Track 81A (`mm devices retire`); "Push `uploaded` rows crowd pull outcomes" → Track 73B (the `history` table). Seven appended: 2.1 policies, 2.2 resolver, 70A's 14B acceptance, and the four deferred inbox items. Every other bullet is byte-identical. "Nothing wires `mm autopush` on the maintainer fleet" was re-observed on device 889e42c0 on 2026-10-11 (no Claude, Codex, launchd or cron hook); its text is unchanged.
+
+**Documents:** root `SPEC.md` keeps the 1.x architecture with an in-place authority notice (tests and code cite its path); `docs/designs/mind-meld-v1.md` moved to `docs/archive/` with a superseded notice; AGENTS.md gained the product-scope bridge. The audit's archive advisories for the live design docs are overridden as before: they cite external host versions or carry live obligations. Documentation-only regeneration needs no version bump.
+
 
 ### Roadmap drain — 2026-10-06
 

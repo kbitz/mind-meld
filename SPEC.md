@@ -1,37 +1,16 @@
-# Mind Meld
+# Mind Meld — architecture and data model (1.x)
 
-> Open-source, self-hosted CLI tool for syncing Claude Code sessions across Macs via iCloud Drive.
+> **Product scope lives in [docs/SPEC.md](docs/SPEC.md)** (project spec,
+> adopted 2026-10-11): purpose, audience, selected target, acceptance and
+> release policy. This file is a current supporting document: the 1.x
+> architecture, data model and CLI contract that the invariants, tests and
+> code cite. Its former Problem, Goals and Non-Goals sections are superseded
+> by the project spec. Project Structure, Implementation Order and the
+> original push algorithm are historical. The 2.0 store replaces the storage
+> sections; see [docs/designs/store-v2.md](docs/designs/store-v2.md).
 
 **License:** MIT
-**Status:** 1.0 — Production/Stable
-
-This is a personal tool. Anyone with a Claude Code setup and a Mac with iCloud Drive should be able to install it, run `mm init`, and be syncing within five minutes — no account creation, no third-party API, no vendor trust required.
-
-## Problem
-
-Claude Code stores sessions, todos, artifacts, and tool results locally in `~/.claude/projects/`. Switch machines and you lose continuity. claude-sync.com solves this but routes your data through a third-party server. This project is an open-source alternative: same workflow, your own storage, zero trust dependencies. Anyone should be able to set it up in minutes.
-
----
-
-## Goals
-
-1. **Push/pull Claude Code session data** between Macs via iCloud Drive.
-2. **Client-side encryption** — iCloud never sees plaintext.
-3. **Minimal infra** — no API server, no database. Just the CLI and iCloud Drive.
-4. **Fast** — manifest-based diffing with gzip compression; only transfer what changed.
-5. **Single binary feel** — Python CLI installed via `pipx`, zero config to start.
-6. **Open-source and forkable** — MIT-licensed, clean codebase, no proprietary dependencies.
-7. **Newcomer-friendly docs** — a first-time user with no context should go from `pip install` to working sync by following the README alone.
-8. **Host-interchangeable retro usage** — Claude, Codex, and Grok appear as identical rows (tokens, days, machines, cost, top model) on one `## Agents` table and the card `AGENTS` block. Usage consent is not file sync. See [Host Interchangeability](#host-interchangeability).
-
-## Non-Goals
-
-- Real-time sync or file watching (explicit push/pull only).
-- Multi-user collaboration or sharing sessions between users.
-- GUI or web interface.
-- Cross-platform support (Mac-only — uses iCloud Drive).
-- Syncing host session transcripts (Claude, Codex, or Grok).
-- Walking a host home directory that mixes credentials and chat as a sync source.
+**Status:** 1.x — Production/Stable
 
 ---
 

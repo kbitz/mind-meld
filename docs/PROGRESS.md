@@ -165,6 +165,16 @@
 | 0.1.0 | 2026-04-07 | **Initial release.** `push`, `pull`, `status`, `devices`, `diff`, and `gc` over an iCloud Drive backend with end-to-end AES-256-GCM encryption, manifest-based diffing with SHA-256 content addressing, scoped sync (`memory/` and `todos/` only), the cross-machine sync log (`.mind-meld-log.md`), and `autopull` / `autopush` for Claude Code integration. _(Synthesized from the CHANGELOG's Added list; 0.1.0 has no lead paragraph.)_ |
 | 0.1.x   | (pre-v0.2) | iCloud-only backend, autopull/autopush for Claude Code; scoped sync to memory/todos |
 
+## Acceptance
+
+Achieved stages and capability checkpoints, as defined by
+[docs/SPEC.md](SPEC.md). `baseline` rows record state at adoption and never
+earn a version bump. Release automation never writes this section.
+
+| Checkpoint or stage | Date | Evidence | Recorded by |
+|---|---|---|---|
+| baseline: MVP-1 on the 1.x iCloud store (macOS only) achieved; the 2.0 target (Syncthing, macOS + Linux) has no acceptance evidence yet | 2026-10-11 | Three registered devices in the iCloud store (`mm devices`), 108 recorded pushes from device 889e42c0 since 2026-04, release rows 1.0.0 to 1.7.0 above; no 2.0 checkpoint, soak or two-Mac acceptance has run | /project-spec, confirmed by the owner |
+
 ## Current phase: v0.x → v1.0
 
 The original cleanup-sweep set (Groups 1–5) shipped through v0.9.4. Five
