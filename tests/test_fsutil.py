@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import stat
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -314,10 +320,14 @@ class TestFlockAppendJsonl:
         fsutil.flock_append_jsonl(path, [b'{"a":1}', b'{"a":2}', b'{"a":3}'])
         assert path.read_text().splitlines() == ['{"a":1}', '{"a":2}', '{"a":3}']
 
-    def test_empty_lines_no_op(self, tmp_path):
-        path = tmp_path / "log.jsonl"
+    def test_empty_lines_no_op(self, synthetic_state_root, monkeypatch, forbid_fs_mutations):
+        path = synthetic_state_root / "missing" / "log.jsonl"
+        monkeypatch.setattr(fsutil.pwd, "getpwuid", lambda uid: pytest.fail("unneeded lookup"))
+        calls = forbid_fs_mutations()
         fsutil.flock_append_jsonl(path, [])
         assert not path.exists(), "empty input must not create the file"
+        assert not path.parent.exists()
+        assert calls == []
 
     def test_creates_parent_dir(self, tmp_path):
         path = tmp_path / "deep" / "nested" / "log.jsonl"
@@ -525,3 +535,537 @@ class TestRotatableSpool:
             fsutil.rotate_jsonl(spool, taken)
         with pytest.raises(OSError):
             fsutil.append_rotatable_jsonl(spool, b"{}", max_bytes=1024)
+
+
+def _assert_guard_diagnostic(error, path, cause):
+    message = str(error)
+    assert str(path) in message
+    assert os.environ["PYTEST_CURRENT_TEST"] in message
+    assert cause in message
+    assert "tmp_path" in message
+    assert "docs/invariants/README.md#test-write-guard" in message
+    assert not isinstance(error, Exception), "forensic Exception handlers must not swallow refusal"
+    if cause.startswith("protected account-state"):
+        # A classifier crash also refuses; only a cause-free refusal proves protection.
+        assert error.__cause__ is None
+        assert "lookup failed" not in message and "path-resolution failed" not in message
+
+
+class TestRealStateWriteGuard:
+    @pytest.mark.parametrize("marker", [None, ""])
+    def test_inactive_marker_does_no_account_or_path_lookup(self, marker, tmp_path, monkeypatch):
+        if marker is None:
+            monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        else:
+            monkeypatch.setenv("PYTEST_CURRENT_TEST", marker)
+        monkeypatch.setattr(fsutil.pwd, "getpwuid", lambda uid: pytest.fail("inactive pwd lookup"))
+        monkeypatch.setattr(Path, "resolve", lambda *a, **kw: pytest.fail("inactive path lookup"))
+        target = tmp_path / "allowed"
+        fsutil.atomic_write_bytes(target, b"production control")
+        assert target.read_bytes() == b"production control"
+
+    def test_marker_is_checked_at_call_time(self, synthetic_state_root, monkeypatch):
+        target = synthetic_state_root / "never-written"
+        guard = fsutil.refuse_real_state_write_under_pytest
+        for marker in ("", "guard-toggle (call)", "", "guard-toggle-again (call)"):
+            monkeypatch.setenv("PYTEST_CURRENT_TEST", marker)
+            if marker:
+                with pytest.raises(fsutil.PytestRealStateWriteError):
+                    guard(target)
+            else:
+                guard(target)
+        assert not target.exists()
+
+    @pytest.mark.parametrize("failure", ["lookup", "empty", "relative", "missing", "file", "type"])
+    def test_unusable_account_home_refuses(
+        self, failure, tmp_path, monkeypatch, forbid_fs_mutations
+    ):
+        home_file = tmp_path / "home-file"
+        home_file.write_bytes(b"not a directory")
+
+        def lookup(uid):
+            assert uid == os.getuid()
+            if failure == "lookup":
+                raise KeyError("account not found")
+            return SimpleNamespace(
+                pw_dir={
+                    "empty": "",
+                    "relative": ".",
+                    "missing": str(tmp_path / "absent-home"),
+                    "file": str(home_file),
+                    "type": None,
+                }[failure]
+            )
+
+        monkeypatch.setattr(fsutil.pwd, "getpwuid", lookup)
+        path = tmp_path / "otherwise-allowed"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "account-home lookup failed")
+        assert "pwd.getpwuid(os.getuid()).pw_dir" in str(caught.value)
+        assert "Repair the account-home lookup" in str(caught.value)
+        assert caught.value.__cause__ is not None
+        assert calls == [] and not path.exists()
+
+    @pytest.mark.parametrize("shape", ["root", "existing", "missing", "relative", "dot-dot"])
+    def test_account_roots_and_normalized_paths(
+        self, shape, synthetic_state_root, synthetic_account_home, monkeypatch, forbid_fs_mutations
+    ):
+        root = synthetic_state_root
+        root.mkdir(parents=True, mode=0o750)
+        existing = root / "sentinel"
+        existing.write_bytes(b"keep")
+        existing.chmod(0o640)
+        before = (root.stat(), existing.stat())
+        monkeypatch.setattr(Path, "home", lambda: Path(os.environ["HOME"]))
+        monkeypatch.chdir(synthetic_account_home)
+        path = {
+            "root": root,
+            "existing": existing,
+            "missing": root / "absent" / "new",
+            "relative": existing.relative_to(synthetic_account_home),
+            "dot-dot": root.parent / "detour" / ".." / root.name / "sentinel",
+        }[shape]
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path")
+        assert calls == []
+        assert (root.stat(), existing.stat()) == before
+        assert existing.read_bytes() == b"keep"
+        assert not (root / "absent").exists()
+
+    def test_similar_prefix_sibling_and_unrelated_path_are_allowed(
+        self, synthetic_state_root, tmp_path
+    ):
+        sibling = synthetic_state_root.with_name(synthetic_state_root.name + "-copy")
+        sibling.mkdir(parents=True)
+        for path in (sibling / "allowed", tmp_path / "unrelated"):
+            fsutil.atomic_write_bytes(path, b"allowed")
+            assert path.read_bytes() == b"allowed"
+
+    @pytest.mark.parametrize("alias", ["into", "out", "dangling", "root-out"])
+    def test_stable_symlink_aliases_refuse_before_mutation(
+        self, alias, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        root = synthetic_state_root
+        root.parent.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        sentinel = outside / "sentinel"
+        sentinel.write_bytes(b"keep")
+        if alias == "root-out":
+            root.symlink_to(outside, target_is_directory=True)
+            link = root
+        else:
+            root.mkdir()
+            link = root / "alias" if alias == "out" else tmp_path / "alias"
+            link.symlink_to(
+                outside if alias == "out" else root / ("absent" if alias == "dangling" else "")
+            )
+        path = link / "missing" / "new"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        lexically_inside = alias in ("out", "root-out")
+        _assert_guard_diagnostic(
+            caught.value,
+            path,
+            "protected account-state path under"
+            if lexically_inside
+            else "protected account-state path or alias under",
+        )
+        assert calls == [] and link.is_symlink()
+        assert sentinel.read_bytes() == b"keep"
+        assert not (outside / "missing").exists() and not (root / "absent").exists()
+
+    @pytest.mark.parametrize("failure", ["loop", "permission", "resolve"])
+    def test_path_lookup_failures_refuse(
+        self, failure, synthetic_account_home, tmp_path, monkeypatch, forbid_fs_mutations
+    ):
+        path = tmp_path / "unclassifiable"
+        locked = tmp_path / "locked"
+        restore_mode = os.chmod
+        if failure == "loop":
+            path.symlink_to(path)
+        elif failure == "permission":
+            if os.geteuid() == 0:
+                pytest.skip("root ignores directory search permission")
+            (locked / "child").mkdir(parents=True)
+            path = locked / "child" / "new"
+            restore_mode(locked, 0)
+        else:
+            monkeypatch.setattr(
+                Path,
+                "resolve",
+                lambda *a, **kw: (_ for _ in ()).throw(OSError("resolution failed")),
+            )
+        try:
+            calls = forbid_fs_mutations()
+            with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+                fsutil.atomic_write_bytes(path, b"refused")
+        finally:
+            if failure == "permission":
+                restore_mode(locked, 0o700)
+        _assert_guard_diagnostic(
+            caught.value, path, "path-resolution failed while classifying the write destination"
+        )
+        assert "Repair the path lookup" in str(caught.value)
+        assert caught.value.__cause__ is not None and calls == []
+        if failure == "permission":
+            assert isinstance(caught.value.__cause__, PermissionError)
+
+    def test_case_alias_on_insensitive_filesystem(self, synthetic_state_root, forbid_fs_mutations):
+        root = synthetic_state_root
+        root.mkdir(parents=True)
+        alternate = root.with_name(root.name.swapcase())
+        if not alternate.exists() or not root.samefile(alternate):
+            pytest.skip("temporary filesystem is case-sensitive; insensitive branch unavailable")
+        calls = forbid_fs_mutations()
+        path = alternate / "absent" / "new"
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and not path.parent.exists()
+
+    @pytest.mark.parametrize("canonical_exists", [False, True])
+    def test_distinct_case_variant_on_sensitive_filesystem(
+        self, canonical_exists, synthetic_state_root
+    ):
+        root = synthetic_state_root
+        root.parent.mkdir(parents=True, exist_ok=True)
+        alternate = root.with_name(root.name.swapcase())
+        alternate.mkdir()
+        if root.exists():
+            pytest.skip("temporary filesystem is case-insensitive; distinct variant unavailable")
+        if canonical_exists:
+            root.mkdir()
+            assert not root.samefile(alternate)
+        path = alternate / "allowed"
+        fsutil.atomic_write_bytes(path, b"distinct path")
+        assert path.read_bytes() == b"distinct path"
+
+    def test_missing_case_variant_is_conservatively_refused(
+        self, synthetic_state_root, forbid_fs_mutations
+    ):
+        root = synthetic_state_root
+        root.parent.mkdir(parents=True, exist_ok=True)
+        path = root.with_name(root.name.swapcase()) / "absent" / "new"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and not root.exists() and not path.parent.exists()
+
+    def test_case_alias_with_every_root_component_missing(
+        self, synthetic_state_root, synthetic_account_home, forbid_fs_mutations
+    ):
+        """With no root component present (a Mac without ~/Sync), the home is the anchor."""
+        relative = synthetic_state_root.relative_to(synthetic_account_home)
+        alias = synthetic_account_home.joinpath(*(part.swapcase() for part in relative.parts))
+        path = alias / "absent" / "new"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and not any(synthetic_account_home.iterdir())
+
+    @pytest.mark.parametrize("helper", ["atomic", "append", "strict-append", "spool"])
+    @pytest.mark.parametrize("exists", [False, True])
+    def test_helpers_refuse_before_first_mutation(
+        self, helper, exists, synthetic_state_root, forbid_fs_mutations
+    ):
+        root = synthetic_state_root
+        path = root / "parent" / "sentinel"
+        if exists:
+            path.parent.mkdir(parents=True, mode=0o750)
+            path.write_bytes(b"keep\n")
+            path.chmod(0o640)
+        before = path.stat() if exists else None
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            if helper == "atomic":
+                fsutil.atomic_write_bytes(path, b"refused")
+            elif helper == "spool":
+                fsutil.append_rotatable_jsonl(path, b"{}", max_bytes=1024)
+            else:
+                fsutil.flock_append_jsonl(path, [b"{}"], strict=helper == "strict-append")
+        assert calls == []
+        if exists:
+            assert path.stat() == before and path.read_bytes() == b"keep\n"
+        else:
+            assert not path.exists() and not path.parent.exists()
+
+    @pytest.mark.parametrize("protected_side", ["source", "destination"])
+    def test_rotation_checks_both_paths(
+        self, protected_side, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        synthetic_state_root.mkdir(parents=True)
+        protected, allowed = synthetic_state_root / "spool", tmp_path / "allowed"
+        protected.write_bytes(b"protected\n")
+        allowed.write_bytes(b"allowed\n")
+        before = (protected.stat(), allowed.stat())
+        source, destination = (
+            (protected, allowed) if protected_side == "source" else (allowed, protected)
+        )
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            fsutil.rotate_jsonl(source, destination)
+        assert calls == [] and (protected.stat(), allowed.stat()) == before
+        assert protected.read_bytes() == b"protected\n" and allowed.read_bytes() == b"allowed\n"
+
+    def test_parent_alias_into_root_with_final_link_out_refuses(
+        self, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        """Helpers create temps and rename inside the resolved parent, not the final target."""
+        nested = synthetic_state_root / "nested"
+        nested.mkdir(parents=True)
+        outside = tmp_path / "outside.json"
+        outside.write_bytes(b"{}")
+        (nested / "state.json").symlink_to(outside)
+        alias = tmp_path / "alias"
+        alias.symlink_to(nested, target_is_directory=True)
+        path = alias / "state.json"
+        entries = sorted(nested.iterdir())
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and sorted(nested.iterdir()) == entries
+        assert (nested / "state.json").is_symlink() and outside.read_bytes() == b"{}"
+
+    @pytest.mark.parametrize("helper", ["append", "spool"])
+    def test_dot_dot_out_of_missing_root_refuses_before_mkdir(
+        self, helper, synthetic_state_root, forbid_fs_mutations
+    ):
+        """Recursive mkdir creates `<root>/missing` although `..` normalizes it away."""
+        synthetic_state_root.parent.mkdir(parents=True, exist_ok=True)
+        path = synthetic_state_root / "missing" / ".." / ".." / "escape" / "log.jsonl"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            if helper == "append":
+                fsutil.flock_append_jsonl(path, [b"{}"])
+            else:
+                fsutil.append_rotatable_jsonl(path, b"{}", max_bytes=1024)
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path under")
+        assert calls == [] and not synthetic_state_root.exists()
+        assert not (synthetic_state_root.parent / "escape").exists()
+
+    def test_regular_file_ancestor_keeps_native_errors(self, synthetic_account_home, tmp_path):
+        """Nothing exists beneath a regular file, so helpers keep their own ENOTDIR result."""
+        blocker = tmp_path / "regular-file"
+        blocker.write_bytes(b"x")
+        path = blocker / "sub" / "log.jsonl"
+        fsutil.flock_append_jsonl(path, [b"{}"])  # best-effort: OSError is swallowed
+        with pytest.raises(NotADirectoryError):
+            fsutil.atomic_write_bytes(path, b"{}")
+        assert blocker.read_bytes() == b"x"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory search permission")
+    def test_unreadable_protected_root_is_named(
+        self, synthetic_account_home, tmp_path, forbid_fs_mutations
+    ):
+        library = synthetic_account_home / "Library"
+        library.mkdir()
+        icloud = library / "Mobile Documents/com~apple~CloudDocs/mind-meld"
+        path = tmp_path / "unrelated" / "state.json"
+        restore_mode = os.chmod
+        restore_mode(library, 0)
+        try:
+            calls = forbid_fs_mutations()
+            with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+                fsutil.atomic_write_bytes(path, b"refused")
+        finally:
+            restore_mode(library, 0o700)
+        _assert_guard_diagnostic(caught.value, path, f"classifying protected root {icloud}")
+        assert "Repair the path lookup" in str(caught.value)
+        assert isinstance(caught.value.__cause__, PermissionError) and calls == []
+
+    def test_dangling_root_link_target_case_alias_refuses(
+        self, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        """An absent volume behind a root link is reached by any spelling of its target."""
+        root = synthetic_state_root
+        root.parent.mkdir(parents=True, exist_ok=True)
+        volume = tmp_path / "volume"
+        volume.mkdir()
+        root.symlink_to(volume / "mm-state", target_is_directory=True)
+        path = volume / "MM-STATE" / "events.jsonl"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.flock_append_jsonl(path, [b"{}"])
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and list(volume.iterdir()) == []
+
+    def test_symlinked_root_target_spelling_refuses(
+        self, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        root = synthetic_state_root
+        root.parent.mkdir(parents=True, exist_ok=True)
+        target = tmp_path / "external-store"
+        target.mkdir()
+        root.symlink_to(target, target_is_directory=True)
+        path = target / "missing" / "new"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(path, b"refused")
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == [] and not (target / "missing").exists()
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory search permission")
+    def test_protected_verdict_precedes_unrelated_root_lookup_failure(
+        self, synthetic_account_home, tmp_path, forbid_fs_mutations
+    ):
+        events = synthetic_account_home / ".local/share/mind-meld"
+        events.mkdir(parents=True)
+        library = synthetic_account_home / "Library"
+        library.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(events, target_is_directory=True)
+        path = link / "new"
+        restore_mode = os.chmod
+        restore_mode(library, 0)
+        try:
+            calls = forbid_fs_mutations()
+            with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+                fsutil.atomic_write_bytes(path, b"refused")
+        finally:
+            restore_mode(library, 0o700)
+        _assert_guard_diagnostic(
+            caught.value, path, f"protected account-state path or alias under {events}"
+        )
+        assert calls == [] and not (events / "new").exists()
+
+    @pytest.mark.parametrize("ancestor", [".config", "Library", "Sync", ".local"])
+    def test_regular_file_root_ancestor_keeps_unrelated_writes(
+        self, ancestor, synthetic_account_home, tmp_path
+    ):
+        (synthetic_account_home / ancestor).write_bytes(b"not a directory")
+        path = tmp_path / "unrelated" / "state.json"
+        path.parent.mkdir()
+        fsutil.atomic_write_bytes(path, b"{}")
+        assert path.read_bytes() == b"{}"
+
+    def test_real_account_path_is_classification_only(self, forbid_fs_mutations):
+        home = Path(fsutil.pwd.getpwuid(os.getuid()).pw_dir)
+        path = home / ".config/mind-meld/never-written-71b"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.refuse_real_state_write_under_pytest(path)
+        _assert_guard_diagnostic(
+            caught.value, path, f"protected account-state path under {home / '.config/mind-meld'}"
+        )
+        assert calls == []
+
+    def test_fsync_is_unguarded(self, synthetic_state_root, monkeypatch, forbid_fs_mutations):
+        synthetic_state_root.mkdir(parents=True)
+        monkeypatch.setattr(
+            fsutil.pwd, "getpwuid", lambda uid: pytest.fail("flush is not a writer")
+        )
+        calls = forbid_fs_mutations()
+        fsutil.fsync_dir(synthetic_state_root)
+        assert calls == []
+
+    def test_documented_diagnostic_anchor_and_safe_example(self):
+        doc = (Path(__file__).parents[1] / "docs/invariants/README.md").read_text()
+        assert "## Test write guard" in doc
+        assert "fsutil.py:refuse_real_state_write_under_pytest" in doc
+        assert 'fsutil.atomic_write_bytes(tmp_path / "state.json", b"{}")' in doc
+        rows = [
+            line
+            for line in doc.splitlines()
+            if line.startswith("|") and "#test-write-guard" in line
+        ]
+        for helper in (
+            "atomic_write_bytes",
+            "flock_append_jsonl",
+            "append_rotatable_jsonl",
+            "rotate_jsonl",
+            "locked_json_rmw",
+            "locked_json_durable_rmw",
+        ):
+            assert any(helper in row for row in rows), helper
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_conftest_free_cli_breadcrumb_refusal_and_safe_control(tmp_path, existing):
+    """The CLI breadcrumb refuses without conftest or the star-import-omitted `_isolate_*` names."""
+    account = tmp_path / "account"
+    protected = account / ".config/mind-meld/last-autorun.json"
+    protected.parent.mkdir(parents=True, mode=0o750)
+    if existing:
+        protected.write_bytes(b'{"sentinel":"keep"}')
+        protected.chmod(0o640)
+    before = protected.stat() if existing else None
+    parent_before = protected.parent.stat()
+    cwd = tmp_path / "child"
+    cwd.mkdir()
+    (cwd / "fixture_shapes.py").write_text(
+        "PUBLIC = True\ndef _isolate_state():\n    raise AssertionError('never loaded')\n"
+    )
+    code = textwrap.dedent("""\
+        import os, pwd, sys
+        from pathlib import Path
+        from types import SimpleNamespace
+        from fixture_shapes import *
+        assert PUBLIC and '_isolate_state' not in globals()
+        pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir=sys.argv[1])
+        from mind_meld import cli, sidecar
+        assert 'tests.conftest' not in sys.modules and 'conftest' not in sys.modules
+        sidecar.SIDECAR_DIR = Path(sys.argv[2]).parent
+        print('CLI imported; underscored isolation omitted', flush=True)
+        if sys.argv[3] == 'refuse':
+            def mutation(*args, **kwargs):
+                raise AssertionError('mutation sentinel reached')
+            real_open = os.open
+            def checked_open(path, flags, *args, **kwargs):
+                if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                    return mutation(path, flags, *args, **kwargs)
+                return real_open(path, flags, *args, **kwargs)
+            Path.mkdir = mutation
+            os.mkdir = os.chmod = os.fchmod = os.write = os.ftruncate = mutation
+            os.open = checked_open
+        cli._write_autorun_breadcrumb('pull', 'success')
+        print('breadcrumb completed', flush=True)
+        """)
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(Path(__file__).parents[1] / "src"),
+        PYTHONDONTWRITEBYTECODE="1",
+        HOME=str(tmp_path / "different-home"),
+        PYTEST_CURRENT_TEST="conftest-free-71b::breadcrumb (call)",
+    )
+    refused = subprocess.run(
+        [sys.executable, "-c", code, str(account), str(protected), "refuse"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert refused.returncode != 0
+    assert "CLI imported; underscored isolation omitted" in refused.stdout
+    assert "PytestRealStateWriteError" in refused.stderr
+    assert "conftest-free-71b::breadcrumb (call)" in refused.stderr
+    assert str(protected) in refused.stderr and "tmp_path" in refused.stderr
+    assert "docs/invariants/README.md#test-write-guard" in refused.stderr
+    assert "mutation sentinel reached" not in refused.stderr
+    assert protected.parent.stat() == parent_before
+    if existing:
+        assert protected.stat() == before and protected.read_bytes() == b'{"sentinel":"keep"}'
+    else:
+        assert not protected.exists()
+    safe = tmp_path / "safe/last-autorun.json"
+    control = subprocess.run(
+        [sys.executable, "-c", code, str(account), str(safe), "allow"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert control.returncode == 0, control.stderr
+    assert "breadcrumb completed" in control.stdout
+    assert json.loads(safe.read_bytes())["pull"]["outcome"] == "success"
+    assert stat.S_IMODE(safe.stat().st_mode) == 0o600

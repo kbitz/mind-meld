@@ -22,6 +22,90 @@ _TEST_ROOT_SALT = bytes(range(16))
 _TEST_MEMORY_KB = 1024
 
 
+@pytest.fixture
+def synthetic_account_home(monkeypatch, tmp_path):
+    """Guard regressions use account roots in tmp_path, never the actual account."""
+    from types import SimpleNamespace
+
+    from mind_meld import fsutil
+
+    account = tmp_path / "account"
+    account.mkdir()
+    monkeypatch.setattr(fsutil.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(account)))
+    monkeypatch.setenv("HOME", str(tmp_path / "different-home"))
+    return account
+
+
+@pytest.fixture(
+    params=(
+        ".config/mind-meld",
+        "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
+        "Sync/mind-meld",
+        ".local/share/mind-meld",
+    ),
+    ids=("config", "icloud", "syncthing", "events"),
+)
+def synthetic_state_root(request, synthetic_account_home):
+    return synthetic_account_home / request.param
+
+
+@pytest.fixture
+def forbid_fs_mutations(monkeypatch):
+    """Install only after synthetic sentinels are prepared; permit read-only opens."""
+    import builtins
+    import io
+    import os
+    import tempfile
+    from pathlib import Path
+
+    calls = []
+
+    def install():
+        def denied(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("mutation reached before test write guard refusal")
+
+        real_os_open = os.open
+
+        def checked_os_open(path, flags, *args, **kwargs):
+            if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+                return denied(path, flags, *args, **kwargs)
+            return real_os_open(path, flags, *args, **kwargs)
+
+        def checked_open(original):
+            def open_file(path, mode="r", *args, **kwargs):
+                if any(flag in mode for flag in "wax+"):
+                    return denied(path, mode, *args, **kwargs)
+                return original(path, mode, *args, **kwargs)
+
+            return open_file
+
+        monkeypatch.setattr(os, "open", checked_os_open)
+        monkeypatch.setattr(builtins, "open", checked_open(builtins.open))
+        monkeypatch.setattr(io, "open", checked_open(io.open))
+        for name in (
+            "mkdir",
+            "chmod",
+            "fchmod",
+            "umask",
+            "rename",
+            "replace",
+            "unlink",
+            "remove",
+            "rmdir",
+            "link",
+            "symlink",
+            "write",
+            "ftruncate",
+        ):
+            monkeypatch.setattr(os, name, denied)
+        monkeypatch.setattr(Path, "mkdir", denied)
+        monkeypatch.setattr(tempfile, "mkstemp", denied)
+        return calls
+
+    return install
+
+
 @pytest.fixture(autouse=True)
 def _default_crypto_session() -> None:
     """Pin a default crypto session before each test; clear after.
