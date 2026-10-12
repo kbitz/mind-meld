@@ -85,9 +85,8 @@ def independent_subkey(master, fleet_id, kind):
     return hmac.digest(prk, b"mm-store-v3/" + kind.encode() + b"\x01", "sha256")
 
 
-def authentic_compressed(compressed, keys, expected):
-    key = independent_subkey(keys.master_key, keys.fleet_id, expected.kind)
-    aad = b"mm-record-v3\0" + json_bytes(
+def independent_record_aad(expected):
+    return b"mm-record-v3\0" + json_bytes(
         [
             expected.fleet_id,
             expected.device_id,
@@ -97,7 +96,20 @@ def authentic_compressed(compressed, keys, expected):
             expected.nparts,
         ]
     )
-    return b"\x03" + NONCE + AESGCM(key).encrypt(NONCE, compressed, aad)
+
+
+def authentic_compressed(compressed, keys, expected):
+    key = independent_subkey(keys.master_key, keys.fleet_id, expected.kind)
+    return (
+        b"\x03" + NONCE + AESGCM(key).encrypt(NONCE, compressed, independent_record_aad(expected))
+    )
+
+
+def independent_open(sealed, keys, expected):
+    """Reverse of authentic_compressed: stdlib HKDF key and AAD, no production key selection."""
+    key = independent_subkey(keys.master_key, keys.fleet_id, expected.kind)
+    compressed = AESGCM(key).decrypt(sealed[1:13], sealed[13:], independent_record_aad(expected))
+    return gzip.decompress(compressed)
 
 
 class TestFleet71C:
@@ -136,6 +148,10 @@ class TestFleet71C:
         assert keys.created_at == STAMP
         assert (keys.memory_kb, keys.time_cost, keys.parallelism, keys.salt) == (1024, 1, 1, SALT)
 
+    # Value: protects=FleetKeys repr omits the salt and every key (store.md Ownership and trust);
+    #   fails_when=repr=False is dropped from the salt, master or any subkey field;
+    #   why_new=the old check looked for key hex, which a bytes repr never prints, so it passed;
+    #   seam=none; no_claim=other leak routes such as logging or pickling
     def test_t01_randomness_and_distinct_domains(self):
         one, a = envelope.create_fleet(TEST_PASSPHRASE, memory_kb=1024)
         two, b = envelope.create_fleet(TEST_PASSPHRASE, memory_kb=1024)
@@ -143,7 +159,16 @@ class TestFleet71C:
         assert json.loads(one)["keycheck"] != json.loads(two)["keycheck"]
         assert len({a.commit_key, a.snapshot_key, a.presence_key, a.keycheck_key}) == 4
         assert a == envelope.unlock_fleet(one, TEST_PASSPHRASE)
-        assert a.master_key.hex() not in repr(a)
+        shown = repr(a)
+        for secret in (
+            a.salt,
+            a.master_key,
+            a.commit_key,
+            a.snapshot_key,
+            a.presence_key,
+            a.keycheck_key,
+        ):
+            assert repr(secret) not in shown
 
     @pytest.mark.parametrize(
         "raw,category",
@@ -262,10 +287,18 @@ class TestFleet71C:
         hdr["keycheck"] = base64.b64encode(fixture).decode()
         assert_error(category, envelope.unlock_fleet, json_bytes(hdr), TEST_PASSPHRASE)
 
+    # Value: protects=create and unlock refuse an empty, None or unencodable passphrase as
+    #   invalid_fleet before any entropy or native Argon2 work;
+    #   fails_when=the _text(passphrase) check in _derive is removed (CryptoError becomes
+    #   resource_limit, whose advice says not to reinitialize);
+    #   why_new=only create_fleet received bad passphrases; unlock_fleet never did;
+    #   seam=none; no_claim=none beyond protects
     @pytest.mark.parametrize("password", ["", "\ud800", None])
-    def test_t02_bad_password_input_before_entropy(self, monkeypatch, password):
+    def test_t02_bad_password_input_before_entropy(self, fleet, monkeypatch, password):
         monkeypatch.setattr(envelope.os, "urandom", lambda n: pytest.fail("randomness"))
+        monkeypatch.setattr(crypto, "derive_key", lambda *a, **k: pytest.fail("derived"))
         assert_error("invalid_fleet", envelope.create_fleet, password)
+        assert_error("invalid_fleet", envelope.unlock_fleet, fleet[0], password)
 
     def test_t02_nested_duplicate_kdf_and_future_algorithm(self, fleet, monkeypatch):
         hdr = json.loads(fleet[0])
@@ -384,6 +417,21 @@ class TestEnvelope71C:
         b = envelope.seal_part(payload, keys, expected=expected)
         assert a[0] == b[0] == 3 and a[1:13] != b[1:13]
         assert envelope.open_part(a, keys, expected=expected) == payload
+
+    # Value: protects=each record kind seals and opens under its own independently derived HKDF
+    #   subkey and AAD, in both directions;
+    #   fails_when=_record_subkey maps snapshot or presence to another kind's key (e.g. commit_key);
+    #   why_new=independent vectors were commit-only and kind round-trips share the key selection;
+    #   seam=none; no_claim=none beyond protects
+    @pytest.mark.parametrize("kind,seq", [("commit", 1), ("snapshot", 0), ("presence", 0)])
+    def test_t04_every_kind_uses_its_own_independent_subkey(self, keys, kind, seq):
+        expected = context(keys, kind, seq)
+        # Independent writer -> production reader.
+        sealed = authentic_compressed(gzip.compress(b"independent", mtime=0), keys, expected)
+        assert envelope.open_part(sealed, keys, expected=expected) == b"independent"
+        # Production writer -> independent reader.
+        produced = envelope.seal_part(b"produced", keys, expected=expected)
+        assert independent_open(produced, keys, expected) == b"produced"
 
     @pytest.mark.parametrize(
         "changes",
@@ -637,6 +685,44 @@ class TestRecords71C:
         hdr["entries"] = 0
         successor = store_format.encode_commit(hdr, [], expected=later)
         assert store_format.decode_commit(successor, expected=later).header["prev"] == hdr["prev"]
+
+    # Value: protects=encode_commit refuses entry, content and count mismatches a decoder would
+    #   refuse, so a writer cannot emit an unreadable commit;
+    #   fails_when=_encode drops the entries count, Entry-type or _content check;
+    #   why_new=these guards were only exercised through decode_commit, never on encode;
+    #   seam=none; no_claim=none beyond protects
+    @pytest.mark.parametrize(
+        "count,entries",
+        [
+            pytest.param(2, [live()], id="count-above-entries"),
+            pytest.param(1, [live(), live("b.md")], id="count-below-entries"),
+            pytest.param(1, [store_format.Entry(live().metadata, None)], id="live-no-content"),
+            pytest.param(1, [store_format.Entry(live().metadata, "abc")], id="live-str-content"),
+            pytest.param(
+                1, [store_format.Entry(tombstone().metadata, b"x")], id="tombstone-with-content"
+            ),
+            pytest.param(1, [live().metadata], id="not-an-entry"),
+            pytest.param(
+                1,
+                [store_format.Entry({**live().metadata, "sha": "a" * 64}, b"abc")],
+                id="sha-mismatch",
+            ),
+            pytest.param(
+                1,
+                [store_format.Entry({**live().metadata, "size": 4}, b"abc")],
+                id="size-mismatch",
+            ),
+        ],
+    )
+    def test_t06_encode_refuses_what_decode_refuses(self, keys, count, entries):
+        expected = context(keys)
+        assert_error(
+            "invalid_payload",
+            store_format.encode_commit,
+            header(expected, count),
+            entries,
+            expected=expected,
+        )
 
     @pytest.mark.parametrize(
         "field,value,category",
@@ -1365,6 +1451,27 @@ class TestParts71C:
             keys,
             expected=replace(expected, nparts=2),
         )
+
+    # Value: protects=a presence set always has count 1: empty input is IncompleteParts((1,), 1)
+    #   and any other known count is invalid_parts (store.md presence rules);
+    #   fails_when=the presence branch in open_record is removed, giving IncompleteParts(None,
+    #   None), or loosened so nparts=2 enumerates missing parts;
+    #   why_new=presence was only opened with its one part present (T12);
+    #   seam=none; no_claim=freshness of an authentic presence record (never asserted)
+    def test_t10_presence_count_is_intrinsic(self, keys):
+        expected = context(keys, "presence", 0)
+        incomplete = store_format.IncompleteParts((1,), 1)
+        assert store_format.open_record([], keys, expected=expected) == incomplete
+        assert store_format.open_record([], keys, expected=expected, nparts=1) == incomplete
+        for count in (2, 512):
+            assert_error(
+                "invalid_parts",
+                store_format.open_record,
+                [],
+                keys,
+                expected=expected,
+                nparts=count,
+            )
 
 
 class TestLayout71C:
