@@ -775,7 +775,7 @@ class TestGcMalformedKeyWarning:
         storage.put("manifests/dev1/manifest.json.enc", enc)
 
         hostile_leaf = f"[/red]inject[red]{_NESTED_OSC_ST}.enc"
-        bkey = f"data/{hostile_leaf}"
+        bkey = f"data/dev1/{hostile_leaf}"
         payload = b"malformed-bytes"
         storage.put(bkey, payload)
 
@@ -807,15 +807,18 @@ class TestGcMalformedKeyWarning:
         from mind_meld.storage.local import LocalBackend
 
         storage = LocalBackend(tmp_path / "storage")
+        # Own ids cannot contain the backslash in an ST terminator. The
+        # malformed-key test above retains ST coverage; use nested OSC/BEL here.
+        hostile_dev = f"evil[red]{_NESTED_OSC_BEL}"
         config = {
-            "device": {"id": "dev1", "name": "Test"},
+            "device": {"id": hostile_dev, "name": "Test"},
             "storage": {"path": str(tmp_path / "storage")},
             "crypto": {"argon2_memory_kb": 1024},
             "sync": {"claude_dir": "~/.claude", "max_file_size": 52_428_800},
         }
-        register_device(storage, "dev1", "Test")
+        register_device(storage, hostile_dev, "Test")
         manifest = {
-            "device_id": "dev1",
+            "device_id": hostile_dev,
             "device_name": "Test",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "files": {},
@@ -823,12 +826,11 @@ class TestGcMalformedKeyWarning:
             "tombstones": {},
         }
         enc = encrypt(serialize_manifest(manifest), "test-passphrase", memory_kb=1024)
-        storage.put("manifests/dev1/manifest.json.enc", enc)
+        storage.put(f"manifests/{hostile_dev}/manifest.json.enc", enc)
 
         sha = "a" * 64
         # parse_blob_key splits on /, so the device_id must not contain a slash
         # (`[/red]` would become extra path depth and miss the orphan branch).
-        hostile_dev = f"evil[red]{_NESTED_OSC_ST}"
         bkey = f"data/{hostile_dev}/{sha}.enc"
         payload = b"orphan-bytes"
         storage.put(bkey, payload)

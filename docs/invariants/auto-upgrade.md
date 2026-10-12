@@ -18,6 +18,14 @@ Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updatep
 
 `~/.config/mind-meld/mind-meld.lock` is the mm lockfile. It is distinct from the installer `install.lock`. Never unlink the mm lockfile: `release_lock` keeps the inode so two processes cannot flock different files at the same path. Contention text never advises deleting the lockfile or killing the holder. `tests/test_lockfile.py` pins that text.
 
+Known and unknown PID messages include `errors.LOCK_HELD_URL`, pointing to the
+README's "Another mm operation is running" heading. Wait/rerun advice stays
+first; known-PID messages put the URL before the final, copyable `ps -p` line.
+PID hints remain diagnostic, never lock authority. The README preserves waiting
+prompts/update completion and the prohibition on deleting the lockfile or
+signalling the holder; pre-1.5.2 remove advice is obsolete. Exact text, plain/Rich
+rendering at widths 60/80 and dynamic URL-anchor discovery cover this contract.
+
 ---
 
 ## Self-update (v1.3.0)
@@ -416,7 +424,11 @@ In 1.0, any observed newer crypto-init copy refuses selection and repair;
 repair re-fetches before mutation and again immediately before replacing
 canonical. iCloud can deliver files out of order: with an older init still
 visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
-sibling, so pull skips that peer and GC refuses. Push rewrites only this
+sibling, so pull skips that peer and GC leaves its namespace untouched. GC
+refuses only on this device's own manifest, when it is unreadable (including a
+late newer-format recheck) or held only by conflict copies; the shared
+crypto-init gate still refuses every crypto session.
+Push rewrites only this
 Mac's own manifest. A push
 can finish publication and then exit 1 when required auto-GC refuses. Newer
 blob errors reach the per-file pull warning; manifest validators intentionally

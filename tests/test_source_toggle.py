@@ -1264,7 +1264,7 @@ class TestStatusBreadcrumbs:
         assert enabled.exit_code == 0, enabled.output
         drifted = runner.invoke(app, ["status"])
         assert drifted.exit_code == 0, drifted.output
-        assert "pipx upgrade mind-meld" in drifted.output
+        assert "mm update" in drifted.output
         assert "disable-source" in drifted.output
         assert "no successful scan yet — run" not in drifted.output
 
@@ -1282,7 +1282,7 @@ class TestStatusBreadcrumbs:
         )
         latched = runner.invoke(app, ["status"])
         assert latched.exit_code == 0, latched.output
-        assert "pipx upgrade mind-meld" in latched.output
+        assert "mm update" in latched.output
         assert "prior scan completed successfully" not in latched.output
 
         _host_usage.GROK_CACHE_PATH.write_text(

@@ -86,6 +86,12 @@ def blob_key(device_id: str, sha: str) -> str:
     return f"{DATA_PREFIX}{device_id}/{sha}.enc"
 
 
+def data_prefix(device_id: str) -> str:
+    """Exact blob directory for one device, including its trailing slash."""
+    _validate_component(device_id, "device_id")
+    return f"{DATA_PREFIX}{device_id}/"
+
+
 def device_key(device_id: str) -> str:
     """Key for a device's metadata JSON."""
     _validate_component(device_id, "device_id")
@@ -99,8 +105,8 @@ def parse_blob_key(key: str) -> tuple[str, str] | None:
     have exactly 3 segments, and the leaf sha must match `[0-9a-f]{64}`
     (fullmatch). device_id is NOT shape-validated — historical registrations
     and test fixtures use short non-hex IDs. The sha check is what keeps a
-    corrupt peer manifest's `data/{dev}/not-a-sha.enc` out of `_do_gc`'s
-    orphan-reaping set — such entries land in the malformed-count path.
+    stray `data/{dev}/not-a-sha.enc` key out of `_do_gc`'s orphan-reaping
+    set — such entries land in the malformed-count path.
     """
     if not key.startswith(DATA_PREFIX) or not key.endswith(".enc"):
         return None

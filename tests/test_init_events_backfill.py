@@ -354,7 +354,7 @@ class TestBackfillHostSnapshot:
             "mm: notice: host-usage snapshot skipped (grok unsupported) — "
             "content sync and git/session capture unaffected. "
             "grok wrote a record this version cannot read. A newer mm may read it: "
-            "run `pipx upgrade mind-meld`, or run "
+            "run `mm update`, or run "
             "`mm disable-source grok` to stop retrying.\n" in err
         )
         assert "The next push that uploads a change retries" not in err, (

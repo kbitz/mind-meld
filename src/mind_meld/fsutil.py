@@ -21,6 +21,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
+import pwd
 import stat
 import sys
 import tempfile
@@ -31,6 +32,174 @@ from pathlib import Path
 from mind_meld.errors import StorageError
 
 _IS_DARWIN = sys.platform == "darwin"
+
+
+class PytestRealStateWriteError(BaseException):
+    """A test tried to mutate account state; best-effort callers must not hide it."""
+
+
+def _existing_ancestors(path: Path) -> Iterable[tuple[Path, os.stat_result]]:
+    """Read identities through a missing suffix, without suppressing lookup errors.
+
+    Nothing exists beneath a regular file, so ENOTDIR counts as missing and the
+    helper keeps its native error.
+    """
+    for ancestor in (path, *path.parents):
+        try:
+            yield ancestor, ancestor.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+
+
+def _root_identity(root: Path) -> tuple[os.stat_result, tuple[str, ...]]:
+    """The root's deepest existing ancestor identity and the parts missing beneath it."""
+    anchor, info = next(iter(_existing_ancestors(root)))
+    return info, root.relative_to(anchor).parts
+
+
+def _aliases_protected_root(
+    path: Path,
+    ancestors: Sequence[tuple[Path, os.stat_result]],
+    info: os.stat_result,
+    missing: tuple[str, ...],
+) -> bool:
+    """Whether `path` reaches the root anchor `info` by any spelling of `missing`.
+
+    `ancestors` is `path`'s existing-ancestor walk, read once per candidate.
+    The deepest ancestor sharing the anchor's identity decides: shallower
+    matches would need a directory loop.
+    """
+    for ancestor, candidate_info in ancestors:
+        if (info.st_dev, info.st_ino) != (candidate_info.st_dev, candidate_info.st_ino):
+            continue
+        suffix = path.relative_to(ancestor).parts[: len(missing)]
+        if tuple(part.casefold() for part in suffix) != tuple(part.casefold() for part in missing):
+            return False
+        # An existing differently spelled component beneath a missing canonical
+        # one proves a distinct path on a sensitive filesystem. Missing aliases
+        # are ambiguous: refuse rather than create a filesystem case probe.
+        actual = ancestor
+        for expected_part, actual_part in zip(missing, suffix):
+            actual /= actual_part
+            if actual_part != expected_part:
+                try:
+                    actual.stat()
+                except (FileNotFoundError, NotADirectoryError):
+                    pass
+                else:
+                    return False
+        return True
+    return False
+
+
+def _mutated_entries(path: Path) -> list[Path]:
+    """The destination plus each prefix a recursive mkdir can create before `..`.
+
+    Normalizing first would hide `<root>/missing/../../x`, whose
+    mkdir(parents=True) still creates `<root>/missing`.
+    """
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    entries = [absolute]
+    prefix = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        if part == ".." and prefix.name not in ("", ".."):
+            entries.append(prefix)
+        prefix /= part
+    return entries
+
+
+def refuse_real_state_write_under_pytest(path: Path) -> None:
+    """Tripwire for shared-helper writes, independent of test isolation fixtures.
+
+    Protect lexical locations, resolved destinations, the destination entry
+    inside its resolved parent and existing ancestor identities (including case
+    aliases). This is not a malicious-test sandbox or a guarantee against
+    concurrent symlink replacement; see the routing doc.
+    """
+    test = os.environ.get("PYTEST_CURRENT_TEST")
+    if not test:
+        return  # Production does no account lookup or filesystem classification.
+
+    def refusal(cause: str, remedy: str = "") -> PytestRealStateWriteError:
+        return PytestRealStateWriteError(
+            f"Test write guard refused {str(path)!r}; PYTEST_CURRENT_TEST={test!r}: "
+            f"{cause}. {remedy}Isolate write destinations under tmp_path. "
+            "See docs/invariants/README.md#test-write-guard"
+        )
+
+    try:
+        home_value = pwd.getpwuid(os.getuid()).pw_dir
+        if not isinstance(home_value, str) or not home_value or "\x00" in home_value:
+            raise ValueError("account home must be a nonempty absolute directory")
+        home = Path(home_value)
+        if not home.is_absolute() or not stat.S_ISDIR(home.stat().st_mode):
+            raise ValueError("account home must be an absolute existing directory")
+    except Exception as exc:
+        raise refusal(
+            "account-home lookup failed (pwd.getpwuid(os.getuid()).pw_dir)",
+            "Repair the account-home lookup or its unusable directory. ",
+        ) from exc
+
+    def unclassifiable(subject: str) -> PytestRealStateWriteError:
+        return refusal(
+            f"path-resolution failed while classifying {subject}",
+            "Repair the path lookup, permissions or symlink chain. ",
+        )
+
+    roots = (
+        home / ".config/mind-meld",
+        home / "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
+        home / "Sync/mind-meld",
+        home / ".local/share/mind-meld",
+    )
+    try:
+        entries = _mutated_entries(path)
+        lexical = [Path(os.path.abspath(entry)) for entry in entries]
+        for candidate in lexical:
+            for root in roots:
+                if candidate.is_relative_to(Path(os.path.abspath(root))):
+                    raise refusal(f"protected account-state path under {root}")
+        # Temps, renames and mkdirs act inside the resolved parent, so classify
+        # the unfollowed entry there as well as the fully resolved target.
+        candidates = dict.fromkeys(lexical)
+        for entry in entries:
+            candidates[entry.resolve()] = None
+            if entry.name not in ("", ".."):
+                candidates[entry.parent.resolve() / entry.name] = None
+    except Exception as exc:
+        raise unclassifiable("the write destination") from exc
+
+    # Every containment verdict precedes identity lookups, so an unrelated
+    # unreadable root cannot mask a definite protected destination.
+    resolved_roots = []
+    for root in roots:
+        try:
+            resolved_roots.append((root, root.resolve()))
+        except Exception as exc:
+            raise unclassifiable(f"protected root {root}") from exc
+    for root, resolved_root in resolved_roots:
+        for candidate in candidates:
+            if candidate.is_relative_to(resolved_root):
+                raise refusal(f"protected account-state path or alias under {root}")
+
+    # Anchor both spellings: a root linked to an absent target is still
+    # reachable through a case alias of that target.
+    anchors = []
+    for root, resolved_root in resolved_roots:
+        try:
+            for spelling in dict.fromkeys((root, resolved_root)):
+                anchors.append((root, *_root_identity(spelling)))
+        except Exception as exc:
+            raise unclassifiable(f"protected root {root}") from exc
+
+    try:
+        for candidate in candidates:
+            ancestors = list(_existing_ancestors(candidate))
+            for root, info, missing in anchors:
+                if _aliases_protected_root(candidate, ancestors, info, missing):
+                    raise refusal(f"protected account-state path or alias under {root}")
+    except Exception as exc:
+        raise unclassifiable("the write destination") from exc
 
 
 def _default_new_file_mode() -> int:
@@ -115,6 +284,7 @@ def atomic_write_bytes(
         OSError: mode lookup errors other than FileNotFoundError occur before
             that try and propagate raw. Other uncaught exceptions also escape.
     """
+    refuse_real_state_write_under_pytest(path)
     parent = path.parent
 
     # Resolve effective mode BEFORE opening the tmp — if the target
@@ -196,6 +366,7 @@ def flock_append_jsonl(
     if not payload:
         return  # nothing to write; avoid creating the file
 
+    refuse_real_state_write_under_pytest(path)
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW
@@ -270,6 +441,7 @@ def append_rotatable_jsonl(
     reader already took. Errors raise (``AppendSizeLimit`` for the ceiling):
     the caller holds the only copy of the row.
     """
+    refuse_real_state_write_under_pytest(path)
     payload = line + b"\n"
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     for _ in range(attempts):
@@ -318,6 +490,8 @@ def rotate_jsonl(
     stuck writer can never wedge the caller; no retry sleeps past ``deadline``
     (a ``time.monotonic()`` value).
     """
+    refuse_real_state_write_under_pytest(path)
+    refuse_real_state_write_under_pytest(destination)
     try:
         fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:

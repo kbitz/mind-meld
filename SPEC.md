@@ -330,7 +330,7 @@ mm devices [--format table|json]   # list registered devices (json: stable schem
 mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
                                              # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
 mm gc [--dry-run] [--conflicts]
-                            # delete orphaned blobs and local retention data; --dry-run previews candidates without mutation
+                            # delete this device's orphaned blobs and local retention data; --dry-run previews candidates without mutation
                             # with --conflicts, also reap converged .sync-conflict-* files >30d; live copies remain
 mm sources                  # list configured sync sources with status
 mm conflicts                # list unresolved .sync-conflict-* files across sources
@@ -439,10 +439,10 @@ attended push's conditional activity tail and exit contract, read
 
 1. Acquire lockfile.
 2. Sweep this device's stale `tmp*.tmp` files left behind by a crashed push (runs under the lock already held, so no concurrent writer can race it).
-3. Download and decrypt ALL device manifests.
-4. Collect the set of all SHA-256 hashes referenced by any manifest.
-5. List all blobs in `data/` across all devices.
-6. Delete blobs not in the referenced set.
+3. Read and decrypt only this device's raw manifest (no exclude or disabled-source filtering). If it is missing, warn that blob collection was skipped and no blobs were deleted, then continue with local retention. If it is corrupt or newer-format, or only iCloud conflict copies of it load because the canonical is absent or unreadable, refuse in apply and preview. When only conflict copies load, `mm push` rewrites the canonical even with no content change; newer-format and unrecoverable corrupt manifests keep their own refusal guidance.
+4. Collect the SHA-256 hashes that manifest references.
+5. Re-read this device's manifest, refusing or skipping on the same conditions and adding any new references, then list only `data/<this-device-id>/` (`storage.keys.data_prefix`).
+6. Delete listed blobs whose parsed owner is this device and whose hash is unreferenced. Peer namespaces are never listed, counted or deleted.
 7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
 8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
 9. With `--conflicts`, also reap post-inversion `.sync-conflict-*` files whose filename birth is older than `CONFLICT_AGE_DAYS` (30), only when canonical exists with identical bytes. Live, ownerless, missing-canonical, pre-inversion, and unhashable copies remain at any age.
@@ -497,7 +497,7 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 
 `_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
-- `ok` — at least one copy decrypted; caller uses `.manifest`.
+- `ok` — at least one copy decrypted; caller uses `.manifest`. When the canonical copy is absent or unreadable and only conflict copies decrypted, `ManifestFetch.conflict_copies_only` is also set: `mm gc` refuses it as incomplete own metadata, and `push` rewrites the canonical from local truth even with no content change, merging the local sidecar into the prior so this device's deletion records survive (with no usable sidecar it warns that recent local deletions may be lost; see [sync invariants](docs/invariants/sync.md#corrupt-manifest-recovery-load-bearing)).
 - `missing` — no manifest at the expected key (first push or fresh device). Callers that read remote state treat this as "empty remote." Push treats this as the correct "no prior state" signal and writes the first manifest.
 - `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
 
@@ -590,7 +590,7 @@ Commands that change sync state or the installation, plus the attended update ta
 
 When the lock is held, the command fails with a message whose stable prefix is `Another mm operation is running`. Wait, then rerun. If the holder is waiting for input, answer that prompt in the holder's own terminal. If its output says it is updating mm, let it finish (pipx is capped at `PIPX_TIMEOUT_SECONDS`, 600 s). Never delete the lockfile. Never send SIGTERM or SIGKILL to the holder: mm has no handler for those signals, so they skip the bounded pipx cleanup. SIGINT triggers mm's bounded cancellation cleanup, and it can still leave mm missing during a forced reinstall, because inspecting output cannot prove the holder is not about to enter an update. During foreground pipx, mm absorbs SIGHUP so the reader can keep the installer running after a terminal hangup. Versions before 1.5.2 printed "remove <path>", which is unsafe.
 
-**GC safety:** `mm gc` checks ALL device manifests before deleting any blob. A blob is only deleted if it is referenced by zero manifests. This is safe even if another device pushes concurrently — the new blob won't be in any manifest yet, but it also won't be in the delete set (it was just uploaded, not listed during the gc scan).
+**GC safety:** `mm gc`, and the post-publication GC of a content-changing attended push, collect only this device's blob namespace, with this device's manifest as the only authority. Each manifest references only its publisher's `data/<device>/` blobs and pull downloads from the publisher's namespace, so a peer's manifest neither authorizes nor vetoes collection, and a peer's blobs that arrive before its manifest are never candidates. Abandoned peers' blobs are never collected (1.x has no retirement command), and a lagging peer still reading this device's prior manifest can miss a blob this device has since collected. See [own-device blob collection](docs/invariants/sync.md#own-device-blob-collection-track-71a).
 
 ---
 
@@ -664,9 +664,9 @@ TWO call sites — both **after** `_fetch_remote_manifest` returns:
    `generate_tombstones`.
 
 The filter MUST NOT be applied inside `_fetch_remote_manifest`. `mm gc`
-walks raw manifests via `_fetch_remote_manifest` to compute referenced
-blobs; a filtered manifest there would mark live peer blobs as orphans
-and silently delete them. Pinned by
+reads this device's raw manifest via `_fetch_remote_manifest` to compute
+referenced blobs; a filtered manifest there would mark live own blobs as
+orphans and silently delete them. Pinned by
 `test_mm_gc_does_not_orphan_excluded_path_blobs`.
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns`
@@ -765,7 +765,7 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 - **Pull, status, diff** accept an optional `--source NAME` flag to operate on a single source for troubleshooting.
 - **Deletions** during pull are scoped to the selected source.
 - **Sync logs** are written only for the claude source. Generic sources don't produce sync logs.
-- **GC** iterates `sources.*.files` in all manifests (with a backward-compat shim for v1 manifests).
+- **GC** iterates `sources.*.files` in this device's own manifest only (with a backward-compat shim for v1 manifests).
 
 ---
 

@@ -72,6 +72,39 @@ class TestRecoverPriorManifest:
         out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is manifest
 
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("quiet", [False, True])
+    @pytest.mark.parametrize("has_sidecar", [True, False])
+    def test_conflict_copies_only_merges_sidecar_and_always_warns(
+        self, tmp_path, monkeypatch, capsys, has_sidecar, quiet, dry_run
+    ):
+        _isolate_sidecar(monkeypatch, tmp_path)
+        backend = LocalBackend(tmp_path / "storage")
+        copies = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
+        if has_sidecar:
+            deleted = {"deleted_at": datetime.now(timezone.utc).isoformat(), "device_id": "abc"}
+            sidecar.write(
+                _make_manifest(
+                    "abc", {"a.md": {"sha256": "aaa"}}, tombstones={"claude:gone.md": deleted}
+                )
+            )
+        fetch = ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
+
+        out = _recover_prior_manifest(
+            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=quiet, dry_run=dry_run
+        )
+        captured = capsys.readouterr()
+        # Autopush (quiet) must still surface this data-at-risk rewrite.
+        text = " ".join((captured.err if quiet else captured.out).split())
+        assert "held only by conflict copies" in text
+        assert ("mm push would rewrite it" in text) == dry_run
+        if has_sidecar:
+            assert "claude:gone.md" in out["tombstones"]
+            assert "keeping deletion records from the local sidecar" in text
+        else:
+            assert out is copies
+            assert "Recent local deletions may be lost" in text
+
     def test_missing_returns_none(self, tmp_path):
         """First push: missing means 'no prior state', tombstones should be empty.
         Refusing here would break every first push."""
@@ -365,13 +398,13 @@ class TestPushRewriteOnRecovery:
         )
 
 
-class TestGCRefusesOnCorruptPeer:
-    """Regression: `mm gc` (dry-run AND write mode) must refuse when any
-    peer has a corrupt manifest. Printing an incomplete orphan list in
+class TestGCRefusesOnCorruptOwnManifest:
+    """Regression: `mm gc` (dry-run AND write mode) must refuse when
+    this device has a corrupt manifest. Printing an incomplete orphan list in
     dry-run would mislead a user into deleting live blobs (Claude finding
     C3)."""
 
-    def test_dry_run_refuses_when_corrupt_peer(self, tmp_path):
+    def test_dry_run_refuses_when_corrupt_own_manifest(self, tmp_path):
         from mind_meld.cli import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
@@ -388,14 +421,15 @@ class TestGCRefusesOnCorruptPeer:
         with pytest.raises(typer.Exit):
             _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=True, verbose=False)
 
-    def test_write_mode_refuses_when_corrupt_peer(self, tmp_path):
+    def test_write_mode_refuses_when_corrupt_own_manifest(self, tmp_path):
         from mind_meld.cli import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         register_device(storage, "dev1", "Test")
         storage.put("manifests/dev1/manifest.json.enc", b"corrupt bytes")
         # Create a blob that would otherwise be reaped as orphan:
-        storage.put("data/dev1/hash_orphan.enc", b"orphan-bytes")
+        orphan_key = "data/dev1/" + "a" * 64 + ".enc"
+        storage.put(orphan_key, b"orphan-bytes")
 
         config = {
             "device": {"id": "dev1", "name": "Test"},
@@ -408,7 +442,7 @@ class TestGCRefusesOnCorruptPeer:
             _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
 
         # The blob MUST still exist — GC must never delete while corrupt.
-        assert storage.exists("data/dev1/hash_orphan.enc"), (
+        assert storage.exists(orphan_key), (
             "GC must refuse to delete blobs while a manifest is corrupt; "
             "we cannot prove the blob is an orphan without the manifest"
         )

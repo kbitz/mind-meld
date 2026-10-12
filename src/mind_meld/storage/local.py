@@ -6,7 +6,7 @@ copies. Writes route through `fsutil.atomic_write_bytes` for crash
 safety; durability policy is set per key prefix:
 
     manifests/  → fsync=True (source of truth; loss = silent un-deletion)
-    devices/    → fsync=True (peer discovery / GC inputs)
+    devices/    → fsync=True (peer discovery; pull and recovery inputs)
     mm-crypto-init* → fsync=True (canonical and preserved crypto lineage)
     data/       → fsync=False (hash-addressed blobs, self-healing via re-push)
 

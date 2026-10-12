@@ -173,7 +173,8 @@ def _sweep_local_tmp_files(
     shared across machines (no per-device subdir), and tempfile.mkstemp
     names are random — there is no reliable way to tell this device's
     stranded tmp from a peer's in-flight write. The rare leak there is
-    accepted; see Track 3A GC sweep for global orphan reaping.
+    accepted. Blob GC never reaps devices/ either: it collects only this
+    device's data/<id>/ namespace (Track 71A).
 
     Returns selection and persistence counts. Dry-run makes no filesystem
     changes, including to the candidate files' metadata.
