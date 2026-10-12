@@ -644,7 +644,7 @@ class TestAutoGC:
         assert not storage.exists(f"data/dev1/{sha_orphan}.enc")
 
     def test_gc_logs_malformed_blob_paths_in_verbose(self, tmp_path, capsys):
-        """Wrong-depth .enc files under data/ are surfaced in verbose mode and
+        """Wrong-depth .enc files under this device's data/ are surfaced in verbose mode and
         NEVER auto-reaped. Before this change, _do_gc silently skipped them
         (`if len(parts) != 3: continue`), making them invisible accumulators.
         """
@@ -671,16 +671,17 @@ class TestAutoGC:
         enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
         storage.put("manifests/dev1/manifest.json.enc", enc)
 
-        # Malformed blob: depth 2 (data/foo.enc) instead of expected depth 3.
-        storage.put("data/stray_artifact.enc", b"who put this here")
+        # Malformed own blob: depth 4 instead of expected depth 3.
+        storage.put("data/dev1/nested/stray_artifact.enc", b"who put this here")
 
         _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=True, verbose=True)
         captured = capsys.readouterr()
         assert "malformed" in captured.out
-        assert "data/stray_artifact.enc" in captured.out
+        assert "data/dev1/nested/stray_artifact.enc" in captured.out
         # Even in non-dry-run, the malformed file is NEVER deleted.
         _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
-        assert storage.exists("data/stray_artifact.enc")
+        assert storage.exists("data/dev1/nested/stray_artifact.enc")
+        assert storage.get("data/dev1/nested/stray_artifact.enc") == b"who put this here"
 
     def test_gc_summarizes_malformed_count_when_not_verbose(self, tmp_path, capsys):
         """In non-verbose, non-dry-run mode the user still gets a one-line
@@ -708,9 +709,10 @@ class TestAutoGC:
         }
         enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
         storage.put("manifests/dev1/manifest.json.enc", enc)
-        storage.put("data/stray.enc", b"x")
+        storage.put("data/dev1/nested/stray.enc", b"x")
 
         _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
         captured = capsys.readouterr()
         assert "1 blob(s) at unexpected path depth" in captured.out
-        assert storage.exists("data/stray.enc")
+        assert storage.exists("data/dev1/nested/stray.enc")
+        assert storage.get("data/dev1/nested/stray.enc") == b"x"

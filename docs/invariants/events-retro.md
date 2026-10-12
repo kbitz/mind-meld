@@ -1649,13 +1649,15 @@ autopush recovery still captures ordinary activity and counts once.
 
 **Maintenance and GC cadence.** Auto-GC is gated on `result.content_changed`,
 not total modified files. Usage-only obsolete blobs await the next user-content
-push or explicit `mm gc`; no fleet manifest decrypt/blob sweep per refresh.
+push or explicit `mm gc`; no own-manifest decrypt/blob sweep per refresh.
 Post-acceptance device/cleanup failures warn without revoking content acceptance,
-including failed/skipped captures. GC's corrupt-manifest refusal remains visible
+including failed/skipped captures. GC's own-manifest refusal remains visible
 and aborts unless a host row was proven published; only that case can say host
 usage was published while GC stopped. Failed attended attempts still run the
 update-or-nudge tail once after releasing the lock (an update, or the nudge when
-none can run); dry-run never does.
+none can run); dry-run never does. Peer corruption/newer metadata cannot veto
+own-device collection. Missing own metadata visibly skips only blob collection;
+explicit GC still runs local retention. See sync.md's own-device collection rule.
 
 **Capture failures and remedies.** Always-stderr `mm: warning:` lines carry
 `prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,

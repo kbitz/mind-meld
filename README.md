@@ -16,6 +16,17 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Before the first attended `mm push` or `mm gc` on any Mac, including a dormant
+one, check every `mm` it can run.** Older releases' GC can delete other Macs'
+blobs during a push or `mm gc`. Run `which -a mm`, then `<path> gc --help` for
+each path listed: an mm with own-device GC says "this device's". Update the pipx
+install with `mm update` (it updates only pipx installs). For any other copy, fix
+`PATH` so the pipx `mm` comes first and never run that copy against real storage.
+Hooks (`mm autopush`, `mm autopull`) do not run GC, but do not
+rely on their background update to bring a Mac current. Updating one Mac protects
+peer namespaces only from that Mac's GC; other arrival-order limitations of the
+1.x store remain.
+
 **v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
 interoperate with no wire or storage migration. The
 [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x)
@@ -294,8 +305,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
-| `mm gc` | Delete orphaned blobs and run local retention cleanup |
-| `mm gc --dry-run` | Preview orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
+| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup; a missing own manifest skips blob collection with a warning |
+| `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
 | `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
@@ -305,6 +316,22 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. |
 | `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
+
+### Garbage collection
+
+GC reads only this device's raw manifest and lists only its blob directory.
+If that manifest is missing, it warns that blob collection was skipped and no
+blobs were deleted: wait for sync, inspect with `mm diag`, then retry `mm gc`.
+Local retention still runs. A valid empty own manifest can collect own orphans.
+If this device's manifest is unreadable, or only iCloud conflict copies of it
+load, GC refuses and says what to do. When only conflict copies load, `mm push`
+on this device rewrites the manifest even with no content change; then retry
+`mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
+only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
+through hooks; otherwise its superseded blobs accumulate in iCloud. Abandoned
+peers' blobs remain; 1.x has no retirement command. A lagging peer
+reading this device's prior manifest can still miss a blob this device has
+already collected; this repair does not solve every arrival order.
 
 ### Nested git repositories
 
@@ -648,7 +675,9 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 null means no newer version was observed. Any newer canonical or conflict copy
 blocks crypto sessions and repair. A newer blob that arrives first is skipped
 with an upgrade warning; an unreadable peer manifest is skipped by pull and
-blocks GC.
+left untouched by GC. GC refuses on this device's unreadable manifest, including
+newer-format conflict copies; the shared crypto-init gate still applies to every
+crypto session.
 
 If this Mac is already on the latest release and no newer mm exists, the file
 may be damaged. Wait for iCloud to finish syncing and locate a known-valid
@@ -701,7 +730,7 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **An unknown model is unpriced.** Upgrading mm on the machine that renders this report may price it; republishing does not add a rate; do not estimate.
 
-**`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either.
+**`mm` is not on PATH after install.** pipx puts console scripts in `~/.local/bin`. If a Homebrew-installed `mm` shadows it, `which -a mm` shows both — fix the PATH order rather than deleting either. Run directly, an older copy still uses the old GC that can delete other Macs' blobs; see [Upgrading](#upgrading).
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
@@ -992,7 +1021,7 @@ cursor and adds nothing to retro push counts. It still re-encrypts and uploads
 the growing day file, updates last-seen and rewrites the recovery sidecar.
 The command therefore reports a file modification even on a converged Mac.
 A content-changing push records activity once and runs auto-GC. Usage-only
-publication skips the fleet-wide GC sweep; obsolete blobs wait for the next
+publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.
 
 Healthy capture adds no per-reader output unless `--verbose` is set. A usage-only
@@ -1039,8 +1068,9 @@ existing bytes intact. If a day file is **already** over the limit and was
 advertised previously, the existing complete-snapshot refusal still applies:
 archive older rows outside mm-events to shrink it, increase the limit, or
 intentionally exclude that day file. The guard does not repair existing oversize
-files. Post-acceptance maintenance errors are reported separately; GC corruption
-refusals still stop push when host publication was skipped or failed. Exit 2 is
+files. Post-acceptance maintenance errors are reported separately; own-manifest GC
+refusals still stop push when host publication was skipped or failed. An unreadable
+peer manifest does not veto collection of this device's blobs. Exit 2 is
 an argument error; exit 4 is reserved for `mm recapture` partial Git recovery.
 
 Status and diag share a read-only prerequisite check: enable an unselected

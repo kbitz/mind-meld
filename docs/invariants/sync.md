@@ -6,7 +6,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
-- `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
+- `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
+- `src/mind_meld/cli.py` — `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
 - `src/mind_meld/cli.py` — `autopull` / `autopush` / `_auto_command_setup` / (see "Visible failures in automatic commands")
 - `src/mind_meld/host_usage.py` — `read_cursor_usage` / `configure_cursor_hook`
 - `src/mind_meld/cli.py` — `_register_and_save` / `_quarantine_corrupt_manifest` / (also read init-devices.md)
@@ -20,7 +21,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
 
-Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
 
 ---
 
@@ -30,7 +31,53 @@ Tests pinning the invariants below: `tests/test_integration.py::TestExcludePatte
 
 ## Validated storage keys
 
-Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `device_key`, `parse_blob_key`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. Do NOT build storage keys with raw f-strings at new call sites.
+Storage keys are constructed via helpers in `storage/keys.py` (`manifest_key`, `blob_key`, `data_prefix`, `device_key`, `parse_blob_key`), which validate components at construction time, so a corrupt or malicious peer manifest cannot smuggle a `sha256: "../../../etc/passwd"` through `backend.get`. `data_prefix(device_id)` validates the owner and includes the trailing slash, preventing prefix-sharing identities from entering an own-device listing. Do NOT build storage keys with raw f-strings at new call sites.
+
+## Own-device blob collection (Track 71A)
+
+Both explicit `mm gc` and post-publication GC on a content-changing attended
+push use `_do_gc`. It reads only this device's raw, normalized manifest, retaining
+excluded, disabled-source and frozen nested-checkout references. It lists only
+`storage.keys.data_prefix(device_id)` and requires every parsed blob owner to
+equal that device before counting or deleting an orphan. Malformed keys are
+preserved with sanitized notices. Peer registry entries and manifests neither
+authorize nor veto collection; no peer namespace is collected.
+
+A missing own manifest returns zero without listing or deleting blob candidates,
+with a visible warning naming this device, skipped collection and no blobs
+deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does not
+repair missing metadata. No blob completion/orphan-success summary is printed.
+A valid empty manifest is distinct and can collect own orphans. Own corrupt or
+newer-format metadata refuses in apply and preview. So does an own manifest held
+only by iCloud conflict copies because the canonical is absent or unreadable
+(`ManifestFetch.conflict_copies_only`): an older copy alone is an incomplete
+reference set, and no peer reference masks it any more. The refusal's `mm push`
+remedy works without a content change: push treats that state like a corrupt
+manifest for its no-op gate, rewrites the canonical and removes the conflict
+copies. The pre-delete recheck of
+the own manifest runs before candidate listing/deletion; it refuses on the same
+conditions, skips like a missing manifest if the manifest vanished, and adds any
+references that appeared since the first read. The shared crypto-init gate, caller error
+classifications, local retention and own temporary-file sweep are unchanged;
+missing-own skips still let the outer local reapers and dry-run completion run.
+
+Before the first attended `mm push` or `mm gc` on any Mac, including a dormant
+one, every `mm` it can run must have own-device GC: older releases' GC can delete
+peer blobs during a push or gc. Hooks do not run GC, but their background update
+is conditional (pipx `@latest`, v1.3.0+, `auto_install`), so it is not a rollout
+guarantee. This device never cleans abandoned peer
+blobs, and 1.x has no retirement command. A lagging peer reading a prior manifest
+can still miss an own blob that has since been collected. Protection is limited
+to peer namespaces from this updated installation's GC; clone/shared-device-ID
+protection and general arrival-order safety remain outside this repair.
+`mm update` covers only pipx installs: any other `mm` on `PATH` (Homebrew, an
+old worktree build) that predates own-device GC still runs the fleet-wide
+collector on attended push or gc, so the README Upgrading note asks for a
+per-Mac `which -a mm` check and treats "this device's" in `<path> gc --help` as
+the marker of an own-device build. `autopush`/`autopull` do not run GC. Before Track 71A any Mac's attended content
+push swept every namespace; now a Mac that syncs mostly through hooks keeps its
+superseded blobs until an attended content push or `mm gc` runs on that Mac.
+Adding own-device GC to autopush or a status nudge is deferred work.
 
 ## Visible failures in automatic commands
 
@@ -218,7 +265,7 @@ only reader-name `empty_sources` evidence, scoped to retained days.
 ## exclude_patterns + consumer-boundary filter (load-bearing, v0.9.1, v0.9.3, v0.11.13)
 Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the relative path. Default `gstack` source ships with `["config.yaml", "projects/*/repo-mode.json", "projects/*/land-deploy-confirmed", "analytics/.last-sync-*"]` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking added in v0.9.3; `analytics/.last-sync-*` are per-machine cursor files that track each device's progress through gstack's local analytics jsonls, added in v0.11.13). The walker drops excluded paths from the local manifest at push time.
 
-`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path to compute referenced blobs, and a filtered manifest there would mark live peer blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
+`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads this device's raw manifest via that path to compute referenced blobs, and a filtered manifest there would mark live own blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
@@ -360,8 +407,8 @@ covering ok-fetch / sidecar / peer-fallback uniformly; (2) `_pull_core` filters
 peer manifests in `manifest_cache` BEFORE `collect_tombstones`. Disable-then-
 exclude order in both sites: dropping the whole source first avoids walking
 soon-to-be-dropped exclude_patterns. The filter MUST NOT apply at
-`_fetch_remote_manifest` itself — `mm gc` reads raw manifests via that path
-and a filtered manifest there orphans live peer blobs (codex-2 #1 hazard,
+`_fetch_remote_manifest` itself — `mm gc` reads its own raw manifest via that path
+and a filtered manifest there orphans live own blobs (codex-2 #1 hazard,
 mirrored from exclude_patterns).
 
 **Tombstone-suppression invariant.** Disabling a source on machine A and
@@ -431,7 +478,7 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 `pullhistory.append(verb, device, source, rel_path, action, ...)` writes one JSONL line to `~/.config/mind-meld/pull-history.jsonl` (mode 0600, fcntl.flock-guarded, 1MB cap with line-boundary rotation to `.1`). Wired into `_pull_core` (per-outcome from `_pull_one_source` + `excluded` from the consumer-boundary filter) and `_upload_changed_blobs` (`uploaded`). Failures are swallowed — history is forensic-only, never block sync. `mm log` queries with `--source / --since / --action / --verb / --limit / --format` filters. Reader tolerates a torn first line in `.1` (crash-mid-rotate fingerprint).
 
 ## Corrupt-manifest recovery (load-bearing)
-`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. `mm gc` refuses when any peer manifest is corrupt (referenced blobs may still be live). See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
+`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
 
 ## Manifest read-path invariant (load-bearing)
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).

@@ -33,7 +33,7 @@ from mind_meld.crypto import (
     decrypt,
     encrypt,
 )
-from mind_meld.devices import list_devices, register_device
+from mind_meld.devices import register_device
 from mind_meld.manifest import (
     deserialize_manifest,
     load_manifest,
@@ -740,14 +740,7 @@ class TestExcludePatterns5C:
         )
 
     def test_mm_gc_does_not_orphan_excluded_path_blobs(self, tmp_path, monkeypatch):
-        """Peer manifest contains an excluded-path blob. mm gc reads RAW
-        manifests via `_fetch_remote_manifest` (no filter applied at fetch
-        boundary), so the blob remains referenced and is NOT deleted.
-
-        Pins codex-2 #1: without the no-filter-at-fetch invariant, gc
-        treats an excluded-path blob as orphan and silently deletes it,
-        breaking peers that haven't yet adopted the exclude.
-        """
+        """Peers stay untouched; own raw references survive a newly added exclude."""
         storage_dir = tmp_path / "storage"
         gstack_a = tmp_path / "a" / ".gstack"
         gstack_b = tmp_path / "b" / ".gstack"
@@ -787,11 +780,14 @@ class TestExcludePatterns5C:
         result = runner.invoke(app, ["gc"])
         assert result.exit_code == 0, result.output
 
-        assert blob_path.exists(), (
-            "mm gc deleted a blob that's still referenced by a peer "
-            "manifest. The exclude filter must NOT apply at the fetch "
-            "boundary used by gc — the consumer-boundary contract."
-        )
+        assert blob_path.exists(), "mm gc deleted a peer blob outside its namespace"
+        own_config = tomllib.loads(config_a.read_text())
+        own_config["sync"]["sources"][0]["exclude_patterns"] = ["projects/*/repo-mode.json"]
+        save_config(own_config, config_a)
+        self._activate(monkeypatch, config_a)
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+        assert blob_path.exists(), "GC filtered its own manifest and orphaned an excluded reference"
 
 
 class TestFilterExcludedPathsHelper:
@@ -1211,13 +1207,7 @@ class TestDisabledSourcesTombstoneSuppression:
         )
 
     def test_mm_gc_does_not_orphan_disabled_source_blobs(self, tmp_path, monkeypatch):
-        """A peer manifest references gstack blobs. Local has gstack disabled.
-        `mm gc` reads RAW peer manifests via _fetch_remote_manifest (no filter
-        applied at fetch boundary), so the gstack blobs remain referenced and
-        are NOT deleted. Without this invariant, gc would orphan and silently
-        delete blobs that peers still reference, breaking sync for peers who
-        still have gstack enabled.
-        """
+        """Peers stay untouched; disabling an own source cannot filter GC references."""
         storage_dir = tmp_path / "storage"
         claude_a = tmp_path / "a" / ".claude"
         gstack_a = tmp_path / "a" / ".gstack"
@@ -1261,11 +1251,14 @@ class TestDisabledSourcesTombstoneSuppression:
         result = runner.invoke(app, ["gc"])
         assert result.exit_code == 0, result.output
 
-        assert blob_path.exists(), (
-            "mm gc deleted a gstack blob that's still referenced by peer A's "
-            "manifest. The disabled-source filter must NOT apply at the fetch "
-            "boundary used by gc — the consumer-boundary contract."
-        )
+        assert blob_path.exists(), "mm gc deleted a peer blob outside its namespace"
+        own_config = tomllib.loads(config_a.read_text())
+        own_config["sync"]["disabled_sources"] = ["gstack"]
+        save_config(own_config, config_a)
+        self._activate(monkeypatch, config_a)
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+        assert blob_path.exists(), "GC filtered its own manifest and orphaned a disabled reference"
 
     def test_retired_source_emits_no_tombstones_across_the_transition(self, tmp_path, monkeypatch):
         """Track 37B: a prior manifest that still has sources.opencode must
@@ -2499,105 +2492,437 @@ class TestSyncLog:
 
 
 class TestGCSafety:
-    def test_gc_never_deletes_referenced_blobs(self, storage):
-        """GC must check ALL manifests before deleting.
-
-        Manifests use the v2 shape (sources dict) that production emits, and
-        the ref-counting loop reads via `load_manifest` so it exercises the
-        same normalization path `_do_gc` hits (see cli.py:_do_gc).
-        """
-
-        # Device A has hash1 and hash2
-        manifest_a = {
-            "device_id": "a",
-            "device_name": "A",
-            "timestamp": "2026-01-01T00:00:00Z",
+    @staticmethod
+    def _store_manifest(backend, device_id, hashes=()):
+        fetch = crypto_module.fetch_crypto_init(backend)
+        crypto_module.set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
+        manifest = {
+            "device_id": device_id,
+            "device_name": device_id,
             "sources": {
-                "claude": {
-                    "base_path": "/tmp",
+                "fixture": {
+                    "base_path": str(backend.root),
                     "files": {
-                        "file1.json": {
-                            "sha256": "hash1",
-                            "size": 100,
-                            "mtime": "2026-01-01T00:00:00Z",
-                        },
-                        "file2.json": {
-                            "sha256": "hash2",
-                            "size": 200,
-                            "mtime": "2026-01-01T00:00:00Z",
-                        },
+                        f"file-{i}.md": {"sha256": sha, "size": 1, "mtime": None}
+                        for i, sha in enumerate(hashes)
                     },
-                },
+                }
             },
             "tombstones": {},
         }
+        backend.put(
+            storage_keys.manifest_key(device_id),
+            encrypt(serialize_manifest(manifest), PASSPHRASE, MEMORY_KB),
+        )
 
-        # Device B has only hash1
-        manifest_b = {
-            "device_id": "b",
-            "device_name": "B",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "sources": {
-                "claude": {
-                    "base_path": "/tmp",
-                    "files": {
-                        "file1.json": {
-                            "sha256": "hash1",
-                            "size": 100,
-                            "mtime": "2026-01-01T00:00:00Z",
-                        },
-                    },
-                },
-            },
-            "tombstones": {},
+    @pytest.mark.parametrize("entrypoint", ["gc", "push"])
+    @pytest.mark.parametrize("manifest_first", [False, True])
+    def test_gc_never_deletes_referenced_blobs(self, push_preview56, entrypoint, manifest_first):
+        """Real GC and attended content push preserve peers in either delivery order."""
+        env = push_preview56
+        backend = env["backend"]
+        initial = runner.invoke(app, ["push"])
+        assert initial.exit_code == 0, initial.output
+        own = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB).manifest
+        live = {
+            storage_keys.blob_key("dev-a", info["sha256"]): backend.get(
+                storage_keys.blob_key("dev-a", info["sha256"])
+            )
+            for info in own["sources"]["claude"]["files"].values()
         }
+        new_content = b"new content also held by the peer"
+        new_sha = hashlib.sha256(new_content).hexdigest()
+        orphan_content = b"own orphan still referenced by the peer"
+        orphan_sha = hashlib.sha256(orphan_content).hexdigest()
+        orphan = storage_keys.blob_key("dev-a", orphan_sha)
+        backend.put(orphan, encrypt(orphan_content, PASSPHRASE, MEMORY_KB))
+        peer_content = b"peer live before its manifest"
+        peer_sha = hashlib.sha256(peer_content).hexdigest()
+        peer_hashes = (peer_sha, new_sha, orphan_sha)
+        register_device(backend, "dev-ab", "Prefix-sharing peer")
+        if manifest_first:
+            self._store_manifest(backend, "dev-ab", peer_hashes)
+        peer_bytes = {}
+        for sha, content in zip(peer_hashes, (peer_content, new_content, orphan_content)):
+            key = storage_keys.blob_key("dev-ab", sha)
+            peer_bytes[key] = encrypt(content, PASSPHRASE, MEMORY_KB)
+            backend.put(key, peer_bytes[key])
+        assert backend.exists(storage_keys.manifest_key("dev-ab")) == manifest_first
 
-        register_device(storage, "a", "A")
-        register_device(storage, "b", "B")
+        if entrypoint == "push":
+            (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_bytes(new_content)
+        result = runner.invoke(app, [entrypoint])
+        assert result.exit_code == 0, result.output
+        assert not backend.exists(orphan)
+        assert {key: backend.get(key) for key in live} == live
+        assert {key: backend.get(key) for key in peer_bytes} == peer_bytes
+        if entrypoint == "push":
+            # A peer-owned identical hash cannot substitute for an own upload.
+            uploaded = backend.get(storage_keys.blob_key("dev-a", new_sha))
+            assert decrypt(uploaded, PASSPHRASE, MEMORY_KB) == new_content
+            accepted = cli_module.sidecar.read("dev-a")
+            assert (
+                accepted["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/new.md"][
+                    "sha256"
+                ]
+                == new_sha
+            )
+        if not manifest_first:
+            self._store_manifest(backend, "dev-ab", peer_hashes)
+        again = runner.invoke(app, ["gc"])
+        assert again.exit_code == 0, again.output
+        assert {key: backend.get(key) for key in peer_bytes} == peer_bytes
+        assert {key: backend.get(key) for key in live} == live
 
-        # Store manifests
-        for did, manifest in [("a", manifest_a), ("b", manifest_b)]:
-            enc = encrypt(serialize_manifest(manifest), PASSPHRASE, memory_kb=MEMORY_KB)
-            storage.put(f"manifests/{did}/manifest.json.enc", enc)
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_missing_own_manifest_skips_blobs_but_keeps_outer_retention(
+        self, push_preview56, monkeypatch, dry_run
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        assert not backend.exists(storage_keys.manifest_key("dev-a"))
+        blob = storage_keys.blob_key("dev-a", hashlib.sha256(b"unproven orphan").hexdigest())
+        backend.put(blob, b"keep without metadata")
+        old_day = (datetime.now(timezone.utc) - timedelta(days=120)).date().isoformat()
+        old_event = env["events"] / "events" / f"dev-a-{old_day}.jsonl"
+        old_event.parent.mkdir(parents=True)
+        old_event.write_text("{}\n")
+        own_tmp = backend.root / "data/dev-a/tmp-crashed.tmp"
+        own_tmp.write_bytes(b"stale")
+        peer_tmp = backend.root / "data/dev-ab/tmp-in-flight.tmp"
+        peer_tmp.parent.mkdir(parents=True)
+        peer_tmp.write_bytes(b"peer")
+        listings, deletes = [], []
+        original_list = LocalBackend.list_keys
+        original_delete = LocalBackend.delete
 
-        # Store blobs
-        storage.put("data/a/hash1.enc", encrypt(b"blob1", PASSPHRASE, memory_kb=MEMORY_KB))
-        storage.put("data/a/hash2.enc", encrypt(b"blob2", PASSPHRASE, memory_kb=MEMORY_KB))
-        storage.put("data/a/hash3.enc", encrypt(b"orphan", PASSPHRASE, memory_kb=MEMORY_KB))
+        def list_keys(storage, prefix):
+            listings.append(prefix)
+            return original_list(storage, prefix)
 
-        # Collect referenced hashes from ALL manifests — same shape _do_gc uses.
-        all_devices = list_devices(storage)
-        referenced = set()
-        for d in all_devices:
-            did = d["device_id"]
-            key = f"manifests/{did}/manifest.json.enc"
-            if storage.exists(key):
-                enc = storage.get(key)
-                plain = decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB)
-                m = load_manifest(plain)
-                for src_data in m["sources"].values():
-                    for info in src_data["files"].values():
-                        referenced.add(info["sha256"])
+        def delete(storage, key):
+            deletes.append(key)
+            return original_delete(storage, key)
 
-        # hash1 and hash2 are referenced, hash3 is not
-        assert "hash1" in referenced
-        assert "hash2" in referenced
-        assert "hash3" not in referenced
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        monkeypatch.setattr(LocalBackend, "delete", delete)
+        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 0
+        before = _preview_tree(env["claude"].parent, pin=dry_run)
+        result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
+        assert result.exit_code == 0, result.output
+        warning = " ".join(result.stderr.split())
+        assert "this device's manifest is missing: Mac A (dev-a)" in warning
+        assert "Blob collection was skipped; no blobs were deleted" in warning
+        assert "Wait for sync" in warning and "mm diag" in warning and "mm gc" in warning
+        assert not listings and not deletes
+        assert "GC complete" not in result.output and "orphaned blobs" not in result.output
+        assert backend.get(blob) == b"keep without metadata"
+        assert peer_tmp.read_bytes() == b"peer"
+        assert old_event.exists() == dry_run
+        assert own_tmp.exists() == dry_run
+        if dry_run:
+            assert cli_module.DRY_RUN_COMPLETE in " ".join(result.output.split())
+            assert _preview_tree(env["claude"].parent) == before
 
-        # GC should only delete hash3
-        all_blobs = storage.list_keys("data/")
-        orphans = []
-        for blob_key in all_blobs:
-            if not blob_key.endswith(".enc"):
-                continue
-            parts = blob_key.split("/")
-            if len(parts) == 3:
-                sha = parts[2].removesuffix(".enc")
-                if sha not in referenced:
-                    orphans.append(blob_key)
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_valid_empty_own_manifest_collects_only_own_orphans(
+        self, push_preview56, monkeypatch, dry_run
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        self._store_manifest(backend, "dev-a")
+        own = storage_keys.blob_key("dev-a", hashlib.sha256(b"own orphan").hexdigest())
+        peer = storage_keys.blob_key("dev-ab", hashlib.sha256(b"peer").hexdigest())
+        backend.put(own, b"own")
+        backend.put(peer, b"peer")
+        listings = []
+        original = LocalBackend.list_keys
 
-        assert len(orphans) == 1
-        assert "hash3" in orphans[0]
+        def list_keys(storage, prefix):
+            listings.append(prefix)
+            return original(storage, prefix)
+
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, False) == 1
+        assert storage_keys.data_prefix("dev-a") == "data/dev-a/"
+        assert listings == ["data/dev-a/"]
+        assert backend.exists(own) == dry_run
+        assert backend.get(peer) == b"peer"
+
+    @pytest.mark.parametrize("device_id", ["", ".", "..", "dev/a", "dev\\a", "dev\x00a"])
+    def test_invalid_owner_cannot_reach_collection(self, push_preview56, monkeypatch, device_id):
+        config = {**push_preview56["config"], "device": {"id": device_id, "name": "Invalid"}}
+        calls = []
+
+        def forbidden(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("invalid identity reached storage collection")
+
+        monkeypatch.setattr(LocalBackend, "list_keys", forbidden)
+        monkeypatch.setattr(LocalBackend, "delete", forbidden)
+        monkeypatch.setattr(cli_module.retention, "_sweep_local_tmp_files", forbidden)
+        with pytest.raises(ValueError, match="storage key: device_id"):
+            cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+        assert calls == []
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_overbroad_listing_preserves_foreign_and_malformed_keys(
+        self, push_preview56, monkeypatch, dry_run, capsys
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        self._store_manifest(backend, "dev-a")
+        own = storage_keys.blob_key("dev-a", hashlib.sha256(b"orphan").hexdigest())
+        foreign = storage_keys.blob_key("elsewhere", hashlib.sha256(b"foreign").hexdigest())
+        prefix_peer = storage_keys.blob_key("dev-ab", hashlib.sha256(b"peer").hexdigest())
+        malformed = "data/dev-a/[/red]inject[red]\x1b]52;c;eA==\x07.enc"
+        non_blob = "data/dev-a/notes.txt"
+        keys = (own, foreign, prefix_peer, malformed, non_blob)
+        for key in keys:
+            backend.put(key, b"preserve unless own orphan")
+
+        def list_keys(storage, prefix):
+            assert prefix == "data/dev-a/"
+            return list(keys)
+
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, dry_run, True) == 1
+        output = capsys.readouterr().out
+        assert "malformed (skipped)" in output and "inject" in output
+        assert "\x1b" not in output and "\x07" not in output
+        assert foreign not in output and prefix_peer not in output
+        assert backend.exists(own) == dry_run
+        for key in keys[1:]:
+            assert backend.get(key) == b"preserve unless own orphan"
+
+    @pytest.mark.parametrize("peer_state", ["missing", "corrupt", "newer"])
+    def test_peer_metadata_and_registry_are_not_gc_dependencies(
+        self, push_preview56, monkeypatch, peer_state
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        self._store_manifest(backend, "dev-a")
+        own = storage_keys.blob_key("dev-a", hashlib.sha256(b"own orphan").hexdigest())
+        peer = storage_keys.blob_key("peer", hashlib.sha256(b"peer").hexdigest())
+        backend.put(own, b"own")
+        backend.put(peer, b"peer")
+        if peer_state != "missing":
+            backend.put(
+                storage_keys.manifest_key("peer"), b"\x03" if peer_state == "newer" else b"bad"
+            )
+        original = LocalBackend.get
+
+        def get(storage, key):
+            assert not key.startswith(("devices/", "manifests/peer/"))
+            return original(storage, key)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("GC read the peer registry")
+
+        monkeypatch.setattr(LocalBackend, "get", get)
+        monkeypatch.setattr(cli_module, "_list_devices_warn", forbidden)
+        assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == 1
+        assert not backend.exists(own)
+        assert backend.get(peer) == b"peer"
+
+    def test_gc_keeps_raw_nested_checkout_references(self, push_preview56):
+        env = push_preview56
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        own = cli_module.sidecar.read("dev-a")
+        hashes = [info["sha256"] for info in own["sources"]["claude"]["files"].values()]
+        (env["claude"] / "projects/-Users-kb-myapp/.git").mkdir()
+        before = {
+            storage_keys.blob_key("dev-a", sha): env["backend"].get(
+                storage_keys.blob_key("dev-a", sha)
+            )
+            for sha in hashes
+        }
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+        assert {key: env["backend"].get(key) for key in before} == before
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("copies", [1, 2])
+    @pytest.mark.parametrize("canonical", ["unreadable", "absent"])
+    def test_conflict_copies_alone_never_authorize_own_collection(
+        self, push_preview56, monkeypatch, canonical, copies, dry_run
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        older = hashlib.sha256(b"older reference").hexdigest()
+        current = hashlib.sha256(b"current-only reference").hexdigest()
+        self._store_manifest(backend, "dev-a", (older,))
+        key = storage_keys.manifest_key("dev-a")
+        # Older iCloud conflict copies still load; the current canonical does not.
+        for n in range(2, 2 + copies):
+            path = backend.root / Path(key).with_name(f"manifest.json {n}.enc")
+            path.write_bytes(backend.get(key))
+        if canonical == "absent":
+            backend.delete(key)
+        else:
+            backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
+        blobs = {storage_keys.blob_key("dev-a", sha): sha.encode() for sha in (older, current)}
+        for blob, data in blobs.items():
+            backend.put(blob, data)
+        listings = []
+        original = LocalBackend.list_keys
+
+        def list_keys(storage, prefix):
+            listings.append(prefix)
+            return original(storage, prefix)
+
+        monkeypatch.setattr(LocalBackend, "list_keys", list_keys)
+        result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
+        assert {blob: backend.get(blob) for blob in blobs} == blobs
+        assert result.exit_code == 1, result.output
+        flat = " ".join(result.output.split())
+        assert "held only by iCloud conflict copies" in flat and "Mac A (dev-a)" in flat
+        assert "corrupt" not in flat
+        assert listings == []
+        if dry_run:
+            _assert_preview_refused(result)
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "ok" and fetched.conflict_copies_only
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_canonical_with_own_conflict_copy_collects_with_union(self, push_preview56, dry_run):
+        backend = push_preview56["backend"]
+        canon, copy_only, orphan = (
+            hashlib.sha256(name).hexdigest() for name in (b"canon", b"copy only", b"orphan")
+        )
+        # The older copy also lists copy_only; the readable canonical dropped it.
+        self._store_manifest(backend, "dev-a", (canon, copy_only))
+        key = storage_keys.manifest_key("dev-a")
+        (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(backend.get(key))
+        self._store_manifest(backend, "dev-a", (canon,))
+        blobs = {storage_keys.blob_key("dev-a", sha): sha.encode() for sha in (canon, copy_only)}
+        orphan_key = storage_keys.blob_key("dev-a", orphan)
+        for blob, data in [*blobs.items(), (orphan_key, b"orphan")]:
+            backend.put(blob, data)
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "ok" and not fetched.conflict_copies_only
+        result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
+        assert result.exit_code == 0, result.output
+        assert "cannot GC safely" not in result.output
+        # Peers pull the merged copies, so a copy-only reference stays live.
+        assert {blob: backend.get(blob) for blob in blobs} == blobs
+        assert backend.exists(orphan_key) == dry_run
+
+    def test_push_and_gc_help_describe_own_device_gc(self):
+        result = runner.invoke(app, ["push", "--help"])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.replace("│", " ").split())
+        assert "run GC on this device's orphaned blobs" in flat
+        assert "fleet-wide" not in flat
+        # README Upgrading treats this marker as proof of an own-device build.
+        gc_help = runner.invoke(app, ["gc", "--help"])
+        assert gc_help.exit_code == 0, gc_help.output
+        gc_flat = " ".join(gc_help.output.replace("│", " ").split())
+        assert "Collect this device's orphaned blobs" in gc_flat
+        assert "without deleting (this device's blobs only)" in gc_flat
+
+    @pytest.mark.parametrize("canonical", ["unreadable", "absent"])
+    def test_push_heals_conflict_copies_only_so_gc_can_resume(self, push_preview56, canonical):
+        env = push_preview56
+        backend = env["backend"]
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        key = storage_keys.manifest_key("dev-a")
+        conflict = backend.root / Path(key).with_name("manifest.json 2.enc")
+        conflict.write_bytes(backend.get(key))
+        if canonical == "absent":
+            backend.delete(key)
+        else:
+            backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
+        orphan = storage_keys.blob_key("dev-a", hashlib.sha256(b"own orphan").hexdigest())
+        backend.put(orphan, b"own orphan")
+        refused = runner.invoke(app, ["gc"])
+        assert refused.exit_code == 1, refused.output
+        assert "Run 'mm push' on this device" in " ".join(refused.output.split())
+        # The remedy the refusal names must work without any content change.
+        healed = runner.invoke(app, ["push"])
+        assert healed.exit_code == 0, healed.output
+        assert "Nothing to push" not in healed.output
+        healed_flat = " ".join(healed.output.split())
+        assert "Rewriting manifest held only by conflict copies" in healed_flat
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "ok" and not fetched.conflict_copies_only
+        assert not conflict.exists()
+        live = [
+            storage_keys.blob_key("dev-a", info["sha256"])
+            for info in fetched.manifest["sources"]["claude"]["files"].values()
+        ]
+        collected = runner.invoke(app, ["gc"])
+        assert collected.exit_code == 0, collected.output
+        assert not backend.exists(orphan)
+        assert all(backend.exists(blob) for blob in live)
+
+    @pytest.mark.parametrize("late", ["missing", "corrupt", "unreadable", "more-refs"])
+    def test_pre_delete_recheck_requires_a_clean_own_manifest(
+        self, push_preview56, monkeypatch, late
+    ):
+        env = push_preview56
+        backend = env["backend"]
+        live, late_ref, orphan = (
+            hashlib.sha256(name).hexdigest() for name in (b"live", b"late ref", b"orphan")
+        )
+        self._store_manifest(backend, "dev-a", (live,))
+        blobs = {
+            storage_keys.blob_key("dev-a", sha): sha.encode() for sha in (live, late_ref, orphan)
+        }
+        for blob, data in blobs.items():
+            backend.put(blob, data)
+        original = cli_module._fetch_remote_manifest
+        calls = []
+
+        def fetch(storage, device_id, passphrase, memory_kb):
+            calls.append(device_id)
+            if len(calls) == 1:
+                return original(storage, device_id, passphrase, memory_kb)
+            if late in ("missing", "corrupt"):
+                return cli_module.ManifestFetch(status=late)
+            files = {"late.md": {"sha256": late_ref, "size": 1, "mtime": None}}
+            fields = {"conflict_copies_only": True} if late == "unreadable" else {}
+            manifest = {"sources": {"late": {"files": files}}, "tombstones": {}}
+            return cli_module.ManifestFetch(status="ok", manifest=manifest, **fields)
+
+        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fetch)
+        if late in ("corrupt", "unreadable"):
+            with pytest.raises(typer.Exit):
+                cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
+        else:
+            expected = 1 if late == "more-refs" else 0
+            assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == expected
+        assert calls == ["dev-a", "dev-a"]
+        orphan_key = storage_keys.blob_key("dev-a", orphan)
+        survivors = dict(blobs)
+        if late == "more-refs":
+            del survivors[orphan_key]
+            assert not backend.exists(orphan_key)
+        assert {blob: backend.get(blob) for blob in survivors} == survivors
+
+    @pytest.mark.parametrize("state", ["corrupt", "missing"])
+    def test_own_label_is_escaped_once(self, push_preview56, monkeypatch, state):
+        from io import StringIO
+
+        from rich.console import Console
+
+        env = push_preview56
+        if state == "corrupt":
+            env["backend"].put(storage_keys.manifest_key("dev-a"), b"corrupt")
+        config = {**env["config"], "device": {**env["config"]["device"], "name": "Mac [work]"}}
+        buf = StringIO()
+        monkeypatch.setattr(
+            cli_module, "stderr_console", Console(file=buf, width=300, color_system=None)
+        )
+        if state == "corrupt":
+            with pytest.raises(typer.Exit):
+                cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False)
+        else:
+            assert cli_module._do_gc(config, PASSPHRASE, MEMORY_KB, False, False) == 0
+        assert "Mac [work] (dev-a)" in buf.getvalue()
+        assert "\\[work]" not in buf.getvalue()
 
 
 class TestAutoCommands:
@@ -7688,7 +8013,7 @@ def test_preview_storage_refusal62(preview62, monkeypatch, command):
         original = LocalBackend.list_keys
 
         def list_keys(backend, prefix=""):
-            if prefix == "data/":
+            if prefix == storage_keys.data_prefix(preview62["config"]["device"]["id"]):
                 return fail()
             return original(backend, prefix)
 
@@ -7960,7 +8285,7 @@ def test_refusal_paths62(preview62, monkeypatch, case):
         argv += ["--from", "missing"]
     elif case == "gc-corrupt":
         argv = ["gc", "--dry-run"]
-        env["backend"].put(manifest_key("dev-b"), b"corrupt")
+        env["backend"].put(manifest_key(env["config"]["device"]["id"]), b"corrupt")
     elif case == "custom-root":
         argv = ["recapture", "--dry-run"]
         env["config"]["sync"]["sources"][1]["path"] = str(env["events"].parent / "missing-custom")
@@ -8855,8 +9180,8 @@ class TestNewerStorage66A:
         before = backend.get(peer_key)
         local_before = _preview_tree(env["claude"])
         result = runner.invoke(app, [command])
-        # Push publishes its own snapshot, then required auto-GC refuses the peer.
-        assert result.exit_code == (0 if command == "pull" else 1), result.output
+        # Pull skips unreadable peers; neither explicit nor post-push GC reads them.
+        assert result.exit_code == 0, result.output
         assert backend.get(peer_key) == before
         assert _preview_tree(env["claude"]) == local_before
         if command == "push":
@@ -8864,8 +9189,10 @@ class TestNewerStorage66A:
                 storage_keys.manifest_key("dev-a"),
                 peer_key,
             ]
-        else:
+        elif command == "pull":
             assert "corrupt" in result.output.lower()
+        else:
+            assert "Blob collection was skipped" in " ".join(result.stderr.split())
 
     @pytest.mark.parametrize("command", ["status", "diff"])
     def test_newer_manifest_inspection_never_claims_recovery_or_empty_diff(
@@ -8887,18 +9214,21 @@ class TestNewerStorage66A:
         assert result.exit_code == (0 if command == "status" else 1), result.output
 
     @pytest.mark.parametrize("shape", ["older-sibling", "conflict-only"])
-    def test_newer_manifest_sibling_blocks_gc(self, push_preview56, shape):
+    @pytest.mark.parametrize("owner", ["dev-a", "dev-peer"])
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_newer_manifest_sibling_blocks_only_own_gc(self, push_preview56, shape, owner, dry_run):
         env = push_preview56
         backend = env["backend"]
         register_device(backend, "dev-peer", "Peer")
-        key = storage_keys.manifest_key("dev-peer")
+        TestGCSafety._store_manifest(backend, "dev-a")
+        key = storage_keys.manifest_key(owner)
         parent = backend.root / Path(key).parent
         parent.mkdir(parents=True, exist_ok=True)
         older = encrypt(
             serialize_manifest(
                 {
-                    "device_id": "dev-peer",
-                    "device_name": "Peer",
+                    "device_id": owner,
+                    "device_name": owner,
                     "sources": {},
                     "tombstones": {},
                 }
@@ -8911,13 +9241,21 @@ class TestNewerStorage66A:
             (parent / "manifest.json 2.enc").write_bytes(older)
         else:
             (parent / "manifest.json 2.enc").write_bytes(b"\x03")
-        blob = storage_keys.blob_key("dev-peer", "b" * 64)
+        blob = storage_keys.blob_key(owner, "b" * 64)
         backend.put(blob, b"\x03newer-only")
+        own_orphan = storage_keys.blob_key("dev-a", "e" * 64)
+        backend.put(own_orphan, b"own orphan")
         local_before = _preview_tree(env["claude"])
-        result = runner.invoke(app, ["gc"])
-        assert result.exit_code == 1, result.output
-        assert "cannot GC safely" in result.output
+        result = runner.invoke(app, ["gc"] + (["--dry-run"] if dry_run else []))
+        assert result.exit_code == (1 if owner == "dev-a" else 0), result.output
+        assert ("cannot GC safely" in result.output) == (owner == "dev-a")
+        assert backend.exists(own_orphan) == (owner == "dev-a" or dry_run)
         assert backend.get(blob) == b"\x03newer-only"
+        if owner == "dev-a":
+            if dry_run:
+                _assert_preview_refused(result)
+            assert "Run 'mm push'" not in result.output
+            return
         pull = runner.invoke(app, ["pull"])
         assert pull.exit_code == 0, pull.output
         assert backend.get(blob) == b"\x03newer-only"
@@ -8928,15 +9266,14 @@ class TestNewerStorage66A:
     ):
         env = push_preview56
         backend = env["backend"]
-        register_device(backend, "dev-peer", "Peer")
-        key = storage_keys.manifest_key("dev-peer")
+        key = storage_keys.manifest_key(env["config"]["device"]["id"])
         parent = backend.root / Path(key).parent
         parent.mkdir(parents=True, exist_ok=True)
         older = encrypt(
             serialize_manifest(
                 {
-                    "device_id": "dev-peer",
-                    "device_name": "Peer",
+                    "device_id": "dev-a",
+                    "device_name": "Mac A",
                     "sources": {},
                     "tombstones": {},
                 }
@@ -8946,7 +9283,7 @@ class TestNewerStorage66A:
         )
         backend.put(key, older)
         (parent / "manifest.json 2.enc").write_bytes(older)
-        blob = storage_keys.blob_key("dev-peer", "c" * 64)
+        blob = storage_keys.blob_key("dev-a", "c" * 64)
         backend.put(blob, b"newer-only")
         reads = {"n": 0}
         original = type(backend).get
@@ -9009,6 +9346,7 @@ class TestNewerStorage66A:
         backend = env["backend"]
         mine = env["config"]["device"]["id"]
         key = storage_keys.manifest_key(mine)
+        TestGCSafety._store_manifest(backend, mine)
         original = cli_module._fetch_remote_manifest
         phase = {"name": "push", "n": 0}
 
@@ -9426,10 +9764,20 @@ def test_usage_only_skips_auto_gc_content_runs_it(capture61, monkeypatch, conten
 
 
 @pytest.mark.parametrize("capture_state", ["published", "failed", "no-reader"])
-def test_corrupt_peer_gc_refusal_preserved(capture61, monkeypatch, capture_state):
+@pytest.mark.parametrize("refusal", [b"corrupt", b"\x03"])
+def test_own_gc_refusal_preserves_post_publication_capture_state(
+    capture61, monkeypatch, capture_state, refusal
+):
     env = capture61
-    register_device(env["backend"], "peer", "Peer")
-    env["backend"].put(cli_module.manifest_key("peer"), b"corrupt")
+    # Inject unreadable own metadata only after the real publication succeeds.
+    original_put = LocalBackend.put
+
+    def put(storage, key, data):
+        original_put(storage, key, data)
+        if key == storage_keys.manifest_key("dev-a"):
+            original_put(storage, key, refusal)
+
+    monkeypatch.setattr(LocalBackend, "put", put)
     (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
     if capture_state == "failed":
         monkeypatch.setattr(
@@ -9455,6 +9803,30 @@ def test_corrupt_peer_gc_refusal_preserved(capture61, monkeypatch, capture_state
         "projects/-Users-kb-myapp/memory/new.md"
         in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
     )
+    accepted = cli_module.sidecar.read("dev-a")
+    sha = accepted["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/new.md"]["sha256"]
+    assert decrypt(
+        env["backend"].get(storage_keys.blob_key("dev-a", sha)), PASSPHRASE, MEMORY_KB
+    ) == (b"pending")
+    assert env["backend"].get(storage_keys.manifest_key("dev-a")) == refusal
+
+
+@pytest.mark.parametrize("peer_manifest", [b"corrupt", b"\x03"])
+def test_unreadable_peer_allows_post_push_own_collection(capture61, peer_manifest):
+    env = capture61
+    register_device(env["backend"], "peer", "Peer")
+    env["backend"].put(storage_keys.manifest_key("peer"), peer_manifest)
+    peer_blob = storage_keys.blob_key("peer", hashlib.sha256(b"peer").hexdigest())
+    own_orphan = storage_keys.blob_key("dev-a", hashlib.sha256(b"own orphan").hexdigest())
+    env["backend"].put(peer_blob, b"peer")
+    env["backend"].put(own_orphan, b"own orphan")
+    (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert "cannot GC safely" not in result.output
+    assert not env["backend"].exists(own_orphan)
+    assert env["backend"].get(peer_blob) == b"peer"
+    assert env["backend"].get(storage_keys.manifest_key("peer")) == peer_manifest
 
 
 def test_attended_resolves_once_and_bootstraps_inside_lock(capture61, monkeypatch):

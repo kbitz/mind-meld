@@ -416,7 +416,10 @@ In 1.0, any observed newer crypto-init copy refuses selection and repair;
 repair re-fetches before mutation and again immediately before replacing
 canonical. iCloud can deliver files out of order: with an older init still
 visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
-sibling, so pull skips that peer and GC refuses. Push rewrites only this
+sibling, so pull skips that peer and GC leaves its namespace untouched. GC
+refuses only on this device's unreadable manifest (including a late newer-format
+recheck); the shared crypto-init gate still refuses every crypto session.
+Push rewrites only this
 Mac's own manifest. A push
 can finish publication and then exit 1 when required auto-GC refuses. Newer
 blob errors reach the per-file pull warning; manifest validators intentionally

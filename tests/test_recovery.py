@@ -365,13 +365,13 @@ class TestPushRewriteOnRecovery:
         )
 
 
-class TestGCRefusesOnCorruptPeer:
-    """Regression: `mm gc` (dry-run AND write mode) must refuse when any
-    peer has a corrupt manifest. Printing an incomplete orphan list in
+class TestGCRefusesOnCorruptOwnManifest:
+    """Regression: `mm gc` (dry-run AND write mode) must refuse when
+    this device has a corrupt manifest. Printing an incomplete orphan list in
     dry-run would mislead a user into deleting live blobs (Claude finding
     C3)."""
 
-    def test_dry_run_refuses_when_corrupt_peer(self, tmp_path):
+    def test_dry_run_refuses_when_corrupt_own_manifest(self, tmp_path):
         from mind_meld.cli import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
@@ -388,14 +388,15 @@ class TestGCRefusesOnCorruptPeer:
         with pytest.raises(typer.Exit):
             _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=True, verbose=False)
 
-    def test_write_mode_refuses_when_corrupt_peer(self, tmp_path):
+    def test_write_mode_refuses_when_corrupt_own_manifest(self, tmp_path):
         from mind_meld.cli import _do_gc
 
         storage = LocalBackend(tmp_path / "storage")
         register_device(storage, "dev1", "Test")
         storage.put("manifests/dev1/manifest.json.enc", b"corrupt bytes")
         # Create a blob that would otherwise be reaped as orphan:
-        storage.put("data/dev1/hash_orphan.enc", b"orphan-bytes")
+        orphan_key = "data/dev1/" + "a" * 64 + ".enc"
+        storage.put(orphan_key, b"orphan-bytes")
 
         config = {
             "device": {"id": "dev1", "name": "Test"},
@@ -408,7 +409,7 @@ class TestGCRefusesOnCorruptPeer:
             _do_gc(config, PASSPHRASE, MEMORY_KB, dry_run=False, verbose=False)
 
         # The blob MUST still exist — GC must never delete while corrupt.
-        assert storage.exists("data/dev1/hash_orphan.enc"), (
+        assert storage.exists(orphan_key), (
             "GC must refuse to delete blobs while a manifest is corrupt; "
             "we cannot prove the blob is an orphan without the manifest"
         )
