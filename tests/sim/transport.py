@@ -387,16 +387,16 @@ class FakeTransport:
             raise
 
     def _conflict(self, loser: Event) -> Event:
-        key = (loser.path, loser.id)
-        if key not in self._copies:
+        loser_ref = (loser.path, loser.id)
+        if loser_ref not in self._copies:
             original = Path(loser.path)
             stamp = datetime.fromtimestamp(EPOCH + loser.id, timezone.utc).strftime("%Y%m%d-%H%M%S")
             path = original.with_name(
                 f"{original.stem}.sync-conflict-{stamp}-{loser.author}{original.suffix}"
             ).as_posix()
             event = self._event(loser.author, path, loser.file, ())
-            self._copies[key] = event.id
-        return self.events[self._copies[key]]
+            self._copies[loser_ref] = event.id
+        return self.events[self._copies[loser_ref]]
 
     def _resolve(self, name: str, event: Event) -> tuple[frozenset[int], list[Event], Event]:
         known = self._knowledge[name].get(event.path, frozenset())

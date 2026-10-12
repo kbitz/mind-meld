@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -430,13 +431,13 @@ def test_failed_clone_registers_nothing_and_can_retry(sim_fleet):
 
 def test_restore_and_clone_preserve_directory_modes(sim_fleet):
     a = sim_fleet.device("a")
-    private = a.source_root / "private"
-    private.mkdir()
-    (private / "kept.md").write_bytes(b"kept")
-    private.chmod(0o500)
+    restricted = a.source_root / "private"
+    restricted.mkdir()
+    (restricted / "kept.md").write_bytes(b"kept")
+    restricted.chmod(0o500)
     a.root.chmod(0o750)
     saved = sim_fleet.snapshot(a)
-    private.chmod(0o755)
+    restricted.chmod(0o755)
     a.root.chmod(0o755)
     sim_fleet.restore(a, saved, index_policy="saved")
     clone = sim_fleet.clone(a, "c")
@@ -702,3 +703,21 @@ def test_source_mtime_defaults_are_fleet_wide_and_not_delivery_time(sim_fleet):
     assert second == first + 1
     assert (a.source_root / REL).stat().st_mtime == EPOCH + 200
     assert sim_fleet.product_time < EPOCH + 100_000
+
+
+def test_remedies_cite_readme_anchors_that_exist():
+    sim_dir = Path(__file__).resolve().parents[2] / "tests/sim"
+    headings, fenced = set(), False
+    for line in (sim_dir / "README.md").read_text().splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and re.match(r"#{1,6} ", line):
+            title = re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower())
+            headings.add(title.replace(" ", "-"))
+    cited = {
+        anchor
+        for source in sim_dir.glob("*.py")
+        for anchor in re.findall(r"README#([a-z0-9-]+)", source.read_text())
+    }
+    assert cited, "no harness remedy cites a README anchor"
+    assert cited <= headings, f"README has no heading for {sorted(cited - headings)}"
