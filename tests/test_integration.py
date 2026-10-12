@@ -2810,15 +2810,22 @@ class TestGCSafety:
         assert backend.exists(orphan_key) == dry_run
 
     def test_push_and_gc_help_describe_own_device_gc(self):
+        import re
+
+        def plain(output):
+            # CI renders Rich help in color; strip SGR codes before matching.
+            text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+            return " ".join(text.replace("│", " ").split())
+
         result = runner.invoke(app, ["push", "--help"])
         assert result.exit_code == 0, result.output
-        flat = " ".join(result.output.replace("│", " ").split())
+        flat = plain(result.output)
         assert "run GC on this device's orphaned blobs" in flat
         assert "fleet-wide" not in flat
         # README Upgrading treats this marker as proof of an own-device build.
         gc_help = runner.invoke(app, ["gc", "--help"])
         assert gc_help.exit_code == 0, gc_help.output
-        gc_flat = " ".join(gc_help.output.replace("│", " ").split())
+        gc_flat = plain(gc_help.output)
         assert "Collect this device's orphaned blobs" in gc_flat
         assert "without deleting (this device's blobs only)" in gc_flat
 
