@@ -1440,7 +1440,9 @@ def test_every_persisted_cause_has_a_catalog_entry_or_an_explicit_no_clause():
         clause = cli._cursor_store_detail_clause(detail)
         assert (clause is None) == (cause in cli._CURSOR_DETAIL_NO_CLAUSE), cause
         if clause:
-            assert "pipx upgrade" not in clause and "delete" not in clause.lower()
+            # Detail clauses never prescribe an upgrade or deletion.
+            assert "mm update" not in clause and "pipx" not in clause
+            assert "delete" not in clause.lower()
     for cause, reason in hu.CURSOR_SQLITE_READER_CAUSES.items():
         assert reason in {"malformed", "io_error", "stale"}, cause
     corrupt = cli._cursor_store_detail_clause({"cause": "corrupt_database", "store": S1})

@@ -160,7 +160,7 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
         if expected == "ready":
-            assert ("pipx upgrade mind-meld" if inventory == "unsupported" else "mm push") in flat
+            assert ("mm update" if inventory == "unsupported" else "mm push") in flat
             if inventory == "unsupported":
                 assert "mm push" not in flat
         else:
@@ -215,7 +215,12 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
         flat = " ".join(result.output.split())
-        assert "pipx upgrade mind-meld" in flat
+        # Pin each changed sentence; other status lines also say "mm update".
+        assert "Run mm update; a consented reader has an unsupported record format." in flat
+        if other == "deadline" and command == "status":
+            # Status renders the deadline sibling as the propagated upgrade blocker.
+            assert "run mm update before refreshing usage." in flat
+        assert "pipx upgrade" not in flat
         assert "mm push" not in flat
 
 
@@ -532,7 +537,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     else:
         assert f"({reader} {expected_reason})" in text
     if expected_reason == "unsupported":
-        assert "pipx upgrade mind-meld" in text
+        assert "mm update" in text
     if expected_reason == "deadline":
         assert "Last read allowed unknown ms; last complete read unknown ms" in text
     if expected_since:
@@ -662,7 +667,7 @@ def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
     plain = runner.invoke(app, ["diag"])
     assert plain.exit_code == 0, plain.output
     assert "grok usage read blocker" in plain.output
-    assert "pipx upgrade mind-meld" in plain.output
+    assert "mm update" in plain.output
 
 
 def test_diag_grok_consent_matches_an_auto_detected_resolved_source(tmp_path, monkeypatch):
@@ -1489,6 +1494,17 @@ def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_s
     assert "outside coverage" not in diag
 
 
+def _assert_no_reader_wide_upgrade(text):
+    """Store-scoped Cursor drift never prints the reader-wide unsupported remedy.
+
+    The store clause itself says `mm update`, so the guard matches the
+    reader-wide sentences rather than the bare command.
+    """
+    flat = " ".join(text.split())
+    assert "unsupported record format" not in flat
+    assert "wrote a record this version cannot read" not in flat
+
+
 @pytest.mark.parametrize("scenario", ["never_read", "read", "unreadable_cache"])
 def test_unread_conductor_sqlite_stores_reach_status_and_diag(tmp_path, monkeypatch, scenario):
     _setup(tmp_path, monkeypatch)
@@ -1522,7 +1538,7 @@ def test_unread_conductor_sqlite_stores_reach_status_and_diag(tmp_path, monkeypa
     expected = {"never_read": "2", "read": "0", "unreadable_cache": "unknown"}[scenario]
     assert f"Conductor workspace stores not yet read: {expected}" in diag
     assert "newer Conductor stores" not in status + diag
-    assert "pipx upgrade" not in status + diag
+    _assert_no_reader_wide_upgrade(status + diag)
     # Value: protects=status and diag omit the unreadable-layout notice when no
     # store is drifted; fails_when=a zero count still tells the user to run mm
     # update; why_new=the unread notice test never forbids the layout sentence;
@@ -1558,7 +1574,7 @@ def test_cursor_sqlite_drift_and_failure_clauses_come_from_a_real_pass(tmp_path,
     state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
     assert state["unsupported_sqlite_stores"] == {"count": 1, "causes": ["missing_required_column"]}
     assert state["last_reason"] is None and state["last_reason_detail"] is None
-    assert "pipx upgrade" not in status + diag  # drift never prints another reader's remedy
+    _assert_no_reader_wide_upgrade(status + diag)  # drift never prints another reader's remedy
 
     broken = root / "2222222222222222"
     broken.mkdir()
@@ -1573,7 +1589,7 @@ def test_cursor_sqlite_drift_and_failure_clauses_come_from_a_real_pass(tmp_path,
     state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
     assert state["last_reason"] == "malformed"
     assert state["last_reason_detail"] == {"cause": "corrupt_database", "store": store}
-    assert "pipx upgrade" not in status + diag
+    _assert_no_reader_wide_upgrade(status + diag)
 
 
 def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monkeypatch):
@@ -1623,7 +1639,7 @@ def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monk
     assert errors.CURSOR_SQLITE_URL in status
     assert "(schema_unreadable)" in diag and version in diag
     assert "missing_required_column" not in status + diag
-    assert "pipx upgrade" not in status + diag
+    _assert_no_reader_wide_upgrade(status + diag)
     state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["cursor"]
     assert state["unsupported_sqlite_stores"] == {"count": 1, "causes": ["schema_unreadable"]}
     assert state["unread_sqlite_stores"] == 0
@@ -1657,7 +1673,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
         # Other readers' cached unsupported formats cannot poison this consent set.
-        assert "pipx upgrade mind-meld" not in " ".join(result.output.split())
+        assert "mm update" not in " ".join(result.output.split())
     monkeypatch.setattr(
         host_usage,
         f"{reader}_usage_diag",
@@ -1672,7 +1688,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
     for command in ("status", "diag"):
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
-        assert "pipx upgrade mind-meld" in " ".join(result.output.split())
+        assert "mm update" in " ".join(result.output.split())
     if reader == "cursor":
         assert "Cursor (Conductor + enrolled CLI)" in result.output
         assert "cursor_host_usage = false" in " ".join(result.output.split())

@@ -179,6 +179,7 @@ from mind_meld.safety import (  # noqa: F401 — re-exported for backwards-compa
     strip_terminal_escapes,
 )
 from mind_meld.storage import get_backend
+from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.keys import (
     DATA_PREFIX,
     DEVICES_PREFIX,
@@ -239,11 +240,20 @@ class ManifestFetch:
                 pull) should surface this to the user; callers that WRITE
                 state (push, gc) must NOT silently treat this as missing
                 because doing so drops tombstones / orphans blobs.
+
+    `conflict_copies_only` marks an "ok" built only from conflict copies
+    because the canonical copy is absent or could not be read. GC refuses
+    it as incomplete own metadata; push treats it like a corrupt manifest
+    only for its no-op gate, rewriting the canonical from local truth. Its
+    prior merges the copies with the local sidecar and freezes only stored
+    blobs; blob diffs use the copies alone. Other callers may use the merged
+    copies.
     """
 
     status: FetchStatus
     manifest: dict | None = None
     newer_version: int | None = None
+    conflict_copies_only: bool = False
 
     @property
     def is_ok(self) -> bool:
@@ -528,8 +538,15 @@ def _init_crypto_session(
             f"crypto: mm-crypto-init root_salt changed since this device was "
             f"initialized (local fp={local_fp}, storage fp={storage_fp}). "
             f"Another device may have bootstrapped storage concurrently. "
-            f"Re-run 'mm init' to reconfigure against the current storage."
-            + (f" {repair_note}" if repair_note else "")
+            "Allow the fleet's mm-crypto-init copies to finish syncing, then inspect "
+            "with 'mm diag'. If the fingerprints still differ after syncing, stop; "
+            "do not reinitialize or re-key."
+            + (
+                " Pending conflict cleanup does not resolve this device's fingerprint "
+                f"mismatch. {repair_note}"
+                if repair_note
+                else ""
+            )
         )
 
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
@@ -703,6 +720,8 @@ def _fetch_remote_manifest(
             return ManifestFetch(status="corrupt", newer_version=exc.version)
         except (CryptoError, ManifestError, OSError, MindMeldError):
             pass  # canonical unreadable — try conflict copies
+    # Absent or unreadable canonical: any result comes from conflict copies.
+    conflict_copies_only = not manifests
 
     # Try conflict copies (iCloud/Dropbox)
     for conflict_path in conflict_copies:
@@ -721,7 +740,9 @@ def _fetch_remote_manifest(
         return ManifestFetch(status="missing")
 
     if len(manifests) == 1:
-        return ManifestFetch(status="ok", manifest=manifests[0])
+        return ManifestFetch(
+            status="ok", manifest=manifests[0], conflict_copies_only=conflict_copies_only
+        )
 
     # Merge multiple manifests additively.
     #
@@ -736,7 +757,11 @@ def _fetch_remote_manifest(
     # during one scan but not another. The correctness guarantee is:
     # union-for-files + newest-wins-for-tombstones + is_tombstoned() gate
     # at every downstream consumer. See SPEC.md "Merge invariants".
-    return ManifestFetch(status="ok", manifest=_merge_manifests(manifests))
+    return ManifestFetch(
+        status="ok",
+        manifest=_merge_manifests(manifests),
+        conflict_copies_only=conflict_copies_only,
+    )
 
 
 def _build_exclude_map(
@@ -798,10 +823,10 @@ def _filter_excluded_paths(
     avoid copying large manifests when no source declares excludes).
 
     Apply at the CONSUMER boundary (_pull_core, _push_core), NOT inside
-    `_fetch_remote_manifest`. `mm gc` walks raw manifests via
+    `_fetch_remote_manifest`. `mm gc` reads this device's raw manifest via
     `_fetch_remote_manifest` to compute referenced blobs — a filtered manifest
-    there would mark live peer blobs as orphans and silently delete them
-    (codex-2 #1, the gc-bypass hazard). The filter is a CONSUMER-side fix
+    there would mark live own blobs (which peers still read) as orphans and
+    silently delete them (codex-2 #1, the gc-bypass hazard). The filter is a CONSUMER-side fix
     for the tombstone-on-exclude-transition bug, not a fetch-side scrub.
 
     Tombstone keys are `<source>:<rel_path>` post-Track-1B. Bare-path keys
@@ -966,8 +991,9 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     `_filter_unselected_sources` for the same asymmetric contract (drop
     unselected source files, keep tombstones). Do not apply inside
     `_fetch_remote_manifest`. Same hazard as `_filter_excluded_paths`:
-    `mm gc` reads raw manifests via that path to compute referenced blobs,
-    and a filtered manifest there would mark live peer blobs as orphans.
+    `mm gc` reads this device's raw manifest via that path to compute
+    referenced blobs, and a filtered manifest there would mark live own
+    blobs as orphans.
     Mirror of the exclude_patterns invariant (docs/invariants/sync.md, 2026-04-24
     first-pull regression).
 
@@ -1447,10 +1473,41 @@ def _recover_prior_manifest(
                                  then peer fallback (propagated tombstones
                                  only); then _error with recovery steps.
 
+    An "ok" built only from conflict copies may predate this device's latest
+    deletions, so it is merged with the sidecar to keep their tombstones.
+
     Raises typer.Exit(1) via _error() when corrupt + no sidecar + no peers.
     """
-    if fetch.is_ok:
+    if fetch.is_ok and not fetch.conflict_copies_only:
         return fetch.manifest
+    if fetch.is_ok:
+        # The returned prior (tombstones, source retention, nested-checkout
+        # freeze) gains the last accepted push's records; blob diffs still
+        # compare against fetch.manifest alone.
+        sidecar_manifest = sidecar.read(device_id)
+        rewrite = "mm push would rewrite it" if dry_run else "rewriting it"
+        if sidecar_manifest is None:
+            msg = (
+                "this device's manifest is held only by conflict copies and no usable "
+                f"local sidecar exists; {rewrite} from local files with those copies "
+                "as the deletion baseline. Recent local deletions may be lost — verify "
+                "no files have resurrected."
+            )
+        else:
+            msg = (
+                "this device's manifest is held only by conflict copies; "
+                f"{rewrite} from local files, keeping deletion records from the "
+                "local sidecar."
+            )
+        if quiet:
+            # Rewriting a manifest from conflict copies is data-at-risk work;
+            # autopush must still surface it.
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        if sidecar_manifest is None:
+            return fetch.manifest
+        return _merge_manifests([fetch.manifest, sidecar_manifest])
     if fetch.status == "missing":
         return None
 
@@ -3864,8 +3921,8 @@ def push(
     is up to date. Requires mm-events and a consented Codex or Grok reader.
     Capture runs before content sync: about five seconds of scanning per cold
     reader, and both readers can be cold. Budgets are not hard timeouts.
-    Content-changing pushes also run a fleet-wide GC sweep; usage-only pushes
-    leave obsolete blobs for the next content push or mm gc.
+    Content-changing pushes also run GC on this device's orphaned blobs;
+    usage-only pushes leave obsolete blobs for the next content push or mm gc.
 
     Exit 0 means content sync succeeded, regardless of usage coverage; check
     mm status for recorded capture/publication evidence. Exit 1 means sync or
@@ -3934,7 +3991,7 @@ def push(
             )
 
         # Usage-only publication leaves obsolete day-file blobs for the next
-        # content-changing push or explicit mm gc, avoiding a fleet sweep per refresh.
+        # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
         if not dry_run and result and result.content_changed:
             try:
                 gc_count = _do_gc(
@@ -4359,10 +4416,11 @@ def _push_core(
             local_manifest,
             remote_manifest,
             nested_roots,
-            # A recovered prior was never accepted as-is: freeze only entries
-            # whose blob is still stored, and exclude the rest.
+            # A recovered prior (sidecar, peers, or conflict copies merged with
+            # the sidecar) was never accepted as-is: freeze only entries whose
+            # blob is still stored, and exclude the rest.
             keep=None
-            if fetch.is_ok
+            if fetch.is_ok and not fetch.conflict_copies_only
             else lambda info: backend.exists(blob_key(device_id, info["sha256"])),
         )
         remote_manifest = _drop_unfrozen_checkout_files(remote_manifest, nested_roots, frozen)
@@ -4394,7 +4452,9 @@ def _push_core(
     # but failed mid-upload). Pre-v0.12.2: events tail fired at HEAD of
     # _push_core unconditionally, so every `mm push` reported at least
     # the events-file modification.
-    recovering_from_corrupt = fetch.status == "corrupt"
+    # A manifest held only by conflict copies is rewritten like a corrupt one,
+    # so GC's "run mm push" remedy works without a content change.
+    recovering_from_corrupt = fetch.status == "corrupt" or fetch.conflict_copies_only
     source_diffs = list(iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
     if fetch.is_ok:
         # Without an accepted manifest of our own, everything (including
@@ -4570,7 +4630,14 @@ def _push_core(
 
     # Upload manifest (includes tombstones)
     if not quiet:
-        if recovering_from_corrupt and not (total_new or total_modified or total_deleted):
+        if fetch.conflict_copies_only:
+            # The mm-events activity row nearly always adds a modified file, so
+            # name the rewrite even when files upload too.
+            console.print(
+                "\n[bold]Rewriting manifest held only by conflict copies "
+                f"({total_new + total_modified} files to upload)...[/bold]"
+            )
+        elif recovering_from_corrupt and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Rewriting manifest to heal remote corruption...[/bold]")
         elif has_selection_change and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (source selection changed)...[/bold]")
@@ -5606,9 +5673,9 @@ def _pull_core(
     # adopted the local exclude_patterns ships an excluded file in their
     # manifest, and pull would either download it (defeating the exclude)
     # or surface it as a conflict. Filter HERE, not in
-    # `_fetch_remote_manifest` — `mm gc` reads raw manifests via that path
-    # to compute referenced blobs, and a filtered manifest there would
-    # mark live peer blobs as orphans (codex-2 #1).
+    # `_fetch_remote_manifest` — `mm gc` reads this device's raw manifest
+    # via that path to compute referenced blobs, and a filtered manifest
+    # there would mark live own blobs as orphans (codex-2 #1).
     # Same disable-then-exclude order as _push_core. The disabled-sources
     # filter strips entire `sources.<name>` entries so the per-peer
     # download loop never tries to land a disabled source's files locally.
@@ -5699,7 +5766,7 @@ def _pull_core(
     # legitimately have both names; we don't normalize manifest keys
     # globally — we only skip the duplicate WRITE on case-insensitive
     # consumers. The raw manifest stays intact for future cross-platform
-    # peers (mm gc reads via _fetch_remote_manifest, unfiltered).
+    # peers.
     case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
     if case_collisions:
         for src_name, clusters in case_collisions.items():
@@ -6815,7 +6882,7 @@ def _usage_capture_needs_upgrade(publication: dict, reader_states: dict[str, dic
 def _usage_capture_remedy(publication: dict, reader_states: dict[str, dict]) -> str:
     """Pair the shared prerequisite verdict with currently consented reader blockers."""
     if _usage_capture_needs_upgrade(publication, reader_states):
-        return "Run pipx upgrade mind-meld; a consented reader has an unsupported record format."
+        return "Run mm update; a consented reader has an unsupported record format."
     return _config_module.usage_capture_remedy(publication["readiness"])
 
 
@@ -7734,8 +7801,9 @@ def gc(
         False,
         "--dry-run",
         help=(
-            "Preview orphan blobs and retention cleanup without deleting. Changes nothing "
-            "except the local lock file. Exits 1 if the preview stops."
+            "Preview orphan blobs and retention cleanup without deleting (this "
+            "device's blobs only). Changes nothing except the local lock file. Exits "
+            "1 if the preview stops."
         ),
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -7745,7 +7813,9 @@ def gc(
         help=f"Also delete .sync-conflict-* files older than {CONFLICT_AGE_DAYS} days",
     ),
 ) -> None:
-    """Garbage collect orphaned blobs and local retention data.
+    """Collect this device's orphaned blobs and local retention data.
+
+    Reads only this device's manifest and lists only its own blob directory.
 
     ``--dry-run`` reports blob and retention candidates without changing files,
     including a preview of the conflict-sidecar reaper. ``--conflicts`` is
@@ -7807,9 +7877,10 @@ def _do_gc(
     *,
     emit_retention_summary: bool = True,
 ) -> int:
-    """Run garbage collection. Returns number of orphaned blobs found/deleted."""
+    """Collect this device's orphaned blobs from its raw manifest only."""
     backend = get_backend(config)
     my_device_id = config["device"]["id"]
+    own_prefix = storage_keys.data_prefix(my_device_id)
 
     # Sweep this device's stale tmp*.tmp files before ref-counting.
     # Runs UNDER the caller's lock (acquire_lock already held by gc()),
@@ -7822,72 +7893,70 @@ def _do_gc(
         emit_summary=emit_retention_summary,
     )
 
-    # Collect all referenced hashes from ALL device manifests
-    devices = _list_devices_warn(backend)
+    # Only this device's raw manifest can authorize collecting its blobs.
+    # Consumer exclusions/disabled sources must never filter these references.
+    gc_fetch = _fetch_remote_manifest(backend, my_device_id, passphrase, memory_kb)
+    # _error escapes markup itself; only the direct stderr print adds safe_str.
+    label = safety.safe_terminal_str(
+        f"{config['device'].get('name', my_device_id)} ({my_device_id})"
+    )
     referenced_hashes: set[str] = set()
 
-    corrupt_devices: list[str] = []
-    newer_devices: list[str] = []
-    for device in devices:
-        did = device["device_id"]
-        gc_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-        if gc_fetch.status == "missing":
-            continue
-        label = f"{device.get('device_name', did)} ({did})"
-        if gc_fetch.newer_version is not None:
-            newer_devices.append(label)
-            continue
-        if gc_fetch.status == "corrupt":
-            # A corrupt manifest may reference blobs we'd otherwise orphan.
-            # Collect the IDs so we can refuse in write mode.
-            corrupt_devices.append(f"{device.get('device_name', did)} ({did})")
-            continue
+    def _skip_missing() -> int:
+        stderr_console.print(
+            f"mm: warning: this device's manifest is missing: {safe_str(label)}. "
+            "Blob collection was skipped; no blobs were deleted. "
+            "Wait for sync, inspect with 'mm diag', then retry 'mm gc'."
+        )
+        return 0
 
-        # gc_fetch.manifest is pre-normalized via load_manifest.
-        manifest = gc_fetch.manifest
+    def _refuse_unless_complete(fetch: ManifestFetch) -> None:
+        if fetch.newer_version is not None:
+            _error(
+                "cannot GC safely — newer-format manifest is corrupt on: "
+                f"{label}. Leave it in place. "
+                f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
+            )
+        # A conflict copy alone cannot stand in for an absent or unreadable
+        # canonical. Refuse previews too: an incomplete reference set cannot
+        # supply a trustworthy orphan list for a separate delete flow.
+        if fetch.conflict_copies_only:
+            _error(
+                "cannot GC safely — this device's manifest is held only by iCloud "
+                f"conflict copies (its main copy is missing or unreadable): {label}. "
+                "Run 'mm push' on this device to rewrite it, then retry GC."
+                + (DRY_RUN_REFUSAL if dry_run else "")
+            )
+        if fetch.status == "corrupt":
+            _error(
+                "cannot GC safely — this device's manifest is corrupt: "
+                f"{label}. It may reference blobs that would be reaped as orphans. "
+                "Run 'mm push' on this device to recover its manifest, then retry GC."
+                + (DRY_RUN_REFUSAL if dry_run else "")
+            )
 
-        # Iterate sources.*.files to collect hashes
-        for src_data in manifest.get("sources", {}).values():
+    def _add_references(fetch: ManifestFetch) -> None:
+        # The manifest is validated/normalized by load_manifest, unfiltered.
+        for src_data in fetch.manifest.get("sources", {}).values():
             for info in src_data.get("files", {}).values():
                 referenced_hashes.add(info["sha256"])
 
-    if newer_devices:
-        _error(
-            "cannot GC safely — newer-format manifest(s) are corrupt on: "
-            f"{', '.join(newer_devices)}. Leave them in place. "
-            f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
-        )
+    if gc_fetch.status == "missing":
+        return _skip_missing()
+    _refuse_unless_complete(gc_fetch)
+    _add_references(gc_fetch)
 
-    if corrupt_devices:
-        msg = (
-            "cannot GC safely — manifest(s) corrupt on: "
-            f"{', '.join(corrupt_devices)}. Those manifests may reference "
-            "blobs that would be reaped as orphans. Run 'mm push' on each "
-            "affected device to recover the manifest, then retry GC."
-        )
-        # Refuse in BOTH modes. Printing an orphan list in dry-run with
-        # corrupt manifests would mislead: the list is incomplete because
-        # the corrupt manifest's referenced hashes are missing from
-        # referenced_hashes. A user who copies that list into a separate
-        # delete flow would reap live data.
-        _error(msg + (DRY_RUN_REFUSAL if dry_run else ""))
+    # The own manifest can change after the reference scan (a reserved
+    # version, a conflict copy, or a failed read). Revalidate this device only
+    # before listing/deleting blob candidates and keep any added references.
+    again = _fetch_remote_manifest(backend, my_device_id, passphrase, memory_kb)
+    if again.status == "missing":
+        return _skip_missing()
+    _refuse_unless_complete(again)
+    _add_references(again)
 
-    # A reserved-version manifest can arrive after the reference scan.
-    # Revalidate before the first deletion.
-    for device in devices:
-        did = device["device_id"]
-        again = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
-        if again.newer_version is None:
-            continue
-        label = f"{device.get('device_name', did)} ({did})"
-        _error(
-            "cannot GC safely — newer-format manifest(s) are corrupt on: "
-            f"{label}. Leave them in place. "
-            f"Upgrade with: {upgrade.INSTALL_CMD}." + (DRY_RUN_REFUSAL if dry_run else "")
-        )
-
-    # List all blobs across all devices
-    all_blobs = backend.list_keys(DATA_PREFIX)
+    # The trailing slash excludes prefix-sharing peer identities.
+    all_blobs = backend.list_keys(own_prefix)
     orphan_count = 0
     malformed_count = 0
 
@@ -7911,7 +7980,9 @@ def _do_gc(
                     f"{safe_str(safety.safe_terminal_str(bkey))}"
                 )
             continue
-        _did, sha = parsed
+        did, sha = parsed
+        if did != my_device_id:
+            continue
         if sha not in referenced_hashes:
             orphan_count += 1
             if verbose:

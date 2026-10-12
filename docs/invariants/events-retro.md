@@ -558,7 +558,7 @@ cannot read contributes nothing, keeps its retained history, is recorded in
 view, or `SQLITE_AUTH`), `model_params`, `column_type`, and `schema_unreadable`
 (CORRUPT on the first schema read). These never set a reader-wide reason, so they
 never set `unsupported`, never reach `_usage_capture_needs_upgrade`, and never
-print the shared "pipx upgrade" remedy. Data and IO failures are reader-wide and
+print the shared "mm update" remedy. Data and IO failures are reader-wide and
 stop the pass: `malformed` (`bad_json`, `oversize_or_type`, `bad_timestamp`,
 `bad_utf8`, `bad_counters`, `bad_model`, `corrupt_database`, `duplicate_request`,
 `conflict`), `io_error` (`non_regular_path`, `cannot_open`, `sqlite_pragma`,
@@ -620,12 +620,14 @@ sibling `.lock`, so the unlocked snapshot is the last committed state.
 Status appends "not yet read" and "use a layout this mm cannot read ... Run
 `mm update`" clauses to the existing Cursor usage narrative, and a store-detail
 clause (and the diag `store detail:` line) rendered in `cli.py` from
-`last_reason_detail` through `safety` follows the unchanged shared blocker line;
-`events_tail._host_skip_phrase` and push output are untouched. The closed catalog
+`last_reason_detail` through `safety` follows the shared blocker line;
+these SQLite-specific clauses do not alter `events_tail._host_skip_phrase` or
+push output. The closed catalog
 covers every reader-wide cause in `CURSOR_SQLITE_READER_CAUSES` or marks it
 explicitly clause-less (`hot_journal`, `identity_changed`: transient), and never
-advises deleting retained history or the spool. The shared "pipx upgrade" phrase
-remains the other readers' remedy; switching it to `mm update` is deferred.
+advises deleting retained history or the spool. The shared "mm update" phrase
+also applies to reader-wide unsupported formats; store-scoped SQLite drift
+does not set that blocker.
 Retirement: on the next Conductor store change the adapter is retired by default
 (status reverts to "not counted"), unless Conductor Cursor runs fall on three or
 more distinct days of the prior thirty fleet-wide, when the user decides.
@@ -1408,7 +1410,7 @@ store would cost the retro its real content AND rewind the cursor into a
 reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
-read; a newer mm **may** read it (`pipx upgrade mind-meld`), or the user can
+read; a newer mm **may** read it (`mm update`), or the user can
 `mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
@@ -1649,13 +1651,15 @@ autopush recovery still captures ordinary activity and counts once.
 
 **Maintenance and GC cadence.** Auto-GC is gated on `result.content_changed`,
 not total modified files. Usage-only obsolete blobs await the next user-content
-push or explicit `mm gc`; no fleet manifest decrypt/blob sweep per refresh.
+push or explicit `mm gc`; no own-manifest decrypt/blob sweep per refresh.
 Post-acceptance device/cleanup failures warn without revoking content acceptance,
-including failed/skipped captures. GC's corrupt-manifest refusal remains visible
+including failed/skipped captures. GC's own-manifest refusal remains visible
 and aborts unless a host row was proven published; only that case can say host
 usage was published while GC stopped. Failed attended attempts still run the
 update-or-nudge tail once after releasing the lock (an update, or the nudge when
-none can run); dry-run never does.
+none can run); dry-run never does. Peer corruption/newer metadata cannot veto
+own-device collection. Missing own metadata visibly skips only blob collection;
+explicit GC still runs local retention. See sync.md's own-device collection rule.
 
 **Capture failures and remedies.** Always-stderr `mm: warning:` lines carry
 `prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,

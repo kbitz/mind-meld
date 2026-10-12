@@ -2,6 +2,27 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.7.2] - 2026-10-12
+
+**`mm gc`, and the GC at the end of a content-changing `mm push`, now collect only this Mac's own orphaned blobs, so this Mac can no longer delete a peer's blobs that reached iCloud before its manifest did.** Two remedies that gave wrong or unsafe advice are also corrected, and the lock-contention error now links to a troubleshooting entry. An older mm still runs the old collection, so before the first `mm push` or `mm gc` on any Mac, including one you rarely use, check every `mm` it can run (see Upgrade notes).
+
+### Fixed
+
+- GC reads only this Mac's raw manifest and lists only its own blob directory. Peer manifests and the device registry neither authorize nor block collection, so an unreadable or newer-format peer manifest no longer stops this Mac's GC.
+- If this Mac's own manifest is missing, GC warns that blob collection was skipped and deletes no blobs; local retention cleanup still runs. A valid empty own manifest still collects this Mac's orphans.
+- If this Mac's own manifest is corrupt, is newer-format, or loads only from iCloud conflict copies (its main copy is missing or unreadable), GC refuses, in `--dry-run` as well, and says what to do.
+- `mm push` now rewrites a manifest held only by conflict copies even when no synced content changed, so GC's "run `mm push`" advice works. It keeps this Mac's recorded deletions from its local recovery sidecar; with no usable sidecar it warns that recent local deletions may be lost.
+- The root-salt drift error no longer says to re-run `mm init`. It says to let the fleet's `mm-crypto-init` copies finish syncing, inspect with `mm diag`, and stop if the fingerprints still differ, without reinitializing or re-keying.
+- The remedy for an unsupported host-usage record now says `mm update` instead of `pipx upgrade mind-meld`.
+- The "another mm operation is running" error now links to a new README troubleshooting entry.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes.
+- Run `which -a mm` on each Mac, then `<path> gc --help` for each path listed: an mm with this fix says "this device's". `mm update` (v1.3.0 and later; an older mm needs `pipx upgrade mind-meld`) updates only the pipx install; for any other copy, fix `PATH` so the pipx `mm` comes first and do not run that copy against real storage. Do not rely on the background update of `mm autopush` or `mm autopull` to bring a Mac current.
+- `mm autopush` and `mm autopull` never run GC. On a Mac that syncs mostly through hooks, run `mm gc` now and then, or its superseded blobs accumulate in iCloud.
+- Limits that remain: blobs of an abandoned peer are never collected (1.x has no retirement command), and a peer still reading this Mac's prior manifest can miss a blob this Mac already collected. Updating one Mac protects peer blobs only from that Mac's GC.
+
 ## [1.7.1] - 2026-10-11
 
 **Pytest can no longer write this Mac's real Mind Meld account state through the shared write helpers.** A test that reaches `~/.config/mind-meld`, the iCloud store, `~/Sync/mind-meld`, or `~/.local/share/mind-meld` stops before the helper creates or changes anything, and names the test and the path. `mm` itself is unchanged: the check runs only while pytest is running.

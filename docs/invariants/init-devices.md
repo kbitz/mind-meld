@@ -82,15 +82,18 @@ copy whose first byte is in 0x03–0x0F is unreadable even when an older sibling
 still decrypts, and a newer conflict copy is not "missing". A read that sees
 that byte after the preliminary scan, including the conflict validator's own
 read, still returns corrupt instead of using the older sibling. Pull skips
-that peer and GC refuses. Push re-fetches immediately before publication, and GC revalidates
-immediately before the first blob deletion. Manifest recovery also refuses
+that peer; GC refuses only for its own manifest, when it is unreadable or held
+only by conflict copies. Push re-fetches
+immediately before publication, and GC revalidates its own manifest immediately
+before blob candidate listing/deletion. Manifest recovery also refuses
 before replacing this Mac's own newer manifest. Blobs only the unread copy could name are kept.
 
 iCloud does not order arrival. A format-changing MAJOR must write its new
 crypto-init **before** new-format manifests/blobs, and refuse on the newer side
 while any registered peer runs below 1.0.0 (0.14.x lacks this gate). A manifest
 or blob may still arrive first: pull skips an unreadable peer manifest with a
-warning, GC refuses while any manifest is unreadable, and push writes only its
+warning, GC refuses while its own manifest is unreadable or held only by conflict
+copies, and push writes only its
 own manifest. Init rescans immediately before bootstrap and again before
 accepting a new salt, so a newer copy that arrives during the prompts refuses
 without saving config. This is an optimistic local recheck, not a distributed transaction.
@@ -110,4 +113,4 @@ in `tests/test_diag.py`.
 
 First-device bootstrap remains create-only. Init's storage probe is pure; second-device and bootstrap-race retry paths verify before applying repair, and a changed winner aborts before config writes or device registration. An unreadable canonical cannot be safely preserved and refuses repair.
 
-Inspection commands `status`, `diag`, and `diff`, plus `push --dry-run`, `pull --dry-run`, `gc --dry-run`, and `recapture --dry-run`, never repair shared crypto-init state. Status loads `_get_config(read_only=True)` and never persists a missing fingerprint; read-only crypto sessions backfill only in memory. Status and the previews print pending counts; diag reports `crypto_init.pending_repair` (`replace_canonical`, `delete`, `preserve`), never copy names. Drift errors include pending counts in every mode. The pending note names the next push, pull, autopull, or autopush that verifies the passphrase as a reconciliation trigger. Track 62A also gates their other setup writers; see the [README Previews table](../../README.md#previews). Every inspection loads config read-only, and declared status/identity-cache exceptions never permit shared crypto repair.
+Inspection commands `status`, `diag`, and `diff`, plus `push --dry-run`, `pull --dry-run`, `gc --dry-run`, and `recapture --dry-run`, never repair shared crypto-init state. Status loads `_get_config(read_only=True)` and never persists a missing fingerprint; read-only crypto sessions backfill only in memory. Status and the previews print pending counts; diag reports `crypto_init.pending_repair` (`replace_canonical`, `delete`, `preserve`), never copy names. Drift errors retain both fingerprints and pending counts in every mode. They first allow fleet crypto-init propagation and name `mm diag` as inspection, then say to stop if fingerprints still differ; never reinitialize or re-key. Pending conflict cleanup is explicitly qualified as not resolving this device's fingerprint mismatch, with no guaranteed recovery or fixed wait. The pending note still names the next push, pull, autopull, or autopush that verifies the passphrase as a reconciliation trigger. Track 62A also gates their other setup writers; see the [README Previews table](../../README.md#previews). Every inspection loads config read-only, and declared status/identity-cache exceptions never permit shared crypto repair.
