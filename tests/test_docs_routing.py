@@ -535,7 +535,7 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
 def test_todos_inbox_keeps_its_heading() -> None:
     """The roadmap drain reads this heading. A rename hides new inbox items."""
     todos = (ROOT / "docs/TODOS.md").read_text(encoding="utf-8")
-    assert "## Unprocessed" in todos
+    assert any(line.strip() == "## Unprocessed" for line in todos.splitlines())
 
 
 def test_every_changelog_version_has_a_progress_row() -> None:
