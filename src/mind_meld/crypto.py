@@ -132,11 +132,19 @@ def root_salt_fingerprint(root_salt: bytes) -> str:
 # ── key derivation ───────────────────────────────────────────────────
 
 
-def derive_key(passphrase: str, salt: bytes, memory_kb: int = 65_536) -> bytes:
+def derive_key(
+    passphrase: str,
+    salt: bytes,
+    memory_kb: int = 65_536,
+    *,
+    time_cost: int = ARGON2_TIME_COST,
+    parallelism: int = ARGON2_PARALLELISM,
+) -> bytes:
     """Derive a 256-bit key from a passphrase using Argon2id.
 
-    Low-level primitive used by load_master_key(). Tests call this directly to
-    validate Argon2 wiring.
+    Low-level primitive used by load_master_key() and the explicit v3 fleet
+    API. Legacy callers retain time=3, parallelism=1 and their original cache.
+    The store validates untrusted v3 parameters before calling this primitive.
     """
     if not passphrase:
         raise CryptoError("init: passphrase cannot be empty.")
@@ -144,9 +152,9 @@ def derive_key(passphrase: str, salt: bytes, memory_kb: int = 65_536) -> bytes:
         return hash_secret_raw(
             secret=passphrase.encode("utf-8"),
             salt=salt,
-            time_cost=ARGON2_TIME_COST,
+            time_cost=time_cost,
             memory_cost=memory_kb,
-            parallelism=ARGON2_PARALLELISM,
+            parallelism=parallelism,
             hash_len=KEY_LEN,
             type=Type.ID,
         )

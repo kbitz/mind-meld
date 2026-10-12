@@ -152,6 +152,13 @@ _CYCLE_SHAPES = [
     ("from mind_meld import resolveflow\n", False),
     ("from .safety import safe_str\n", False),
     ("from mind_meld.client import x\n", False),
+    # Store is nested: both parent-relative forms must remain detectable.
+    ("from .. import cli\n", True),
+    ("from ..cli import _error\n", True),
+    ("def f():\n    from .. import cli\n", True),
+    ("def f():\n    from ..cli import _error\n", True),
+    ("from . import envelope\n", False),
+    ("from .. import crypto\n", False),
 ]
 
 
@@ -180,6 +187,56 @@ def test_leaf_modules_import_nothing_from_cli(mod: str) -> None:
     """Leaves are the cycle-break. If one grows a cli import the break is gone."""
     hits = _imports_cli(SRC / f"{mod}.py")
     assert hits == [], f"leaf {mod}.py must not import cli (found {hits})"
+
+
+def test_store_recursively_imports_no_cli_or_lifecycle() -> None:
+    """T17: include every present/future store submodule and function-local import."""
+    modules = sorted((SRC / "store").rglob("*.py"))
+    assert len(modules) >= 4, "store gate must inspect the package and its three owners"
+    for path in modules:
+        assert _imports_cli(path) == [], f"store imports CLI: {path}"
+        package = "mind_meld." + ".".join(path.relative_to(SRC).parts[:-1])
+        for node in ast.walk(ast.parse(path.read_text())):
+            imported = []
+            if isinstance(node, ast.Import):
+                imported = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                from importlib.util import resolve_name
+
+                module = node.module or ""
+                if node.level:
+                    module = resolve_name("." * node.level + module, package)
+                imported = (
+                    [module]
+                    if module != "mind_meld"
+                    else ["mind_meld." + alias.name for alias in node.names]
+                )
+            for name in imported:
+                if path.name == "layout.py":
+                    assert name.split(".")[0] in sys.stdlib_module_names, (
+                        f"layout must remain standard-library-only: {name}"
+                    )
+                if name.startswith("mind_meld."):
+                    assert name.split(".")[1] in {"store", "crypto", "errors"}, (
+                        f"store must not import scanners/lifecycle: {path}:{node.lineno}: {name}"
+                    )
+
+
+def test_store_fresh_subprocess_does_not_load_cli_or_scanners() -> None:
+    """T17: a clean process can import the entire store without CLI initialization."""
+    statement = "\n".join(
+        [
+            "import sys",
+            "import mind_meld.store",
+            "import mind_meld.store.envelope",
+            "import mind_meld.store.format",
+            "import mind_meld.store.layout",
+            "assert not {'mind_meld.cli', 'mind_meld.manifest', 'mind_meld.config', "
+            "'mind_meld.devices', 'mind_meld.identity'}.intersection(sys.modules)",
+        ]
+    )
+    result = subprocess.run([sys.executable, "-c", statement], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 _MAY_CREATE_CALLEES = {"_ensure_retro_skill_links", "_skill_links_check_due"}

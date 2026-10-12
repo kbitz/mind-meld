@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.7.3] - 2026-10-12
+
+**Adds the 2.0 store format's building blocks, inert in this release: nothing in `mm` calls them yet, so no command, flag, or synced storage changes.** The new `mind_meld.store` package defines the plaintext fleet header, the encrypted version 0x03 record envelope, and the commit, snapshot and presence codecs for the planned Syncthing store. They are unit-tested and stay unused until later releases wire them in.
+
+### Added
+
+- `fleet.json` (format 3) is the plaintext fleet header: Argon2id parameters that are validated before any key derivation, a salt, and an authenticated passphrase check. Per-kind HKDF subkeys are derived from the passphrase and never stored.
+- Envelope 0x03 seals each part with AES-256-GCM bound to the fleet, device, record kind, sequence and part number, so ciphertext that was renamed, moved between devices or renumbered is refused. Gzip decoding happens only after authentication and is size-bounded.
+- Commit and snapshot codecs split records into parts of up to 8 MiB with a whole-record SHA-256, and carry tombstones and, in snapshots, held versions. A record with parts missing reports as incomplete, while mixed, hybrid or forged part sets are refused. The presence codec writes one small part.
+- Strict canonical record names, and a classifier that separates record files, control files (`fleet.json` and `.stignore`) and foreign files, and flags Syncthing conflict copies of `fleet.json` and commit files as forks. Forks are also counted as foreign.
+
+### Changed
+
+- `crypto.derive_key` accepts optional keyword-only `time_cost` and `parallelism`. Defaults are unchanged, and the 1.x format byte stays `0x02` and still refuses `0x03`.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes. Nothing reads or writes the new format yet.
+
 ## [1.7.2] - 2026-10-12
 
 **`mm gc`, and the GC at the end of a content-changing `mm push`, now collect only this Mac's own orphaned blobs, so this Mac can no longer delete a peer's blobs that reached iCloud before its manifest did.** Two remedies that gave wrong or unsafe advice are also corrected, and the lock-contention error now links to a troubleshooting entry. An older mm still runs the old collection, so before the first `mm push` or `mm gc` on any Mac, including one you rarely use, check every `mm` it can run (see Upgrade notes).
