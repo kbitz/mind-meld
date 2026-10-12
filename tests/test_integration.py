@@ -2858,6 +2858,63 @@ class TestGCSafety:
         assert not backend.exists(orphan)
         assert all(backend.exists(blob) for blob in live)
 
+    @pytest.mark.parametrize("canonical", ["unreadable", "absent"])
+    def test_conflict_copies_only_heal_keeps_sidecar_deletions(self, push_preview56, canonical):
+        env = push_preview56
+        backend = env["backend"]
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        key = storage_keys.manifest_key("dev-a")
+        older = backend.get(key)
+        # Created and deleted after the copy that will survive alone.
+        gone = env["claude"] / "projects/-Users-kb-myapp/memory/gone.md"
+        gone.write_text("created after the older copy")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        gone.unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        tombstone = "claude:projects/-Users-kb-myapp/memory/gone.md"
+        assert tombstone in cli_module.sidecar.read("dev-a")["tombstones"]
+        (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(older)
+        if canonical == "absent":
+            backend.delete(key)
+        else:
+            backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
+        healed = runner.invoke(app, ["push"])
+        assert healed.exit_code == 0, healed.output
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        assert fetched.status == "ok" and not fetched.conflict_copies_only
+        # The rewrite and the refreshed sidecar both keep the deletion record.
+        assert tombstone in fetched.manifest["tombstones"]
+        assert tombstone in cli_module.sidecar.read("dev-a")["tombstones"]
+        assert "deletion records from the local sidecar" in " ".join(healed.output.split())
+        assert cli_module.sidecar.read("dev-a")["timestamp"] == fetched.manifest["timestamp"]
+
+    def test_conflict_copies_only_heal_freezes_only_stored_blobs(self, push_preview56):
+        env = push_preview56
+        backend = env["backend"]
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        key = storage_keys.manifest_key("dev-a")
+        older = backend.get(key)
+        late = env["claude"] / "projects/-Users-kb-myapp/memory/late.md"
+        late.write_text("pushed after the surviving copy")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        late_sha = cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"][
+            "projects/-Users-kb-myapp/memory/late.md"
+        ]["sha256"]
+        # Lost with the canonical; the project then becomes a frozen checkout.
+        backend.delete(storage_keys.blob_key("dev-a", late_sha))
+        (env["claude"] / "projects/-Users-kb-myapp/.git").mkdir()
+        (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(older)
+        backend.put(key, b"\x02" + b"unreadable current manifest" * 4)
+        healed = runner.invoke(app, ["push"])
+        assert healed.exit_code == 0, healed.output
+        fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
+        published = fetched.manifest["sources"]["claude"]["files"]
+        assert "projects/-Users-kb-myapp/memory/late.md" not in published
+        assert all(
+            backend.exists(storage_keys.blob_key("dev-a", info["sha256"]))
+            for info in published.values()
+        )
+
     @pytest.mark.parametrize("late", ["missing", "corrupt", "unreadable", "more-refs"])
     def test_pre_delete_recheck_requires_a_clean_own_manifest(
         self, push_preview56, monkeypatch, late

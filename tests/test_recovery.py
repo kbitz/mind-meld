@@ -72,6 +72,39 @@ class TestRecoverPriorManifest:
         out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is manifest
 
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("quiet", [False, True])
+    @pytest.mark.parametrize("has_sidecar", [True, False])
+    def test_conflict_copies_only_merges_sidecar_and_always_warns(
+        self, tmp_path, monkeypatch, capsys, has_sidecar, quiet, dry_run
+    ):
+        _isolate_sidecar(monkeypatch, tmp_path)
+        backend = LocalBackend(tmp_path / "storage")
+        copies = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
+        if has_sidecar:
+            deleted = {"deleted_at": datetime.now(timezone.utc).isoformat(), "device_id": "abc"}
+            sidecar.write(
+                _make_manifest(
+                    "abc", {"a.md": {"sha256": "aaa"}}, tombstones={"claude:gone.md": deleted}
+                )
+            )
+        fetch = ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
+
+        out = _recover_prior_manifest(
+            fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=quiet, dry_run=dry_run
+        )
+        captured = capsys.readouterr()
+        # Autopush (quiet) must still surface this data-at-risk rewrite.
+        text = " ".join((captured.err if quiet else captured.out).split())
+        assert "held only by conflict copies" in text
+        assert ("mm push would rewrite it" in text) == dry_run
+        if has_sidecar:
+            assert "claude:gone.md" in out["tombstones"]
+            assert "keeping deletion records from the local sidecar" in text
+        else:
+            assert out is copies
+            assert "Recent local deletions may be lost" in text
+
     def test_missing_returns_none(self, tmp_path):
         """First push: missing means 'no prior state', tombstones should be empty.
         Refusing here would break every first push."""

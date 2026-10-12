@@ -244,8 +244,10 @@ class ManifestFetch:
     `conflict_copies_only` marks an "ok" built only from conflict copies
     because the canonical copy is absent or could not be read. GC refuses
     it as incomplete own metadata; push treats it like a corrupt manifest
-    only for its no-op gate, rewriting the canonical from local truth with
-    the merged copies as prior. Other callers may use the merged copies.
+    only for its no-op gate, rewriting the canonical from local truth. Its
+    prior merges the copies with the local sidecar and freezes only stored
+    blobs; blob diffs use the copies alone. Other callers may use the merged
+    copies.
     """
 
     status: FetchStatus
@@ -1471,10 +1473,41 @@ def _recover_prior_manifest(
                                  then peer fallback (propagated tombstones
                                  only); then _error with recovery steps.
 
+    An "ok" built only from conflict copies may predate this device's latest
+    deletions, so it is merged with the sidecar to keep their tombstones.
+
     Raises typer.Exit(1) via _error() when corrupt + no sidecar + no peers.
     """
-    if fetch.is_ok:
+    if fetch.is_ok and not fetch.conflict_copies_only:
         return fetch.manifest
+    if fetch.is_ok:
+        # The returned prior (tombstones, source retention, nested-checkout
+        # freeze) gains the last accepted push's records; blob diffs still
+        # compare against fetch.manifest alone.
+        sidecar_manifest = sidecar.read(device_id)
+        rewrite = "mm push would rewrite it" if dry_run else "rewriting it"
+        if sidecar_manifest is None:
+            msg = (
+                "this device's manifest is held only by conflict copies and no usable "
+                f"local sidecar exists; {rewrite} from local files with those copies "
+                "as the deletion baseline. Recent local deletions may be lost — verify "
+                "no files have resurrected."
+            )
+        else:
+            msg = (
+                "this device's manifest is held only by conflict copies; "
+                f"{rewrite} from local files, keeping deletion records from the "
+                "local sidecar."
+            )
+        if quiet:
+            # Rewriting a manifest from conflict copies is data-at-risk work;
+            # autopush must still surface it.
+            print(f"mm: warning: {msg}", file=sys.stderr)
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        if sidecar_manifest is None:
+            return fetch.manifest
+        return _merge_manifests([fetch.manifest, sidecar_manifest])
     if fetch.status == "missing":
         return None
 
@@ -4383,10 +4416,11 @@ def _push_core(
             local_manifest,
             remote_manifest,
             nested_roots,
-            # A recovered prior was never accepted as-is: freeze only entries
-            # whose blob is still stored, and exclude the rest.
+            # A recovered prior (sidecar, peers, or conflict copies merged with
+            # the sidecar) was never accepted as-is: freeze only entries whose
+            # blob is still stored, and exclude the rest.
             keep=None
-            if fetch.is_ok
+            if fetch.is_ok and not fetch.conflict_copies_only
             else lambda info: backend.exists(blob_key(device_id, info["sha256"])),
         )
         remote_manifest = _drop_unfrozen_checkout_files(remote_manifest, nested_roots, frozen)
