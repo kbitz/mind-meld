@@ -330,7 +330,7 @@ mm devices [--format table|json]   # list registered devices (json: stable schem
 mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
                                              # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
 mm gc [--dry-run] [--conflicts]
-                            # delete orphaned blobs and local retention data; --dry-run previews candidates without mutation
+                            # delete this device's orphaned blobs and local retention data; --dry-run previews candidates without mutation
                             # with --conflicts, also reap converged .sync-conflict-* files >30d; live copies remain
 mm sources                  # list configured sync sources with status
 mm conflicts                # list unresolved .sync-conflict-* files across sources
@@ -497,7 +497,7 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 
 `_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
-- `ok` — at least one copy decrypted; caller uses `.manifest`.
+- `ok` — at least one copy decrypted; caller uses `.manifest`. When the canonical copy is absent or unreadable and only conflict copies decrypted, `ManifestFetch.conflict_copies_only` is also set: `mm gc` refuses it as incomplete own metadata, and `push` rewrites the canonical from local truth even with no content change, merging the local sidecar into the prior so this device's deletion records survive (with no usable sidecar it warns that recent local deletions may be lost; see [sync invariants](docs/invariants/sync.md#corrupt-manifest-recovery-load-bearing)).
 - `missing` — no manifest at the expected key (first push or fresh device). Callers that read remote state treat this as "empty remote." Push treats this as the correct "no prior state" signal and writes the first manifest.
 - `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
 

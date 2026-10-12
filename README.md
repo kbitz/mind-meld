@@ -20,8 +20,10 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 one, check every `mm` it can run.** Older releases' GC can delete other Macs'
 blobs during a push or `mm gc`. Run `which -a mm`, then `<path> gc --help` for
 each path listed: an mm with own-device GC says "this device's". Update the pipx
-install with `mm update` (it updates only pipx installs). For any other copy, fix
-`PATH` so the pipx `mm` comes first and never run that copy against real storage.
+install with `mm update` (it updates only pipx installs; an mm older than v1.3.0
+has no `mm update`, so use `pipx upgrade mind-meld` as described below). For any
+other copy, fix `PATH` so the pipx `mm` comes first and never run that copy
+against real storage.
 Hooks (`mm autopush`, `mm autopull`) do not run GC, but do not
 rely on their background update to bring a Mac current. Updating one Mac protects
 peer namespaces only from that Mac's GC; other arrival-order limitations of the

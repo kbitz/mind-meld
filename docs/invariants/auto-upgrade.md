@@ -425,8 +425,9 @@ repair re-fetches before mutation and again immediately before replacing
 canonical. iCloud can deliver files out of order: with an older init still
 visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
 sibling, so pull skips that peer and GC leaves its namespace untouched. GC
-refuses only on this device's unreadable manifest (including a late newer-format
-recheck); the shared crypto-init gate still refuses every crypto session.
+refuses only on this device's own manifest, when it is unreadable (including a
+late newer-format recheck) or held only by conflict copies; the shared
+crypto-init gate still refuses every crypto session.
 Push rewrites only this
 Mac's own manifest. A push
 can finish publication and then exit 1 when required auto-GC refuses. Newer

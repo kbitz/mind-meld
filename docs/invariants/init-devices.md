@@ -82,7 +82,8 @@ copy whose first byte is in 0x03–0x0F is unreadable even when an older sibling
 still decrypts, and a newer conflict copy is not "missing". A read that sees
 that byte after the preliminary scan, including the conflict validator's own
 read, still returns corrupt instead of using the older sibling. Pull skips
-that peer; GC refuses only for its own unreadable manifest. Push re-fetches
+that peer; GC refuses only for its own manifest, when it is unreadable or held
+only by conflict copies. Push re-fetches
 immediately before publication, and GC revalidates its own manifest immediately
 before blob candidate listing/deletion. Manifest recovery also refuses
 before replacing this Mac's own newer manifest. Blobs only the unread copy could name are kept.
@@ -91,7 +92,8 @@ iCloud does not order arrival. A format-changing MAJOR must write its new
 crypto-init **before** new-format manifests/blobs, and refuse on the newer side
 while any registered peer runs below 1.0.0 (0.14.x lacks this gate). A manifest
 or blob may still arrive first: pull skips an unreadable peer manifest with a
-warning, GC refuses while its own manifest is unreadable, and push writes only its
+warning, GC refuses while its own manifest is unreadable or held only by conflict
+copies, and push writes only its
 own manifest. Init rescans immediately before bootstrap and again before
 accepting a new salt, so a newer copy that arrives during the prompts refuses
 without saving config. This is an optimistic local recheck, not a distributed transaction.
