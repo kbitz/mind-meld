@@ -23,6 +23,7 @@ import fcntl
 import os
 from pathlib import Path
 
+from mind_meld import errors
 from mind_meld.config import LOCK_PATH
 from mind_meld.errors import LockError
 
@@ -60,7 +61,8 @@ def _contention_message(pid: int | None) -> str:
         "Wait for it to finish, then run this command again. If that operation is "
         "waiting for input in another terminal, answer it there; if its output says "
         "it is updating mm, let it finish, which can take several minutes. Do not "
-        "delete the mm lockfile or kill the process; the lock is released when it exits."
+        "delete the mm lockfile or kill the process; the lock is released when it exits. "
+        f"See {errors.LOCK_HELD_URL}."
     )
     if isinstance(pid, int) and pid > 0:
         return (

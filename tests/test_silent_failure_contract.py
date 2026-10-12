@@ -148,7 +148,7 @@ def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch,
     assert "prior scan completed successfully" not in text
     assert "no successful scan yet" not in text
     if reason == "unsupported":
-        assert "pipx upgrade mind-meld" in text
+        assert "mm update" in text
         # The device-wide publication block may name the explicit refresh.
         # The standing unsupported blocker must still prescribe upgrade,
         # never promise that a retry alone fixes the record.
@@ -1900,7 +1900,7 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
         "host-usage snapshot skipped (grok unsupported) — "
         "content sync and git/session capture unaffected. "
         "grok wrote a record this version cannot read. A newer mm may read it: "
-        "run `pipx upgrade mind-meld`, or run `mm disable-source grok` to stop retrying."
+        "run `mm update`, or run `mm disable-source grok` to stop retrying."
     )
     # Safe by construction: no path, transcript, query, or exception text.
     assert str(tmp_path) not in payload["detail"]

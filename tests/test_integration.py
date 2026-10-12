@@ -8742,7 +8742,10 @@ class TestPushPreviewNoMutation56A:
         finally:
             parent.chmod(0o700)
 
-    def test_drift_reports_canonical_replacement_without_repair(self, push_preview56):
+    @pytest.mark.parametrize("pending_repair", [False, True])
+    def test_drift_reports_safe_remedy_and_pending_facts_without_repair(
+        self, push_preview56, pending_repair
+    ):
         env = push_preview56
         # Lexicographically smaller lineage wins; local fingerprint still pins canonical.
         salt = b"\x00" * 16
@@ -8752,12 +8755,31 @@ class TestPushPreviewNoMutation56A:
             salt,
             crypto_module._encrypt_with_master_key(crypto_module._KEYCHECK_PLAINTEXT, key),
         )
-        (env["backend"].root / "mm-crypto-init 2").write_bytes(blob)
+        if pending_repair:
+            (env["backend"].root / "mm-crypto-init 2").write_bytes(blob)
+        else:
+            env["backend"].put("mm-crypto-init", blob)
         result = env["invoke"]()
         _assert_preview_refused(result)
         text = _preview_text(result)
         assert "root_salt changed" in text
-        assert "replace the canonical copy; delete 1 identical conflict copies" in text
+        assert f"local fp={env['config']['crypto']['root_salt_fp']}" in text
+        assert f"storage fp={crypto_module.root_salt_fingerprint(salt)}" in text
+        assert "Allow the fleet's mm-crypto-init copies to finish syncing" in text
+        assert "inspect with 'mm diag'" in text
+        assert "If the fingerprints still differ after syncing, stop" in text
+        assert "do not reinitialize or re-key" in text
+        assert "mm init" not in text
+        assert "minutes" not in text and "seconds" not in text
+        qualification = (
+            "Pending conflict cleanup does not resolve this device's fingerprint mismatch"
+        )
+        assert (qualification in text) == pending_repair
+        if pending_repair:
+            assert "replace the canonical copy; delete 1 identical conflict copies" in text
+            assert "preserve 1 differing or unreadable copies" in text
+            assert text.index("after syncing, stop") < text.index(qualification)
+            assert "verifies the passphrase will reconcile mm-crypto-init" in text
 
     def test_scan_failure_is_lock_only(self, push_preview56, monkeypatch):
         env = push_preview56

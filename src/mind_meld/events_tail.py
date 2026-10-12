@@ -595,7 +595,7 @@ def _host_skip_phrase(
     if upgrade_required and reason not in _HOST_PERMANENT_REASONS:
         return (
             f"{phrase}. A consented reader has an unsupported record format; "
-            "run pipx upgrade mind-meld before refreshing usage."
+            "run mm update before refreshing usage."
         )
     if reason in _HOST_PERMANENT_REASONS:
         stop = (
@@ -605,7 +605,7 @@ def _host_skip_phrase(
         )
         return (
             f"{phrase}. {reader} wrote a record this version cannot read. "
-            f"A newer mm may read it: run `pipx upgrade mind-meld`, or {stop} to stop retrying."
+            f"A newer mm may read it: run `mm update`, or {stop} to stop retrying."
         )
     if reason == "deadline":
         if attended:

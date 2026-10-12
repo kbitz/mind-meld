@@ -536,8 +536,15 @@ def _init_crypto_session(
             f"crypto: mm-crypto-init root_salt changed since this device was "
             f"initialized (local fp={local_fp}, storage fp={storage_fp}). "
             f"Another device may have bootstrapped storage concurrently. "
-            f"Re-run 'mm init' to reconfigure against the current storage."
-            + (f" {repair_note}" if repair_note else "")
+            "Allow the fleet's mm-crypto-init copies to finish syncing, then inspect "
+            "with 'mm diag'. If the fingerprints still differ after syncing, stop; "
+            "do not reinitialize or re-key."
+            + (
+                " Pending conflict cleanup does not resolve this device's fingerprint "
+                f"mismatch. {repair_note}"
+                if repair_note
+                else ""
+            )
         )
 
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)
@@ -6841,7 +6848,7 @@ def _usage_capture_needs_upgrade(publication: dict, reader_states: dict[str, dic
 def _usage_capture_remedy(publication: dict, reader_states: dict[str, dict]) -> str:
     """Pair the shared prerequisite verdict with currently consented reader blockers."""
     if _usage_capture_needs_upgrade(publication, reader_states):
-        return "Run pipx upgrade mind-meld; a consented reader has an unsupported record format."
+        return "Run mm update; a consented reader has an unsupported record format."
     return _config_module.usage_capture_remedy(publication["readiness"])
 
 

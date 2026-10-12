@@ -18,6 +18,14 @@ Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updatep
 
 `~/.config/mind-meld/mind-meld.lock` is the mm lockfile. It is distinct from the installer `install.lock`. Never unlink the mm lockfile: `release_lock` keeps the inode so two processes cannot flock different files at the same path. Contention text never advises deleting the lockfile or killing the holder. `tests/test_lockfile.py` pins that text.
 
+Known and unknown PID messages include `errors.LOCK_HELD_URL`, pointing to the
+README's "Another mm operation is running" heading. Wait/rerun advice stays
+first; known-PID messages put the URL before the final, copyable `ps -p` line.
+PID hints remain diagnostic, never lock authority. The README preserves waiting
+prompts/update completion and the prohibition on deleting the lockfile or
+signalling the holder; pre-1.5.2 remove advice is obsolete. Exact text, plain/Rich
+rendering at widths 60/80 and dynamic URL-anchor discovery cover this contract.
+
 ---
 
 ## Self-update (v1.3.0)

@@ -272,7 +272,7 @@ Expected: a new `as_of`, the enabled readers in `consulted`, and their actual wo
 
 The retro should name Grok's inherent pricing floor. After the next real capture, repeat the second-Mac check: `as_of` must advance with Grok still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
 
-If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
+If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. A newer mm may read it: run `mm update`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
 
 Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
 
@@ -661,6 +661,25 @@ Managing conflicts:
 - `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
+
+### Another mm operation is running
+
+Wait for the operation to finish, then run the command again. If it is waiting
+for input in another terminal, answer the prompt there. If its output says it
+is updating mm, let the update finish; it can take several minutes.
+
+Never delete the mm lockfile or signal the holder. The kernel releases the lock
+when the operation exits, and deleting the file can let two processes hold
+different locks at the same path. The PID is a diagnostic hint and can be stale
+or unknown; it does not decide whether the lock is held. When the error gives a
+known PID, use the printed command to inspect it, for example:
+
+```bash
+ps -p 12345 -o etime=,tty=,command=
+```
+
+An mm older than v1.5.2 printed advice to `remove <path>`. That advice is
+obsolete: keep the lockfile and wait for the operation to finish.
 
 ### Newer or damaged storage format
 
@@ -1204,7 +1223,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `pipx upgrade mind-meld`, or `mm disable-source codex` / `mm disable-source grok` to stop the corresponding source reader. A retry alone cannot fix it. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` to stop the corresponding source reader. A retry alone cannot fix it. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |

@@ -18,6 +18,7 @@ GIT_WALK_FAILURES_URL = (
 HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture-codex-and-grok"
 CURSOR_SQLITE_URL = "https://github.com/kbitz/mind-meld#cursor-sqlite-stores"
 NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
+LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-running"
 
 
 class MindMeldError(Exception):
