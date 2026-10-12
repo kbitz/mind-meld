@@ -44,6 +44,12 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review] Direct test writers can still touch real account state
+- **Why:** Track 71B stops the shared write helpers from mutating four account roots under pytest. Direct raw writers, custom storage roots, and agent destinations can still write real state. The owner deferred that remainder on 2026-10-11 for a follow-up card via /roadmap. This guard does not accept Track 71B, and Track 71D cannot claim simulator safety from it.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** Deferred from plan: ~/.gstack/projects/kbitz-mind-meld/track-71b-autoplan-20261011.md (SHA-256 e4183a763f11fe4aef1423544660a455c1c94fee91365882e98b79bdc01cbcc9). Decision D4, 2026-10-11.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-11
