@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-FLEET_KEY = "fleet.json"
-STIGNORE_KEY = ".stignore"
+FLEET_PATH = "fleet.json"
+STIGNORE_PATH = ".stignore"
 # Mirrors envelope.MAX_SEQ / MAX_PARTS without a crypto import; T13 pins them equal.
 MAX_SEQ = 999_999_999_999
 MAX_PARTS = 512
@@ -117,7 +117,7 @@ def _fork(key: str) -> bool:
     except ValueError:
         return False
     original = match["stem"] + match["extension"]
-    if original == FLEET_KEY:
+    if original == FLEET_PATH:
         return True
     record = parse_record_key(original)
     return record is not None and record.kind == "commit"
@@ -133,7 +133,7 @@ def classify_keys(keys: Iterable[str]) -> KeyClassification:
         record = parse_record_key(key)
         if record is not None:
             records.append((key, record))
-        elif key in (FLEET_KEY, STIGNORE_KEY):
+        elif key in (FLEET_PATH, STIGNORE_PATH):
             controls.append(key)
         else:
             foreign.append(key)
