@@ -645,6 +645,21 @@ class TestRealStateWriteGuard:
             fsutil.atomic_write_bytes(path, b"allowed")
             assert path.read_bytes() == b"allowed"
 
+    # Value: protects=pwd account home, so a redirected HOME/Path.home mind-meld
+    # root stays writable; fails_when=the guard also classifies HOME or
+    # Path.home() and raises PytestRealStateWriteError; why_new=refuse tests
+    # catch replacing pwd, not unioning it with HOME; seam=none;
+    # no_claim=does not pin the open C1 agent-directory holes.
+    def test_redirected_home_env_is_not_an_account_root(self, synthetic_account_home, monkeypatch):
+        redirected = Path(os.environ["HOME"])
+        assert redirected != synthetic_account_home
+        monkeypatch.setattr(Path, "home", lambda: redirected)
+        path = redirected / ".config/mind-meld/state.json"
+        path.parent.mkdir(parents=True)
+        fsutil.atomic_write_bytes(path, b"allowed")
+        assert path.read_bytes() == b"allowed"
+        assert not (synthetic_account_home / ".config").exists()
+
     @pytest.mark.parametrize("alias", ["into", "out", "dangling", "root-out"])
     def test_stable_symlink_aliases_refuse_before_mutation(
         self, alias, synthetic_state_root, tmp_path, forbid_fs_mutations
@@ -851,6 +866,32 @@ class TestRealStateWriteGuard:
         _assert_guard_diagnostic(caught.value, path, "protected account-state path under")
         assert calls == [] and not synthetic_state_root.exists()
         assert not (synthetic_state_root.parent / "escape").exists()
+
+    # Value: protects=mkdir through a live symlink into an account root cannot
+    # create the in-root prefix when `..` normalizes the final path outside;
+    # fails_when=flock_append_jsonl creates `<root>/missing` or the guard
+    # returns; why_new=lexical dot-dot stays on the root spelling and
+    # symlink-into tests do not use `..`; seam=none; no_claim=not a concurrent
+    # symlink-swap sandbox.
+    def test_symlink_dot_dot_refuses_before_in_root_mkdir(
+        self, synthetic_account_home, forbid_fs_mutations
+    ):
+        root = synthetic_account_home / ".config/mind-meld"
+        root.mkdir(parents=True)
+        sentinel = root / "sentinel"
+        sentinel.write_bytes(b"keep")
+        alias = synthetic_account_home.parent / "alias"
+        alias.symlink_to(root, target_is_directory=True)
+        path = alias / "missing" / ".." / ".." / "escape" / "log.jsonl"
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.flock_append_jsonl(path, [b"{}"])
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
+        assert calls == []
+        assert sentinel.read_bytes() == b"keep"
+        assert not (root / "missing").exists()
+        assert not (synthetic_account_home / ".config" / "escape").exists()
+        assert alias.is_symlink()
 
     def test_regular_file_ancestor_keeps_native_errors(self, synthetic_account_home, tmp_path):
         """Nothing exists beneath a regular file, so helpers keep their own ENOTDIR result."""
