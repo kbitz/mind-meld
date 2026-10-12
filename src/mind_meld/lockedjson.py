@@ -75,8 +75,11 @@ def locked_json_durable_rmw(
     immutable once published, so its old-or-new snapshot is coherent without
     acquiring/creating the sibling lock. They do not claim writer exclusion.
     """
+    lock_path = path.with_name(path.name + ".lock")
+    fsutil.refuse_real_state_write_under_pytest(path)
+    fsutil.refuse_real_state_write_under_pytest(lock_path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(str(path.with_name(path.name + ".lock")), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     acquired = False
     try:
         acquired = _acquire_lock(
@@ -204,6 +207,7 @@ def locked_json_rmw(
     fast — so the dump dominates and hashing twice was net-negative.
     Always-write remains the default design for normal R/M/W callers.
     """
+    fsutil.refuse_real_state_write_under_pytest(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_CREAT, mode)
     is_locked = False

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld import lockedjson
+from mind_meld import fsutil, lockedjson
 from mind_meld.lockedjson import (
     LockContended,
     LockedJson,
@@ -109,8 +109,14 @@ class TestLockedJsonCorruption:
 
 
 class TestLockedJsonSnapshot:
-    def test_missing_snapshot_does_not_create_parent_or_file(self, tmp_path: Path) -> None:
-        path = tmp_path / "nested" / "cache.json"
+    def test_missing_snapshot_does_not_create_parent_or_file(
+        self, synthetic_state_root, monkeypatch, forbid_fs_mutations
+    ) -> None:
+        path = synthetic_state_root / "nested" / "cache.json"
+        monkeypatch.setattr(
+            fsutil.pwd, "getpwuid", lambda uid: pytest.fail("read-only account lookup")
+        )
+        calls = forbid_fs_mutations()
 
         with locked_json_snapshot(path) as snapshot:
             assert snapshot.state == "missing"
@@ -118,13 +124,21 @@ class TestLockedJsonSnapshot:
 
         assert not path.parent.exists()
         assert not path.exists()
+        assert calls == []
 
-    def test_snapshot_preserves_existing_cache_bytes_and_mode(self, tmp_path: Path) -> None:
-        path = tmp_path / "cache.json"
+    def test_snapshot_preserves_existing_cache_bytes_and_mode(
+        self, synthetic_state_root, monkeypatch, forbid_fs_mutations
+    ) -> None:
+        path = synthetic_state_root / "cache.json"
+        path.parent.mkdir(parents=True)
         original = b'{"files":{},"version":1,"unknown":"preserve me"}'
         path.write_bytes(original)
         path.chmod(0o640)
         before = path.stat()
+        monkeypatch.setattr(
+            fsutil.pwd, "getpwuid", lambda uid: pytest.fail("read-only account lookup")
+        )
+        calls = forbid_fs_mutations()
 
         with locked_json_snapshot(path) as snapshot:
             assert snapshot.state == "valid"
@@ -134,6 +148,8 @@ class TestLockedJsonSnapshot:
         assert path.read_bytes() == original
         assert after.st_mode & 0o777 == before.st_mode & 0o777
         assert after.st_mtime_ns == before.st_mtime_ns
+        assert after.st_ino == before.st_ino
+        assert calls == []
 
     @pytest.mark.parametrize(
         ("contents", "expected_state"),
@@ -314,3 +330,70 @@ class TestDurableJson67A:
                 locked.data["count"] = 2
                 raise RuntimeError("interrupted")
         assert path.read_bytes() == before
+
+
+class TestRealStateWriteGuard:
+    @pytest.mark.parametrize("protocol", ["ordinary", "durable"])
+    @pytest.mark.parametrize("exists", [False, True])
+    def test_rmw_refuses_before_parent_open_mode_or_context_entry(
+        self, protocol, exists, synthetic_state_root, forbid_fs_mutations
+    ):
+        path = synthetic_state_root / "parent" / "state.json"
+        if exists:
+            path.parent.mkdir(parents=True, mode=0o750)
+            path.write_bytes(b'{"keep":1}')
+            path.chmod(0o640)
+        before = path.stat() if exists else None
+        helper = locked_json_rmw if protocol == "ordinary" else lockedjson.locked_json_durable_rmw
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            with helper(path) as locked:
+                locked.write_on_exit = False
+                pytest.fail("a would-be read-only RMW must refuse before entering its context")
+        assert calls == []
+        if exists:
+            assert path.stat() == before and path.read_bytes() == b'{"keep":1}'
+        else:
+            assert not path.exists() and not path.parent.exists()
+        assert not path.with_name(path.name + ".lock").exists()
+
+    @pytest.mark.parametrize("protocol", ["ordinary", "durable"])
+    def test_rmw_dot_dot_out_of_missing_root_refuses_before_mkdir(
+        self, protocol, synthetic_state_root, forbid_fs_mutations
+    ):
+        """Recursive mkdir creates `<root>/missing` although `..` normalizes it away."""
+        synthetic_state_root.parent.mkdir(parents=True, exist_ok=True)
+        path = synthetic_state_root / "missing" / ".." / ".." / "escape" / "state.json"
+        helper = locked_json_rmw if protocol == "ordinary" else lockedjson.locked_json_durable_rmw
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            with helper(path):
+                pytest.fail("traversal out of a protected root must refuse before mkdir")
+        assert "protected account-state path under" in str(caught.value)
+        assert caught.value.__cause__ is None
+        assert calls == [] and not synthetic_state_root.exists()
+        assert not (synthetic_state_root.parent / "escape").exists()
+
+    def test_durable_rmw_checks_dangling_sibling_lock_alias(
+        self, synthetic_state_root, tmp_path, forbid_fs_mutations
+    ):
+        path = tmp_path / "allowed" / "history.json"
+        path.parent.mkdir(mode=0o750)
+        target = synthetic_state_root / "missing" / "lock-target"
+        lock = path.with_name(path.name + ".lock")
+        lock.symlink_to(target)
+
+        # Linux relatime may bump a symlink's atime when the guard follows it.
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns, info.st_ctime_ns)
+
+        before = (identity(path.parent.stat()), identity(lock.lstat()))
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            with lockedjson.locked_json_durable_rmw(path):
+                pytest.fail("the sibling lock alias must refuse before context entry")
+        assert str(lock) in str(caught.value) and caught.value.__cause__ is None
+        assert "protected account-state path or alias under" in str(caught.value)
+        assert calls == [] and (identity(path.parent.stat()), identity(lock.lstat())) == before
+        assert not path.exists() and not target.exists() and not target.parent.exists()
+        assert lock.is_symlink() and lock.readlink() == target

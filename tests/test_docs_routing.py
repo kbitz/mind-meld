@@ -532,6 +532,12 @@ def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     )
 
 
+def test_todos_inbox_keeps_its_heading() -> None:
+    """The roadmap drain reads this heading. A rename hides new inbox items."""
+    todos = (ROOT / "docs/TODOS.md").read_text(encoding="utf-8")
+    assert any(line.strip() == "## Unprocessed" for line in todos.splitlines())
+
+
 def test_every_changelog_version_has_a_progress_row() -> None:
     """Every released version appears in docs/PROGRESS.md.
 
@@ -548,7 +554,7 @@ def test_every_changelog_version_has_a_progress_row() -> None:
     it costs nothing at release time.
     """
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    progress = (ROOT / "docs" / "PROGRESS.md").read_text(encoding="utf-8")
+    progress = (ROOT / "docs/PROGRESS.md").read_text(encoding="utf-8")
 
     released = re.findall(r"^## \[(\d+\.\d+\.\d+(?:\.\d+)?)\]", changelog, re.M)
     assert len(released) > 20, "CHANGELOG parse found suspiciously few releases"

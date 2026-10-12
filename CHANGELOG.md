@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.7.1] - 2026-10-11
+
+**Pytest can no longer write this Mac's real Mind Meld account state through the shared write helpers.** A test that reaches `~/.config/mind-meld`, the iCloud store, `~/Sync/mind-meld`, or `~/.local/share/mind-meld` stops before the helper creates or changes anything, and names the test and the path. `mm` itself is unchanged: the check runs only while pytest is running.
+
+### Fixed
+
+- Shared write helpers refuse those four account roots under pytest, including a symlink that points into one and a `..` path that would still create a folder inside it. A redirected `HOME` is not treated as the account. Writes outside those roots still proceed.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes.
+
 ## [1.7.0] - 2026-10-09
 
 **Cursor runs that Conductor 0.90.1 keeps in SQLite now show up in the fleet Agents table, and `mm status` and `mm diag` name stores this mm cannot read.** After `mm update`, those runs are counted once alongside legacy Conductor JSONL and standalone CLI runs. Totals can rise: backfilled and migrated runs, and counter-bearing cancelled, errored, or expired runs, come in, and an errored run is dated by its update time. An older mm still cannot read the stores and may drop the local metadata that protects retained SQLite counters.
