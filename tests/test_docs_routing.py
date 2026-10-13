@@ -33,6 +33,7 @@ from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
 from mind_meld import errors, upgrade
+from mind_meld.config import DEFAULT_SOURCES
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "mind_meld"
@@ -76,6 +77,26 @@ def _markdown_tokens(text: str) -> list[Token]:
     dropped first: CommonMark would read `[^1]: text` as a link reference."""
     tokens = _MARKDOWN.parse(_FOOTNOTE_DEFINITION.sub("", text))
     return tokens + [child for token in tokens for child in token.children or []]
+
+
+@pytest.mark.parametrize(
+    ("doc", "heading", "level"),
+    [
+        ("README.md", "### Syncing gstack", 3),
+        ("docs/invariants/sync.md", "## exclude_patterns + consumer-boundary filter", 2),
+    ],
+)
+def test_gstack_default_excludes_are_documented72b(doc, heading, level):
+    text = (ROOT / doc).read_text(encoding="utf-8")
+    section = re.search(
+        rf"^{re.escape(heading)}[^\n]*\n(.*?)(?=^#{{1,{level}}} |\Z)",
+        text,
+        re.M | re.S,
+    )
+    assert section is not None, f"Missing {heading} in {doc}"
+    tokens = {t.content for t in _markdown_tokens(section[1]) if t.type == "code_inline"}
+    patterns = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")["exclude_patterns"]
+    assert set(patterns) <= tokens, f"{doc} missing {set(patterns) - tokens}"
 
 
 def _exists_exact(path: Path) -> bool:

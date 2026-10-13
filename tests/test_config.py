@@ -7,6 +7,7 @@ import pytest
 
 from mind_meld.config import (
     _GENERATED_HOST_SKILL_GLOBS,
+    _GSTACK_GENERATOR_GLOBS,
     DEFAULT_SOURCES,
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
     HOST_USAGE_BUDGET_MAX_MS,
@@ -23,6 +24,113 @@ from mind_meld.config import (
     save_config,
 )
 from mind_meld.errors import ConfigError, SnapshotError
+from mind_meld.manifest import _is_excluded
+
+
+class TestGstackGeneratorExcludes72B:
+    def test_default_order_and_retained_categories(self):
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        patterns = gstack["exclude_patterns"]
+        assert patterns == [
+            "config.yaml",
+            "projects/*/repo-mode.json",
+            "projects/*/land-deploy-confirmed",
+            "analytics/.last-sync-*",
+            "projects/*/decisions.active.json",
+            "projects/*/brain-cache/*",
+            "projects/*/pair-review/session.yaml",
+            *_GSTACK_GENERATOR_GLOBS,
+        ]
+        assert patterns is not _GSTACK_GENERATOR_GLOBS
+        for omitted in (
+            "*/node_modules/*",
+            "*.tar*",
+            "tools",
+            "fixture",
+            "fixtures",
+            "compact-snapshots",
+            "ranking-summaries",
+        ):
+            assert not any(omitted in p for p in patterns)
+
+    @pytest.mark.parametrize(
+        ("glob", "rel"),
+        [
+            # Measured 2026-10-13 path shapes, with neutral project slugs.
+            ("projects/*/venv/*", "projects/acme/wheel-20260906/venv/pyvenv.cfg"),
+            ("projects/*/*.app/*", "projects/acme/spikes/artifacts/Spike.app/Contents/Info.plist"),
+            (
+                "projects/*/.qa-evidence/*",
+                "projects/acme/review/qa/.qa-evidence/001/observation.json",
+            ),
+            ("*.zip", "projects/acme/usage/redacted-screenshots.zip"),
+            ("*.tar", "projects/acme/review-and-prep/track-71c-uncommitted-20261011T201606Z.tar"),
+            (
+                "*.tar.xz",
+                "projects/acme/spikes/artifacts/Spike.app/Contents/Resources/payload.tar.xz",
+            ),
+            (
+                "*.whl",
+                "projects/acme/review-and-prep/live-acceptance/wheels/mind_meld-1.5.1-py3-none-any.whl",
+            ),
+            (
+                "*.so",
+                "projects/acme/wheel-20260906/venv/lib/python3.11/"
+                "site-packages/_cffi_backend.cpython-311-darwin.so",
+            ),
+            (
+                "*.dylib",
+                "projects/acme/spikes/artifacts/Spike.app/Contents/Frameworks/"
+                "X.framework/Versions/A/Libraries/libEGL.dylib",
+            ),
+            (
+                "*.pak",
+                "projects/acme/spikes/artifacts/Spike.app/Contents/Frameworks/"
+                "X.framework/Versions/A/Resources/resources.pak",
+            ),
+            # Synthetic: these six shapes had no measured match on this Mac.
+            ("projects/*/.venv/*", "projects/acme/tool/.venv/bin/python"),
+            ("*.tgz", "projects/acme/x.tgz"),
+            ("*.tar.gz", "projects/acme/x.tar.gz"),
+            ("*.tar.bz2", "projects/acme/x.tar.bz2"),
+            ("*.tar.zst", "projects/acme/x.tar.zst"),
+            ("*.dmg", "projects/acme/x.dmg"),
+        ],
+    )
+    def test_each_glob_matches_its_path_shape(self, glob, rel):
+        import fnmatch
+
+        assert glob in _GSTACK_GENERATOR_GLOBS
+        assert fnmatch.fnmatchcase(rel, glob)
+
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "projects/acme/decisions.jsonl",
+            "projects/acme/checkpoints/x.md",
+            "projects/acme/ceo-plans/x.md",
+            "projects/acme/pair-review/report.md",
+            "projects/acme/release.targets.md",
+            "projects/acme/notes.tar.md",
+            "projects/acme/tooling/x.md",
+            "projects/acme/fixtures.md",
+            "retros/x.md",
+            "projects/acme/deno-source/cli/tools/desktop.rs",
+            "projects/acme/probe/tests/fixtures/cases.json",
+            "projects/acme/review-and-prep/run/compact-snapshots/run-1/receipt.json",
+            "projects/acme/review-and-prep/run/ranking-summaries/summary.json",
+            "projects/venv/ceo-plans/x.md",
+            "projects/Foo.app/decisions.jsonl",
+            "projects/acme/x.ZIP",
+        ],
+    )
+    def test_retained_paths_reach_the_walker(self, rel):
+        patterns = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")["exclude_patterns"]
+        assert not _is_excluded(rel, patterns)
+
+    def test_node_modules_is_already_globally_excluded(self):
+        patterns = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")["exclude_patterns"]
+        assert _is_excluded("projects/acme/web/node_modules/x/index.js", patterns)
 
 
 class TestValidation:

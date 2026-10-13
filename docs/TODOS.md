@@ -50,6 +50,24 @@ here by hand, use the H3 form.
 - **Priority:** P1
 - **Context:** Deferred from plan: ~/.gstack/projects/kbitz-mind-meld/track-71b-autoplan-20261011.md (SHA-256 e4183a763f11fe4aef1423544660a455c1c94fee91365882e98b79bdc01cbcc9). Decision D4, 2026-10-11.
 
+### [manual] Report the largest synced subtrees in 2.0 status/diag
+- **Why:** the 72B trim was measured with an ad hoc read-only script twice (2026-10-11, 2026-10-12); new bulk under new names stays invisible until someone re-measures, and 2.0 snapshots carry every synced byte.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Track 72B autoplan, CEO E1 (deferred: SPEC freezes 1.x except the trim; 2.0 status/diag owns it). `mm sources` already shows per-source Excluded counts but no sizes. Trigger: the pre-cutover re-measure needs another ad hoc script.
+
+### [manual] Re-measure the gstack set at cutover step 1
+- **Why:** default globs are name-based; trees written after 2026-10-13 under other names will land in every 2.0 snapshot.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 72B autoplan, CEO E3. Reader-check any kept tree over about 20 MB sealed before adding a glob. Baselines 2026-10-12 on the measured Mac: a defect-candidates runs tree 101.5 MB raw / 22.5 MB sealed; `kbitz-mind-meld/gate-diff` 24.1 MB raw. 1.x is frozen, so any further glob lands only in 2.0 defaults. Method: walk `~/.gstack/{projects,analytics,retros}` with the walker's global EXCLUDED list and current gstack globs, gzip each file at the default level for sealed size, prune nested checkouts.
+
+### [manual] Choose a 2.0 mechanism that ends ad hoc gstack glob batches
+- **Why:** each trim is a new list of directory names; reviewers flagged the 72B list as whack-a-mole and found real source and fixtures under generic names.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Track 72B autoplan (CEO native M5, Codex H2). Candidates with kept-set numbers from 2026-10-12: writer-side routing of bulky scratch out of `~/.gstack` (upstream of mm), an allowlist by artifact kind inside gstack, a reported skip for large files under O3's partial-sync reporting, a generic skip marker like `.extend-root`. Trigger: a third ad hoc glob batch for gstack scratch trees.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-11
