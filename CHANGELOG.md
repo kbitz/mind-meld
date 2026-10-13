@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.8.0] - 2026-10-13
+
+**gstack sync now leaves generated environments, app bundles, archives, binaries and QA evidence on each Mac, while continuing to sync project notes, source, fixtures and review receipts.** Explicit source configs adopt 16 new default exclusions with `mm migrate-config`; implicit configs adopt them on update. Publishing the smaller manifest creates no tombstones and leaves every Mac's local copies in place.
+
+### Changed
+
+- The gstack defaults exclude virtualenvs, app bundles and QA evidence inside projects, plus archives and binaries anywhere in the source. Directory matching preserves project slugs such as `venv` and `Foo.app`; extension matching is case-sensitive. Source, fixtures and review receipts remain in scope.
+- Config migration explains exclusions before showing the glob changes. A direct successful exclusions write points to `mm push` and `mm status`; previews, no-ops and retirement-only migrations omit that instruction.
+
+### Upgrade notes
+
+- Before the release tag, back up `~/.config/mind-meld/pull-history.jsonl*` on every active Mac. Until every active Mac migrates and pushes, attended pulls can log thousands of excluded peer files and rotate earlier history away.
+- On every active Mac, update and confirm `mm --version` reports 1.8.0, inspect `mm sources`, run `mm migrate-config` for explicit source configs, then `mm push` and `mm status` before the next attended pull on any Mac. Implicit configs report nothing to migrate. The first trimmed push's deleted count describes manifest entries; no local file is deleted. Follow the [README checklist](README.md#v180-scope-trim).
+- A migrated explicit config keeps the added globs after a rollback unless they are removed by hand. Pinned installs stay pinned; an install tracking `@latest` can update again unless automatic installation is disabled. No wire or storage format changes.
+
 ## [1.7.3] - 2026-10-12
 
 **Adds the 2.0 store format's building blocks, inert in this release: nothing in `mm` calls them yet, so no command, flag, or synced storage changes.** The new `mind_meld.store` package defines the plaintext fleet header, the encrypted version 0x03 record envelope, and the commit, snapshot and presence codecs for the planned Syncthing store. They are unit-tested and stay unused until later releases wire them in.
