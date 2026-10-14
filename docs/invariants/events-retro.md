@@ -359,9 +359,12 @@ pass.
 
 *Muse copies count once or refuse (load-bearing).* Cross-log dedup covers
 every live log, and a day whose steps are shared with another live day
-never freezes. A frozen day keeps its step-key prefixes while any live
-session, or one created later (dated today − 1 at the earliest, west of
-UTC), could accept a copy of its steps under the step-lead rule; a live
+never freezes. A frozen day keeps its step-key prefixes while a session
+still being written (a live day with a log modified within
+`_MUSE_SETTLE_IDLE_NS`, or one created later, dated today − 1 at the
+earliest, west of UTC) could accept a copy of its steps under the step-lead
+rule, and a day freezing past that point stores none; an idle live day
+holds no keys open, so a copy pair that stays live cannot pin them; a live
 step matching a held prefix unfreezes that day so the dedup sees both
 copies. Once its newest step is older than every such session accepts, the
 day drops its keys, and a copy of it breaks the step-lead rule: a step
@@ -375,7 +378,9 @@ pin it.
 
 *Unconsented Muse is not walked.* `mm diag` counts session logs
 (`muse_usage_diag(count_logs=True)`) only for an enabled `muse` source;
-otherwise `files_on_disk` is null. `mm status` stats `sessions/` only for
+otherwise `files_on_disk` is null. `mm status` and recapture use the
+cache-only view (`reader_usage_diag`), since the count walks every day
+directory. `mm status` stats `sessions/` only for
 the opt-in nudge, and not at all when `muse` is in `disabled_sources` or
 already enabled. No path opens a session log without consent. (Grok's diag
 count and status probe predate this rule.)

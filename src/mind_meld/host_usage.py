@@ -2090,11 +2090,10 @@ HOST_READER_DIAGS = {
 
 def reader_usage_diag(reader: str) -> dict[str, Any]:
     # Resolve at call time so patching the owner still reaches every consumer.
-    function = globals()[HOST_READER_DIAGS[reader].function]
-    # Every caller here already holds the reader's consent (status: publication
-    # readers; recapture: consented readers), so Muse may count its logs.
-    # ``mm diag`` calls ``muse_usage_diag`` directly with its own consent bit.
-    return function(count_logs=True) if reader == "muse" else function()
+    # Muse's on-disk count walks every day directory (no calendar floor), so
+    # status and recapture use its cache-only view; ``mm diag`` calls
+    # ``muse_usage_diag(count_logs=...)`` directly with its own consent bit.
+    return globals()[HOST_READER_DIAGS[reader].function]()
 
 
 def reader_cache_cold(reader: str, state: dict[str, Any]) -> bool:
@@ -3234,7 +3233,8 @@ opened just after local midnight east of UTC records the previous UTC day.
 Anything earlier is history copied into a new session."""
 _MUSE_KEY_PREFIX = 16
 """Hex characters of a step key a frozen day keeps for copy detection (64 bits;
-a collision only costs an extra unfreeze and re-read, never a wrong total)."""
+a collision only costs an unfreeze and re-read, repeated each pass while it
+lasts, never a wrong total)."""
 _MUSE_MAX_FROZEN_LOGS = 1_000_000
 
 
@@ -3507,14 +3507,21 @@ def _scan_muse_root(
                     return _incomplete("unsupported"), staged, frozen, learned, True
                 owners.setdefault(turn["key"], set()).add(rel)
 
-    # A live session dated D accepts steps from D - _MUSE_STEP_LEAD_DAYS on,
-    # and a session created later is dated today - 1 at the earliest (west of
-    # UTC). A frozen day whose newest step is older than every such session
-    # accepts can never be copied undetected, so it drops its keys.
-    oldest_live = min(
-        [today - timedelta(days=1)] + [_muse_dir_date(rel) or today for rel in live_dirs]
-    )
-    copyable_from = (oldest_live - timedelta(days=_MUSE_STEP_LEAD_DAYS)).isoformat()
+    # A session dated D accepts steps from D - _MUSE_STEP_LEAD_DAYS on. Copies
+    # land in sessions still being written: live days with a recent log, or a
+    # session created later (dated today - 1 at the earliest, west of UTC).
+    # An idle live day is no more open to copies than a frozen one, so it
+    # does not hold keys open. A frozen day whose newest step is older than
+    # every such session accepts drops its keys (and a day freezing below
+    # stores none).
+    idle_before = int(now.timestamp() * 1_000_000_000) - _MUSE_SETTLE_IDLE_NS
+    active_dates = [
+        _muse_dir_date(rel) or today
+        for rel, keys in live_dirs.items()
+        if any(staged[key]["mtime_ns"] > idle_before for key in keys)
+    ]
+    oldest_open = min([today - timedelta(days=1), *active_dates])
+    copyable_from = (oldest_open - timedelta(days=_MUSE_STEP_LEAD_DAYS)).isoformat()
     for rel, record in list(kept.items()):
         if record["keys"] and max(record["days"], default="") < copyable_from:
             kept[rel] = {**record, "keys": []}
@@ -3534,7 +3541,6 @@ def _scan_muse_root(
         partial_days=frozenset(partial),
     )
 
-    idle_before = int(now.timestamp() * 1_000_000_000) - _MUSE_SETTLE_IDLE_NS
     freezing: dict[str, None] = {}
     for rel, keys in live_dirs.items():
         when = _muse_dir_date(rel)
@@ -3551,7 +3557,10 @@ def _scan_muse_root(
     for rel in freezing:
         keys = live_dirs[rel]
         entries = [staged[key] for key in keys]
-        kept[rel] = _freeze_muse_day(entries, {log_paths[key]: staged[key] for key in keys}, 0)
+        record = _freeze_muse_day(entries, {log_paths[key]: staged[key] for key in keys}, 0)
+        if max(record["days"], default="") < copyable_from:
+            record["keys"] = []
+        kept[rel] = record
         for key in keys:
             del staged[key]
         learned = True

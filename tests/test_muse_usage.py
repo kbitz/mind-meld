@@ -743,3 +743,28 @@ def test_frozen_keys_drop_once_no_session_can_accept_a_copy(muse_cache, tmp_path
     refused = hu.read_muse_usage(tmp_path, consented=True)  # the step-lead rule refuses
     assert not refused.complete
     assert refused.reason == "unsupported"
+
+
+def test_idle_live_days_do_not_hold_frozen_keys_open(muse_cache, tmp_path):
+    """An idle live pair (a detected copy that never freezes) must not pin key retention."""
+    shared = _record("pair", _usage(), at=datetime(2026, 3, 1, 23, tzinfo=timezone.utc))
+    for day in ("2026/03/01", "2026/03/02"):
+        _age(_write_session(tmp_path, [shared], day=day), timedelta(days=200))
+    for index, day in enumerate(("2026/10/01", "2026/10/05", "2026/10/10")):
+        _settled_session(tmp_path, f"k{index}", day)
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    frozen = _cache(muse_cache)["frozen"]
+    assert set(frozen) == {"2026/10/01", "2026/10/05", "2026/10/10"}  # the pair stays live
+    # First read over old history stores no keys: nothing open can accept a copy.
+    assert all(record["keys"] == [] for record in frozen.values())
+    assert result.hosts["other"]["2026-03-01"]["input"] == 60  # the pair counts once
+
+
+def test_status_diag_path_never_walks_muse_sessions(muse_cache, tmp_path, monkeypatch):
+    """Without a floor the on-disk count walks all history: only mm diag pays for it."""
+    _write_session(tmp_path, [_record("e1", _usage())])
+    monkeypatch.setattr(hu, "MUSE_SESSIONS_PATH", tmp_path)
+    monkeypatch.setattr(hu, "_count_muse_ledgers", Mock(side_effect=AssertionError("walked")))
+    hu.read_muse_usage(tmp_path, consented=True)
+    assert hu.reader_usage_diag("muse")["files_on_disk"] is None
