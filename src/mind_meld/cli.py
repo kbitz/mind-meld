@@ -8746,10 +8746,10 @@ def _explicit_opencode_source_present(sources: list[dict] | None) -> bool:
     return any(s.get("name") == "opencode" for s in sources)
 
 
-def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
+def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
     """Body of `mm migrate-config`. Extracted so the interactive
     `_maybe_prompt_migration` can call it directly without going through
-    typer's option-parsing machinery.
+    typer's option-parsing machinery. Returns True only after writing exclusions.
     """
     config = _get_config(read_only=dry_run)
 
@@ -8762,7 +8762,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         )
         if dry_run:
             console.print(DRY_RUN_COMPLETE_LOCK_FREE)
-        return
+        return False
 
     diffs = _compute_recommended_excludes_diff(sources)
     retire_opencode = _explicit_opencode_source_present(sources)
@@ -8770,9 +8770,19 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         console.print("[green]Config is already up to date.[/green]")
         if dry_run:
             console.print(DRY_RUN_COMPLETE_LOCK_FREE)
-        return
+        return False
 
     if diffs:
+        explanation = "These globs stop per-machine caches and generated output from syncing"
+        if any(name == "gstack" for name, _missing, _current in diffs):
+            explanation += (
+                " (for gstack: virtualenvs, app bundles, archives and binaries, QA evidence)"
+            )
+        console.print(
+            f"\n{explanation}. Pushing publishes the smaller set: that push counts these files "
+            "as deleted from this Mac's manifest, writes no tombstones, and every Mac keeps "
+            "its copy. Removing a recommended glob later brings this prompt back."
+        )
         console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
         for name, missing, current in diffs:
             console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
@@ -8788,11 +8798,11 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
 
     if dry_run:
         console.print(DRY_RUN_COMPLETE_LOCK_FREE)
-        return
+        return False
 
     if not yes and not typer.confirm("\nApply these updates?", default=True):
         console.print("[yellow]Cancelled.[/yellow]")
-        return
+        return False
 
     try:
         acquire_lock()
@@ -8843,6 +8853,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> None:
         )
     finally:
         release_lock()
+    return bool(diffs)
 
 
 @app.command(name="migrate-config")
@@ -8865,7 +8876,11 @@ def migrate_config(
     Acquires the mm lockfile so a concurrent push/pull can't read a half-
     written config.
     """
-    _migrate_config_core(yes=yes, dry_run=dry_run)
+    if _migrate_config_core(yes=yes, dry_run=dry_run):
+        console.print(
+            "Run [bold]mm push[/bold] to publish the exclusions; until then [bold]mm status[/bold] "
+            "counts them as pending deletions. No Mac deletes its local copy."
+        )
 
 
 # ── install-skills ────────────────────────────────────────────────────
@@ -10318,10 +10333,6 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
         console.print(
             f"\n[yellow]Config is missing recommended exclude_patterns for "
             f"source(s):[/yellow] {', '.join(missing)}"
-        )
-        console.print(
-            "  These per-machine artifacts (e.g. gstack repo-mode caches) "
-            "produce churn on every pull when synced."
         )
     if retire_opencode:
         console.print(

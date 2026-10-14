@@ -130,6 +130,33 @@ _GENERATED_HOST_SKILL_GLOBS: list[str] = [
     "skills/review-apparatus/*",
 ]
 
+# Generator output measured 2026-10-11 (store-v2 P1 demand), re-measured
+# 2026-10-13 on device 889e42c0: about 30% of the gstack set's sealed bytes.
+# Exclusion writes no tombstones, so peers keep their copies. Anchor directory
+# globs under projects/*/ so a slug named venv or Foo.app stays in scope.
+# node_modules is already globally EXCLUDED; avoid *.tar* because fnmatch's *
+# crosses /. tools/, fixture(s)/ and review receipts stay in scope; see sync.md
+# "Bulk generator output" for the measurement and retained-content rationale.
+# Splat into a fresh list, as with _GENERATED_HOST_SKILL_GLOBS above.
+_GSTACK_GENERATOR_GLOBS: list[str] = [
+    "projects/*/venv/*",
+    "projects/*/.venv/*",
+    "projects/*/*.app/*",
+    "projects/*/.qa-evidence/*",
+    "*.zip",
+    "*.tar",
+    "*.tgz",
+    "*.tar.gz",
+    "*.tar.xz",
+    "*.tar.bz2",
+    "*.tar.zst",
+    "*.whl",
+    "*.so",
+    "*.dylib",
+    "*.pak",
+    "*.dmg",
+]
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
@@ -203,6 +230,7 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "projects/*/decisions.active.json",
             "projects/*/brain-cache/*",
             "projects/*/pair-review/session.yaml",
+            *_GSTACK_GENERATOR_GLOBS,
         ],
     },
     {

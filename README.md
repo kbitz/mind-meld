@@ -29,6 +29,43 @@ rely on their background update to bring a Mac current. Updating one Mac protect
 peer namespaces only from that Mac's GC; other arrival-order limitations of the
 1.x store remain.
 
+<a id="v180-scope-trim"></a>
+
+**v1.8.0:** gstack defaults exclude generated output. Complete this checklist
+on every active Mac before the next attended `mm pull` on any of them:
+
+1. Before the release lands on each Mac, copy its pull-history files aside.
+   A migrated Mac's attended pull can log about 8,000 excluded peer files,
+   rotating the 1 MB history and evicting earlier records until peers publish
+   their smaller manifests.
+2. Update each Mac and check `mm --version` (expect 1.8.0).
+3. Run `mm migrate-config`, then `mm push`. A Mac without explicit
+   `[[sync.sources]]` reports nothing to migrate; it already uses the new defaults.
+4. Run `mm status` on each Mac: no migration warning and no pending gstack deletions.
+
+```bash
+# Before v1.8.0 lands on each Mac:
+mkdir -p ~/mm-history-backup && cp ~/.config/mind-meld/pull-history.jsonl* ~/mm-history-backup/
+# On every active Mac before the next attended pull on any of them:
+mm update && mm --version
+mm migrate-config
+mm push
+mm status
+```
+
+The first push after migrating shows a red deleted count for the excluded
+files. This counts entries removed from this Mac's manifest: expected, no
+tombstones, and every Mac keeps its copies. A default-config Mac's autopush
+may already have printed `mm: pushed N files (N deleted)` for that trim;
+autopush removes no local files and never runs GC. Own storage reclamation
+needs an attended content-changing `mm push` or `mm gc`.
+
+Rollback: an install tracking `@latest` can reinstall the latest release on a
+later sync command unless `[upgrade] auto_install = false`; a tag-pinned
+rollback follows the exception under [Automatic updates](#automatic-updates).
+A migrated explicit config keeps these globs until removed by hand, which
+brings back the migration warning and attended prompt.
+
 **v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
 interoperate with no wire or storage migration. The
 [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x)
@@ -385,7 +422,24 @@ If `~/.gstack` is detected during `mm init`, it is automatically added as a sync
 
 - `include_dirs`: `projects/`, `analytics/`, `retros/`
 - `include_files`: `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
-- `exclude_patterns`: `config.yaml`, `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`, `analytics/.last-sync-*`, `projects/*/decisions.active.json`, `projects/*/brain-cache/*` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking; `analytics/.last-sync-*` are per-machine cursor files tracking each device's progress through gstack's local analytics jsonls; `decisions.active.json` is a derived one-line snapshot of `decisions.jsonl`, which **does** sync and merges cleanly, and gstack rebuilds the snapshot from it on demand; `brain-cache/` is gbrain's per-machine cache)
+- `exclude_patterns`, per-machine caches and state: `config.yaml`,
+  `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`,
+  `analytics/.last-sync-*`, `projects/*/decisions.active.json`,
+  `projects/*/brain-cache/*`, `projects/*/pair-review/session.yaml`.
+  These are version-check state, deploy markers, analytics cursors, derived
+  decisions, gbrain caches and the live pair-review state machine. The source
+  `decisions.jsonl` and pair-review prose reports stay in scope.
+- `exclude_patterns`, generated output: `projects/*/venv/*`,
+  `projects/*/.venv/*`, `projects/*/*.app/*`, `projects/*/.qa-evidence/*`,
+  `*.zip`, `*.tar`, `*.tgz`, `*.tar.gz`, `*.tar.xz`, `*.tar.bz2`, `*.tar.zst`,
+  `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`.
+
+The generated-output trim saves about 30% of the gstack set's sealed bytes on
+the measured Mac (a per-file proxy for 2.0 snapshots); in 1.x it means about
+23% fewer gstack manifest entries plus own storage reclaimed by an attended
+content-changing push's GC. [Measurement and matching caveats](docs/invariants/sync.md#bulk-generator-output).
+Those directory names are skipped at any depth inside a project; removing a
+default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
 
 This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
 
@@ -416,7 +470,9 @@ exclude_patterns = [
 ]
 ```
 
-Supplying `sync.sources` replaces the defaults wholesale — copy the full list, don't just add your extras. Run `mm sources` to confirm the resolved source list.
+Supplying `sync.sources` replaces the defaults wholesale — copy the full list,
+don't just add your extras, then run `mm migrate-config` to append the
+recommended globs. Run `mm sources` to confirm the resolved source list.
 
 **Useful flags:**
 
@@ -663,6 +719,13 @@ Managing conflicts:
 - `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
+
+### A gstack file doesn't reach my other Mac
+
+Check the [gstack default exclusions](#syncing-gstack) and run `mm sources`
+to inspect this Mac's selected sources and Excluded counts. Generated output
+is kept locally but omitted from sync; project notes, copied source, fixtures
+and review receipts remain in scope unless another exclusion applies.
 
 ### Another mm operation is running
 

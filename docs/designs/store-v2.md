@@ -447,7 +447,7 @@ SIZE limits when it turns these into cards.
 | Track | Delivers | Main files | Release | Size |
 |---|---|---|---|---|
 | **P0** Stop today's two hazards | `_do_gc` reaps only `data/<me>/`; the root-salt drift remedy stops saying "Re-run `mm init`" | `cli.py`, tests | 1.6.1 | S |
-| **P1** Trim sync scope | Default gstack `exclude_patterns` for generator trees (`*/venv/*`, `*/.venv/*`, `*/node_modules/*`, `*.app/*`, `*/tools/*`, `*/fixture/*`, `*/fixtures/*`, `*/.qa-evidence/*`) and archives or binaries (`*.zip`, `*.tar*`, `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`); `migrate-config` appends them; README | `config.py`, `cli.py`, README, tests | 1.6.x | S |
+| **P1** Trim sync scope | Track 72B's resolved 16-glob list: `projects/*/venv/*`, `projects/*/.venv/*`, `projects/*/*.app/*`, `projects/*/.qa-evidence/*`, `*.zip`, `*.tar`, `*.tgz`, `*.tar.gz`, `*.tar.xz`, `*.tar.bz2`, `*.tar.zst`, `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`; `migrate-config` appends them. `node_modules` is already globally excluded; `*.tar*` overmatches notes; `tools/` and `fixture(s)/` contain real source and fixtures, so those proposed globs were dropped. [Measurement](../invariants/sync.md#bulk-generator-output) | `config.py`, `cli.py`, README, tests | 1.8.0 | S |
 | **T1** Replication simulator | Fake Syncthing transport, device harness, state machine with invariants 1–6 (against stubs until T3–T5 land) | `tests/sim/` | 2.0 | M |
 | **T2** Local state DB | `statedb.py`: schema, migrations, history import, `mm log` on SQLite | `statedb.py`, `pullhistory.py`, `cli.py:log` | 2.0 | M |
 | **T3** Store format | `fleet.json`, envelope 0x03 with associated data, commit/snapshot/presence codecs, parts, strict layout parser | new `store/` package, `crypto.py` | 2.0 | M |
@@ -493,11 +493,13 @@ landings.
    *Recommended: yes.*
 5. **Relay** as a plain `receiveonly` Syncthing peer, not an untrusted
    device. *Recommended: yes*, when an always-on machine is available.
-6. **gstack review receipts.** The 455 MB of JSON receipts over 1 MiB are
-   machine-written, but a skill may read them on another Mac. Exclude
-   `*/compact-snapshots/*` and `*/ranking-summaries/*` in P1 only if no
-   skill resumes from them cross-machine. *Recommended: check the reader
-   first, then exclude.*
+6. **gstack review receipts: kept in scope (2026-10-13).** No skill reads or
+   writes `compact-snapshots/` or `ranking-summaries/`, but an active project's
+   notes cite the receipts as durable evidence. These names describe one
+   review run's directories rather than a generator class; Track 72B adds no
+   glob for them. Retire them by deleting that run's directory when its work
+   closes. The [bulk-output measurement](../invariants/sync.md#bulk-generator-output)
+   records the accepted trim separately from retained receipts.
 
 ## Considered and rejected
 
