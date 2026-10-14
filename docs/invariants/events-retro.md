@@ -1635,8 +1635,8 @@ sweep deadline before invocation) remain per-push stderr/breadcrumb signals.
 A no-op autopush may overwrite that breadcrumb with `success` without
 reading either host; a persisted blocker remains visible in status and diag.
 Attended push refreshes consented host usage even with no user-content changes;
-no-op autopush still performs no host reads. See README "Host usage capture (Codex and
-Grok)" for remedies and the three existing deferred-work TODOs.
+no-op autopush still performs no host reads. See README "Host usage capture (Codex,
+Grok, Cursor and Muse)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`

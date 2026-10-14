@@ -492,9 +492,9 @@ itself is present on every Grok install and is not consent. The default
 `muse` source (`type: "muse"`) has the same walker shape (`memory/` hardcoded
 at `~/.local/share/muse`, `.muse-memory.lock` excluded on push and pull) but
 never auto-activates: Muse creates `memory/` itself on first run, so neither
-the data root nor that tree is consent. Only `mm enable-source muse` or an
-explicit "y" at the init prompt (which defaults to N) adds it, and
-`reconfigure-sources` never defaults it on. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+the data root nor that tree is consent. Only `mm enable-source muse`, or an
+explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it.
+Both prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).

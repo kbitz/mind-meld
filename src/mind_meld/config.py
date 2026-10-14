@@ -625,7 +625,8 @@ def muse_memory_dir_exists(root: Path) -> bool:
     A label only ("detected" in the init and reconfigure prompts). It is
     never an activation or consent signal: Muse creates ``memory/`` itself
     on first run, so the default muse source activates only through
-    ``mm enable-source muse`` or an explicit "y" at the init prompt.
+    ``mm enable-source muse``, or an explicit "y" at the ``mm init`` or
+    ``mm reconfigure-sources`` prompt. Both prompts default to N.
     """
     from mind_meld.manifest import MUSE_SYNCED_SUBDIRS
 
@@ -775,7 +776,9 @@ def _configured_sources(
         # Muse never auto-activates. Muse creates memory/ itself on first
         # run (holding only its PID lock), so no tree under its root is a
         # consent signal, and an enabled source also authorizes the usage
-        # reader. Only `mm enable-source muse` or an init "y" adds it.
+        # reader. Only `mm enable-source muse`, or an explicit "y" at
+        # `mm init` or `mm reconfigure-sources`, adds it. Both prompts
+        # default to N.
         sources = [s for s in sources if s.get("type") != "muse" or s["name"] in disabled]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but

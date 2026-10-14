@@ -728,7 +728,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`grok`** — Claude-shaped walker. Scans `skills/`, `commands/`, and `rules/` at `~/.grok`. Sessions and `auth.json` are never synced.
-- **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. The default source never auto-activates: only `mm enable-source muse` or an explicit "y" at the `mm init` prompt adds it.
+- **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. The default source never auto-activates: only `mm enable-source muse`, or an explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it. Both prompts default to N.
 - **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
