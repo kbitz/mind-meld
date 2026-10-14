@@ -989,6 +989,146 @@ class TestPipxSeams:
                 killpg(proc.pid, signal.SIGKILL)
                 proc.wait(timeout=2)
 
+    @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGKILL])
+    def test_cleanup_reaps_exit_not_yet_visible_to_poll(
+        self, pipx_install, monkeypatch, tmp_path, stop_signal
+    ):
+        # Value: protects=the original drain error survives an exit not yet
+        # visible to poll; fails_when=cleanup trusts one poll or restarts the
+        # grace budget; why_new=the existing exit test reaps before refusal;
+        # seam=none; no_claim=installed pipx or native timing (owned child and
+        # controlled exit-visibility window).
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        pipx = _fake_pipx(tmp_path, "import time\ntime.sleep(30)\n")
+        children = []
+        popen = subprocess.Popen
+        killpg = os.killpg
+        injected = False
+        waits = []
+        polls = []
+        clock = [100.0]
+        monkeypatch.setattr(upgrade.time, "monotonic", lambda: clock[0])
+
+        def capture_child(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            children.append(proc)
+            return proc
+
+        def exit_pending_reap(pid, sig):
+            nonlocal injected
+            if sig == stop_signal and not injected:
+                injected = True
+                proc = children[0]
+                try:
+                    killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                # Force the kernel window observed on macOS without a timing
+                # dependency: nonblocking poll still says pending; wait reaps.
+                clock[0] += 0.25  # Half the existing stop budget is consumed.
+                polls.append(proc.poll)
+                wait = proc.wait
+
+                def pending_poll():
+                    return None
+
+                def reap_exit(*, timeout):
+                    waits.append(timeout)
+                    monkeypatch.setattr(proc, "poll", polls[0])
+                    return wait(timeout=timeout)
+
+                monkeypatch.setattr(proc, "poll", pending_poll)
+                monkeypatch.setattr(proc, "wait", reap_exit)
+                raise PermissionError(errno.EPERM, "exit pending reap")
+            return killpg(pid, sig)
+
+        def failing_drain(self, proc, timeout):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade.subprocess, "Popen", capture_child)
+        monkeypatch.setattr(upgrade.os, "killpg", exit_pending_reap)
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        try:
+            outcome = upgrade.run_update(
+                upgrade.detect_install(), pipx, on_progress=lambda state: None
+            )
+            assert injected
+            assert outcome.status == "failed"
+            assert "out of range" in outcome.detail
+            assert "exit pending reap" not in outcome.detail
+            assert waits and waits[0] == 0.25
+            assert children[0].returncode is not None
+        finally:
+            for proc in children:
+                if polls:
+                    monkeypatch.setattr(proc, "poll", polls[0])
+                if proc.poll() is None:
+                    try:
+                        killpg(proc.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass  # wait below still proves the owned child exits.
+                proc.wait(timeout=2)
+
+    def test_cleanup_permission_refusal_after_deadline_has_no_new_grace(
+        self, pipx_install, monkeypatch, tmp_path
+    ):
+        # Value: protects=an expired cleanup deadline never starts another grace;
+        # fails_when=a positive wait budget or signal retry follows an expired
+        # live-parent refusal; why_new=existing live-parent tests start with
+        # positive budgets; seam=none; no_claim=installed pipx or native timing
+        # (owned child and controlled monotonic clock).
+        pipx_install()
+        monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+        monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.5)
+        pipx = _fake_pipx(tmp_path, "import time\ntime.sleep(30)\n")
+        children = []
+        popen = subprocess.Popen
+        killpg = os.killpg
+        clock = [100.0]
+        waits = []
+        signals = []
+        monkeypatch.setattr(upgrade.time, "monotonic", lambda: clock[0])
+
+        def capture_child(*args, **kwargs):
+            proc = popen(*args, **kwargs)
+            children.append(proc)
+            wait = proc.wait
+
+            def track_wait(*, timeout):
+                waits.append(timeout)
+                return wait(timeout=timeout)
+
+            monkeypatch.setattr(proc, "wait", track_wait)
+            return proc
+
+        def refuse_after_deadline(pid, sig):
+            assert children[0].poll() is None
+            signals.append(sig)
+            clock[0] += 1.0
+            raise PermissionError(errno.EPERM, "live child signal refused")
+
+        def failing_drain(self, proc, timeout):
+            raise ValueError("filedescriptor out of range in select()")
+
+        monkeypatch.setattr(upgrade.subprocess, "Popen", capture_child)
+        monkeypatch.setattr(upgrade.os, "killpg", refuse_after_deadline)
+        monkeypatch.setattr(upgrade._PipxOutputStream, "communicate", failing_drain)
+        try:
+            outcome = upgrade.run_update(
+                upgrade.detect_install(), pipx, on_progress=lambda state: None
+            )
+            assert outcome.status == "failed"
+            assert "live child signal refused" in outcome.detail
+            assert waits == [0]
+            assert signals == [signal.SIGINT]
+            assert children[0].poll() is None
+        finally:
+            for proc in children:
+                killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+
     def test_cleanup_signal_retry_and_missing_group(self, pipx_install, monkeypatch, tmp_path):
         # Value: protects=a permission error on the cleanup retry still fails the
         # update, and a missing process group keeps the drain error;

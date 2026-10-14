@@ -11,6 +11,10 @@ All notable changes to Mind Meld will be documented in this file.
 - The gstack defaults exclude virtualenvs, app bundles and QA evidence inside projects, plus archives and binaries anywhere in the source. Directory matching preserves project slugs such as `venv` and `Foo.app`; extension matching is case-sensitive. Source, fixtures and review receipts remain in scope.
 - Config migration explains exclusions before showing the glob changes. A direct successful exclusions write points to `mm push` and `mm status`; previews, no-ops and retirement-only migrations omit that instruction.
 
+### Fixed
+
+- A failed `mm update` on macOS keeps its original error when the installer is still exiting during cleanup. Cleanup waits within its existing deadline before retrying the signal; a live installer or repeated permission refusal still reports failure.
+
 ### Upgrade notes
 
 - Before the release tag, back up `~/.config/mind-meld/pull-history.jsonl*` on every active Mac. Until every active Mac migrates and pushes, attended pulls can log thousands of excluded peer files and rotate earlier history away.
