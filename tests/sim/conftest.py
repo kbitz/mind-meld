@@ -27,11 +27,13 @@ def _lookup_write_guard(request):
 
 @pytest.fixture
 def sim_write_guard(request):
-    from .devices import MISSING_GUARD
-
     guard = _lookup_write_guard(request)
     if guard is None:
-        pytest.fail(MISSING_GUARD, pytrace=False)
+        pytest.fail(
+            "Cannot run simulator: Track 71B shared write-site guard is missing; "
+            "Fix: include its delivered API before bootstrap; see README#prerequisites",
+            pytrace=False,
+        )
     guard()
     return guard
 
@@ -61,3 +63,13 @@ def pytest_runtest_makereport(item, call):
         except Exception as error:  # Never mask the test's own failure.
             diagnostics = f"diagnostics unavailable: {error!r}"
         report.sections.append(("sim_fleet reproduction", diagnostics))
+
+
+@pytest.fixture
+def store_fleet(tmp_path, sim_write_guard, monkeypatch):
+    from mind_meld.store import format as codec
+
+    from .store_fleet import PART_BYTES, StoreFleet
+
+    monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
+    yield StoreFleet(tmp_path / "v2", write_guard=sim_write_guard).bootstrap()
