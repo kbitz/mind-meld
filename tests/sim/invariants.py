@@ -709,7 +709,7 @@ def inv7_quiescent(fleet):
                 )
 
 
-def observed_record(fleet, obs, peer, kind, seq, *, published=False):
+def observed_record(fleet, obs, peer, kind, seq, *, published=False, required=True):
     """Authenticate the observation's bytes, independently of model read/history."""
     keys = fleet.keys(fleet.devices[obs.device])
     trees = (
@@ -737,8 +737,10 @@ def observed_record(fleet, obs, peer, kind, seq, *, published=False):
             continue
         if isinstance(payload, bytes):
             decode = codec.decode_commit if kind == "commit" else codec.decode_snapshot
-            return decode(payload, expected=expected)
-    fail(fleet, 7, (peer, kind, seq), "applied history has no authenticated record")
+            return payload, decode(payload, expected=expected)
+    if required:
+        fail(fleet, 7, (peer, kind, seq), "applied history has no authenticated record")
+    return None
 
 
 def inv7_observed_inputs(fleet, obs):
@@ -753,8 +755,8 @@ def inv7_observed_inputs(fleet, obs):
         (s, p): (v.data, v.mtime_ns / 1_000_000_000)
         for (s, p), v in obs.sources_before[obs.device].items()
     }
-    cursors = {p: r["applied_seq"] for p, r in obs.before_state.cursors.items()}
-    own_records = set(obs.before_state.own_log)
+    cursors = {p: (r["applied_seq"], r["hash"]) for p, r in obs.before_state.cursors.items()}
+    own_records = {seq: r["hash"] for seq, r in obs.before_state.own_log.items()}
     identity = obs.before_identity
     bootstrap_pending = obs.operation == "join" and not obs.before_state.meta.get("joined")
     pending = []
@@ -766,6 +768,18 @@ def inv7_observed_inputs(fleet, obs):
 
     def wire_row(entry):
         return {**entry.metadata, "content": entry.content, "pending": False}
+
+    def anchor_hash(peer, seq):
+        for kind in ("commit", "snapshot"):
+            observed = observed_record(fleet, obs, peer, kind, seq, required=False)
+            if observed is not None:
+                payload, record = observed
+                return (
+                    hashlib.sha256(payload).hexdigest()
+                    if kind == "commit"
+                    else record.header["prev"]
+                )
+        return None
 
     for event in obs.history:
         operation = event.get("operation")
@@ -780,7 +794,7 @@ def inv7_observed_inputs(fleet, obs):
             )
             identity, bootstrap_pending = obs.identity, True
             ledger, cursors = {}, {}
-            own_records = set()
+            own_records = {}
         elif operation == "joined":
             require(
                 obs.operation in ("create_fleet", "join", "rejoin"),
@@ -793,14 +807,17 @@ def inv7_observed_inputs(fleet, obs):
             published = operation == "publish"
             peer = identity if published else event["peer"]
             kind = "commit" if published else event["kind"]
-            record = observed_record(fleet, obs, peer, kind, event["seq"], published=published)
+            payload, record = observed_record(
+                fleet, obs, peer, kind, event["seq"], published=published
+            )
+            digest = hashlib.sha256(payload).hexdigest()
             if kind == "commit":
                 if peer == identity:
-                    own_records.add(str(event["seq"]))
+                    own_records[str(event["seq"])] = digest
                     authored.extend((identity, entry) for entry in record.entries)
                 else:
                     require(
-                        event["seq"] == cursors.get(peer, 0) + 1,
+                        event["seq"] == cursors.get(peer, (0, None))[0] + 1,
                         (peer, event["seq"]),
                         "commit skipped a sequence without a covering snapshot",
                     )
@@ -918,13 +935,14 @@ def inv7_observed_inputs(fleet, obs):
                             files[key] = (result["content"], result["mtime"])
                 pending = []
                 bootstrap_pending = False
-            cursors[peer] = event["seq"]
+            cursors[peer] = (event["seq"], digest if kind == "commit" else record.header["prev"])
             if kind == "snapshot":
-                for other, seq in record.header["cursors"].items():
-                    cursors[other] = max(cursors.get(other, 0), seq)
+                for other, seq in sorted(record.header["cursors"].items()):
+                    if seq > cursors.get(other, (0, None))[0]:
+                        cursors[other] = (seq, anchor_hash(other, seq))
     require(not pending, obs.device, "classification without an applied record")
     require(
-        own_records == set(obs.state.own_log),
+        own_records == {seq: r["hash"] for seq, r in obs.state.own_log.items()},
         obs.device,
         "own log changed without authenticated record history",
     )
@@ -938,9 +956,16 @@ def inv7_observed_inputs(fleet, obs):
         for (s, p), v in obs.sources_after[obs.device].items()
     }
     require(files == actual_files, obs.device, "source effects differ from reconstructed history")
-    actual_cursors = {p: r["applied_seq"] for p, r in obs.state.cursors.items()}
+    actual_cursors = {p: (r["applied_seq"], r["hash"]) for p, r in obs.state.cursors.items()}
+    # An indirect snapshot cursor may acquire its missing anchor before a fork
+    # refusal, without applying another record. Only authenticated bytes can
+    # justify that hash-only transition; an established hash cannot change.
+    for peer, (seq, digest) in sorted(cursors.items()):
+        if seq and digest is None and actual_cursors.get(peer) != (seq, None):
+            cursors[peer] = (seq, anchor_hash(peer, seq))
     require(
-        {p: n for p, n in cursors.items() if n} == {p: n for p, n in actual_cursors.items() if n},
+        {p: value for p, value in cursors.items() if value != (0, None)}
+        == {p: value for p, value in actual_cursors.items() if value != (0, None)},
         obs.device,
         {"expected_cursors": cursors, "observed_cursors": actual_cursors},
     )

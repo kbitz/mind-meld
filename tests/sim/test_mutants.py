@@ -251,3 +251,45 @@ def test_same_sha_cannot_clear_pending_publication(store_fleet):
         f.action("c", "pull")
     assert seen == ["same-sha"]
     assert raised.value.invariant == 7
+
+
+@pytest.mark.parametrize(
+    "target,noop",
+    [
+        ("own-log", False),
+        ("own-cursor", False),
+        ("both", False),
+        ("peer-cursor", False),
+        ("own-log", True),
+        ("own-cursor", True),
+    ],
+)
+def test_saved_hash_mutant_is_detected(store_fleet, target, noop):
+    # Value: protects=authenticated chain state; fails_when=hash-only state
+    # corruption escapes INV7; why_new=existing checks compare only own-log
+    # keys and cursor sequences; seam=registry replacement plus FileState.
+    f = store_fleet
+    a = f.devices["a"]
+    a.edit("notes.txt", CONTENTS[1])
+    peer = target == "peer-cursor"
+    if peer or noop:
+        f.action("a", "push", attended=False)
+        f.drain()
+    piece = "read" if peer else "publish"
+    previous = f.registry[piece]
+
+    def corrupt_saved_hash(ctx, **kwargs):
+        result = previous.implementation(ctx, **kwargs)
+        with ctx.state.transaction() as state:
+            if target in ("own-log", "both"):
+                state.own_log["1"]["hash"] = "0" * 64
+            if target in ("own-cursor", "both", "peer-cursor"):
+                state.cursors[a.mm_id]["hash"] = "0" * 64
+        return result
+
+    f.registry[piece] = Piece(
+        corrupt_saved_hash, "model", previous.owner, "saved chain hash mutant"
+    )
+    with pytest.raises(InvariantError) as raised:
+        f.action("b" if peer else "a", "pull" if peer else "push", attended=False)
+    assert raised.value.invariant == 7
