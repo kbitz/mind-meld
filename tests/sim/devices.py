@@ -54,7 +54,8 @@ from mind_meld import (
 from mind_meld import devices as registry
 from mind_meld.storage.local import LocalBackend
 
-from .transport import FakeTransport, File, Index, device_name, owned_path, read_tree
+from .disk import Snapshot, _rmtree, copy_snapshot, discard_backup
+from .transport import FakeTransport, device_name, owned_path, read_tree
 
 PASSPHRASE = "simulated-fleet-test-passphrase"
 MEMORY_KB = 1024
@@ -70,17 +71,6 @@ MISSING_GUARD = (
 
 def _offline_fetch(*args, **kwargs):
     raise urllib.error.URLError("network disabled in the simulator")
-
-
-def _rmtree(path: Path) -> None:
-    """Remove a fixture copy whose restored directory modes may be read-only."""
-    os.chmod(path, 0o700)
-    for directory, children, _ in os.walk(path):
-        for child in children:
-            target = os.path.join(directory, child)
-            if not os.path.islink(target):  # chmod would follow it out of the copy.
-                os.chmod(target, 0o700)
-    shutil.rmtree(path)
 
 
 def inventory(root: Path) -> dict:
@@ -112,18 +102,6 @@ def inventory(root: Path) -> dict:
 
     walk(root)
     return result
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    owner: str
-    root: Path
-    files: tuple[tuple[str, File], ...]
-    directories: tuple[tuple[str, int], ...]  # Relative name and mode.
-    root_mode: int
-    index: Index
-    hardware_id: str
-    mm_id: str
 
 
 @dataclass(frozen=True)
@@ -557,77 +535,11 @@ class SimFleet:
         )
 
     def _copy_snapshot(self, snapshot: Snapshot, destination: Path) -> Path | None:
-        """Install the disk; returns a backup to discard once the index is committed."""
-        # Validate all source/destination names before any destructive action.
-        owned_path(self.root, destination.relative_to(self.root).as_posix())
-        for relative, _ in snapshot.files:
-            owned_path(destination, relative)
-        for relative, _ in snapshot.directories:
-            owned_path(destination, relative)
-        if destination.exists():
-            read_tree(destination)
-        stage = self.root / f".mm-tmp-copy-{destination.name}"
-        backup = self.root / f".mm-tmp-backup-{destination.name}"
-        for path in (stage, backup):
-            if path.exists() or path.is_symlink():
-                raise ValueError(
-                    f"Copy staging occupied at {path}: "
-                    "remove fixture staging before retrying; see README#lifecycle"
-                )
-        try:
-            stage.mkdir()
-            for relative, _ in snapshot.directories:
-                owned_path(stage, relative).mkdir(parents=True, exist_ok=True)
-            for relative, file in snapshot.files:
-                target = owned_path(stage, relative)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(file.data)
-                os.chmod(target, file.mode)
-                os.utime(target, ns=(file.mtime_ns, file.mtime_ns))
-            # Children before parents, so a read-only parent is applied last.
-            for relative, mode in reversed(snapshot.directories):
-                os.chmod(owned_path(stage, relative), mode)
-            os.chmod(stage, snapshot.root_mode)
-            if destination.exists():
-                os.replace(destination, backup)
-            try:
-                os.replace(stage, destination)
-            except OSError as error:
-                if backup.exists():
-                    try:
-                        os.replace(backup, destination)
-                    except OSError as rollback:
-                        error.add_note(
-                            f"Rollback also failed: {rollback}; saved disk remains at {backup}"
-                        )
-                raise
-        except OSError as error:
-            error.add_note(
-                f"Copying device {snapshot.owner} to {destination}; "
-                "repair I/O and retry; see README#lifecycle"
-            )
-            if stage.exists():
-                try:
-                    _rmtree(stage)
-                except OSError as cleanup:
-                    error.add_note(
-                        f"Staging cleanup failed: {cleanup}; remove {stage} before retry"
-                    )
-            raise
-        return backup if backup.exists() else None
+        return copy_snapshot(self.root, snapshot, destination)
 
     @staticmethod
     def _discard_backup(backup: Path | None) -> None:
-        if backup is None:
-            return
-        try:
-            _rmtree(backup)
-        except OSError as error:
-            error.add_note(
-                f"Disk and index are committed, but backup cleanup failed; "
-                f"remove {backup} before the next copy; see README#lifecycle"
-            )
-            raise
+        discard_backup(backup)
 
     def restore(self, device: SimDevice, snapshot: Snapshot, *, index_policy: str) -> None:
         self._idle(device, "restore")

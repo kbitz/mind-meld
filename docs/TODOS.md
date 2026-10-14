@@ -50,6 +50,78 @@ here by hand, use the H3 form.
 - **Priority:** P1
 - **Context:** Deferred from plan: ~/.gstack/projects/kbitz-mind-meld/track-71b-autoplan-20261011.md (SHA-256 e4183a763f11fe4aef1423544660a455c1c94fee91365882e98b79bdc01cbcc9). Decision D4, 2026-10-11.
 
+### [plan-eng-review:track=72A] 75A publish and presence must replace model pieces and supply the state seam
+- **Why:** V7/E12/E13/E25 require the first real publisher to supply a statedb-backed `read`/atomic `transaction` seam shared with remaining model pieces. Publish alone owns seq, `vv + me`, and the transaction containing ledger, own_log and history. A pending resolution must publish even with unchanged sha, then clear pending; fast-forward rows are not pending. Presence writes belong to 75A, including publish refreshes. Use directly callable injected state/clock/machine-id/replica/source/key entry points, without CliRunner or activation.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** Approved Track 72A plan (2026-10-13), V7/E12/E13/E25; `tests/sim/model/registry.py`, `state.py`, mixed-publish scenario. No database schema is promised by FileState. Replace publish/presence entries, keep remaining models on the same seam, run bounded and deep profiles, and record deep duration/result in the promotion handoff. SQLite/real-process interruption evidence remains required for the real publisher.
+
+### [plan-eng-review:track=72A] 76A must replace snapshot, compaction and own-storage reconciliation
+- **Why:** V7/E13 require real snapshot/compact/reconcile pieces behind the shared seam, directly callable with injected state, clock, machine id, roots and keys. Persist observations/history, retain write-once/own-namespace rules and add real crash-interruption scenarios. Model protocol stops do not establish SQLite transactions or actual process-crash safety.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** Registry owner 76A; `docs/designs/store-v2.md` §6/9. Run bounded and deep simulator profiles and record deep duration/result in the promotion handoff. Resolve owned gaps below; a passed model run is not acceptance of O1/O3/O5.
+
+### [plan-eng-review:track=72A] 77A must replace the peer reader behind observable injected entry points
+- **Why:** V7/E13 require real read behavior using the shared seam and persisted per-entry history so independent INV7 observes each pull action. Preserve gap/parts/ENOENT pending, unreadable warnings, snapshot cursor raising and hash-chain verification; supply state, clock, machine-id, replica/source roots and fleet keys without CliRunner or activation.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** Registry owner 77A, §6/9; snapshot-raised cursors lacking a hash wait for a complete anchor. Run bounded/deep, record duration/result in the promotion handoff, and qualify native transport separately.
+
+### [plan-eng-review:track=72A] 78A classification and resolution must honor the shared publication contract
+- **Why:** V7/E12/E13 require real classify/resolve entries and persisted pull-entry actions, directly callable with the injected seam, clock, machine id, roots and keys. Resolution writes `sha=resolved`, `vv=max(L,R)`, `pending=true`; it never owns the publish increment. Fast-forward clears pending, same-sha merges vectors without I/O and retains an existing publication obligation. Equal vectors with unequal sha are concurrent under the current model reading.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** §4; `tests/sim/test_scenarios.py` mixed publisher + third reader, independent INV7 and seeded mutants. A qualified pure core can be promoted with peer display names routed through safety; the model I/O shell cannot. Run bounded/deep and record duration/result in the promotion handoff; decide the non-UTF-8 gap below.
+
+### [plan-eng-review:track=72A] 80A fleet creation, join and rejoin must replace model registry entries
+- **Why:** V7/E13/E20 require directly callable create_fleet/join/rejoin with the shared seam, injected clock, live machine id, roots and keys. Join waits for fleet header and bootstraps from a complete peer snapshot; rejoin mints a fresh identity. Preserve clone timing checks and observable history; no model fallback under a real-labelled entry.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** §8/9; current freshest-snapshot reading is logical created_at then id/seq. Both restore variants remain acceptance blockers absent an owner decision. Run bounded/deep and record deep duration/result in the promotion handoff.
+
+### [plan-eng-review:track=72A] 81A retire and delivery status must preserve simulator ownership boundaries
+- **Why:** V7/E13/E25 require real retire behind an injected seam/clock/machine-id/roots/keys entry point. Prove 30-day eligibility and snapshot coverage, delete only the target namespace, and decide the meaning of every active device when a retiree remains alive. Delivery receipts and status belong here; presence writing belongs to 75A.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** §8, registry owner 81A. Keep persisted action observations, run bounded/deep and record deep duration/result in the promotion handoff. Simulator eligibility and logical time do not qualify native retirement operations.
+
+### [plan-eng-review:track=72A] 2.0.0 acceptance requires no model pieces and explicit gap disposition
+- **Why:** The approved V7 acceptance condition is zero model pieces and an empty or explicitly owner-accepted KNOWN_DESIGN_GAPS table. A green simulator with active gaps cannot establish SPEC O1/O3/O5. Real storage, native CI and the selected macOS/Linux Syncthing soak retain their separate gates under SPEC's release policy.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** Track 72A approval, `docs/SPEC.md` O1–O7/release policy; registry + strict gap table/terminal summaries. Each 75A–81A promotion must run deep and record duration/result. This inbox condition does not record achieved acceptance in PROGRESS or waive an owned design fix.
+
+### [plan-eng-review:track=72A] 81A must define active membership before retirement under delayed presence
+- **Why:** E23's active-device ambiguity has a confirmed O1.1 counterexample. A retire actor sees stale presence for an active peer and deletes a target namespace before that peer has covered it. The actor's snapshot carries the missing adopted state, but §6 prefers complete authored commits and does not load that snapshot once its seq is already applied; full delivery still leaves different files. INV1 remains unchanged.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** `KNOWN_DESIGN_GAPS['retire-delayed-presence']`, strict `test_gap_retire_delayed_active_presence`; §4 authored-only logs, §6 reader table, §8 coverage. Owner 81A with 76A/77A dependencies must define authoritative active membership/coverage or a recovery mechanism that preserves convergence. Random retirement retains fully delivered presence and covering snapshots. Registering this fifth gap preserves the four prior gaps and is not a risk waiver: owning-Track and 2.0.0 acceptance remain blocked absent an explicit owner disposition. Remove the pin/gate only with the accepted design fix; native retirement remains a separate gate.
+
+### [plan-eng-review:track=72A] Decide saved-policy restore fork recovery without losing a recoverable edit
+- **Why:** §4/9 rows 1/4 leave an edit stranded only as a readable peer record when rollback reuses seq and fork refusal excludes the owner. INV2 permits the record during execution but requires current/displaced/superseded recovery at quiescence. O1/O5 fail in the strict saved-restore regression.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** `KNOWN_DESIGN_GAPS['restore-saved']`, strict `test_gap_restore_saved`; dependent 75A/76A/78A/80A. UC2 approved a checkable INV6 and explicitly retained both restore pins, not a release waiver. Owning Track acceptance and 2.0.0 remain blocked absent a recorded owner decision; remove gate/xfail only with the accepted design fix.
+
+### [plan-eng-review:track=72A] Decide current-policy restore recovery after fleet-wide deletion and seq reuse
+- **Why:** §4/9 rows 1/4 permit rollback deletion to reach peers, followed by a reused seq without a conflict copy. Prev-chain mismatch refuses readers that saw the old commit, but remaining participants can retain divergent files. O1/O5 fail in the strict current-restore regression; INV2 still observes all device witnesses across the fork.
+- **Effort:** L
+- **Priority:** P1
+- **Context:** `KNOWN_DESIGN_GAPS['restore-current']`, strict `test_gap_restore_current`; dependent 75A/76A/78A/80A. UC2 approval retains this pin. Resolve or explicitly accept the gap before owning Track/2.0.0 acceptance; do not weaken INV1/2/6.
+
+### [plan-eng-review:track=72A] Preserve non-UTF-8 union bytes or obtain an explicit outcome decision
+- **Why:** §4's symmetric .jsonl/MEMORY.md resolution uses existing merge helpers that replace non-UTF-8 bytes. The independent lossless normalized-line oracle reports INV2 for both paths; O1.1 preservation is affected.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** `KNOWN_DESIGN_GAPS['non-utf8-union']`, strict parametrized `test_gap_non_utf8_union`, owner 78A. Random union-input cases alone are gated; the invariant remains unchanged. Model CI cannot accept the affected outcome until a design fix or explicit owner decision removes the blocker.
+
+### [plan-eng-review:track=72A] Specify recovery of a partial exclusively created own commit
+- **Why:** §1 write-once, §5 steps 4/5 and §9 row 1 specify full publication replay but no completion rule when a crash leaves k of n parts. Conservatively preserving existing parts leaves the sequence occupied and readers pending forever; strict `test_gap_partial_own_commit` fails INV1 after settle. O1/O3/O5 are affected.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** `KNOWN_DESIGN_GAPS['partial-own-commit']`, dependent 75A/76A; owner decision pending. Full-before-state replay and partial-snapshot scenarios remain enabled. Decide completion/cleanup semantics and add real crash evidence before owning Track or 2.0.0 acceptance; do not overwrite parts or relax convergence merely to green the model.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-11

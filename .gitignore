@@ -10,3 +10,5 @@ build/
 .pytest_cache/
 .context/
 .gstack/
+
+.hypothesis/
