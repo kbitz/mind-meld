@@ -815,7 +815,7 @@ class TestPipxSeams:
 
         def interrupted_progress(chunk):
             calls.append(chunk)
-            raise KeyboardInterrupt  # Ctrl-C delivered while the bar draws.
+            raise KeyboardInterrupt  # Ctrl-C delivered while the display draws.
 
         with pytest.raises(KeyboardInterrupt):
             upgrade._run_pipx(
@@ -2190,6 +2190,11 @@ def _flat(text: str) -> str:
 
 
 class TestUpdateCommand:
+    # Extended by the /ship test coverage audit (pass 1).
+    # Value: protects=completed installer counters leave the spinner visible through verification;
+    # fails_when=a completed phase counter prematurely finishes the Rich task;
+    # why_new=existing counters stop below completion and only check the Verifying label;
+    # seam=none; no_claim=real pipx acceptance (mocked installer and metadata; CLI rendering only)
     @pytest.mark.parametrize(
         "scenario",
         [
@@ -2202,7 +2207,7 @@ class TestUpdateCommand:
             "busy",
         ],
     )
-    def test_terminal_bar_tracks_installer_counters_without_forwarding_raw_output(
+    def test_terminal_display_tracks_installer_counters_without_forwarding_raw_output(
         self, pipx_install, monkeypatch, scenario
     ):
         venv = pipx_install()
@@ -2218,7 +2223,7 @@ class TestUpdateCommand:
             "\x1b[32m133.4/784.7 kB\x1b[0m\r"
             "532.5/784.7 kB\r"
             "Building wheel for mind-meld\nInstalling collected packages: mind-meld\n"
-            "1/3 [hypothesis]\r2/3 [mind-meld]\r"
+            "1/3 [hypothesis]\r2/3 [mind-meld]\r1/1 [mind-meld]\r"
         )
 
         def run(argv, *, on_output=None):
@@ -2241,11 +2246,13 @@ class TestUpdateCommand:
         output = terminal.getvalue()
         assert ("Updated mm" in output) == (scenario == "updated")
         assert result.stdout == ""
+        assert "━" not in output  # Spinner + step text; there is no bar.
         assert "PRIVATE_INSTALLER_DETAIL" not in output
         if scenario != "busy":
             assert "17.0%" in output and "67.9%" in output
             assert "33.3%" in output and "66.7%" in output
             assert "1/3 packages" in output and "2/3 packages" in output
+            assert "100.0% 1/1 packages" in output
             assert output.index("17.0%") < output.index("67.9%")
         final = {
             "updated": "Done",
@@ -2263,10 +2270,52 @@ class TestUpdateCommand:
         assert ("Verifying" in output) == verified
         if verified:
             assert output.rindex(final) > output.rindex("Verifying")
+            assert any(f"{frame} Verifying" in output for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
         assert ("Done" in output) == (scenario == "updated")
         assert "\x1b[?25h" in output
         lockfile.acquire_lock()
         lockfile.release_lock()
+
+    # Extended by the /ship test coverage audit (pass 1).
+    # Value: protects=phase-only updates never show an invented percentage, including Done;
+    # fails_when=synthetic task completion leaks 100.0% into terminal output;
+    # why_new=existing spinner assertions do not reject synthetic percentage text;
+    # seam=none; no_claim=real pipx acceptance (mocked installer and metadata; CLI rendering only)
+    def test_phase_only_update_shows_a_spinner_not_a_zero_percent_bar(
+        self, pipx_install, monkeypatch
+    ):
+        # A cached/small update streams phase labels only: pip reports no
+        # counters, so a bar can only sit at 0% until Done jumps it to 100%.
+        # The display must be a spinner plus the step text, never a bar.
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+        raw_output = (
+            "Cloning https://github.com/kbitz/mind-meld.git to /tmp/build\n"
+            "Building wheel for mind-meld (pyproject.toml) ... started\n"
+            "Installing collected packages: mind-meld\n"
+        )
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output(raw_output)
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout=raw_output)
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        output = terminal.getvalue()
+        assert "━" not in output
+        assert "%" not in output
+        assert any(frame in output for frame in "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+        for phase in ("Fetching source", "Building wheel", "Installing", "Verifying", "Done"):
+            assert phase in output
+        assert output.index("Fetching source") < output.index("Building wheel")
 
     def test_failed_update_prints_what_the_terminal_finally_showed(self, pipx_install, monkeypatch):
         pipx_install()
@@ -2297,7 +2346,7 @@ class TestUpdateCommand:
         assert "Update did not complete: ERROR: no matching distribution." in _flat(dump)
         assert "upgrading shared libraries" not in dump
 
-    def test_forced_color_on_a_pipe_runs_without_the_bar(self, pipx_install, monkeypatch):
+    def test_forced_color_on_a_pipe_runs_without_the_display(self, pipx_install, monkeypatch):
         venv = pipx_install()
         piped = StringIO()  # FORCE_COLOR / TTY_COMPATIBLE make Rich call this a terminal.
         monkeypatch.setattr(
@@ -2316,7 +2365,9 @@ class TestUpdateCommand:
         assert "Starting installer" not in piped.getvalue()
         assert "Updated mm 1.2.0 → 1.3.0." in piped.getvalue()
 
-    def test_bar_that_cannot_start_falls_back_to_a_plain_update(self, pipx_install, monkeypatch):
+    def test_display_that_cannot_start_falls_back_to_a_plain_update(
+        self, pipx_install, monkeypatch
+    ):
         venv = pipx_install()
 
         class FlakyTerminal(_TerminalBuffer):
@@ -2324,7 +2375,7 @@ class TestUpdateCommand:
 
             def write(self, text):
                 # EAGAIN is transient: Rich keeps the text and retries it later.
-                if "\x1b[?25l" in text and not self.failed:  # The bar hides the cursor.
+                if "\x1b[?25l" in text and not self.failed:  # The display hides the cursor.
                     self.failed = True
                     raise BlockingIOError(35, "Resource temporarily unavailable")
                 return super().write(text)
@@ -2348,7 +2399,7 @@ class TestUpdateCommand:
         assert calls == [None]
         assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
 
-    def test_bar_completes_when_github_is_unreachable_and_pipx_decides(
+    def test_display_completes_when_github_is_unreachable_and_pipx_decides(
         self, pipx_install, monkeypatch
     ):
         pipx_install()

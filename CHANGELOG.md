@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.8.2] - 2026-10-14
+
+**`mm update` in a terminal shows a spinner and the current step, instead of a bar that sat empty until it jumped to done.** When pip reports a real download or package count, that percentage still appears beside the step. Phases that report no count show the step name only.
+
+### Fixed
+
+- The terminal update display no longer invents a percentage for a phase that did not report one. A finished download count stays in the detail line and does not hide the spinner before verification finishes.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes. The next terminal `mm update` shows the spinner. Redirected output is unchanged.
+
 ## [1.8.1] - 2026-10-14
 
 **Installing 1.8.1 does not change how `mm` syncs.** The repository now carries an executable model of the planned store-v2 replication rules, used only by tests, so later store work can be checked before it ships in `mm`.
