@@ -37,6 +37,7 @@ from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
     Progress,
+    SpinnerColumn,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -9638,9 +9639,14 @@ def _print_update_current(install: upgrade.InstallInfo) -> None:
 def _run_update_with_progress(
     install: upgrade.InstallInfo, pipx: str, *, latest: str | None
 ) -> upgrade.UpdateOutcome:
-    """Render one bar from actual installer counters and phase changes.
+    """Render a spinner from actual installer counters and phase changes.
 
-    The bar is best-effort: a terminal that stops accepting writes never
+    No bar: most phases report no fraction, so a bar could only sit at 0%
+    until completion jumped it to 100%. The spinner shows activity, the
+    description names the current step, and the detail shows a counter's
+    real percentage when the installer reports one.
+
+    The display is best-effort: a terminal that stops accepting writes never
     changes the outcome or hides an interruption from `update`. Rich reports
     a closed pipe as SystemExit, so that counts as a display failure too.
     """
@@ -9649,24 +9655,24 @@ def _run_update_with_progress(
     if not (console.is_terminal and console.file.isatty()):
         return upgrade.run_update(install, pipx, latest=latest)
     progress = Progress(
+        SpinnerColumn(),
         TextColumn("{task.description}", markup=False),
-        BarColumn(bar_width=None),
         TextColumn("{task.fields[detail]}", markup=False),
         console=console,
-        expand=True,
         auto_refresh=False,
         redirect_stdout=False,
         redirect_stderr=False,
     )
     task = progress.add_task("Starting installer", total=1, detail="")
 
-    def render(state: updateprogress.UpdateProgress) -> None:
+    def render(state: updateprogress.UpdateProgress, *, complete: bool = False) -> None:
         measured = state.total is not None and state.completed is not None
         detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
         progress.update(
             task,
-            total=state.total if measured else 1,
-            completed=state.completed if measured else 0,
+            # Phase counters are detail only. Completing Rich's task would
+            # hide the spinner during later phases, including verification.
+            completed=1 if complete else 0,
             description=state.phase,
             detail=detail.rstrip(),
             refresh=True,
@@ -9674,7 +9680,7 @@ def _run_update_with_progress(
 
     def settle(phase: str, *, complete: bool = False) -> None:
         with suppress(Exception, SystemExit):
-            render(updateprogress.UpdateProgress(phase, *((1, 1) if complete else ())))
+            render(updateprogress.UpdateProgress(phase), complete=complete)
 
     try:
         progress.start()

@@ -1,6 +1,338 @@
 # Replication fixtures
 
+Start with the deterministic two-device **store-v2 model** smoke:
+
+```sh
+./bin/check tests/sim/test_scenarios.py::test_v2_smoke
+```
+
+Expected: one passing test and a terminal summary with Hypothesis 6.169.0,
+all twelve pieces labelled `model`, and the active design gaps. This uses
+real 71C codecs and envelope 0x03 with fixture keys; it establishes model
+behavior. It does not establish native Syncthing, SQLite, actual process
+crash, CI Keychain/wheel or live-soak acceptance. Cold first-process bootstrap
+and warm smoke timings are recorded separately in the implementation handoff.
+A dependency download is a separate setup cost, not a simulator step.
+
+## Store-v2 suite
+
+The existing portable CI job already includes this suite. No second job is
+needed. Hypothesis is pinned: a version bump belongs in its own PR, and new
+counterexamples need investigation rather than dismissal as tool drift.
+
+```sh
+# Bounded core, lifecycle, oracle clauses, mutants and deterministic scenarios.
+./bin/check tests/sim tests/test_docs_routing.py
+# One named scenario.
+./bin/check tests/sim/test_scenarios.py::test_edit_delete_then_redelete
+# Random deep search with the default example database.
+MM_SIM_DEEP=1 ./bin/check tests/sim/test_replication.py
+# Repeat a deep seed; bounded derandomization ignores seed selection.
+MM_SIM_DEEP=1 ./bin/check --serial tests/sim/test_replication.py -- --hypothesis-seed=417
+# Statistics and controller-side summary, including under xdist.
+./bin/check --serial tests/sim/test_replication.py -- --hypothesis-show-statistics
+```
+
+`MM_SIM_DEEP` accepts unset, `0`, or `1`; anything else fails with a one-line
+remedy inside the machine test. Settings are passed to
+`run_state_machine_as_test`, never globally loaded. `sim-bounded` inherits
+Hypothesis's `ci` profile: core 50 examples × 40 steps, lifecycle 30 × 50,
+derandomized, `print_blob=True`, no deadline, `too_slow` suppressed.
+`sim-deep` draws random seeds with 1000 × 100, the default database, and the
+same diagnostic settings. A bounded run does **not** replay deep failures.
+Executed constructors can exceed configured examples during shrinking or
+replay; summaries distinguish configured limits from actual examples and
+rule steps. Every run prints piece provenance and gaps. Machine summaries
+also print wall time, mean store-action cost and mean settle cost. The local
+60-second ceiling is report-only. Measure before tuning; lower examples
+before steps if the suite exceeds its three-minute CI budget. The initial
+60/40 example limits produced a 211.7-second scoped run under contention;
+measured action/settle costs justified reducing examples to 50/30 while
+retaining step limits, every reachability check and the deep budget.
+
+`CoreMachine` runs core rules first; `LifecycleMachine` adds join, retire,
+clone, rejoin, restore and protocol crash points. Each invocation accumulates
+hard-state reachability independently of the invariant checks. Missing states
+fail as `REACHABILITY`, naming macro rules, initialize witnesses or logical
+time jumps as remedies. At least half of lifecycle examples must settle with
+two participants; deterministic scenarios require at least two at quiescence.
+
+## V2 API
+
+`StoreFleet` is separate from the legacy `SimFleet`. It never imports the CLI
+or legacy harness. Its roots and write guard are explicit. `add_device` allocates
+local fixture storage and a fresh transport index; `join` is a store operation.
+Transport names are alphanumeric, identities are deterministic eight-hex
+values, and runs permit four devices and six total identities. The whole-run
+part cap is derived in [store_fleet.py](store_fleet.py) from the content/path,
+vector and cursor caps; snapshots remain below the 512-part format limit.
+
+| API / input | Result and effects | Clock |
+|---|---|---|
+| `StoreFleet(root, write_guard=guard).bootstrap()` | Create fleet once, deliver header, join A/B; no legacy config or records | Read logical now |
+| `fleet.add_device(name)` | Unjoined device, independent source/state/replica roots, fresh transport index | None |
+| `device.edit(path, bytes, mtime=None)` / `delete(path)` | User intent in the oracle, then source mutation; edits may reuse an old mtime | Read logical now |
+| `fleet.action(name, 'push'/'pull'/'publish_snapshot'/'compact', **flags)` | Outcome with status, seq, peer/gap, reason, warnings and hard states; persisted state/history and source/replica observations | Read logical now |
+| `fleet.action(name, 'join')` | Wait for header or bootstrap freshest complete peer snapshot, snapshot and pull | Read logical now |
+| `fleet.action(actor, 'retire', target=id)` | Pending unless age and active snapshot coverage qualify; remove target namespace only | Read logical now |
+| `fleet.rejoin(device)` | Allocate a fresh ID; registered rejoin owns the observed identity/state reset and bootstrap, preserving displaced/history | Read logical now |
+| `fleet.snapshot(device)` | Opaque local disk **backup**, including persisted state and index; requires idle device | None |
+| `fleet.restore(device, backup, index_policy='saved'/'current')` | Restore disk; reset saved index or retain current index; last-copy oracle exclusion is narrowly witnessed | None |
+| `fleet.clone(device, name)` | Copy disk/index/id, new live hardware identity; no legacy config | None |
+| `fleet.advance(seconds)` | Advance one logical seconds clock for every protocol time field | Explicit advance |
+| `fleet.transport.advance(seconds)` | Advance delivery scheduling only | Transport clock only |
+| `fleet.drain()` / `settle(fleet, min_participants=2)` | Bounded drain; settle finishes replacements, onlines all, passes delays, then push/drain/pull/drain rounds | Transport advance only |
+
+Every store action reconstructs its adapter from injected roots, state seam,
+keys, clock and live machine-id provider. Only unlocked keys keyed by the
+header bytes are cached in the model. File state commits ledger, own log and
+history atomically through one replacement; it promises seam operations, not
+a database schema or durability under power loss. Transport scans use a
+measured stat-signature fast path (inode, size, mtime, ctime and mode), with
+cache invalidation on index restore; observations read complete trees without
+transport ignores. Scans lstat children, reject even ignored symlinks and
+never follow them. This finite sequential fixture does not prove hostile
+filesystem rename-race safety.
+
+## Invariants
+
+Invariants 1–7 are enforced; 7 extends store-v2 §12. The independent oracle
+never imports model decisions or merge normalization. Its histories are not
+limited by the transport's 200-entry trace. All allocated devices remain
+possible preservation witnesses, including refused, unjoined and retired ones.
+Only joined, non-retired, non-refused devices participate in convergence.
+Unpublished edits on excluded devices remain local preservation obligations;
+they are not published fleet causal versions.
+
+| ID / name | Design / SPEC | When / checker | Primary mutant |
+|---|---|---|---|
+| INV1 convergence | §4/6/12; O1 | Quiescence / `inv1_convergence` | Drop later peer commit |
+| INV2 no-silent-loss | §4/9/12; O1/O5 | Every step + Q / `Oracle.check` | Overwrite unpublished edit; lose path while bytes survive elsewhere |
+| INV3 single-writer | §1/8/12; O4 | Every store action / `inv3_single_writer`, `replica_integrity` | Peer namespace write; plaintext/invalid envelope |
+| INV4 ordering-never-fails | §6/9/12; O3/O5 | Store observation / `inv4_ordering_never_fails` | Missing becomes error; refuse everything |
+| INV5 termination | §4/12; O1 | Settle bounded by 3 × participants + 2 / `settle` | Local-wins ping-pong |
+| INV6 fork-safety | §9/12; O5 | Store observation / `inv6_fork_safety` | Skip live host/fork checks |
+| INV7 causal-fidelity | §4; O1.1 | Every store observation + Q / `inv7_causal_fidelity`, `inv7_observed_inputs`, `inv7_quiescent` | Missing unpublished increment; forged history/effects; treat dominance as concurrent; resurrect tombstone |
+
+Same-sha actions merge vectors without source I/O. Equal vectors with different
+sha resolve concurrently and emit counter reuse. A pending resolution stores
+`vv=max(L,R)`; only its next publish increments `me`, even if bytes match the
+ledger sha. Fast-forwards clear pending. Store resolutions never count as user
+supersession. During execution a complete readable replica record can preserve
+an edit; at quiescence it must be current, displaced, expired after 30 days,
+or transitively user-superseded. Restore excludes a version only when the
+restored device had its last file/record/displaced witness and rollback removed
+it. Path and source identities always match. Complete authenticated conflict-copy
+families also count as transient records; incomplete or corrupt copies do not.
+Deleting an already absent file creates no phantom authored version. Expiry
+reachability requires an observed transition from retained bytes to an expired
+row at least 30 days old; an empty compaction earns no coverage.
+
+INV7 reconstructs local inputs from the before-ledger and source bytes, including
+the unpublished `+me`, then binds each classification to authenticated record
+entries. It threads multiple entries through the action and reconciles the final
+source, ledger and sequence cursors. Dropped classifications and forged results
+cannot pass by agreeing with their own history. Bootstrap inversion applies only
+to the initial snapshot of a fresh join/rejoin. Existing drop-later and path-loss
+mutants now trip INV7 earlier; their original INV1/INV2 clauses are independently
+checked on the same broken state.
+
+Replica audits authenticate canonical records and known fork signals. The
+transport can also produce encrypted presence/snapshot conflict copies,
+including nested copies. These must have the transport's exact conflict-name
+grammar and open under their original canonical record identity; they do not
+acquire commit/fleet fork semantics. Empty input is checked structurally;
+nonempty pool markers (at least 16 bytes) must never appear in replica bytes.
+
+## Known design gaps
+
+The authoritative table is [KNOWN_DESIGN_GAPS in invariants.py](invariants.py).
+Each row has a design section, SPEC outcome, dependent Tracks, owner decision,
+strict regression node and the exact randomly generated case it gates. The
+row/strict-xfail mapping is tested one to one. Both restore variants remain
+pinned following UC2 approval; approval of a checkable INV6 did not waive
+restore recovery. The current table also pins non-UTF-8 union loss and the
+unspecified completion of a partial own commit. A fifth gap pins retirement
+while an active peer's refreshed presence is delayed: local presence cannot
+establish the full active set, and a covering snapshot need not reach that peer
+through the gap-driven reader rule. Random retirement keeps E4's fully delivered,
+snapshot-covered precondition; the delayed-presence schedule is pinned separately.
+
+Only the designated boundary's checked invariant becomes `ExpectedDesignGap`;
+earlier or unrelated invariant failures cannot satisfy an xfail. A successful
+saved restore with peer redelivery and own-log replay has a separate deterministic
+witness. Random restore remains conservatively gated for both policies because
+later generated publication can occur before redelivery and enter the pinned
+divergence; this does not claim either restore design gap is repaired.
+
+Example row shape (the table itself remains the source of truth):
+
+```python
+"partial-own-commit": {
+    "section": "§1 write-once, §5 steps 4/5, §9 row 1",
+    "outcome": "O1/O3/O5", "tracks": "75A/76A",
+    "decision": "confirmed underspecified crash recovery; owner decision pending",
+    "node": "test_scenarios.py::test_gap_partial_own_commit",
+    "gates": "push crash after k of n parts with 0 < k < n",
+}
+```
+
+Triage first: a model/oracle bug gets a regression and a fix. A confirmed
+violation, silence or contradiction in store-v2 gets an unchanged invariant,
+a `strict=True` xfail constrained to the expected invariant, a named random
+precondition gate, and an inbox item in [docs/TODOS.md](../../docs/TODOS.md).
+Remove the gate and strict pin when the design fix lands. A gap blocks the
+owning Track's acceptance and 2.0.0 unless the owner records an explicit
+decision. Green model CI with nonempty gaps cannot accept SPEC O1, O3 or O5.
+
+Conservative readings, registered before search:
+
+- Partial own commit: do not overwrite any exclusively created part. A full
+  record before local state commit replays via §9; an incomplete occupied
+  sequence waits. The latter now has a confirmed strict gap. Partial snapshots
+  are not bootstrap candidates; complete commits still permit convergence.
+- A still-alive retiree must be inactive at least 30 days. Active means an
+  unretired presence newer than 30 days, plus the actor; every such device's
+  newest complete snapshot must cover the retiree's last advertised/named seq.
+  This local-presence reading now has a confirmed E23 gap: delayed refreshes can
+  omit an active peer. Its strict regression keeps INV1 unchanged and blocks
+  81A/2.0.0 acceptance pending a design decision, with 76A/77A dependencies.
+- Freshest complete peer snapshot means greatest logical `created_at`, then
+  device id and seq as deterministic ties. No ciphertext byte breaks a tie.
+- Before `fleet.json`, join/push waits; fork signals still take precedence.
+- Equal vv with unequal sha is concurrent, never dominance. It remains a
+  design question for §4/9 despite safe model classification.
+- Snapshots are write-once by own seq. Adopting a peer entry alone does not
+  overwrite an existing same-seq snapshot; retirement coverage requires a
+  genuinely newer snapshot. A snapshot raises other seq cursors, but without
+  their hashes a later commit waits for a complete chain anchor.
+- A corrupted own commit with a trusted own-log row stalls visibly; forced
+  snapshot may seal trusted current state. Without trusted state, the model
+  does not fabricate recovery. The deterministic corruption scenario propagates
+  corruption to the owner and asserts both its reaction and the remedy.
+
+## Failure replay
+
+All rule arguments are plain repr-able pool/device/choice indices and seconds.
+Paste the printed program into a **named deterministic regression before fixing
+it**, retain observations, and set scoped roots and guard. No manual import of
+`tests/conftest.py` is needed. Subagents or standalone runners must use a temp
+HOME. The ordinary pytest invocation obtains the existing isolation fixtures.
+For a replay blob or seed, decorate the no-argument factory with `reproduce_failure`
+or `seed`, then call `run_state_machine_as_test(..., settings=...)` under the
+same scoped context; a seed selects the deep profile only.
+
+```python
+def test_regression_example(tmp_path, sim_write_guard, monkeypatch):
+    from mind_meld.store import format as codec
+    from tests.sim.store_fleet import PART_BYTES
+    from tests.sim.test_replication import ACTIVE, Invocation, CoreMachine
+    monkeypatch.setattr(codec, 'MAX_PART_BYTES', PART_BYTES)
+    token = ACTIVE.set(Invocation(tmp_path / 'replay', sim_write_guard))
+    state = CoreMachine()
+    try:
+        # Replace these lines with the complete printed program.
+        state.core_witness(case=0)
+        state.observations_hold()
+        state.edit(device=0, path=0, content=1, old_mtime=False)
+        state.observations_hold()
+    finally:
+        try:
+            state.teardown()
+        finally:
+            ACTIVE.reset(token)
+```
+
+An annotated failure has this form:
+
+```text
+INV2 no-silent-loss store-v2 §4/9/12 O1/O5;
+subject=('claude', 'notes.txt', 7, 'a'); step=24;
+expected/observed={last_holders: [], path_history: [...], quiescent: true};
+last-moving piece=classify:real;
+next=fix the model; replay tests/sim/README.md#failure-replay;
+KNOWN_DESIGN_GAPS={...}; tests/sim/README.md#known-design-gaps
+```
+
+`subject` identifies source/path/authored event/device. The oracle's complete
+path history and last holders explain loss; per-pull evidence includes vectors,
+expected action, actual action and I/O. Refusal evidence compares the outcome
+with independent disk/live-host ground truth. If a mutant survives, its error
+names the invariant it was meant to kill. Unexpected invariant failures do not
+qualify as the expected strict design gap.
+
+## Replace a model piece
+
+[registry.py](model/registry.py) owns all twelve entries and their typed call
+contract. Collection validates signatures and provenance; real-labelled pieces
+must execute, with no model fallback. The seam offers `read()` and atomic
+`transaction()` over ledger, cursors, own log, displaced and persisted history.
+An adapter accepts state seam, clock, live machine-id provider, replica/source
+roots and fleet keys directly, without `CliRunner` or `activate()`.
+
+Read/reconcile/snapshot application writes one `record-applied` history receipt
+(`peer`, `kind`, `seq`) after its per-entry `pull-entry` rows, in the same state
+transaction as cursor advancement. INV7 authenticates that record, requires one
+classification per entry, and reconciles all cursor and own-log changes. Publish
+retains its `publish` receipt; these are checker inputs, never unchecked proof.
+Each `pull-entry` that writes or deletes source bytes records `writer` from
+`context.current_piece` (for example `classify:real`). After the action, the
+wrapper checks that label against the dispatched registry piece and records
+every checked write in the oracle, including intermediate writes and deletions.
+The last source writer supplies the diagnostic label; actions without source
+writes retain their execution trace. Causal checks still reconstruct inputs and
+compare persisted results with observed files before accepting write history;
+no model-to-oracle callback supplies observations.
+The registered rejoin receives `new_id`, persists `meta.device_id`, and records
+the old/new identities with the reset. The wrapper reads that field to adopt
+the identity and validate namespace writes; the harness only allocates the ID.
+All operations accept `context, **kwargs`; classify, resolve, retire and rejoin
+also have their explicit required keyword arguments validated at collection.
+
+| After Track | Pieces expected to be real, cumulatively |
+|---|---|
+| 75A | publish, presence; statedb-backed seam shared with remaining models |
+| 76A | + snapshot, compact, reconcile; real crash-interruption cases |
+| 77A | + read |
+| 78A | + classify, resolve; persisted per-entry actions, E12 resolution contract |
+| 80A | + create_fleet, join, rejoin |
+| 81A | + retire; delivery receipt/status work remains with 81A |
+
+Swap publish for real code (illustrative future interface; it does not exist
+in product code yet):
+
+```diff
++from mind_meld.store.publish import publish as real_publish
+ registry = default_registry()
+-registry['publish'] = Piece(model.publish, 'model', '75A', check)
++registry['publish'] = Piece(real_publish, 'real', '75A', check)
++fleet = StoreFleet(root, write_guard=guard, registry=registry,
++                   state_factory=SQLiteState)
+```
+
+The independent publisher fixture in
+[test_mixed_publish_transaction_then_third_device_model_pull](test_scenarios.py)
+seals real-shaped commits without calling model publish, commits pending-ledger
+increments/own log/history together, and lets model pull on a third device read
+the same seam. Its temporary `real` label tests dispatch, **not production
+implementation**. Default runs still report every piece as model. Every promotion
+runs bounded checks and deep search and records duration/result in its handoff.
+
+A test-side executable model provides decisions to test before store Tracks
+exist. Promoting its core now would ship unqualified behavior; a differential
+oracle has no independent real implementation to compare; exhaustive small-scope
+search would not cover these file-shaped crash/delivery histories at the stated
+caps. Later Tracks may promote pure core functions, after qualification, with
+peer names routed through `safety`. The I/O shell is never promoted. This suite
+makes no claim of cryptographic writer authentication; fleet-key holders can
+forge headers. SQLite transactions, real-process crash interruption, native
+Syncthing and the mixed-OS soak remain their respective implementation/acceptance
+gates. 2.0.0 needs zero model pieces and empty or explicitly owner-accepted gaps.
+
 ## Prerequisites
+
+The sections below describe the legacy 1.x CLI fixtures.
+
 
 Use a source checkout, Python 3.11+ and `./bin/check` (which installs the
 existing dev dependencies). No Syncthing daemon, network, OS keyring account
@@ -291,7 +623,7 @@ must add that check.
 ## Later owners and evidence
 
 71D supplies the apparatus for SPEC O1/O3. Track 72A owns Hypothesis and the
-six store invariants. Tracks 75A/77A adapt push/pull; 76A owns actual hardware,
+seven store invariants. Tracks 75A/77A adapt push/pull; 76A owns actual hardware,
 clone refusal and restore behavior; 80A replaces `_bootstrap_legacy`; 83A
 removes legacy wiring. The synthetic `hardware_id` is provisional fixture
 metadata until its actual product reader lands.

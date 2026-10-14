@@ -72,6 +72,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 
 | If you're editing… | READ FIRST |
 |---|---|
+| `tests/sim/` replication simulator, any change under `src/mind_meld/store/`, or a store adapter | [Replication fixtures](../../tests/sim/README.md) and `docs/invariants/store.md`; run `./bin/check tests/sim` |
 | `store/__init__.py` / `store/envelope.py:FleetKeys` / `RecordContext` / `create_fleet` / `unlock_fleet` / `seal_part` / `open_part` / `StoreError` | `docs/invariants/store.md` |
 | `store/format.py:Entry` / `Record` / `IncompleteParts` / `host_fingerprint` / `encode_commit` / `decode_commit` / `encode_snapshot` / `decode_snapshot` / `encode_presence` / `decode_presence` / `seal_record` / `open_record` | `docs/invariants/store.md` |
 | `store/layout.py:RecordName` / `KeyClassification` / `record_key` / `parse_record_key` / `classify_keys` | `docs/invariants/store.md` |

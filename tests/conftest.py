@@ -580,3 +580,31 @@ def cursor_store(tmp_path, monkeypatch):
     root = host_usage.CURSOR_STORE_PATH
     shutil.copytree(Path(__file__).parent / "fixtures/host_sessions/cursor", root)
     return root
+
+
+_SIM_SUMMARIES = {}
+
+
+def pytest_runtest_logreport(report):
+    if report.when in ("call", "teardown"):
+        for key, value in report.user_properties:
+            if key == "sim_summary":
+                _SIM_SUMMARIES[report.nodeid] = value
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminalreporter.section("store simulator: model evidence, not native acceptance")
+    for nodeid, value in sorted(_SIM_SUMMARIES.items()):
+        terminalreporter.write_line(nodeid + " " + value)
+
+    if not _SIM_SUMMARIES:
+        import hypothesis
+
+        from tests.sim.invariants import KNOWN_DESIGN_GAPS
+        from tests.sim.model.registry import default_registry
+
+        pieces = {k: v.kind for k, v in sorted(default_registry().items())}
+        terminalreporter.write_line(
+            f"Hypothesis {hypothesis.__version__}; profile=none; configured/executed "
+            f"examples=0/0 steps=0/0; wall=0s; pieces={pieces}; gaps={KNOWN_DESIGN_GAPS}"
+        )

@@ -448,3 +448,30 @@ def test_saved_index_rollback_keeps_unique_events_without_false_ancestry(transpo
     transport.deliver(queued)
     transport.deliver(choice(transport, new, "b"))
     assert set(contents(transport, "b").values()) == {b"undone", b"after restore"}
+
+
+def test_cached_scan_detects_same_mtime_same_size_rewrite(transport):
+    write(transport, "a", b"first", mtime=EPOCH)
+    assert transport.scan("a") == ()
+    target = transport.roots["a"] / "note.md"
+    target.write_bytes(b"other")
+    os.utime(target, (EPOCH, EPOCH))
+    (event,) = transport.scan("a")
+    assert transport.events[event].file.data == b"other"
+    assert transport.scan("a") == ()
+
+
+def test_cached_scan_still_rejects_symlinks_and_restore_invalidates(transport):
+    write(transport, "a", b"first")
+    index = transport.index("a")
+    target = transport.roots["a"] / "note.md"
+    target.unlink()
+    target.symlink_to(transport.roots["b"])
+    with pytest.raises(ValueError, match="symlink"):
+        transport.scan("a")
+    target.unlink()
+    target.write_bytes(b"restored")
+    transport.restore_index("a", index)
+    assert "a" not in transport._scan_cache
+    (event,) = transport.scan("a")
+    assert transport.events[event].file.data == b"restored"
