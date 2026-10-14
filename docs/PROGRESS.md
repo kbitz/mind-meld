@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.8.2 | 2026-10-14 | **`mm update` in a terminal shows a spinner and the current step, instead of a bar that sat empty until it jumped to done.** When pip reports a real download or package count, that percentage still appears beside the step. Phases that report no count show the step name only. |
 | 1.8.1 | 2026-10-14 | **Installing 1.8.1 does not change how `mm` syncs.** The repository now carries an executable model of the planned store-v2 replication rules, used only by tests, so later store work can be checked before it ships in `mm`. |
 | 1.8.0 | 2026-10-14 | **gstack sync now leaves generated environments, app bundles, archives, binaries and QA evidence on each Mac, while continuing to sync project notes, source, fixtures and review receipts.** Explicit source configs adopt 16 new default exclusions with `mm migrate-config`; implicit configs adopt them on update. Publishing the smaller manifest creates no tombstones and leaves every Mac's local copies in place. |
 | 1.7.3 | 2026-10-12 | **Adds the 2.0 store format's building blocks, inert in this release: nothing in `mm` calls them yet, so no command, flag, or synced storage changes.** The new `mind_meld.store` package defines the plaintext fleet header, the encrypted version 0x03 record envelope, and the commit, snapshot and presence codecs for the planned Syncthing store. They are unit-tested and stay unused until later releases wire them in. |
