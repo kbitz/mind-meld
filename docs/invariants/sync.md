@@ -201,7 +201,7 @@ unchecked `os.write`, plain `os.fsync` (not `F_FULLFSYNC`), no parent flush, and
 a stranded temp on a raw write/flush `OSError`. Its consumers are
 `devices.py:register_device` and `crypto.py:bootstrap_crypto_init`. Ordinary
 `lockedjson.py:locked_json_rmw` / `_write_json` forensic caches (identity,
-upgrade, token usage, Codex/Grok host usage), `seen_sources` in-place flock
+upgrade, token usage, Codex/Grok/Muse host usage), `seen_sources` in-place flock
 writes, `fsutil.py:flock_append_jsonl` and the Cursor completion spool's
 `fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` (an fsynced append and a
 rename-aside rotation; between them they call `_fsync_fd` and `fsync_dir`
@@ -542,7 +542,7 @@ The `_prompt_source_toggle(source, *, current_state)` helper (extracted from
 `_prompt_sources` in v0.10.0) is the single source of truth for the per-source
 Y/N prompt copy + default rule. `_prompt_sources` (init) and
 `reconfigure_sources` both call it; `mm init`'s default-Y-on-path-exists
-behavior is preserved.
+behavior is preserved, except that Muse always defaults to N (see above).
 
 **`has_explicit_sources` gates on key presence, not list truthiness (Track 61A
 pre-landing review).** `enable_source`'s `currently_active` check and
@@ -619,11 +619,11 @@ Defense-in-depth: `_download_and_apply` ALSO checks `local_path.resolve(strict=F
 
 ## Symlink policy at the manifest and apply boundaries (load-bearing, v0.12.17)
 
-Symlinks **below** a source root are local routing, not synced content. Strict publishing scans omit descendant symlinks for Claude, generic, and Grok; a symlinked source root remains allowed. Prior-state filtering suppresses those omissions for all three types before deletion proof so a converted link is not tombstoned. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links. An unavailable symlink/privacy probe refuses rather than becoming an intentional omission.
+Symlinks **below** a source root are local routing, not synced content. Strict publishing scans omit descendant symlinks for Claude, generic, Grok, and Muse; a symlinked source root remains allowed. Prior-state filtering suppresses those omissions for all four types before deletion proof so a converted link is not tombstoned. The source root itself may be a symlink: users can locate an entire source through a link, and resolving that root remains valid. Do not weaken the rel-path traversal defense to admit child links. An unavailable symlink/privacy probe refuses rather than becoming an intentional omission.
 
-The Grok walker is stricter still: it rejects a candidate whose inode has more
-than one link. A hard link to `auth.json` or a session transcript inside an
-allowlisted `skills/` path has no symlink component, but would otherwise evade
+The Grok and Muse walkers are stricter still: each rejects a candidate whose
+inode has more than one link. A hard link to `auth.json` or a session transcript
+inside an allowlisted `skills/` or Muse `memory/` path has no symlink component, but would otherwise evade
 the scoped-source privacy boundary. Do not replace this conservative refusal
 with an inode-path search that can race the filesystem walk.
 

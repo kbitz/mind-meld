@@ -348,15 +348,17 @@ first; newest first among equals) while their estimated cost
 reserve (`_MUSE_TAIL_RESERVE_S` plus `_MUSE_TAIL_STEP_COST_S` per live step);
 a day that does not fit is skipped, and a deadline inside a check stops
 checking without failing the pass and sends that day to the back of the
-queue, so an attended push
-re-checks every frozen day (~345 ms at 90 days of ~100 logs) and an
-autopush checks what fits; a digest mismatch (a resumed, pruned, moved or
+queue. With enough budget every frozen day is re-checked (about 400 ms for
+90 days of ~100 logs, measured on a synthetic corpus); an attended push
+checks what its share of the 500 ms budget allows and the rest over later
+pushes, and an autopush checks what fits; a digest mismatch (a resumed, pruned, moved or
 new log) unfreezes that day and re-reads it; (4) directories older than
 `MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS` calendar days are never walked; a
 frozen day past that floor is kept only while one of its days is among
 Muse's own `MAX_BY_DAY_DAYS` most recent active days — exactly the Muse
 days the wire, which keeps the most recent active days across all readers,
-can carry — and a frozen day inside the floor is never evicted. Freezing,
+can carry — and a frozen day inside the floor is evicted only when its
+directory is gone. Freezing,
 checking and eviction commit only with a complete pass. Cross-log dedup
 spans live logs; a day whose steps are shared with another live day never
 freezes; frozen days carry totals, not keys. A step recorded more than
@@ -1061,7 +1063,7 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex and Grok Build ledgers and Cursor
+  overlap: `host_usage` reads Codex, Grok Build and Muse ledgers and Cursor
   (Conductor runs plus enrolled standalone completions), never Claude Code's
   own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.
@@ -1652,7 +1654,7 @@ attended push, tail and backfill; no duplicated warm path.
 **Attended push refreshes usage; previews never capture (64A amendment).**
 A real attended `mm push` refreshes consented readers even when user content is
 already in sync. `_push_core(attended=True)` resolves sources once under the
-mm lock, recovers the prior Grok source, then captures before `build_manifest_v2`.
+mm lock, recovers the prior Grok and Muse sources, then captures before `build_manifest_v2`.
 The pure prerequisite check uses the final sources and keeps unavailable custom
 mm-events roots distinct from disabled ones. Prerequisites unmet means skip and
 continue ordinary content sync. An unreadable config or failed source scan is
@@ -2153,7 +2155,7 @@ The budget lever ships, so these measurements document headroom rather than
 gate merge. Remeasure on each producing Mac/version before changing its budget.
 
 **Tests must never read a real host store.** `conftest._isolate_host_usage`
-redirects every reader root (Codex live and archived, Grok, Cursor) and all three
+redirects every reader root (Codex live and archived, Grok, Cursor, Muse) and all four
 caches per test; tests needing data monkeypatch the reader functions. Without
 it the suite's result would depend on which agents are installed on the machine
 running it — a developer

@@ -1293,7 +1293,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` to stop the corresponding source reader. A retry alone cannot fix it. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |

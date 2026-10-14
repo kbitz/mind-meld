@@ -921,7 +921,7 @@ def _filter_symlinked_paths(
     manifest at this consumer boundary prevents that omission from minting a
     fleet-wide deletion tombstone, including for pre-migration explicit source
     configurations that do not yet carry the new default exclude globs.
-    Applies to Claude, generic, and Grok sources. Entries and tombstones under
+    Applies to every source type (Claude, generic, Grok, Muse). Entries and tombstones under
     ``exempt_roots`` (frozen nested checkouts) are kept without probing.
     """
     exempt = {name: sorted(roots) for name, roots in (exempt_roots or {}).items()}
