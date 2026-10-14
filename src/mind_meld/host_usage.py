@@ -3224,8 +3224,9 @@ _MUSE_VERIFY_LOG_COST_S = 50e-6
 Frozen days are checked, least recently checked first, while their summed
 estimate fits the budget left after ``_MUSE_TAIL_RESERVE_S``; a day that
 does not fit is skipped, not waited on, and a day whose check runs out of
-time moves to the back of the queue. An attended push (500 ms) re-checks
-every frozen day; an autopush (50 ms grace) checks what fits."""
+time moves to the back of the queue. With enough budget every frozen day is
+re-checked (~400 ms for 90 days of ~100 logs); an attended push checks what
+its share of the 500 ms budget allows, an autopush what fits in its grace."""
 _MUSE_STEP_LEAD_DAYS = 1
 """How many UTC days a step may precede its session directory's date.
 
@@ -3893,8 +3894,8 @@ def _muse_turn_from_record(record: Any, dir_date: date) -> tuple[str, dict[str, 
     # One envelope is one step, so the model stays OUT of the key: a repeated
     # id with a different model must reach the ``existing == turn`` check and
     # refuse, not count twice. Not session-scoped either; see _scan_muse_root.
-    key = hashlib.sha256(f"muse\0{envelope_id}".encode()).hexdigest()
-    return key, {"key": key, "day": day, "model": model, "usage": counters}, partial
+    step_id = hashlib.sha256(f"muse\0{envelope_id}".encode()).hexdigest()
+    return step_id, {"key": step_id, "day": day, "model": model, "usage": counters}, partial
 
 
 def _validate_muse_counters(usage: dict[str, Any]) -> tuple[Usage, bool]:
