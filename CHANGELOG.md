@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [1.8.0] - 2026-10-13
+## [1.8.0] - 2026-10-14
 
 **gstack sync now leaves generated environments, app bundles, archives, binaries and QA evidence on each Mac, while continuing to sync project notes, source, fixtures and review receipts.** Explicit source configs adopt 16 new default exclusions with `mm migrate-config`; implicit configs adopt them on update. Publishing the smaller manifest creates no tombstones and leaves every Mac's local copies in place.
 
