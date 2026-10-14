@@ -48,6 +48,44 @@ PASSPHRASE = "integration-test-passphrase"
 MEMORY_KB = 1024  # Low for fast tests
 runner = CliRunner()
 
+# Track 72B: one distinct synthetic file per generator glob, including overlap-
+# free archive/binary paths so directory exclusion cannot mask a missing glob.
+_GENERATOR_PATHS72B = (
+    "projects/acme/tool/venv/pyvenv.cfg",
+    "projects/acme/tool/.venv/bin/python",
+    "projects/acme/tool/Spike.app/Contents/Info.plist",
+    "projects/acme/qa/.qa-evidence/001/observation.json",
+    "projects/acme/artifacts/x.zip",
+    "projects/acme/artifacts/x.tar",
+    "projects/acme/artifacts/x.tgz",
+    "projects/acme/artifacts/x.tar.gz",
+    "projects/acme/artifacts/x.tar.xz",
+    "projects/acme/artifacts/x.tar.bz2",
+    "projects/acme/artifacts/x.tar.zst",
+    "projects/acme/artifacts/x.whl",
+    "projects/acme/artifacts/x.so",
+    "projects/acme/artifacts/x.dylib",
+    "projects/acme/artifacts/x.pak",
+    "projects/acme/artifacts/x.dmg",
+)
+_KEPT_PATHS72B = {
+    "projects/acme/decisions.jsonl": b'{"id":"base"}\n',
+    "projects/acme/ceo-plans/plan.md": b"Keep this plan.\n",
+    "projects/acme/deno-source/cli/tools/desktop.rs": b"fn main() {}\n",
+    "projects/acme/probe/tests/fixtures/cases.json": b"{}\n",
+    "projects/acme/review-and-prep/run/compact-snapshots/run-1/receipt.json": b"{}\n",
+    "projects/acme/review-and-prep/run/ranking-summaries/summary.json": b"{}\n",
+}
+_PRE18_GSTACK_GLOBS72B = [
+    "config.yaml",
+    "projects/*/repo-mode.json",
+    "projects/*/land-deploy-confirmed",
+    "analytics/.last-sync-*",
+    "projects/*/decisions.active.json",
+    "projects/*/brain-cache/*",
+    "projects/*/pair-review/session.yaml",
+]
+
 # Track 51A mixed-ts fixtures. Expected merge is a literal, not derived
 # from merge._extract_ts. Local keeps a unique string-ts line so retry
 # hashes still differ and `_apply_merge`'s no-op branch runs.
@@ -489,6 +527,195 @@ class TestExcludePatterns5C:
         old = time.time() - seconds
         for p in paths:
             os.utime(p, (old, old))
+
+    def _populate_generators72b(self, root):
+        files = {rel: f"generated:{rel}\n".encode() for rel in _GENERATOR_PATHS72B}
+        files.update(_KEPT_PATHS72B)
+        for rel, data in files.items():
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        return files
+
+    def _remote72b(self, backend, device):
+        return load_manifest(
+            decrypt(backend.get(storage_keys.manifest_key(device)), PASSPHRASE, memory_kb=MEMORY_KB)
+        )
+
+    def test_generator_explicit_config_upgrade72b(self, tmp_path, monkeypatch):
+        """Migration trims A's manifest while a stale peer keeps and republishes bytes."""
+        storage_dir = tmp_path / "storage"
+        root_a, root_b = tmp_path / "a" / ".gstack", tmp_path / "b" / ".gstack"
+        original = self._populate_generators72b(root_a)
+        root_b.mkdir(parents=True)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        config_a = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            root_a,
+            "dev-a",
+            "A",
+            exclude_patterns=[*_PRE18_GSTACK_GLOBS72B, "projects/acme/private/*"],
+        )
+        config_b = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            root_b,
+            "dev-b",
+            "B",
+            exclude_patterns=list(_PRE18_GSTACK_GLOBS72B),
+        )
+        old_b_sources = config_module.load_config(config_b)["sync"]["sources"]
+        TestMigrateConfigCommand()._redirect_lock(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        def invoke(config, args):
+            self._activate(monkeypatch, config)
+            result = runner.invoke(app, args)
+            assert result.exit_code == 0, result.output
+            if config == config_b:
+                # Initial crypto fingerprint backfill may update other sections.
+                assert config_module.load_config(config_b)["sync"]["sources"] == old_b_sources
+            return " ".join(result.output.split())
+
+        invoke(config_a, ["push"])
+        assert set(self._remote72b(backend, "dev-a")["sources"]["gstack"]["files"]) == set(original)
+        invoke(config_b, ["pull"])
+        invoke(config_b, ["push"])
+        assert all((root_b / rel).read_bytes() == data for rel, data in original.items())
+
+        before = config_a.read_bytes()
+        preview = invoke(config_a, ["migrate-config", "--dry-run"])
+        assert config_a.read_bytes() == before
+        for glob in config_module._GSTACK_GENERATOR_GLOBS:
+            assert f"+ {glob}" in preview
+        written = invoke(config_a, ["migrate-config", "--yes"])
+        assert "Run mm push to publish the exclusions" in written
+        migrated = config_module.load_config(config_a)["sync"]["sources"][0]["exclude_patterns"]
+        assert migrated == [
+            *_PRE18_GSTACK_GLOBS72B,
+            "projects/acme/private/*",
+            *config_module._GSTACK_GENERATOR_GLOBS,
+        ]
+        rerun = invoke(config_a, ["migrate-config", "--yes"])
+        assert "already up to date" in rerun
+        assert "Run mm push to publish the exclusions" not in rerun
+        invoke(config_a, ["push"])
+        trimmed = self._remote72b(backend, "dev-a")
+        assert set(trimmed["sources"]["gstack"]["files"]) == set(_KEPT_PATHS72B)
+        assert trimmed["tombstones"] == {}
+        assert all((root_a / rel).read_bytes() == data for rel, data in original.items())
+        status = invoke(config_a, ["status"])
+        assert "deleted" not in status
+        assert "missing recommended" not in status
+
+        invoke(config_b, ["pull"])
+        invoke(config_b, ["push"])
+        peer = self._remote72b(backend, "dev-b")
+        assert set(peer["sources"]["gstack"]["files"]) == set(original)
+        assert peer["tombstones"] == {}
+        assert all((root_b / rel).read_bytes() == data for rel, data in original.items())
+        assert not list(root_b.rglob("*sync-conflict-*"))
+
+        divergent = "projects/acme/artifacts/x.zip"
+        absent = "projects/acme/artifacts/x.tar"
+        control = "projects/acme/decisions.jsonl"
+        (root_b / divergent).write_bytes(b"different peer archive\n")
+        (root_b / control).write_bytes(b'{"id":"base"}\n{"id":"peer"}\n')
+        invoke(config_b, ["push"])
+        peer = self._remote72b(backend, "dev-b")
+        (root_a / absent).unlink()
+        # Older divergent A bytes would conflict without the pull filter.
+        self._backdate(root_a / divergent)
+        excluded_keys = {
+            storage_keys.blob_key("dev-b", peer["sources"]["gstack"]["files"][rel]["sha256"])
+            for rel in _GENERATOR_PATHS72B
+        }
+        fetched = []
+        real_get = LocalBackend.get
+
+        def record_get(self, key):
+            fetched.append(key)
+            return real_get(self, key)
+
+        monkeypatch.setattr(LocalBackend, "get", record_get)
+        invoke(config_a, ["pull"])
+        assert excluded_keys.isdisjoint(fetched)
+        assert (root_a / divergent).read_bytes() == original[divergent]
+        assert not (root_a / absent).exists()
+        assert (root_a / control).read_bytes() == (root_b / control).read_bytes()
+        assert not list(root_a.rglob("*sync-conflict-*"))
+        assert self._remote72b(backend, "dev-a")["tombstones"] == {}
+        assert peer["tombstones"] == {}
+        assert config_module.load_config(config_b)["sync"]["sources"] == old_b_sources
+
+    def test_generator_default_config_upgrade_autopush72b(self, tmp_path, monkeypatch):
+        """An implicit source gains the new defaults without a config migration."""
+        storage_dir = tmp_path / "storage"
+        root_a, root_b = tmp_path / "a" / ".gstack", tmp_path / "b" / ".gstack"
+        original = self._populate_generators72b(root_a)
+        root_b.mkdir(parents=True)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        config_a = tmp_path / "default.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_a,
+        )
+        config_b = self._make_gstack_config(
+            tmp_path,
+            storage_dir,
+            root_b,
+            "dev-b",
+            "B",
+            exclude_patterns=list(_PRE18_GSTACK_GLOBS72B),
+        )
+        default = config_module.get_default_source("gstack")
+        default["path"] = str(root_a)
+        previous = {**default, "exclude_patterns": list(_PRE18_GSTACK_GLOBS72B)}
+        TestMigrateConfigCommand()._redirect_lock(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        with monkeypatch.context() as old_defaults:
+            old_defaults.setattr(config_module, "DEFAULT_SOURCES", [previous])
+            old_defaults.setattr(cli_module, "DEFAULT_SOURCES", [previous])
+            self._activate(monkeypatch, config_a)
+            result = runner.invoke(app, ["push"])
+            assert result.exit_code == 0, result.output
+            assert set(self._remote72b(backend, "dev-a")["sources"]["gstack"]["files"]) == set(
+                original
+            )
+            self._activate(monkeypatch, config_b)
+            result = runner.invoke(app, ["pull"])
+            assert result.exit_code == 0, result.output
+
+        monkeypatch.setattr(config_module, "DEFAULT_SOURCES", [default])
+        monkeypatch.setattr(cli_module, "DEFAULT_SOURCES", [default])
+        self._activate(monkeypatch, config_a)
+        before = config_a.read_bytes()
+        result = runner.invoke(app, ["autopush"])
+        assert result.exit_code == 0, result.output
+        trimmed = self._remote72b(backend, "dev-a")
+        assert set(trimmed["sources"]["gstack"]["files"]) == set(_KEPT_PATHS72B)
+        assert trimmed["tombstones"] == {}
+        assert config_a.read_bytes() == before
+        self._activate(monkeypatch, config_b)
+        result = runner.invoke(app, ["pull"])
+        assert result.exit_code == 0, result.output
+        assert all((root_b / rel).read_bytes() == data for rel, data in original.items())
+        assert not list(root_b.rglob("*sync-conflict-*"))
+        self._activate(monkeypatch, config_a)
+        result = runner.invoke(app, ["migrate-config"])
+        assert result.exit_code == 0, result.output
+        assert "nothing to migrate" in result.output
+        assert "Run mm push to publish the exclusions" not in result.output
 
     def test_two_device_first_pull_no_conflicts_for_excluded_paths(self, tmp_path, monkeypatch):
         """2026-04-24 first-pull: A pushes per-machine artifacts WITHOUT the
@@ -1464,6 +1691,16 @@ class TestMigrateConfigCommand:
         result = runner.invoke(app, ["migrate-config", "--yes"])
         assert result.exit_code == 0, result.output
 
+        output = " ".join(result.output.split())
+        assert "per-machine caches and generated output" in output
+        assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
+        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "Removing a recommended glob later brings this prompt back" in output
+        assert output.index("writes no tombstones") < output.index("+ config.yaml")
+        assert "Run mm push to publish the exclusions" in output
+        assert "mm status counts them as pending deletions" in output
+        assert "No Mac deletes its local copy" in output
+
         loaded = config_module.load_config(config_path)
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         assert "projects/*/repo-mode.json" in gstack["exclude_patterns"]
@@ -1475,12 +1712,120 @@ class TestMigrateConfigCommand:
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         self._redirect_lock(monkeypatch, tmp_path)
 
+        before = config_path.read_bytes()
         result = runner.invoke(app, ["migrate-config", "--dry-run"])
         assert result.exit_code == 0, result.output
+        assert config_path.read_bytes() == before
+        output = " ".join(result.output.split())
+        assert "per-machine caches and generated output" in output
+        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "Run mm push to publish the exclusions" not in output
         loaded = config_module.load_config(config_path)
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         # exclude_patterns NOT added.
         assert "exclude_patterns" not in gstack or not gstack["exclude_patterns"]
+
+    # Generated by /ship coverage audit for Track 72B.
+    # Value: protects=incomplete migrations preserve config and omit the publish instruction;
+    # fails_when=cancellation, lock refusal or write failure prints the success instruction;
+    # why_new=existing migration tests cover success, previews and no-ops but no failures;
+    # seam=none;
+    # no_claim=live fleet migration; uses temporary config and lock plus an injected write failure.
+    @pytest.mark.parametrize("outcome", ["declined", "locked", "write-failed"])
+    def test_incomplete_migration_has_no_publish_instruction72b(
+        self, tmp_path, monkeypatch, outcome
+    ):
+        config_path = self._write_explicit_config(
+            tmp_path, exclude_patterns=list(_PRE18_GSTACK_GLOBS72B)
+        )
+        monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+        before = config_path.read_bytes()
+
+        if outcome == "write-failed":
+
+            def fail_write(*args, **kwargs):
+                raise OSError("simulated config write failure")
+
+            monkeypatch.setattr(cli_module, "patch_config_on_disk", fail_write)
+        if outcome == "locked":
+            cli_module.acquire_lock()
+        try:
+            result = runner.invoke(
+                app,
+                ["migrate-config", *([] if outcome == "declined" else ["--yes"])],
+                input="n\n" if outcome == "declined" else None,
+            )
+            assert result.exit_code == (0 if outcome == "declined" else 1), result.output
+            output = " ".join(result.output.split())
+            if outcome == "declined":
+                assert "Cancelled." in output
+            elif outcome == "locked":
+                assert "already holds the lock" in output
+            assert config_path.read_bytes() == before
+            assert "Config written to" not in output
+            assert "Run mm push to publish the exclusions" not in output
+        finally:
+            if outcome == "locked":
+                cli_module.release_lock()
+
+    def test_attended_push_migration_explains_and_publishes72b(self, tmp_path, monkeypatch):
+        config_path = self._write_explicit_config(
+            tmp_path, exclude_patterns=list(_PRE18_GSTACK_GLOBS72B)
+        )
+        root = tmp_path / ".gstack"
+        fixture = TestExcludePatterns5C()
+        fixture._populate_generators72b(root)
+        backend = fixture._bootstrap(tmp_path / "storage")
+        register_device(backend, "dev-a", "A")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+        before = config_path.read_bytes()
+        original = cli_module._maybe_prompt_migration
+
+        def prompt(config, **kwargs):
+            monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+            monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+            return original(config, **kwargs)
+
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", prompt)
+        monkeypatch.setattr(typer, "confirm", lambda *a, **kw: True)
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.output
+        output = " ".join(result.output.split())
+        assert "Config is missing recommended exclude_patterns for source(s): gstack" in output
+        assert "for gstack: virtualenvs, app bundles, archives and binaries, QA evidence" in output
+        assert "writes no tombstones, and every Mac keeps its copy" in output
+        assert "produce churn on every pull" not in output
+        assert "Run mm push to publish the exclusions" not in output
+        assert config_path.read_bytes() != before
+        remote = fixture._remote72b(backend, "dev-a")
+        assert set(remote["sources"]["gstack"]["files"]) == set(_KEPT_PATHS72B)
+        assert remote["tombstones"] == {}
+
+    def test_codex_only_migration_has_generic_copy72b(self, tmp_path, monkeypatch):
+        config_path = self._write_explicit_config(tmp_path)
+        config = config_module.load_config(config_path)
+        config["sync"]["sources"] = [
+            {
+                "name": "codex",
+                "path": str(tmp_path / "codex"),
+                "type": "generic",
+                "include_dirs": ["skills"],
+                "exclude_patterns": [],
+            }
+        ]
+        save_config(config, config_path)
+        monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+        result = runner.invoke(app, ["migrate-config", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        output = " ".join(result.output.split())
+        assert "per-machine caches and generated output" in output
+        assert "for gstack:" not in output
+        assert "virtualenvs" not in output
+        assert "Run mm push to publish the exclusions" not in output
 
     def test_preserves_user_added_excludes(self, tmp_path, monkeypatch):
         """Migration appends missing recommended globs to whatever the
@@ -1543,6 +1888,8 @@ class TestMigrateConfigCommand:
 
         result = runner.invoke(app, ["migrate-config", "--yes"])
         assert result.exit_code == 0, result.output
+        assert "Config written to" in result.output
+        assert "Run mm push to publish the exclusions" not in " ".join(result.output.split())
 
         import tomllib
 

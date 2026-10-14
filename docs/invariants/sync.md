@@ -263,13 +263,47 @@ only reader-name `empty_sources` evidence, scoped to retained days.
 ---
 
 ## exclude_patterns + consumer-boundary filter (load-bearing, v0.9.1, v0.9.3, v0.11.13)
-Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the relative path. Default `gstack` source ships with `["config.yaml", "projects/*/repo-mode.json", "projects/*/land-deploy-confirmed", "analytics/.last-sync-*"]` (per-machine artifacts that churn-conflict on every pull — `config.yaml` holds gstack's version-check tracking added in v0.9.3; `analytics/.last-sync-*` are per-machine cursor files that track each device's progress through gstack's local analytics jsonls, added in v0.11.13). The walker drops excluded paths from the local manifest at push time.
+Per-source `exclude_patterns: list[str]` of fnmatch globs is matched against the
+relative path. The default `gstack` source ships with:
+
+- Per-machine caches and state: `config.yaml`, `projects/*/repo-mode.json`,
+  `projects/*/land-deploy-confirmed`, `analytics/.last-sync-*`,
+  `projects/*/decisions.active.json`, `projects/*/brain-cache/*`,
+  `projects/*/pair-review/session.yaml`.
+- Generated output (v1.8.0): `projects/*/venv/*`, `projects/*/.venv/*`,
+  `projects/*/*.app/*`, `projects/*/.qa-evidence/*`, `*.zip`, `*.tar`, `*.tgz`,
+  `*.tar.gz`, `*.tar.xz`, `*.tar.bz2`, `*.tar.zst`, `*.whl`, `*.so`, `*.dylib`,
+  `*.pak`, `*.dmg`.
+
+The walker drops excluded paths from the local manifest at push time. The
+cache rationale and generator measurements live in
+[Generated files are not sync data](#generated-files-are-not-sync-data-load-bearing-v01251).
 
 `_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads this device's raw manifest via that path to compute referenced blobs, and a filtered manifest there would mark live own blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
 **Visible-failure contract for migration UX (v0.9.1).** Existing configs need to opt in by running `mm migrate-config`. autopull / autopush NEVER auto-mutate config — they record the missing-excludes signal to `~/.config/mind-meld/migration-state.json` and let `mm status` surface it. Interactive `mm pull` / `mm push` prompt-once. Silent config mutation in a hook would be exactly the class of "wedged sync I never noticed" failure the visible-failure contract exists to prevent. Add the new "config missing recommended excludes" warning to the existing curated stderr signal set (corrupt-manifest recovery, fsync failures, no-sources misconfig, etc.).
+
+**v1.8.0 rollout.** Until every active Mac has migrated and pushed, each attended
+`mm pull` on a migrated Mac logs one `excluded` row per file an unmigrated peer
+still lists under these globs: about 8,000 rows / 2 MB on the measured Mac.
+This exceeds pull-history's 1 MB cap, rotates it and evicts earlier history.
+[Back up history and upgrade, migrate and push every active Mac before the next
+attended pull on any of them](../../README.md#v180-scope-trim).
+Auto-update installs per Mac. A default-config Mac publishes the trim on its
+next push or autopush; autopush can print `mm: pushed N files (N deleted)`.
+Those deletions count manifest entries, remove no local files and write no
+tombstones. Autopush never runs GC. An explicit-config Mac waits for
+`mm migrate-config`; a direct successful migration tells the owner to run
+`mm push` to publish, while migration inside push, pull or recapture leaves
+that instruction to the calling command's own flow. `mm status` after pushing
+should show no migration warning and no pending gstack deletions.
+
+Optional diagnostic: capture `date -u +%FT%TZ` before an attended pull, then
+run `mm log --action excluded --source gstack --limit 0 --format jsonl --since <that>`
+and read `device` on rows under the new globs. This identifies peers still
+listing those files; it does not certify fleet completion.
 
 ## Nested git checkouts are frozen, never published
 
@@ -387,6 +421,65 @@ The four v0.12.51 additions, each with the observed conflict count:
 The remaining over-exclusion: `roadmap`, `full-review`, `test-plan`, `pair-review`, and `review-apparatus` are **generic names**, and unlike `skills/gstack-*` they carry no distinguishing prefix. A user who hand-authors `~/.codex/skills/roadmap/SKILL.md` on a machine without gstack-extend (and without an `.extend-root` marker) still gets it **silently dropped from sync** by the name glob. Nothing is deleted (exclusion only narrows the manifest), so this is lost propagation rather than lost data, but the user is not told.
 
 **What is deliberately NOT excluded.** `~/.gstack/projects/*/pair-review/` prose artifacts (`deploy.md`, `report.md`, `parked-bugs.md`) stay in scope: pair-review advertises cross-machine resume as a feature. `projects/*/pair-review/session.yaml` IS excluded (v0.14.0) — it is a live per-machine state machine and definitionally cannot be shared. The measurement behind leaving the prose in: the same paths took **31 conflicts against 178 mtime-skips**, so the existing local-is-newer gate already absorbs 85% of these collisions. The fuller fix is device-scoped artifact paths (`pair-review/<device>/`) in gstack, not a blanket mm exclusion.
+
+### Bulk generator output
+
+Agent-written environments, app bundles, archives, binaries and QA evidence
+are not sync data even when they never conflict: they cost bytes in every
+2.0 snapshot. Track 72B's 16 globs above address the P1 demand measured
+2026-10-11 and re-measured 2026-10-13 on device 889e42c0.
+
+Method: a read-only walk of `projects/`, `analytics/` and `retros/`, applying
+the walker's global `EXCLUDED` list and the seven prior gstack globs, pruning
+nested git checkouts. Match each glob with fnmatch against the relative path.
+Sealed size below is per-file `gzip.compress` at its default level, as
+`crypto._encrypt_with_master_key` compresses before encryption; the fixed
+AES-GCM overhead is omitted. This is a proxy for 2.0 snapshots, which frame
+many files per payload, rather than a measured snapshot size.
+
+Measured 2026-10-13, device 889e42c0; overlaps count in each glob row:
+
+| glob | files | raw MB | sealed MB |
+|---|---:|---:|---:|
+| `projects/*/venv/*` | 3,650 | 62.1 | 18.3 |
+| `projects/*/.venv/*` | 0 | 0.0 | 0.0 |
+| `projects/*/*.app/*` | 43 | 59.2 | 42.9 |
+| `projects/*/.qa-evidence/*` | 4,458 | 20.1 | 4.1 |
+| `*.zip` | 2 | 39.1 | 39.0 |
+| `*.tar` | 2 | 0.5 | 0.1 |
+| `*.tar.xz` | 1 | 19.2 | 19.2 |
+| `*.whl` | 1 | 0.5 | 0.5 |
+| `*.so` | 6 | 24.3 | 7.7 |
+| `*.dylib` | 3 | 7.0 | 2.7 |
+| `*.pak` | 4 | 15.3 | 14.7 |
+| `*.tgz`, `*.tar.gz`, `*.tar.bz2`, `*.tar.zst`, `*.dmg` | 0 | 0.0 | 0.0 |
+| union | 8,156 | 181.6 | 104.9 |
+| gstack set before | 35,689 | 1,286.2 | 345.7 |
+
+The union is 23% of files, 14% of raw bytes and 30% of sealed bytes. Archive
+and binary bytes mostly sit inside virtualenvs and app bundles, so summing
+the categories overstates the saving. In 1.x this trims manifest entries;
+own storage is reclaimed by an attended content-changing push's GC or `mm gc`.
+
+`node_modules` is already in the global `EXCLUDED` list. `*.tar*` is deliberately
+absent: fnmatch `*` crosses `/`, so that glob also matches `release.targets.md`
+and `notes.tar.md`. Directory globs are anchored under `projects/*/` so a slug
+named `venv` or `Foo.app` keeps its project notes. Inside a project, directories
+named `venv`, `.venv`, `*.app` or `.qa-evidence` are skipped at any depth.
+The extension globs match anywhere in the gstack source, including `analytics/`
+and `retros/`. Matching is case-sensitive: `*.ZIP` stays in scope.
+
+`tools/`, `fixture/` and `fixtures/` stay in scope: their 741 files / 3.2 MB
+sealed (0.9% of the set) include real copied source and test fixtures.
+Decision 6 also keeps `compact-snapshots/` and `ranking-summaries/` review
+receipts in scope (2026-10-13). No skill reads or writes those names, but an
+active project's notes cite the receipts as durable evidence; the names
+describe one run's directories, not a generator class. Retire them by deleting
+that run's directory when its work closes.
+
+Exclusion deletes nothing on any Mac. There is no default-glob opt-out:
+removing a recommended glob from explicit config brings back the status
+warning and attended migration prompt, which re-adds it by default.
 
 ## disabled_sources + consumer-boundary filter (load-bearing, v0.10.0)
 Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source

@@ -157,9 +157,10 @@ failure escalates like a timeout, so the SIGKILL and group check never depend
 on reading output, and `run_update` reports it as a failed update. Both PTY
 descriptors close on every exit, and cleanup disables UI callbacks before
 draining remaining output. `_signal_pipx_group` handles macOS rejecting a signal
-to an exited, unreaped installer: reap the parent and retry once. Permission
-errors with a live parent or on the retry still propagate; only a missing
-process group is ignored.
+to an exiting, unreaped installer before nonblocking `poll()` sees its exit:
+wait for the parent within the existing stop deadline, then retry once.
+A parent that stays live through that deadline or a permission error on the
+retry still propagates the refusal; only a missing process group is ignored.
 
 **One attempt per release per day (`_claim_install_attempt`).** The claim is a
 single read-modify-write under the upgrade-state flock, stamped **before**
