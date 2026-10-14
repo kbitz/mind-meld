@@ -493,41 +493,6 @@ def test_pre_release_cache_layout_is_rebuilt(muse_cache, tmp_path):
     assert all(entry["turns"][0]["key"] != "0" * 64 for entry in cache["files"].values())
 
 
-def test_days_past_the_window_are_not_walked(muse_cache, tmp_path, monkeypatch):
-    _settled_session(tmp_path, "ancient", "2026/07/01")
-    _write_session(tmp_path, [_record("live", _usage())])
-    monkeypatch.setattr(hu, "MUSE_SESSIONS_PATH", tmp_path)
-    result = hu.read_muse_usage(tmp_path, consented=True)
-    assert result.complete
-    assert set(result.hosts["other"]) == {"2026-10-13"}
-    assert hu.muse_usage_diag(count_logs=True)["files_on_disk"] == 1
-    assert hu.muse_usage_diag()["files_on_disk"] is None  # fail closed
-
-
-def test_old_frozen_days_stay_while_muse_still_publishes_them(muse_cache, tmp_path, monkeypatch):
-    """The wire keeps the 90 most recent ACTIVE days, so sparse use keeps old days."""
-    _write_session(tmp_path, [_record("live", _usage())])
-    hu.read_muse_usage(tmp_path, consented=True)
-    cache = _cache(muse_cache)
-    old = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 1}
-    cache["frozen"]["2026/07/02"] = {  # past the walk floor: kept on trust
-        "digest": "0" * 64,
-        "logs": 1,
-        "check_seq": 0,
-        "days": {"2026-07-02": {"muse-wonder-1.0": old}},
-        "partial_days": [],
-    }
-    muse_cache.write_text(json.dumps(cache))
-    sparse = hu.read_muse_usage(tmp_path, consented=True)
-    assert sparse.hosts["other"]["2026-07-02"]["input"] == 1
-    assert "2026/07/02" in _cache(muse_cache)["frozen"]
-
-    monkeypatch.setattr(hu, "MAX_BY_DAY_DAYS", 1)  # now 2026-10-13 alone is publishable
-    trimmed = hu.read_muse_usage(tmp_path, consented=True)
-    assert set(trimmed.hosts["other"]) == {"2026-10-13"}
-    assert "2026/07/02" not in _cache(muse_cache)["frozen"]
-
-
 def test_muse_row_is_accepted_by_a_pre_muse_peer(muse_cache, monkeypatch):
     from mind_meld import events
     from mind_meld.skills.retro_fleet import aggregator
@@ -544,47 +509,6 @@ def test_muse_row_is_accepted_by_a_pre_muse_peer(muse_cache, monkeypatch):
     accepted = aggregator._accept_host_usage_snapshot(dict(row))
     assert isinstance(accepted, aggregator._AcceptedHostRow), accepted
     assert accepted.consulted == ("codex", "grok", "cursor", "muse")
-
-
-def test_a_day_freezes_only_once_a_copy_of_it_would_be_refused(muse_cache, tmp_path, monkeypatch):
-    """West of UTC: a fresh session can be dated today - 1, so a just-settled day waits."""
-    early = datetime(2026, 10, 12, 17, tzinfo=timezone.utc)
-    late = datetime(2026, 10, 12, 23, tzinfo=timezone.utc)
-    steps = [_record("p1", _usage(), at=early), _record("p2", _usage(), at=late)]
-    original = _write_session(tmp_path, steps, day="2026/10/12")
-    monkeypatch.setattr(hu, "_muse_now", lambda: datetime(2026, 10, 14, 0, 30, tzinfo=timezone.utc))
-    stamp = late.timestamp()
-    os.utime(original, (stamp, stamp))  # idle 25.5 h, dated two days back
-    hu.read_muse_usage(tmp_path, consented=True)
-    assert _cache(muse_cache)["frozen"] == {}  # held: a 2026/10/13 session would accept it
-
-    copy = _write_session(tmp_path, steps, "s2", day="2026/10/13")
-    os.utime(copy, (stamp, stamp))
-    counted = hu.read_muse_usage(tmp_path, consented=True)
-    assert counted.complete
-    assert counted.hosts["other"]["2026-10-12"]["input"] == 120  # live dedup: once
-
-    copy.unlink()
-    monkeypatch.setattr(hu, "_muse_now", lambda: datetime(2026, 10, 16, 18, tzinfo=timezone.utc))
-    hu.read_muse_usage(tmp_path, consented=True)
-    assert set(_cache(muse_cache)["frozen"]) == {"2026/10/12"}
-    _write_session(tmp_path, steps, "s3", day="2026/10/15")
-    refused = hu.read_muse_usage(tmp_path, consented=True)
-    assert not refused.complete
-    assert refused.reason == "unsupported"
-
-
-def test_steps_after_midnight_hold_their_day_back(muse_cache, tmp_path, monkeypatch):
-    """A 2026/10/12 session with a 2026-10-13 step freezes no earlier than 10/16."""
-    after_midnight = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
-    path = _write_session(tmp_path, [_record("m1", _usage(), at=after_midnight)], day="2026/10/12")
-    stamp = after_midnight.timestamp()
-    os.utime(path, (stamp, stamp))
-    for day, frozen in ((15, set()), (16, {"2026/10/12"})):
-        now = datetime(2026, 10, day, 18, tzinfo=timezone.utc)
-        monkeypatch.setattr(hu, "_muse_now", lambda now=now: now)
-        assert hu.read_muse_usage(tmp_path, consented=True).complete
-        assert set(_cache(muse_cache)["frozen"]) == frozen
 
 
 def test_a_check_that_does_not_fit_leaves_the_pass_complete(muse_cache, tmp_path, monkeypatch):
@@ -622,18 +546,6 @@ def test_tail_reserve_grows_with_the_live_window(muse_cache, tmp_path, monkeypat
     assert _cache(muse_cache)["frozen"]["2026/10/10"]["check_seq"] == seq  # not checked
 
 
-def test_a_frozen_day_inside_the_floor_is_never_evicted(muse_cache, tmp_path, monkeypatch):
-    _settled_session(tmp_path, "old", "2026/10/11")
-    _write_session(tmp_path, [_record("live", _usage())])
-    monkeypatch.setattr(hu, "MAX_BY_DAY_DAYS", 1)  # floor 2026-10-11; only 10-13 publishable
-    hu.read_muse_usage(tmp_path, consented=True)
-    assert "2026/10/11" in _cache(muse_cache)["frozen"]
-    with monkeypatch.context() as m:
-        m.setattr(hu, "_read_full_muse_file", Mock(side_effect=AssertionError("re-read")))
-        hu.read_muse_usage(tmp_path, consented=True)
-    assert "2026/10/11" in _cache(muse_cache)["frozen"]
-
-
 def test_a_session_removed_mid_walk_is_absent(tmp_path, monkeypatch):
     day = tmp_path / "2026" / "10" / "13"
     for session in ("s1", "s2"):
@@ -652,12 +564,16 @@ def test_a_session_removed_mid_walk_is_absent(tmp_path, monkeypatch):
 
 
 def test_consecutive_settled_days_all_freeze(muse_cache, tmp_path):
-    """Holding back one recent day must not hold back the older days behind it."""
+    """Every settled, idle day freezes; none waits on its neighbours."""
     for index, day in enumerate(("2026/10/09", "2026/10/10", "2026/10/11", "2026/10/12")):
         _settled_session(tmp_path, f"c{index}", day)
     hu.read_muse_usage(tmp_path, consented=True)
-    # 2026/10/12 is held (a session dated 10/13 would accept its steps).
-    assert set(_cache(muse_cache)["frozen"]) == {"2026/10/09", "2026/10/10", "2026/10/11"}
+    assert set(_cache(muse_cache)["frozen"]) == {
+        "2026/10/09",
+        "2026/10/10",
+        "2026/10/11",
+        "2026/10/12",
+    }
 
 
 # Generated by the /ship test coverage audit (pass 1).
@@ -733,3 +649,97 @@ def test_freezing_keeps_a_same_day_restated_step_counted_once(muse_cache, tmp_pa
     with monkeypatch.context() as m:
         m.setattr(hu, "_read_muse_file", Mock(side_effect=AssertionError("reopened")))
         assert hu.read_muse_usage(tmp_path, consented=True) == first
+
+
+def test_old_day_directories_are_read_and_counted(muse_cache, tmp_path, monkeypatch):
+    """No calendar floor: history older than the wire window is still read once."""
+    _settled_session(tmp_path, "ancient", "2026/07/01")
+    _write_session(tmp_path, [_record("live", _usage())])
+    monkeypatch.setattr(hu, "MUSE_SESSIONS_PATH", tmp_path)
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    assert set(result.hosts["other"]) == {"2026-07-01", "2026-10-13"}
+    assert hu.muse_usage_diag(count_logs=True)["files_on_disk"] == 2
+    assert hu.muse_usage_diag()["files_on_disk"] is None  # fail closed
+
+
+def test_a_frozen_day_whose_directory_is_gone_is_evicted(muse_cache, tmp_path):
+    _write_session(tmp_path, [_record("live", _usage())])
+    hu.read_muse_usage(tmp_path, consented=True)
+    cache = _cache(muse_cache)
+    gone = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 1}
+    cache["frozen"]["2026/07/02"] = {
+        "digest": "0" * 64,
+        "logs": 1,
+        "check_seq": 0,
+        "days": {"2026-07-02": {"muse-wonder-1.0": gone}},
+        "partial_days": [],
+        "keys": [],
+    }
+    muse_cache.write_text(json.dumps(cache))
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert set(result.hosts["other"]) == {"2026-10-13"}
+    assert "2026/07/02" not in _cache(muse_cache)["frozen"]
+
+
+def test_a_session_resumed_months_later_is_counted(muse_cache, tmp_path):
+    """A frozen day stays checkable at any age, so a resumed old session counts."""
+    path = _settled_session(tmp_path, "june", "2026/06/01")
+    hu.read_muse_usage(tmp_path, consented=True)
+    assert "2026/06/01" in _cache(muse_cache)["frozen"]
+    now_step = _record("october", _usage(output_tokens=5), at=NOW - timedelta(hours=1))
+    with path.open("a") as fp:
+        fp.write(json.dumps(now_step) + "\n")
+    _age(path, timedelta(hours=1))
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    assert result.hosts["other"]["2026-06-01"]["input"] == 60
+    assert result.hosts["other"]["2026-10-14"]["output"] == 5
+
+
+def test_a_copy_into_an_existing_older_session_counts_once(muse_cache, tmp_path):
+    """A frozen day keeps its keys while a live session could still accept a copy."""
+    original = _record("orig", _usage(), at=datetime(2026, 10, 10, 12, tzinfo=timezone.utc))
+    old = _write_session(tmp_path, [original], day="2026/10/10")
+    _age(old, timedelta(days=3))
+    live_step = _record("x", _usage(), at=datetime(2026, 10, 11, 12, tzinfo=timezone.utc))
+    live = _write_session(tmp_path, [live_step], "s2", day="2026/10/11")  # fresh: stays live
+    hu.read_muse_usage(tmp_path, consented=True)
+    frozen = _cache(muse_cache)["frozen"]
+    assert set(frozen) == {"2026/10/10"}
+    assert frozen["2026/10/10"]["keys"]  # 10/11 is live and accepts 10/10 steps
+
+    with live.open("a") as fp:
+        fp.write(json.dumps(original) + "\n")
+    counted = hu.read_muse_usage(tmp_path, consented=True)
+    assert counted.complete
+    assert counted.hosts["other"]["2026-10-10"]["input"] == 60  # once, not twice
+    assert "2026/10/10" not in _cache(muse_cache)["frozen"]  # shared step keeps it live
+
+
+def test_a_conflicting_copy_of_a_frozen_step_refuses(muse_cache, tmp_path):
+    original = _record("orig", _usage(), at=datetime(2026, 10, 10, 12, tzinfo=timezone.utc))
+    _age(_write_session(tmp_path, [original], day="2026/10/10"), timedelta(days=3))
+    live_step = _record("x", _usage(), at=datetime(2026, 10, 11, 12, tzinfo=timezone.utc))
+    live = _write_session(tmp_path, [live_step], "s2", day="2026/10/11")
+    hu.read_muse_usage(tmp_path, consented=True)
+    altered = _record(
+        "orig", _usage(input_tokens=500), at=datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+    )
+    with live.open("a") as fp:
+        fp.write(json.dumps(altered) + "\n")
+    refused = hu.read_muse_usage(tmp_path, consented=True)
+    assert not refused.complete
+    assert refused.reason == "unsupported"
+
+
+def test_frozen_keys_drop_once_no_session_can_accept_a_copy(muse_cache, tmp_path):
+    _settled_session(tmp_path, "old", "2026/10/10")
+    hu.read_muse_usage(tmp_path, consented=True)  # freezes with keys
+    hu.read_muse_usage(tmp_path, consented=True)  # no live day: 10/10 is uncopyable
+    assert _cache(muse_cache)["frozen"]["2026/10/10"]["keys"] == []
+    copied = _record("old", _usage(), at=datetime(2026, 10, 10, 12, tzinfo=timezone.utc))
+    _write_session(tmp_path, [copied], "resumed", day="2026/10/13")
+    refused = hu.read_muse_usage(tmp_path, consented=True)  # the step-lead rule refuses
+    assert not refused.complete
+    assert refused.reason == "unsupported"

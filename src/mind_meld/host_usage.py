@@ -103,7 +103,6 @@ from mind_meld.lockedjson import (
     locked_json_snapshot,
 )
 from mind_meld.token_usage import (
-    MAX_BY_DAY_DAYS,
     MAX_JSONL_LINE_BYTES,
     TOKEN_FIELDS,
     DayBucket,
@@ -3233,8 +3232,9 @@ _MUSE_STEP_LEAD_DAYS = 1
 A directory date may be local while ``recorded_at`` is UTC, so a session
 opened just after local midnight east of UTC records the previous UTC day.
 Anything earlier is history copied into a new session."""
-_MUSE_DIR_LAG_DAYS = 2
-"""Margin past the published window before a day directory is no longer walked."""
+_MUSE_KEY_PREFIX = 16
+"""Hex characters of a step key a frozen day keeps for copy detection (64 bits;
+a collision only costs an extra unfreeze and re-read, never a wrong total)."""
 _MUSE_MAX_FROZEN_LOGS = 1_000_000
 
 
@@ -3254,25 +3254,13 @@ def _muse_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _muse_walk_floor(today: date) -> date:
-    """Oldest directory date still walked, in calendar days.
-
-    The wire keeps the most recent MAX_BY_DAY_DAYS *active* days, so a sparse
-    fleet can publish older days. Frozen totals past this floor are kept for
-    exactly that; a directory past it that never froze (history older than
-    the first consented read) is not counted.
-    """
-    return today - timedelta(days=MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS)
-
-
 def _count_muse_ledgers(root: Path) -> int | None:
     """Count reader-visible session logs under ``root``.
 
     Mirrors ``_count_two_level_ledgers``: a missing root is 0, a symlink
     or non-directory root is unknown, and scan errors stay unknown rather
-    than rendering as empty. The walk is the reader's own, including its
-    window floor, so the count can never disagree with the reader about
-    visibility.
+    than rendering as empty. The walk is the reader's own, so the count can
+    never disagree with the reader about visibility.
     """
     try:
         if not root.exists():
@@ -3283,10 +3271,8 @@ def _count_muse_ledgers(root: Path) -> int | None:
         return None
     try:
         deadline = time.monotonic() + DEFAULT_READ_BUDGET_S
-        floor = _muse_walk_floor(_muse_now().date())
         return sum(
-            len(_muse_day_logs(day, deadline))
-            for _, day in _iter_muse_day_dirs(root, deadline, floor)
+            len(_muse_day_logs(day, deadline)) for _, day in _iter_muse_day_dirs(root, deadline)
         )
     except (_ReadFailure, OSError):
         return None
@@ -3402,23 +3388,20 @@ def _scan_muse_root(
     whose dev/ino/size/mtime are unchanged is not reopened). Frozen days are
     then stat-checked, least recently checked first, while their estimated
     cost fits the budget; a mismatch unfreezes that day and re-reads it.
-    Directories past the walk floor are not walked; their frozen totals stay
-    while Muse's own ``MAX_BY_DAY_DAYS`` most recent active days need them.
+    Every day directory is listed, but a frozen one is only stat-checked, so a
+    session resumed months later is still found. A frozen day keeps its step
+    keys while a live session could accept a copy of its steps.
     """
     today = now.date()
-    floor = _muse_walk_floor(today)
     try:
-        day_dirs = dict(_iter_muse_day_dirs(root, deadline, floor))
+        day_dirs = dict(_iter_muse_day_dirs(root, deadline))
     except _ReadFailure as failure:
         return _incomplete(failure.reason), {}, frozen, False, False
 
-    # A frozen day inside the walk floor whose directory is gone is evicted;
-    # one past the floor is no longer walkable and is kept on trust.
-    kept = {
-        rel: record
-        for rel, record in frozen.items()
-        if rel in day_dirs or (_muse_dir_date(rel) or floor) < floor
-    }
+    # A frozen day whose directory is gone is evicted. Every other one stays
+    # (a few hundred bytes a day): the wire trims to its own active-day window,
+    # and dropping a record would turn its directory back into a live re-read.
+    kept = {rel: record for rel, record in frozen.items() if rel in day_dirs}
     check_seq = max((record["check_seq"] for record in kept.values()), default=0) + 1
     canonical_root = root.resolve()
     staged: dict[str, Any] = {}
@@ -3490,15 +3473,30 @@ def _scan_muse_root(
             del kept[rel]
             learned = True
             read_live(rel, logs)
+        # A live step whose key a frozen day still holds is a copy of that day's
+        # history: unfreeze it so the dedup below sees both copies (once if
+        # equal, refused if not).
+        held = {prefix: rel for rel, record in kept.items() for prefix in record["keys"]}
+        copied = {
+            held[turn["key"][:_MUSE_KEY_PREFIX]]
+            for keys in live_dirs.values()
+            for key in keys
+            for turn in staged[key]["turns"]
+            if turn["key"][:_MUSE_KEY_PREFIX] in held
+        }
+        for rel in sorted(copied):
+            del kept[rel]
+            learned = True
+            read_live(rel, _muse_day_logs(day_dirs[rel], deadline))
     except _ReadFailure as failure:
         return _incomplete(failure.reason), staged, frozen, learned, True
 
     # Turn keys are corpus-wide envelope ids, so a step restated in a second
-    # live log (a parent echoing a subagent, a session copied the same day)
-    # counts once when identical and refuses when it disagrees. Frozen days
-    # keep totals, not keys, so this check spans live logs only; a step
-    # copied into a later session from an older day is refused instead by the
-    # step-lead rule in ``_muse_turn_from_record``.
+    # live log (a parent echoing a subagent, a resumed session copying
+    # history) counts once when identical and refuses when it disagrees.
+    # Frozen days hold keys only while a live session could still accept a
+    # copy (above); a copy of anything older breaks the step-lead rule in
+    # ``_muse_turn_from_record`` and refuses.
     unique: dict[str, dict[str, Any]] = {}
     owners: dict[str, set[str]] = {}
     for rel, keys in live_dirs.items():
@@ -3509,24 +3507,18 @@ def _scan_muse_root(
                     return _incomplete("unsupported"), staged, frozen, learned, True
                 owners.setdefault(turn["key"], set()).add(rel)
 
-    # The wire keeps the MAX_BY_DAY_DAYS most recent active days across all
-    # readers, so any Muse day it can carry is among Muse's own that many
-    # most recent active days. A frozen day past the walk floor outside that
-    # set is dead weight; inside the floor it stays (at most ~93 records), so
-    # a still-walked directory is never evicted and re-read.
-    active = sorted(
-        {turn["day"] for turn in unique.values()}
-        | {day for record in kept.values() for day in record["days"]},
-        reverse=True,
-    )[:MAX_BY_DAY_DAYS]
-    recent = set(active)
-    for rel in [
-        rel
-        for rel, record in kept.items()
-        if (_muse_dir_date(rel) or floor) < floor and not recent & set(record["days"])
-    ]:
-        del kept[rel]
-        learned = True
+    # A live session dated D accepts steps from D - _MUSE_STEP_LEAD_DAYS on,
+    # and a session created later is dated today - 1 at the earliest (west of
+    # UTC). A frozen day whose newest step is older than every such session
+    # accepts can never be copied undetected, so it drops its keys.
+    oldest_live = min(
+        [today - timedelta(days=1)] + [_muse_dir_date(rel) or today for rel in live_dirs]
+    )
+    copyable_from = (oldest_live - timedelta(days=_MUSE_STEP_LEAD_DAYS)).isoformat()
+    for rel, record in list(kept.items()):
+        if record["keys"] and max(record["days"], default="") < copyable_from:
+            kept[rel] = {**record, "keys": []}
+            learned = True
 
     frozen_turns = [
         {"day": day, "model": model, "usage": usage}
@@ -3543,7 +3535,7 @@ def _scan_muse_root(
     )
 
     idle_before = int(now.timestamp() * 1_000_000_000) - _MUSE_SETTLE_IDLE_NS
-    freezing: dict[str, date | None] = {}
+    freezing: dict[str, None] = {}
     for rel, keys in live_dirs.items():
         when = _muse_dir_date(rel)
         if when is None or when > today - timedelta(days=_MUSE_SETTLE_DAYS):
@@ -3555,16 +3547,7 @@ def _scan_muse_root(
         # cross-log check above keeps seeing both copies.
         if any(owners[turn["key"]] != {rel} for entry in entries for turn in entry["turns"]):
             continue
-        days = [turn["day"] for entry in entries for turn in entry["turns"]]
-        freezing[rel] = date.fromisoformat(max(days)) if days else None
-    # A frozen day keeps totals, not keys, so its steps must already be too old
-    # for the step-lead rule to accept in any session created later. Such a
-    # session is dated today - 1 at the earliest (west of UTC), so it accepts
-    # steps from today - 1 - _MUSE_STEP_LEAD_DAYS on; hold back any day whose
-    # newest step is that recent.
-    accepts_from = today - timedelta(days=1 + _MUSE_STEP_LEAD_DAYS)
-    for rel in [rel for rel, newest in freezing.items() if newest and newest >= accepts_from]:
-        del freezing[rel]
+        freezing[rel] = None
     for rel in freezing:
         keys = live_dirs[rel]
         entries = [staged[key] for key in keys]
@@ -3618,6 +3601,7 @@ def _freeze_muse_day(
         "check_seq": check_seq,
         "days": days,
         "partial_days": sorted(partial),
+        "keys": sorted({key[:_MUSE_KEY_PREFIX] for key in seen}),
     }
 
 
@@ -3645,7 +3629,8 @@ def _validated_muse_frozen(value: Any) -> dict[str, dict[str, Any]]:
             continue
         days = _validated_muse_frozen_days(record.get("days"))
         partial = _validated_grok_partial_days(record.get("partial_days"))
-        if days is None or partial is None:
+        keys = record.get("keys")
+        if days is None or partial is None or not _valid_muse_key_prefixes(keys):
             continue
         out[rel] = {
             "digest": digest,
@@ -3653,8 +3638,21 @@ def _validated_muse_frozen(value: Any) -> dict[str, dict[str, Any]]:
             "check_seq": record["check_seq"],
             "days": days,
             "partial_days": partial,
+            "keys": keys,
         }
     return out
+
+
+def _valid_muse_key_prefixes(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) > _MUSE_MAX_FROZEN_LOGS:
+        return False
+    return len(set(value)) == len(value) and all(
+        isinstance(item, str) and len(item) == _MUSE_KEY_PREFIX and _HEX_PREFIX.fullmatch(item)
+        for item in value
+    )
+
+
+_HEX_PREFIX = re.compile(r"[0-9a-f]+")
 
 
 def _validated_muse_frozen_days(value: Any) -> dict[str, dict[str, Usage]] | None:
@@ -3681,8 +3679,8 @@ def _validated_muse_frozen_days(value: Any) -> dict[str, dict[str, Usage]] | Non
     return out
 
 
-def _iter_muse_day_dirs(root: Path, deadline: float, floor: date):
-    """Yield ``("YYYY/MM/DD", path)`` for each day directory dated ``floor`` or later."""
+def _iter_muse_day_dirs(root: Path, deadline: float):
+    """Yield ``("YYYY/MM/DD", path)`` for each valid day directory under ``root``."""
     if _expired(deadline):
         raise _ReadFailure("deadline")
     try:
@@ -3691,25 +3689,17 @@ def _iter_muse_day_dirs(root: Path, deadline: float, floor: date):
         if root.is_symlink() or not root.is_dir():
             raise _ReadFailure("unsupported")
         for year in _sorted_children(root, deadline):
-            if not _YEAR_PART.fullmatch(year.name) or int(year.name) < floor.year:
-                continue
-            if not _is_directory(year):
+            if not _YEAR_PART.fullmatch(year.name) or not _is_directory(year):
                 continue
             for month in _sorted_children(year, deadline):
-                if not _MONTH_OR_DAY_PART.fullmatch(month.name):
-                    continue
-                if (int(year.name), int(month.name)) < (floor.year, floor.month):
-                    continue
-                if not _is_directory(month):
+                if not _MONTH_OR_DAY_PART.fullmatch(month.name) or not _is_directory(month):
                     continue
                 for day in _sorted_children(month, deadline):
                     if not _MONTH_OR_DAY_PART.fullmatch(day.name) or not _is_directory(day):
                         continue
                     rel = f"{year.name}/{month.name}/{day.name}"
-                    when = _muse_dir_date(rel)
-                    if when is None or when < floor:
-                        continue
-                    yield rel, day
+                    if _muse_dir_date(rel) is not None:
+                        yield rel, day
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 

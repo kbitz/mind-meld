@@ -282,8 +282,8 @@ The reader counts terminal `model_completed` events in
 under the strict Grok discipline; `goal_usage_attribution` records
 restate the same steps and are never read. Muse writes about ten times
 Grok's volume (~100 logs a day at the census), so settled day directories
-freeze into per-day/model totals and directories past the 90-day wire
-window are no longer walked; see the events/retro invariants. The census
+freeze into per-day/model totals that are only stat-checked afterwards;
+see the events/retro invariants. The census
 and counter semantics are `tests/fixtures/host_sessions/muse/CONTRACT.md`.
 
 No new host family in 1.x: the compatibility contract makes a family a

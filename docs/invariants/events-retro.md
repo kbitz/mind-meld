@@ -336,38 +336,40 @@ writes ~100 logs a day, and a reader that revisits every log grows past the
 stat-only hit (dev/ino/size/mtime equal; never reopened or fingerprinted);
 (2) a `YYYY/MM/DD` directory at least `_MUSE_SETTLE_DAYS` old whose logs
 have all been idle `_MUSE_SETTLE_IDLE_NS` freezes into the cache's `frozen`
-map — per-day/model totals, partial days, and one digest over its logs'
-relative paths and stat identities — and its per-turn entries are dropped,
-but only once its newest step is older than the step-lead rule would accept
-in any session created later (dated today − 1 at the earliest, so the
-newest step must fall on or before today − 3), so a copy of a frozen step
-into a new session refuses rather than counting twice; (3) frozen days are stat-checked least recently checked first (a
-`check_seq` pass counter, not a clock; a just-frozen day is 0 and goes
-first; newest first among equals) while their estimated cost
-(`_MUSE_VERIFY_LOG_COST_S` per log) fits the budget left after the tail
-reserve (`_MUSE_TAIL_RESERVE_S` plus `_MUSE_TAIL_STEP_COST_S` per live step);
-a day that does not fit is skipped, and a deadline inside a check stops
-checking without failing the pass and sends that day to the back of the
-queue. With enough budget every frozen day is re-checked (about 400 ms for
-90 days of ~100 logs, measured on a synthetic corpus); an attended push
-checks what its share of the 500 ms budget allows and the rest over later
-pushes, and an autopush checks what fits; a digest mismatch (a resumed, pruned, moved or
-new log) unfreezes that day and re-reads it; (4) directories older than
-`MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS` calendar days are never walked; a
-frozen day past that floor is kept only while one of its days is among
-Muse's own `MAX_BY_DAY_DAYS` most recent active days — exactly the Muse
-days the wire, which keeps the most recent active days across all readers,
-can carry — and a frozen day inside the floor is evicted only when its
-directory is gone. Freezing,
-checking and eviction commit only with a complete pass. Cross-log dedup
-spans live logs; a day whose steps are shared with another live day never
-freezes; frozen days carry totals, not keys. A step recorded more than
-`_MUSE_STEP_LEAD_DAYS` before its session directory's date is history
-copied into a later session and refuses the reader (`unsupported`, whose
-generic remedy is `mm update`; a re-census decides the real fix). A session
-resumed in place after its day froze is counted once a check reaches that
-day: the next attended push, or when an autopush's budget allows. History
-older than the walk floor at the first consented read is never counted. The cache root carries `muse_format`;
+map — per-day/model totals, partial days, one digest over its logs'
+relative paths and stat identities, and `_MUSE_KEY_PREFIX`-hex prefixes of
+its step keys — and its per-turn entries are dropped; (3) frozen days are
+stat-checked least recently checked first (a `check_seq` pass counter, not
+a clock; a just-frozen day is 0 and goes first; newest first among equals)
+while their estimated cost (`_MUSE_VERIFY_LOG_COST_S` per log) fits the
+budget left after the tail reserve (`_MUSE_TAIL_RESERVE_S` plus
+`_MUSE_TAIL_STEP_COST_S` per live step); a day that does not fit is
+skipped, and a deadline inside a check stops checking without failing the
+pass and sends that day to the back of the queue. With enough budget every
+frozen day is re-checked (about 400 ms for 90 days of ~100 logs, measured
+on a synthetic corpus); an attended push checks what its share of the
+500 ms budget allows and the rest over later pushes, and an autopush checks
+what fits; a digest mismatch (a resumed, pruned, moved or new log)
+unfreezes that day and re-reads it; (4) every day directory is listed but
+only live ones are read, so there is no calendar floor: a frozen day stays
+(a few hundred bytes) until its directory is gone, and a session resumed
+months later is found by the check. The wire trims to its own most recent
+active days. Freezing, checking and eviction commit only with a complete
+pass.
+
+*Muse copies count once or refuse (load-bearing).* Cross-log dedup covers
+every live log, and a day whose steps are shared with another live day
+never freezes. A frozen day keeps its step-key prefixes while any live
+session, or one created later (dated today − 1 at the earliest, west of
+UTC), could accept a copy of its steps under the step-lead rule; a live
+step matching a held prefix unfreezes that day so the dedup sees both
+copies. Once its newest step is older than every such session accepts, the
+day drops its keys, and a copy of it breaks the step-lead rule: a step
+recorded more than `_MUSE_STEP_LEAD_DAYS` before its session directory's
+date refuses the reader (`unsupported`, whose generic remedy is
+`mm update`; a re-census decides the real fix). Residual: a frozen session
+resumed in place that copies another frozen day's history after that day
+dropped its keys is not detected. The cache root carries `muse_format`;
 a cache without it is rebuilt. The reader clock is `_muse_now`, so tests
 pin it.
 
