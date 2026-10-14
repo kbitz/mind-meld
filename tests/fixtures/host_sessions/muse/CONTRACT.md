@@ -43,8 +43,26 @@ payload.event.duration_ms, payload.event.finish_reason  (finish_reason optional)
   (1,397), `muse-spark-1.3` (46), `muse-wonder-1.0` (19).
 - Envelope `id` values: 62,593 unique, zero duplicates corpus-wide.
 - `sequence` is strictly increasing in only 164 of 174 then-present
-  files (retained frames rewrite history), so the reader never keys
-  on it; the dedup key is the envelope `id` scoped by session dir.
+  files (retained frames are appended mid-file and restart the
+  sequence), so the reader never keys on it; the dedup key is the
+  envelope `id` alone, corpus-wide.
+
+Re-census at review (2026-10-14, same Mac, Muse 1.4.7, 212 files,
+87,539 envelopes, 2,020 `model_completed`): zero duplicate envelope
+ids, none shared across files; 0 of 462 subagent steps reappear in
+the parent log as an identical (model, six counters) tuple; every
+retained frame sits mid-file (none on line 0); and the two carriers'
+per-file input+output sums are equal in all 206 files with usage.
+Logs present at the first census were appended, never rewritten:
+re-reading against that cache resumed 7, added 33, re-walked 0 and
+lost 0 counted steps. Sessions run past midnight: 37 of 215 logs were
+last modified the day after their `YYYY/MM/DD` directory date, and
+246 of 2,108 steps were recorded on the next UTC day, and none on an
+earlier day than their directory. A two-day corpus cannot show
+in-place resumes days later, so the reader's freeze rule
+(`_MUSE_SETTLE_DAYS`, `_MUSE_SETTLE_IDLE_NS`) is backed by its
+frozen-day stat check rather than by this span; see the events/retro
+invariants.
 
 ## The second carrier (never read)
 
@@ -61,10 +79,13 @@ record (other event kinds, `status` records, retained frames).
 
 Unknown event/usage key, `cached != cache_read`, `reasoning >
 output`, a missing/oversize envelope id or model, and a conflicting
-duplicate envelope id refuse the whole reader as `unsupported`
+duplicate envelope id (in one log or across logs, including the same
+id under another model) refuse the whole reader as `unsupported`
 (Track 31A isolates the drop to this reader). A `recorded_at` before
-2020-01-01 UTC or more than a day in the future is `malformed`. None
-of these fired on the census corpus.
+2020-01-01 UTC, more than a day in the future, or longer than 20
+digits is `malformed`. A step recorded more than one UTC day before its
+session directory's date (history copied into a later session) is
+`unsupported`. None of these fired on the census corpus.
 
 ## Fixtures (sanitized; no real session content)
 
@@ -81,6 +102,7 @@ content, prompts, responses, tool data or credentials appear.
 For the next census: record the installed Muse version separately
 from the corpus span; count envelope kinds, `model_completed` event
 and usage key sets, counter-relation violations, duplicate envelope
-ids, and per-carrier per-file sums (to re-prove the attribution
-restatement). Report key names and counts only. Run the real reader
+ids (within and across logs), per-carrier per-file sums (to re-prove
+the attribution restatement), and how many days after its directory
+date each log is still appended to (to re-prove the freeze rule). Report key names and counts only. Run the real reader
 with its cache redirected to a disposable directory.

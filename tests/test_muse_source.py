@@ -88,6 +88,34 @@ def test_hardlink_to_session_log_is_not_walked(tmp_path):
     assert skipped == [(str(memory / "copied-secret"), "hardlink")]
 
 
+def test_muse_memory_lock_never_roams(tmp_path):
+    """Muse's machine-local PID lock stays local on push and on pull."""
+    from mind_meld.cli import _build_exclude_map, _filter_excluded_paths
+
+    root = tmp_path / "muse"
+    personal = root / "memory" / "personal"
+    personal.mkdir(parents=True)
+    (personal / ".muse-memory.lock").write_text("pid=30489\n")
+    (personal / "MEMORY.md").write_text("# index\n")
+    src = {"name": "muse", "path": str(root), "type": "muse"}
+    assert set(walk_muse_source(src)) == {"memory/personal/MEMORY.md"}
+
+    exclude_map, prefixes = _build_exclude_map({}, [src])
+    incoming = {
+        "sources": {
+            "muse": {
+                "files": {
+                    "memory/personal/MEMORY.md": {"sha256": "a" * 64},
+                    "memory/personal/.muse-memory.lock": {"sha256": "b" * 64},
+                }
+            }
+        },
+        "tombstones": {},
+    }
+    filtered = _filter_excluded_paths(incoming, exclude_map, prefixes)
+    assert set(filtered["sources"]["muse"]["files"]) == {"memory/personal/MEMORY.md"}
+
+
 def test_missing_memory_dir_is_a_noop(tmp_path):
     root = tmp_path / "muse"
     root.mkdir()
@@ -95,15 +123,24 @@ def test_missing_memory_dir_is_a_noop(tmp_path):
     assert not muse_memory_dir_exists(root)
 
 
-def test_default_source_activates_only_with_memory_tree(monkeypatch):
+def test_default_source_never_auto_activates(monkeypatch, tmp_path):
+    """Muse creates memory/ itself, so no tree is consent: explicit enable only."""
     from mind_meld import config as config_module
 
-    # Selection, not availability: the gate runs before the exists
-    # filter, so ``selected`` is the machine-independent surface.
-    monkeypatch.setattr(config_module, "muse_memory_dir_exists", lambda *a, **kw: False)
-    assert "muse" not in [s["name"] for s in config_module.resolve_sources({}).selected]
-    monkeypatch.setattr(config_module, "muse_memory_dir_exists", lambda *a, **kw: True)
-    assert "muse" in [s["name"] for s in config_module.resolve_sources({}).selected]
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".local" / "share" / "muse" / "memory" / "personal").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    assert muse_memory_dir_exists(home / ".local" / "share" / "muse")
+
+    # Selection, not availability: both legacy shapes (no sync table, and
+    # claude_dir with auto-detect) must leave muse out.
+    for cfg in ({}, {"sync": {"claude_dir": str(home / ".claude")}}):
+        selected = config_module.resolve_sources(cfg).selected
+        assert "muse" not in [s["name"] for s in selected], cfg
+
+    explicit = {"sync": {"sources": [get_default_source("muse")]}}
+    assert [s["name"] for s in config_module.resolve_sources(explicit).selected] == ["muse"]
 
 
 def test_muse_name_and_type_are_reserved_for_each_other():

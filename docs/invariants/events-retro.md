@@ -321,12 +321,52 @@ key set exactly the six `*_tokens` counters, `cached_tokens` equal to
 `cache_read_tokens`, `reasoning_tokens` a bounded subset of
 `output_tokens`, counters disjoint-normalized by the shared three-term
 rule, a nonzero cache write marking the day partial. The dedup key is the
-hashed envelope `id` scoped by session dir and model; an equal duplicate
-counts once, a conflicting one refuses the reader. `goal_usage_attribution`
+hashed envelope `id` alone, corpus-wide: not the model (one envelope is one
+step, so a repeated id under another model refuses) and not the session dir
+(a step restated in a second log counts once). An equal duplicate counts
+once, a conflicting one refuses the reader. `goal_usage_attribution`
 records restate the same steps and are never read. The private
 `muse-host-tokens.json` cache reuses Grok's turns-entry shape and
-fingerprint/resume machinery; it stores hashed keys, model IDs, days and
+resume machinery for live logs; it stores hashed keys, model IDs, days and
 aggregate counters — never paths, envelope ids, or conversation bytes.
+
+*Muse cost tracks the live window, not the history (load-bearing).* Muse
+writes ~100 logs a day, and a reader that revisits every log grows past the
+50 ms autopush grace within days. So: (1) an unchanged live log is a
+stat-only hit (dev/ino/size/mtime equal; never reopened or fingerprinted);
+(2) a `YYYY/MM/DD` directory at least `_MUSE_SETTLE_DAYS` old whose logs
+have all been idle `_MUSE_SETTLE_IDLE_NS` freezes into the cache's `frozen`
+map — per-day/model totals, partial days, and one digest over its logs'
+relative paths and stat identities — and its per-turn entries are dropped;
+(3) every pass stat-checks at least `_MUSE_VERIFY_PER_PASS` frozen days,
+least recently checked first (a `check_seq` pass counter, not a clock;
+newest first among equals), and keeps checking while more than
+`_MUSE_VERIFY_RESERVE_S` of budget remains, so an attended push re-checks
+every frozen day (~345 ms at 90 days of ~100 logs) and an autopush rotates
+through them one per pass; a digest mismatch (a resumed, pruned, moved or
+new log) unfreezes that day and re-reads it; (4) directories older than
+`MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS` are never walked, and a frozen day
+past that floor is kept on trust only while one of its days is among Muse's
+own `MAX_BY_DAY_DAYS` most recent active days — exactly the Muse days the
+wire, which keeps the most recent active days across all readers, can
+carry. Freezing, checking and eviction commit only with a complete pass.
+Cross-log dedup spans live logs; a day whose steps are shared with another
+live day never freezes; frozen days carry totals, not keys. A step recorded
+more than `_MUSE_STEP_LEAD_DAYS` before its session directory's date is
+history copied into a later session and refuses the reader, so a copy of a
+frozen step cannot be counted twice. A session resumed in place after its
+day froze is counted once a check reaches that day: the next attended push,
+or within one rotation of autopushes. The cache root carries `muse_format`;
+a cache without it is rebuilt. The reader clock is `_muse_now`, so tests
+pin it.
+
+*Unconsented Muse is not walked.* `mm diag` counts session logs
+(`muse_usage_diag(count_logs=True)`) only for an enabled `muse` source;
+otherwise `files_on_disk` is null. `mm status` stats `sessions/` only for
+the opt-in nudge, and not at all when `muse` is in `disabled_sources` or
+already enabled. No path opens a session log without consent. (Grok's diag
+count and status probe predate this rule.)
+
 The census and fatal-check list are
 `tests/fixtures/host_sessions/muse/CONTRACT.md`, bound to
 `MUSE_USAGE_CENSUS_HOST_VERSION`. Muse models classify as `other` in
@@ -2018,9 +2058,9 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok and Cursor). Only `deadline` qualifies, including a reader whose
+(today Codex, Grok, Cursor and Muse). Only `deadline` qualifies, including a reader whose
 first invocation was prevented by sweep expiry. A healthy empty scan never
-warms. Autopush supplies no warm callback. Codex/Grok continue to converge
+warms. Autopush supplies no warm callback. Codex/Grok/Muse continue to converge
 through partial commits; Cursor commits stable-file progress but reparses
 rewritten files, so repeated short passes need not converge.
 

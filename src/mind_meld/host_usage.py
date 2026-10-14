@@ -89,7 +89,7 @@ import sys
 import time
 from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Literal, NamedTuple, TypedDict, get_args
 
@@ -103,6 +103,7 @@ from mind_meld.lockedjson import (
     locked_json_snapshot,
 )
 from mind_meld.token_usage import (
+    MAX_BY_DAY_DAYS,
     MAX_JSONL_LINE_BYTES,
     TOKEN_FIELDS,
     DayBucket,
@@ -265,6 +266,11 @@ _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
 _GROK_REQUIRED_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
 _GROK_IGNORABLE_KEYS = frozenset({"elapsed_ms"})
 GROK_USAGE_CENSUS_HOST_VERSION = "1.0.30"
+"""Host version of the last Grok usage-reader wire census.
+
+Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by
+``test_contract_census_pin_matches_src_constant``. Not the skill-discovery
+pin in README.md (that is a different census, ``grok inspect --json``)."""
 _MUSE_USAGE_KEYS = frozenset(
     {
         "input_tokens",
@@ -277,12 +283,12 @@ _MUSE_USAGE_KEYS = frozenset(
 )
 _MUSE_EVENT_KEYS = frozenset({"kind", "model", "usage", "duration_ms", "finish_reason"})
 _MUSE_EVENT_REQUIRED_KEYS = frozenset({"kind", "model", "usage"})
+_MUSE_RECORDED_AT_MAX_DIGITS = 20
 MUSE_USAGE_CENSUS_HOST_VERSION = "1.4.7"
-"""Host version of the last Grok usage-reader wire census.
+"""Host version of the last Muse usage-reader census.
 
-Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by
-``test_contract_census_pin_matches_src_constant``. Not the skill-discovery
-pin in README.md (that is a different census, ``grok inspect --json``)."""
+Bound to ``tests/fixtures/host_sessions/muse/CONTRACT.md`` by
+``test_muse_contract_census_pin_matches_src_constant``."""
 GrokUpdateClass = Literal["terminal", "usage_less", "ignore", "drift"]
 _CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_PART = re.compile(r"^\d{4}$")
@@ -673,7 +679,7 @@ def warm_host_cache_inline(
 
     The result is the retry: attended capture publishes it through the usual
     reader failure boundary, without a second short-budget read. Autopush
-    never calls this helper. Codex/Grok can resume partial progress across
+    never calls this helper. Codex/Grok/Muse can resume partial progress across
     pushes; Cursor reparses rewritten files and need not converge under the
     same short allowance.
     ``reader`` selects a name in ``events_tail.WARMABLE_HOST_READERS``.
@@ -2085,7 +2091,11 @@ HOST_READER_DIAGS = {
 
 def reader_usage_diag(reader: str) -> dict[str, Any]:
     # Resolve at call time so patching the owner still reaches every consumer.
-    return globals()[HOST_READER_DIAGS[reader].function]()
+    function = globals()[HOST_READER_DIAGS[reader].function]
+    # Every caller here already holds the reader's consent (status: publication
+    # readers; recapture: consented readers), so Muse may count its logs.
+    # ``mm diag`` calls ``muse_usage_diag`` directly with its own consent bit.
+    return function(count_logs=True) if reader == "muse" else function()
 
 
 def reader_cache_cold(reader: str, state: dict[str, Any]) -> bool:
@@ -2252,13 +2262,16 @@ def grok_usage_diag() -> dict[str, Any]:
     }
 
 
-def muse_usage_diag() -> dict[str, Any]:
+def muse_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
     """Muse cache inventory and session-log path count. Never opens host logs.
 
     Same contract as ``grok_usage_diag``: cache-only reads plus a path
     count, so ``mm diag`` runs without a passphrase or a valid config.
+    The path count walks the sessions tree, so it is off unless the caller
+    holds consent (``count_logs=True``); otherwise ``files_on_disk`` is None
+    and an unconsented Muse tree is never walked.
     """
-    on_disk = _count_muse_ledgers(muse_sessions_root())
+    on_disk = _count_muse_ledgers(muse_sessions_root()) if count_logs else None
     blank = {
         **_cached_read_timing({}),
         "complete_once": False,
@@ -2285,9 +2298,19 @@ def muse_usage_diag() -> dict[str, Any]:
     files = data.get("files")
     if data.get("version") != CACHE_VERSION or not isinstance(files, dict):
         return blank
+    if data.get("muse_format") != _MUSE_CACHE_FORMAT:
+        files = {}  # a pre-release layout; the next read rebuilds it
     raw_skip = data.get("usage_less_skipped", 0)
     skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
-    models = _diag_grok_model_ids(files)
+    frozen = _validated_muse_frozen(data.get("frozen"))
+    # Frozen days keep per-model totals, not turns; list their models too.
+    frozen_models = {
+        f"\0frozen:{rel}": {
+            "turns": [{"model": model} for models in record["days"].values() for model in models]
+        }
+        for rel, record in frozen.items()
+    }
+    models = _diag_grok_model_ids({**files, **frozen_models})
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
@@ -2297,7 +2320,7 @@ def muse_usage_diag() -> dict[str, Any]:
         "cache_state": "ok",
         "model_count": models["model_count"],
         "models": models["models"],
-        "files_cached": len(files),
+        "files_cached": len(files) + sum(record["logs"] for record in frozen.values()),
         "files_on_disk": on_disk,
     }
 
@@ -3164,10 +3187,11 @@ def _aggregate_grok(entries: Any) -> HostUsageBuckets:
 # records restate the same steps split by purpose and are never read —
 # counting both would double every total (measured: per-file sums of the
 # two carriers are equal whenever attribution has caught up). The cache
-# entry shape is Grok's turns shape, so the fingerprint/resume/aggregate
-# machinery above is shared, not copied; only the walk, the record
-# projection and the counter validation are Muse's own. The fixture
-# contract is ``tests/fixtures/host_sessions/muse/CONTRACT.md``.
+# entry shape is Grok's turns shape, so the entry validation, fingerprint,
+# resume and aggregate helpers above are shared; the lock/commit
+# orchestration in ``read_muse_usage`` mirrors ``read_grok_usage``. The walk,
+# the record projection, cross-log dedup and counter validation are Muse's
+# own. The fixture contract is ``tests/fixtures/host_sessions/muse/CONTRACT.md``.
 
 
 def muse_sessions_root() -> Path:
@@ -3175,13 +3199,67 @@ def muse_sessions_root() -> Path:
     return MUSE_SESSIONS_PATH
 
 
+_MUSE_CACHE_FORMAT = 2
+"""Root marker of the Muse cache layout (envelope-only turn keys, ``frozen``).
+
+A cache without it (a pre-release build keyed turns by session and model) is
+discarded and rebuilt rather than mixing key schemes."""
+_MUSE_SETTLE_DAYS = 2
+"""A day directory may freeze once its date is this many UTC days old.
+
+Sessions run past midnight: at the 2026-10-14 census 37 of 215 logs had
+been appended the day after their directory date. That census spans two
+days, so it cannot show later in-place resumes; the idle rule below and the
+frozen-day check exist for them."""
+_MUSE_SETTLE_IDLE_NS = 24 * 60 * 60 * 1_000_000_000
+"""...and only when every log in it has been idle this long."""
+_MUSE_VERIFY_PER_PASS = 1
+"""Frozen days every pass stat-checks, however short its budget."""
+_MUSE_VERIFY_RESERVE_S = 0.05
+"""Budget kept back once the minimum is checked. Beyond the minimum, frozen
+days are checked, least recently checked first, while more than this remains,
+so an attended push (500 ms) re-checks every frozen day and an autopush (50 ms
+grace) checks one."""
+_MUSE_STEP_LEAD_DAYS = 1
+"""How many UTC days a step may precede its session directory's date.
+
+A directory date may be local while ``recorded_at`` is UTC, so a session
+opened just after local midnight east of UTC records the previous UTC day.
+Anything earlier is history copied into a new session."""
+_MUSE_DIR_LAG_DAYS = 2
+"""Margin past the published window before a day directory is no longer walked."""
+_MUSE_MAX_FROZEN_LOGS = 1_000_000
+
+
+def _muse_dir_date(rel: str) -> date | None:
+    """Calendar date of a ``YYYY/MM/DD`` session directory, or None."""
+    parts = rel.split("/")
+    if len(parts) != 3 or not all(part.isascii() and part.isdigit() for part in parts):
+        return None
+    try:
+        return date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+
+
+def _muse_now() -> datetime:
+    """The reader's clock for window, settle and idle decisions; tests pin it."""
+    return datetime.now(timezone.utc)
+
+
+def _muse_walk_floor(today: date) -> date:
+    """Oldest directory date still walked: the wire carries MAX_BY_DAY_DAYS days."""
+    return today - timedelta(days=MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS)
+
+
 def _count_muse_ledgers(root: Path) -> int | None:
     """Count reader-visible session logs under ``root``.
 
     Mirrors ``_count_two_level_ledgers``: a missing root is 0, a symlink
     or non-directory root is unknown, and scan errors stay unknown rather
-    than rendering as empty. The walk itself is ``_iter_muse_ledgers``
-    so the count can never disagree with the reader about visibility.
+    than rendering as empty. The walk is the reader's own, including its
+    window floor, so the count can never disagree with the reader about
+    visibility.
     """
     try:
         if not root.exists():
@@ -3192,7 +3270,11 @@ def _count_muse_ledgers(root: Path) -> int | None:
         return None
     try:
         deadline = time.monotonic() + DEFAULT_READ_BUDGET_S
-        return sum(1 for _ in _iter_muse_ledgers(root, deadline))
+        floor = _muse_walk_floor(_muse_now().date())
+        return sum(
+            len(_muse_day_logs(day, deadline))
+            for _, day in _iter_muse_day_dirs(root, deadline, floor)
+        )
     except (_ReadFailure, OSError):
         return None
 
@@ -3231,16 +3313,25 @@ def read_muse_usage(
             if not locked.is_locked:
                 return _incomplete("locked")
             prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
-            cached_files = _cached_files(locked.data)
+            current_format = locked.data.get("muse_format") == _MUSE_CACHE_FORMAT
+            cached_files = _cached_files(locked.data) if current_format else {}
+            prior_frozen = _cached_muse_frozen(locked.data) if current_format else {}
             prior_complete = (
                 locked.data.get("version") == CACHE_VERSION
                 and locked.data.get("complete_once") is True
             )
+            scan_now = _muse_now()
             if _expired(read_deadline):
-                result, staged_files, learned, saw_files = _incomplete("deadline"), {}, False, False
+                result, staged_files, frozen, learned, saw_files = (
+                    _incomplete("deadline"),
+                    {},
+                    prior_frozen,
+                    False,
+                    False,
+                )
             else:
-                result, staged_files, learned, saw_files = _scan_muse_root(
-                    source_root, cached_files, read_deadline
+                result, staged_files, frozen, learned, saw_files = _scan_muse_root(
+                    source_root, cached_files, prior_frozen, read_deadline, scan_now
                 )
             ready = time.monotonic()
             over_budget = result.complete and _expired(read_deadline)
@@ -3259,15 +3350,19 @@ def read_muse_usage(
             if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
                 raise _NoCacheCommit(result)
             complete_once = prior_complete or (result.complete and saw_files)
+            # Freezing, verification and eviction commit only with a complete
+            # pass; a partial pass keeps the frozen days it started from.
             files = staged_files if result.complete else {**cached_files, **staged_files}
             locked.data = {
                 **timing,
                 "version": CACHE_VERSION,
+                "muse_format": _MUSE_CACHE_FORMAT,
                 "complete_once": complete_once,
                 "usage_less_skipped": 0,
                 "last_reason": carried[0],
                 "last_reason_since": carried[1],
                 "files": files,
+                "frozen": frozen if result.complete else prior_frozen,
             }
             if over_budget:
                 result = _incomplete("deadline")
@@ -3282,56 +3377,270 @@ def read_muse_usage(
 def _scan_muse_root(
     root: Path,
     cached_files: dict[str, Any],
+    frozen: dict[str, dict[str, Any]],
     deadline: float,
-) -> tuple[HostUsageResult, dict[str, Any], bool, bool]:
-    """Returns ``(result, staged, learned, saw_files)``; Grok's scan shape."""
-    try:
-        ledgers = list(_iter_muse_ledgers(root, deadline))
-    except _ReadFailure as failure:
-        return _incomplete(failure.reason), {}, False, False
+    now: datetime,
+) -> tuple[HostUsageResult, dict[str, Any], dict[str, dict[str, Any]], bool, bool]:
+    """Returns ``(result, live, frozen, learned, saw_files)``.
 
+    Cost tracks the live window, not the whole history. Logs in day
+    directories that have not frozen are read through Grok's entry, resume
+    and aggregate helpers, with a stat-only cache hit (an append-only log
+    whose dev/ino/size/mtime are unchanged is not reopened). Frozen days are
+    then stat-checked, least recently checked first, at least
+    ``_MUSE_VERIFY_PER_PASS`` and more while budget remains; a mismatch
+    unfreezes that day and re-reads it. Directories past the walk floor are
+    not walked; their frozen totals stay while Muse's own ``MAX_BY_DAY_DAYS``
+    most recent active days still need them.
+    """
+    today = now.date()
+    floor = _muse_walk_floor(today)
+    try:
+        day_dirs = dict(_iter_muse_day_dirs(root, deadline, floor))
+    except _ReadFailure as failure:
+        return _incomplete(failure.reason), {}, frozen, False, False
+
+    # A frozen day inside the walk floor whose directory is gone is evicted;
+    # one past the floor is no longer walkable and is kept on trust.
+    kept = {
+        rel: record
+        for rel, record in frozen.items()
+        if rel in day_dirs or _muse_dir_date(rel) < floor  # type: ignore[operator]
+    }
+    check_seq = max((record["check_seq"] for record in kept.values()), default=0) + 1
     canonical_root = root.resolve()
     staged: dict[str, Any] = {}
-    learned = False
-    for session_id, path in ledgers:
-        if _expired(deadline):
-            return _incomplete("deadline"), staged, learned, True
-        key = _cache_key(path, root=root, canonical_root=canonical_root)
-        try:
+    live_dirs: dict[str, list[str]] = {}
+    log_paths: dict[str, str] = {}
+    learned = len(kept) != len(frozen)
+    saw_files = any(record["logs"] for record in kept.values())
+
+    def read_live(rel: str, logs: list[tuple[str, os.stat_result]]) -> None:
+        nonlocal learned
+        when = _muse_dir_date(rel) or today  # day_dirs keys are validated dates
+        for log_rel, _ in logs:
+            if _expired(deadline):
+                raise _ReadFailure("deadline")
+            path = day_dirs[rel] / log_rel
+            key = _cache_key(path, root=root, canonical_root=canonical_root)
             before = _regular_stat(path)
             existing = _validated_grok_entry(cached_files.get(key))
-            entry = _grok_cache_hit(path, before, existing, deadline)
-            if entry is None:
+            if existing is not None and _same_cache_metadata(existing, before):  # type: ignore[arg-type]
+                entry = existing
+            else:
                 resume = _grok_resumable_entry(path, before, existing, deadline)
                 entry = (
-                    _resume_muse_file(path, session_id, before, resume, deadline)
+                    _resume_muse_file(path, before, resume, deadline, when)
                     if resume is not None
-                    else _read_full_muse_file(path, session_id, before, deadline)
+                    else _read_full_muse_file(path, before, deadline, when)
                 )
                 learned = True
             staged[key] = entry
-        except _ReadFailure as failure:
-            return _incomplete(failure.reason), staged, learned, True
+            live_dirs.setdefault(rel, []).append(key)
+            log_paths[key] = log_rel
 
-    return (
-        _result_from_buckets(
-            _aggregate_grok(staged.values()),
-            partial_days=_grok_partial_days(staged.values()),
-        ),
-        staged,
-        learned,
-        bool(ledgers),
+    try:
+        for rel, day in day_dirs.items():
+            if rel in kept:
+                continue
+            logs = _muse_day_logs(day, deadline)
+            saw_files = saw_files or bool(logs)
+            read_live(rel, logs)
+        # Newest first among equally stale days: a resumed session is likelier there.
+        stalest = sorted(
+            (rel for rel in kept if rel in day_dirs),
+            key=lambda rel: (kept[rel]["check_seq"], -_muse_dir_date(rel).toordinal()),  # type: ignore[union-attr]
+        )
+        for checked, rel in enumerate(stalest):
+            if checked >= _MUSE_VERIFY_PER_PASS and deadline - time.monotonic() <= (
+                _MUSE_VERIFY_RESERVE_S
+            ):
+                break
+            logs = _muse_day_logs(day_dirs[rel], deadline)
+            identities = {log_rel: _muse_identity(st) for log_rel, st in logs}
+            if _muse_logs_digest(identities) == kept[rel]["digest"]:
+                kept[rel] = {**kept[rel], "check_seq": check_seq}
+                continue
+            # A frozen day changed (a resumed session, a pruned or moved log):
+            # drop its totals and read it as live again.
+            del kept[rel]
+            learned = True
+            read_live(rel, logs)
+    except _ReadFailure as failure:
+        return _incomplete(failure.reason), staged, frozen, learned, True
+
+    # Turn keys are corpus-wide envelope ids, so a step restated in a second
+    # live log (a parent echoing a subagent, a session copied the same day)
+    # counts once when identical and refuses when it disagrees. Frozen days
+    # keep totals, not keys, so this check spans live logs only; a step
+    # copied into a later session from an older day is refused instead by the
+    # step-lead rule in ``_muse_turn_from_record``.
+    unique: dict[str, dict[str, Any]] = {}
+    owners: dict[str, set[str]] = {}
+    for rel, keys in live_dirs.items():
+        for key in keys:
+            for turn in staged[key]["turns"]:
+                prior_turn = unique.setdefault(turn["key"], turn)
+                if prior_turn is not turn and prior_turn != turn:
+                    return _incomplete("unsupported"), staged, frozen, learned, True
+                owners.setdefault(turn["key"], set()).add(rel)
+
+    # The wire keeps the MAX_BY_DAY_DAYS most recent active days across all
+    # readers, so any Muse day it can carry is among Muse's own that many
+    # most recent active days. Frozen days outside that set are dead weight.
+    active = sorted(
+        {turn["day"] for turn in unique.values()}
+        | {day for record in kept.values() for day in record["days"]},
+        reverse=True,
+    )[:MAX_BY_DAY_DAYS]
+    recent = set(active)
+    for rel in [rel for rel, record in kept.items() if not recent & set(record["days"])]:
+        del kept[rel]
+        learned = True
+
+    frozen_turns = [
+        {"day": day, "model": model, "usage": usage}
+        for record in kept.values()
+        for day, models in record["days"].items()
+        for model, usage in models.items()
+    ]
+    partial = set(_grok_partial_days(staged.values()))
+    for record in kept.values():
+        partial.update(record["partial_days"])
+    result = _result_from_buckets(
+        _aggregate_grok([{"turns": [*unique.values(), *frozen_turns]}]),
+        partial_days=frozenset(partial),
     )
 
+    idle_before = int(now.timestamp() * 1_000_000_000) - _MUSE_SETTLE_IDLE_NS
+    for rel, keys in live_dirs.items():
+        when = _muse_dir_date(rel)
+        if when is None or when > today - timedelta(days=_MUSE_SETTLE_DAYS):
+            continue
+        entries = [staged[key] for key in keys]
+        if any(entry["mtime_ns"] > idle_before for entry in entries):
+            continue
+        # A step shared with a log in another live day stays live, so the
+        # cross-log check above keeps seeing both copies.
+        if any(owners[turn["key"]] != {rel} for entry in entries for turn in entry["turns"]):
+            continue
+        kept[rel] = _freeze_muse_day(
+            entries, {log_paths[key]: staged[key] for key in keys}, check_seq
+        )
+        for key in keys:
+            del staged[key]
+        learned = True
+    return result, staged, kept, learned, saw_files
 
-def _iter_muse_ledgers(root: Path, deadline: float):
-    """Yield ``(session_id, session.jsonl)`` under ``root``'s date tree.
 
-    Subagent sessions nest one level down at
-    ``<session>/subagent/<child-id>/session.jsonl`` (142 of 179 files in
-    the census corpus) and their model steps are real spend, so the walk
-    descends through literal ``subagent`` segments and nothing else.
-    """
+def _muse_identity(source: os.stat_result | dict[str, Any]) -> tuple[int, int, int, int]:
+    if isinstance(source, dict):
+        return (source["dev"], source["ino"], source["size"], source["mtime_ns"])
+    return (source.st_dev, source.st_ino, source.st_size, source.st_mtime_ns)
+
+
+def _muse_logs_digest(identities: dict[str, tuple[int, int, int, int]]) -> str:
+    """One digest over a day directory's log paths (relative) and stat identities."""
+    digest = hashlib.sha256()
+    for log_rel in sorted(identities):
+        line = f"{log_rel}\0{':'.join(map(str, identities[log_rel]))}\n"
+        digest.update(os.fsencode(line))
+    return digest.hexdigest()
+
+
+def _freeze_muse_day(
+    entries: list[dict[str, Any]],
+    by_log: dict[str, dict[str, Any]],
+    check_seq: int,
+) -> dict[str, Any]:
+    """Collapse one settled day directory to per-day/model totals."""
+    days: dict[str, dict[str, Usage]] = {}
+    seen: set[str] = set()
+    partial: set[str] = set()
+    for entry in entries:
+        partial.update(entry.get("partial_days") or ())
+        for turn in entry["turns"]:
+            if turn["key"] in seen:
+                continue
+            seen.add(turn["key"])
+            row = days.setdefault(turn["day"], {})
+            prior_usage = row.get(turn["model"])
+            row[turn["model"]] = (
+                dict(turn["usage"])
+                if prior_usage is None
+                else {name: prior_usage[name] + turn["usage"][name] for name in TOKEN_FIELDS}
+            )
+    return {
+        "digest": _muse_logs_digest({log: _muse_identity(e) for log, e in by_log.items()}),
+        "logs": len(by_log),
+        "check_seq": check_seq,
+        "days": days,
+        "partial_days": sorted(partial),
+    }
+
+
+def _cached_muse_frozen(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if data.get("version") != CACHE_VERSION:
+        return {}
+    return _validated_muse_frozen(data.get("frozen"))
+
+
+def _validated_muse_frozen(value: Any) -> dict[str, dict[str, Any]]:
+    """Keep each well-formed frozen day; a malformed one is re-read as live."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for rel, record in value.items():
+        if not isinstance(rel, str) or _muse_dir_date(rel) is None or not isinstance(record, dict):
+            continue
+        digest = record.get("digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            continue
+        logs = record.get("logs")
+        if not _is_nonnegative_int(logs) or logs > _MUSE_MAX_FROZEN_LOGS:
+            continue
+        if not _is_nonnegative_int(record.get("check_seq")):
+            continue
+        days = _validated_muse_frozen_days(record.get("days"))
+        partial = _validated_grok_partial_days(record.get("partial_days"))
+        if days is None or partial is None:
+            continue
+        out[rel] = {
+            "digest": digest,
+            "logs": logs,
+            "check_seq": record["check_seq"],
+            "days": days,
+            "partial_days": partial,
+        }
+    return out
+
+
+def _validated_muse_frozen_days(value: Any) -> dict[str, dict[str, Usage]] | None:
+    if not isinstance(value, dict):
+        return None
+    out: dict[str, dict[str, Usage]] = {}
+    for day, models in value.items():
+        if not isinstance(day, str) or not _CANONICAL_DAY.fullmatch(day):
+            return None
+        if not isinstance(models, dict):
+            return None
+        row: dict[str, Usage] = {}
+        for model, usage in models.items():
+            if not isinstance(model, str) or not model:
+                return None
+            if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+                return None
+            if not isinstance(usage, dict):
+                return None
+            if any(not _is_valid_counter(usage.get(name)) for name in TOKEN_FIELDS):
+                return None
+            row[model] = {name: usage[name] for name in TOKEN_FIELDS}
+        out[day] = row
+    return out
+
+
+def _iter_muse_day_dirs(root: Path, deadline: float, floor: date):
+    """Yield ``("YYYY/MM/DD", path)`` for each day directory dated ``floor`` or later."""
     if _expired(deadline):
         raise _ReadFailure("deadline")
     try:
@@ -3340,52 +3649,89 @@ def _iter_muse_ledgers(root: Path, deadline: float):
         if root.is_symlink() or not root.is_dir():
             raise _ReadFailure("unsupported")
         for year in _sorted_children(root, deadline):
-            if not _YEAR_PART.fullmatch(year.name) or not _is_directory(year):
+            if not _YEAR_PART.fullmatch(year.name) or int(year.name) < floor.year:
+                continue
+            if not _is_directory(year):
                 continue
             for month in _sorted_children(year, deadline):
-                if not _MONTH_OR_DAY_PART.fullmatch(month.name) or not _is_directory(month):
+                if not _MONTH_OR_DAY_PART.fullmatch(month.name):
+                    continue
+                if (int(year.name), int(month.name)) < (floor.year, floor.month):
+                    continue
+                if not _is_directory(month):
                     continue
                 for day in _sorted_children(month, deadline):
                     if not _MONTH_OR_DAY_PART.fullmatch(day.name) or not _is_directory(day):
                         continue
-                    for session in _sorted_children(day, deadline):
-                        if _is_directory(session):
-                            yield from _iter_muse_session_tree(session, deadline)
+                    rel = f"{year.name}/{month.name}/{day.name}"
+                    when = _muse_dir_date(rel)
+                    if when is None or when < floor:
+                        continue
+                    yield rel, day
     except OSError as exc:
         raise _ReadFailure("io_error") from exc
 
 
-def _iter_muse_session_tree(session: Path, deadline: float):
-    """Yield a session's own log plus its ``subagent/`` descendants'."""
-    candidate = session / "session.jsonl"
-    if _is_regular_non_symlink(candidate):
-        yield session.name, candidate
-    children = session / "subagent"
-    if _is_directory(children):
-        for child in _sorted_children(children, deadline):
-            if _is_directory(child):
-                yield from _iter_muse_session_tree(child, deadline)
+def _muse_day_logs(day: Path, deadline: float) -> list[tuple[str, os.stat_result]]:
+    """Every ``session.jsonl`` of one day directory, relative to it, with its lstat.
+
+    Subagent sessions nest below a session at
+    ``<session>/subagent/<child-id>/session.jsonl`` (142 of 179 files in
+    the census corpus) and their model steps are real spend, so the walk
+    descends through literal ``subagent`` segments and nothing else.
+    Symlinks, and anything that is not a directory or regular file, are
+    skipped. ``scandir`` file types and plain strings keep this near one
+    directory read and one lstat per log, which is what lets frozen days be
+    re-checked inside an attended budget.
+    """
+    base = os.fspath(day)
+    found: list[tuple[str, os.stat_result]] = []
+
+    def entries(rel: str) -> list[os.DirEntry[str]]:
+        if _expired(deadline):
+            raise _ReadFailure("deadline")
+        with os.scandir(os.path.join(base, rel) if rel else base) as listing:
+            return sorted(listing, key=lambda entry: entry.name)
+
+    def session_tree(rel: str) -> None:
+        children = {entry.name: entry for entry in entries(rel)}
+        log = children.get("session.jsonl")
+        if log is not None and log.is_file(follow_symlinks=False):
+            found.append((f"{rel}/session.jsonl", log.stat(follow_symlinks=False)))
+        sub = children.get("subagent")
+        if sub is not None and sub.is_dir(follow_symlinks=False):
+            for child in entries(f"{rel}/subagent"):
+                if child.is_dir(follow_symlinks=False):
+                    session_tree(f"{rel}/subagent/{child.name}")
+
+    try:
+        for session in entries(""):
+            if session.is_dir(follow_symlinks=False):
+                session_tree(session.name)
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+    return found
 
 
 def _read_full_muse_file(
     path: Path,
-    session_id: str,
     before: os.stat_result,
     deadline: float,
+    dir_date: date,
 ) -> dict[str, Any]:
-    turns, new_partial = _read_muse_file(path, session_id, 0, {}, before, deadline)
+    turns, new_partial = _read_muse_file(path, 0, {}, before, deadline, dir_date)
     return _grok_file_entry(path, before, deadline, turns, 0, new_partial=new_partial)
 
 
 def _resume_muse_file(
     path: Path,
-    session_id: str,
     before: os.stat_result,
     entry: dict[str, Any],
     deadline: float,
+    dir_date: date,
 ) -> dict[str, Any]:
     prior = {turn["key"]: turn for turn in entry["turns"]}
-    turns, new_partial = _read_muse_file(path, session_id, entry["offset"], prior, before, deadline)
+    turns, new_partial = _read_muse_file(path, entry["offset"], prior, before, deadline, dir_date)
     return _grok_file_entry(
         path,
         before,
@@ -3399,11 +3745,11 @@ def _resume_muse_file(
 
 def _read_muse_file(
     path: Path,
-    session_id: str,
     start_offset: int,
     prior: dict[str, dict[str, Any]],
     before: os.stat_result,
     deadline: float,
+    dir_date: date,
 ) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
     turns = dict(prior)
     last_offset = start_offset
@@ -3428,7 +3774,7 @@ def _read_muse_file(
                     record = json.loads(raw)
                 except (TypeError, ValueError, UnicodeDecodeError) as exc:
                     raise _ReadFailure("malformed") from exc
-                parsed = _muse_turn_from_record(record, session_id)
+                parsed = _muse_turn_from_record(record, dir_date)
                 if parsed is None:
                     continue
                 key, turn, partial = parsed
@@ -3450,7 +3796,7 @@ def _read_muse_file(
     return turns, frozenset(partial_days)
 
 
-def _muse_turn_from_record(record: Any, session_id: str) -> tuple[str, dict[str, Any], bool] | None:
+def _muse_turn_from_record(record: Any, dir_date: date) -> tuple[str, dict[str, Any], bool] | None:
     """Project one terminal ``model_completed`` event, or skip the record.
 
     Strict like the Grok terminal ledger: a recognized carrier with an
@@ -3489,7 +3835,16 @@ def _muse_turn_from_record(record: Any, session_id: str) -> tuple[str, dict[str,
         raise _ReadFailure("unsupported")
     counters, partial = _validate_muse_counters(usage)
     day = _muse_recorded_day(record.get("recorded_at"))
-    key = hashlib.sha256(f"{session_id}\0{envelope_id}\0{model}".encode()).hexdigest()
+    # A step recorded before its session began is history copied into a new
+    # session (census: every step falls on its directory's date or the next
+    # UTC day). Counting it would double spend already counted, possibly in
+    # a frozen day whose keys are gone, so refuse rather than guess.
+    if date.fromisoformat(day) < dir_date - timedelta(days=_MUSE_STEP_LEAD_DAYS):
+        raise _ReadFailure("unsupported")
+    # One envelope is one step, so the model stays OUT of the key: a repeated
+    # id with a different model must reach the ``existing == turn`` check and
+    # refuse, not count twice. Not session-scoped either; see _scan_muse_root.
+    key = hashlib.sha256(f"muse\0{envelope_id}".encode()).hexdigest()
     return key, {"key": key, "day": day, "model": model, "usage": counters}, partial
 
 
@@ -3538,6 +3893,9 @@ def _muse_recorded_day(value: Any) -> str:
     if isinstance(value, str):
         if not value.isascii() or not value.isdigit():
             raise _ReadFailure("unsupported")
+        # int() refuses strings past 4,300 digits with a raw ValueError.
+        if len(value) > _MUSE_RECORDED_AT_MAX_DIGITS:
+            raise _ReadFailure("malformed")
         micros = int(value)
     else:
         micros = value

@@ -619,39 +619,20 @@ def grok_customization_dirs_exist(
     return False
 
 
-def muse_memory_dir_exists(
-    root: Path,
-    *,
-    strict: bool = False,
-    source_name: str = "muse",
-) -> bool:
+def muse_memory_dir_exists(root: Path) -> bool:
     """True if the hardcoded Muse ``memory/`` dir exists under ``root``.
 
-    The data root itself exists on every Muse install (sessions and
-    caches). That is not a signal that there is anything to roam, and
-    because source-enabled is also the usage reader's consent, the
-    default source activates only once a memory tree does — the same
-    posture as ``grok_customization_dirs_exist``.
+    A label only ("detected" in the init and reconfigure prompts). It is
+    never an activation or consent signal: Muse creates ``memory/`` itself
+    on first run, so the default muse source activates only through
+    ``mm enable-source muse`` or an explicit "y" at the init prompt.
     """
     from mind_meld.manifest import MUSE_SYNCED_SUBDIRS
 
     for name in MUSE_SYNCED_SUBDIRS:
-        candidate = root / name
         try:
-            st = candidate.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=name,
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
+            st = (root / name).lstat()
+        except OSError:
             continue
         if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
             return True
@@ -752,7 +733,6 @@ def _configured_sources(
     disabled = set(sync.get("disabled_sources", []) or [])
     explicit_sources = "sources" in sync
     grok_strict = strict and "grok" not in disabled
-    muse_strict = strict and "muse" not in disabled
 
     if explicit_sources:
         sources = []
@@ -792,15 +772,11 @@ def _configured_sources(
             or s["name"] in disabled
             or grok_customization_dirs_exist(Path(s["path"]), strict=grok_strict)
         ]
-        # Same gate for Muse: the data root exists on every install, so
-        # only a memory/ tree activates the default muse source.
-        sources = [
-            s
-            for s in sources
-            if s.get("type") != "muse"
-            or s["name"] in disabled
-            or muse_memory_dir_exists(Path(s["path"]), strict=muse_strict)
-        ]
+        # Muse never auto-activates. Muse creates memory/ itself on first
+        # run (holding only its PID lock), so no tree under its root is a
+        # consent signal, and an enabled source also authorizes the usage
+        # reader. Only `mm enable-source muse` or an init "y" adds it.
+        sources = [s for s in sources if s.get("type") != "muse" or s["name"] in disabled]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.
@@ -854,15 +830,12 @@ def _configured_sources(
         for source_name, source_path in (
             ("codex", Path.home() / ".codex"),
             ("grok", Path.home() / ".grok"),
-            ("muse", Path.home() / ".local" / "share" / "muse"),
         ):
             if source_name in disabled or any(s["name"] == source_name for s in sources):
                 continue
             present = (
                 grok_customization_dirs_exist(source_path, strict=False)
                 if source_name == "grok"
-                else muse_memory_dir_exists(source_path, strict=False)
-                if source_name == "muse"
                 else _optional_host_present(source_path)
             )
             if present:

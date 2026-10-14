@@ -286,7 +286,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Muse
 
-`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names; a dedicated `Muse` row arrives with the 2.0 compatibility contract. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
+`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names; a dedicated `Muse` row arrives with the 2.0 compatibility contract. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
 ### Grok usage in fleet retro
 

@@ -27,6 +27,7 @@ from mind_meld.cli import (
     _fsync_touched_parents,
     _FsyncWarning,
     _include_prior_grok_if_needed,
+    _include_prior_host_if_needed,
     _load_prior_device_metadata,
     _PerSourceResult,
     _prefetch_manifests,
@@ -2184,7 +2185,11 @@ class TestPromptSources:
 
         user_sources = [s for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
         assert len(probes) == len(user_sources)
-        assert all(default is True for _prompt, default in prompts)
+        # Every detected source defaults on except Muse, which is opt-in even
+        # when detected (its memory/ tree is host-created).
+        assert [default for _prompt, default in prompts] == [
+            s["name"] != "muse" for s in user_sources
+        ]
         assert all("detected" in prompt for prompt, _default in prompts)
 
 
@@ -3014,33 +3019,65 @@ class TestSnapshotPublicationHelpers:
         backend.put.assert_called_once()
         assert transferred == len(b"enc")
 
-    def test_upload_refuses_grok_hardlink_replacement(self, tmp_path):
-        base = tmp_path / ".grok"
-        skills = base / "skills"
-        skills.mkdir(parents=True)
-        path = skills / "SKILL.md"
+    @pytest.mark.parametrize(("source_type", "subdir"), [("grok", "skills"), ("muse", "memory")])
+    def test_upload_refuses_hardlink_replacement(self, tmp_path, source_type, subdir):
+        base = tmp_path / source_type
+        tree = base / subdir
+        tree.mkdir(parents=True)
+        path = tree / "SKILL.md"
         path.write_text("ok")
         rev = read_file_revision(
             path,
             max_file_size=1024,
             retain_bytes=True,
-            source_type="grok",
+            source_type=source_type,
             base=base,
         )
-        os.link(path, skills / "alias.md")
+        os.link(path, tree / "alias.md")
         info = {"sha256": rev.digest, "size": rev.size, "mtime": rev.mtime_iso}
         backend = MagicMock()
         with pytest.raises(SnapshotError, match="no longer a confined regular file"):
             _upload_changed_blobs(
                 backend,
                 base,
-                {"skills/SKILL.md": info},
+                {f"{subdir}/SKILL.md": info},
                 "dev",
                 "pw",
                 1024,
-                source_type="grok",
+                source_type=source_type,
             )
         backend.put.assert_not_called()
+
+    def test_prior_muse_without_memory_is_retained_and_scans_empty(self, tmp_path):
+        """memory/ deleted after publishing: keep the source so deletions propagate."""
+        from mind_meld.manifest import build_manifest_v2
+
+        root = tmp_path / "muse"
+        (root / "sessions").mkdir(parents=True)
+        muse_cfg = {"name": "muse", "path": str(root), "type": "muse"}
+        resolution = SourceResolution(selected=[muse_cfg], available=[])
+        remote = {"sources": {"muse": {"files": {"memory/personal/a.md": {"sha256": "a" * 64}}}}}
+        sources = _include_prior_host_if_needed({"sync": {}}, resolution, remote, [], "muse")
+        assert [src["name"] for src in sources] == ["muse"]
+        local = build_manifest_v2("dev", "A", sources, 1024, strict=True)
+        assert local["sources"]["muse"]["files"] == {}
+        disabled = {"sync": {"disabled_sources": ["muse"]}}
+        assert _include_prior_host_if_needed(disabled, resolution, remote, [], "muse") == []
+
+    def test_previously_published_muse_lock_does_not_block_push(self, tmp_path):
+        """A lock a pre-exclusion build published may stay on disk, now excluded."""
+        root = tmp_path / "muse"
+        personal = root / "memory" / "personal"
+        personal.mkdir(parents=True)
+        (personal / ".muse-memory.lock").write_text("pid=1\n")
+        muse_cfg = {"name": "muse", "path": str(root), "type": "muse"}
+        prior = {
+            "sources": {
+                "muse": {"files": {"memory/personal/.muse-memory.lock": {"sha256": "a" * 64}}}
+            }
+        }
+        local = {"sources": {"muse": {"files": {}}}}
+        _prove_omitted_paths_absent(local, prior, [muse_cfg], max_file_size=1024)
 
     def test_prior_grok_missing_root_refuses(self, tmp_path):
         missing = tmp_path / "gone-grok"

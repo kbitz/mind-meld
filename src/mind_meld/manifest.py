@@ -294,11 +294,13 @@ GROK_EXCLUDE_PATTERNS = [
 # memory/ (personal/ + projects/<workspace>/) roams. Measured 2026-10-14
 # against Muse 1.4.7's live ~/.local/share/muse.
 MUSE_SYNCED_SUBDIRS = ["memory"]
-# No generated-link globs: memory/ holds user/agent-authored notes only,
-# and the walker rejects every symlink as defense in depth. Kept as a
-# named list so the walker merges user exclude_patterns the same way
-# Grok's does; the pull-side CLI filters need no muse branch while empty.
-MUSE_EXCLUDE_PATTERNS: list[str] = []
+# Muse keeps a machine-local PID lock beside the personal notes
+# (``memory/personal/.muse-memory.lock``, ``pid=<n>``; observed on 1.4.7).
+# Roaming it would hand every peer a foreign PID and a conflict sidecar
+# each time another Muse process takes the lock. The pull-side filters
+# (``cli._build_exclude_map``, ``cli._prove_omitted_paths_absent``) merge
+# this list exactly as they merge Grok's.
+MUSE_EXCLUDE_PATTERNS: list[str] = ["*.muse-memory.lock"]
 
 
 def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
@@ -1289,7 +1291,8 @@ def _lstat_or_none(
 
 
 # Per-file walker pipeline (single source of truth, called by
-# walk_claude_source, walk_generic_source, and walk_grok_source):
+# walk_claude_source, walk_generic_source, walk_grok_source, and
+# walk_muse_source):
 #
 #   path ──► relative_to(base) ──► rel
 #                                   │

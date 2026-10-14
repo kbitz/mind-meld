@@ -272,15 +272,19 @@ joins Grok, while unobserved auto/composer remain Unclassified.
 bundled skills and plugin caches at the same root never roam, and
 `~/.config/muse` (auth, settings, trust, the config-repo-deployed
 `AGENTS.md`) is not a source at all. Source-enabled is the usage
-reader's consent, matching Codex and Grok; there is no retro bit. The
-default source activates only while `memory/` exists, mirroring Grok's
-customization-dir gate, because the data root exists on every install.
+reader's consent, matching Codex and Grok; there is no retro bit. Unlike
+Grok's user-authored customization dirs, Muse creates `memory/` itself on
+first run (holding only its `.muse-memory.lock` PID file, which never
+roams), so the source never auto-activates: explicit enable only.
 
 The reader counts terminal `model_completed` events in
 `sessions/YYYY/MM/DD/<id>/session.jsonl` (plus `subagent/` descendants)
 under the strict Grok discipline; `goal_usage_attribution` records
-restate the same steps and are never read. The census and counter
-semantics are `tests/fixtures/host_sessions/muse/CONTRACT.md`.
+restate the same steps and are never read. Muse writes about ten times
+Grok's volume (~100 logs a day at the census), so settled day directories
+freeze into per-day/model totals and directories past the 90-day wire
+window are no longer walked; see the events/retro invariants. The census
+and counter semantics are `tests/fixtures/host_sessions/muse/CONTRACT.md`.
 
 No new host family in 1.x: the compatibility contract makes a family a
 MAJOR (an un-upgraded peer rejects the whole snapshot over an unknown

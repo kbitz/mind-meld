@@ -161,6 +161,18 @@ class TestReaderOrchestration:
         readers[0][1](deadline=1_000.0)
         assert seen == {"consented": True}
 
+    def test_source_authorized_muse_reader_passes_consented_true(self, monkeypatch):
+        seen: dict[str, bool] = {}
+
+        def read(*, deadline, consented=False):
+            seen["consented"] = consented
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", read)
+        readers = dict(events_tail._default_host_readers(self._enabled("muse")))
+        readers["muse"](deadline=1_000.0)
+        assert seen == {"consented": True}
+
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
         no consent check at all. Strict equality against the live reader set

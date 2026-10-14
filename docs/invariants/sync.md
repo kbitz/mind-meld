@@ -489,10 +489,12 @@ filter. The default `grok` source (`type: "grok"`) is Claude-shaped: the walker
 hardcodes `skills/`, `commands/`, and `rules/` at `~/.grok`. The fallback and
 auto-detect paths only activate it when one of those dirs exists — `~/.grok`
 itself is present on every Grok install and is not consent. The default
-`muse` source (`type: "muse"`) is the same shape: the walker hardcodes
-`memory/` at `~/.local/share/muse`, and the fallback and auto-detect paths
-only activate it while that dir exists — the data root itself is present on
-every Muse install and is not consent. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+`muse` source (`type: "muse"`) has the same walker shape (`memory/` hardcoded
+at `~/.local/share/muse`, `.muse-memory.lock` excluded on push and pull) but
+never auto-activates: Muse creates `memory/` itself on first run, so neither
+the data root nor that tree is consent. Only `mm enable-source muse` or an
+explicit "y" at the init prompt (which defaults to N) adds it, and
+`reconfigure-sources` never defaults it on. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).

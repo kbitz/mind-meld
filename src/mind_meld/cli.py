@@ -144,6 +144,7 @@ from mind_meld.manifest import (
     CONFLICT_V1_MARKER,
     GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
+    MUSE_EXCLUDE_PATTERNS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
@@ -794,6 +795,8 @@ def _build_exclude_map(
         patterns = list(src.get("exclude_patterns") or [])
         if src.get("type") == "grok":
             patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
+        elif src.get("type") == "muse":
+            patterns = [*MUSE_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
         prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
         if patterns:
@@ -1186,6 +1189,8 @@ def _prove_omitted_paths_absent(
             extra = list(src_cfg.get("exclude_patterns") or [])
             if src_cfg.get("type") == "grok":
                 extra = [*GROK_EXCLUDE_PATTERNS, *extra]
+            elif src_cfg.get("type") == "muse":
+                extra = [*MUSE_EXCLUDE_PATTERNS, *extra]
             if _manifest_is_excluded(rel_path, extra):
                 continue
             path = base / rel_path
@@ -1278,13 +1283,14 @@ def _include_prior_host_if_needed(
     sources: list[dict[str, Any]],
     name: str,
 ) -> list[dict[str, Any]]:
-    """Retain a gated host source when its on-disk trigger tree is gone.
+    """Retain a published host source whose allowlisted tree is gone.
 
-    Grok and Muse activate their default sources only while their
-    allowlisted trees exist. Once such a source has been published,
-    deleting the tree must not silently drop the source from the scan:
-    retain it so the deletions truthfully propagate, and refuse loudly
-    when the root itself is unreadable.
+    Grok's default source activates only while its customization trees
+    exist; Muse's activates only by explicit enable, and its ``memory/`` can
+    still be deleted later. Once such a source has been published, losing
+    the tree must not silently drop the source from the scan: retain it so
+    the deletions truthfully propagate, and refuse loudly when the root
+    itself is unreadable.
     """
     if remote_manifest is None or name not in remote_manifest.get("sources", {}):
         return sources
@@ -3205,7 +3211,10 @@ def _prompt_sources() -> list[dict[str, Any]]:
                 enabled.append(src)
             continue
         exists = _source_path_is_detected(default)
-        if _prompt_source_toggle(default, current_state=exists, detected=exists):
+        # Muse is opt-in even when detected: its memory/ tree is host-created,
+        # and enabling the source also consents to the usage reader.
+        default_on = exists and default["name"] != "muse"
+        if _prompt_source_toggle(default, current_state=default_on, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
                 enabled.append(src)
@@ -3940,7 +3949,7 @@ def push(
     refuse the push and preserve the previous snapshot.
 
     Attended pushes also refresh and publish host usage, even when user content
-    is up to date. Requires mm-events and a consented Codex or Grok reader.
+    is up to date. Requires mm-events and a consented host reader.
     Capture runs before content sync: about five seconds of scanning per cold
     reader, and both readers can be cold. Budgets are not hard timeouts.
     Content-changing pushes also run GC on this device's orphaned blobs;
@@ -6431,11 +6440,15 @@ def status(
             )
 
     muse_on = any(s.get("name") == "muse" for s in sources_configs)
+    # The presence probe only feeds the opt-in nudge: skip it once Muse is
+    # enabled (its reader state answers) or explicitly disabled (no nudge).
+    muse_disabled = "muse" in (config.get("sync", {}).get("disabled_sources") or [])
     muse_present = False
-    try:
-        muse_present = _host_usage.muse_sessions_root().exists()
-    except OSError:
-        muse_present = False
+    if not muse_on and not muse_disabled:
+        try:
+            muse_present = _host_usage.muse_sessions_root().exists()
+        except OSError:
+            muse_present = False
     if muse_on or muse_present:
         if muse_on:
             muse_diag = reader_states["muse"]
@@ -7288,15 +7301,21 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         grok_consented = grok_host_usage_enabled(cfg) or any(
             source.get("name") == "grok" for source in resolved_sources
         )
-    host_usage_state = {
-        name: _host_usage.reader_usage_diag(name) for name in _host_usage.HOST_READER_DIAGS
-    }
-    host_usage_state["grok"]["consented"] = grok_consented
-    host_usage_state["muse"]["consented"] = (
+    muse_consented = (
         any(source.get("name") == "muse" for source in resolved_sources)
         if config_state == "ok"
         else None
     )
+    host_usage_state = {
+        # Muse's session-log count walks the sessions tree; only a consented
+        # source may pay for it (Grok's count predates that rule).
+        name: _host_usage.muse_usage_diag(count_logs=muse_consented is True)
+        if name == "muse"
+        else _host_usage.reader_usage_diag(name)
+        for name in _host_usage.HOST_READER_DIAGS
+    }
+    host_usage_state["grok"]["consented"] = grok_consented
+    host_usage_state["muse"]["consented"] = muse_consented
     host_usage_state["cursor"]["consented"] = (
         _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
     )
@@ -8755,6 +8774,10 @@ def reconfigure_sources() -> None:
                 # every Grok install. It must not become a default-Y source
                 # or authorize the separate usage reader.
                 default_active = detected
+            elif iname == "muse":
+                # Muse never defaults on: its memory/ tree is host-created, so
+                # even a detected root is not consent for sync or usage reads.
+                default_active = False
             currently_active = (
                 iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled
