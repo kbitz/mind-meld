@@ -3213,13 +3213,15 @@ days, so it cannot show later in-place resumes; the idle rule below and the
 frozen-day check exist for them."""
 _MUSE_SETTLE_IDLE_NS = 24 * 60 * 60 * 1_000_000_000
 """...and only when every log in it has been idle this long."""
-_MUSE_VERIFY_PER_PASS = 1
-"""Frozen days every pass stat-checks, however short its budget."""
-_MUSE_VERIFY_RESERVE_S = 0.05
-"""Budget kept back once the minimum is checked. Beyond the minimum, frozen
-days are checked, least recently checked first, while more than this remains,
-so an attended push (500 ms) re-checks every frozen day and an autopush (50 ms
-grace) checks one."""
+_MUSE_TAIL_RESERVE_S = 0.01
+"""Budget kept for dedup, aggregation, freezing and the cache write."""
+_MUSE_VERIFY_LOG_COST_S = 50e-6
+"""Estimated stat-check cost per frozen log (measured ~40 µs on APFS).
+
+Frozen days are checked, least recently checked first, while their summed
+estimate fits the budget left after ``_MUSE_TAIL_RESERVE_S``; a day that
+does not fit is skipped, not waited on. An attended push (500 ms) re-checks
+every frozen day; an autopush (50 ms grace) checks what fits."""
 _MUSE_STEP_LEAD_DAYS = 1
 """How many UTC days a step may precede its session directory's date.
 
@@ -3248,7 +3250,13 @@ def _muse_now() -> datetime:
 
 
 def _muse_walk_floor(today: date) -> date:
-    """Oldest directory date still walked: the wire carries MAX_BY_DAY_DAYS days."""
+    """Oldest directory date still walked, in calendar days.
+
+    The wire keeps the most recent MAX_BY_DAY_DAYS *active* days, so a sparse
+    fleet can publish older days. Frozen totals past this floor are kept for
+    exactly that; a directory past it that never froze (history older than
+    the first consented read) is not counted.
+    """
     return today - timedelta(days=MAX_BY_DAY_DAYS + _MUSE_DIR_LAG_DAYS)
 
 
@@ -3387,11 +3395,10 @@ def _scan_muse_root(
     directories that have not frozen are read through Grok's entry, resume
     and aggregate helpers, with a stat-only cache hit (an append-only log
     whose dev/ino/size/mtime are unchanged is not reopened). Frozen days are
-    then stat-checked, least recently checked first, at least
-    ``_MUSE_VERIFY_PER_PASS`` and more while budget remains; a mismatch
-    unfreezes that day and re-reads it. Directories past the walk floor are
-    not walked; their frozen totals stay while Muse's own ``MAX_BY_DAY_DAYS``
-    most recent active days still need them.
+    then stat-checked, least recently checked first, while their estimated
+    cost fits the budget; a mismatch unfreezes that day and re-reads it.
+    Directories past the walk floor are not walked; their frozen totals stay
+    while Muse's own ``MAX_BY_DAY_DAYS`` most recent active days need them.
     """
     today = now.date()
     floor = _muse_walk_floor(today)
@@ -3446,17 +3453,25 @@ def _scan_muse_root(
             logs = _muse_day_logs(day, deadline)
             saw_files = saw_files or bool(logs)
             read_live(rel, logs)
-        # Newest first among equally stale days: a resumed session is likelier there.
+        # Least recently checked first (a just-frozen day is 0, so it is checked
+        # on the next pass); newest first among equals, where resumes are likelier.
         stalest = sorted(
             (rel for rel in kept if rel in day_dirs),
             key=lambda rel: (kept[rel]["check_seq"], -_muse_dir_date(rel).toordinal()),  # type: ignore[union-attr]
         )
-        for checked, rel in enumerate(stalest):
-            if checked >= _MUSE_VERIFY_PER_PASS and deadline - time.monotonic() <= (
-                _MUSE_VERIFY_RESERVE_S
-            ):
-                break
-            logs = _muse_day_logs(day_dirs[rel], deadline)
+        verify_deadline = deadline - _MUSE_TAIL_RESERVE_S
+        budget = verify_deadline - time.monotonic()
+        for rel in stalest:
+            cost = kept[rel]["logs"] * _MUSE_VERIFY_LOG_COST_S
+            if cost > budget:
+                continue
+            budget -= cost
+            try:
+                logs = _muse_day_logs(day_dirs[rel], verify_deadline)
+            except _ReadFailure as failure:
+                if failure.reason != "deadline":
+                    raise
+                break  # out of checking budget; unchecked days stay frozen on trust
             identities = {log_rel: _muse_identity(st) for log_rel, st in logs}
             if _muse_logs_digest(identities) == kept[rel]["digest"]:
                 kept[rel] = {**kept[rel], "check_seq": check_seq}
@@ -3487,14 +3502,20 @@ def _scan_muse_root(
 
     # The wire keeps the MAX_BY_DAY_DAYS most recent active days across all
     # readers, so any Muse day it can carry is among Muse's own that many
-    # most recent active days. Frozen days outside that set are dead weight.
+    # most recent active days. A frozen day past the walk floor outside that
+    # set is dead weight; inside the floor it stays (at most ~93 records), so
+    # a still-walked directory is never evicted and re-read.
     active = sorted(
         {turn["day"] for turn in unique.values()}
         | {day for record in kept.values() for day in record["days"]},
         reverse=True,
     )[:MAX_BY_DAY_DAYS]
     recent = set(active)
-    for rel in [rel for rel, record in kept.items() if not recent & set(record["days"])]:
+    for rel in [
+        rel
+        for rel, record in kept.items()
+        if _muse_dir_date(rel) < floor and not recent & set(record["days"])  # type: ignore[operator]
+    ]:
         del kept[rel]
         learned = True
 
@@ -3513,6 +3534,7 @@ def _scan_muse_root(
     )
 
     idle_before = int(now.timestamp() * 1_000_000_000) - _MUSE_SETTLE_IDLE_NS
+    freezing: dict[str, date | None] = {}
     for rel, keys in live_dirs.items():
         when = _muse_dir_date(rel)
         if when is None or when > today - timedelta(days=_MUSE_SETTLE_DAYS):
@@ -3524,9 +3546,20 @@ def _scan_muse_root(
         # cross-log check above keeps seeing both copies.
         if any(owners[turn["key"]] != {rel} for entry in entries for turn in entry["turns"]):
             continue
-        kept[rel] = _freeze_muse_day(
-            entries, {log_paths[key]: staged[key] for key in keys}, check_seq
-        )
+        days = [turn["day"] for entry in entries for turn in entry["turns"]]
+        freezing[rel] = date.fromisoformat(max(days)) if days else None
+    # A frozen day keeps totals, not keys, so its steps must already be too old
+    # for the step-lead rule to accept in any session created later. Such a
+    # session is dated today - 1 at the earliest (west of UTC), so it accepts
+    # steps from today - 1 - _MUSE_STEP_LEAD_DAYS on; hold back any day whose
+    # newest step is that recent.
+    accepts_from = today - timedelta(days=1 + _MUSE_STEP_LEAD_DAYS)
+    for rel in [rel for rel, newest in freezing.items() if newest and newest >= accepts_from]:
+        del freezing[rel]
+    for rel in freezing:
+        keys = live_dirs[rel]
+        entries = [staged[key] for key in keys]
+        kept[rel] = _freeze_muse_day(entries, {log_paths[key]: staged[key] for key in keys}, 0)
         for key in keys:
             del staged[key]
         learned = True
@@ -3690,14 +3723,22 @@ def _muse_day_logs(day: Path, deadline: float) -> list[tuple[str, os.stat_result
     def entries(rel: str) -> list[os.DirEntry[str]]:
         if _expired(deadline):
             raise _ReadFailure("deadline")
-        with os.scandir(os.path.join(base, rel) if rel else base) as listing:
-            return sorted(listing, key=lambda entry: entry.name)
+        try:
+            with os.scandir(os.path.join(base, rel) if rel else base) as listing:
+                return sorted(listing, key=lambda entry: entry.name)
+        except (FileNotFoundError, NotADirectoryError):
+            return []  # removed by Muse mid-walk: absent, like the old walker
 
     def session_tree(rel: str) -> None:
         children = {entry.name: entry for entry in entries(rel)}
         log = children.get("session.jsonl")
         if log is not None and log.is_file(follow_symlinks=False):
-            found.append((f"{rel}/session.jsonl", log.stat(follow_symlinks=False)))
+            try:
+                st = log.stat(follow_symlinks=False)
+            except (FileNotFoundError, NotADirectoryError):
+                st = None
+            if st is not None:
+                found.append((f"{rel}/session.jsonl", st))
         sub = children.get("subagent")
         if sub is not None and sub.is_dir(follow_symlinks=False):
             for child in entries(f"{rel}/subagent"):

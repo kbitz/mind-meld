@@ -408,11 +408,11 @@ def test_short_budget_rotates_one_frozen_day_per_pass(muse_cache, tmp_path, monk
         return real(day, deadline)
 
     monkeypatch.setattr(hu, "_muse_day_logs", spy)
-    # An autopush-sized budget: only the per-pass minimum is checked.
-    monkeypatch.setattr(hu, "_MUSE_VERIFY_RESERVE_S", 1e9)
+    # A budget that fits one single-log frozen day per pass.
+    monkeypatch.setattr(hu, "_MUSE_VERIFY_LOG_COST_S", 3.0)
     for _ in range(3):
         hu.read_muse_usage(tmp_path, consented=True)
-    # Least recently checked first, newest first among equals: all three in three passes.
+    # Just-frozen days first, newest first among equals: all three in three passes.
     assert walked == ["2026/10/10", "2026/10/09", "2026/10/08"]
 
 
@@ -544,3 +544,104 @@ def test_muse_row_is_accepted_by_a_pre_muse_peer(muse_cache, monkeypatch):
     accepted = aggregator._accept_host_usage_snapshot(dict(row))
     assert isinstance(accepted, aggregator._AcceptedHostRow), accepted
     assert accepted.consulted == ("codex", "grok", "cursor", "muse")
+
+
+def test_a_day_freezes_only_once_a_copy_of_it_would_be_refused(muse_cache, tmp_path, monkeypatch):
+    """West of UTC: a fresh session can be dated today - 1, so a just-settled day waits."""
+    early = datetime(2026, 10, 12, 17, tzinfo=timezone.utc)
+    late = datetime(2026, 10, 12, 23, tzinfo=timezone.utc)
+    steps = [_record("p1", _usage(), at=early), _record("p2", _usage(), at=late)]
+    original = _write_session(tmp_path, steps, day="2026/10/12")
+    monkeypatch.setattr(hu, "_muse_now", lambda: datetime(2026, 10, 14, 0, 30, tzinfo=timezone.utc))
+    stamp = late.timestamp()
+    os.utime(original, (stamp, stamp))  # idle 25.5 h, dated two days back
+    hu.read_muse_usage(tmp_path, consented=True)
+    assert _cache(muse_cache)["frozen"] == {}  # held: a 2026/10/13 session would accept it
+
+    copy = _write_session(tmp_path, steps, "s2", day="2026/10/13")
+    os.utime(copy, (stamp, stamp))
+    counted = hu.read_muse_usage(tmp_path, consented=True)
+    assert counted.complete
+    assert counted.hosts["other"]["2026-10-12"]["input"] == 120  # live dedup: once
+
+    copy.unlink()
+    monkeypatch.setattr(hu, "_muse_now", lambda: datetime(2026, 10, 16, 18, tzinfo=timezone.utc))
+    hu.read_muse_usage(tmp_path, consented=True)
+    assert set(_cache(muse_cache)["frozen"]) == {"2026/10/12"}
+    _write_session(tmp_path, steps, "s3", day="2026/10/15")
+    refused = hu.read_muse_usage(tmp_path, consented=True)
+    assert not refused.complete
+    assert refused.reason == "unsupported"
+
+
+def test_steps_after_midnight_hold_their_day_back(muse_cache, tmp_path, monkeypatch):
+    """A 2026/10/12 session with a 2026-10-13 step freezes no earlier than 10/16."""
+    after_midnight = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    path = _write_session(tmp_path, [_record("m1", _usage(), at=after_midnight)], day="2026/10/12")
+    stamp = after_midnight.timestamp()
+    os.utime(path, (stamp, stamp))
+    for day, frozen in ((15, set()), (16, {"2026/10/12"})):
+        now = datetime(2026, 10, day, 18, tzinfo=timezone.utc)
+        monkeypatch.setattr(hu, "_muse_now", lambda now=now: now)
+        assert hu.read_muse_usage(tmp_path, consented=True).complete
+        assert set(_cache(muse_cache)["frozen"]) == frozen
+
+
+def test_a_check_that_does_not_fit_leaves_the_pass_complete(muse_cache, tmp_path, monkeypatch):
+    _settled_session(tmp_path, "old", "2026/10/10")
+    first = hu.read_muse_usage(tmp_path, consented=True)
+    seq = _cache(muse_cache)["frozen"]["2026/10/10"]["check_seq"]
+
+    monkeypatch.setattr(hu, "_MUSE_VERIFY_LOG_COST_S", 1e9)
+    assert hu.read_muse_usage(tmp_path, consented=True) == first
+    assert _cache(muse_cache)["frozen"]["2026/10/10"]["check_seq"] == seq
+
+    monkeypatch.setattr(hu, "_MUSE_VERIFY_LOG_COST_S", 0.0)
+    real = hu._muse_day_logs
+
+    def out_of_time(day, deadline):
+        if day.parts[-3:] == ("2026", "10", "10"):
+            raise hu._ReadFailure("deadline")
+        return real(day, deadline)
+
+    monkeypatch.setattr(hu, "_muse_day_logs", out_of_time)
+    assert hu.read_muse_usage(tmp_path, consented=True) == first  # stop checking, not fail
+    assert _cache(muse_cache)["frozen"]["2026/10/10"]["check_seq"] == seq
+
+
+def test_a_frozen_day_inside_the_floor_is_never_evicted(muse_cache, tmp_path, monkeypatch):
+    _settled_session(tmp_path, "old", "2026/10/11")
+    _write_session(tmp_path, [_record("live", _usage())])
+    monkeypatch.setattr(hu, "MAX_BY_DAY_DAYS", 1)  # floor 2026-10-11; only 10-13 publishable
+    hu.read_muse_usage(tmp_path, consented=True)
+    assert "2026/10/11" in _cache(muse_cache)["frozen"]
+    with monkeypatch.context() as m:
+        m.setattr(hu, "_read_full_muse_file", Mock(side_effect=AssertionError("re-read")))
+        hu.read_muse_usage(tmp_path, consented=True)
+    assert "2026/10/11" in _cache(muse_cache)["frozen"]
+
+
+def test_a_session_removed_mid_walk_is_absent(tmp_path, monkeypatch):
+    day = tmp_path / "2026" / "10" / "13"
+    for session in ("s1", "s2"):
+        (day / session).mkdir(parents=True)
+        (day / session / "session.jsonl").write_text("{}\n")
+    real = os.scandir
+
+    def vanishing(path):
+        if os.fspath(path).endswith("/s1"):
+            raise FileNotFoundError(path)
+        return real(path)
+
+    monkeypatch.setattr(hu.os, "scandir", vanishing)
+    logs = hu._muse_day_logs(day, deadline=float("inf"))
+    assert [rel for rel, _ in logs] == ["s2/session.jsonl"]
+
+
+def test_consecutive_settled_days_all_freeze(muse_cache, tmp_path):
+    """Holding back one recent day must not hold back the older days behind it."""
+    for index, day in enumerate(("2026/10/09", "2026/10/10", "2026/10/11", "2026/10/12")):
+        _settled_session(tmp_path, f"c{index}", day)
+    hu.read_muse_usage(tmp_path, consented=True)
+    # 2026/10/12 is held (a session dated 10/13 would accept its steps).
+    assert set(_cache(muse_cache)["frozen"]) == {"2026/10/09", "2026/10/10", "2026/10/11"}

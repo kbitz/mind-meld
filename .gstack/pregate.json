@@ -1,6 +1,19 @@
 {
   "runner": "./bin/check --tests {files}",
   "dependencies": {
-    "docs/roadmap-future.md": []
+    "docs/roadmap-future.md": [],
+    "docs/SPEC.md": [],
+    "tests/fixtures/host_sessions/muse/2026/10/13/session-a/session.jsonl": [
+      "tests/test_muse_usage.py"
+    ],
+    "tests/fixtures/host_sessions/muse/2026/10/13/session-a/subagent/child-a/session.jsonl": [
+      "tests/test_muse_usage.py"
+    ],
+    "tests/fixtures/host_sessions/muse/2026/10/14/session-b/session.jsonl": [
+      "tests/test_muse_usage.py"
+    ],
+    "tests/fixtures/host_sessions/muse/CONTRACT.md": [
+      "tests/test_muse_usage.py"
+    ]
   }
 }
