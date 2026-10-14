@@ -1,0 +1,6 @@
+{
+  "runner": "./bin/check --tests {files}",
+  "dependencies": {
+    "docs/roadmap-future.md": []
+  }
+}

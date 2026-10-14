@@ -101,37 +101,42 @@ Comparisons use installed metadata rather than the process's imported version;
 an install another updater has already advanced is current, not a failure.
 
 **Explicit-update progress represents installer output and is terminal-only.**
-`mm update` renders one Rich bar from `updateprogress.PipxProgressParser`, and
-only when stdout is a real terminal: `FORCE_COLOR` can make Rich treat a pipe
-as one, so the bar also requires `isatty()`. Redirected output and automatic
-updates keep their existing pipe capture and messages. For the in-place
-`pipx upgrade` (and no other command shape), `_run_pipx(on_output=...)`
+`mm update` renders one Rich spinner from `updateprogress.PipxProgressParser`,
+and only when stdout is a real terminal: `FORCE_COLOR` can make Rich treat a
+pipe as one, so the display also requires `isatty()`. Redirected output and
+automatic updates keep their existing pipe capture and messages. For the
+in-place `pipx upgrade` (and no other command shape), `_run_pipx(on_output=...)`
 captures a private PTY so pipx reports native counters without writing raw
 output to the user's terminal. Percentages belong to the current download,
-Git operation or package batch. pip clones quietly and draws counters only for
-larger uncached downloads and multi-package installs, so most updates show
-phase labels alone. Build phases have a fixed label with no invented fraction.
-Repeated/unknown lines do not advance the bar; no timer advances it. The parser
-handles split ANSI frames, bounds its partial-line buffer and emits only fixed
-labels and validated numeric counters. pip's interactive spinner ends a step's
-line only when the step finishes, so phase labels are also read from the
-unterminated line; counters wait for their line to end. The hidden PTY has a
+Git operation or package batch and appear as detail text next to the step
+label. pip clones quietly and draws counters only for larger uncached
+downloads and multi-package installs, so most updates show phase labels alone.
+There is no bar: a phase with no measured fraction could only render as 0%
+until completion jumped it to 100%, so the spinner shows activity instead.
+Build phases have a fixed label with no invented fraction. Repeated/unknown
+lines do not change the display. No timer refreshes it, so a long silent step
+can hold one spinner frame. Measured counters do not finish the spinner; only
+verified update completion does. The parser handles split ANSI frames, bounds
+its partial-line buffer and emits only fixed labels and validated numeric
+counters. pip's interactive spinner ends a step's line only when the step
+finishes, so phase labels are also read from the unterminated line; counters
+wait for their line to end. The hidden PTY has a
 fixed `PTY_COLUMNS` width, also passed to pipx as `COLUMNS`, so a narrow window
 cannot wrap pip's counters, and pipx gets `PYTHONIOENCODING=utf-8`: on a TTY it
 tees pip's output and re-raises a failed write after pip finishes, before it
 records metadata. The parser knows pip's wording; a uv-backed pipx venv streams
-uv's, so the bar shows fewer labels and no counters there. When no PTY can be opened, or its reader is past
-`select()`'s FD_SETSIZE limit, the pipe capture runs without live counters;
-both are decided before pipx starts.
+uv's, so the display shows fewer labels and no counters there. When no PTY can
+be opened, or its reader is past `select()`'s FD_SETSIZE limit, the pipe capture
+runs without live counters; both are decided before pipx starts.
 
 **The display never decides the update.** Parsing human installer output is
 best-effort: the first exception from the display or parser
 (`upgrade._ProgressRelay`) turns the display off while pipx keeps running and
 the metadata is still verified. Rich reports a closed pipe as `SystemExit`, so
 that counts as a display failure too. Only `KeyboardInterrupt` (Ctrl-C while
-drawing) reaches pipx cleanup. A bar that cannot start falls back to a plain
-update, and neither its final label nor stopping it can replace an
-interruption or the outcome. Only verified metadata completes the bar.
+drawing) reaches pipx cleanup. A display that cannot start falls back to a
+plain update, and neither its final label nor stopping it can replace an
+interruption or the outcome. Only verified metadata completes the display.
 
 **Only the in-place upgrade is tied to mm's terminal (load-bearing).** On a
 TTY, pipx 1.17 streams pip's output and re-raises a failed write after pip
@@ -143,7 +148,7 @@ inside that same transaction once nothing reads them. Every foreground
 display stops drawing and mm keeps reading until pipx exits. It installs a
 no-op handler, not `SIG_IGN`, so pipx and its children keep the default SIGHUP
 disposition. SIGTERM or SIGKILL of mm itself remains a risk on both paths, as
-before the progress bar: the in-place upgrade then completes with stale
+before the progress display: the in-place upgrade then completes with stale
 metadata that the next update repairs. A terminal paused by Ctrl-S, or mm
 suspended past the timeout, stalls the streaming reader (deferred in
 `docs/roadmap-future.md`, "A paused terminal pauses a streaming mm update").
