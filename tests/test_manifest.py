@@ -485,14 +485,19 @@ class TestNestedRepositories:
         assert list(walk_generic_source(cfg)) == ["docs/note.md"]
         assert not (directory / ".git").exists()
 
+    # The "muse" row was added by the /ship test coverage audit (pass 1).
+    # Value: protects=a git checkout under Muse memory/ is pruned unread by walk_muse_source and
+    # inventoried by nested_repo_skip_prefixes; fails_when=nested_repo_skip_prefixes drops its
+    # muse branch or the Muse walker enters a checkout; why_new=this table covered claude,
+    # generic and grok only; seam=none; no_claim=none beyond protects
     @pytest.mark.parametrize("strict", [False, True])
-    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok"])
+    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok", "muse"])
     @pytest.mark.parametrize("gitlink", [False, True])
     def test_checkout_is_pruned_and_plain_content_and_source_root_repo_survive(
         self, tmp_path, monkeypatch, strict, source_type, gitlink
     ):
         base = tmp_path / "source"
-        parent = "projects/app/memory" if source_type == "claude" else "skills"
+        parent = {"claude": "projects/app/memory", "muse": "memory"}.get(source_type, "skills")
         repo = base / parent / "checkout"
         repo.mkdir(parents=True)
         if gitlink:

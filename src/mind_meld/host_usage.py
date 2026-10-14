@@ -3214,13 +3214,17 @@ frozen-day check exist for them."""
 _MUSE_SETTLE_IDLE_NS = 24 * 60 * 60 * 1_000_000_000
 """...and only when every log in it has been idle this long."""
 _MUSE_TAIL_RESERVE_S = 0.01
-"""Budget kept for dedup, aggregation, freezing and the cache write."""
+"""Fixed part of the budget kept for dedup, aggregation and freezing."""
+_MUSE_TAIL_STEP_COST_S = 4e-6
+"""Per live step on top of that (measured ~2.7 µs): with ~1,000 steps a day
+and three to four days live, the tail alone is 8-13 ms."""
 _MUSE_VERIFY_LOG_COST_S = 50e-6
 """Estimated stat-check cost per frozen log (measured ~40 µs on APFS).
 
 Frozen days are checked, least recently checked first, while their summed
 estimate fits the budget left after ``_MUSE_TAIL_RESERVE_S``; a day that
-does not fit is skipped, not waited on. An attended push (500 ms) re-checks
+does not fit is skipped, not waited on, and a day whose check runs out of
+time moves to the back of the queue. An attended push (500 ms) re-checks
 every frozen day; an autopush (50 ms grace) checks what fits."""
 _MUSE_STEP_LEAD_DAYS = 1
 """How many UTC days a step may precede its session directory's date.
@@ -3412,7 +3416,7 @@ def _scan_muse_root(
     kept = {
         rel: record
         for rel, record in frozen.items()
-        if rel in day_dirs or _muse_dir_date(rel) < floor  # type: ignore[operator]
+        if rel in day_dirs or (_muse_dir_date(rel) or floor) < floor
     }
     check_seq = max((record["check_seq"] for record in kept.values()), default=0) + 1
     canonical_root = root.resolve()
@@ -3432,7 +3436,7 @@ def _scan_muse_root(
             key = _cache_key(path, root=root, canonical_root=canonical_root)
             before = _regular_stat(path)
             existing = _validated_grok_entry(cached_files.get(key))
-            if existing is not None and _same_cache_metadata(existing, before):  # type: ignore[arg-type]
+            if existing is not None and _muse_identity(existing) == _muse_identity(before):
                 entry = existing
             else:
                 resume = _grok_resumable_entry(path, before, existing, deadline)
@@ -3457,9 +3461,10 @@ def _scan_muse_root(
         # on the next pass); newest first among equals, where resumes are likelier.
         stalest = sorted(
             (rel for rel in kept if rel in day_dirs),
-            key=lambda rel: (kept[rel]["check_seq"], -_muse_dir_date(rel).toordinal()),  # type: ignore[union-attr]
+            key=lambda rel: (kept[rel]["check_seq"], -(_muse_dir_date(rel) or today).toordinal()),
         )
-        verify_deadline = deadline - _MUSE_TAIL_RESERVE_S
+        live_steps = sum(len(entry["turns"]) for entry in staged.values())
+        verify_deadline = deadline - _MUSE_TAIL_RESERVE_S - live_steps * _MUSE_TAIL_STEP_COST_S
         budget = verify_deadline - time.monotonic()
         for rel in stalest:
             cost = kept[rel]["logs"] * _MUSE_VERIFY_LOG_COST_S
@@ -3471,7 +3476,10 @@ def _scan_muse_root(
             except _ReadFailure as failure:
                 if failure.reason != "deadline":
                     raise
-                break  # out of checking budget; unchecked days stay frozen on trust
+                # Out of checking budget: unchecked days stay frozen on trust,
+                # and this one goes to the back so it cannot hog every pass.
+                kept[rel] = {**kept[rel], "check_seq": check_seq}
+                break
             identities = {log_rel: _muse_identity(st) for log_rel, st in logs}
             if _muse_logs_digest(identities) == kept[rel]["digest"]:
                 kept[rel] = {**kept[rel], "check_seq": check_seq}
@@ -3514,7 +3522,7 @@ def _scan_muse_root(
     for rel in [
         rel
         for rel, record in kept.items()
-        if _muse_dir_date(rel) < floor and not recent & set(record["days"])  # type: ignore[operator]
+        if (_muse_dir_date(rel) or floor) < floor and not recent & set(record["days"])
     ]:
         del kept[rel]
         learned = True

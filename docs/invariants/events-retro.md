@@ -344,9 +344,11 @@ newest step must fall on or before today − 3), so a copy of a frozen step
 into a new session refuses rather than counting twice; (3) frozen days are stat-checked least recently checked first (a
 `check_seq` pass counter, not a clock; a just-frozen day is 0 and goes
 first; newest first among equals) while their estimated cost
-(`_MUSE_VERIFY_LOG_COST_S` per log) fits the budget left after
-`_MUSE_TAIL_RESERVE_S`; a day that does not fit is skipped and a deadline
-inside a check stops checking without failing the pass, so an attended push
+(`_MUSE_VERIFY_LOG_COST_S` per log) fits the budget left after the tail
+reserve (`_MUSE_TAIL_RESERVE_S` plus `_MUSE_TAIL_STEP_COST_S` per live step);
+a day that does not fit is skipped, and a deadline inside a check stops
+checking without failing the pass and sends that day to the back of the
+queue, so an attended push
 re-checks every frozen day (~345 ms at 90 days of ~100 logs) and an
 autopush checks what fits; a digest mismatch (a resumed, pruned, moved or
 new log) unfreezes that day and re-reads it; (4) directories older than
