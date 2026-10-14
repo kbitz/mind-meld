@@ -450,7 +450,7 @@ def test_snapshot_witness_reaches_actual_displaced_expiry(tmp_path, sim_write_gu
     # reports expiry without expiring anything; why_new=summary checks only labels;
     # seam=existing no-argument machine replay context.
     monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
-    token = ACTIVE.set(Invocation(tmp_path / "expiry-witness", sim_write_guard))
+    activation_context = ACTIVE.set(Invocation(tmp_path / "expiry-witness", sim_write_guard))
     machine = CoreMachine()
     try:
         machine.snapshot_witness()
@@ -468,7 +468,7 @@ def test_snapshot_witness_reaches_actual_displaced_expiry(tmp_path, sim_write_gu
         try:
             machine.teardown()
         finally:
-            ACTIVE.reset(token)
+            ACTIVE.reset(activation_context)
 
 
 def test_teardown_preserves_original_failure_and_cleans_root(
@@ -479,7 +479,7 @@ def test_teardown_preserves_original_failure_and_cleans_root(
     from .invariants import InvariantError
 
     monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
-    token = ACTIVE.set(Invocation(tmp_path / "first-failure", sim_write_guard))
+    activation_context = ACTIVE.set(Invocation(tmp_path / "first-failure", sim_write_guard))
     machine = CoreMachine()
     calls = []
 
@@ -498,4 +498,4 @@ def test_teardown_preserves_original_failure_and_cleans_root(
         assert calls == []
         assert not machine.fleet.root.exists()
     finally:
-        ACTIVE.reset(token)
+        ACTIVE.reset(activation_context)

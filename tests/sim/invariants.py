@@ -361,11 +361,13 @@ def record_versions(fleet):
             name = layout.parse_record_key(match[1] + ".enc") if match else None
             if name is None or name.kind not in ("commit", "snapshot"):
                 continue
-            key = (name.device_id, name.kind, name.seq, name.nparts, match[2])
+            family_identity = (name.device_id, name.kind, name.seq, name.nparts, match[2])
             expected = envelope.RecordContext(
                 ctx.keys.fleet_id, name.device_id, name.kind, name.seq, name.part, name.nparts
             )
-            families.setdefault(key, []).append((expected, (ctx.replica_root / path).read_bytes()))
+            families.setdefault(family_identity, []).append(
+                (expected, (ctx.replica_root / path).read_bytes())
+            )
         for (peer, kind, seq, _, _), parts in sorted(families.items()):
             expected = ctx.context(peer, kind, seq)
             try:
