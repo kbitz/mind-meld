@@ -366,6 +366,8 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_host_usage, "CURSOR_SPOOL_PATH", root / "cursor-standalone-spool.jsonl")
     monkeypatch.setattr(_host_usage, "CURSOR_HOOK_CONFIG_PATH", root / "cursor-hooks.json")
     monkeypatch.setattr(_host_usage, "CURSOR_CLI_CONFIG_PATH", root / "cursor-cli-config.json")
+    monkeypatch.setattr(_host_usage, "MUSE_SESSIONS_PATH", root / "muse" / "sessions")
+    monkeypatch.setattr(_host_usage, "MUSE_CACHE_PATH", root / "muse-host-tokens.json")
 
 
 @pytest.fixture(autouse=True)

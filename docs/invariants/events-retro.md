@@ -225,7 +225,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) readers as one additive
+The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) / Muse readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -270,8 +270,8 @@ Codex returns `unsupported` for a ledger it cannot attribute, which means
 "real usage is here and I could not read it" — that keeps the veto. Getting
 that distinction backwards silently under-reports the fleet.
 
-**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
-Grok to the source name whose being enabled authorizes them. The live set is
+**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex,
+Grok and Muse to the source name whose being enabled authorizes them. The live set is
 `events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
 tuple (same names, same order). Unknown inbound names (retired `opencode`,
 or a future reader) are retained by the aggregator, not listed here.
@@ -310,6 +310,31 @@ prompt IDs, or conversation bytes. Equal duplicate
 `(workspace, session, prompt_id, model)` records count once; conflicting
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
+
+**Muse terminal ledger (1.x minor, 2026-10-14).** When the `muse` source
+is enabled, `read_muse_usage` walks
+`~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` plus literal
+`subagent/` descendants, regular non-symlink files only, and accepts only
+`model_completed` events under a `runtime.session` envelope: the event key
+set within `{kind, model, usage, duration_ms, finish_reason}`, the usage
+key set exactly the six `*_tokens` counters, `cached_tokens` equal to
+`cache_read_tokens`, `reasoning_tokens` a bounded subset of
+`output_tokens`, counters disjoint-normalized by the shared three-term
+rule, a nonzero cache write marking the day partial. The dedup key is the
+hashed envelope `id` scoped by session dir and model; an equal duplicate
+counts once, a conflicting one refuses the reader. `goal_usage_attribution`
+records restate the same steps and are never read. The private
+`muse-host-tokens.json` cache reuses Grok's turns-entry shape and
+fingerprint/resume machinery; it stores hashed keys, model IDs, days and
+aggregate counters — never paths, envelope ids, or conversation bytes.
+The census and fatal-check list are
+`tests/fixtures/host_sessions/muse/CONTRACT.md`, bound to
+`MUSE_USAGE_CENSUS_HOST_VERSION`. Muse models classify as `other` in
+1.x: a new host family is a MAJOR under the compatibility contract in
+`docs/invariants/auto-upgrade.md`, while the reader/token-source name is
+a MINOR. The `muse` *file* walker never opens `sessions/`; the usage
+reader is a separate consented walk of `session.jsonl` only. Muse gets
+no `AgentRow` (it discovers `~/.claude/skills`).
 
 **Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`

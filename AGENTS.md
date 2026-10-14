@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, and configurable sync sources, plus Cursor usage capture. 2.0 moves the store to a Syncthing folder on macOS and Arch-based Linux; [docs/SPEC.md](docs/SPEC.md) is the product authority.
+Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, Muse, and configurable sync sources, plus Cursor usage capture. 2.0 moves the store to a Syncthing folder on macOS and Arch-based Linux; [docs/SPEC.md](docs/SPEC.md) is the product authority.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.

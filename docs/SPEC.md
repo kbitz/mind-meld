@@ -13,8 +13,8 @@ record archived as `docs/archive/mind-meld-v1.md`.
 ## Purpose
 Mind Meld (`mm`) keeps one person's AI coding-agent context identical across
 the machines they work on, with no server and nobody else able to read it:
-Claude Code memory and project notes, Codex and Grok customization, gstack
-project state, and mm's own activity log. The complete workflow: finish on one
+Claude Code memory and project notes, Codex and Grok customization, Muse
+memory, gstack project state, and mm's own activity log. The complete workflow: finish on one
 machine and `mm push`; start on another and `mm pull`, and the memory, skills
 and gstack state are there; `retro-fleet` then reports agent usage across every
 machine as one fleet.
@@ -94,9 +94,11 @@ holds identical synced files.
    without authoring tombstones. Ships on 1.x before the first 2.0 snapshot.
 
 ### O7: Fleet usage reporting survives the transport change
-1. `retro-fleet` reports Claude, Codex, Grok and Cursor usage across the fleet
-   as it does today, and `mm devices --format json` keeps its contract fields,
-   projected from presence records.
+1. `retro-fleet` reports Claude, Codex, Grok, Cursor and Muse usage across the
+   fleet as it does today, and `mm devices --format json` keeps its contract
+   fields, projected from presence records. Muse models classify as
+   Unclassified under the 1.x closed family set; the `muse` family arrives
+   with the 2.x contract.
 
 Carried forward unchanged from 1.x: client-side encryption; no API server or
 database service; pipx install with self-update; MIT; a newcomer-readable
@@ -118,9 +120,11 @@ Interchangeability).
   snapshot is a device's whole state (about 330 MB sealed today) and is taken
   only from an attended push; tombstones are never dropped; 2.0 never reads
   1.x storage.
-- 1.x is frozen at cutover: the GC repair and the scope trim are the last 1.x
-  releases; after 2.0 ships, 1.x gets no fixes and the iCloud folder is
-  deleted two weeks after cutover.
+- 1.x is frozen at cutover: the GC repair and the scope trim are the last
+  planned 1.x releases, plus one owner-approved exception — Muse host
+  support as a single minor (new reader name and sync source; no new host
+  family, which the 1.x contract reserves for a MAJOR). After 2.0 ships, 1.x
+  gets no fixes and the iCloud folder is deleted two weeks after cutover.
 
 ## Non-goals and later work
 - Windows and non-Arch Linux distributions. Revisit when such a machine needs
@@ -143,7 +147,9 @@ Interchangeability).
   the [Compatibility (1.x) contract](invariants/auto-upgrade.md#compatibility-1x).
   The 2.0 rewrite of the invariants defines the 2.x contract.
 - Capability checkpoints: the 1.x GC repair and remedy corrections are a
-  patch; the scope trim (O6) is a minor; **2.0.0** is O1 to O7 accepted after
+  patch; the scope trim (O6) is a minor; Muse host support is a minor (new
+  reader/token-source name, appended; the `muse` host family is deferred to
+  the 2.x contract); **2.0.0** is O1 to O7 accepted after
   the soak, a MAJOR because storage and the device registry change and
   cutover is a fresh start; 2.1 is conflict policies; 2.2 is the resolver.
 - Stage versions: MVP-1 (iCloud, macOS) = 1.0.0, achieved; MVP-1 (Syncthing,

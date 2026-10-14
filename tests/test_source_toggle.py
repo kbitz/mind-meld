@@ -989,6 +989,71 @@ class TestGrokUsageConsent:
         assert "grok" in _known_source_names({})
 
 
+class TestMuseSourceToggle:
+    def test_enable_source_muse_appends_source_without_retro_bit(self, cfg, isolated_seen_sources):
+        """Muse consent is source-enabled only; no [retro] key is written."""
+        import tomllib
+
+        result = runner.invoke(app, ["enable-source", "muse"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled source 'muse'" in result.output
+        assert "memory/" in result.output
+        assert "not synced" in result.output
+        assert "model-step" in result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "muse_host_usage" not in (on_disk.get("retro") or {})
+        added = next(s for s in on_disk["sync"]["sources"] if s["name"] == "muse")
+        assert added == get_default_source("muse")
+        assert "muse" not in (on_disk["sync"].get("disabled_sources") or [])
+
+        again = runner.invoke(app, ["enable-source", "muse"])
+        assert again.exit_code == 0
+        assert "already enabled" in again.output
+
+        off = runner.invoke(app, ["disable-source", "muse"])
+        assert off.exit_code == 0, off.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "muse" in (on_disk["sync"].get("disabled_sources") or [])
+
+    def test_enable_source_muse_materializes_legacy_sources_before_adding_row(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    ):
+        """Explicit Muse enable must not replace a legacy Claude source."""
+        import tomllib
+
+        from mind_meld.config import get_sources, load_config, save_config
+
+        home = tmp_path / "home"
+        (home / ".local" / "share" / "muse").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        config = load_config(cfg)
+        config["sync"].pop("sources")
+        config["sync"]["claude_dir"] = str(tmp_path / ".claude")
+        save_config(config, cfg)
+
+        result = runner.invoke(app, ["enable-source", "muse"])
+        assert result.exit_code == 0, result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "muse") == (
+            get_default_source("muse")
+        )
+        assert [source["name"] for source in get_sources(load_config(cfg))] == ["claude", "muse"]
+        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "claude") == {
+            "name": "claude",
+            "path": str((tmp_path / ".claude").resolve()),
+            "type": "claude",
+        }
+
+    def test_muse_is_a_known_source_name(self):
+        _validate_source_name("muse", {"sync": {"sources": []}}, force=False)
+        assert "muse" in _known_source_names({})
+
+
 class TestReconfigureSources:
     def test_bare_grok_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
         """Reconfigure must not turn a stock ~/.grok into source or consent."""

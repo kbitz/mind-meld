@@ -13,7 +13,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `_register_and_save` / `_quarantine_corrupt_manifest` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
@@ -488,7 +488,11 @@ names to skip on this device only (config.toml is per-machine, never synced).
 filter. The default `grok` source (`type: "grok"`) is Claude-shaped: the walker
 hardcodes `skills/`, `commands/`, and `rules/` at `~/.grok`. The fallback and
 auto-detect paths only activate it when one of those dirs exists — `~/.grok`
-itself is present on every Grok install and is not consent. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+itself is present on every Grok install and is not consent. The default
+`muse` source (`type: "muse"`) is the same shape: the walker hardcodes
+`memory/` at `~/.local/share/muse`, and the fallback and auto-detect paths
+only activate it while that dir exists — the data root itself is present on
+every Muse install and is not consent. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).

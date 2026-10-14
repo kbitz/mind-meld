@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, and Grok. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code and Codex; verified 2026-08-24). Grok 1.0.5 already loads that directory via its default-on Claude compatibility layer, so `mm diag` reports Grok under `host_skill_discovery`, not as a third `skill_links` row.
+Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, Grok, and Muse. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code and Codex; verified 2026-08-24). Grok 1.0.5 already loads that directory via its default-on Claude compatibility layer, so `mm diag` reports Grok under `host_skill_discovery`, not as a third `skill_links` row. Muse discovers that directory too, so it needs no link either.
 
 ## Install
 
@@ -249,7 +249,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 ## Codex Integration
 
-Mind Meld treats Codex as a first-class peer of Claude Code. Grok is the other usage-reader host (see [Grok usage in fleet retro](#grok-usage-in-fleet-retro)).
+Mind Meld treats Codex as a first-class peer of Claude Code. Grok and Muse are the other usage-reader hosts (see [Grok usage in fleet retro](#grok-usage-in-fleet-retro) and [Muse](#muse)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
@@ -263,6 +263,7 @@ Fresh installs are asked about the `codex` source during `mm init`. That choice 
 ```bash
 mm enable-source codex
 mm enable-source grok
+mm enable-source muse
 ```
 
 To verify Codex usage capture on an initialized Mac with Codex logs and the
@@ -282,6 +283,10 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
 read blocker. Neither proves a snapshot was published. The device-wide capture
 and publication lines in `mm status` provide that evidence. For a blocker, see
 [Host usage capture](#host-usage-capture-codex-and-grok).
+
+### Muse
+
+`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names; a dedicated `Muse` row arrives with the 2.0 compatibility contract. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
 ### Grok usage in fleet retro
 
@@ -909,7 +914,7 @@ claim to repair historical attribution.
 
 <a id="host-usage-capture-codex-and-grok"></a>
 
-### Host usage capture (Codex, Grok and Cursor)
+### Host usage capture (Codex, Grok, Cursor and Muse)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -935,7 +940,7 @@ magnitudes or payloads. Local publication evidence proves acceptance by this Mac
 storage backend; it does not prove delivery to another Mac.
 
 Capture requires enabled, available `mm-events` and consented readers. Enable
-with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok`;
+with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse`;
 Grok also accepts the existing `[retro] grok_host_usage = true` usage-only consent.
 
 Cursor uses local usage consent. Enable capture with:

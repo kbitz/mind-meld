@@ -122,6 +122,8 @@ CODEX_ARCHIVED_SESSIONS_PATH = Path.home() / ".codex" / "archived_sessions"
 date tree; Paseo archives on merge, and the Codex app and VS Code can too."""
 GROK_SESSIONS_PATH = Path.home() / ".grok" / "sessions"
 GROK_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "grok-host-tokens.json"
+MUSE_SESSIONS_PATH = Path.home() / ".local" / "share" / "muse" / "sessions"
+MUSE_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "muse-host-tokens.json"
 CURSOR_STORE_PATH = (
     Path.home() / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
 )
@@ -263,6 +265,19 @@ _GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
 _GROK_REQUIRED_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
 _GROK_IGNORABLE_KEYS = frozenset({"elapsed_ms"})
 GROK_USAGE_CENSUS_HOST_VERSION = "1.0.30"
+_MUSE_USAGE_KEYS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "cache_read_tokens",
+        "reasoning_tokens",
+    }
+)
+_MUSE_EVENT_KEYS = frozenset({"kind", "model", "usage", "duration_ms", "finish_reason"})
+_MUSE_EVENT_REQUIRED_KEYS = frozenset({"kind", "model", "usage"})
+MUSE_USAGE_CENSUS_HOST_VERSION = "1.4.7"
 """Host version of the last Grok usage-reader wire census.
 
 Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by
@@ -527,6 +542,12 @@ def host_family(model: str) -> HostFamily:
         return "codex"
     if normalized.startswith("grok-"):
         return "grok"
+    # Muse models (``muse-*``) deliberately fall through to ``other``:
+    # a new host family is a MAJOR exception in the 1.x compatibility
+    # contract (an un-upgraded peer rejects the whole snapshot over an
+    # unknown nested family), while the muse *reader* name is a MINOR.
+    # Add the ``muse`` family when 2.0 rewrites the contract; see
+    # docs/invariants/auto-upgrade.md "Compatibility (1.x)".
     return "other"
 
 
@@ -667,6 +688,8 @@ def warm_host_cache_inline(
         return read_grok_usage(root, deadline=deadline, consented=True)
     if reader == "cursor":
         return read_cursor_usage(root, deadline=deadline, consented=True)
+    if reader == "muse":
+        return read_muse_usage(root, deadline=deadline, consented=True)
     return read_codex_usage(root, deadline=deadline)
 
 
@@ -2056,6 +2079,7 @@ HOST_READER_DIAGS = {
     "cursor": HostReaderDiag(
         "cursor_usage_diag", "complete_once", True, "Cursor (Conductor + enrolled CLI)"
     ),
+    "muse": HostReaderDiag("muse_usage_diag", "complete_once", True, "muse"),
 }
 
 
@@ -2199,6 +2223,56 @@ def grok_usage_diag() -> dict[str, Any]:
     }
     try:
         with locked_json_snapshot(GROK_CACHE_PATH, blocking=False) as snap:
+            data = snap.data
+            state = snap.state
+    except OSError:
+        return blank
+    if state != "valid" or not isinstance(data, dict):
+        return {
+            **blank,
+            "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
+        }
+    files = data.get("files")
+    if data.get("version") != CACHE_VERSION or not isinstance(files, dict):
+        return blank
+    raw_skip = data.get("usage_less_skipped", 0)
+    skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
+    models = _diag_grok_model_ids(files)
+    return {
+        "complete_once": data.get("complete_once") is True,
+        "usage_less_skipped": skipped,
+        **_cached_read_timing(data),
+        "last_reason": _cached_last_reason(data),
+        "last_reason_since": _cached_reason_since(data),
+        "cache_state": "ok",
+        "model_count": models["model_count"],
+        "models": models["models"],
+        "files_cached": len(files),
+        "files_on_disk": on_disk,
+    }
+
+
+def muse_usage_diag() -> dict[str, Any]:
+    """Muse cache inventory and session-log path count. Never opens host logs.
+
+    Same contract as ``grok_usage_diag``: cache-only reads plus a path
+    count, so ``mm diag`` runs without a passphrase or a valid config.
+    """
+    on_disk = _count_muse_ledgers(muse_sessions_root())
+    blank = {
+        **_cached_read_timing({}),
+        "complete_once": False,
+        "usage_less_skipped": 0,
+        "last_reason": None,
+        "last_reason_since": None,
+        "cache_state": "unreadable",
+        "model_count": 0,
+        "models": [],
+        "files_cached": None,
+        "files_on_disk": on_disk,
+    }
+    try:
+        with locked_json_snapshot(MUSE_CACHE_PATH, blocking=False) as snap:
             data = snap.data
             state = snap.state
     except OSError:
@@ -3079,6 +3153,403 @@ def _aggregate_grok(entries: Any) -> HostUsageBuckets:
     differs — it deliberately does not, and a second implementation here is how
     the two readers drifted apart in the first place."""
     return _aggregate(entry for entry in entries if isinstance(entry, dict))
+
+
+# --- Muse reader -----------------------------------------------------------
+# Muse session logs are append-only event streams at
+# ``sessions/YYYY/MM/DD/<session-id>/session.jsonl``. The only usage
+# carrier this reader accepts is the terminal ``model_completed`` event
+# (``payload.event`` under a ``runtime.session`` envelope): per-step
+# counters plus the model that ran the step. ``goal_usage_attribution``
+# records restate the same steps split by purpose and are never read —
+# counting both would double every total (measured: per-file sums of the
+# two carriers are equal whenever attribution has caught up). The cache
+# entry shape is Grok's turns shape, so the fingerprint/resume/aggregate
+# machinery above is shared, not copied; only the walk, the record
+# projection and the counter validation are Muse's own. The fixture
+# contract is ``tests/fixtures/host_sessions/muse/CONTRACT.md``.
+
+
+def muse_sessions_root() -> Path:
+    """Resolve the Muse sessions directory at call time."""
+    return MUSE_SESSIONS_PATH
+
+
+def _count_muse_ledgers(root: Path) -> int | None:
+    """Count reader-visible session logs under ``root``.
+
+    Mirrors ``_count_two_level_ledgers``: a missing root is 0, a symlink
+    or non-directory root is unknown, and scan errors stay unknown rather
+    than rendering as empty. The walk itself is ``_iter_muse_ledgers``
+    so the count can never disagree with the reader about visibility.
+    """
+    try:
+        if not root.exists():
+            return 0
+        if root.is_symlink() or not root.is_dir():
+            return None
+    except OSError:
+        return None
+    try:
+        deadline = time.monotonic() + DEFAULT_READ_BUDGET_S
+        return sum(1 for _ in _iter_muse_ledgers(root, deadline))
+    except (_ReadFailure, OSError):
+        return None
+
+
+@_pause_gc()
+def read_muse_usage(
+    root: Path | None = None,
+    *,
+    deadline: float | None = None,
+    consented: bool = False,
+) -> HostUsageResult:
+    """Read completed Muse model-step totals from ``session.jsonl`` logs.
+
+    Closed by default: ``consented=False`` does not stat or open the
+    store. The sweep binds ``consented=True`` only when the ``muse`` sync
+    source is enabled (``HOST_READER_SOURCE_GATE``).
+    """
+    started = time.monotonic()
+    if not consented:
+        return _incomplete("no_metadata_ledger")
+    source_root = root if root is not None else muse_sessions_root()
+    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
+    if _expired(read_deadline):
+        return _incomplete("deadline")
+
+    try:
+        with locked_json_rmw(
+            MUSE_CACHE_PATH,
+            mode=0o600,
+            compact=True,
+            default_factory=_empty_grok_cache,
+            retry_intervals=(),
+            on_contention="warn",
+            contention_warning="host token adapter cache was locked; skipping host usage scan",
+        ) as locked:
+            if not locked.is_locked:
+                return _incomplete("locked")
+            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
+            cached_files = _cached_files(locked.data)
+            prior_complete = (
+                locked.data.get("version") == CACHE_VERSION
+                and locked.data.get("complete_once") is True
+            )
+            if _expired(read_deadline):
+                result, staged_files, learned, saw_files = _incomplete("deadline"), {}, False, False
+            else:
+                result, staged_files, learned, saw_files = _scan_muse_root(
+                    source_root, cached_files, read_deadline
+                )
+            ready = time.monotonic()
+            over_budget = result.complete and _expired(read_deadline)
+            now = datetime.now(timezone.utc)
+            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
+            timing = _carry_read_timing(
+                locked.data,
+                result,
+                carried[0],
+                started,
+                ready,
+                read_deadline,
+                now,
+                over_budget=over_budget,
+            )
+            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
+                raise _NoCacheCommit(result)
+            complete_once = prior_complete or (result.complete and saw_files)
+            files = staged_files if result.complete else {**cached_files, **staged_files}
+            locked.data = {
+                **timing,
+                "version": CACHE_VERSION,
+                "complete_once": complete_once,
+                "usage_less_skipped": 0,
+                "last_reason": carried[0],
+                "last_reason_since": carried[1],
+                "files": files,
+            }
+            if over_budget:
+                result = _incomplete("deadline")
+        _notice_cache_write_failure(locked.write_error)
+        return result
+    except _NoCacheCommit as aborted:
+        return aborted.result
+    except OSError:
+        return _incomplete("io_error")
+
+
+def _scan_muse_root(
+    root: Path,
+    cached_files: dict[str, Any],
+    deadline: float,
+) -> tuple[HostUsageResult, dict[str, Any], bool, bool]:
+    """Returns ``(result, staged, learned, saw_files)``; Grok's scan shape."""
+    try:
+        ledgers = list(_iter_muse_ledgers(root, deadline))
+    except _ReadFailure as failure:
+        return _incomplete(failure.reason), {}, False, False
+
+    canonical_root = root.resolve()
+    staged: dict[str, Any] = {}
+    learned = False
+    for session_id, path in ledgers:
+        if _expired(deadline):
+            return _incomplete("deadline"), staged, learned, True
+        key = _cache_key(path, root=root, canonical_root=canonical_root)
+        try:
+            before = _regular_stat(path)
+            existing = _validated_grok_entry(cached_files.get(key))
+            entry = _grok_cache_hit(path, before, existing, deadline)
+            if entry is None:
+                resume = _grok_resumable_entry(path, before, existing, deadline)
+                entry = (
+                    _resume_muse_file(path, session_id, before, resume, deadline)
+                    if resume is not None
+                    else _read_full_muse_file(path, session_id, before, deadline)
+                )
+                learned = True
+            staged[key] = entry
+        except _ReadFailure as failure:
+            return _incomplete(failure.reason), staged, learned, True
+
+    return (
+        _result_from_buckets(
+            _aggregate_grok(staged.values()),
+            partial_days=_grok_partial_days(staged.values()),
+        ),
+        staged,
+        learned,
+        bool(ledgers),
+    )
+
+
+def _iter_muse_ledgers(root: Path, deadline: float):
+    """Yield ``(session_id, session.jsonl)`` under ``root``'s date tree.
+
+    Subagent sessions nest one level down at
+    ``<session>/subagent/<child-id>/session.jsonl`` (142 of 179 files in
+    the census corpus) and their model steps are real spend, so the walk
+    descends through literal ``subagent`` segments and nothing else.
+    """
+    if _expired(deadline):
+        raise _ReadFailure("deadline")
+    try:
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise _ReadFailure("unsupported")
+        for year in _sorted_children(root, deadline):
+            if not _YEAR_PART.fullmatch(year.name) or not _is_directory(year):
+                continue
+            for month in _sorted_children(year, deadline):
+                if not _MONTH_OR_DAY_PART.fullmatch(month.name) or not _is_directory(month):
+                    continue
+                for day in _sorted_children(month, deadline):
+                    if not _MONTH_OR_DAY_PART.fullmatch(day.name) or not _is_directory(day):
+                        continue
+                    for session in _sorted_children(day, deadline):
+                        if _is_directory(session):
+                            yield from _iter_muse_session_tree(session, deadline)
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+
+
+def _iter_muse_session_tree(session: Path, deadline: float):
+    """Yield a session's own log plus its ``subagent/`` descendants'."""
+    candidate = session / "session.jsonl"
+    if _is_regular_non_symlink(candidate):
+        yield session.name, candidate
+    children = session / "subagent"
+    if _is_directory(children):
+        for child in _sorted_children(children, deadline):
+            if _is_directory(child):
+                yield from _iter_muse_session_tree(child, deadline)
+
+
+def _read_full_muse_file(
+    path: Path,
+    session_id: str,
+    before: os.stat_result,
+    deadline: float,
+) -> dict[str, Any]:
+    turns, new_partial = _read_muse_file(path, session_id, 0, {}, before, deadline)
+    return _grok_file_entry(path, before, deadline, turns, 0, new_partial=new_partial)
+
+
+def _resume_muse_file(
+    path: Path,
+    session_id: str,
+    before: os.stat_result,
+    entry: dict[str, Any],
+    deadline: float,
+) -> dict[str, Any]:
+    prior = {turn["key"]: turn for turn in entry["turns"]}
+    turns, new_partial = _read_muse_file(path, session_id, entry["offset"], prior, before, deadline)
+    return _grok_file_entry(
+        path,
+        before,
+        deadline,
+        turns,
+        0,
+        prior_partial=entry.get("partial_days") or (),
+        new_partial=new_partial,
+    )
+
+
+def _read_muse_file(
+    path: Path,
+    session_id: str,
+    start_offset: int,
+    prior: dict[str, dict[str, Any]],
+    before: os.stat_result,
+    deadline: float,
+) -> tuple[dict[str, dict[str, Any]], frozenset[str]]:
+    turns = dict(prior)
+    last_offset = start_offset
+    partial_days: set[str] = set()
+    try:
+        with path.open("rb") as fp:
+            fp.seek(start_offset)
+            for raw, end_offset in iter_bounded_lines(
+                fp,
+                _cache_key(path),
+                start_offset,
+                label="muse usage walker",
+            ):
+                if _expired(deadline):
+                    raise _ReadFailure("deadline")
+                last_offset = end_offset
+                if raw == b"":
+                    raise _ReadFailure("malformed")
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (TypeError, ValueError, UnicodeDecodeError) as exc:
+                    raise _ReadFailure("malformed") from exc
+                parsed = _muse_turn_from_record(record, session_id)
+                if parsed is None:
+                    continue
+                key, turn, partial = parsed
+                if partial:
+                    partial_days.add(turn["day"])
+                existing = turns.get(key)
+                if existing is None:
+                    turns[key] = turn
+                    continue
+                if existing == turn:
+                    continue
+                raise _ReadFailure("unsupported")
+            if fp.tell() != last_offset:
+                raise _ReadFailure("partial")
+    except OSError as exc:
+        raise _ReadFailure("io_error") from exc
+    if not _same_source(before, _regular_stat(path)):
+        raise _ReadFailure("stale")
+    return turns, frozenset(partial_days)
+
+
+def _muse_turn_from_record(record: Any, session_id: str) -> tuple[str, dict[str, Any], bool] | None:
+    """Project one terminal ``model_completed`` event, or skip the record.
+
+    Strict like the Grok terminal ledger: a recognized carrier with an
+    unexpected key set or counter shape refuses the whole reader
+    (``unsupported``) instead of guessing. Everything that is not the
+    carrier — other event kinds, retained frames, attribution records —
+    is skipped without being interpreted.
+    """
+    if not isinstance(record, dict):
+        raise _ReadFailure("malformed")
+    if record.get("record_type") != "event" or record.get("payload_type") != "runtime.session":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return None
+    if event.get("kind") != "model_completed":
+        return None
+    keys = set(event)
+    if not _MUSE_EVENT_REQUIRED_KEYS <= keys <= _MUSE_EVENT_KEYS:
+        raise _ReadFailure("unsupported")
+    envelope_id = record.get("id")
+    if not isinstance(envelope_id, str) or not envelope_id:
+        raise _ReadFailure("unsupported")
+    if len(envelope_id.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
+        raise _ReadFailure("unsupported")
+    model = event.get("model")
+    if not isinstance(model, str) or not model:
+        raise _ReadFailure("unsupported")
+    if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+        raise _ReadFailure("unsupported")
+    usage = event.get("usage")
+    if not isinstance(usage, dict) or set(usage) != _MUSE_USAGE_KEYS:
+        raise _ReadFailure("unsupported")
+    counters, partial = _validate_muse_counters(usage)
+    day = _muse_recorded_day(record.get("recorded_at"))
+    key = hashlib.sha256(f"{session_id}\0{envelope_id}\0{model}".encode()).hexdigest()
+    return key, {"key": key, "day": day, "model": model, "usage": counters}, partial
+
+
+def _validate_muse_counters(usage: dict[str, Any]) -> tuple[Usage, bool]:
+    """Disjoint-normalize Muse's inclusive counters; flag unattributable days.
+
+    ``input_tokens`` already contains ``cache_read_tokens`` (and, under
+    the same three-term rule as Codex/Grok, ``cache_write_tokens``).
+    ``cached_tokens`` duplicates ``cache_read_tokens`` in every censused
+    record, so a disagreement is format drift, not a second bucket.
+    ``reasoning_tokens`` is a subset of ``output_tokens`` and is never
+    added twice. A nonzero cache write marks the day partial, matching
+    the shared ``unattributable_days`` rule.
+    """
+    for name in _MUSE_USAGE_KEYS:
+        if not _is_valid_counter(usage.get(name)):
+            raise _ReadFailure("unsupported")
+    if usage["cached_tokens"] != usage["cache_read_tokens"]:
+        raise _ReadFailure("unsupported")
+    if usage["reasoning_tokens"] > usage["output_tokens"]:
+        raise _ReadFailure("unsupported")
+    normalized = _normalize_inclusive_usage(
+        {
+            "input": usage["input_tokens"],
+            "cache_create": usage["cache_write_tokens"],
+            "cache_read": usage["cache_read_tokens"],
+            "output": usage["output_tokens"],
+        }
+    )
+    return normalized, usage["cache_write_tokens"] > 0
+
+
+_MUSE_RECORDED_AT_MIN_US = 1_577_836_800_000_000
+"""2020-01-01 UTC in microseconds; below this the stamp is not Muse's clock."""
+
+
+def _muse_recorded_day(value: Any) -> str:
+    """UTC day of an envelope ``recorded_at`` (microsecond epoch, as text).
+
+    Bounded like the Cursor terminal stamps: pre-2020 or more than a day
+    in the future is ``malformed``, so a wrong-scale clock cannot be
+    reaped as ancient history or squat in the shared 90-day window.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise _ReadFailure("unsupported")
+    if isinstance(value, str):
+        if not value.isascii() or not value.isdigit():
+            raise _ReadFailure("unsupported")
+        micros = int(value)
+    else:
+        micros = value
+    if micros < _MUSE_RECORDED_AT_MIN_US:
+        raise _ReadFailure("malformed")
+    try:
+        when = datetime.fromtimestamp(micros / 1_000_000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise _ReadFailure("malformed") from exc
+    if when > datetime.now(timezone.utc) + timedelta(days=1):
+        raise _ReadFailure("malformed")
+    return when.date().isoformat()
 
 
 def _utc_day(value: Any) -> str:

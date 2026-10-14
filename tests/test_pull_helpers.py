@@ -2094,8 +2094,8 @@ class TestPromptSources:
 
     def test_mm_init_does_not_prompt_for_opencode(self, monkeypatch) -> None:
         """Track 37B: DEFAULT_SOURCES no longer ships opencode, so init asks
-        for the five remaining user-facing names (claude, gstack,
-        gstack-extend, codex, grok). mm-events auto-includes."""
+        for the six user-facing names (claude, gstack, gstack-extend,
+        codex, grok, muse). mm-events auto-includes."""
         from mind_meld import cli as cli_module
 
         prompted: list[str] = []
@@ -2107,9 +2107,9 @@ class TestPromptSources:
         monkeypatch.setattr(cli_module.typer, "confirm", capture)
         _prompt_sources()
         user_facing = [s["name"] for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
-        assert len(user_facing) == 5
+        assert len(user_facing) == 6
         assert "opencode" not in user_facing
-        assert len(prompted) == 5
+        assert len(prompted) == 6
         assert all("opencode" not in p for p in prompted)
 
     def test_claude_only(self, monkeypatch) -> None:
