@@ -45,34 +45,58 @@ class File:
     mode: int
 
 
-def read_tree(root: Path, *, ignore_transport: bool = False) -> dict[str, File]:
-    """No symlink following, including directory symlinks; read before mutation."""
-    owned_path(root, "containment-check")
-    files = {}
+def read_tree(root: Path, *, ignore_transport: bool = False, _cache=None) -> dict[str, File]:
+    """Read a finite tree without following links. Optional scan cache uses full stat identity.
 
-    def walk(directory: Path) -> None:
-        for path in sorted(directory.iterdir()):
-            rel = path.relative_to(root).as_posix()
-            owned_path(root, rel)
-            if ignore_transport and ignored(path.name):
+    Validate root ancestry once and lstat every traversed child. No directory
+    or file symlink is followed, including ignored names. This remains a
+    sequential fixture, not a proof against hostile filesystem rename races.
+    """
+    owned_path(root, "containment-check")
+    files, signatures = {}, {}
+
+    def walk(directory: Path, prefix: str) -> None:
+        with os.scandir(directory) as entries:
+            ordered = sorted(entries, key=lambda entry: entry.name)
+        for entry in ordered:
+            path = Path(entry.path)
+            rel = prefix + entry.name
+            info = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"Bad path {path}: symlink; remove it; see README#paths")
+            if ignore_transport and ignored(entry.name):
                 continue
-            if path.is_dir():
-                walk(path)
+            if stat.S_ISDIR(info.st_mode):
+                walk(path, rel + "/")
+            elif not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"Bad path {path}: require a regular file; see README#paths")
             else:
-                info = path.stat()
-                if not stat.S_ISREG(info.st_mode):
-                    raise ValueError(f"Bad path {path}: require a regular file; see README#paths")
+                signature = (
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                    stat.S_IMODE(info.st_mode),
+                )
+                cached = None if _cache is None else _cache.get(rel)
                 try:
-                    files[rel] = File(
-                        path.read_bytes(), info.st_mtime_ns, stat.S_IMODE(info.st_mode)
+                    file = (
+                        cached[1]
+                        if cached is not None and cached[0] == signature
+                        else File(path.read_bytes(), info.st_mtime_ns, stat.S_IMODE(info.st_mode))
                     )
                 except OSError as error:
                     error.add_note(
                         f"Reading {root.name}/{rel}; repair I/O and retry; see README#paths"
                     )
                     raise
+                files[rel] = file
+                signatures[rel] = signature, file
 
-    walk(root)
+    walk(root, "")
+    if _cache is not None:
+        _cache.clear()
+        _cache.update(signatures)
     return files
 
 
@@ -144,6 +168,7 @@ class FakeTransport:
         # this device's holdings for events it no longer knows.
         self._holders: dict[int, set[str]] = {}
         self._disk: dict[str, dict[str, File]] = {}
+        self._scan_cache: dict[str, dict] = {}
         self._due: dict[tuple[int, str], float] = {}
         self._replacements: dict[int, Replacement] = {}
         self._busy: dict[tuple[str, str], int] = {}
@@ -228,7 +253,9 @@ class FakeTransport:
 
     def scan(self, device) -> tuple[int, ...]:
         name = self._name(device)
-        tree = read_tree(self.roots[name], ignore_transport=True)
+        tree = read_tree(
+            self.roots[name], ignore_transport=True, _cache=self._scan_cache.setdefault(name, {})
+        )
         new = []
         for path in sorted(tree.keys() | self._disk[name].keys()):
             file = tree.get(path)
@@ -256,6 +283,7 @@ class FakeTransport:
     def restore_index(self, device, index: Index) -> None:
         name = self._name(device)
         self._knowledge[name], self._disk[name] = dict(index.knowledge), dict(index.disk)
+        self._scan_cache.pop(name, None)
         observed = {event for _, events in index.knowledge for event in events}
         for event, holders in self._holders.items():
             if event in observed:

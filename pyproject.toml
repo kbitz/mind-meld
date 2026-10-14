@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mind-meld"
-version = "1.8.0"
+version = "1.8.1"
 description = "Sync AI coding-agent context across machines via iCloud Drive"
 readme = "README.md"
 license = "MIT"
@@ -34,7 +34,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.0",
-    "hypothesis>=6.0",
+    "hypothesis==6.169.0",
     "ruff==0.15.12",
 ]
 
