@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.8.1] - 2026-10-14
+
+**Installing 1.8.1 does not change how `mm` syncs.** The repository now carries an executable model of the planned store-v2 replication rules, used only by tests, so later store work can be checked before it ships in `mm`.
+
+### Added
+
+- Repository tests under `tests/sim` model store-v2 replication, including crash recovery and the known design gaps that still block the 2.0 store. `MM_SIM_DEEP=1` selects the longer random profile. This code is not part of the installed `mm` command.
+
+### Changed
+
+- Development installs pin Hypothesis to 6.169.0 so the replication model runs against the settings this suite expects.
+
+### Upgrade notes
+
+- No command, flag, wire, or synced-storage changes. No action on existing Macs.
+
 ## [1.8.0] - 2026-10-14
 
 **gstack sync now leaves generated environments, app bundles, archives, binaries and QA evidence on each Mac, while continuing to sync project notes, source, fixtures and review receipts.** Explicit source configs adopt 16 new default exclusions with `mm migrate-config`; implicit configs adopt them on update. Publishing the smaller manifest creates no tombstones and leaves every Mac's local copies in place.
