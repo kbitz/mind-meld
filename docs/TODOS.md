@@ -44,103 +44,38 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review] Direct test writers can still touch real account state
-- **Why:** Track 71B stops the shared write helpers from mutating four account roots under pytest. Direct raw writers, custom storage roots, and agent destinations can still write real state. The owner deferred that remainder on 2026-10-11 for a follow-up card via /roadmap. This guard does not accept Track 71B, and Track 71D cannot claim simulator safety from it.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** Deferred from plan: ~/.gstack/projects/kbitz-mind-meld/track-71b-autoplan-20261011.md (SHA-256 e4183a763f11fe4aef1423544660a455c1c94fee91365882e98b79bdc01cbcc9). Decision D4, 2026-10-11.
-
-### [plan-eng-review:track=72A] 75A publish and presence must replace model pieces and supply the state seam
-- **Why:** V7/E12/E13/E25 require the first real publisher to supply a statedb-backed `read`/atomic `transaction` seam shared with remaining model pieces. Publish alone owns seq, `vv + me`, and the transaction containing ledger, own_log and history. A pending resolution must publish even with unchanged sha, then clear pending; fast-forward rows are not pending. Presence writes belong to 75A, including publish refreshes. Use directly callable injected state/clock/machine-id/replica/source/key entry points, without CliRunner or activation.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** Approved Track 72A plan (2026-10-13), V7/E12/E13/E25; `tests/sim/model/registry.py`, `state.py`, mixed-publish scenario. No database schema is promised by FileState. Replace publish/presence entries, keep remaining models on the same seam, run bounded and deep profiles, and record deep duration/result in the promotion handoff. SQLite/real-process interruption evidence remains required for the real publisher.
-
-### [plan-eng-review:track=72A] 76A must replace snapshot, compaction and own-storage reconciliation
-- **Why:** V7/E13 require real snapshot/compact/reconcile pieces behind the shared seam, directly callable with injected state, clock, machine id, roots and keys. Persist observations/history, retain write-once/own-namespace rules and add real crash-interruption scenarios. Model protocol stops do not establish SQLite transactions or actual process-crash safety.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** Registry owner 76A; `docs/designs/store-v2.md` §6/9. Run bounded and deep simulator profiles and record deep duration/result in the promotion handoff. Resolve owned gaps below; a passed model run is not acceptance of O1/O3/O5.
-
-### [plan-eng-review:track=72A] 77A must replace the peer reader behind observable injected entry points
-- **Why:** V7/E13 require real read behavior using the shared seam and persisted per-entry history so independent INV7 observes each pull action. Preserve gap/parts/ENOENT pending, unreadable warnings, snapshot cursor raising and hash-chain verification; supply state, clock, machine-id, replica/source roots and fleet keys without CliRunner or activation.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** Registry owner 77A, §6/9; snapshot-raised cursors lacking a hash wait for a complete anchor. Run bounded/deep, record duration/result in the promotion handoff, and qualify native transport separately.
-
-### [plan-eng-review:track=72A] 78A classification and resolution must honor the shared publication contract
-- **Why:** V7/E12/E13 require real classify/resolve entries and persisted pull-entry actions, directly callable with the injected seam, clock, machine id, roots and keys. Resolution writes `sha=resolved`, `vv=max(L,R)`, `pending=true`; it never owns the publish increment. Fast-forward clears pending, same-sha merges vectors without I/O and retains an existing publication obligation. Equal vectors with unequal sha are concurrent under the current model reading.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** §4; `tests/sim/test_scenarios.py` mixed publisher + third reader, independent INV7 and seeded mutants. A qualified pure core can be promoted with peer display names routed through safety; the model I/O shell cannot. Run bounded/deep and record duration/result in the promotion handoff; decide the non-UTF-8 gap below.
-
-### [plan-eng-review:track=72A] 80A fleet creation, join and rejoin must replace model registry entries
-- **Why:** V7/E13/E20 require directly callable create_fleet/join/rejoin with the shared seam, injected clock, live machine id, roots and keys. Join waits for fleet header and bootstraps from a complete peer snapshot; rejoin mints a fresh identity. Preserve clone timing checks and observable history; no model fallback under a real-labelled entry.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** §8/9; current freshest-snapshot reading is logical created_at then id/seq. Both restore variants remain acceptance blockers absent an owner decision. Run bounded/deep and record deep duration/result in the promotion handoff.
-
-### [plan-eng-review:track=72A] 81A retire and delivery status must preserve simulator ownership boundaries
-- **Why:** V7/E13/E25 require real retire behind an injected seam/clock/machine-id/roots/keys entry point. Prove 30-day eligibility and snapshot coverage, delete only the target namespace, and decide the meaning of every active device when a retiree remains alive. Delivery receipts and status belong here; presence writing belongs to 75A.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** §8, registry owner 81A. Keep persisted action observations, run bounded/deep and record deep duration/result in the promotion handoff. Simulator eligibility and logical time do not qualify native retirement operations.
-
-### [plan-eng-review:track=72A] 2.0.0 acceptance requires no model pieces and explicit gap disposition
-- **Why:** The approved V7 acceptance condition is zero model pieces and an empty or explicitly owner-accepted KNOWN_DESIGN_GAPS table. A green simulator with active gaps cannot establish SPEC O1/O3/O5. Real storage, native CI and the selected macOS/Linux Syncthing soak retain their separate gates under SPEC's release policy.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** Track 72A approval, `docs/SPEC.md` O1–O7/release policy; registry + strict gap table/terminal summaries. Each 75A–81A promotion must run deep and record duration/result. This inbox condition does not record achieved acceptance in PROGRESS or waive an owned design fix.
-
-### [plan-eng-review:track=72A] 81A must define active membership before retirement under delayed presence
-- **Why:** E23's active-device ambiguity has a confirmed O1.1 counterexample. A retire actor sees stale presence for an active peer and deletes a target namespace before that peer has covered it. The actor's snapshot carries the missing adopted state, but §6 prefers complete authored commits and does not load that snapshot once its seq is already applied; full delivery still leaves different files. INV1 remains unchanged.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** `KNOWN_DESIGN_GAPS['retire-delayed-presence']`, strict `test_gap_retire_delayed_active_presence`; §4 authored-only logs, §6 reader table, §8 coverage. Owner 81A with 76A/77A dependencies must define authoritative active membership/coverage or a recovery mechanism that preserves convergence. Random retirement retains fully delivered presence and covering snapshots. Registering this fifth gap preserves the four prior gaps and is not a risk waiver: owning-Track and 2.0.0 acceptance remain blocked absent an explicit owner disposition. Remove the pin/gate only with the accepted design fix; native retirement remains a separate gate.
-
-### [plan-eng-review:track=72A] Decide saved-policy restore fork recovery without losing a recoverable edit
-- **Why:** §4/9 rows 1/4 leave an edit stranded only as a readable peer record when rollback reuses seq and fork refusal excludes the owner. INV2 permits the record during execution but requires current/displaced/superseded recovery at quiescence. O1/O5 fail in the strict saved-restore regression.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** `KNOWN_DESIGN_GAPS['restore-saved']`, strict `test_gap_restore_saved`; dependent 75A/76A/78A/80A. UC2 approved a checkable INV6 and explicitly retained both restore pins, not a release waiver. Owning Track acceptance and 2.0.0 remain blocked absent a recorded owner decision; remove gate/xfail only with the accepted design fix.
-
-### [plan-eng-review:track=72A] Decide current-policy restore recovery after fleet-wide deletion and seq reuse
-- **Why:** §4/9 rows 1/4 permit rollback deletion to reach peers, followed by a reused seq without a conflict copy. Prev-chain mismatch refuses readers that saw the old commit, but remaining participants can retain divergent files. O1/O5 fail in the strict current-restore regression; INV2 still observes all device witnesses across the fork.
-- **Effort:** L
-- **Priority:** P1
-- **Context:** `KNOWN_DESIGN_GAPS['restore-current']`, strict `test_gap_restore_current`; dependent 75A/76A/78A/80A. UC2 approval retains this pin. Resolve or explicitly accept the gap before owning Track/2.0.0 acceptance; do not weaken INV1/2/6.
-
-### [plan-eng-review:track=72A] Preserve non-UTF-8 union bytes or obtain an explicit outcome decision
-- **Why:** §4's symmetric .jsonl/MEMORY.md resolution uses existing merge helpers that replace non-UTF-8 bytes. The independent lossless normalized-line oracle reports INV2 for both paths; O1.1 preservation is affected.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** `KNOWN_DESIGN_GAPS['non-utf8-union']`, strict parametrized `test_gap_non_utf8_union`, owner 78A. Random union-input cases alone are gated; the invariant remains unchanged. Model CI cannot accept the affected outcome until a design fix or explicit owner decision removes the blocker.
-
-### [plan-eng-review:track=72A] Specify recovery of a partial exclusively created own commit
-- **Why:** §1 write-once, §5 steps 4/5 and §9 row 1 specify full publication replay but no completion rule when a crash leaves k of n parts. Conservatively preserving existing parts leaves the sequence occupied and readers pending forever; strict `test_gap_partial_own_commit` fails INV1 after settle. O1/O3/O5 are affected.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** `KNOWN_DESIGN_GAPS['partial-own-commit']`, dependent 75A/76A; owner decision pending. Full-before-state replay and partial-snapshot scenarios remain enabled. Decide completion/cleanup semantics and add real crash evidence before owning Track or 2.0.0 acceptance; do not overwrite parts or relax convergence merely to green the model.
-
-### [manual] Report the largest synced subtrees in 2.0 status/diag
-- **Why:** the 72B trim was measured with an ad hoc read-only script twice (2026-10-11, 2026-10-12); new bulk under new names stays invisible until someone re-measures, and 2.0 snapshots carry every synced byte.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Track 72B autoplan, CEO E1 (deferred: SPEC freezes 1.x except the trim; 2.0 status/diag owns it). `mm sources` already shows per-source Excluded counts but no sizes. Trigger: the pre-cutover re-measure needs another ad hoc script.
-
-### [manual] Re-measure the gstack set at cutover step 1
-- **Why:** default globs are name-based; trees written after 2026-10-13 under other names will land in every 2.0 snapshot.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Track 72B autoplan, CEO E3. Reader-check any kept tree over about 20 MB sealed before adding a glob. Baselines 2026-10-12 on the measured Mac: a defect-candidates runs tree 101.5 MB raw / 22.5 MB sealed; `kbitz-mind-meld/gate-diff` 24.1 MB raw. 1.x is frozen, so any further glob lands only in 2.0 defaults. Method: walk `~/.gstack/{projects,analytics,retros}` with the walker's global EXCLUDED list and current gstack globs, gzip each file at the default level for sealed size, prune nested checkouts.
-
-### [manual] Choose a 2.0 mechanism that ends ad hoc gstack glob batches
-- **Why:** each trim is a new list of directory names; reviewers flagged the 72B list as whack-a-mole and found real source and fixtures under generic names.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Track 72B autoplan (CEO native M5, Codex H2). Candidates with kept-set numbers from 2026-10-12: writer-side routing of bulky scratch out of `~/.gstack` (upstream of mm), an allowlist by artifact kind inside gstack, a reported skip for large files under O3's partial-sync reporting, a generic skip marker like `.extend-root`. Trigger: a third ad hoc glob batch for gstack scratch trees.
-
 ## Drain records
+
+### Roadmap drain — 2026-10-15
+
+16 inbox items: **14 placed, 2 deferred, 0 killed, 0 discharged**. Authored-false rate: 0 / (14 + 0) = 0%. Verification baseline: `573fb12` (v1.9.0). Tracks 71A (v1.7.2, PR #205), 71C (v1.7.3, PR #203), 71D (PR #206), 72A (v1.8.1, PR #208) and 72B (v1.8.0, PR #207) were recorded independently in shipped history, with v1.8.2 (PR #209) and v1.9.0 (Muse, PR #210) under additional release history. Track 71B (PR #204, v1.7.1) is **not** recorded: its receipt says "Track 71B not accepted" and the owner deferred C1 to a follow-up card, so its remainder continues as Track 74A. Groups 71 and 72 are tombstoned. No active pins were declared.
+
+| Inbox item | Disposition |
+|---|---|
+| [review] Direct test writers can still touch real account state | place → Track 74A (formerly 71B; manifested 2026-10-08 through `_log_unexpected`) |
+| 75A publish and presence must replace model pieces and supply the state seam | place → Track 75A (presence writes move from 81A) |
+| 76A must replace snapshot, compaction and own-storage reconciliation | place → Track 76A |
+| 77A must replace the peer reader behind observable injected entry points | place → Track 77A |
+| 78A classification and resolution must honor the shared publication contract | place → Track 78A |
+| 80A fleet creation, join and rejoin must replace model registry entries | place → Track 80A |
+| 81A retire and delivery status must preserve simulator ownership boundaries | place → Track 81A |
+| 2.0.0 acceptance requires no model pieces and explicit gap disposition | place → ROADMAP Phase 4 note on the 2.0.0 cut (acceptance condition, not a Track) |
+| 81A must define active membership before retirement under delayed presence | place → Track 74B (design and model), implemented by Track 81A |
+| Decide saved-policy restore fork recovery without losing a recoverable edit | place → Track 73C (design and model), implemented by Track 76A |
+| Decide current-policy restore recovery after fleet-wide deletion and seq reuse | place → Track 73C, implemented by Track 76A |
+| Preserve non-UTF-8 union bytes or obtain an explicit outcome decision | place → Track 74B, implemented by Track 78A |
+| Specify recovery of a partial exclusively created own commit | place → Track 73C, implemented by Tracks 75A and 76A |
+| [manual] Report the largest synced subtrees in 2.0 status/diag | defer → Future |
+| [manual] Re-measure the gstack set at cutover step 1 | place → Track 84A (cutover runbook step 1). Method kept here: walk `~/.gstack/{projects,analytics,retros}` with the walker's global EXCLUDED list and current gstack globs, gzip each file at the default level for sealed size, prune nested checkouts; reader-check any kept tree over about 20 MB sealed before adding a glob. Baselines 2026-10-12 on the measured Mac: a defect-candidates runs tree 101.5 MB raw / 22.5 MB sealed; `kbitz-mind-meld/gate-diff` 24.1 MB raw. |
+| [manual] Choose a 2.0 mechanism that ends ad hoc gstack glob batches | defer → Future |
+
+**Leftover plan:** former Track 74A ("Preserve coherent state after config publication failures") is killed by owner-approved scope amendment: its defects were reproduced only with injected flush failures, the card itself says registration self-heals, and the device registry, crypto-init backfill and `mm recover --abandon-manifest` it repairs are 1.x code that Track 83A deletes (spec 1.x freeze). Re-verified at `573fb12`: `_register_and_save` still deletes `devices/<id>.json` on any save exception, and crypto backfill still lets `StorageError` through.
+
+**Shipped-PR backlogs** (filed only in PR bodies and receipt comments): PR #205's eight 1.x items (heal hardening, own-GC in autopush, pull conflict-copy cleanup, crypto-init and corrupt-manifest `mm init` remedies, own-manifest diag status, coverage gaps G1 and G2, root SPEC "bytes freed") are killed under the 1.x freeze. PR #203's D3 backlog: the version byte in the AAD, passphrase normalization and an expected `fleet_id` on unlock go to Track 80A; `.stfolder/` and other markers counted as foreign, and `syncthing_id` grammar and freshness go to Track 82A; mixed part-count families and torn multipart recovery go to Track 73C; the AGENTS.md storage-key rule and the routing leaf list go to Track 84A; the rest (fork names, `mtime` bounds, drive-prefix and case collisions, decode peak, bounded reads, `StoreError` hierarchy, decode-once and simplification advisories, compression side channel, coverage gaps, Python 3.11 timestamp verdict) are killed as unobserved and reversible or inconsequential. PR #206: the `tests/sim/README.md` link is discharged@`42f4f57`; the `.stignore` fixture check goes to Track 82A; native Syncthing conformance is deferred to Future; docstring plan IDs, `_busy`/`ready_at`, scan cost, how-to docs and the `_patch_legacy` Muse paths are killed. PR #208: X3 (scheduled deep run) is deferred; V13 (cross-OS Claude path check) goes to Track 79A; row 46 (isolated `tests/sim` time) goes to Track 75A. PR #207: O6 acceptance is held in Future as REQUIRED / PENDING; root SPEC's gstack default list goes to Track 84A; the `PYTEST_ADDOPTS` leak into the nested simulator runner (seen twice, in pregate diagnostics only) is killed. PR #210's (a)–(h) are killed as unobserved and reversible (no standing Muse blocker, no observed pruning or duplicate envelope id); Linux Muse paths fall under O7 acceptance on the soak.
+
+**Future membership:** 94 → 53. The manifestation gate killed 39 unobserved defect claims, the 1.x freeze killed 6 (`_resolve_interactive_loop`, two-machine test bootstrap, abort transactionality, machine-readable diag conflicts, pull-history failure reasons, `_open_crypto_session`), and "README prerequisites and a timed two-Mac preview/apply walkthrough" is discharged@`2ddaa39` (README prerequisites line; the walkthrough exists; the timing remainder is iCloud onboarding that 2.0 replaces). Five appended: O6 acceptance, native Syncthing conformance, the scheduled deep run, and the two deferred inbox items. "Overdue counterless-FINISHED tracking and an SQLite authorizer" is kept intact: its authorizer half is privacy hardening. Every other bullet is byte-identical. The pointer count was also stale (93 for 94 bullets after PR #210).
+
+**Version:** documentation-only regeneration; no bump.
 
 ### Roadmap drain — 2026-10-11
 
