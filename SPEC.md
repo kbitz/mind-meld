@@ -340,6 +340,7 @@ mm autopush                 # silent push for Claude Code (one-line output, neve
 mm enable-source NAME       # turn a configured sync source ON for this machine
                             # NAME=grok adds its scoped skills/ commands/ rules/
                             # source and keeps [retro].grok_host_usage enabled
+                            # NAME=muse adds its scoped memory/ source (never auto-enabled) and authorizes its usage reader
                             # NAME=cursor is a usage-only alias (no files sync): installs mm's stop hook in ~/.cursor/hooks.json, then sets [retro].cursor_host_usage (v1.5.0)
                             # an explicitly configured file source named cursor keeps its ordinary file-source toggle
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
@@ -610,6 +611,8 @@ SYNCED_SUBDIRS = ["memory", "todos"]
 
 **`grok` type** — Claude-shaped walker for `~/.grok`. Hardcodes `skills/`, `commands/`, and `rules/` at the source root. Sessions, credentials, and `config.toml` are never entered. See [Host Interchangeability](#host-interchangeability).
 
+**`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
+
 **Nested git checkouts (all types).** Every walker skips a directory strictly below the source root that contains a `.git` directory or file, so a repository cloned inside a synced folder is not published. A folder that was already published and later becomes a checkout is frozen, not deleted. See [Nested git repositories](README.md#nested-git-repositories) and [the sync invariant](docs/invariants/sync.md#nested-git-checkouts-are-frozen-never-published).
 
 ### Excluded Patterns
@@ -725,6 +728,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`grok`** — Claude-shaped walker. Scans `skills/`, `commands/`, and `rules/` at `~/.grok`. Sessions and `auth.json` are never synced.
+- **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. The default source never auto-activates: only `mm enable-source muse`, or an explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it. Both prompts default to N.
 - **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):

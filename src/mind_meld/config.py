@@ -31,6 +31,7 @@ DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
 DEFAULT_GROK_DIR = "~/.grok"
+DEFAULT_MUSE_DIR = "~/.local/share/muse"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
@@ -90,7 +91,8 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
         "disabled": "Run mm enable-source mm-events to enable usage publication.",
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (
-            "No host reader is consented. Run mm enable-source codex or mm enable-source grok; "
+            "No host reader is consented. Run mm enable-source codex, mm enable-source grok "
+            "or mm enable-source muse; "
             "Grok usage-only consent also accepts [retro] grok_host_usage = true. "
             "Run mm enable-source cursor to enroll Cursor usage capture."
         ),
@@ -285,6 +287,15 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "path": DEFAULT_GROK_DIR,
         "type": "grok",
     },
+    {
+        # Same Claude-shaped entry: name/path/type only. The walker
+        # hardcodes memory/ — not user-editable include_dirs — so a
+        # config edit cannot widen the walk onto sessions/ or the
+        # session index. See manifest.MUSE_SYNCED_SUBDIRS.
+        "name": "muse",
+        "path": DEFAULT_MUSE_DIR,
+        "type": "muse",
+    },
 ]
 
 
@@ -456,6 +467,22 @@ def _validate_sources(sources: Any) -> None:
                     "config: source 'grok' does not support include_dirs or include_files; "
                     "it syncs skills/, commands/, and rules/ only."
                 )
+        if src["type"] == "muse" and name != "muse":
+            raise ConfigError(
+                "config: type 'muse' is reserved for source name 'muse' so only its "
+                "hardcoded memory allowlist is walked."
+            )
+        if name == "muse":
+            if src["type"] != "muse":
+                raise ConfigError(
+                    "config: source 'muse' must use type 'muse' so only its "
+                    "hardcoded memory allowlist is walked."
+                )
+            if "include_dirs" in src or "include_files" in src:
+                raise ConfigError(
+                    "config: source 'muse' does not support include_dirs or include_files; "
+                    "it syncs memory/ only."
+                )
         if name in seen_names:
             raise ConfigError(f"config: duplicate source name '{name}'.")
         seen_names.add(name)
@@ -586,6 +613,27 @@ def grok_customization_dirs_exist(
                         next_action="Restore read access, then run mm push.",
                     )
                 ) from e
+            continue
+        if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+            return True
+    return False
+
+
+def muse_memory_dir_exists(root: Path) -> bool:
+    """True if the hardcoded Muse ``memory/`` dir exists under ``root``.
+
+    A label only ("detected" in the init and reconfigure prompts). It is
+    never an activation or consent signal: Muse creates ``memory/`` itself
+    on first run, so the default muse source activates only through
+    ``mm enable-source muse``, or an explicit "y" at the ``mm init`` or
+    ``mm reconfigure-sources`` prompt. Both prompts default to N.
+    """
+    from mind_meld.manifest import MUSE_SYNCED_SUBDIRS
+
+    for name in MUSE_SYNCED_SUBDIRS:
+        try:
+            st = (root / name).lstat()
+        except OSError:
             continue
         if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
             return True
@@ -725,6 +773,13 @@ def _configured_sources(
             or s["name"] in disabled
             or grok_customization_dirs_exist(Path(s["path"]), strict=grok_strict)
         ]
+        # Muse never auto-activates. Muse creates memory/ itself on first
+        # run (holding only its PID lock), so no tree under its root is a
+        # consent signal, and an enabled source also authorizes the usage
+        # reader. Only `mm enable-source muse`, or an explicit "y" at
+        # `mm init` or `mm reconfigure-sources`, adds it. Both prompts
+        # default to N.
+        sources = [s for s in sources if s.get("type") != "muse" or s["name"] in disabled]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.

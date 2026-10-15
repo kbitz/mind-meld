@@ -144,6 +144,7 @@ from mind_meld.manifest import (
     CONFLICT_V1_MARKER,
     GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
+    MUSE_EXCLUDE_PATTERNS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
@@ -794,6 +795,8 @@ def _build_exclude_map(
         patterns = list(src.get("exclude_patterns") or [])
         if src.get("type") == "grok":
             patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
+        elif src.get("type") == "muse":
+            patterns = [*MUSE_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
         prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
         if patterns:
@@ -918,7 +921,7 @@ def _filter_symlinked_paths(
     manifest at this consumer boundary prevents that omission from minting a
     fleet-wide deletion tombstone, including for pre-migration explicit source
     configurations that do not yet carry the new default exclude globs.
-    Applies to Claude, generic, and Grok sources. Entries and tombstones under
+    Applies to every source type (Claude, generic, Grok, Muse). Entries and tombstones under
     ``exempt_roots`` (frozen nested checkouts) are kept without probing.
     """
     exempt = {name: sorted(roots) for name, roots in (exempt_roots or {}).items()}
@@ -1186,6 +1189,8 @@ def _prove_omitted_paths_absent(
             extra = list(src_cfg.get("exclude_patterns") or [])
             if src_cfg.get("type") == "grok":
                 extra = [*GROK_EXCLUDE_PATTERNS, *extra]
+            elif src_cfg.get("type") == "muse":
+                extra = [*MUSE_EXCLUDE_PATTERNS, *extra]
             if _manifest_is_excluded(rel_path, extra):
                 continue
             path = base / rel_path
@@ -1271,6 +1276,65 @@ def _retain_prior_default_sources(
     )
 
 
+def _include_prior_host_if_needed(
+    config: dict,
+    resolution: SourceResolution,
+    remote_manifest: dict | None,
+    sources: list[dict[str, Any]],
+    name: str,
+) -> list[dict[str, Any]]:
+    """Retain a published host source whose allowlisted tree is gone.
+
+    Grok's default source activates only while its customization trees
+    exist; Muse's activates only by explicit enable, and its ``memory/`` can
+    still be deleted later. Once such a source has been published, losing
+    the tree must not silently drop the source from the scan: retain it so
+    the deletions truthfully propagate, and refuse loudly when the root
+    itself is unreadable.
+    """
+    if remote_manifest is None or name not in remote_manifest.get("sources", {}):
+        return sources
+    disabled = set(config.get("sync", {}).get("disabled_sources") or [])
+    if name in disabled or any(src["name"] == name for src in sources):
+        return sources
+    host_cfg = next((src for src in resolution.selected if src["name"] == name), None)
+    if host_cfg is None:
+        if resolution.explicit:
+            return sources
+        host_cfg = get_default_source(name)
+        if host_cfg is None:
+            return sources
+        host_cfg = {**host_cfg, "path": str(Path(host_cfg["path"]).expanduser())}
+    root = Path(host_cfg["path"]).expanduser()
+    try:
+        root.stat()
+    except FileNotFoundError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=name,
+                problem="is missing after it was previously published",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore the source folder, or run "
+                    f"'mm disable-source {name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+    except OSError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=name,
+                problem="could not be read",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore read access, or run "
+                    f"'mm disable-source {name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+    return [*sources, host_cfg]
+
+
 def _include_prior_grok_if_needed(
     config: dict,
     resolution: SourceResolution,
@@ -1278,47 +1342,7 @@ def _include_prior_grok_if_needed(
     sources: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Retain Grok before capture/scanning when its customization dirs are gone."""
-    if remote_manifest is None or "grok" not in remote_manifest.get("sources", {}):
-        return sources
-    disabled = set(config.get("sync", {}).get("disabled_sources") or [])
-    if "grok" in disabled or any(src["name"] == "grok" for src in sources):
-        return sources
-    grok_cfg = next((src for src in resolution.selected if src["name"] == "grok"), None)
-    if grok_cfg is None:
-        if resolution.explicit:
-            return sources
-        grok_cfg = get_default_source("grok")
-        if grok_cfg is None:
-            return sources
-        grok_cfg = {**grok_cfg, "path": str(Path(grok_cfg["path"]).expanduser())}
-    root = Path(grok_cfg["path"]).expanduser()
-    try:
-        root.stat()
-    except FileNotFoundError as e:
-        raise SnapshotError(
-            snapshot_refusal(
-                source="grok",
-                problem="is missing after it was previously published",
-                cause=os_error_cause(e),
-                next_action=(
-                    "Restore the source folder, or run "
-                    "'mm disable-source grok' if it should stop syncing."
-                ),
-            )
-        ) from e
-    except OSError as e:
-        raise SnapshotError(
-            snapshot_refusal(
-                source="grok",
-                problem="could not be read",
-                cause=os_error_cause(e),
-                next_action=(
-                    "Restore read access, or run "
-                    "'mm disable-source grok' if it should stop syncing."
-                ),
-            )
-        ) from e
-    return [*sources, grok_cfg]
+    return _include_prior_host_if_needed(config, resolution, remote_manifest, sources, "grok")
 
 
 def _refuse_unavailable_selected_sources(
@@ -3145,7 +3169,8 @@ def _source_path_is_detected(source: dict[str, Any]) -> bool:
     root is not an activation or usage-consent signal. Its three hardcoded
     customization trees are. Explicitly configured Grok sources remain valid
     when those trees are absent; this helper controls only prompt defaults and
-    labels.
+    labels. Muse is the same shape: its data root always exists, so the
+    hardcoded ``memory/`` tree is the signal.
     """
     path_str = str(source.get("path", ""))
     if not path_str:
@@ -3153,6 +3178,8 @@ def _source_path_is_detected(source: dict[str, Any]) -> bool:
     root = Path(path_str).expanduser()
     if source.get("type") == "grok" or source.get("name") == "grok":
         return _config_module.grok_customization_dirs_exist(root)
+    if source.get("type") == "muse" or source.get("name") == "muse":
+        return _config_module.muse_memory_dir_exists(root)
     return root.exists()
 
 
@@ -3184,7 +3211,10 @@ def _prompt_sources() -> list[dict[str, Any]]:
                 enabled.append(src)
             continue
         exists = _source_path_is_detected(default)
-        if _prompt_source_toggle(default, current_state=exists, detected=exists):
+        # Muse is opt-in even when detected: its memory/ tree is host-created,
+        # and enabling the source also consents to the usage reader.
+        default_on = exists and default["name"] != "muse"
+        if _prompt_source_toggle(default, current_state=default_on, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
                 enabled.append(src)
@@ -3919,7 +3949,7 @@ def push(
     refuse the push and preserve the previous snapshot.
 
     Attended pushes also refresh and publish host usage, even when user content
-    is up to date. Requires mm-events and a consented Codex or Grok reader.
+    is up to date. Requires mm-events and a consented host reader.
     Capture runs before content sync: about five seconds of scanning per cold
     reader, and both readers can be cold. Budgets are not hard timeouts.
     Content-changing pushes also run GC on this device's orphaned blobs;
@@ -4317,6 +4347,13 @@ def _push_core(
         resolution,
         remote_manifest,
         sources,
+    )
+    sources = _include_prior_host_if_needed(
+        config,
+        resolution,
+        remote_manifest,
+        sources,
+        "muse",
     )
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
@@ -6402,6 +6439,43 @@ def status(
                 "and publish token totals (session files stay local)."
             )
 
+    muse_on = any(s.get("name") == "muse" for s in sources_configs)
+    # The presence probe only feeds the opt-in nudge: skip it once Muse is
+    # enabled (its reader state answers) or explicitly disabled (no nudge).
+    muse_disabled = "muse" in (config.get("sync", {}).get("disabled_sources") or [])
+    muse_present = False
+    if not muse_on and not muse_disabled:
+        try:
+            muse_present = _host_usage.muse_sessions_root().exists()
+        except OSError:
+            muse_present = False
+    if muse_on or muse_present:
+        if muse_on:
+            muse_diag = reader_states["muse"]
+            if muse_diag.get("last_reason"):
+                console.print(
+                    "  Muse usage capture: enabled — "
+                    + _host_usage_blocker(
+                        "muse",
+                        muse_diag,
+                        readiness=_reader_capture_readiness(publication, "muse"),
+                        upgrade_required=upgrade_required,
+                    )
+                )
+            elif muse_diag.get("complete_once") is True:
+                console.print("  Muse usage capture: enabled; a prior scan completed successfully")
+            else:
+                console.print(
+                    "  Muse usage capture: enabled, but no successful scan yet — "
+                    + safe_str(capture_remedy)
+                )
+        else:
+            console.print(
+                "  Muse usage capture: disabled — "
+                "run [bold]mm enable-source muse[/bold] to sync Muse memory "
+                "and publish token totals (session files stay local)."
+            )
+
     if "cursor" in reader_states:
         cursor_diag = reader_states["cursor"]
         if cursor_diag.get("last_reason"):
@@ -7227,10 +7301,21 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         grok_consented = grok_host_usage_enabled(cfg) or any(
             source.get("name") == "grok" for source in resolved_sources
         )
+    muse_consented = (
+        any(source.get("name") == "muse" for source in resolved_sources)
+        if config_state == "ok"
+        else None
+    )
     host_usage_state = {
-        name: _host_usage.reader_usage_diag(name) for name in _host_usage.HOST_READER_DIAGS
+        # Muse's session-log count walks the sessions tree; only a consented
+        # source may pay for it (Grok's count predates that rule).
+        name: _host_usage.muse_usage_diag(count_logs=muse_consented is True)
+        if name == "muse"
+        else _host_usage.reader_usage_diag(name)
+        for name in _host_usage.HOST_READER_DIAGS
     }
     host_usage_state["grok"]["consented"] = grok_consented
+    host_usage_state["muse"]["consented"] = muse_consented
     host_usage_state["cursor"]["consented"] = (
         _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
     )
@@ -7464,6 +7549,41 @@ def diag(
     )
     console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
     console.print("  grok last complete read: " + safe_str(_host_complete_read_line(hu_state)))
+
+    mu_state = (state.get("host_usage") or {}).get("muse") or {}
+    mu_consented = mu_state.get("consented")
+    if mu_consented is None:
+        mu_consented_shown = "(config unreadable)"
+    else:
+        mu_consented_shown = "yes" if mu_consented else "no"
+    if mu_state.get("complete_once"):
+        mu_scan_shown = "yes"
+    elif mu_state.get("cache_state") == "unreadable":
+        mu_scan_shown = "unreadable"
+    else:
+        mu_scan_shown = "no"
+    console.print(f"  muse consented:          {mu_consented_shown}")
+    console.print(f"  muse prior successful scan: {mu_scan_shown}")
+    console.print(f"  muse cache inventory:    {safe_str(str(mu_state.get('cache_state', '')))}")
+    if mu_state.get("cache_state") == "ok":
+        console.print(
+            "  muse usage read blocker: "
+            + _host_usage_blocker(
+                "muse",
+                mu_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "muse"),
+                upgrade_required=upgrade_required,
+            )
+        )
+    mu_cached = mu_state.get("files_cached")
+    mu_disk = mu_state.get("files_on_disk")
+    console.print(
+        f"  muse session logs cached: {'unknown' if mu_cached is None else mu_cached}"
+        f" of {'unknown' if mu_disk is None else mu_disk}"
+    )
+    console.print(f"  muse models cached:      {_diag_models_line(mu_state)}")
+    console.print("  muse last complete read: " + safe_str(_host_complete_read_line(mu_state)))
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
@@ -8494,7 +8614,7 @@ def enable_source(
     a freshly-shipped codex source that didn't auto-enable), append the
     default config so the source actually starts syncing.
 
-    Enabling `codex` or `grok` ALSO authorizes that host's local
+    Enabling `codex`, `grok` or `muse` ALSO authorizes that host's local
     usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
     block, and (for `codex` / `claude`) authorizes mm to
     maintain a `retro-fleet` skill link in that agent's skills directory.
@@ -8530,13 +8650,14 @@ def enable_source(
         disabled.remove(name)
         updates["disabled_sources"] = sorted(disabled)
 
-    # Grok must be materialized even when its customization dirs are not
-    # present yet: explicit enable is consent.  In a legacy config, first
-    # preserve the resolved source set before writing sync.sources.  An
-    # explicit list takes priority over legacy claude_dir/default fallback;
-    # writing only Grok here would make the existing sources disappear and
-    # eventually produce their deletion tombstones.
-    if name == "grok" and not has_explicit_sources:
+    # Grok and Muse must be materialized even when their allowlisted
+    # trees are not present yet: explicit enable is consent.  In a legacy
+    # config, first preserve the resolved source set before writing
+    # sync.sources.  An explicit list takes priority over legacy
+    # claude_dir/default fallback; writing only Grok here would make the
+    # existing sources disappear and eventually produce their deletion
+    # tombstones.
+    if name in ("grok", "muse") and not has_explicit_sources:
         explicit_sources = get_sources(config)
         explicit_names = [s["name"] for s in explicit_sources]
         updates["sources"] = explicit_sources
@@ -8545,7 +8666,7 @@ def enable_source(
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name == "grok" or (has_explicit_sources and name in default_names)
+        name in ("grok", "muse") or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -8582,6 +8703,16 @@ def enable_source(
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
         )
         console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
+    if name == "muse":
+        console.print(
+            "[dim]Syncs ~/.local/share/muse memory/ only. "
+            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+        )
+        console.print(
+            "[dim]Reads completed model-step token totals from local Muse session logs. "
+            "Session files are not synced. Prompts never leave the Mac.[/dim]"
+        )
+        console.print("[dim]Run 'mm disable-source muse' to turn this off.[/dim]")
 
 
 @app.command(name="reconfigure-sources")
@@ -8643,6 +8774,10 @@ def reconfigure_sources() -> None:
                 # every Grok install. It must not become a default-Y source
                 # or authorize the separate usage reader.
                 default_active = detected
+            elif iname == "muse":
+                # Muse never defaults on: its memory/ tree is host-created, so
+                # even a detected root is not consent for sync or usage reads.
+                default_active = False
             currently_active = (
                 iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled

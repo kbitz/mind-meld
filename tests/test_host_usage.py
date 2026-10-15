@@ -620,28 +620,65 @@ def _seed_blocker(cache, *, reason="unsupported", since=_OBSERVED, files=None):
         "usage_less_skipped": 2,
         "files": files or {},
     }
+    if cache == hu.MUSE_CACHE_PATH:
+        data["muse_format"] = hu._MUSE_CACHE_FORMAT
     cache.write_text(json.dumps(data))
     return data
 
 
-@pytest.fixture(params=["codex", "grok"])
+def _write_muse_session(root: Path, rid: str = "e1") -> Path:
+    """One Muse step in today's day directory, inside the reader's window."""
+    now = datetime.now(timezone.utc)
+    path = root / now.strftime("%Y/%m/%d") / "s1" / "session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    usage = {
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "cached_tokens": 40,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 40,
+        "reasoning_tokens": 3,
+    }
+    record = {
+        "id": rid,
+        "record_type": "event",
+        "payload_type": "runtime.session",
+        "recorded_at": str(int(now.timestamp() * 1_000_000)),
+        "payload": {
+            "event": {"kind": "model_completed", "model": "muse-wonder-1.0", "usage": usage}
+        },
+    }
+    with path.open("a") as fp:
+        fp.write(json.dumps(record) + "\n")
+    return path
+
+
+@pytest.fixture(params=["codex", "grok", "muse"])
 def reader_case(request, tmp_path, monkeypatch):
     name = request.param
-    cache = hu.CACHE_PATH if name == "codex" else hu.GROK_CACHE_PATH
+    cache = {"codex": hu.CACHE_PATH, "grok": hu.GROK_CACHE_PATH, "muse": hu.MUSE_CACHE_PATH}[name]
     root = tmp_path / "reader-sessions"
     monkeypatch.setattr(hu, "CODEX_SESSIONS_PATH", root)
 
     def read():
         if name == "codex":
             return hu.read_codex_usage(root)
+        if name == "muse":
+            return hu.read_muse_usage(root, consented=True)
         return hu.read_grok_usage(root, consented=True)
 
-    diag = hu.codex_usage_diag if name == "codex" else hu.grok_usage_diag
+    diag = {"codex": hu.codex_usage_diag, "grok": hu.grok_usage_diag, "muse": hu.muse_usage_diag}[
+        name
+    ]
 
     def set_scan(result, staged=None, learned=False):
-        output = (result, staged or {}, learned)
-        if name == "grok":
-            output += (True,)
+        if name == "muse":
+            # Muse also returns its frozen days: (result, live, frozen, learned, saw).
+            output = (result, staged or {}, {}, learned, True)
+        else:
+            output = (result, staged or {}, learned)
+            if name == "grok":
+                output += (True,)
         scan = Mock(return_value=output)
         monkeypatch.setattr(hu, f"_scan_{name}_root", scan)
         return scan
@@ -917,7 +954,8 @@ def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, mo
         assert diag()["last_reason"] == "deadline"
         if "complete_once" in data:
             assert data["complete_once"] is True
-            assert data["usage_less_skipped"] == 2
+            # Muse has no usage-less records, so its root tally is always 0.
+            assert data["usage_less_skipped"] == (0 if cache == hu.MUSE_CACHE_PATH else 2)
 
 
 def test_complete_then_expired_records_deadline_and_keeps_cache(reader_case, monkeypatch):
@@ -4394,7 +4432,7 @@ def test_validator_tamper_corpus_matches_frozen_oracle():
         ), (location, bad, _ORACLE_RULE)
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "grok", "muse"])
 def test_appended_file_validates_cached_entry_once(reader, tmp_path, monkeypatch):
     root = tmp_path / "sessions"
     if reader == "codex":
@@ -4405,6 +4443,15 @@ def test_appended_file_validates_cached_entry_once(reader, tmp_path, monkeypatch
 
         validator = "_validated_entry"
         extra = _token(150)
+    elif reader == "muse":
+        path = _write_muse_session(root)
+        assert hu.read_muse_usage(root, consented=True).complete
+        _write_muse_session(root, rid="e2")
+        spy = Mock(wraps=hu._validated_grok_entry)
+        monkeypatch.setattr(hu, "_validated_grok_entry", spy)
+        assert hu.read_muse_usage(root, consented=True).complete
+        assert spy.call_count == 1
+        return
     else:
         path = _write_grok_session(root, lines=[_grok_turn()])
 
@@ -4497,10 +4544,16 @@ def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, er
         assert len(starts) == before
         if error:
             raise error()
+        if cache == hu.MUSE_CACHE_PATH:
+            return (hu.HostUsageResult({}, True), {}, {}, False, False)
         result = (hu.HostUsageResult({}, True), {}, False)
         return result if cache == hu.CACHE_PATH else result + (False,)
 
-    name = "_scan_codex_root" if cache == hu.CACHE_PATH else "_scan_grok_root"
+    name = {
+        hu.CACHE_PATH: "_scan_codex_root",
+        hu.GROK_CACHE_PATH: "_scan_grok_root",
+        hu.MUSE_CACHE_PATH: "_scan_muse_root",
+    }[cache]
     monkeypatch.setattr(hu, name, scan)
     try:
         gc.set_threshold(1, 1, 1)
@@ -4568,6 +4621,8 @@ def test_unchanged_deadline_rewrites_when_allotted_budget_changes(reader_case, m
     monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
     if cache == hu.CACHE_PATH:
         result = hu.read_codex_usage(deadline=1000.4)
+    elif cache == hu.MUSE_CACHE_PATH:
+        result = hu.read_muse_usage(consented=True, deadline=1000.4)
     else:
         result = hu.read_grok_usage(consented=True, deadline=1000.4)
     assert result.reason == "deadline"
@@ -4603,7 +4658,7 @@ def test_invalid_timing_fields_are_unknown(reader_case, bad):
 
 
 @pytest.mark.parametrize("compact", [False, True])
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "grok", "muse"])
 def test_host_cache_accepts_both_encodings_and_writes_compact(
     compact, reader, tmp_path, monkeypatch
 ):
@@ -4611,16 +4666,19 @@ def test_host_cache_accepts_both_encodings_and_writes_compact(
     if reader == "codex":
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
         cache, full_reader = hu.CACHE_PATH, "_read_full_rollout"
+    elif reader == "muse":
+        _write_muse_session(root)
+        cache, full_reader = hu.MUSE_CACHE_PATH, "_read_full_muse_file"
     else:
         _write_grok_session(root, lines=[_grok_turn()])
         cache, full_reader = hu.GROK_CACHE_PATH, "_read_full_grok_file"
 
     def read():
-        return (
-            hu.read_codex_usage(root)
-            if reader == "codex"
-            else hu.read_grok_usage(root, consented=True)
-        )
+        if reader == "codex":
+            return hu.read_codex_usage(root)
+        if reader == "muse":
+            return hu.read_muse_usage(root, consented=True)
+        return hu.read_grok_usage(root, consented=True)
 
     first = read()
     data = json.loads(cache.read_text())

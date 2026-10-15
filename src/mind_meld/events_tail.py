@@ -140,6 +140,10 @@ HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     # consent, matching Codex. The 21A [retro].grok_host_usage bit remains
     # an OR so a prior usage-only opt-in does not go dark.
     "grok": "grok",
+    # Muse is a scoped sync source too (``type: "muse"``, hardcoded
+    # ``memory/``). Source-enabled is consent, matching Codex and Grok;
+    # there is no separate retro bit.
+    "muse": "muse",
     **dict.fromkeys(mm_config.HOST_USAGE_ONLY_CONSENT),
 }
 """Which enabled sync source each reader's consent derives from.
@@ -152,7 +156,7 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
-WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor"})
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor", "muse"})
 """Readers with cached totals an attended warm can populate.
 
 A future reader whose cache stores no totals must not be added here.
@@ -347,6 +351,12 @@ def _default_host_readers(
             return host_usage.read_cursor_usage(deadline=deadline, consented=True)
 
         chosen.append(("cursor", _read_cursor))
+    if HOST_READER_SOURCE_GATE["muse"] in enabled:
+
+        def _read_muse(*, deadline: float) -> host_usage.HostUsageResult:
+            return host_usage.read_muse_usage(deadline=deadline, consented=True)
+
+        chosen.append(("muse", _read_muse))
     return tuple(chosen)
 
 
@@ -619,7 +629,7 @@ def _host_skip_phrase(
             def shown(value: int | None) -> str:
                 return "unknown" if value is None else str(value)
 
-            unit = {"grok": "ledgers"}.get(reader, "rollouts")
+            unit = {"grok": "ledgers", "muse": "session logs"}.get(reader, "rollouts")
             if reader == "cursor":
                 progress = (
                     f"{shown(evidence.files_cached)} retained runs; "

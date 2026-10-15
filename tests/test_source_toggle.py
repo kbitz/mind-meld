@@ -989,6 +989,71 @@ class TestGrokUsageConsent:
         assert "grok" in _known_source_names({})
 
 
+class TestMuseSourceToggle:
+    def test_enable_source_muse_appends_source_without_retro_bit(self, cfg, isolated_seen_sources):
+        """Muse consent is source-enabled only; no [retro] key is written."""
+        import tomllib
+
+        result = runner.invoke(app, ["enable-source", "muse"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled source 'muse'" in result.output
+        assert "memory/" in result.output
+        assert "not synced" in result.output
+        assert "model-step" in result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "muse_host_usage" not in (on_disk.get("retro") or {})
+        added = next(s for s in on_disk["sync"]["sources"] if s["name"] == "muse")
+        assert added == get_default_source("muse")
+        assert "muse" not in (on_disk["sync"].get("disabled_sources") or [])
+
+        again = runner.invoke(app, ["enable-source", "muse"])
+        assert again.exit_code == 0
+        assert "already enabled" in again.output
+
+        off = runner.invoke(app, ["disable-source", "muse"])
+        assert off.exit_code == 0, off.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "muse" in (on_disk["sync"].get("disabled_sources") or [])
+
+    def test_enable_source_muse_materializes_legacy_sources_before_adding_row(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    ):
+        """Explicit Muse enable must not replace a legacy Claude source."""
+        import tomllib
+
+        from mind_meld.config import get_sources, load_config, save_config
+
+        home = tmp_path / "home"
+        (home / ".local" / "share" / "muse").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        config = load_config(cfg)
+        config["sync"].pop("sources")
+        config["sync"]["claude_dir"] = str(tmp_path / ".claude")
+        save_config(config, cfg)
+
+        result = runner.invoke(app, ["enable-source", "muse"])
+        assert result.exit_code == 0, result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "muse") == (
+            get_default_source("muse")
+        )
+        assert [source["name"] for source in get_sources(load_config(cfg))] == ["claude", "muse"]
+        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "claude") == {
+            "name": "claude",
+            "path": str((tmp_path / ".claude").resolve()),
+            "type": "claude",
+        }
+
+    def test_muse_is_a_known_source_name(self):
+        _validate_source_name("muse", {"sync": {"sources": []}}, force=False)
+        assert "muse" in _known_source_names({})
+
+
 class TestReconfigureSources:
     def test_bare_grok_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
         """Reconfigure must not turn a stock ~/.grok into source or consent."""
@@ -1029,6 +1094,44 @@ class TestReconfigureSources:
             on_disk = tomllib.load(f)
         assert "grok" not in [s["name"] for s in on_disk["sync"]["sources"]]
         assert on_disk["retro"]["grok_host_usage"] is False
+
+    def test_bare_muse_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
+        """Reconfigure must not turn a stock Muse data root into source or consent."""
+        import tomllib
+
+        from mind_meld.config import load_config
+
+        home = tmp_path / "home"
+        claude = home / ".claude"
+        claude.mkdir(parents=True)
+        (home / ".local" / "share" / "muse" / "sessions").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+
+        config = load_config(cfg)
+        config["sync"] = {
+            "claude_dir": str(claude),
+            "max_file_size": 52_428_800,
+        }
+        save_config(config, cfg)
+
+        muse_prompt: dict[str, object] = {}
+
+        def accept_default(prompt, default):
+            if "'muse'" in prompt:
+                muse_prompt.update(prompt=prompt, default=default)
+            return default
+
+        monkeypatch.setattr(typer, "confirm", accept_default)
+        result = runner.invoke(app, ["reconfigure-sources"])
+        assert result.exit_code == 0, result.output
+        assert muse_prompt == {
+            "prompt": "Sync 'muse' source at ~/.local/share/muse? (not detected)",
+            "default": False,
+        }
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "muse" not in [s["name"] for s in on_disk["sync"]["sources"]]
 
     def test_usage_only_grok_opt_in_defaults_on(
         self, cfg, isolated_seen_sources, monkeypatch, tmp_path
@@ -1197,6 +1300,54 @@ class TestStatusBreadcrumbs:
         assert result.exit_code == 0, result.output
         assert "Disabled sources" not in result.output
         assert "not-a-real-source" not in result.output
+
+    def test_muse_status_nudge_enabled_and_disabled(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    ):
+        from mind_meld import crypto
+        from mind_meld import host_usage as _host_usage
+        from mind_meld.crypto import bootstrap_crypto_init
+        from mind_meld.devices import register_device
+        from mind_meld.storage.local import LocalBackend
+
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "test-passphrase")
+
+        import tomllib
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        backend = LocalBackend(on_disk["storage"]["path"])
+        bootstrap_crypto_init(backend, "test-passphrase", argon2_memory_kb=1024)
+        register_device(backend, "abc123", "MacBook")
+        crypto.clear_crypto_session()
+        home = tmp_path / "home"
+        sessions = home / ".local" / "share" / "muse" / "sessions"
+        sessions.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(_host_usage, "MUSE_SESSIONS_PATH", sessions)
+
+        nudged = runner.invoke(app, ["status"])
+        assert nudged.exit_code == 0, nudged.output
+        flat = " ".join(nudged.output.split())
+        assert "Muse usage capture: disabled" in flat
+        assert "mm enable-source muse" in flat
+
+        assert runner.invoke(app, ["enable-source", "muse"]).exit_code == 0
+        enabled = runner.invoke(app, ["status"])
+        assert enabled.exit_code == 0, enabled.output
+        assert "Muse usage capture: enabled, but no successful scan yet" in enabled.output
+
+        assert runner.invoke(app, ["disable-source", "muse"]).exit_code == 0
+        probes: list[object] = []
+        real_root = _host_usage.muse_sessions_root
+        monkeypatch.setattr(
+            _host_usage, "muse_sessions_root", lambda: probes.append(real_root()) or real_root()
+        )
+        silent = runner.invoke(app, ["status"])
+        assert silent.exit_code == 0, silent.output
+        # Explicitly disabled: no presence probe and no nudge.
+        assert "Muse usage capture" not in silent.output
+        assert probes == []
 
     def test_grok_status_when_enabled_or_present(self, cfg, isolated_seen_sources, monkeypatch):
         from mind_meld import crypto

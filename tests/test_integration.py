@@ -202,6 +202,95 @@ class TestPushPullRoundTrip:
             pulled = (claude_b / rel).read_bytes()
             assert original == pulled, f"Mismatch: {rel}"
 
+    def test_muse_memory_round_trip_conflict_and_local_only_files(self, tmp_path, monkeypatch):
+        """Push A, pull B: memory/ arrives; sessions/ and the PID lock never leave."""
+        storage_dir = tmp_path / "storage"
+        muse_a = tmp_path / "machine_a" / "muse"
+        muse_b = tmp_path / "machine_b" / "muse"
+        personal_a = muse_a / "memory" / "personal"
+        personal_a.mkdir(parents=True)
+        (personal_a / "MEMORY.md").write_text("- [Role](role.md)\n")
+        (personal_a / "role.md").write_text("Data scientist\n")
+        (personal_a / ".muse-memory.lock").write_text("pid=111\n")
+        project_a = muse_a / "memory" / "projects" / "Users-kb-app-0c84"
+        project_a.mkdir(parents=True)
+        (project_a / "notes.md").write_text("project note\n")
+        session_a = muse_a / "sessions" / "2026" / "10" / "14" / "s1"
+        session_a.mkdir(parents=True)
+        (session_a / "session.jsonl").write_text('{"prompt": "never synced"}\n')
+        personal_b = muse_b / "memory" / "personal"
+        personal_b.mkdir(parents=True)
+        (personal_b / ".muse-memory.lock").write_text("pid=222\n")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        configs = {}
+        for device, root in (("dev-a", muse_a), ("dev-b", muse_b)):
+            configs[device] = tmp_path / f"config_{device}.toml"
+            save_config(
+                {
+                    "device": {"id": device, "name": device},
+                    "storage": {"path": str(storage_dir)},
+                    "sync": {
+                        "max_file_size": 52_428_800,
+                        "sources": [{"name": "muse", "path": str(root), "type": "muse"}],
+                    },
+                    "crypto": {"argon2_memory_kb": MEMORY_KB},
+                },
+                configs[device],
+            )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, configs["dev-a"])
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        remote = load_manifest(
+            decrypt(
+                backend.get("manifests/dev-a/manifest.json.enc"), PASSPHRASE, memory_kb=MEMORY_KB
+            )
+        )
+        assert set(remote["sources"]["muse"]["files"]) == {
+            "memory/personal/MEMORY.md",
+            "memory/personal/role.md",
+            "memory/projects/Users-kb-app-0c84/notes.md",
+        }
+
+        self._activate(monkeypatch, configs["dev-b"])
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        for rel in (
+            "memory/personal/MEMORY.md",
+            "memory/personal/role.md",
+            "memory/projects/Users-kb-app-0c84/notes.md",
+        ):
+            assert (muse_b / rel).read_bytes() == (muse_a / rel).read_bytes(), rel
+        assert (personal_b / ".muse-memory.lock").read_text() == "pid=222\n"
+        assert not (muse_b / "sessions").exists()
+
+        # Divergent edits: an ordinary note keeps local bytes plus a remote
+        # sidecar; MEMORY.md is an index, so it line-unions like Claude's.
+        self._activate(monkeypatch, configs["dev-a"])
+        (personal_a / "role.md").write_text("Principal engineer\n")
+        (personal_a / "MEMORY.md").write_text("- [Role](role.md)\n- [Team](team.md)\n")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        self._activate(monkeypatch, configs["dev-b"])
+        role_b = personal_b / "role.md"
+        role_b.write_text("Staff engineer\n")
+        (personal_b / "MEMORY.md").write_text("- [Role](role.md)\n- [Goals](goals.md)\n")
+        old = time.time() - 3600
+        for path in (role_b, personal_b / "MEMORY.md"):
+            os.utime(path, (old, old))
+        pulled = runner.invoke(app, ["pull", "--conflict-mode", "keep-both"])
+        assert pulled.exit_code == 0, pulled.output
+        assert role_b.read_text() == "Staff engineer\n"
+        sidecars = list(personal_b.glob("role.sync-conflict-*.md"))
+        assert [p.read_text() for p in sidecars] == ["Principal engineer\n"]
+        assert (personal_b / "MEMORY.md").read_text().splitlines() == sorted(
+            ["- [Goals](goals.md)", "- [Role](role.md)", "- [Team](team.md)"]
+        )
+        assert (personal_b / ".muse-memory.lock").read_text() == "pid=222\n"
+
     def test_enable_grok_preserves_legacy_claude_manifest_on_next_push(self, tmp_path, monkeypatch):
         """Materializing Grok must not turn legacy Claude content into tombstones."""
         storage_dir = tmp_path / "storage"

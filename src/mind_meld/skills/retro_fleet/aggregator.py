@@ -3780,7 +3780,7 @@ def _agent_coverage_notes(
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok`), then "
+                "enable with `mm enable-source codex` (or `grok` / `muse`), then "
                 f"{_attended_usage_remedy()}; readers with no attributable local ledger "
                 "are also omitted."
             )

@@ -104,12 +104,13 @@ def _enable_capture_sources(tmp_path, *, readers):
             continue
         root = tmp_path / name
         root.mkdir(exist_ok=True)
+        hardcoded = name in ("grok", "muse")
         cfg["sync"]["sources"].append(
             {
                 "name": name,
                 "path": str(root),
-                "type": "grok" if name == "grok" else "generic",
-                **({"include_dirs": ["events"]} if name != "grok" else {}),
+                "type": name if hardcoded else "generic",
+                **({} if hardcoded else {"include_dirs": ["events"]}),
             }
         )
     save_config(cfg)
@@ -1646,7 +1647,7 @@ def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monk
     assert state["last_reason"] is None and state["last_reason_detail"] is None
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok", "cursor"])
+@pytest.mark.parametrize("reader", ["codex", "grok", "cursor", "muse"])
 def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
     from mind_meld import cli, events
 
@@ -1661,7 +1662,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         monkeypatch.setattr(
             host_usage,
             f"{name}_usage_diag",
-            lambda name=name: {
+            lambda name=name, **_kw: {
                 "cache_state": "ok",
                 "state": "ready",
                 "complete_once": True,
@@ -1677,7 +1678,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
     monkeypatch.setattr(
         host_usage,
         f"{reader}_usage_diag",
-        lambda: {
+        lambda **_kw: {
             "cache_state": "ok",
             "state": "ready",
             "complete_once": True,
@@ -1697,7 +1698,7 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         ready.setattr(
             host_usage,
             f"{reader}_usage_diag",
-            lambda: {
+            lambda **_kw: {
                 "state": "ready",
                 "complete_once": True,
                 "last_reason": None,
@@ -1728,3 +1729,33 @@ def test_cursor_diag_is_read_only_and_exposes_own_cache(cursor_store, tmp_path, 
     assert state["consented"] is False
     assert state["models"] == ["grok-4.7"]
     assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before
+
+
+def test_diag_never_walks_an_unconsented_muse_tree(tmp_path, monkeypatch):
+    """Muse's session-log count is paid only by an enabled ``muse`` source."""
+    _setup(tmp_path, monkeypatch)
+    from datetime import datetime, timezone
+
+    sessions = tmp_path / "muse" / "sessions"
+    session = sessions / datetime.now(timezone.utc).strftime("%Y/%m/%d") / "s1"
+    session.mkdir(parents=True)
+    (session / "session.jsonl").write_text("{}\n")
+    monkeypatch.setattr(host_usage, "MUSE_SESSIONS_PATH", sessions)
+    walked: list[Path] = []
+    real = host_usage._count_muse_ledgers
+    monkeypatch.setattr(
+        host_usage, "_count_muse_ledgers", lambda root: walked.append(root) or real(root)
+    )
+
+    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["muse"]
+    assert state["consented"] is False
+    assert state["files_on_disk"] is None
+    assert walked == []
+
+    cfg = load_config()
+    cfg["sync"]["sources"].append({"name": "muse", "path": str(tmp_path / "muse"), "type": "muse"})
+    save_config(cfg)
+    state = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["muse"]
+    assert state["consented"] is True
+    assert state["files_on_disk"] == 1
+    assert walked == [sessions]

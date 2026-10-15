@@ -225,7 +225,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) readers as one additive
+The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) / Muse readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -270,8 +270,8 @@ Codex returns `unsupported` for a ledger it cannot attribute, which means
 "real usage is here and I could not read it" — that keeps the veto. Getting
 that distinction backwards silently under-reports the fleet.
 
-**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex and
-Grok to the source name whose being enabled authorizes them. The live set is
+**Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex,
+Grok and Muse to the source name whose being enabled authorizes them. The live set is
 `events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
 tuple (same names, same order). Unknown inbound names (retired `opencode`,
 or a future reader) are retained by the aggregator, not listed here.
@@ -310,6 +310,89 @@ prompt IDs, or conversation bytes. Equal duplicate
 `(workspace, session, prompt_id, model)` records count once; conflicting
 duplicates refuse the store. The model is always part of the key so a
 later multi-model restatement of the same prompt cannot double-count.
+
+**Muse terminal ledger (1.x minor, 2026-10-14).** When the `muse` source
+is enabled, `read_muse_usage` walks
+`~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` plus literal
+`subagent/` descendants, regular non-symlink files only, and accepts only
+`model_completed` events under a `runtime.session` envelope: the event key
+set within `{kind, model, usage, duration_ms, finish_reason}`, the usage
+key set exactly the six `*_tokens` counters, `cached_tokens` equal to
+`cache_read_tokens`, `reasoning_tokens` a bounded subset of
+`output_tokens`, counters disjoint-normalized by the shared three-term
+rule, a nonzero cache write marking the day partial. The dedup key is the
+hashed envelope `id` alone, corpus-wide: not the model (one envelope is one
+step, so a repeated id under another model refuses) and not the session dir
+(a step restated in a second log counts once). An equal duplicate counts
+once, a conflicting one refuses the reader. `goal_usage_attribution`
+records restate the same steps and are never read. The private
+`muse-host-tokens.json` cache reuses Grok's turns-entry shape and
+resume machinery for live logs; it stores hashed keys, model IDs, days and
+aggregate counters — never paths, envelope ids, or conversation bytes.
+
+*Muse cost tracks the live window, not the history (load-bearing).* Muse
+writes ~100 logs a day, and a reader that revisits every log grows past the
+50 ms autopush grace within days. So: (1) an unchanged live log is a
+stat-only hit (dev/ino/size/mtime equal; never reopened or fingerprinted);
+(2) a `YYYY/MM/DD` directory at least `_MUSE_SETTLE_DAYS` old whose logs
+have all been idle `_MUSE_SETTLE_IDLE_NS` freezes into the cache's `frozen`
+map — per-day/model totals, partial days, one digest over its logs'
+relative paths and stat identities, and `_MUSE_KEY_PREFIX`-hex prefixes of
+its step keys — and its per-turn entries are dropped; (3) frozen days are
+stat-checked least recently checked first (a `check_seq` pass counter, not
+a clock; a just-frozen day is 0 and goes first; newest first among equals)
+while their estimated cost (`_MUSE_VERIFY_LOG_COST_S` per log) fits the
+budget left after the tail reserve (`_MUSE_TAIL_RESERVE_S` plus
+`_MUSE_TAIL_STEP_COST_S` per live step); a day that does not fit is
+skipped, and a deadline inside a check stops checking without failing the
+pass and sends that day to the back of the queue. With enough budget every
+frozen day is re-checked (about 400 ms for 90 days of ~100 logs, measured
+on a synthetic corpus); an attended push checks what its share of the
+500 ms budget allows and the rest over later pushes, and an autopush checks
+what fits; a digest mismatch (a resumed, pruned, moved or new log)
+unfreezes that day and re-reads it; (4) every day directory is listed but
+only live ones are read, so there is no calendar floor: a frozen day stays
+(a few hundred bytes) until its directory is gone, and a session resumed
+months later is found by the check. The wire trims to its own most recent
+active days. Freezing, checking and eviction commit only with a complete
+pass.
+
+*Muse copies count once or refuse (load-bearing).* Cross-log dedup covers
+every live log, and a day whose steps are shared with another live day
+never freezes. A frozen day keeps its step-key prefixes while a session
+still being written (a live day with a log modified within
+`_MUSE_SETTLE_IDLE_NS`, or one created later, dated today − 1 at the
+earliest, west of UTC) could accept a copy of its steps under the step-lead
+rule, and a day freezing past that point stores none; an idle live day
+holds no keys open, so a copy pair that stays live cannot pin them; a live
+step matching a held prefix unfreezes that day so the dedup sees both
+copies. Once its newest step is older than every such session accepts, the
+day drops its keys, and a copy of it breaks the step-lead rule: a step
+recorded more than `_MUSE_STEP_LEAD_DAYS` before its session directory's
+date refuses the reader (`unsupported`, whose generic remedy is
+`mm update`; a re-census decides the real fix). Residual: a frozen session
+resumed in place that copies another frozen day's history after that day
+dropped its keys is not detected. The cache root carries `muse_format`;
+a cache without it is rebuilt. The reader clock is `_muse_now`, so tests
+pin it.
+
+*Unconsented Muse is not walked.* `mm diag` counts session logs
+(`muse_usage_diag(count_logs=True)`) only for an enabled `muse` source;
+otherwise `files_on_disk` is null. `mm status` and recapture use the
+cache-only view (`reader_usage_diag`), since the count walks every day
+directory. `mm status` stats `sessions/` only for
+the opt-in nudge, and not at all when `muse` is in `disabled_sources` or
+already enabled. No path opens a session log without consent. (Grok's diag
+count and status probe predate this rule.)
+
+The census and fatal-check list are
+`tests/fixtures/host_sessions/muse/CONTRACT.md`, bound to
+`MUSE_USAGE_CENSUS_HOST_VERSION`. Muse models classify as `other` in
+1.x: a new host family is a MAJOR under the compatibility contract in
+`docs/invariants/auto-upgrade.md`, while the reader/token-source name is
+a MINOR. The `muse` *file* walker never opens `sessions/`; the usage
+reader is a separate consented walk of `session.jsonl` only. Muse gets
+no `AgentRow` (it discovers `~/.claude/skills`).
 
 **Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`
@@ -987,7 +1070,7 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex and Grok Build ledgers and Cursor
+  overlap: `host_usage` reads Codex, Grok Build and Muse ledgers and Cursor
   (Conductor runs plus enrolled standalone completions), never Claude Code's
   own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.
@@ -1552,8 +1635,8 @@ sweep deadline before invocation) remain per-push stderr/breadcrumb signals.
 A no-op autopush may overwrite that breadcrumb with `success` without
 reading either host; a persisted blocker remains visible in status and diag.
 Attended push refreshes consented host usage even with no user-content changes;
-no-op autopush still performs no host reads. See README "Host usage capture (Codex and
-Grok)" for remedies and the three existing deferred-work TODOs.
+no-op autopush still performs no host reads. See README "Host usage capture (Codex,
+Grok, Cursor and Muse)" for remedies and the three existing deferred-work TODOs.
 
 **`degraded_sources` is additive.** No `EVENTS_SCHEMA_VERSION` bump:
 `_accept_host_usage_snapshot` does no key-set check and `_tie_break_key`
@@ -1578,7 +1661,7 @@ attended push, tail and backfill; no duplicated warm path.
 **Attended push refreshes usage; previews never capture (64A amendment).**
 A real attended `mm push` refreshes consented readers even when user content is
 already in sync. `_push_core(attended=True)` resolves sources once under the
-mm lock, recovers the prior Grok source, then captures before `build_manifest_v2`.
+mm lock, recovers the prior Grok and Muse sources, then captures before `build_manifest_v2`.
 The pure prerequisite check uses the final sources and keeps unavailable custom
 mm-events roots distinct from disabled ones. Prerequisites unmet means skip and
 continue ordinary content sync. An unreadable config or failed source scan is
@@ -1993,9 +2076,9 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok and Cursor). Only `deadline` qualifies, including a reader whose
+(today Codex, Grok, Cursor and Muse). Only `deadline` qualifies, including a reader whose
 first invocation was prevented by sweep expiry. A healthy empty scan never
-warms. Autopush supplies no warm callback. Codex/Grok continue to converge
+warms. Autopush supplies no warm callback. Codex/Grok/Muse continue to converge
 through partial commits; Cursor commits stable-file progress but reparses
 rewritten files, so repeated short passes need not converge.
 
@@ -2079,7 +2162,7 @@ The budget lever ships, so these measurements document headroom rather than
 gate merge. Remeasure on each producing Mac/version before changing its budget.
 
 **Tests must never read a real host store.** `conftest._isolate_host_usage`
-redirects every reader root (Codex live and archived, Grok, Cursor) and all three
+redirects every reader root (Codex live and archived, Grok, Cursor, Muse) and all four
 caches per test; tests needing data monkeypatch the reader functions. Without
 it the suite's result would depend on which agents are installed on the machine
 running it — a developer

@@ -2201,6 +2201,7 @@ class TestSourceBootstrapPreview56A:
         cfg = {"sync": {"claude_dir": str(claude)}}
         monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
         monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
+        monkeypatch.setattr(config_module, "muse_memory_dir_exists", lambda *a, **kw: False)
         resolution = resolve_sources(cfg, strict=True, bootstrap=False)
         # claude_dir legacy resolution itself never adds mm-events; supply the
         # pending root in the resolution to exercise the reconstruction seam.

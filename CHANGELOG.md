@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.9.0] - 2026-10-14
+
+**Muse memory notes now roam between your Macs, and Muse token usage shows up in `retro-fleet`.** Turn it on with `mm enable-source muse`. Muse does not turn itself on, even after it creates `memory/`. Session logs, plugin caches, and `~/.config/muse` stay on the machine.
+
+### Added
+
+- `mm enable-source muse` syncs `~/.local/share/muse/memory/` (personal and per-project notes) and counts completed Muse model steps from local session logs. Each step counts once across live logs, and a session resumed months later is still found. One case is not detected: a frozen session resumed in place that copies another frozen day's history after that day dropped its keys can count twice. Prompts stay on the Mac. In `retro-fleet`, Muse models appear under Unclassified, with their model names. A dedicated Muse row waits for the 2.0 contract.
+- Older 1.x installs accept the new usage row. The reader name `muse` is appended to the host-usage token sources.
+
+### Changed
+
+- `mm init` and `mm reconfigure-sources` offer Muse with a default of N.
+- `mm diag` walks Muse session logs only after the source is enabled. `mm status` uses the saved cache and does not open the session store just to describe Muse.
+- Muse's `.muse-memory.lock` is left in place on push and pull.
+
+### Upgrade notes
+
+- No storage-format change. Nothing happens until you want Muse synced: on each Mac, run `mm enable-source muse`, then an attended `mm push`. A Mac still on an older 1.x release keeps syncing and accepts the new usage row.
+
 ## [1.8.2] - 2026-10-14
 
 **`mm update` in a terminal shows a spinner and the current step, instead of a bar that sat empty until it jumped to done.** When pip reports a real download or package count, that percentage still appears beside the step. Phases that report no count show the step name only.

@@ -34,13 +34,13 @@ either upload prompts or mint a fake `grok` sync source.
 
 ## Capability matrix
 
-| Capability | Claude | Codex | Grok | Cursor (Conductor + enrolled CLI) |
-|---|---|---|---|---|
-| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger plus enrolled standalone completions; model-family rows |
-| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` | None; no user-authored tree observed |
-| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No |
-| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C | None; discovers ~/.claude/skills with third-party extensibility enabled |
-| Session / transcript sync | Never | Never | Never | Never |
+| Capability | Claude | Codex | Grok | Cursor (Conductor + enrolled CLI) | Muse |
+|---|---|---|---|---|---|
+| Usage totals on the MODELS card | Session jsonl walk (priced) | Host snapshot, source-gated | 18D reader + 21A consent; 22A/23A render | 67A consented run ledger plus enrolled standalone completions; model-family rows | Host snapshot, source-gated; `muse-*` models render under Unclassified in 1.x (family deferred to 2.x) |
+| Customization roaming | `memory/` + `todos/` only. `CLAUDE.md` / agents / commands stay git-tracked | Allowlisted `skills/`, `plugins/`, `AGENTS.md` | Allowlisted `skills/`, `commands/`, `rules/` via `type: "grok"` | None; no user-authored tree observed | Allowlisted `memory/` via `type: "muse"` |
+| Sessions snapshot (repos, counts, skill names) | Yes. Local walk; no transcript bytes on the wire | No | No | No | No |
+| `retro-fleet` skill link | `~/.claude/skills` | `~/.codex/skills` | None. Grok 1.0.5 discovers `~/.claude/skills` via default-on Claude-compat (`grok inspect --json`). `mm diag` reports that under `host_skill_discovery`, not a fourth `skill_links` row. See Plan C | None; discovers ~/.claude/skills with third-party extensibility enabled | None; discovers ~/.claude/skills (`muse skills list` resolves user skills there) |
+| Session / transcript sync | Never | Never | Never | Never | Never |
 
 Claude is not the template for "sync the home directory." Claude does
 not sync `~/.claude/projects/**/*.jsonl`. Codex only roams because it
@@ -263,3 +263,33 @@ No AGENT_ROWS entry: Cursor already discovers ~/.claude/skills, follows the
 mm-owned store link, and has third-party extensibility enabled by default.
 Grok Build remains exempt for the same reason. No new host family: Grok 4.7
 joins Grok, while unobserved auto/composer remain Unclassified.
+
+## Muse (1.x minor, 2026-10-14)
+
+`mm enable-source muse` adds a Claude-shaped source (`type: "muse"`,
+`~/.local/share/muse`) whose walker hardcodes `memory/` — Muse's
+`personal/` and per-project memory notes. Sessions, the session index,
+bundled skills and plugin caches at the same root never roam, and
+`~/.config/muse` (auth, settings, trust, the config-repo-deployed
+`AGENTS.md`) is not a source at all. Source-enabled is the usage
+reader's consent, matching Codex and Grok; there is no retro bit. Unlike
+Grok's user-authored customization dirs, Muse creates `memory/` itself on
+first run (holding only its `.muse-memory.lock` PID file, which never
+roams), so the source never auto-activates: explicit enable only.
+
+The reader counts terminal `model_completed` events in
+`sessions/YYYY/MM/DD/<id>/session.jsonl` (plus `subagent/` descendants)
+under the strict Grok discipline; `goal_usage_attribution` records
+restate the same steps and are never read. Muse writes about ten times
+Grok's volume (~100 logs a day at the census), so settled day directories
+freeze into per-day/model totals that are only stat-checked afterwards;
+see the events/retro invariants. The census
+and counter semantics are `tests/fixtures/host_sessions/muse/CONTRACT.md`.
+
+No new host family in 1.x: the compatibility contract makes a family a
+MAJOR (an un-upgraded peer rejects the whole snapshot over an unknown
+nested family), while the `muse` reader/token-source name is a MINOR.
+`muse-*` models therefore render under Unclassified until the 2.x
+contract rewrite adds the family. No AGENT_ROWS entry: Muse discovers
+`~/.claude/skills` (the Plan C exit criterion), verified with
+`muse skills list --source user --json` resolving user skills there.
