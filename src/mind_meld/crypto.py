@@ -35,6 +35,7 @@ import gzip
 import hashlib
 import os
 import stat
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,13 +46,14 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from mind_meld.errors import CryptoError, NewerFormatError
+from mind_meld.errors import CryptoError, KeyringUnavailableError, NewerFormatError
 from mind_meld.safety import safe_str
 from mind_meld.storage.keys import CRYPTO_INIT_KEY
 
 __all__ = [
     "CRYPTO_INIT_KEY",  # re-exported for tests and legacy callers
     "CryptoInitFetch",
+    "KeyringUnavailableError",  # re-exported from mind_meld.errors
     "FORMAT_VERSION",
     "FORMAT_VERSION_LEGACY_V1",
     "bootstrap_crypto_init",
@@ -666,6 +668,191 @@ def verify_passphrase(master_key: bytes, keycheck_blob: bytes) -> None:
 
 # ── passphrase retrieval ─────────────────────────────────────────────
 
+# Track 73A: the non-interactive read must never open a desktop prompt.
+# keyring's Secret Service backend unlocks a locked collection and
+# creates a missing default one (both prompt via secretstorage, which
+# waits with no timeout), so the hook path reads that backend directly
+# through secretstorage and skips instead. See
+# docs/invariants/init-devices.md "Non-interactive keyring reads".
+
+_IS_LOCKED_DBUS_ERROR = "org.freedesktop.Secret.Error.IsLocked"
+
+
+def _keyring_members(kr: Any, backend: Any) -> list[Any]:
+    """Backend walk list: chainer members in priority order, else [backend].
+
+    `ChainerBackend.backends` recomputes discovery on each access, so it
+    is read exactly once here.
+    """
+    from keyring.backends.chainer import ChainerBackend
+
+    if isinstance(backend, ChainerBackend):
+        return list(backend.backends)
+    return [backend]
+
+
+def _secret_service_class() -> Any:
+    from keyring.backends.SecretService import Keyring as _SecretServiceKeyring
+
+    return _SecretServiceKeyring
+
+
+def _scheme_query(member: Any) -> dict[str, str]:
+    """Item query in keyring's configured scheme (default or KeePassXC)."""
+    scheme = member.schemes[member.scheme]
+    return {scheme["username"]: KEYRING_USERNAME, scheme["service"]: KEYRING_SERVICE}
+
+
+def _open_secret_service_collection(conn: Any, member: Any) -> Any:
+    """Open the member's collection without creating or unlocking anything.
+
+    ItemNotFoundException becomes KeyringUnavailableError(
+    "no-default-collection"); other SecretStorageExceptions propagate so
+    the reader can apply today's swallowed-KeyringError fallthrough and
+    diag can report the exception class.
+    """
+    import secretstorage
+    import secretstorage.collection
+    import secretstorage.exceptions
+
+    path = getattr(member, "preferred_collection", secretstorage.collection.DEFAULT_COLLECTION)
+    try:
+        return secretstorage.Collection(conn, path)
+    except secretstorage.exceptions.ItemNotFoundException:
+        raise KeyringUnavailableError("no-default-collection", "secret-service") from None
+
+
+def _read_secret_service(member: Any) -> str | None:
+    """Read the passphrase item without ever prompting.
+
+    Never calls unlock, create_collection, get_default_collection,
+    exec_prompt or keyring.get_password. Returns None when the member
+    yields no value (no item, or a collection error keyring would have
+    swallowed as InitError); raises KeyringUnavailableError when the
+    keyring cannot answer without prompting.
+    """
+    import secretstorage
+    import secretstorage.exceptions
+
+    # dbus_init failures propagate: keyring calls it outside its InitError
+    # wrapper today, so the outcome stays the keyring-error arm.
+    with closing(secretstorage.dbus_init()) as conn:
+        try:
+            collection = _open_secret_service_collection(conn, member)
+        except secretstorage.exceptions.SecretStorageException:
+            return None
+        if collection.is_locked():
+            raise KeyringUnavailableError("locked", "secret-service")
+        attrs = _scheme_query(member)
+        try:
+            items = list(collection.search_items(attrs))
+            if not items:
+                return None
+            # First match, like keyring; an empty string is returned as is.
+            return items[0].get_secret().decode("utf-8")
+        except secretstorage.exceptions.LockedException:
+            raise KeyringUnavailableError("locked", "secret-service") from None
+        except Exception as e:
+            if getattr(e, "name", None) == _IS_LOCKED_DBUS_ERROR:
+                raise KeyringUnavailableError("locked", "secret-service") from None
+            raise
+
+
+def _non_interactive_keyring_read(kr: Any) -> str | None:
+    """Keyring read for hook-path callers; never opens a desktop prompt.
+
+    Walks keyring's backend(s) in chainer order. A value ends the walk;
+    a member yielding no value (None, or a KeyringError keyring would
+    swallow) moves to the next member. A Secret Service member is read
+    directly so a locked or missing default collection raises
+    KeyringUnavailableError and stops the walk instead of prompting.
+    Any KeyringLocked from another backend becomes
+    KeyringUnavailableError("denied", ...). Other exceptions propagate.
+    """
+    from keyring.errors import KeyringError, KeyringLocked
+
+    try:
+        backend = kr.get_keyring()
+    except KeyringError:
+        return None
+    ss_class = _secret_service_class()
+    for member in _keyring_members(kr, backend):
+        if isinstance(member, ss_class):
+            value = _read_secret_service(member)
+            if value is not None:
+                return value
+            continue
+        try:
+            value = member.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        except KeyringLocked:
+            kind = (
+                "keychain"
+                if type(member).__module__.startswith("keyring.backends.macOS")
+                else "other"
+            )
+            raise KeyringUnavailableError("denied", kind) from None
+        except KeyringError:
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+def _secret_service_state() -> dict[str, Any]:
+    """Diag-only keyring probe: never reads a secret, never prompts.
+
+    Returns backend/member class names plus closed-vocabulary Secret
+    Service and item states. Any exception degrades to "unknown" with
+    the exception class name in "error" — diag must not crash.
+    """
+    state: dict[str, Any] = {
+        "backend": "unavailable",
+        "member": None,
+        "secret_service": "n/a",
+        "item": "n/a",
+        "error": None,
+    }
+    try:
+        import keyring as kr
+    except ImportError:
+        return state
+    try:
+        backend = kr.get_keyring()
+        state["backend"] = type(backend).__name__
+        ss_member = next(
+            (m for m in _keyring_members(kr, backend) if isinstance(m, _secret_service_class())),
+            None,
+        )
+        if ss_member is None:
+            return state
+        state["member"] = type(ss_member).__name__
+        import secretstorage
+
+        with closing(secretstorage.dbus_init()) as conn:
+            collection = _open_secret_service_collection(conn, ss_member)
+            if collection.is_locked():
+                state["secret_service"] = "locked"
+                state["item"] = "unknown"
+                return state
+            state["secret_service"] = "unlocked"
+            items = list(collection.search_items(_scheme_query(ss_member)))
+            state["item"] = "absent" if not items else "present" if len(items) == 1 else "multiple"
+            return state
+    except KeyringUnavailableError as e:
+        if e.reason == "no-default-collection":
+            state["secret_service"] = "no-default-collection"
+            state["item"] = "n/a"
+        else:
+            state["secret_service"] = "unknown"
+            state["item"] = "unknown"
+            state["error"] = type(e).__name__
+        return state
+    except Exception as e:
+        state["secret_service"] = "unknown"
+        state["item"] = "unknown"
+        state["error"] = type(e).__name__
+        return state
+
 
 def get_passphrase(non_interactive: bool = False) -> str:
     """Retrieve passphrase via keyring → env var → prompt fallback chain.
@@ -673,7 +860,10 @@ def get_passphrase(non_interactive: bool = False) -> str:
     When `non_interactive=True`, skip the `getpass` prompt and raise
     CryptoError if neither keyring nor env var yielded a passphrase.
     Hook-path callers (autopull/autopush) MUST pass non_interactive=True;
-    `getpass.getpass()` blocks on stdin and would hang the hook.
+    `getpass.getpass()` blocks on stdin and would hang the hook. The
+    non-interactive keyring read never opens a desktop unlock prompt
+    (Track 73A): a keyring that cannot answer without prompting raises
+    KeyringUnavailableError unless the env var is set.
     """
     # Narrow catch: KeyringError covers the published backend-failure family
     # (NoKeyringError, InitError, PasswordSetError, ...), ImportError handles
@@ -683,18 +873,34 @@ def get_passphrase(non_interactive: bool = False) -> str:
     # autopull/autopush's outer `except Exception` records a non-success
     # breadcrumb instead of silently falling through to env-var lookup under
     # a bogus "keyring said no" premise.
+    backend_name = "unavailable"
     try:
         import keyring as kr
         from keyring.errors import KeyringError
     except ImportError:
         pass
     else:
-        try:
-            stored = kr.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        if non_interactive:
+            try:
+                backend_name = type(kr.get_keyring()).__name__
+            except Exception:
+                backend_name = "unknown"
+            try:
+                stored = _non_interactive_keyring_read(kr)
+            except KeyringUnavailableError:
+                env_passphrase = os.environ.get(ENV_VAR)
+                if env_passphrase:
+                    return env_passphrase
+                raise
             if stored is not None:
                 return stored
-        except KeyringError:
-            pass
+        else:
+            try:
+                stored = kr.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+                if stored is not None:
+                    return stored
+            except KeyringError:
+                pass
 
     env_passphrase = os.environ.get(ENV_VAR)
     if env_passphrase:
@@ -702,8 +908,9 @@ def get_passphrase(non_interactive: bool = False) -> str:
 
     if non_interactive:
         raise CryptoError(
-            "no passphrase available (keyring empty and "
-            f"{ENV_VAR} unset); non-interactive caller cannot prompt."
+            "no passphrase available: the keyring returned none or could "
+            f"not be read (backend {backend_name}) and {ENV_VAR} is unset; "
+            "run mm diag"
         )
 
     try:

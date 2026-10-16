@@ -124,11 +124,13 @@ from mind_meld.errors import (
     CURSOR_SQLITE_URL,
     GIT_WALK_FAILURES_URL,
     HOST_USAGE_CAPTURE_URL,
+    KEYRING_UNAVAILABLE_URL,
     NEWER_STORAGE_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     ConfigError,
     CryptoError,
+    KeyringUnavailableError,
     LockError,
     ManifestError,
     MindMeldError,
@@ -6231,6 +6233,11 @@ def status(
             f"  Last auto-{safe_str(str(verb))}: {safe_str(str(ts))} ({outcome_str})"
             f"{_breadcrumb_staleness_suffix(ts)}"
         )
+        if outcome in ("keyring-locked", "keyring-no-collection"):
+            console.print(
+                f"  [yellow]The last auto-{safe_str(str(verb))} was skipped:[/yellow] "
+                f"keyring locked or unavailable; see {KEYRING_UNAVAILABLE_URL}"
+            )
         if (
             verb == "pull"
             and outcome == "degraded"
@@ -7178,6 +7185,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         publication/publication_reason, latest_attempt class/cause/time/readers/
         read-reason/superseded evidence and sanitized errors
         may escape; never hosts, tokens_by_day, magnitudes, models or peer ids
+      * keyring values other than the backend/member class names, the
+        closed secret_service / item vocabularies and an exception class
+        name; never a secret, an item label or an item path (Track 73A)
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -7331,6 +7341,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             "root_salt_fp": local_fp,  # fingerprint only, never the raw salt
         },
         "crypto_init": crypto_init,
+        "keyring": crypto._secret_service_state(),
         "root_salt_drift": (
             "ok"
             if (local_fp and crypto_init.get("root_salt_fp") == local_fp)
@@ -7429,6 +7440,14 @@ def diag(
         console.print(f"  root_salt_fp:  {ci.get('root_salt_fp')}")
         console.print(f"  argon2 mem kb: {ci.get('argon2_memory_kb')}")
     console.print(f"  drift check:   {state['root_salt_drift']}")
+
+    kr_state = state["keyring"]
+    console.print("\n[bold]Keyring[/bold]")
+    console.print(f"  backend:        {kr_state.get('backend')}")
+    console.print(f"  member:         {kr_state.get('member')}")
+    console.print(f"  secret_service: {kr_state.get('secret_service')}")
+    console.print(f"  item:           {kr_state.get('item')}")
+    console.print(f"  error:          {kr_state.get('error')}")
 
     sc = state["sidecar"]
     console.print("\n[bold]Sidecar (local last-push snapshot)[/bold]")
@@ -10758,6 +10777,19 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
 
     try:
         passphrase = get_passphrase(non_interactive=True)
+    except KeyringUnavailableError as e:
+        # Track 73A: the keyring cannot answer without a desktop prompt.
+        # Skip with the remedy on stderr and a breadcrumb; never prompt,
+        # never log a traceback for this expected condition.
+        print(
+            f"mm: {verb} skipped - {strip_terminal_escapes(e.render(verb))}",
+            file=sys.stderr,
+        )
+        if e.reason == "no-default-collection":
+            _write_autorun_breadcrumb(verb, "keyring-no-collection")
+        else:
+            _write_autorun_breadcrumb(verb, "keyring-locked", e.reason)
+        return None
     except CryptoError as e:
         _print_auto_typed_error(verb, "skipped", e)
         _write_autorun_breadcrumb(verb, "no-passphrase")

@@ -427,6 +427,50 @@ def test_diag_json_is_valid_json(tmp_path, monkeypatch):
     assert payload["config"]["device_id"] == "mac-a"
 
 
+def test_diag_keyring_na_without_secret_service(tmp_path, monkeypatch):
+    """Default isolated backend (fail.Keyring): no Secret Service member."""
+    _setup(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["keyring"] == {
+        "backend": "Keyring",
+        "member": None,
+        "secret_service": "n/a",
+        "item": "n/a",
+        "error": None,
+    }
+
+
+def test_diag_keyring_secret_service_states(tmp_path, monkeypatch, ss_harness):
+    from tests.conftest import _ss_member, _use_backend
+
+    _setup(tmp_path, monkeypatch)
+    ss_harness.items = [ss_harness.make_item()]
+    _use_backend(monkeypatch, _ss_member())
+    payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert payload["keyring"] == {
+        "backend": "Keyring",
+        "member": "Keyring",
+        "secret_service": "unlocked",
+        "item": "present",
+        "error": None,
+    }
+    ss_harness.locked = True
+    payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert payload["keyring"]["secret_service"] == "locked"
+    assert payload["keyring"]["item"] == "unknown"
+
+
+def test_diag_plain_text_shows_keyring_fields(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    assert "Keyring" in result.stdout
+    for field in ("backend:", "member:", "secret_service:", "item:", "error:"):
+        assert field in result.stdout
+
+
 def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     result = runner.invoke(app, ["diag", "--json"])
@@ -435,6 +479,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "mm_version",
         "config",
         "crypto_init",
+        "keyring",
         "root_salt_drift",
         "sidecar",
         "storage_inventory",

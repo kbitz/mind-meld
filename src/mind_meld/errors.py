@@ -19,6 +19,9 @@ HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture-
 CURSOR_SQLITE_URL = "https://github.com/kbitz/mind-meld#cursor-sqlite-stores"
 NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
 LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-running"
+KEYRING_UNAVAILABLE_URL = (
+    "https://github.com/kbitz/mind-meld#auto-commands-skip-keyring-locked-or-unavailable"
+)
 
 
 class MindMeldError(Exception):
@@ -27,6 +30,43 @@ class MindMeldError(Exception):
 
 class CryptoError(MindMeldError):
     """Encryption or decryption failure."""
+
+
+class KeyringUnavailableError(CryptoError):
+    """The keyring cannot answer without a desktop prompt (Track 73A).
+
+    Raised only on the non-interactive read path. `reason` is one of
+    "locked", "denied", "no-default-collection"; `backend_kind` is one of
+    "secret-service", "keychain", "other". `render(verb)` builds the
+    remedy line for an auto command; `str(exc)` is the same text without
+    the verb-specific rerun hint.
+    """
+
+    def __init__(self, reason: str, backend_kind: str) -> None:
+        self.reason = reason
+        self.backend_kind = backend_kind
+        super().__init__(self.render())
+
+    def render(self, verb: str | None = None) -> str:
+        cell = (self.reason, self.backend_kind)
+        if cell == ("locked", "secret-service"):
+            lead = "keyring locked (Secret Service collection is locked)"
+            action = "unlock your login keyring in the desktop session"
+        elif cell == ("no-default-collection", "secret-service"):
+            lead = "keyring has no default collection"
+            action = "create one and store the passphrase with secret-tool"
+        elif cell == ("denied", "keychain"):
+            lead = "keyring locked (Keychain access was denied)"
+            attended = f"mm {verb}" if verb else "mm"
+            action = f"run {attended} in a terminal in your desktop session and choose Always Allow"
+        elif cell == ("denied", "other"):
+            lead = "keyring locked (desktop keyring refused access)"
+            action = "unlock or allow access in your desktop keyring"
+        else:
+            lead = f"keyring unavailable ({self.reason})"
+            action = "unlock or allow access in your desktop keyring"
+        rerun = f", then rerun mm auto{verb}" if verb else ""
+        return f"{lead}; {action}{rerun}. See {KEYRING_UNAVAILABLE_URL}"
 
 
 class NewerFormatError(CryptoError):

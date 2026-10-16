@@ -876,6 +876,102 @@ def test_autopull_no_passphrase_prints_skipped_line(tmp_path, monkeypatch):
     assert not (iso / "autopull.log").exists()
 
 
+# ─── Track 73A: keyring-locked auto-command skips (end-to-end) ──────────
+#
+# Portable seam: a real keyring Secret Service backend object (it
+# constructs on macOS) over a fake secretstorage module, with
+# keyring.get_password patched to raise if called. Runs in every CI job.
+
+_KEYRING_URL = "https://github.com/kbitz/mind-meld#auto-commands-skip-keyring-locked-or-unavailable"
+
+
+def _keyring_skip_scenario(harness, reason: str) -> None:
+    from tests.conftest import _FakeDBusError
+
+    if reason == "locked":
+        harness.locked = True
+    elif reason == "no-default-collection":
+        harness.collection_error = harness.ItemNotFoundException("no alias")
+    elif reason == "locked-race":
+        harness.items = [harness.make_item(error=harness.LockedException("locked"))]
+    elif reason == "is-locked":
+        harness.items = [
+            harness.make_item(error=_FakeDBusError("org.freedesktop.Secret.Error.IsLocked"))
+        ]
+    else:  # pragma: no cover - parametrize guard
+        raise AssertionError(reason)
+
+
+@pytest.mark.parametrize("verb", ["pull", "push"])
+@pytest.mark.parametrize("reason", ["locked", "no-default-collection", "locked-race", "is-locked"])
+def test_auto_command_skips_when_keyring_cannot_answer(
+    tmp_path, monkeypatch, ss_harness, verb, reason
+):
+    from tests.conftest import _ss_member, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    _keyring_skip_scenario(ss_harness, reason)
+    _use_backend(monkeypatch, _ss_member())
+
+    r = runner.invoke(app, [f"auto{verb}"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    if reason == "no-default-collection":
+        expected = (
+            f"mm: {verb} skipped - keyring has no default collection; "
+            "create one and store the passphrase with secret-tool, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    else:
+        expected = (
+            f"mm: {verb} skipped - keyring locked "
+            "(Secret Service collection is locked); "
+            "unlock your login keyring in the desktop session, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    assert expected in (r.stderr or "").splitlines()
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), verb)
+    if reason == "no-default-collection":
+        assert entry.get("outcome") == "keyring-no-collection"
+        assert entry.get("detail") is None
+    else:
+        assert entry.get("outcome") == "keyring-locked"
+        assert entry.get("detail") == "locked"
+    assert not (iso / f"auto{verb}.log").exists()
+    assert ss_harness.prompt_calls == []
+
+
+def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):
+    import keyring
+
+    from tests.conftest import _ss_member, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_module.console, "width", 240)
+
+    control = runner.invoke(app, ["status"])
+    assert control.exit_code == 0, control.output
+    assert "was skipped: keyring locked or unavailable" not in control.stdout
+
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    ss_harness.locked = True
+    _use_backend(monkeypatch, _ss_member())
+    skipped = runner.invoke(app, ["autopull"])
+    assert skipped.exit_code == 0
+
+    # status reads the passphrase interactively first; give it the env
+    # value and a non-exploding keyring.get_password again.
+    monkeypatch.setattr(keyring, "get_password", lambda *a, **kw: None)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"The last auto-pull was skipped: keyring locked or unavailable; see {_KEYRING_URL}"
+    ) in result.stdout
+
+
 def test_pull_conflict_mode_prompt_threads_interactive_flag(tmp_path, monkeypatch):
     """--conflict-mode prompt must thread interactive_resolve=True into _download_and_apply.
 

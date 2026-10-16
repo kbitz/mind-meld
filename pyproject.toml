@@ -26,6 +26,7 @@ dependencies = [
     "cryptography>=42.0",
     "argon2-cffi>=23.1",
     "keyring>=25.0",
+    "secretstorage>=3.2; sys_platform == \"linux\"",
     "rich>=13.0",
     "packaging>=21.0",
 ]
