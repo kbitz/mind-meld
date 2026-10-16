@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.9.1] - 2026-10-15
+
+**The `mm update` spinner keeps moving during quiet clone and wheel-build steps.** Phase names and percentages still change only when the installer reports progress.
+
+### Fixed
+
+- Keep the terminal update spinner animating while the installer is silent, without inventing progress. A failed animation redraw stops the ticker without changing the installer result.
+
 ## [1.9.0] - 2026-10-14
 
 **Muse memory notes now roam between your Macs, and Muse token usage shows up in `retro-fleet`.** Turn it on with `mm enable-source muse`. Muse does not turn itself on, even after it creates `memory/`. Session logs, plugin caches, and `~/.config/muse` stay on the machine.

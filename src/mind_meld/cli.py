@@ -21,6 +21,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections import Counter
@@ -9659,6 +9660,14 @@ def _print_update_current(install: upgrade.InstallInfo) -> None:
         )
 
 
+# Rich's Progress default refresh rate; the dots spinner advances by clock,
+# so redrawing at this interval animates smoothly. The timer only redraws
+# the current state: phases and counters still change solely on installer
+# output, never on elapsed time.
+_UPDATE_SPINNER_TICK_SECONDS = 0.1
+_UPDATE_SPINNER_JOIN_SECONDS = 1.0
+
+
 def _run_update_with_progress(
     install: upgrade.InstallInfo, pipx: str, *, latest: str | None
 ) -> upgrade.UpdateOutcome:
@@ -9667,11 +9676,14 @@ def _run_update_with_progress(
     No bar: most phases report no fraction, so a bar could only sit at 0%
     until completion jumped it to 100%. The spinner shows activity, the
     description names the current step, and the detail shows a counter's
-    real percentage when the installer reports one.
+    real percentage when the installer reports one. A timer thread redraws
+    the current state so the spinner keeps animating through silent steps;
+    measured text still moves only on installer output.
 
-    The display is best-effort: a terminal that stops accepting writes never
-    changes the outcome or hides an interruption from `update`. Rich reports
-    a closed pipe as SystemExit, so that counts as a display failure too.
+    Display exceptions never replace the outcome or an interruption from
+    `update`. Rich reports a closed pipe as SystemExit, so that counts as a
+    display failure too. Blocked terminal writes can still delay rendering
+    and completion; the join timeout bounds only the ticker join.
     """
     # FORCE_COLOR can make a pipe look like a terminal; only a real one
     # draws, so a reader that exits early never reaches the installer.
@@ -9682,6 +9694,8 @@ def _run_update_with_progress(
         TextColumn("{task.description}", markup=False),
         TextColumn("{task.fields[detail]}", markup=False),
         console=console,
+        # Rich's own refresh thread dies with a traceback on a failed draw;
+        # the ticker below turns itself off instead, per the display contract.
         auto_refresh=False,
         redirect_stdout=False,
         redirect_stderr=False,
@@ -9705,6 +9719,16 @@ def _run_update_with_progress(
         with suppress(Exception, SystemExit):
             render(updateprogress.UpdateProgress(phase), complete=complete)
 
+    stop_ticking = threading.Event()
+
+    def tick() -> None:
+        while not stop_ticking.wait(_UPDATE_SPINNER_TICK_SECONDS):
+            try:
+                progress.refresh()
+            except (Exception, SystemExit):  # First failed draw: timer off.
+                return
+
+    ticker = threading.Thread(target=tick, name="mm-update-spinner", daemon=True)
     try:
         progress.start()
     except (Exception, SystemExit):
@@ -9714,6 +9738,8 @@ def _run_update_with_progress(
             console.show_cursor(True)  # A failed start can skip Rich's own restore.
         return upgrade.run_update(install, pipx, latest=latest)
     try:
+        with suppress(Exception):  # No ticker thread: state changes still redraw.
+            ticker.start()
         try:
             outcome = upgrade.run_update(install, pipx, latest=latest, on_progress=render)
         except BaseException as error:
@@ -9728,8 +9754,18 @@ def _run_update_with_progress(
         )
         return outcome
     finally:
+        stop_ticking.set()
         with suppress(Exception, SystemExit):
-            progress.stop()
+            # ident also covers an interruption after native startup but
+            # before Thread.start returned; an unstarted thread cannot join.
+            if ticker.ident is not None:
+                ticker.join(timeout=_UPDATE_SPINNER_JOIN_SECONDS)
+        # Avoid another wait on Rich if the ticker is still writing. This
+        # timeout bounds only join: settlement above and later result output
+        # can still block on a paused terminal. The ticker remains a daemon.
+        if not ticker.is_alive():
+            with suppress(Exception, SystemExit):
+                progress.stop()
 
 
 @app.command()

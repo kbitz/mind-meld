@@ -682,7 +682,10 @@ class TestPipxSeams:
     ):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
-        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 1)
+        # Two interpreters have to start, and the child has to ignore SIGINT,
+        # before the pid line exists. One second loses that race when the
+        # suite is using every core. The child still sleeps longer than this.
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 15)
         monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.2)
         ready = tmp_path / "ready"
         child_code = (
@@ -2211,7 +2214,18 @@ class TestUpdateCommand:
         self, pipx_install, monkeypatch, scenario
     ):
         venv = pipx_install()
-        terminal = _TerminalBuffer()
+        ticker_drew = threading.Event()
+        ticker_threads = set()
+
+        class ObservedTerminal(_TerminalBuffer):
+            def write(self, text):
+                writer = threading.current_thread()
+                if writer is not threading.main_thread():
+                    ticker_threads.add(writer)
+                    ticker_drew.set()
+                return super().write(text)
+
+        terminal = ObservedTerminal()
         monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setattr(
             "mind_meld.cli.console",
@@ -2228,6 +2242,7 @@ class TestUpdateCommand:
 
         def run(argv, *, on_output=None):
             assert on_output is not None
+            assert ticker_drew.wait(5), "spinner never drew during installer silence"
             if scenario == "busy":
                 raise upgrade._PipxBusy("another mm update is still running")
             on_output(raw_output)
@@ -2241,9 +2256,19 @@ class TestUpdateCommand:
             return subprocess.CompletedProcess(argv, int(scenario == "failed"), stdout=raw_output)
 
         monkeypatch.setattr(upgrade, "_run_pipx", run)
-        result = runner.invoke(app, ["update"])
+        try:
+            result = runner.invoke(app, ["update"])
+            # A stopped renderer cannot write after completion, failure or
+            # cancellation. Observe the real writer, not just Thread.join calls.
+            assert len(ticker_threads) == 1
+            assert not next(iter(ticker_threads)).is_alive()
+        finally:
+            terminal_output = terminal.getvalue()
+            terminal.close()  # A broken lifecycle must not leak a writer into later tests.
+            for ticker in ticker_threads:
+                ticker.join(timeout=5)
         assert (result.exit_code == 0) == (scenario == "updated"), result.output
-        output = terminal.getvalue()
+        output = terminal_output
         assert ("Updated mm" in output) == (scenario == "updated")
         assert result.stdout == ""
         assert "━" not in output  # Spinner + step text; there is no bar.
@@ -2316,6 +2341,228 @@ class TestUpdateCommand:
         for phase in ("Fetching source", "Building wheel", "Installing", "Verifying", "Done"):
             assert phase in output
         assert output.index("Fetching source") < output.index("Building wheel")
+
+    def test_spinner_animates_while_installer_is_silent(self, pipx_install, monkeypatch):
+        # The spinner must advance on its own timer, not only when the
+        # installer emits a new phase or counter: a silent step (quiet clone,
+        # wheel build) otherwise holds one frozen frame and looks hung.
+        venv = pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+        frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+        def building_frames() -> set[str]:
+            output = terminal.getvalue()
+            return {frame for frame in frames if f"{frame} Building wheel" in output}
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            on_output("Building wheel for mind-meld (pyproject.toml) ... started\n")
+            # No further installer output: only a timer can redraw from here.
+            deadline = time.monotonic() + 5
+            while len(building_frames()) < 2 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert len(building_frames()) >= 2
+
+    @pytest.mark.parametrize("draw_error", [OSError, SystemExit])
+    def test_spinner_timer_failure_never_stops_the_update(
+        self, pipx_install, monkeypatch, draw_error
+    ):
+        # A failed timer redraw turns the timer off: no thread traceback on
+        # the user's terminal, and the installer outcome is unchanged.
+        venv = pipx_install()
+        failed = threading.Event()
+
+        class DyingTerminal(_TerminalBuffer):
+            dead = False
+            failed_writes = 0
+            failing_thread = None
+
+            def write(self, text):
+                if self.dead:
+                    self.failed_writes += 1
+                    self.failing_thread = threading.current_thread()
+                    failed.set()
+                    raise draw_error("terminal gone")
+                return super().write(text)
+
+        terminal = DyingTerminal()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(
+            "mind_meld.cli.console",
+            Console(file=terminal, force_terminal=True, color_system=None, width=80),
+        )
+
+        def run(argv, *, on_output=None):
+            assert on_output is not None
+            terminal.dead = True
+            try:
+                # Assert timer-origin failure before any synchronous redraw
+                # can satisfy the check, then prove the first failure stops it.
+                assert failed.wait(5), "timer never attempted a redraw"
+                assert terminal.failing_thread is not threading.current_thread()
+                terminal.failing_thread.join(timeout=5)
+                assert not terminal.failing_thread.is_alive()
+                assert terminal.failed_writes == 1
+            finally:
+                terminal.dead = False
+            on_output("Building wheel for mind-meld (pyproject.toml) ... started\n")
+            _write_metadata(venv, spec=upgrade.INSTALL_SPEC, version="1.3.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="")
+
+        monkeypatch.setattr(upgrade, "_run_pipx", run)
+        thread_errors: list = []
+        monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+        result = runner.invoke(app, ["update"])
+        assert result.exit_code == 0, result.output
+        assert terminal.failed_writes >= 1
+        # The default hook prints the traceback to the user's stderr.
+        assert thread_errors == []
+        assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
+
+    def test_spinner_shutdown_leaves_a_blocked_ticker_as_a_daemon(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(cli, "console", Console(file=_TerminalBuffer(), force_terminal=True))
+        monkeypatch.setattr(cli, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+        monkeypatch.setattr(cli, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+        drawing = threading.Event()
+        release_draw = threading.Event()
+        finished = threading.Event()
+        tickers, displays, stopped, outcomes, errors = [], [], [], [], []
+        original_refresh = cli.Progress.refresh
+        original_stop = cli.Progress.stop
+        expected = upgrade.UpdateOutcome("updated", "1.2.0", "1.3.0")
+
+        def refresh(progress):
+            if not displays:
+                displays.append(progress)
+            if threading.current_thread().name == "mm-update-spinner":
+                tickers.append(threading.current_thread())
+                drawing.set()
+                # Block before taking Rich's lock: this isolates the join
+                # contract from the accepted paused-terminal limitation.
+                release_draw.wait()
+            return original_refresh(progress)
+
+        def stop(progress):
+            stopped.append(progress)
+            return original_stop(progress)
+
+        def run_update(*args, **kwargs):
+            assert drawing.wait(5), "ticker never entered the blocked draw"
+            return expected
+
+        def update():
+            try:
+                outcomes.append(
+                    cli._run_update_with_progress(upgrade.detect_install(), PIPX, latest="1.3.0")
+                )
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(cli.Progress, "refresh", refresh)
+        monkeypatch.setattr(cli.Progress, "stop", stop)
+        monkeypatch.setattr(upgrade, "run_update", run_update)
+        caller = threading.Thread(target=update, daemon=True)
+        caller.start()
+        try:
+            assert finished.wait(5), "shutdown waited for the blocked ticker"
+            assert not errors
+            assert outcomes == [expected]
+            assert len(tickers) == 1 and tickers[0].is_alive() and tickers[0].daemon
+            assert stopped == []
+        finally:
+            release_draw.set()
+            caller.join(timeout=5)
+            for ticker in tickers:
+                ticker.join(timeout=5)
+            for progress in displays:
+                original_stop(progress)
+        assert not caller.is_alive()
+        assert all(not ticker.is_alive() for ticker in tickers)
+
+    @pytest.mark.parametrize("scenario", ["updated", "failed", "cancelled"])
+    def test_spinner_start_failure_preserves_installer_outcome(
+        self, pipx_install, monkeypatch, scenario
+    ):
+        pipx_install()
+        terminal = _TerminalBuffer()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(cli, "console", Console(file=terminal, force_terminal=True))
+        expected = upgrade.UpdateOutcome(scenario, "1.2.0", "1.3.0")
+
+        def run_update(*args, **kwargs):
+            if scenario == "cancelled":
+                raise KeyboardInterrupt("installer interrupted")
+            return expected
+
+        def refuse_start(self):
+            raise RuntimeError("cannot start new thread")
+
+        monkeypatch.setattr(upgrade, "run_update", run_update)
+        monkeypatch.setattr(threading.Thread, "start", refuse_start)
+        if scenario == "cancelled":
+            with pytest.raises(KeyboardInterrupt, match="installer interrupted"):
+                cli._run_update_with_progress(upgrade.detect_install(), PIPX, latest="1.3.0")
+        else:
+            assert (
+                cli._run_update_with_progress(upgrade.detect_install(), PIPX, latest="1.3.0")
+                is expected
+            )
+        assert "\x1b[?25h" in terminal.getvalue()
+
+    @pytest.mark.parametrize("started", [False, True])
+    def test_spinner_start_interruption_restores_display(self, pipx_install, monkeypatch, started):
+        pipx_install()
+
+        class Terminal(_TerminalBuffer):
+            closing = False
+
+            def write(self, text):
+                if self.closing:
+                    raise OSError("test terminal closed")
+                return super().write(text)
+
+        terminal = Terminal()
+        monkeypatch.setenv("TERM", "xterm-256color")
+        monkeypatch.setattr(cli, "console", Console(file=terminal, force_terminal=True))
+        original_start = threading.Thread.start
+        tickers = []
+
+        def interrupted_start(ticker):
+            tickers.append(ticker)
+            if started:
+                original_start(ticker)
+            raise KeyboardInterrupt("startup interrupted")
+
+        def unexpected_install(*args, **kwargs):
+            pytest.fail("interrupted startup must not launch the installer")
+
+        monkeypatch.setattr(threading.Thread, "start", interrupted_start)
+        monkeypatch.setattr(upgrade, "run_update", unexpected_install)
+        try:
+            with pytest.raises(KeyboardInterrupt, match="startup interrupted"):
+                cli._run_update_with_progress(upgrade.detect_install(), PIPX, latest="1.3.0")
+            assert "\x1b[?25h" in terminal.getvalue()
+            assert len(tickers) == 1
+            assert not tickers[0].is_alive()
+        finally:
+            terminal.closing = True
+            for ticker in tickers:
+                if ticker.ident is not None:
+                    ticker.join(timeout=5)
 
     def test_failed_update_prints_what_the_terminal_finally_showed(self, pipx_install, monkeypatch):
         pipx_install()
