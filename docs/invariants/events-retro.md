@@ -92,7 +92,7 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
   | `_read_cwd_from_latest_jsonl` | Claude Code session jsonls | **Yes** — `iter_bounded_lines` |
   | `_iter_mm_push_objs` | `mm-events` daily files, **synced**, peer bytes arrive via the pull apply path | **Yes** — `iter_bounded_lines` |
   | `token_usage.is_cache_cold` | local token cache | N/A — whole-file `read_bytes` behind an `st_size` gate, no line iteration |
-  | `pullhistory._yield_lines` | `~/.config/mind-meld/pull-history.jsonl` | No, and that is fine — the config dir is **never synced** and the file is written only by `pullhistory.append`. Tolerant reading is the requirement here; bounding would buy nothing and would import `token_usage` into a forensic-log reader for no gain. |
+  | `pullhistory._yield_lines` | `~/.config/mind-meld/pull-history.jsonl` | No, and that is fine — the config dir is **never synced** and the file was written by pre-73B `pullhistory.append` and is now a legacy import/fallback source; new history rows go to local `state.db`. Tolerant reading is the requirement here; bounding would buy nothing and would import `token_usage` into a forensic-log reader for no gain. |
 
   `iter_bounded_lines` is public since v0.12.16 precisely because it grew consumers outside `token_usage`. Its `label` kwarg names a call site in the oversize notice, so do not hardcode "token walker" back into it — but note the notice is deduped by PATH ONLY, so when two sites read the same file the label shown is whichever reached it first.
 

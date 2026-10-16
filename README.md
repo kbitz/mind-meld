@@ -29,16 +29,47 @@ rely on their background update to bring a Mac current. Updating one Mac protect
 peer namespaces only from that Mac's GC; other arrival-order limitations of the
 1.x store remain.
 
+**Local history database (Track 73B):** the first history write after upgrading
+imports `~/.config/mind-meld/pull-history.jsonl` and `.1` once into local
+`state.db`. Before that first write, `mm log` still reads JSONL. New rows go only
+to the database; the legacy files remain untouched. The table keeps 20,000 rows
+per (verb, action) class, including per-file uploaded rows. The [history
+remedies](#history-database-statedb) cover interrupted writes and import notices.
+
+Downgrading to an older mm shows only its JSONL history; it cannot see database
+rows. After re-upgrading, rows the older binary appended to either legacy file
+are **not** imported again. `mm log` notices changes to either file: this shows
+past divergence, not proof that an old binary still runs. Check `which -a mm`
+and fix PATH on that Mac. To inspect and keep those rows before moving both
+legacy files aside (with no mm running):
+
+```bash
+jq -c . ~/.config/mind-meld/pull-history.jsonl.1 ~/.config/mind-meld/pull-history.jsonl
+mkdir -p ~/mm-history-backup
+for name in pull-history.jsonl pull-history.jsonl.1; do
+  if [ -f "$HOME/.config/mind-meld/$name" ]; then
+    mv "$HOME/.config/mind-meld/$name" "$HOME/mm-history-backup/$name.$(date +%Y%m%d-%H%M%S)"
+  fi
+done
+```
+
+These copies remain readable with `jq -c . ~/mm-history-backup/pull-history*`;
+neither the importer nor `mm log` reads backup directories. Keep state.db too
+if you need the history recorded by the newer version. Moving only one legacy
+file may leave a stale-binary notice for the other.
+
 <a id="v180-scope-trim"></a>
 
 **v1.8.0:** gstack defaults exclude generated output. Complete this checklist
 on every active Mac before the next attended `mm pull` on any of them:
 
 1. Before the release lands on each Mac, copy its pull-history files aside.
-   A migrated Mac's attended pull can log about 8,000 excluded peer files,
-   rotating the 1 MB history and evicting earlier records until peers publish
-   their smaller manifests.
-2. Update each Mac and check `mm --version` (expect 1.8.0).
+   Before Track 73B, about 8,000 excluded peer rows per attended pull could
+   rotate the shared 1 MB history and evict earlier records. The database now
+   keeps 20,000 excluded rows independently of conflict history. Keep existing
+   `~/mm-history-backup/` copies: inspect them with `jq -c .
+   ~/mm-history-backup/pull-history*`; neither import nor `mm log` reads them.
+2. Update each Mac and check `mm --version` (1.8.0 or newer).
 3. Run `mm migrate-config`, then `mm push`. A Mac without explicit
    `[[sync.sources]]` reports nothing to migrate; it already uses the new defaults.
 4. Run `mm status` on each Mac: no migration warning and no pending gstack deletions.
@@ -353,7 +384,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
-| `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
+| `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
@@ -724,6 +755,64 @@ Managing conflicts:
 - `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
+
+### History database (state.db)
+
+History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
+(a directory mm creates is 0700; an existing `~/.config/mind-meld` keeps its
+mode). It records pull/push outcomes and self-upgrades, keeping the newest
+20,000 rows per known (verb, action) class. Excluded/uploaded traffic
+cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
+workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
+rows in one snapshot, closes the connection, then prints; memory grows with
+retained history. An absent, empty or not-yet-imported database falls back to
+legacy JSONL without writing anything.
+
+The first history writer imports `.1` then live JSONL once, leaving both files
+in place. Invalid lines are skipped. An unreadable legacy file yields
+`mm: notice: legacy history ... is not imported yet`; new rows remain visible.
+Repair the file's access or I/O problem; a later writer retries the entire import
+without duplication. `mm log` never repairs or imports. A changed legacy file
+after import triggers the stale-binary notice; see [Upgrading](#upgrading) to
+inspect, preserve and move both files aside after fixing PATH.
+
+`mm: notice: history not recorded` means that command dropped its attempted
+history rows; sync is unaffected and those rows are not replayed. Attended
+push, pull and recapture print it once; auto commands stay silent. A busy database means wait
+for the other command, then retry. A newer incompatible schema means run
+`mm update`; if `mm --version` is already newer, check `which -a mm`. A Python
+without usable sqlite3 needs an mm reinstall from [Install](#install).
+
+An interrupted write can leave `state.db-journal`. `mm log` refuses it without
+writing; the next non-preview `mm pull` or `mm push` repairs it even if sync is
+unchanged. For repair without syncing, with no mm running:
+
+```bash
+sqlite3 'file:'"$HOME"'/.config/mind-meld/state.db?mode=rw' 'PRAGMA user_version;'
+```
+
+`mode=rw` refuses an absent file instead of creating a world-readable database.
+Do not delete the journal separately. History uses a rollback journal with
+synchronous=FULL, without macOS fullfsync; it makes no hard power-loss durability
+claim. A killed process can lose up to 999 buffered rows; power loss can also
+corrupt the database.
+
+For a damaged database **while it holds history only**, with no mm running,
+move the database and all its companion files aside together:
+
+```bash
+history_save="$HOME/mm-history-backup/state-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$history_save"
+for history_file in "$HOME/.config/mind-meld/state.db" "$HOME/.config/mind-meld/"state.db-*; do
+  if [ -e "$history_file" ]; then mv "$history_file" "$history_save/"; fi
+done
+```
+
+History recorded since import is lost from `mm log`; the next write re-imports
+the remaining legacy JSONL. Preserve the moved files for investigation. This
+remedy expires before ledger/displaced state is activated by the 2.0 Tracks;
+those Tracks must supply authoritative-state recovery first.
+
 
 ### A gstack file doesn't reach my other Mac
 

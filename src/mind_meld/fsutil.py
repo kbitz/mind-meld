@@ -351,15 +351,15 @@ def flock_append_jsonl(
         serializes push-vs-push at the higher layer; cross-process contention
         on this helper is rare in practice.
       - Best-effort: OSError swallowed silently. Callers are forensic logs
-        (pullhistory, mm-events), not data integrity — a crashed FS or
+        (mm-events), not data integrity — a crashed FS or
         permission flip MUST NOT break the calling sync.
         Attended host captures opt into ``strict``: write errors and
         short appends raise OSError. Existing forensic callers are unchanged.
       - `max_bytes` checks the whole batch, including any separator, under
         flock; `AppendSizeLimit` reports a skipped append without changing
         bytes and without creating a missing file.
-      - `on_locked(fd)` runs under flock AFTER the writes complete; pullhistory
-        uses this for its line-boundary rotation closure. Exceptions raised
+      - `on_locked(fd)` runs under flock AFTER the writes complete; it has no
+        production callers since history moved to state.db. Exceptions raised
         from the callback are swallowed (same forensic-only stance).
     """
     payload = b"".join(line + b"\n" for line in lines)

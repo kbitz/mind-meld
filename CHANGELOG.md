@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.10.0] - 2026-10-16
+
+**Pull and push history no longer disappears when one class of rows fills the log.** `mm log` reads a private local database that keeps each history class on its own, including excluded files and per-file uploads.
+
+### Added
+
+- The first history write imports `~/.config/mind-meld/pull-history.jsonl` and its rotated `.1` once into `state.db` (mode 0600). Until that write, `mm log` still reads the JSONL files and names which source it used.
+
+### Changed
+
+- Attended push, pull, and recapture repair an interrupted history write and print at most one notice when history cannot be recorded. Autopush and autopull stay quiet. Previews do not create or touch the database.
+
+### Upgrade notes
+
+- The database stays on this Mac and is not synced. An older mm shows only JSONL history, and rows that older binary appends are not imported again after you upgrade. After the first attended pull on 1.10.0, `mm log --limit 5` should name `state.db`, the file mode should be 600, and there should be no stale-binary notice. README Upgrading has the backup steps.
+
 ## [1.9.1] - 2026-10-15
 
 **The `mm update` spinner keeps moving during quiet clone and wheel-build steps.** Phase names and percentages still change only when the installer reports progress.

@@ -693,12 +693,15 @@ failure contract exists to prevent.
 
 ### Pull / push history log
 
-`mm log` queries `~/.config/mind-meld/pull-history.jsonl` (mode 0600,
-fcntl.flock-guarded appends, 1MB cap with line-boundary rotation to
-`.1`). Records every per-file pull/push action: `written` / `merged` /
-`skipped` / `conflicted` / `excluded` / `uploaded` / `failed`. Forensic
-audit trail; `mm log` failures (disk full, perms flip) NEVER block a
-calling pull/push.
+`mm log` queries local `~/.config/mind-meld/state.db` (0600, rollback journal,
+forward migrations), falling back to legacy `pull-history.jsonl{,.1}` before
+the first writer imports them once. Per-file actions include `written`, `merged`,
+`merged-via-lcs`, `skipped`, `conflicted`, `excluded`, `uploaded`, `failed`, plus
+the separate self-upgrade row shape. Retention keeps 20,000 rows per known
+(verb, action) class. Writers batch 1000 rows; history failures never block sync.
+Inspection opens read-only and materializes its snapshot before printing.
+See [history invariants](docs/invariants/sync.md#pullpush-history-log-track-73b)
+for import, compatibility, errors and lock order.
 
 ### Sync Log (`.mind-meld-log.md`)
 

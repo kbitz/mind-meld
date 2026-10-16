@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.10.0 | 2026-10-16 | **Pull and push history no longer disappears when one class of rows fills the log.** `mm log` reads a private local database that keeps each history class on its own, including excluded files and per-file uploads. |
 | 1.9.1 | 2026-10-15 | **The `mm update` spinner keeps moving during quiet clone and wheel-build steps.** Phase names and percentages still change only when the installer reports progress. |
 | 1.9.0 | 2026-10-14 | **Muse memory notes now roam between your Macs, and Muse token usage shows up in `retro-fleet`.** Turn it on with `mm enable-source muse`. Muse does not turn itself on, even after it creates `memory/`. Session logs, plugin caches, and `~/.config/muse` stay on the machine. |
 | 1.8.2 | 2026-10-14 | **`mm update` in a terminal shows a spinner and the current step, instead of a bar that sat empty until it jumped to done.** When pip reports a real download or package count, that percentage still appears beside the step. Phases that report no count show the step name only. |

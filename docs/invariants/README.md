@@ -32,7 +32,8 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `merge.py` | Merge dispatch (`.jsonl`, `MEMORY.md`) + `lcs_merge` 3-way merge |
 | `upgrade.py` | Release check, nudge, transition hook; (v1.3.0) self-update: install classification (`detect_install`), the two pipx subprocess seams, the one-attempt-per-release gate, `update_or_nudge`; `mm update` progress capture: the private PTY for the in-place upgrade (`_PipxOutputStream`), the best-effort `_ProgressRelay`, the foreground hangup guard and `_final_frames` |
 | `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
-| `pullhistory.py` | Forensic per-file pull log |
+| `pullhistory.py` | Forensic table-backed pull/push/self-upgrade history, legacy import, batching and mm log queries |
+| `statedb.py` | Local state.db connections, forward migrations, translated errors, transactions and displaced expiry; standard library + fsutil leaf |
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |
 | `sidecar.py` | Manifest sidecar read/write |
@@ -56,7 +57,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 **Import direction (Track 16A, load-bearing).** `cli` imports the six modules
 above; none of them imports `cli`, at module scope *or* function scope. The
 leaves (`consoles`, `conflictmtime`, `safety`, `conflictdiff`, `fsutil`,
-`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`, `updateprogress`) import nothing from the CLI layer at all. Enforced by
+`host_skill_discovery`, `gitenv`, `pullplan`, `attemptlog`, `updateprogress`, `statedb`) import nothing from the CLI layer at all. Enforced by
 `tests/test_module_boundaries.py` — ruff's F811 cannot see
 function-local shadowing, so lint alone will never catch a re-introduced cycle.
 `aggregator.py` reaches the CLI as a **subprocess**
@@ -97,7 +98,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `manifest.py:walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `MUSE_SYNCED_SUBDIRS` / `walk_claude_source` / `build_manifest_v2` / (`nested_roots` out-parameter) / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `_directory_is_git_repo` / `_collect_regular_files_scandir` / `cli.py:_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_collect_diag_state` / (diag `sync_scope`) | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
-| `pullhistory.py` (forensic log) | `docs/invariants/sync.md` |
+| `pullhistory.py` (forensic log) / `statedb.py` / `cli.py:log_cmd` | `docs/invariants/sync.md` and `docs/invariants/auto-upgrade.md` |
 | `cli.py:_apply_write` / `_apply_merge` / `_apply_conflict` / `_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
 | `conflictmtime.py:_restore_mtime_best_effort` / `_MTIME_RESTORE_MAX_SKEW_SECONDS` (future-clamp) | `docs/invariants/sync.md` |
 | `cli.py:_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename` / `_filter_excluded_paths` | `docs/invariants/conflicts.md` |
@@ -130,7 +131,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:refresh_identity_cmd` / `devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
 | `cli.py:cursor_agent` / `capture_cursor_usage` / `_toggle_cursor_usage` / `_RawArgsCommand` / `_forwarding_signals` / `host_usage.py:configure_cursor_hook` / `record_cursor_usage` / `cursor_cli_model` / `cursor_hook_state` / `_take_cursor_spool` / `_fold_cursor_spool` / `fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` | `docs/invariants/events-retro.md` (standalone Cursor capture) and `docs/invariants/sync.md` (atomic write publication failures) |
 | `host_usage.py:_read_cursor_sqlite` / `_query_cursor_sqlite` / `_cursor_sqlite_select` / `_lstat_sqlite_files` / `_sqlite_identity` / `_sqlite_text` / `_sqlite_json` / `_cursor_store_counts` / `_stage_cursor_directory` / `_sqlite_run` / `_sqlite_model` / `_sqlite_day` / `_cursor_entry` / `_cursor_placeholder` / `_cursor_run` / `_cursor_rank` / `_iter_cursor_directories` / `read_cursor_usage` / `cursor_sqlite_stores` / `unread_sqlite_stores` / `cursor_usage_diag` / `_cursor_read_set` / `_cursor_reason_detail` / `_carry_reason_detail` / `_ReadFailure` / `CURSOR_SQLITE_CENSUS_CONDUCTOR_VERSION` / `CURSOR_SQLITE_READER_CAUSES` / `CURSOR_SQLITE_STORE_CAUSES` / `cli.py:_cursor_store_detail_clause` / `_cursor_unsupported_clause` / `errors.py:CURSOR_SQLITE_URL` | `tests/fixtures/host_sessions/cursor/CONTRACT.md` and `docs/invariants/events-retro.md` (Conductor SQLite stores) |
-| `cli.py:recapture` / `events_tail.py:_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` |
+| `cli.py:recapture` / `events_tail.py:_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` (and `docs/invariants/sync.md` for recapture's history scope and hot-journal recovery) |
 | `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_is_live_conflict` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |
 | `gitenv.py:scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS` / `events.py:_walk_one_repo` / `_origin_remote_url` / `identity.py:_gather_global_email` / `_gather_per_repo_emails` / `read_cached_identities` / `_normalize_cache` | `docs/invariants/events-retro.md` |
 | `events.py` / `identity.py` / `token_usage.py` | `docs/invariants/events-retro.md` |
@@ -188,7 +189,7 @@ refuse instead of disabling protection and name the destination or protected
 root that failed. No case probes or home-tree scans run.
 
 `atomic_write_bytes`, nonempty `flock_append_jsonl`, `append_rotatable_jsonl`,
-both `rotate_jsonl` paths, `locked_json_rmw` and `locked_json_durable_rmw`
+both `rotate_jsonl` paths, `statedb.connect(read_only=False)`, `locked_json_rmw` and `locked_json_durable_rmw`
 (data **and** sibling `.lock`) check before their first mutation, including
 mkdir, writable open, mode changes, temp creation and rename. Empty appends
 remain no-ops; `locked_json_snapshot` and `fsync_dir` are unguarded. Allowed-path
