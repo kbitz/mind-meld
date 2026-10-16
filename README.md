@@ -209,7 +209,7 @@ If your storage path is **not** under iCloud Drive (e.g. a custom local folder o
 
 ## Claude Code Integration
 
-Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt and stay silent when already in sync. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
+Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt for input and stay silent when already in sync. On Linux with the Secret Service keyring backend they also never open a desktop unlock prompt: a locked or missing collection skips the run with a `keyring-locked` / `keyring-no-collection` breadcrumb instead (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)). Other backends (KWallet, KeePassXC, keyring's libsecret backend), macOS Keychain access dialogs, and a stalled D-Bus session can still block. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
 
 Add the following to your **global** `~/.claude/CLAUDE.md` to have Claude automatically sync at the start and end of each conversation:
 
@@ -233,7 +233,7 @@ mm autopush
 \`\`\`
 
 - **No output:** Nothing to push. Say goodbye normally.
-- **Any output:** Tell the user what was pushed.
+- **Any output:** Tell the user what was pushed; surface skips, warnings and their suggested fixes.
 
 If `mm` is not installed, both commands will fail silently — no action needed.
 ```
@@ -345,7 +345,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -751,6 +751,62 @@ ps -p 12345 -o etime=,tty=,command=
 An mm older than v1.5.2 printed advice to `remove <path>`. That advice is
 obsolete: keep the lockfile and wait for the operation to finish.
 
+### Auto commands skip: keyring locked or unavailable
+
+`mm autopull` / `mm autopush` read the passphrase without prompting. When the
+desktop keyring cannot answer without opening a prompt, the run skips with
+exit 0, one `mm: <verb> skipped - …` line on stderr, and a breadcrumb that
+`mm status` surfaces. Nothing is half-synced; rerun the auto command after
+fixing the keyring state. `mm diag` reports what the keyring side looks like
+(`keyring` in `--json`: backend and member class names, `secret_service`,
+`item`, `error`) without reading the secret or prompting — run it first.
+
+The four passphrase outcomes in `mm status` / the breadcrumb:
+
+| Outcome | Meaning |
+|---|---|
+| `keyring-locked` (`locked`) | The Secret Service collection is locked. |
+| `keyring-locked` (`denied`) | The keyring refused access (macOS Keychain denial, or another backend reporting locked). |
+| `keyring-no-collection` | There is no default Secret Service collection to read from. |
+| `keyring-error` | The keyring read failed some other way; see `auto<verb>.log` next to the breadcrumb. |
+| `no-passphrase` | The keyring answered with nothing (or could not be read) and `MINDMELD_PASSPHRASE` is unset. The stderr line names the backend class. |
+
+**Linux.** Prerequisites: `mm` via pipx (Arch: `python-pipx`), plus
+`libsecret` and `gnome-keyring` (Arch package names; on Ubuntu the
+`secret-tool` command is in `libsecret-tools`). For `keyring-locked`, unlock
+the login keyring in the desktop session. Asking the keyring for an item
+makes it offer the unlock dialog:
+
+```bash
+secret-tool lookup service mind-meld username passphrase >/dev/null
+```
+
+(That lookup route is documented from the Secret Service API; it is marked
+verified only after the fleet soak.) Durable fixes so hooks stop depending on
+a manual unlock: use a blank-password login keyring — the passphrase is then
+stored unencrypted on disk, relying on full-disk encryption, as Omarchy may
+install — or turn desktop autologin off so PAM unlocks the keyring at login.
+
+For `keyring-no-collection`, store the passphrase once, which also creates
+the default collection through the desktop prompt:
+
+```bash
+secret-tool store --label=mind-meld service mind-meld username passphrase application 'Python keyring library'
+```
+
+**macOS.** For `keyring-locked` with detail `denied`, run `mm pull` or
+`mm push` in a terminal in your desktop session and choose **Always Allow**
+on the Keychain access dialog; later auto runs then read without asking.
+
+**Fallbacks (any OS).** `MINDMELD_PASSPHRASE` is used only when the keyring
+cannot answer without prompting (or yields nothing). Export it where the
+agent process starts, not in an interactive shell the agent does not read.
+It is a plaintext secret in the process environment, inherited by every
+agent subprocess — prefer fixing the keyring. `PYTHON_KEYRING_BACKEND` can
+pin a different keyring backend if discovery picks the wrong one;
+`mm diag` shows which backend and member were actually selected. After any
+fix, confirm with `mm diag`, then rerun `mm autopull` / `mm autopush`.
+
 ### Newer or damaged storage format
 
 If mm reports a newer format, leave every `mm-crypto-init` copy in place and
@@ -825,7 +881,7 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.13.0); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -1503,18 +1559,39 @@ rm -rf ~/.local/share/mind-meld
 # Config, device identity, caches, and TTL markers.
 rm -rf ~/.config/mind-meld
 
-# Keychain entry (service `mind-meld`, account `passphrase`).
-security delete-generic-password -s mind-meld -a passphrase
+# Keychain entry (macOS; service `mind-meld`, account `passphrase`).
+command -v security >/dev/null && security delete-generic-password -s mind-meld -a passphrase
+
+# Secret Service entry (Linux).
+command -v secret-tool >/dev/null && secret-tool clear service mind-meld username passphrase
 ```
 
 Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
 
-CI uses one job on `macos-latest` with Python 3.13. It runs
-`./bin/check --no-bootstrap` for the portable checks, verifies the real Keychain
-backend, and builds the wheel into a disposable venv for `mm --version` and
-`python -m mind_meld.cli` smokes. The pip cache is keyed on `pyproject.toml`.
+CI uses three jobs. `ci` runs on `macos-latest` with Python 3.13: the
+portable checks (`./bin/check --no-bootstrap`), a real-Keychain backend
+assertion, and a wheel smoke in a disposable venv. `portable-linux` runs the
+same portable checks plus a wheel smoke on `ubuntu-latest` with Python 3.14,
+so macOS-only code fails before it lands. `secret-service-live` runs the
+opt-in live keyring test against a real gnome-keyring in an Arch container.
+The Pythons differ on purpose: 3.13 is the macOS fleet's interpreter, 3.14 is
+the newest portable target, and `./bin/check` accepts either (it notices when
+you run a third one). The pip cache is keyed on `pyproject.toml`.
+
+The live keyring test also runs locally on a Linux box with `dbus`,
+`gnome-keyring` and `libsecret` installed:
+
+```
+MM_LIVE_SECRET_SERVICE=1 ./bin/check --tests tests/test_secret_service_live.py
+```
+
+Each scenario runs under its own `dbus-run-session` with a throwaway HOME —
+it never touches your desktop keyring — and with the flag set a missing tool
+fails the test rather than skipping it, so the flag fails by design on macOS.
+Without the flag the live scenarios skip and only the portable
+process-teardown test runs.
 
 From a clone (no environment required):
 
@@ -1528,7 +1605,7 @@ That command bootstraps `.venv` if needed, then runs `ruff check .`, `ruff forma
 ./bin/check tests/test_config.py
 ```
 
-A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. `MM_SIM_DEEP=1` selects the random 1000-example replication-model profile; see [replication fixtures](tests/sim/README.md). See `./bin/check --help`.
+A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. `MM_LIVE_SECRET_SERVICE=1` enables the live keyring test above. `MM_SIM_DEEP=1` selects the random 1000-example replication-model profile; see [replication fixtures](tests/sim/README.md). See `./bin/check --help`.
 
 Manual fallback (separate lines; quote `'.[dev]'` — macOS zsh globs it):
 

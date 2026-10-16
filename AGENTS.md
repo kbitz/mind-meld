@@ -80,7 +80,7 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 
 ## CI
 
-`.github/workflows/ci.yml` runs portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13; see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
+`.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
 
 ## Commands
 

@@ -982,6 +982,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "mm_version",
     "config",
     "crypto_init",
+    "keyring",
     "root_salt_drift",
     "sidecar",
     "storage_inventory",

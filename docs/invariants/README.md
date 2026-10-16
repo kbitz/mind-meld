@@ -109,7 +109,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc` / (its peer-controlled blob-key prints) | `docs/invariants/init-devices.md` and `docs/invariants/sync.md` (Own-device blob collection) |
 | `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
-| `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
+| `crypto.py:store_passphrase_in_keyring` / `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `errors.py:KeyringUnavailableError` / keyring path | `docs/invariants/init-devices.md` |
 | `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
 | `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
 | `upgrade.py:cached_upgrade_view` / `cli.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |

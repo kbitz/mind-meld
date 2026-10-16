@@ -44,6 +44,66 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [manual] Bound the non-interactive keyring read with a timeout backstop
+- **Why:** Track 73A's lock-state check covers gnome-keyring's locked and missing default collection and locked items. It cannot see prompt paths that do not use the Secret Service `Unlock` API, such as KeePassXC's "confirm access" dialog or a stalled D-Bus activation. A hook would still wait on those.
+- **Hypothesis (untested):** Run the auto commands' keyring read under a bounded wait (for example a daemon thread joined with a few-second timeout) and record `keyring-locked` with reason `timeout` when it expires. Backend-agnostic, but a thread enters the hook path, the dialog still opens on screen, and the abandoned thread holds a D-Bus connection until process exit.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Supported desktops (docs/SPEC.md) are Keychain and an unlocked Secret Service collection on Arch-based Linux (Omarchy ships gnome-keyring). KeePassXC is outside the supported set. Start in `crypto.get_passphrase(non_interactive=True)`. Depends on Track 73A. Revisit trigger: an autopull or autopush stall observed on a supported desktop that the 73A lock-state check does not explain. Source: /autoplan Track 73A, CEO E1 (2026-10-16).
+
+### [manual] Omarchy qualification checkpoint before Track 80A (for /roadmap)
+- **Why:** A small native run on the owner's Omarchy machine (pipx install, actual keyring backend selected, login and reboot behavior, a hook invocation, manual recovery) before 80A builds the Linux passphrase flow.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Source: /autoplan Track 73A, Codex CEO voice C1 (2026-10-16); not a 73A merge gate. Trigger: a Linux machine joins the owner's desk.
+
+### [manual] Proposed owner acceptance for Track 73A at the 2.0 soak — PENDING owner confirmation
+- **Why:** Live owner acceptance that Linux hooks skip (not hang) on a locked Secret Service collection and recover after unlock. Filed as **PROPOSED, pending owner confirmation** — ac1 was not answered at the /autoplan gate (2026-10-16), so this is NOT a required acceptance entry. A new acceptance entry counts only after the owner confirms it directly. Do not mark REQUIRED without that confirmation.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** On an install made by 2.0's `init --new-fleet` or `join`: lock the Secret Service collection, run `mm autopull`, record the stderr line, `mm status`, `mm diag --json` and timestamps; unlock, rerun, record success and the recovery time (target under 2 minutes); record which unlock path worked, whether the keyring has a password, and whether full-disk encryption is on. Draft script below (verify each command on the machine first; it deletes nothing).
+
+```bash
+#!/usr/bin/env bash
+# Track 73A owner acceptance: Linux only, deletes nothing.
+set -euo pipefail
+[ "$(uname -s)" = Linux ] || { echo "refusing: Linux only" >&2; exit 1; }
+command -v mm >/dev/null && command -v busctl >/dev/null
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+echo "start $(ts)"; mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "keyring has a password? (y/n)"; read -r KR_PW; echo "full-disk encryption on? (y/n)"; read -r FDE
+busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
+  org.freedesktop.Secret.Service Lock ao 1 /org/freedesktop/secrets/aliases/default
+echo "locked $(ts)"; mm autopull || true; mm status | grep -i "auto-pull" || true
+mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "Unlock the keyring now (desktop keyring manager, or: secret-tool lookup service mind-meld username passphrase >/dev/null). Press Enter when done."; read -r _
+echo "unlocked $(ts)"; mm autopull; echo "recovered $(ts)"
+mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "record: keyring_password=$KR_PW fde=$FDE"
+```
+
+### [manual] Owner for store-v2 section 11 prose outside pyproject.toml (for /roadmap)
+- **Why:** store-v2 §11's remaining platform prose has no owning Track: README prerequisites (`README.md` "macOS with iCloud Drive"), init help, "other Mac" strings, the root SPEC overview, and AGENTS.md principles. For /roadmap to assign (likely 84A).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Source: /autoplan Track 73A deferred items (2026-10-16). 73A updated only the CI line and keyring-related prose.
+
+### [manual] Attended commands that agents run can block on a locked Linux keyring
+- **Why:** `mm status` (which AGENTS.md tells agents to run) reads the passphrase interactively before rendering; on a locked Secret Service collection it raises a desktop prompt or fails at getpass on a non-TTY. Consider a non-interactive-first read when stdin is not a TTY.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Trigger: an agent-run attended command observed blocking on the soak machine. Source: /autoplan Track 73A Eng M4 (2026-10-16).
+
+### [manual] Track 80A owns the 2.0 default storage path ~/Sync/mind-meld (for /roadmap, UC1)
+- **Why:** Gate answer UC1 accepted (2026-10-16): the `~/Sync/mind-meld` 2.0 default path moved out of Track 73A to Track 80A. First reader is `mm init --new-fleet`. 73A deliberately did not touch `config.DEFAULT_STORAGE_PATH`. For /roadmap to add to the 80A card.
+- **Effort:** S
+- **Priority:** P2
+
+### [manual] Track 84A owns pyproject.toml description, keywords and classifiers (for /roadmap, UC2)
+- **Why:** Gate answer UC2 accepted (2026-10-16): `pyproject.toml` description, keywords and classifiers moved out of Track 73A to Track 84A, which must list `pyproject.toml` in its touches. 73A only added the `secretstorage` dependency.
+- **Effort:** S
+- **Priority:** P3
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-15
