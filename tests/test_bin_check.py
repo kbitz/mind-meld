@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -123,7 +124,8 @@ class TestInterpreter:
 
         assert mod.python_version("python") is None
 
-    def test_prefers_3_14_when_present(self, tmp_path: Path, monkeypatch) -> None:
+    def test_prefers_3_13_when_both_ci_pythons_present(self, tmp_path: Path, monkeypatch) -> None:
+        """A Mac with 3.13 and 3.14 keeps the macOS CI interpreter (Track 73A)."""
         mod = load_check()
         bindir = tmp_path / "bin"
         _stub_python(bindir, "python3.14", "3.14.7")
@@ -132,8 +134,8 @@ class TestInterpreter:
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
         path, ver = mod.resolve_interpreter()
-        assert path.endswith("python3.14")
-        assert ver[:2] == (3, 14)
+        assert path.endswith("python3.13")
+        assert ver[:2] == (3, 13)
 
     def test_driver_finds_named_python3_14(self, tmp_path: Path, monkeypatch, capsys) -> None:
         """A 3.14-only host (Linux CI shape) resolves via the named candidate."""
@@ -183,7 +185,7 @@ class TestInterpreter:
     def test_no_python_remedy_chosen_by_os(self) -> None:
         mod = load_check()
         darwin = mod._fix_no_python([], platform="darwin")
-        assert "install Python 3.14" in darwin
+        assert "install Python 3.13 or 3.14" in darwin
         assert "do not run xcode-select --install" in darwin
         linux = mod._fix_no_python([], platform="linux")
         assert "distro Python 3.11+" in linux
@@ -199,6 +201,37 @@ class TestInterpreter:
         assert match, "launcher candidate loop not found"
         assert tuple(match.group(1).split()) == mod.CANDIDATES
         assert "python3.14" in text
+
+    @pytest.mark.parametrize(
+        "uname,expect,forbid",
+        [
+            ("Darwin", "do not run xcode-select --install", "distro Python"),
+            ("Linux", "install a distro Python 3.11+", "xcode-select --install"),
+        ],
+    )
+    def test_launcher_no_python_remedy_by_os(
+        self, tmp_path: Path, uname: str, expect: str, forbid: str
+    ) -> None:
+        """The POSIX launcher picks its no-Python remedy from `uname -s`."""
+        bindir = tmp_path / "bin"
+        bindir.mkdir(parents=True)
+        dirname = shutil.which("dirname")
+        assert dirname, "dirname not on PATH"
+        (bindir / "dirname").symlink_to(dirname)
+        stub = bindir / "uname"
+        stub.write_text(f"#!/bin/sh\necho {uname}\n", encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        proc = subprocess.run(
+            ["/bin/sh", str(ROOT / "bin" / "check"), "--help"],
+            env={"PATH": str(bindir), "HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 1, proc.stderr
+        assert "looked for python3.13, python3.14," in proc.stderr
+        assert expect in proc.stderr
+        assert forbid not in proc.stderr
 
     def test_launcher_finds_named_python3_14(self, tmp_path: Path) -> None:
         """The POSIX launcher execs the driver under a stub python3.14."""

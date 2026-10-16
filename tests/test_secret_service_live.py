@@ -42,16 +42,51 @@ _PROMPT_METHODS = ("Unlock", "Prompt", "CreateCollection")
 
 
 def _kill_process_group(proc: subprocess.Popen, *, timeout: float = 5.0) -> None:
-    """SIGKILL the child's process group and reap it, with bounded waits."""
-    if proc.poll() is None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    """SIGKILL the child's whole process group and reap the leader, bounded.
+
+    The group is killed even when the leader already exited: a member
+    (dbus-daemon, gnome-keyring-daemon) can outlive it and hold the pipes.
+    The PGID stays valid while any member lives.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         pass
+
+
+def _pid_running(pid: int) -> bool:
+    """True while `pid` exists and is not a zombie awaiting its reaper.
+
+    A container whose PID 1 never reaps orphans keeps a killed grandchild
+    as a zombie, and kill(pid, 0) still succeeds on zombies.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        # /proc/<pid>/stat: the state follows the parenthesized comm.
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        try:
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            ).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        if not state:
+            return False
+    return not state.startswith("Z")
 
 
 def _run_live_child(scenario: str, tmp_path: Path) -> dict:
@@ -96,19 +131,30 @@ def _run_live_child(scenario: str, tmp_path: Path) -> dict:
         stdout, stderr = proc.communicate(timeout=_CHILD_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
-        _out, stderr = proc.communicate()
+        try:
+            _out, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            stderr = "<pipes still held after the process-group kill>"
         pytest.fail(
             f"live child {scenario!r} timed out after {_CHILD_TIMEOUT_S}s; "
-            f"stderr tail:\n{stderr[-2000:]}"
+            f"stderr tail:\n{(stderr or '')[-2000:]}"
         )
     finally:
         _kill_process_group(proc)
-    assert proc.returncode == 0, (
-        f"live child {scenario!r} exited {proc.returncode}; stderr tail:\n{stderr[-2000:]}"
-    )
     lines = [line for line in stdout.splitlines() if line.strip()]
+    payload: dict = {}
+    if lines:
+        try:
+            payload = json.loads(lines[-1])
+        except ValueError:
+            payload = {"unparsed": lines[-1][-500:]}
+    # The child's own JSON (its error and the checks it reached) separates
+    # a provisioning failure from a behavioral one; show it on every failure.
+    assert proc.returncode == 0, (
+        f"live child {scenario!r} exited {proc.returncode}; result: {payload}; "
+        f"stderr tail:\n{stderr[-2000:]}"
+    )
     assert lines, f"live child {scenario!r} printed no result line; stderr:\n{stderr[-2000:]}"
-    payload = json.loads(lines[-1])
     assert payload.get("ok") is True, f"live child {scenario!r} payload: {payload}"
     failed = [k for k, v in payload.get("checks", {}).items() if v is not True]
     assert not failed, f"live child {scenario!r} failed checks: {failed} ({payload})"
@@ -145,20 +191,44 @@ def test_process_group_teardown_kills_whole_group():
     )
     try:
         grandchild_pid = int(proc.stdout.readline().strip())
-        os.kill(grandchild_pid, 0)  # grandchild alive before teardown
+        assert _pid_running(grandchild_pid)  # alive before teardown
         _kill_process_group(proc)
         assert proc.poll() is not None
-        deadline = time.monotonic() + 5.0
-        while True:
-            try:
-                os.kill(grandchild_pid, 0)
-            except ProcessLookupError:
-                break
-            if time.monotonic() > deadline:
-                raise AssertionError("grandchild survived process-group teardown")
-            time.sleep(0.05)
+        _assert_gone(grandchild_pid)
     finally:
         _kill_process_group(proc)
+
+
+def test_process_group_teardown_after_the_leader_exited():
+    """Portable: a member that outlives the leader is still killed."""
+    child_code = (
+        "import subprocess, sys\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],"
+        " stdout=subprocess.DEVNULL)\n"
+        "print(g.pid, flush=True)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        grandchild_pid = int(proc.stdout.readline().strip())
+        proc.wait(timeout=10)  # leader gone; grandchild still in the group
+        assert _pid_running(grandchild_pid)
+        _kill_process_group(proc)
+        _assert_gone(grandchild_pid)
+    finally:
+        _kill_process_group(proc)
+
+
+def _assert_gone(pid: int, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while _pid_running(pid):
+        if time.monotonic() > deadline:
+            raise AssertionError(f"pid {pid} survived process-group teardown")
+        time.sleep(0.05)
 
 
 # ── child side (runs under dbus-run-session; never under pytest) ────
@@ -240,7 +310,7 @@ def _ss_member():
     from mind_meld import crypto
 
     backend = keyring.get_keyring()
-    for member in crypto._keyring_members(keyring, backend):
+    for member in crypto._keyring_members(backend):
         if isinstance(member, SSKeyring):
             return member
     raise RuntimeError(f"no Secret Service backend member in {backend!r}")
@@ -280,6 +350,9 @@ def _child_main_scenario() -> int:
         checks["set_then_read"] = crypto._read_secret_service(member) == "live-test-pw"
 
         # secret-tool parity: an item stored by libsecret is readable.
+        # libsecret adds its own attributes (xdg:schema), so it would not
+        # replace keyring's item; delete that first so exactly one matches.
+        keyring.delete_password("mind-meld", "passphrase")
         secret_tool = shutil.which("secret-tool")
         if secret_tool is None:
             raise RuntimeError("secret-tool missing; install libsecret")

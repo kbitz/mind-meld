@@ -106,6 +106,8 @@ The setup entry calls one repo-tracked script (`bin/conductor-setup`)
 with zero inline logic, tees to a log in the workspace, and exits 0. A
 hard failure would sit between the user and every new workspace for a
 sub-10s convenience. Branch on `CONDUCTOR_IS_LOCAL`, not `uname`.
+(Superseded for `bin/check`'s no-Python remedy by Track 73A, which made
+Linux a supported platform: the remedy now branches on the OS.)
 
 ## Explicitly refused
 

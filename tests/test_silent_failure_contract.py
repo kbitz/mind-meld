@@ -873,7 +873,12 @@ def test_autopull_no_passphrase_prints_skipped_line(tmp_path, monkeypatch):
     assert r.exit_code == 0
     assert "pull skipped" in (r.stderr or "")
     assert "no passphrase available" in (r.stderr or "")
+    assert "(backend keyring.backends.fail.Keyring)" in (r.stderr or "")
     assert not (iso / "autopull.log").exists()
+    # Track 73A: the detail records the backend this hook process saw.
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert entry.get("outcome") == "no-passphrase"
+    assert entry.get("detail") == "keyring.backends.fail.Keyring"
 
 
 # ─── Track 73A: keyring-locked auto-command skips (end-to-end) ──────────
@@ -940,6 +945,64 @@ def test_auto_command_skips_when_keyring_cannot_answer(
         assert entry.get("detail") == "locked"
     assert not (iso / f"auto{verb}.log").exists()
     assert ss_harness.prompt_calls == []
+
+
+@pytest.mark.parametrize("verb", ["pull", "push"])
+@pytest.mark.parametrize("kind", ["keychain", "other"])
+def test_auto_command_skips_when_keyring_denies(tmp_path, monkeypatch, verb, kind):
+    """KeyringLocked from a non-Secret-Service backend -> keyring-locked/denied."""
+    from keyring.errors import KeyringLocked
+
+    from tests.conftest import _FakeBackend, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    module = "keyring.backends.macOS" if kind == "keychain" else "keyring.backends.kwallet"
+    backend_cls = type("Keyring", (_FakeBackend,), {"__module__": module})
+    _use_backend(monkeypatch, backend_cls(error=KeyringLocked("denied")))
+
+    r = runner.invoke(app, [f"auto{verb}"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    if kind == "keychain":
+        expected = (
+            f"mm: {verb} skipped - keyring locked (Keychain access was denied); "
+            f"run mm {verb} in a terminal in your desktop session and choose "
+            f"Always Allow, then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    else:
+        expected = (
+            f"mm: {verb} skipped - keyring locked (desktop keyring refused access); "
+            "unlock or allow access in your desktop keyring, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    assert expected in (r.stderr or "").splitlines()
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), verb)
+    assert (entry.get("outcome"), entry.get("detail")) == ("keyring-locked", "denied")
+    assert not (iso / f"auto{verb}.log").exists()
+
+
+@pytest.mark.parametrize(
+    "outcome,detail",
+    [
+        ("keyring-no-collection", ""),
+        ("keyring-locked", ""),
+        ("keyring-locked", "denied"),
+        ("keyring-locked", "bogus"),
+        ("no-passphrase", "keyring.backends.fail.Keyring"),  # control: no hint
+    ],
+)
+def test_status_hint_for_every_keyring_outcome(tmp_path, monkeypatch, outcome, detail):
+    """Spec 3.4: both outcomes hint, with or without a (known) detail."""
+    _setup_real_config(tmp_path, monkeypatch)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_module.console, "width", 240)
+    cli_module._write_autorun_breadcrumb("pull", outcome, detail)
+
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, r.output
+    hint = f"The last auto-pull was skipped: keyring locked or unavailable; see {_KEYRING_URL}"
+    assert (hint in r.stdout) is outcome.startswith("keyring-")
 
 
 def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):

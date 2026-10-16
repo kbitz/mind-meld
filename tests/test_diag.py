@@ -312,14 +312,19 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
 
         monkeypatch.setattr(builtins, "open", read)
     if mode == "root-unreadable":
-        real_stat = Path.stat
+        import os
+
+        # Inject at os.stat: Python 3.14's Path.is_dir() goes through
+        # os.path.isdir (swallowing the error) instead of Path.stat, and the
+        # reader then re-stats to tell an unreadable root from absence.
+        real_os_stat = os.stat
 
         def stat(path, *args, **kwargs):
-            if path == daydir:
-                raise PermissionError("denied")
-            return real_stat(path, *args, **kwargs)
+            if os.fspath(path) == str(daydir):
+                raise PermissionError(13, "denied", str(daydir))
+            return real_os_stat(path, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "stat", stat)
+        monkeypatch.setattr(os, "stat", stat)
     diag = runner.invoke(app, ["diag", "--json"])
     assert diag.exit_code == 0, diag.output
     pub = json.loads(diag.stdout)["host_publication"]
@@ -434,7 +439,7 @@ def test_diag_keyring_na_without_secret_service(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["keyring"] == {
-        "backend": "Keyring",
+        "backend": "keyring.backends.fail.Keyring",
         "member": None,
         "secret_service": "n/a",
         "item": "n/a",
@@ -450,8 +455,8 @@ def test_diag_keyring_secret_service_states(tmp_path, monkeypatch, ss_harness):
     _use_backend(monkeypatch, _ss_member())
     payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
     assert payload["keyring"] == {
-        "backend": "Keyring",
-        "member": "Keyring",
+        "backend": "keyring.backends.SecretService.Keyring",
+        "member": "keyring.backends.SecretService.Keyring",
         "secret_service": "unlocked",
         "item": "present",
         "error": None,
@@ -469,6 +474,7 @@ def test_diag_plain_text_shows_keyring_fields(tmp_path, monkeypatch):
     assert "Keyring" in result.stdout
     for field in ("backend:", "member:", "secret_service:", "item:", "error:"):
         assert field in result.stdout
+    assert "keyring.backends.fail.Keyring" in result.stdout
 
 
 def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):

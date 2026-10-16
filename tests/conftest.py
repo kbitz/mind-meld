@@ -131,10 +131,17 @@ def _isolate_keyring(monkeypatch) -> None:
     Track 73A's non-interactive reader walks `keyring.get_keyring()`
     members instead of calling `keyring.get_password`, so the backend is
     pinned to keyring's fail backend too. Tests that need a backend
-    inject one by patching `keyring.get_keyring` themselves.
+    inject one by patching `keyring.get_keyring` themselves. A developer's
+    PYTHON_KEYRING_BACKEND / KEYRING_PROPERTY_* (e.g. a KeePassXC scheme)
+    would reshape backends the tests construct, so they are cleared.
     """
+    import os
+
     import keyring.backends.fail
 
+    for name in list(os.environ):
+        if name == "PYTHON_KEYRING_BACKEND" or name.startswith("KEYRING_PROPERTY_"):
+            monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *a, **kw: None)
     monkeypatch.setattr("keyring.set_password", lambda *a, **kw: None)
     monkeypatch.setattr("keyring.get_keyring", lambda: keyring.backends.fail.Keyring())
@@ -713,9 +720,24 @@ class _SecretStorageHarness:
         ss.get_default_collection = prompt_spy("get_default_collection")
         ss.collection = coll_mod
         ss.exceptions = exc_mod
+        # secretstorage.util holds the prompt runner; crypto never imports
+        # it, so reaching it means a regression routed through a prompt.
+        util_mod = types.ModuleType("secretstorage.util")
+        util_mod.exec_prompt = prompt_spy("exec_prompt")
+        util_mod.unlock_objects = prompt_spy("unlock_objects")
+        ss.util = util_mod
         monkeypatch.setitem(sys.modules, "secretstorage", ss)
         monkeypatch.setitem(sys.modules, "secretstorage.collection", coll_mod)
         monkeypatch.setitem(sys.modules, "secretstorage.exceptions", exc_mod)
+        monkeypatch.setitem(sys.modules, "secretstorage.util", util_mod)
+        # keyring's SecretService module bound the real secretstorage at
+        # import (Linux). Rebind it to the fake so a regression that routes
+        # a Secret Service member through keyring's own read hits the spies
+        # instead of a real session keyring.
+        import keyring.backends.SecretService as _keyring_ss
+
+        monkeypatch.setattr(_keyring_ss, "secretstorage", ss, raising=False)
+        monkeypatch.setattr(_keyring_ss, "exceptions", exc_mod, raising=False)
 
 
 def _ss_member(scheme: str | None = None, preferred_collection: str | None = None):

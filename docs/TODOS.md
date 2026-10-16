@@ -104,6 +104,20 @@ echo "record: keyring_password=$KR_PW fde=$FDE"
 - **Effort:** S
 - **Priority:** P3
 
+### [manual] Audit Python 3.14 Path.exists / is_dir / is_file callers for swallowed errors
+- **Why:** On Python 3.14, `Path.exists()`, `is_dir()` and `is_file()` call `os.path.*` and return False for any `OSError`; on 3.13 they raise `PermissionError`/`EIO`. Any strict path that relied on the raise now reads an unreadable directory as absent, and with truth-based manifests that could publish deletions. Linux CI runs 3.14 and pipx installs already resolve 3.14 on Macs that have it.
+- **Hypothesis (untested):** The strict manifest walkers already use explicit `lstat`/`stat` mode checks (`walk_claude_source` strict branch), and `events.latest_event_rows` re-stats after `is_dir()`; no unsafe strict caller is known. An AST sweep of the ~100 `src/` call sites, classifying each as strict, preview or best-effort, would confirm it.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Found by Track 73A's portable-linux job (PR #213): three tests that injected faults through `Path.stat` stopped firing on 3.14 and were moved to `Path.lstat` / `os.stat`. Revisit trigger: before Track 80A's Linux flow, or any strict-path change that calls `exists()`/`is_dir()`/`is_file()`.
+
+### [manual] macOS hook with a locked Keychain and no UI reports no-passphrase, not keyring-locked
+- **Why:** keyring's macOS backend maps only `-128` (user denied) to `KeyringLocked`. A locked login keychain in an SSH or launchd session returns `errSecInteractionNotAllowed` (`-25308`), which keyring raises as a plain `KeyringError`; the non-interactive read treats that as no value, so the hook records `no-passphrase` and the README's `mm diag` advice shows nothing Keychain-specific.
+- **Hypothesis (untested):** Inspect the swallowed `KeyringError`'s `__cause__` for the macOS status and map `-25308` to `KeyringUnavailableError("locked", "keychain")` with an unlock-the-keychain remedy.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 73A Red Team / adversarial review (PR #213). Not a regression: the old wording also said "keyring empty". Revisit trigger: an owner hook run over SSH or from a launchd agent on a fleet Mac records `no-passphrase` while the passphrase is in the Keychain.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-15

@@ -9,6 +9,7 @@ critical v1-blob regression (must fail loud post-Track-1C).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -1237,6 +1238,33 @@ class TestKeyringLibraryContract:
         assert hasattr(ss, "ItemNotFoundException")
         assert hasattr(ss, "LockedException")
 
+    def test_secretstorage_paths_the_reader_uses_where_importable(self):
+        """Module paths crypto imports, the >=3.4 UnknownObject mapping, and
+        jeepney's `.name` on DBusErrorResponse (the IsLocked check reads it)."""
+        pytest.importorskip("secretstorage")
+        import secretstorage.collection
+        import secretstorage.defines
+        import secretstorage.exceptions
+        from jeepney import DBusAddress, DBusErrorResponse, new_error, new_method_call
+
+        assert secretstorage.collection.DEFAULT_COLLECTION == (
+            "/org/freedesktop/secrets/aliases/default"
+        )
+        for name in ("SecretStorageException", "ItemNotFoundException", "LockedException"):
+            assert hasattr(secretstorage.exceptions, name)
+        # secretstorage >= 3.4 maps a missing collection's UnknownObject to
+        # ItemNotFoundException (pyproject floor); older ones raise raw D-Bus.
+        unknown_object = "org.freedesktop.DBus.Error.UnknownObject"
+        assert secretstorage.defines.DBUS_UNKNOWN_OBJECT == unknown_object
+        call = new_method_call(
+            DBusAddress("/item", "org.freedesktop.secrets", "org.freedesktop.Secret.Item"),
+            "GetSecret",
+            "o",
+            ("/session",),
+        )
+        err = DBusErrorResponse(new_error(call, "org.freedesktop.Secret.Error.IsLocked"))
+        assert err.name == "org.freedesktop.Secret.Error.IsLocked"
+
 
 class TestNonInteractiveSecretServiceRead:
     """Single Secret Service backend through get_passphrase(non_interactive)."""
@@ -1360,6 +1388,22 @@ class TestNonInteractiveSecretServiceRead:
         with pytest.raises(RuntimeError, match="property read failed"):
             get_passphrase(non_interactive=True)
 
+    def test_is_locked_storage_error_propagates_even_with_env(self, ss_harness, monkeypatch):
+        """A SecretStorageException from is_locked() is a keyring error, not a skip."""
+        ss_harness.is_locked_error = ss_harness.NotAvailable("NoReply")
+        _use_backend(monkeypatch, _ss_member())
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "env-pw")
+        with pytest.raises(ss_harness.NotAvailable):
+            get_passphrase(non_interactive=True)
+
+    def test_get_secret_storage_error_propagates_even_with_env(self, ss_harness, monkeypatch):
+        """A SecretStorageException from the item read propagates (spec 3.1 step 6)."""
+        ss_harness.items = [ss_harness.make_item(error=ss_harness.NotAvailable("NoReply"))]
+        _use_backend(monkeypatch, _ss_member())
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", "env-pw")
+        with pytest.raises(ss_harness.NotAvailable):
+            get_passphrase(non_interactive=True)
+
     def test_collection_storage_error_falls_through_like_today(self, ss_harness, monkeypatch):
         """Non-ItemNotFound SecretStorageException -> env, else no-passphrase."""
         ss_harness.collection_error = ss_harness.NotAvailable("daemon gone")
@@ -1376,7 +1420,8 @@ class TestNonInteractiveSecretServiceRead:
             get_passphrase(non_interactive=True)
         assert str(ei.value) == (
             "no passphrase available: the keyring returned none or could "
-            "not be read (backend Keyring) and MINDMELD_PASSPHRASE is "
+            "not be read (backend keyring.backends.SecretService.Keyring) and "
+            "MINDMELD_PASSPHRASE is "
             "unset; run mm diag"
         )
 
@@ -1404,6 +1449,23 @@ class TestNonInteractiveOtherBackends:
         monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
         macos_cls = type("Keyring", (), {"__module__": "keyring.backends.macOS"})
         backend = macos_cls()
+        backend.get_password = _FakeBackend(error=KeyringLocked("denied")).get_password
+        _use_backend(monkeypatch, backend)
+        with pytest.raises(KeyringUnavailableError) as ei:
+            get_passphrase(non_interactive=True)
+        assert (ei.value.reason, ei.value.backend_kind) == ("denied", "keychain")
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="real macOS keyring backend class")
+    def test_real_macos_backend_class_maps_to_keychain(self, monkeypatch):
+        """Pins the module-prefix check to keyring's actual macOS class."""
+        from keyring.backends.macOS import Keyring as MacKeyring
+        from keyring.errors import KeyringLocked
+
+        from mind_meld.errors import KeyringUnavailableError
+
+        monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+        backend = MacKeyring()
+        # Instance attribute shadows the method: the real Keychain is never read.
         backend.get_password = _FakeBackend(error=KeyringLocked("denied")).get_password
         _use_backend(monkeypatch, backend)
         with pytest.raises(KeyringUnavailableError) as ei:
@@ -1545,7 +1607,7 @@ class TestSecretServiceState:
         # conftest default: fail backend, no Secret Service member.
         state = crypto._secret_service_state()
         assert state == {
-            "backend": "Keyring",
+            "backend": "keyring.backends.fail.Keyring",
             "member": None,
             "secret_service": "n/a",
             "item": "n/a",
@@ -1557,8 +1619,8 @@ class TestSecretServiceState:
         _use_backend(monkeypatch, _ss_member())
         state = crypto._secret_service_state()
         assert (state["secret_service"], state["item"]) == ("unlocked", "absent")
-        assert state["backend"] == "Keyring"
-        assert state["member"] == "Keyring"
+        assert state["backend"] == "keyring.backends.SecretService.Keyring"
+        assert state["member"] == "keyring.backends.SecretService.Keyring"
         assert state["error"] is None
 
         ss_harness.items = [ss_harness.make_item()]
@@ -1566,6 +1628,17 @@ class TestSecretServiceState:
 
         ss_harness.items = [ss_harness.make_item(), ss_harness.make_item()]
         assert crypto._secret_service_state()["item"] == "multiple"
+        assert ss_harness.prompt_calls == []
+
+    def test_state_walks_chainer_members_once(self, ss_harness, monkeypatch):
+        """keyring's usual Linux shape: a chainer holding the SS member."""
+        ss_harness.items = [ss_harness.make_item()]
+        chainer, calls = _chainer([_FakeBackend(value=None), _ss_member()])
+        _use_backend(monkeypatch, chainer)
+        state = crypto._secret_service_state()
+        assert state["member"] == "keyring.backends.SecretService.Keyring"
+        assert (state["secret_service"], state["item"]) == ("unlocked", "present")
+        assert calls == [1]
         assert ss_harness.prompt_calls == []
 
     def test_locked_state(self, ss_harness, monkeypatch):
@@ -1601,7 +1674,7 @@ class TestSecretServiceState:
 
         monkeypatch.setattr(keyring, "get_keyring", boom)
         state = crypto._secret_service_state()
-        assert state["backend"] == "unavailable"
+        assert state["backend"] == "unknown"
         assert state["secret_service"] == "unknown"
         assert state["item"] == "unknown"
         assert state["error"] == "RuntimeError"
@@ -1633,3 +1706,28 @@ class TestSecretServiceState:
         _use_backend(monkeypatch, _ss_member())
         assert crypto._secret_service_state()["item"] == "present"
         assert read == []
+
+
+class TestFakeSecretStorageHarness:
+    """The fake must catch a regression before it can reach a real keyring."""
+
+    def test_prompt_runner_is_a_spy(self, ss_harness):
+        util = sys.modules["secretstorage.util"]
+        with pytest.raises(AssertionError):
+            util.exec_prompt(None, "/prompt")
+        assert ss_harness.prompt_calls == ["exec_prompt"]
+
+    def test_keyrings_own_secret_service_read_hits_the_spies(self, ss_harness):
+        """keyring's SecretService module is rebound to the fake."""
+        import keyring.backends.SecretService as keyring_ss
+
+        assert keyring_ss.secretstorage is sys.modules["secretstorage"]
+        ss_harness.locked = True
+        with pytest.raises(AssertionError):
+            _ss_member().get_password("mind-meld", "passphrase")
+        assert ss_harness.prompt_calls
+        assert set(ss_harness.prompt_calls) <= {
+            "get_default_collection",
+            "collection.unlock",
+            "create_collection",
+        }

@@ -135,7 +135,11 @@ jobs:
           "$smoke/venv/bin/mm" --version
           "$smoke/venv/bin/python" -c 'import secretstorage'
           iso_home=$(mktemp -d)
-          env -u DBUS_SESSION_BUS_ADDRESS HOME="$iso_home" "$smoke/venv/bin/mm" diag --json > /tmp/diag.out 2>/tmp/diag.err
+          if ! env -u DBUS_SESSION_BUS_ADDRESS HOME="$iso_home" "$smoke/venv/bin/mm" diag --json > /tmp/diag.out 2>/tmp/diag.err; then
+            echo "::error::mm diag --json failed without a session bus"
+            cat /tmp/diag.err
+            exit 1
+          fi
           if grep -q 'Traceback' /tmp/diag.err; then
             echo "::error::mm diag --json crashed without a session bus"
             cat /tmp/diag.err
@@ -154,18 +158,23 @@ jobs:
     # tests/test_secret_service_live.py against a real gnome-keyring in
     # an Arch container (the supported Linux flavor). The test fails —
     # never skips — when its tools are missing under the live flag.
+    # gnome-keyring-daemon aborts as container root ("error dropping process
+    # capabilities"): it keeps only CAP_IPC_LOCK, which Docker's default set
+    # lacks. The test runs as an unprivileged user, like a desktop session;
+    # IPC_LOCK lets the daemon keep mlock if the package grants it.
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    container: archlinux:latest
+    container:
+      image: archlinux:latest
+      options: --cap-add=IPC_LOCK
     steps:
-      - name: Install git for checkout
-        run: pacman -Sy --noconfirm git
+      # One full upgrade before checkout (git included): a bare `pacman -Sy`
+      # followed by installs is an Arch partial upgrade.
+      - name: Install system packages
+        run: pacman -Syu --noconfirm git python python-pip gnome-keyring libsecret dbus
 
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Install system packages
-        run: pacman -Syu --noconfirm python python-pip gnome-keyring libsecret dbus
 
       - name: Create venv and install (PEP 668 externally-managed Python)
         run: |
@@ -173,5 +182,13 @@ jobs:
           /opt/mm-venv/bin/python -m pip install --upgrade pip
           /opt/mm-venv/bin/python -m pip install -e '.[dev]'
 
+      - name: Create an unprivileged test user
+        run: |
+          useradd --create-home mmtest
+          chown -R mmtest: "$GITHUB_WORKSPACE" /opt/mm-venv
+
       - name: Live Secret Service test
-        run: MM_PYTHON=/opt/mm-venv/bin/python MM_LIVE_SECRET_SERVICE=1 ./bin/check --no-bootstrap --tests tests/test_secret_service_live.py
+        run: >-
+          runuser -u mmtest --
+          env HOME=/home/mmtest MM_PYTHON=/opt/mm-venv/bin/python MM_LIVE_SECRET_SERVICE=1
+          ./bin/check --no-bootstrap --tests tests/test_secret_service_live.py

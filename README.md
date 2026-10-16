@@ -242,7 +242,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 - `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed.
-- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
+- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, upgrade the producing Mac to v0.14.17+ and run mm push. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
@@ -758,8 +758,12 @@ desktop keyring cannot answer without opening a prompt, the run skips with
 exit 0, one `mm: <verb> skipped - …` line on stderr, and a breadcrumb that
 `mm status` surfaces. Nothing is half-synced; rerun the auto command after
 fixing the keyring state. `mm diag` reports what the keyring side looks like
-(`keyring` in `--json`: backend and member class names, `secret_service`,
-`item`, `error`) without reading the secret or prompting — run it first.
+(`keyring` in `--json`: module-qualified backend and member class paths such
+as `keyring.backends.SecretService.Keyring`, `secret_service`, `item`,
+`error`) without reading the secret or prompting — run it first. Diag
+reflects the shell it runs in; a hook runs in the agent's environment
+(session bus, `PYTHON_KEYRING_BACKEND`), so compare with the backend the
+`no-passphrase` breadcrumb recorded in `mm status`.
 
 The four passphrase outcomes in `mm status` / the breadcrumb:
 
@@ -769,7 +773,7 @@ The four passphrase outcomes in `mm status` / the breadcrumb:
 | `keyring-locked` (`denied`) | The keyring refused access (macOS Keychain denial, or another backend reporting locked). |
 | `keyring-no-collection` | There is no default Secret Service collection to read from. |
 | `keyring-error` | The keyring read failed some other way; see `auto<verb>.log` next to the breadcrumb. |
-| `no-passphrase` | The keyring answered with nothing (or could not be read) and `MINDMELD_PASSPHRASE` is unset. The stderr line names the backend class. |
+| `no-passphrase` | The keyring answered with nothing (or could not be read) and `MINDMELD_PASSPHRASE` is unset. The stderr line and the breadcrumb detail name the backend the hook saw. |
 
 **Linux.** Prerequisites: `mm` via pipx (Arch: `python-pipx`), plus
 `libsecret` and `gnome-keyring` (Arch package names; on Ubuntu the
@@ -783,9 +787,12 @@ secret-tool lookup service mind-meld username passphrase >/dev/null
 
 (That lookup route is documented from the Secret Service API; it is marked
 verified only after the fleet soak.) Durable fixes so hooks stop depending on
-a manual unlock: use a blank-password login keyring — the passphrase is then
-stored unencrypted on disk, relying on full-disk encryption, as Omarchy may
-install — or turn desktop autologin off so PAM unlocks the keyring at login.
+a manual unlock: turn desktop autologin off so PAM unlocks the keyring at
+login (keeps the keyring encrypted), or use a blank-password login keyring,
+as Omarchy may install. A blank password stores **every** secret in the login
+keyring unencrypted on disk — browser, Wi-Fi and SSH passphrases, other
+apps' tokens, not only mm's passphrase — so it relies entirely on full-disk
+encryption.
 
 For `keyring-no-collection`, store the passphrase once, which also creates
 the default collection through the desktop prompt:

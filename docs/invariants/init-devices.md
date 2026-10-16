@@ -111,9 +111,12 @@ Track 80A's Linux passphrase flow must keep this contract or update the
 reader with it; the README's `secret-tool store` recovery command writes
 the same attributes (plus keyring's `application` attribute).
 
-**Diag probe.** `crypto._secret_service_state()` reports backend/member
-class names and closed-vocabulary `secret_service` / `item` states for
-`mm diag` (`keyring` key). It never reads a secret (`search_items` only,
+**Diag probe.** `crypto._secret_service_state()` reports module-qualified
+backend/member class paths (`_backend_label`; every keyring backend class is
+named `Keyring`, so bare names identify nothing) and closed-vocabulary
+`secret_service` / `item` states for `mm diag` (`keyring` key); `backend` is
+`unavailable` without the keyring package and `unknown` when discovery
+raises. It never reads a secret (`search_items` only,
 for presence), never prompts, and degrades any exception to
 `unknown` + the exception class name. `cli.py` calls it module-qualified
 (`crypto._secret_service_state()`) so test patches on the owner module
