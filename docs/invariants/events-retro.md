@@ -2477,7 +2477,8 @@ on an unreadable agent dir.
 `_symlink_lives` treats py3.11/3.12's `RuntimeError("Symlink loop from ...")`
 and py3.13+'s `OSError(ELOOP)` identically as "not live". Otherwise the same
 filesystem state is a repairable classification on one Python and a hard
-`failed` on another — and CI runs 3.13 only, so the worse branch was invisible.
+`failed` on another — and CI runs only 3.13 (macOS) and 3.14 (Linux), so the
+worse branch is invisible there.
 
 **The push notice renders through `render_skill_status`,** so the push path and
 `mm install-skills` state the SAME cause. One hardcoded string said "is not

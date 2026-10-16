@@ -58,6 +58,10 @@ resolve to site-packages, and `devices --format json` against a real
   `xcode-select --install`: `/usr/bin/python3` is 3.9.6.
 - Print the resolved interpreter unconditionally.
 
+(Extended by Track 73A: the candidates are now `python3.13`, `python3.14`,
+`python3.12`, `python3.11`, `python3`, and the notice fires only when the
+pick is neither CI interpreter, 3.13 on macOS or 3.14 on Linux.)
+
 Staleness is a content hash of `pyproject.toml` + interpreter identity +
 a policy version, written to a marker after a successful install, under
 the bootstrap lock. Never `pyvenv.cfg`'s mtime — that file is written

@@ -7,7 +7,7 @@ Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack a
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
 
 ## Stack
-Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich, packaging.
+Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), rich, packaging.
 
 ## Key Principles
 - No API server. The CLI talks directly to iCloud Drive through the local filesystem.

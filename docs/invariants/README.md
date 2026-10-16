@@ -16,7 +16,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes |
-| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
+| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, (73A) the prompt-free hook keyring read and the `mm diag` keyring probe, crypto-init bootstrap |
 | `store/__init__.py` | Inert v3 package; no eager imports or lifecycle wiring |
 | `store/envelope.py` | (71C) Verified fleet header/keycheck, explicit keys/context, envelope 0x03, bounded authenticated decoding and safe store errors |
 | `store/format.py` | (71C) Commit/snapshot/presence schemas and frames, host fingerprint, whole-record digest and authenticated multipart assembly |
