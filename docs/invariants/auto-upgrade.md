@@ -114,8 +114,12 @@ downloads and multi-package installs, so most updates show phase labels alone.
 There is no bar: a phase with no measured fraction could only render as 0%
 until completion jumped it to 100%, so the spinner shows activity instead.
 Build phases have a fixed label with no invented fraction. Repeated/unknown
-lines do not change the display. No timer refreshes it, so a long silent step
-can hold one spinner frame. Measured counters do not finish the spinner; only
+lines do not change the display. A timer thread redraws the current state
+every 100 ms so the spinner keeps animating through silent steps; the timer
+never changes the phase or counters, which move only on installer output.
+Rich's `auto_refresh` stays off because its refresh thread dies with a
+traceback on a failed draw; mm's ticker turns itself off instead (see the
+display contract below). Measured counters do not finish the spinner; only
 verified update completion does. The parser handles split ANSI frames, bounds
 its partial-line buffer and emits only fixed labels and validated numeric
 counters. pip's interactive spinner ends a step's line only when the step
@@ -133,10 +137,22 @@ runs without live counters; both are decided before pipx starts.
 best-effort: the first exception from the display or parser
 (`upgrade._ProgressRelay`) turns the display off while pipx keeps running and
 the metadata is still verified. Rich reports a closed pipe as `SystemExit`, so
-that counts as a display failure too. Only `KeyboardInterrupt` (Ctrl-C while
-drawing) reaches pipx cleanup. A display that cannot start falls back to a
-plain update, and neither its final label nor stopping it can replace an
-interruption or the outcome. Only verified metadata completes the display.
+that counts as a display failure too. The spinner timer applies the same
+rule to itself: its first failed redraw stops the timer with no thread
+traceback, leaving the last drawn frame. Only `KeyboardInterrupt` (Ctrl-C
+while drawing) reaches pipx cleanup. A display that cannot start falls back
+to a plain update. If only the ticker cannot start, installer output still
+redraws the display; cleanup never joins an unstarted thread. Interruption
+during ticker startup still stops the display. Exceptions from its final
+label or shutdown cannot replace an interruption or the outcome.
+
+After settlement, shutdown signals the ticker to stop and joins a started
+ticker for at most one second. If it is still alive, it remains a daemon and
+shutdown skips Rich's stop to avoid another wait on its lock. This bounds
+only the join, not command completion: a blocked terminal write can stall
+the output callback, settlement (including cancellation), or later result
+printing before or after that join. The existing Ctrl-S/Ctrl-Z limitation
+below remains. Only verified metadata completes the display.
 
 **Only the in-place upgrade is tied to mm's terminal (load-bearing).** On a
 TTY, pipx 1.17 streams pip's output and re-raises a failed write after pip
