@@ -371,20 +371,20 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_statedb(monkeypatch, tmp_path) -> None:
+    """Every test database stays beside its isolated legacy history."""
+    from mind_meld import statedb
+
+    monkeypatch.setattr(statedb, "DB_DIR", tmp_path / "mm_state")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_pullhistory(monkeypatch, tmp_path) -> None:
-    """Redirect pullhistory.HISTORY_DIR to a per-test path.
+    """Keep legacy history inputs beside the isolated state.db.
 
-    `pullhistory.append` writes to `~/.config/mind-meld/pull-history.jsonl`
-    by default. Tests that drive the CLI (test_track_*, test_integration)
-    end up calling `_pull_core` / `_push_core`, which call
-    `pullhistory.append` with the test's fixture device id (e.g. "dev-a",
-    "peerA"). Without this autouse, the lines leak into the user's real
-    pull-history file — observed as ~1MB of fixture-named entries
-    accumulating from CI / local pytest runs.
-
-    `pullhistory.history_path()` reads `HISTORY_DIR` at call time, so a
-    single setattr suffices. Per-test overrides via explicit monkeypatch
-    in test bodies still work — last write wins.
+    HISTORY_DIR is resolved at call time. New writers use statedb.DB_DIR;
+    import/fallback must still never read the developer's real JSONL.
+    Explicit per-test overrides remain possible (last patch wins).
     """
     from mind_meld import pullhistory as _pullhistory
 

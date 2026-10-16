@@ -36,6 +36,7 @@ EXTRACTED = [
 ]
 
 LEAVES = [
+    "statedb",
     "attemptlog",
     "pullplan",
     "consoles",
@@ -956,3 +957,16 @@ def test_command_set_is_unchanged_by_the_decomposition() -> None:
         "status",
         "update",
     }
+
+
+def test_statedb_import_allowlist():
+    tree = ast.parse((SRC / "statedb.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(a.name.split(".")[0] in sys.stdlib_module_names for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0
+            if node.module == "mind_meld":
+                assert [a.name for a in node.names] == ["fsutil"]
+            else:
+                assert node.module.split(".")[0] in sys.stdlib_module_names

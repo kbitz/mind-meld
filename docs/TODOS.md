@@ -44,6 +44,56 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-ceo-review:track=73B] Report state.db health in `mm diag`
+
+- **What:** `mm diag` prints one `state.db` line: schema `user_version`, file size, history rows per `(verb, action)` class, whether `meta.history_imported` is set, and whether a hot journal is present.
+- **Why:** history writes are forensic and swallow their failures (sync invariants, "Pull/push history log"), so a broken or locked `state.db` is invisible until the owner runs `mm log` and sees nothing new.
+- **Pros:** one read-only query; turns a silent forensic failure into a visible line where the owner already looks.
+- **Cons:** another diag line to keep accurate; 2.0 adds ledger and cursor health that 82A's diag work should own anyway.
+- **Context:** Track 73B created `state.db` (rollback journal; owner decision uc1a at its /autoplan gate, 2026-10-16). No state.db problem has been observed yet.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** the owner reports a missing or stale `mm log` history, or 82A starts its `mm diag` work, whichever comes first.
+- **Source:** [plan-ceo-review:track=73B] E2.
+
+### [plan-ceo-review:track=73B] 75A card note: INV7 equivalence and the authoritative-state remedy
+
+- **What:** (a) Track 75A's `SQLiteState` adapter and oracle keep `tests/sim/invariants.py` INV7's byte-integrity and causal checks with a metadata-only ledger (no `content` column), with cases for an unpublished edit, a deletion and a pending resolution. Rebuilding `content` from current source bytes, or narrowing INV7 (`ledger == obs.state.ledger`, line 950) without equivalent coverage, is not allowed. (b) Before the first ledger row is written, replace 73B's `StateDBCorrupt` "move `state.db*` aside" advice, which is valid only for a history-only database. Track 76A owns the authoritative-state recovery contract: preserve the database, refuse unsafe continuation, and prove recovery with pending publications and unexpired displaced content present.
+- **Why:** Track 73B's ledger stores `sha, vv, size, mtime, deleted, pending` but no bytes; an unpublished edit makes current source bytes differ from the ledger's version, so a naive adapter either fails or hides real defects. Moving an authoritative `state.db` aside discards causal vectors, pending obligations, cursors and displaced bytes.
+- **Pros:** keeps the 1.3 GB sync set out of `state.db` without weakening the simulator's acceptance evidence; no destructive remedy outlives its premise.
+- **Cons:** more adapter and oracle work inside 75A; a recovery contract for 76A.
+- **Context:** decided at Track 73B's /autoplan (spec review round 2; CEO dual voices, Codex findings 2 and 3), 2026-10-16.
+- **Effort:** human M / CC S (inside 75A and 76A).
+- **Priority:** P1 (75A and 76A acceptance).
+- **Revisit when:** /roadmap next regenerates 75A's and 76A's cards.
+- **Also (Eng G7):** `history` is forensic only and its per-class prune never touches a class an older binary does not know; any 2.0 receipt that sync logic reads (the model's `record-applied`, `pull-entry`, `own-replay`, and the presence check that reads `history[-1:]`, `tests/sim/model/store.py:369`) must live in its owning Track's table or in a class with its own retention.
+- **Source:** [plan-ceo-review:track=73B] spec review 2, Consistency 3; CEO voices V9, V10; [plan-eng-review:track=73B] G7.
+
+### [plan-ceo-review:track=73B] Remove `fsutil.flock_append_jsonl(on_locked=)`
+
+- **What:** delete the `on_locked` callback parameter and its test (`tests/test_fsutil.py:348-368`).
+- **Why:** Track 73B removed pull-history's 1 MB rotation, its only production caller; the parameter is now dead code in a shared write helper.
+- **Pros:** one less swallowed-exception path in the test-write-guarded helper.
+- **Cons:** touches `fsutil.py` and `tests/test_fsutil.py`, which Tracks 73A and 74A also edit.
+- **Context:** kept by Track 73B's /autoplan (spec review round 3) to avoid colliding with 73A and 74A.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** Track 74A lands, or the next change to `flock_append_jsonl`.
+- **Source:** [plan-ceo-review:track=73B] spec review 3, Consistency 2.
+
+### [review:track=73B] Import legacy history only under the mm lock
+
+- **What:** run the one-time `pull-history.jsonl{,.1}` import only from a flush that holds the mm lockfile. Either queue the transition hook's self-upgrade row into the command's batch, or let a standalone flush insert without importing until a locked flush or `recover_if_needed` imports.
+- **Why:** the first post-upgrade history write is usually the self-upgrade row. `run_transition_hook` writes it as a standalone flush before `acquire_lock()` (`_get_config`, `_auto_command_setup`). A pre-73B process that already holds the mm lock can keep appending JSONL after the import. Those rows never reach the table, and `mm log` then shows the stale-binary notice even when PATH is fine.
+- **Pros:** the import is serialized against every pre-73B writer; the notice then means an old binary really ran later.
+- **Cons:** the self-upgrade row path changes; an import deferred until a locked command is slightly later.
+- **Context:** red-team finding during Track 73B's /review-and-prep, 2026-10-16. Stat-before-read (fixed in 73B) makes such appends fire the notice instead of disappearing silently, and README Upgrading describes the notice as evidence of past divergence. Impact is forensic only.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** an owner reports a stale-binary notice on a Mac whose `which -a mm` is clean, or the next change to `pullhistory` import or `run_transition_hook`.
+- **Source:** [review:track=73B] red-team finding 2.
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-15

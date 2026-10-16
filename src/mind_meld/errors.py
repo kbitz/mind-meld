@@ -19,6 +19,11 @@ HOST_USAGE_CAPTURE_URL = "https://github.com/kbitz/mind-meld#host-usage-capture-
 CURSOR_SQLITE_URL = "https://github.com/kbitz/mind-meld#cursor-sqlite-stores"
 NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
 LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-running"
+STATEDB_HELP_URL = "https://github.com/kbitz/mind-meld#history-database-statedb"
+SQLITE_UNAVAILABLE_REMEDY = (
+    "mm's Python has no usable sqlite3 module; "
+    "reinstall mm as described in the README Install section"
+)
 
 
 class MindMeldError(Exception):
