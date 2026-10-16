@@ -168,12 +168,28 @@ class TestInterpreter:
         assert "3.13 on macOS" in err
         assert "3.14 on Linux" in err
 
-    def test_nothing_ge_311_fails_naming_3_14(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    # Extended by the /ship test coverage audit (pass 1): platform parametrization.
+    # Value: protects=the driver's real no-Python exit prints the remedy for the
+    # host OS; fails_when=resolve_interpreter or _fix_no_python stops reading
+    # sys.platform; why_new=the OS test passes platform explicitly and this one
+    # only checked "3.14", which both remedies contain; seam=none;
+    # no_claim=a real Linux host (sys.platform is patched)
+    @pytest.mark.parametrize(
+        "platform,expect,forbid",
+        [
+            ("darwin", "do not run xcode-select --install", "distro Python"),
+            ("linux", "install a distro Python 3.11+", "xcode-select --install"),
+        ],
+    )
+    def test_nothing_ge_311_fails_naming_3_14(
+        self, tmp_path: Path, monkeypatch, capsys, platform: str, expect: str, forbid: str
+    ) -> None:
         mod = load_check()
         bindir = tmp_path / "bin"
         _stub_python(bindir, "python3", "3.9.6")
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
+        monkeypatch.setattr(mod.sys, "platform", platform)
         with pytest.raises(SystemExit) as ei:
             mod.resolve_interpreter()
         assert ei.value.code != 0
@@ -181,6 +197,8 @@ class TestInterpreter:
         assert ">= 3.11" in err or ">=3.11" in err
         assert "python3.14" in err  # looked-for list names the new candidate
         assert "3.14" in err  # remedy names 3.14 on every OS
+        assert expect in err
+        assert forbid not in err
 
     def test_no_python_remedy_chosen_by_os(self) -> None:
         mod = load_check()
@@ -244,8 +262,13 @@ class TestInterpreter:
             encoding="utf-8",
         )
         stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        # PATH holds only the stub and `dirname`: a host /usr/bin/python3.13
+        # would otherwise win under the 3.13-first candidate order.
+        dirname = shutil.which("dirname")
+        assert dirname, "dirname not on PATH"
+        (bindir / "dirname").symlink_to(dirname)
         env = os.environ.copy()
-        env["PATH"] = f"{bindir}:/usr/bin:/bin"
+        env["PATH"] = str(bindir)
         env.pop("MM_PYTHON", None)
         env["MM_STUB_MARKER"] = str(marker)
         proc = subprocess.run(
