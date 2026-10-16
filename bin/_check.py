@@ -19,8 +19,10 @@ from pathlib import Path
 POLICY_VERSION = 1
 MIN_VERSION = (3, 11)
 # CI runs 3.13 on macOS and 3.14 on Linux (Track 73A); either is preferred.
+# 3.13 is tried first so a Mac with both keeps matching the macOS CI job
+# (and its existing .venv); a 3.14-only Linux host still picks 3.14.
 CI_VERSIONS = ((3, 13), (3, 14))
-CANDIDATES = ("python3.14", "python3.13", "python3.12", "python3.11", "python3")
+CANDIDATES = ("python3.13", "python3.14", "python3.12", "python3.11", "python3")
 OWNER_NAME = ".mm-check-owner"
 OWNER_BODY = "mind-meld-bin-check\n"
 STAMP_NAME = ".mm-check-stamp"
@@ -101,7 +103,7 @@ def _fix_no_python(found: list[str], platform: str | None = None) -> str:
         platform = sys.platform
     if platform == "darwin":
         lines = [
-            "install Python 3.14 (or 3.13 / 3.12 / 3.11) and put it on PATH.",
+            "install Python 3.13 or 3.14 (3.12 / 3.11 also work) and put it on PATH.",
             "do not run xcode-select --install: /usr/bin/python3 is 3.9.6,",
             "below requires-python >=3.11, and that advice causes a second failure.",
         ]
@@ -117,7 +119,7 @@ def _fix_no_python(found: list[str], platform: str | None = None) -> str:
 
 
 def manual_recipe(python: str | None = None) -> str:
-    py = python or "python3.14"
+    py = python or "python3.13"
     return "\n".join(
         [
             f"  {py} -m venv .venv",
@@ -170,7 +172,7 @@ def _which(name: str) -> str | None:
 
 
 def resolve_interpreter() -> tuple[str, tuple[int, int, int]]:
-    """Prefer a CI interpreter (3.14, then 3.13) for parity. NOTICE,
+    """Prefer a CI interpreter (3.13, then 3.14) for parity. NOTICE,
     never hard-fail, on any other minor that satisfies requires-python
     (>=3.11, no upper bound). Classifiers are metadata, not a
     compatibility bound.
@@ -493,7 +495,7 @@ flags:
   --rebuild        recreate an owned .venv, then install
 
 env:
-  MM_PYTHON        interpreter for the venv (default: python3.14, then 3.13,
+  MM_PYTHON        interpreter for the venv (default: python3.13, then 3.14,
                    3.12, 3.11, python3). Printed unconditionally.
   MM_VENV          validate-and-use or fail; never mutated
   MM_PYTEST_WORKERS  xdist worker count (default: auto)

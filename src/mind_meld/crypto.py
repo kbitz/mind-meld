@@ -678,7 +678,7 @@ def verify_passphrase(master_key: bytes, keycheck_blob: bytes) -> None:
 _IS_LOCKED_DBUS_ERROR = "org.freedesktop.Secret.Error.IsLocked"
 
 
-def _keyring_members(kr: Any, backend: Any) -> list[Any]:
+def _keyring_members(backend: Any) -> list[Any]:
     """Backend walk list: chainer members in priority order, else [backend].
 
     `ChainerBackend.backends` recomputes discovery on each access, so it
@@ -689,6 +689,33 @@ def _keyring_members(kr: Any, backend: Any) -> list[Any]:
     if isinstance(backend, ChainerBackend):
         return list(backend.backends)
     return [backend]
+
+
+def _backend_label(backend: Any) -> str:
+    """Module-qualified class path of a keyring backend.
+
+    Every keyring backend class is named `Keyring` (macOS, SecretService,
+    fail, libsecret), so the bare class name cannot tell them apart.
+    """
+    cls = type(backend)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _keyring_backend_label() -> str:
+    """Label of the backend keyring selects in this process.
+
+    "unavailable" without the keyring package, "unknown" when backend
+    discovery itself raises. Hooks run in the agent's environment, so the
+    auto commands record this in the no-passphrase breadcrumb detail.
+    """
+    try:
+        import keyring as kr
+    except ImportError:
+        return "unavailable"
+    try:
+        return _backend_label(kr.get_keyring())
+    except Exception:
+        return "unknown"
 
 
 def _secret_service_class() -> Any:
@@ -776,7 +803,7 @@ def _non_interactive_keyring_read(kr: Any) -> str | None:
     except KeyringError:
         return None
     ss_class = _secret_service_class()
-    for member in _keyring_members(kr, backend):
+    for member in _keyring_members(backend):
         if isinstance(member, ss_class):
             value = _read_secret_service(member)
             if value is not None:
@@ -801,9 +828,11 @@ def _non_interactive_keyring_read(kr: Any) -> str | None:
 def _secret_service_state() -> dict[str, Any]:
     """Diag-only keyring probe: never reads a secret, never prompts.
 
-    Returns backend/member class names plus closed-vocabulary Secret
-    Service and item states. Any exception degrades to "unknown" with
-    the exception class name in "error" — diag must not crash.
+    Returns module-qualified backend/member class paths plus
+    closed-vocabulary Secret Service and item states. "backend" is
+    "unavailable" without the keyring package and "unknown" when backend
+    discovery raises. Any exception degrades to "unknown" with the
+    exception class name in "error" — diag must not crash.
     """
     state: dict[str, Any] = {
         "backend": "unavailable",
@@ -816,20 +845,25 @@ def _secret_service_state() -> dict[str, Any]:
         import keyring as kr
     except ImportError:
         return state
+    state["backend"] = "unknown"
     try:
         backend = kr.get_keyring()
-        state["backend"] = type(backend).__name__
+        state["backend"] = _backend_label(backend)
         ss_member = next(
-            (m for m in _keyring_members(kr, backend) if isinstance(m, _secret_service_class())),
+            (m for m in _keyring_members(backend) if isinstance(m, _secret_service_class())),
             None,
         )
         if ss_member is None:
             return state
-        state["member"] = type(ss_member).__name__
+        state["member"] = _backend_label(ss_member)
         import secretstorage
 
         with closing(secretstorage.dbus_init()) as conn:
-            collection = _open_secret_service_collection(conn, ss_member)
+            try:
+                collection = _open_secret_service_collection(conn, ss_member)
+            except KeyringUnavailableError:  # only no-default-collection
+                state["secret_service"] = "no-default-collection"
+                return state
             if collection.is_locked():
                 state["secret_service"] = "locked"
                 state["item"] = "unknown"
@@ -838,15 +872,6 @@ def _secret_service_state() -> dict[str, Any]:
             items = list(collection.search_items(_scheme_query(ss_member)))
             state["item"] = "absent" if not items else "present" if len(items) == 1 else "multiple"
             return state
-    except KeyringUnavailableError as e:
-        if e.reason == "no-default-collection":
-            state["secret_service"] = "no-default-collection"
-            state["item"] = "n/a"
-        else:
-            state["secret_service"] = "unknown"
-            state["item"] = "unknown"
-            state["error"] = type(e).__name__
-        return state
     except Exception as e:
         state["secret_service"] = "unknown"
         state["item"] = "unknown"
@@ -881,10 +906,7 @@ def get_passphrase(non_interactive: bool = False) -> str:
         pass
     else:
         if non_interactive:
-            try:
-                backend_name = type(kr.get_keyring()).__name__
-            except Exception:
-                backend_name = "unknown"
+            backend_name = _keyring_backend_label()
             try:
                 stored = _non_interactive_keyring_read(kr)
             except KeyringUnavailableError:

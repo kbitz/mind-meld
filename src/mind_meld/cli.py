@@ -10732,6 +10732,8 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
       - config typed no-cause   -> typed one-line stderr (no log)
       - config typed w/cause    -> typed one-line stderr + full chain to log
       - config unexpected error -> one-line stderr + traceback to log
+      - keyring cannot answer   -> remedy one-line stderr + keyring-locked /
+        without a prompt           keyring-no-collection breadcrumb (no log)
       - keyring + env empty     -> typed one-line stderr (no log)
       - crypto typed no-cause   -> typed one-line stderr (no log)
       - crypto typed w/cause    -> typed one-line stderr + full chain to log
@@ -10792,13 +10794,18 @@ def _auto_command_setup(verb: str) -> _AutoSetup | None:
         return None
     except CryptoError as e:
         _print_auto_typed_error(verb, "skipped", e)
-        _write_autorun_breadcrumb(verb, "no-passphrase")
+        # Detail: the backend this hook process saw (Track 73A). Hooks run
+        # in the agent's environment, which `mm diag` in a terminal may not
+        # share, so `mm status` shows what the hook actually used.
+        _write_autorun_breadcrumb(verb, "no-passphrase", crypto._keyring_backend_label())
         return None
     except Exception as e:
         # crypto.get_passphrase narrowed its keyring catch to
         # (KeyringError, ImportError) in v0.8.9. Other exception kinds
-        # (OSError from a locked keychain, RuntimeError from a broken
-        # Linux DBus backend) now propagate here. Without this guard they
+        # (an unexpected OSError from a backend, RuntimeError or a
+        # secretstorage error from a broken Linux DBus session) now
+        # propagate here; a locked or denied keyring takes the
+        # KeyringUnavailableError arm above (Track 73A). Without this guard they
         # would escape the hook entirely — no breadcrumb, no stderr line,
         # silent sync stop. Mirrors the backend-error shape below.
         print(
