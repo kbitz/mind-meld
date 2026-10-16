@@ -133,11 +133,14 @@ MIGRATIONS = (
 
 @contextmanager
 def transaction(conn):
+    """Write transaction; rechecks compatibility once it holds the write lock."""
     if conn.in_transaction:
         raise StateDBError("nested transaction")
     with translate():
         conn.execute("BEGIN IMMEDIATE")
         try:
+            # A newer mm may raise compat_version after connect's checks.
+            check_compat(conn)
             yield
             conn.execute("COMMIT")
         except BaseException:
@@ -205,8 +208,7 @@ def connect(*, read_only: bool):
                     conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
                     conn.execute("PRAGMA journal_mode = DELETE")
                 with transaction(conn):
-                    # The transaction rechecks both gates after racing openers.
-                    check_compat(conn)
+                    # transaction() rechecks compatibility after racing openers.
                     version = conn.execute("PRAGMA user_version").fetchone()[0]
                     for index in range(version, len(MIGRATIONS)):
                         statements, compat = MIGRATIONS[index]

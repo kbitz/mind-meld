@@ -612,7 +612,8 @@ or missing import marker uses the legacy JSONL reader. The URI is percent-quoted
 and has `mode=ro`. A hot rollback journal raises the typed read-only error;
 every non-preview push/pull/auto command and `mm recapture` repairs it under the
 mm lock before work, even on an unchanged sync. Recovery failures never fail
-sync. `mm log` rechecks compat_version inside its read snapshot; malformed
+sync. `mm log` rechecks compat_version inside its read snapshot, and every
+write transaction rechecks it after BEGIN IMMEDIATE; malformed
 stored values (compat_version, legacy_jsonl_stat, a row's extra) are corrupt.
 
 A statedb write transaction is always the **innermost** lock: never acquire the

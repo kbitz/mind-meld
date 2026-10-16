@@ -858,3 +858,36 @@ def test_since_keeps_microsecond_precision():
     assert [r["rel_path"] for r in pullhistory.query(since=stamp)] == ["at"]
     later = datetime(2026, 1, 2, 3, 4, 5, 123458, tzinfo=timezone.utc)
     assert pullhistory.query(since=later) == []
+
+
+@pytest.mark.parametrize("writer", ["flush", "maintain"])
+def test_writers_recheck_compat_inside_their_transaction(monkeypatch, writer):
+    import sqlite3
+    from contextlib import contextmanager
+
+    add("before")
+    original = statedb.connect
+
+    @contextmanager
+    def racing(*, read_only):
+        with original(read_only=read_only) as conn:
+            if not read_only:
+                # A newer mm raises compat after connect's checks, before our write.
+                with sqlite3.connect(statedb.db_path()) as newer:
+                    newer.execute("UPDATE meta SET value='2' WHERE key='compat_version'")
+                newer.close()
+            yield conn
+
+    monkeypatch.setattr(statedb, "connect", racing)
+    before = statedb.db_path().read_bytes()
+    with pullhistory.command_scope():
+        if writer == "flush":
+            add("after")
+        else:
+            pullhistory.maintain_best_effort()
+        assert pullhistory.failed()
+    monkeypatch.setattr(statedb, "connect", original)
+    with sqlite3.connect(statedb.db_path()) as conn:
+        assert conn.execute("SELECT rel_path FROM history").fetchall() == [("before",)]
+    conn.close()
+    assert statedb.db_path().stat().st_size == len(before)
