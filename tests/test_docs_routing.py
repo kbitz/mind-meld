@@ -1146,6 +1146,33 @@ def test_ci_yml_invokes_bin_check_as_a_command() -> None:
     )
 
 
+def _ci_job(body: str, name: str) -> str:
+    """Text of one top-level job in ci.yml (two-space indented key)."""
+    match = re.search(rf"(?m)^  {re.escape(name)}:\n((?:(?:    .*)?\n)+)", body + "\n")
+    assert match, f"ci.yml has no {name!r} job"
+    return match.group(1)
+
+
+def test_ci_yml_runs_the_three_track_73a_jobs() -> None:
+    """Track 73A: `ci` (macOS, 3.13; the name may be a required check),
+    `portable-linux` (Ubuntu, 3.14) and `secret-service-live` (the live
+    keyring test in Arch, as an unprivileged user, with the live flag)."""
+    body = _code_without_comments((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    mac = _ci_job(body, "ci")
+    assert "runs-on: macos-latest" in mac
+    assert 'python-version: "3.13"' in mac
+    linux = _ci_job(body, "portable-linux")
+    assert "runs-on: ubuntu-latest" in linux
+    assert 'python-version: "3.14"' in linux
+    assert "./bin/check --no-bootstrap" in linux
+    assert "diag --json" in linux  # the no-session-bus wheel smoke
+    live = _ci_job(body, "secret-service-live")
+    assert "image: archlinux:latest" in live
+    assert "runuser -u mmtest" in live  # gnome-keyring aborts as root
+    assert "MM_LIVE_SECRET_SERVICE=1" in live
+    assert "tests/test_secret_service_live.py" in live
+
+
 def test_release_yml_latest_advance_compares_tag_to_head() -> None:
     """latest must not move to an untagged commit.
 

@@ -1,6 +1,9 @@
 {
   "runner": "./bin/check --tests {files}",
   "dependencies": {
+    ".github/workflows/ci.yml": [
+      "tests/test_docs_routing.py"
+    ],
     "docs/roadmap-future.md": [],
     "docs/SPEC.md": [],
     "tests/fixtures/host_sessions/muse/2026/10/13/session-a/session.jsonl": [
