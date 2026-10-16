@@ -8303,6 +8303,43 @@ def preview62(push_preview56, tmp_path, monkeypatch):
     events_tail._prepare_recapture(
         env["config"], sources, "dev-a", since=datetime.now(timezone.utc) - timedelta(days=1)
     )
+    # The walk returns when its budget expires and does not wait out a slow
+    # git log. The recording pass then has no log entry, and the command the
+    # test issues next fails the allowlist. Seed the two read-only calls the
+    # walk is allowed to make unless it already recorded them.
+    from mind_meld import gitenv
+
+    resolved = str(repo.resolve())
+
+    def already_recorded(argv: list[str]) -> bool:
+        key = tuple(arg for arg in argv if not arg.startswith("--since="))
+        return any(
+            key == tuple(arg for arg in seen if not arg.startswith("--since=")) for seen in replay
+        )
+
+    log_argv = [
+        "git",
+        "-C",
+        resolved,
+        "log",
+        "--since=1970-01-01T00:00:00+00:00",
+        "--numstat",
+        "-M",
+        "-C",
+        f"--format={_mm_events._GIT_LOG_FORMAT}",
+    ]
+    remote_argv = ["git", "-C", resolved, "config", "--get", "remote.origin.url"]
+    git_kwargs = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "env": gitenv.scrubbed_git_env(),
+        "timeout": 30,
+    }
+    if not already_recorded(log_argv):
+        record(log_argv, errors="replace", **git_kwargs)
+    if not already_recorded(remote_argv):
+        record(remote_argv, errors="strict", **git_kwargs)
 
     def run(argv, **kwargs):
         key = tuple(arg for arg in argv if not arg.startswith("--since="))

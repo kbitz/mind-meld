@@ -682,7 +682,10 @@ class TestPipxSeams:
     ):
         pipx_install()
         monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
-        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 1)
+        # Two interpreters have to start, and the child has to ignore SIGINT,
+        # before the pid line exists. One second loses that race when the
+        # suite is using every core. The child still sleeps longer than this.
+        monkeypatch.setattr(upgrade, "PIPX_TIMEOUT_SECONDS", 15)
         monkeypatch.setattr(upgrade, "PIPX_STOP_GRACE_SECONDS", 0.2)
         ready = tmp_path / "ready"
         child_code = (
