@@ -55,7 +55,7 @@ def test_git_walk_degradation_names_current_failure_check():
 
 def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypatch):
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.console, "width", 240)
+    monkeypatch.setattr(cli_module.console, "_width", 240)
     now = datetime.now(timezone.utc).isoformat()
     _mm_events.write_push_event(
         tmp_path / "mm-events" / "events",

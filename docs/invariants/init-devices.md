@@ -108,11 +108,13 @@ configured scheme (`member.schemes[member.scheme]`): default
 `Title=mind-meld`, `UserName=passphrase`. Writers must keep storing under
 that scheme — `store_passphrase_in_keyring` does so through keyring today.
 Track 80A's Linux passphrase flow must keep this contract or update the
-reader with it. The `secretstorage>=3.4` floor exists because only 3.4+ maps
-a missing collection's D-Bus `UnknownObject` reply to `ItemNotFoundException`;
-3.3.x raised a raw D-Bus error, which surfaced as `keyring-error` instead of
-`keyring-no-collection`; the README's `secret-tool store` recovery command writes
-the same attributes (plus keyring's `application` attribute).
+reader with it; the README's `secret-tool store` recovery command writes the
+same attributes (plus keyring's `application` attribute).
+
+The `secretstorage>=3.4` floor exists because only 3.4+ maps a missing
+collection's D-Bus `UnknownObject` reply to `ItemNotFoundException`; 3.3.x
+raised a raw D-Bus error, which surfaced as `keyring-error` instead of
+`keyring-no-collection`.
 
 **Diag probe.** `crypto._secret_service_state()` reports module-qualified
 backend/member class paths (`_backend_label`; every keyring backend class is

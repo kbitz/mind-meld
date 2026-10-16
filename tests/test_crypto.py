@@ -1265,26 +1265,23 @@ class TestKeyringLibraryContract:
         err = DBusErrorResponse(new_error(call, "org.freedesktop.Secret.Error.IsLocked"))
         assert err.name == "org.freedesktop.Secret.Error.IsLocked"
 
-    def test_unknown_object_maps_to_item_not_found_where_importable(self):
-        """Behavior behind the >=3.4 floor: a missing collection's D-Bus
-        UnknownObject reply surfaces as ItemNotFoundException (3.3.x raised a
-        raw DBusErrorResponse, so the reader reported keyring-error)."""
+    def test_unknown_object_reaches_the_reader_as_no_collection_where_importable(self):
+        """Behavior behind the >=3.4 floor, through the reader's own entry
+        point: a missing collection's D-Bus UnknownObject reply becomes
+        no-default-collection (3.3.x raised a raw DBusErrorResponse, so the
+        hook reported keyring-error)."""
         pytest.importorskip("secretstorage")
-        import secretstorage.exceptions
         from jeepney import new_error
-        from secretstorage.util import DBusAddressWrapper
+
+        from mind_meld.errors import KeyringUnavailableError
 
         class _Conn:
             def send_and_get_reply(self, msg):
                 return new_error(msg, "org.freedesktop.DBus.Error.UnknownObject")
 
-        wrapper = DBusAddressWrapper(
-            "/org/freedesktop/secrets/aliases/default",
-            "org.freedesktop.Secret.Collection",
-            _Conn(),
-        )
-        with pytest.raises(secretstorage.exceptions.ItemNotFoundException):
-            wrapper.get_property("Label")
+        with pytest.raises(KeyringUnavailableError) as ei:
+            crypto._open_secret_service_collection(_Conn(), _ss_member())
+        assert ei.value.reason == "no-default-collection"
 
 
 class TestNonInteractiveSecretServiceRead:

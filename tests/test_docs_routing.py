@@ -1165,12 +1165,17 @@ def test_ci_yml_runs_the_three_track_73a_jobs() -> None:
     assert "runs-on: ubuntu-latest" in linux
     assert 'python-version: "3.14"' in linux
     assert "./bin/check --no-bootstrap" in linux
-    assert "diag --json" in linux  # the no-session-bus wheel smoke
+    # The wheel smoke runs diag with the session bus removed, on one line.
+    assert re.search(r"env -u DBUS_SESSION_BUS_ADDRESS\b[^\n]*\bmm\b[^\n]*diag --json", linux)
     live = _ci_job(body, "secret-service-live")
     assert "image: archlinux:latest" in live
-    assert "runuser -u mmtest" in live  # gnome-keyring aborts as root
-    assert "MM_LIVE_SECRET_SERVICE=1" in live
-    assert "tests/test_secret_service_live.py" in live
+    # One step: unprivileged user (gnome-keyring aborts as root), the live
+    # flag, and the live test file, so none can drift onto another step.
+    assert re.search(
+        r"runuser -u mmtest --\s+env\b[^\n]*\bMM_LIVE_SECRET_SERVICE=1\b[^\n]*\n"
+        r"\s*\./bin/check\b[^\n]*tests/test_secret_service_live\.py",
+        live,
+    )
 
 
 def test_release_yml_latest_advance_compares_tag_to_head() -> None:
