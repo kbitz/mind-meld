@@ -2427,6 +2427,69 @@ class TestUpdateCommand:
         assert thread_errors == []
         assert "Updated mm 1.2.0 → 1.3.0." in terminal.getvalue()
 
+    def test_spinner_shutdown_leaves_a_blocked_ticker_as_a_daemon(self, pipx_install, monkeypatch):
+        pipx_install()
+        monkeypatch.setattr(cli, "console", Console(file=_TerminalBuffer(), force_terminal=True))
+        monkeypatch.setattr(cli, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+        monkeypatch.setattr(cli, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+        drawing = threading.Event()
+        release_draw = threading.Event()
+        finished = threading.Event()
+        tickers, displays, stopped, outcomes, errors = [], [], [], [], []
+        original_refresh = cli.Progress.refresh
+        original_stop = cli.Progress.stop
+        expected = upgrade.UpdateOutcome("updated", "1.2.0", "1.3.0")
+
+        def refresh(progress):
+            if not displays:
+                displays.append(progress)
+            if threading.current_thread().name == "mm-update-spinner":
+                tickers.append(threading.current_thread())
+                drawing.set()
+                # Block before taking Rich's lock: this isolates the join
+                # contract from the accepted paused-terminal limitation.
+                release_draw.wait()
+            return original_refresh(progress)
+
+        def stop(progress):
+            stopped.append(progress)
+            return original_stop(progress)
+
+        def run_update(*args, **kwargs):
+            assert drawing.wait(5), "ticker never entered the blocked draw"
+            return expected
+
+        def update():
+            try:
+                outcomes.append(
+                    cli._run_update_with_progress(upgrade.detect_install(), PIPX, latest="1.3.0")
+                )
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(cli.Progress, "refresh", refresh)
+        monkeypatch.setattr(cli.Progress, "stop", stop)
+        monkeypatch.setattr(upgrade, "run_update", run_update)
+        caller = threading.Thread(target=update, daemon=True)
+        caller.start()
+        try:
+            assert finished.wait(5), "shutdown waited for the blocked ticker"
+            assert not errors
+            assert outcomes == [expected]
+            assert len(tickers) == 1 and tickers[0].is_alive() and tickers[0].daemon
+            assert stopped == []
+        finally:
+            release_draw.set()
+            caller.join(timeout=5)
+            for ticker in tickers:
+                ticker.join(timeout=5)
+            for progress in displays:
+                original_stop(progress)
+        assert not caller.is_alive()
+        assert all(not ticker.is_alive() for ticker in tickers)
+
     @pytest.mark.parametrize("scenario", ["updated", "failed", "cancelled"])
     def test_spinner_start_failure_preserves_installer_outcome(
         self, pipx_install, monkeypatch, scenario
