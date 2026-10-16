@@ -982,6 +982,26 @@ def test_auto_command_skips_when_keyring_denies(tmp_path, monkeypatch, verb, kin
     assert not (iso / f"auto{verb}.log").exists()
 
 
+def test_autopull_no_passphrase_records_unknown_backend(tmp_path, monkeypatch):
+    """A backend lookup that raises records detail `unknown` (D1 label)."""
+    import keyring
+    from keyring.errors import NoKeyringError
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+
+    def no_backend():
+        raise NoKeyringError("no backend")
+
+    monkeypatch.setattr(keyring, "get_keyring", no_backend)
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0
+    assert "(backend unknown)" in (r.stderr or "")
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert (entry.get("outcome"), entry.get("detail")) == ("no-passphrase", "unknown")
+
+
 @pytest.mark.parametrize(
     "outcome,detail",
     [
@@ -996,7 +1016,9 @@ def test_status_hint_for_every_keyring_outcome(tmp_path, monkeypatch, outcome, d
     """Spec 3.4: both outcomes hint, with or without a (known) detail."""
     _setup_real_config(tmp_path, monkeypatch)
     _redirect_sidecar(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli_module.console, "width", 240)
+    # _width, not width: the property setter makes undo pin the computed
+    # width for the rest of the worker.
+    monkeypatch.setattr(cli_module.console, "_width", 240)
     cli_module._write_autorun_breadcrumb("pull", outcome, detail)
 
     r = runner.invoke(app, ["status"])
@@ -1012,7 +1034,9 @@ def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):
 
     _setup_real_config(tmp_path, monkeypatch)
     _redirect_sidecar(monkeypatch, tmp_path)
-    monkeypatch.setattr(cli_module.console, "width", 240)
+    # _width, not width: the property setter makes undo pin the computed
+    # width for the rest of the worker.
+    monkeypatch.setattr(cli_module.console, "_width", 240)
 
     control = runner.invoke(app, ["status"])
     assert control.exit_code == 0, control.output

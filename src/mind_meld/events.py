@@ -826,9 +826,9 @@ def _classify_git_root(path: Path) -> bool:
     Accepts a normal clone (``.git`` directory containing ``HEAD``) and a
     worktree or submodule (``.git`` file whose first line is ``gitdir:``
     pointing at an existing git dir). Wrapped in ``OSError`` because on
-    Python 3.11 (the declared floor) ``Path.exists()`` / ``Path.is_dir()``
-    raise ``PermissionError`` on an unreadable directory; on 3.13+ they
-    return False. CI runs 3.13 only, so this cannot reproduce there.
+    Python 3.11-3.13 ``Path.exists()`` / ``Path.is_dir()`` raise
+    ``PermissionError`` on an unreadable directory; on 3.14+ they return
+    False. CI runs 3.13 (macOS) and 3.14 (Linux).
     """
     try:
         git = path / ".git"

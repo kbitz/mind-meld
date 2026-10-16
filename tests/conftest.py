@@ -726,16 +726,17 @@ class _SecretStorageHarness:
         util_mod.exec_prompt = prompt_spy("exec_prompt")
         util_mod.unlock_objects = prompt_spy("unlock_objects")
         ss.util = util_mod
+        # keyring's SecretService module binds secretstorage at import (the
+        # real one on Linux, none on macOS). Import it BEFORE the fakes enter
+        # sys.modules, so it never binds a fake that undo would then keep;
+        # then rebind it so a regression that routes a Secret Service member
+        # through keyring's own read hits the spies, not a session keyring.
+        import keyring.backends.SecretService as _keyring_ss
+
         monkeypatch.setitem(sys.modules, "secretstorage", ss)
         monkeypatch.setitem(sys.modules, "secretstorage.collection", coll_mod)
         monkeypatch.setitem(sys.modules, "secretstorage.exceptions", exc_mod)
         monkeypatch.setitem(sys.modules, "secretstorage.util", util_mod)
-        # keyring's SecretService module bound the real secretstorage at
-        # import (Linux). Rebind it to the fake so a regression that routes
-        # a Secret Service member through keyring's own read hits the spies
-        # instead of a real session keyring.
-        import keyring.backends.SecretService as _keyring_ss
-
         monkeypatch.setattr(_keyring_ss, "secretstorage", ss, raising=False)
         monkeypatch.setattr(_keyring_ss, "exceptions", exc_mod, raising=False)
 

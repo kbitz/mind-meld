@@ -1598,7 +1598,8 @@ Each scenario runs under its own `dbus-run-session` with a throwaway HOME —
 it never touches your desktop keyring — and with the flag set a missing tool
 fails the test rather than skipping it, so the flag fails by design on macOS.
 Without the flag the live scenarios skip and only the portable
-process-teardown test runs.
+process-teardown tests run. Run it as a non-root user: gnome-keyring-daemon
+aborts as root in a container ("error dropping process capabilities").
 
 From a clone (no environment required):
 

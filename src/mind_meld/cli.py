@@ -7185,9 +7185,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         publication/publication_reason, latest_attempt class/cause/time/readers/
         read-reason/superseded evidence and sanitized errors
         may escape; never hosts, tokens_by_day, magnitudes, models or peer ids
-      * keyring values other than the backend/member class names, the
-        closed secret_service / item vocabularies and an exception class
-        name; never a secret, an item label or an item path (Track 73A)
+      * keyring values other than the module-qualified backend/member class
+        paths, the closed secret_service / item vocabularies and an
+        exception class name; never a secret, an item label or an item path
+        (Track 73A)
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are

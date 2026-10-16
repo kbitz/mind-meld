@@ -1265,6 +1265,27 @@ class TestKeyringLibraryContract:
         err = DBusErrorResponse(new_error(call, "org.freedesktop.Secret.Error.IsLocked"))
         assert err.name == "org.freedesktop.Secret.Error.IsLocked"
 
+    def test_unknown_object_maps_to_item_not_found_where_importable(self):
+        """Behavior behind the >=3.4 floor: a missing collection's D-Bus
+        UnknownObject reply surfaces as ItemNotFoundException (3.3.x raised a
+        raw DBusErrorResponse, so the reader reported keyring-error)."""
+        pytest.importorskip("secretstorage")
+        import secretstorage.exceptions
+        from jeepney import new_error
+        from secretstorage.util import DBusAddressWrapper
+
+        class _Conn:
+            def send_and_get_reply(self, msg):
+                return new_error(msg, "org.freedesktop.DBus.Error.UnknownObject")
+
+        wrapper = DBusAddressWrapper(
+            "/org/freedesktop/secrets/aliases/default",
+            "org.freedesktop.Secret.Collection",
+            _Conn(),
+        )
+        with pytest.raises(secretstorage.exceptions.ItemNotFoundException):
+            wrapper.get_property("Label")
+
 
 class TestNonInteractiveSecretServiceRead:
     """Single Secret Service backend through get_passphrase(non_interactive)."""
@@ -1500,7 +1521,7 @@ class TestNonInteractiveOtherBackends:
             raise NoKeyringError("no backend")
 
         monkeypatch.setattr(keyring, "get_keyring", no_backend)
-        with pytest.raises(CryptoError, match="no passphrase available"):
+        with pytest.raises(CryptoError, match=r"no passphrase available.*\(backend unknown\)"):
             get_passphrase(non_interactive=True)
 
     def test_interactive_path_unchanged(self, monkeypatch):
@@ -1716,6 +1737,27 @@ class TestFakeSecretStorageHarness:
         with pytest.raises(AssertionError):
             util.exec_prompt(None, "/prompt")
         assert ss_harness.prompt_calls == ["exec_prompt"]
+
+    def test_undo_restores_the_pre_harness_binding(self, monkeypatch):
+        """The harness may be the first importer of keyring's SecretService
+        module; undo must not leave that module bound to the dead fake."""
+        import keyring.backends
+        import keyring.backends.SecretService as original
+        from keyring.backend import KeyringBackend
+
+        from tests.conftest import _SecretStorageHarness
+
+        # A fresh import registers another backend class and repoints the
+        # package attribute; restore both so later tests see one module.
+        monkeypatch.setattr(KeyringBackend, "_classes", set(KeyringBackend._classes))
+        monkeypatch.setattr(keyring.backends, "SecretService", original)
+        monkeypatch.delitem(sys.modules, "keyring.backends.SecretService")
+        inner = pytest.MonkeyPatch()
+        _SecretStorageHarness().install(inner)
+        inner.undo()
+        import keyring.backends.SecretService as keyring_ss
+
+        assert vars(keyring_ss).get("secretstorage") is sys.modules.get("secretstorage")
 
     def test_keyrings_own_secret_service_read_hits_the_spies(self, ss_harness):
         """keyring's SecretService module is rebound to the fake."""

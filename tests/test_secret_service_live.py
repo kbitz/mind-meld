@@ -350,8 +350,8 @@ def _child_main_scenario() -> int:
         checks["set_then_read"] = crypto._read_secret_service(member) == "live-test-pw"
 
         # secret-tool parity: an item stored by libsecret is readable.
-        # libsecret adds its own attributes (xdg:schema), so it would not
-        # replace keyring's item; delete that first so exactly one matches.
+        # Delete keyring's item first so the read can only be satisfied by
+        # the secret-tool item, whether or not its store replaces keyring's.
         keyring.delete_password("mind-meld", "passphrase")
         secret_tool = shutil.which("secret-tool")
         if secret_tool is None:

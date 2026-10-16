@@ -745,7 +745,7 @@ class TestDiscoverGitRoots:
 
         monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", read_cwd)
         assert events._probe_claude(deadline_monotonic=1.0) == [tmp_path / "repo"]
-        # iterdir order is the filesystem's (sorted on APFS, hashed on ext4):
+        # iterdir order is the filesystem's (unsorted on APFS and ext4):
         # exactly one project is probed before the deadline stops the walk.
         assert len(seen) == 1
         assert seen[0] in (first, second)
