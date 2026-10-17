@@ -154,14 +154,27 @@ def reader_rule(
 
 
 def reconcile_rule(
-    *, fleet_fork=False, own_fork=False, foreign_host=False, own_missing=False
+    *,
+    fleet_fork=False,
+    own_fork=False,
+    foreign_host=False,
+    chain_fork=False,
+    own_missing=False,
 ) -> str | None:
+    """§9 refusal codes, strongest evidence first.
+
+    ``fork``: a transport conflict copy of a commit or ``fleet.json``. ``fork-clone``:
+    a record from another host under this device id. ``fork-restore``: this host's own
+    chain diverged from its own log. ``missing-own-directory``: only once the folder is
+    synced and ``dev/<me>/`` is still absent (the caller decides; before that it waits).
+    """
     return next(
         (
             reason
             for flag, reason in (
                 (fleet_fork or own_fork, "fork"),
-                (foreign_host, "foreign-host"),
+                (foreign_host, "fork-clone"),
+                (chain_fork, "fork-restore"),
                 (own_missing, "missing-own-directory"),
             )
             if flag

@@ -115,11 +115,16 @@ Interchangeability).
 - Every automatic conflict resolution is a symmetric function of the versions.
 - Accepted manual steps: Syncthing install and pairing confirmation, the
   cutover runbook, `mm resolve`, retiring dead devices, unlocking the Linux
-  keyring before hooks run.
+  keyring before hooks run, `mm rejoin` after a restored machine refuses with
+  a fork.
 - Known limits: paths outside the home folder stay machine-specific; a
   snapshot is a device's whole state (about 330 MB sealed today) and is taken
   only from an attended push; tombstones are never dropped; 2.0 never reads
-  1.x storage.
+  1.x storage. After a restore, a machine that publishes before Syncthing has
+  returned any of its own records or a peer's receipt forks its device id and
+  refuses until `mm rejoin`. An edit made after such a restore can lose to a
+  version derived from the pre-restore copy; mm keeps it in `displaced` and
+  warns until it expires (30 days).
 - 1.x is frozen at cutover: the GC repair and the scope trim are the last
   planned 1.x releases, plus two owner-approved exceptions, each a single
   minor: Muse host support (new reader name and sync source; no new host

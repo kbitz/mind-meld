@@ -10,9 +10,13 @@ from pathlib import Path
 
 from mind_meld.store import envelope
 
-from .transport import EPOCH, FakeTransport, device_name, owned_path, read_tree
+from .transport import EPOCH, FakeTransport, Index, device_name, owned_path, read_tree
 
 PASSPHRASE = "simulated-v2-passphrase"
+# Record families come from sha256(run salt || fleet counter): deterministic for a
+# replayed trace and independent of PYTHONHASHSEED and os.urandom, but not
+# monotonic, so nothing may assume that a later family sorts later.
+FAMILY_SALT = b"mm-sim-record-family-v1"
 STIGNORE = b"(?d).mm-tmp-*\n(?d).DS_Store\n"
 DAY = 86400
 PATHS = ("notes.txt", "other.txt", "MEMORY.md", "events.jsonl")
@@ -28,8 +32,14 @@ CONTENTS = (
     b"sim-marker-binary0005\xff\n",
 )
 MARKERS = tuple(data if i in (3, 4) else data[:20] for i, data in enumerate(CONTENTS) if data)
-MAX_IDS = 6
-# Snapshot cap: 4 paths, each <= all pool lines + 6 counters; <= 100 steps
+# Four devices plus up to four rejoins. The old cap of six left room for two rejoins
+# once the fleet was full, and restores add fork-and-rejoin paths; PART_BYTES stays
+# at its 1024 floor (the snapshot cap moves 7724 -> 7980 bytes), so sealing is
+# unchanged.
+MAX_DEVICES = 4
+MAX_REJOINS = 4
+MAX_IDS = MAX_DEVICES + MAX_REJOINS
+# Snapshot cap: 4 paths, each <= all pool lines + MAX_IDS counters; <= 100 steps
 # per example => counters <= 10000. 2048-byte header/cursor allowance and
 # 1024 bytes metadata per path. Divide by 512, round up; floor 1024 permits
 # ordinary commits into multiple parts while bounding the largest snapshot.
@@ -105,6 +115,13 @@ class StoreFleet:
         self.last_observation = None
         self.action_seconds = []
         self.allow_corruption = False
+        # Held by the fleet, never on a device disk. ``forced_families`` is the
+        # collision hook: its values are returned first, in order.
+        self.family_counter = 0
+        self.forced_families: list[str] = []
+        # Called with every drawn family, so a test can make a name appear between the
+        # publisher's listing and its exclusive create (a real EEXIST race).
+        self.family_hook = None
 
     def ordered(self) -> list[StoreDevice]:
         return [self.devices[n] for n in sorted(self.devices)]
@@ -115,7 +132,7 @@ class StoreFleet:
             raise ValueError("v2 requires a fresh alphanumeric name and at most 4 devices")
         mm_id = hashlib.sha256(name.encode()).hexdigest()[:8]
         if len(self.ids | {mm_id}) > MAX_IDS:
-            raise ValueError("v2 run permits at most 6 device ids")
+            raise ValueError(f"v2 run permits at most {MAX_IDS} device ids")
         root = owned_path(self.root, name)
         device = StoreDevice(self, name, root, mm_id, "hardware-" + name)
         for directory in (device.source_root, device.state_root, device.replica_root):
@@ -124,6 +141,35 @@ class StoreFleet:
         self.devices[name] = device
         self.ids.add(mm_id)
         return device
+
+    def next_family(self) -> str:
+        """The simulator's ``family_source``: 8 lowercase hex, fresh per publication."""
+        if self.forced_families:
+            family = self.forced_families.pop(0)
+        else:
+            self.family_counter += 1
+            digest = hashlib.sha256(FAMILY_SALT + self.family_counter.to_bytes(8, "big"))
+            family = digest.hexdigest()[:8]
+        if self.family_hook is not None:
+            self.family_hook(family)
+        return family
+
+    def force_families(self, *families: str) -> None:
+        """Test hook: the next draws return these, so a name can collide on purpose."""
+        self.forced_families.extend(families)
+
+    def folder_synced(self, name: str) -> bool:
+        """Model of Syncthing reporting an idle folder with nothing needed here.
+
+        Presence files do not count: peers refresh presence on their own clock and a
+        presence arrival can never complete a record, so it must not hold the
+        torn/skip-ahead sync gate (in settle, hourly presence refresh under large
+        clock advances would otherwise starve torn closure forever).
+        """
+        return not any(
+            choice.dst == name and not choice.path.endswith("presence.enc")
+            for choice in self.transport.pending()
+        )
 
     def keys(self, device: StoreDevice) -> envelope.FleetKeys | None:
         try:
@@ -217,18 +263,72 @@ class StoreFleet:
             device.mm_id,
         )
 
-    def restore(self, device: StoreDevice, snapshot, *, index_policy: str) -> None:
+    def scoped_snapshot(self, device: StoreDevice, snapshot, scope: str):
+        """A backup narrowed to what ``scope`` rolls back; the rest of the disk stays as is.
+
+        ``state``: sources and state come from the backup, the replica stays current.
+        ``fresh-replica``: sources and state come from the backup, the replica is empty.
+        """
+        import stat
+        from dataclasses import replace
+
+        def kept(path):
+            return path.split("/", 1)[0] in ("sources", "state")
+
+        files = [(p, f) for p, f in snapshot.files if kept(p)]
+        directories = [(p, mode) for p, mode in snapshot.directories if kept(p)]
+        if scope == "state":
+            files += sorted(
+                (p, f) for p, f in read_tree(device.root).items() if p.startswith("replica/")
+            )
+            directories += [
+                (p.relative_to(device.root).as_posix(), stat.S_IMODE(p.lstat().st_mode))
+                for p in sorted(device.replica_root.rglob("*"))
+                if p.is_dir()
+            ]
+        directories.append(("replica", stat.S_IMODE(device.replica_root.stat().st_mode)))
+        return replace(
+            snapshot, files=tuple(sorted(files)), directories=tuple(sorted(set(directories)))
+        )
+
+    def restore(
+        self, device: StoreDevice, snapshot, *, index_policy: str | None = None, scope="disk"
+    ) -> None:
+        """Roll a device back to a backup.
+
+        ``scope="disk"`` (default) restores the whole disk and needs ``index_policy``
+        ``saved`` or ``current``. ``scope="state"`` rolls back sources and state only and
+        ``scope="fresh-replica"`` also empties the replica and resets the transport index
+        so peers refill it; neither takes an ``index_policy``.
+        """
         from .disk import copy_snapshot, discard_backup
-        from .invariants import contains, record_versions, source_inventory
+        from .invariants import (
+            carried_identities,
+            contains,
+            merged_records,
+            record_versions,
+            source_inventory,
+            version_identity,
+        )
 
         self.idle(device, "restore")
+        if scope not in ("disk", "state", "fresh-replica"):
+            raise ValueError(
+                "restore scope must be disk, state or fresh-replica; see README#lifecycle"
+            )
+        if (scope == "disk") != (index_policy is not None) or (
+            scope == "disk" and index_policy not in ("saved", "current")
+        ):
+            raise ValueError(
+                "restore with scope disk needs index_policy saved or current; "
+                "scopes state and fresh-replica take none; see README#lifecycle"
+            )
         if (
-            index_policy not in ("saved", "current")
-            or snapshot.owner != device.name
+            snapshot.owner != device.name
             or snapshot.root != device.root
             or snapshot.hardware_id != device.hardware_id
         ):
-            raise ValueError("restore requires its own saved/current backup; see README#lifecycle")
+            raise ValueError("restore requires its own backup; see README#lifecycle")
         external = [
             (source, path, file.data)
             for d in self.ordered()
@@ -236,8 +336,12 @@ class StoreFleet:
             for (source, path), file in source_inventory(d).items()
         ]
         records = record_versions(self)
+        others = [d for d in self.ordered() if d is not device]
+        # A family split across other replicas still counts: the transport reassembles it.
         external += [
-            (source, path, data) for source, path, data, name in records if name != device.name
+            (e.metadata["source"], e.metadata["path"], e.content)
+            for found in merged_records(self, others)
+            for e in found.record.entries
         ]
         external += [
             (v["source"], v["path"], v["content"])
@@ -269,8 +373,14 @@ class StoreFleet:
                 for source, path, data in external
             )
         ]
-        backup = copy_snapshot(self.root, snapshot, device.root)
-        if index_policy == "saved":
+        if scope == "disk":
+            carried_before = carried_identities(self, [device])
+            carried_elsewhere = carried_identities(self, others)
+        installed = snapshot if scope == "disk" else self.scoped_snapshot(device, snapshot, scope)
+        backup = copy_snapshot(self.root, installed, device.root)
+        if scope == "fresh-replica":
+            self.transport.restore_index(device.name, Index((), ()))
+        elif scope == "disk" and index_policy == "saved":
             self.transport.restore_index(device.name, snapshot.index)
         device.mm_id = snapshot.mm_id
         restored = [
@@ -294,8 +404,46 @@ class StoreFleet:
                 for source, path, data in restored
             ):
                 self.oracle.excluded.add(event)
+        # INV7's exact-identity loss: only this device carried the version's bytes under
+        # its vector (a record no peer received yet, and no family complete over the other
+        # replicas' merged parts), and the restore removed it. Only a disk restore: the
+        # owner rolled the whole disk back outside mm, and under either index policy the
+        # restore's scan announces the lost record files' deletion, so nothing redelivers
+        # them. A fresh-replica restore emptying the only copy is mm's own recovery step,
+        # the pinned KNOWN_DESIGN_GAPS[fresh-replica-unreplicated], and INV7 keeps
+        # demanding it.
+        if scope == "disk":
+            carried_after = carried_identities(self, [device])
+            for event, version in sorted(self.oracle.versions.items()):
+                identity = version_identity(version.source, version.path, version.data, version.vv)
+                if (
+                    identity in carried_before
+                    and identity not in carried_elsewhere
+                    and identity not in carried_after
+                ):
+                    self.oracle.destroyed.add(event)
+        # Only versions this rollback actually undid: authored after the backup point,
+        # causally. A user version's own counter is linear per path, so it postdates
+        # the backup exactly when it exceeds the restored ledger's counter for that
+        # path. (Byte comparison cannot say this: deleting a file created after the
+        # backup restores to the same absence the deletion produced.)
+        from .model.state import path_key as _path_key
+
+        restored_ledger = self.state_factory(device.state_root).read().ledger
+
+        def _undone(version):
+            identity = version.identity or snapshot.mm_id
+            row = restored_ledger.get(_path_key(version.source, version.path))
+            restored_counter = row["vv"].get(identity, 0) if row else 0
+            return version.vv.get(identity, 0) > restored_counter
+
+        self.oracle.rolled_back |= {
+            event
+            for event, version in self.oracle.versions.items()
+            if version.user and version.device == device.name and _undone(version)
+        }
         discard_backup(backup)
-        self.steps.append(("restore", device.name, index_policy))
+        self.steps.append(("restore", device.name, index_policy, scope))
         self.oracle_checked = False
         self.transport.scan(device.name)
 
@@ -325,7 +473,7 @@ class StoreFleet:
     def rejoin(self, device: StoreDevice):
         self.idle(device, "rejoin")
         if len(self.ids) >= MAX_IDS:
-            raise ValueError("v2 run permits at most 6 device ids")
+            raise ValueError(f"v2 run permits at most {MAX_IDS} device ids")
         new_id = hashlib.sha256(
             (device.name + ":rejoin:" + str(len(self.ids))).encode()
         ).hexdigest()[:8]

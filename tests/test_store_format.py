@@ -1474,6 +1474,14 @@ class TestParts71C:
             )
 
 
+FAMILY = "0badf00d"
+OTHER_FAMILY = "c0ffee11"
+
+
+def family_for(kind):
+    return None if kind == "presence" else FAMILY
+
+
 class TestLayout71C:
     @pytest.mark.parametrize(
         "kind,seq,part,nparts",
@@ -1488,40 +1496,43 @@ class TestLayout71C:
         ],
     )
     def test_t13_canonical_builder_parser(self, kind, seq, part, nparts):
-        key = layout.record_key(DEVICE, kind, seq, part=part, nparts=nparts)
+        family = family_for(kind)
+        key = layout.record_key(DEVICE, kind, seq, part=part, nparts=nparts, family=family)
         parsed = layout.parse_record_key(key)
-        assert parsed == layout.RecordName(DEVICE, kind, seq, part, nparts)
+        assert parsed == layout.RecordName(DEVICE, kind, seq, part, nparts, family)
+        assert parsed.family == family
         if kind == "presence":
             assert key == "dev/a1b2c3d4/presence.enc"
         elif nparts == 1:
-            assert key.endswith(f"/{seq:012d}.enc")
+            assert key.endswith(f"/{seq:012d}.{FAMILY}.enc")
         else:
-            assert key.endswith(f"/{seq:012d}.{part}of{nparts}.enc")
+            assert key.endswith(f"/{seq:012d}.{FAMILY}.{part}of{nparts}.enc")
 
     @pytest.mark.parametrize(
         "key",
         [
-            "/dev/a1b2c3d4/log/000000000001.enc",
-            "dev/A1B2C3D4/log/000000000001.enc",
-            "dev/a1b2c3d4/log/1.enc",
-            "dev/a1b2c3d4/log/000000000000.enc",
-            "dev/a1b2c3d4/log/1000000000000.enc",
-            "dev/a1b2c3d4/../log/000000000001.enc",
-            "dev/a1b2c3d4/log/000000000001.1of1.enc",
-            "dev/a1b2c3d4/log/000000000001.01of2.enc",
-            "dev/a1b2c3d4/log/000000000001.1of02.enc",
-            "dev/a1b2c3d4/log/000000000001.0of2.enc",
-            "dev/a1b2c3d4/log/000000000001.3of2.enc",
-            "dev/a1b2c3d4/log/000000000001.1of513.enc",
-            "dev/a1b2c3d4/log/000000000001.1of" + "9" * 10000 + ".enc",
-            "dev/a1b2c3d4//log/000000000001.enc",
-            "dev/a1b2c3d4/log/000000000001.ENC",
-            "dev/a1b2c3d4/snap/000000000000.enc/",
+            "/dev/a1b2c3d4/log/000000000001.0badf00d.enc",
+            "dev/A1B2C3D4/log/000000000001.0badf00d.enc",
+            "dev/a1b2c3d4/log/1.0badf00d.enc",
+            "dev/a1b2c3d4/log/000000000000.0badf00d.enc",
+            "dev/a1b2c3d4/log/1000000000000.0badf00d.enc",
+            "dev/a1b2c3d4/../log/000000000001.0badf00d.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.1of1.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.01of2.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.1of02.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.0of2.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.3of2.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.1of513.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.1of" + "9" * 10000 + ".enc",
+            "dev/a1b2c3d4//log/000000000001.0badf00d.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.ENC",
+            "dev/a1b2c3d4/snap/000000000000.0badf00d.enc/",
             "dev/a1b2c3d4/log",
             "dev/a1b2c3d4/",
             "dev/a1b2c3d4/presence.1of2.enc",
+            "dev/a1b2c3d4/presence.0badf00d.enc",
             "dev/a1b2c3d4/presence.enc\n",
-            "dev/a1b2c3d4/log/０００００００００００１.enc",
+            "dev/a1b2c3d4/log/０００００００００００１.0badf00d.enc",
             "dev/a1b2c3d4/log/.mm-tmp-123",
             "fleet.json",
             ".stignore",
@@ -1529,6 +1540,17 @@ class TestLayout71C:
             "garbage",
             "\ud800",
             None,
+            # Family grammar: required, exactly 8 lowercase hex, before the part suffix.
+            "dev/a1b2c3d4/log/000000000001.enc",
+            "dev/a1b2c3d4/log/000000000001.2of3.enc",
+            "dev/a1b2c3d4/snap/000000000000.enc",
+            "dev/a1b2c3d4/log/000000000001.0BADF00D.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d0.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00g.enc",
+            "dev/a1b2c3d4/log/000000000001.2of3.0badf00d.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.0badf00d.enc",
+            "dev/a1b2c3d4/log/000000000001..enc",
         ],
     )
     def test_t13_foreign_names_are_not_normalized(self, key):
@@ -1548,16 +1570,44 @@ class TestLayout71C:
             {"part": 2},
             {"nparts": 513},
             {"nparts": True},
-            {"kind": "presence", "seq": 1},
-            {"kind": "presence", "seq": 0, "nparts": 2},
+            {"kind": "presence", "seq": 1, "family": None},
+            {"kind": "presence", "seq": 0, "nparts": 2, "family": None},
         ],
     )
     def test_t13_builder_never_emits_invalid_identity(self, kwargs):
-        values = {"device_id": DEVICE, "kind": "commit", "seq": 1}
+        values = {"device_id": DEVICE, "kind": "commit", "seq": 1, "family": FAMILY}
         values.update(kwargs)
         with pytest.raises(ValueError, match="invalid_parts") as caught:
             layout.record_key(**values)
         assert "\x1bSECRET" not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "kwargs,problem",
+        [
+            ({"kind": "commit"}, "needs a family"),
+            ({"kind": "snapshot", "seq": 0}, "needs a family"),
+            ({"kind": "commit", "family": "0BADF00D"}, "not 8 lowercase hex"),
+            ({"kind": "commit", "family": "0badf00"}, "not 8 lowercase hex"),
+            ({"kind": "snapshot", "seq": 0, "family": "0badf00d0"}, "not 8 lowercase hex"),
+            ({"kind": "commit", "family": ""}, "not 8 lowercase hex"),
+            ({"kind": "commit", "family": 12345678}, "not 8 lowercase hex"),
+            ({"kind": "commit", "family": "\x1bSECRET!"}, "not 8 lowercase hex"),
+            ({"kind": "presence", "seq": 0, "family": FAMILY}, "presence has no family"),
+        ],
+    )
+    def test_t13_family_errors_name_cause_fix_and_anchor(self, kwargs, problem):
+        # Value: protects=each family failure explains itself; fails_when=one
+        # generic message hides which component was wrong; why_new=names had no
+        # family before; seam=none; no_claim=none beyond protects.
+        values = {"device_id": DEVICE, "kind": "commit", "seq": 1}
+        values.update(kwargs)
+        with pytest.raises(ValueError) as caught:
+            layout.record_key(**values)
+        message = str(caught.value)
+        assert message.startswith("invalid_parts: ")
+        assert problem in message
+        assert "; " in message and "docs/invariants/store.md#errors" in message
+        assert "\x1bSECRET" not in message
 
     def test_t13_layout_bounds_match_envelope(self):
         assert (layout.MAX_SEQ, layout.MAX_PARTS) == (envelope.MAX_SEQ, envelope.MAX_PARTS)
@@ -1566,17 +1616,19 @@ class TestLayout71C:
         canonical = [
             "fleet.json",
             ".stignore",
-            layout.record_key(DEVICE, "commit", 1),
-            layout.record_key(DEVICE, "snapshot", 0),
+            layout.record_key(DEVICE, "commit", 1, family=FAMILY),
+            layout.record_key(DEVICE, "snapshot", 0, family=FAMILY),
             layout.record_key(DEVICE, "presence", 0),
         ]
         forks = [
             "fleet.sync-conflict-20261011-143500-A7.json",
-            "dev/a1b2c3d4/log/000000000001.sync-conflict-20261011-143500-D7.enc",
-            "dev/a1b2c3d4/log/000000000001.2of3.sync-conflict-20261011-143500-" + "x" * 64 + ".enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.sync-conflict-20261011-143500-D7.enc",
+            "dev/a1b2c3d4/log/000000000001.0badf00d.2of3.sync-conflict-20261011-143500-"
+            + "x" * 64
+            + ".enc",
         ]
         foreign = [
-            "dev/a1b2c3d4/snap/000000000000.sync-conflict-20261011-143500-D.enc",
+            "dev/a1b2c3d4/snap/000000000000.0badf00d.sync-conflict-20261011-143500-D.enc",
             "dev/a1b2c3d4/presence.sync-conflict-20261011-143500-D.enc",
             "fleet.sync-conflict-20260230-143500-D.json",
             "fleet.sync-conflict-20261011-250000-D.json",
@@ -1584,8 +1636,11 @@ class TestLayout71C:
             "fleet.sync-conflict-20261011-143500-A-B.json",
             "fleet.sync-conflict-20261011-143500-" + "x" * 65 + ".json",
             "fleet.json.sync-conflict-20261011-143500-D.json",
-            "dev/a1b2c3d4/log/000000000000.sync-conflict-20261011-143500-D.enc",
-            "dev/A1B2C3D4/log/000000000001.sync-conflict-20261011-143500-D.enc",
+            "dev/a1b2c3d4/log/000000000000.0badf00d.sync-conflict-20261011-143500-D.enc",
+            "dev/A1B2C3D4/log/000000000001.0badf00d.sync-conflict-20261011-143500-D.enc",
+            # A copy of a name without a family is not a canonical commit copy.
+            "dev/a1b2c3d4/log/000000000001.sync-conflict-20261011-143500-D.enc",
+            "dev/a1b2c3d4/log/000000000001.BADF00D.sync-conflict-20261011-143500-D.enc",
             "other/fleet.sync-conflict-20261011-143500-D.json",
             ".mm-tmp-123",
             "dev/a1b2c3d4/log/",
@@ -1599,8 +1654,47 @@ class TestLayout71C:
         assert result.foreign == tuple(forks + foreign)
         assert set(result.forks) <= set(result.foreign)
 
+    def test_t13_group_record_names_groups_by_device_kind_seq_family(self):
+        # Value: protects=families at one slot stay distinct records; fails_when=
+        # grouping ignores the family and mixes parts of two publications;
+        # why_new=names had no family before; seam=none; no_claim=completeness,
+        # which stays with the caller.
+        peer = "b2c3d4e5"
+        keys = [
+            layout.record_key(DEVICE, "commit", 3, part=2, nparts=3, family=OTHER_FAMILY),
+            layout.record_key(DEVICE, "commit", 3, part=1, nparts=3, family=OTHER_FAMILY),
+            layout.record_key(DEVICE, "commit", 3, family=FAMILY),
+            layout.record_key(DEVICE, "commit", 4, family=FAMILY),
+            layout.record_key(DEVICE, "snapshot", 3, family=FAMILY),
+            layout.record_key(peer, "commit", 3, family=FAMILY),
+            layout.record_key(DEVICE, "presence", 0),
+        ]
+        classified = layout.classify_keys(keys)
+        groups = layout.group_record_names(classified.records)
+        assert list(groups) == [
+            (DEVICE, "commit", 3, FAMILY),
+            (DEVICE, "commit", 3, OTHER_FAMILY),
+            (DEVICE, "commit", 4, FAMILY),
+            (DEVICE, "presence", 0, None),
+            (DEVICE, "snapshot", 3, FAMILY),
+            (peer, "commit", 3, FAMILY),
+        ]
+        assert set(groups) == {
+            (DEVICE, "commit", 3, OTHER_FAMILY),
+            (DEVICE, "commit", 3, FAMILY),
+            (DEVICE, "commit", 4, FAMILY),
+            (DEVICE, "snapshot", 3, FAMILY),
+            (peer, "commit", 3, FAMILY),
+            (DEVICE, "presence", 0, None),
+        }
+        parts = groups[(DEVICE, "commit", 3, OTHER_FAMILY)]
+        # Input order inside a group is preserved; grouping neither parses nor reads files.
+        assert [key for key, _ in parts] == keys[:2]
+        assert [name.part for _, name in parts] == [2, 1]
+        assert layout.group_record_names([]) == {}
 
-def named_parts(parts, keys):
+
+def named_parts(parts, keys, family=FAMILY):
     """Reader obtains expected identity solely from canonical names and verified fleet."""
     result = []
     for full_context, sealed in parts:
@@ -1610,6 +1704,7 @@ def named_parts(parts, keys):
             full_context.seq,
             part=full_context.part,
             nparts=full_context.nparts,
+            family=None if full_context.kind == "presence" else family,
         )
         name = layout.parse_record_key(key)
         result.append(

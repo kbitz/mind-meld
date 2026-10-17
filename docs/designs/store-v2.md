@@ -72,15 +72,28 @@ v2.1.6 on 2026-10-09:
 ~/Sync/mind-meld/                     Syncthing folder id: mind-meld-<fleet8>
   fleet.json                          plaintext header; write-once
   .stignore                           local, written by mm: (?d).mm-tmp-*  (?d).DS_Store
-  dev/<device>/log/000000001043.enc   commit; large ones split: 000000001043.2of3.enc
-  dev/<device>/snap/000000001000.enc  full-state snapshot (same part rule)
+  dev/<device>/log/000000001043.3f9a1c2e.enc   commit; large ones split: 000000001043.3f9a1c2e.2of3.enc
+  dev/<device>/snap/000000001000.7b04d6e1.enc  full-state snapshot (same part rule)
   dev/<device>/presence.enc           small mutable record
 ```
 
 Only names matching this grammar are read. Anything else, including Syncthing
 temp files and `*.sync-conflict-*` copies, is foreign: `mm diag` counts it.
-A conflict copy of a commit, or of `fleet.json`, is a **fork signal** and
-refuses loudly (§9).
+
+**Family.** A commit or snapshot name carries a *family*: eight lowercase hex
+characters drawn fresh for each publication. All parts of one publication share
+one family and one part count, and one family name has exactly one part count.
+A slot `(device, kind, seq)` can hold several families, and each is a distinct
+record. Syncthing 2.1 resolves a rewrite of an existing name with
+`max(old + 1, now)` counters, so a restored device that republishes a seq under
+the old name silently dominates it and no conflict copy appears. A new family
+makes that rewrite a new file instead. The family is a name, not a secret or an
+ordering: apply order is a pure function of names (§6), and nothing may assume
+that a later family sorts later.
+
+A conflict copy of a commit, or of `fleet.json`, is still a **fork signal**.
+What a fork signal does depends on who sees it (§6, §9): the forked device
+refuses; its peers warn and keep applying.
 
 ## 2. Formats
 
@@ -92,8 +105,10 @@ refuses loudly (§9).
 **Envelope 0x03.** Payloads are gzip-compressed, then sealed with AES-256-GCM
 under per-kind subkeys derived from the master key, with a random nonce. The
 associated data binds `(fleet_id, device_id, kind, seq, part, nparts)`, so a
-file renamed, moved between devices or replayed under another number fails
-authentication.
+file renamed to another fleet, device, kind, seq, part or part count fails
+authentication. The family is not in the associated data: the payload digest is
+the record identity for de-duplication and fork comparison, and binding the
+family comes with the next version byte.
 
 **Commit payload.** Length-prefixed frames:
 - **Header:** `{fleet_id, device_id, host, seq, prev, created_at, mm_version, entries}`.
@@ -120,7 +135,15 @@ that ever matters.
 
 **Presence payload.** `{device_id, device_name, os, mm_version, host, syncthing_id, registered, last_active, published_seq, snapshot_seq, applied: {peer: seq}}`.
 It is rewritten atomically (temp file plus rename) at the end of push and
-pull when something changed, and at most hourly otherwise.
+pull when something changed, and at most hourly otherwise. A device whose own
+records are still arriving does not rewrite it (§9).
+
+**Delivery receipts.** A receipt names the digest of the family a peer applied
+at a seq, and `mm status` says "has your latest push" only when a peer's
+receipt matches the owner's newest `own_log` seq *and* digest, so a peer that
+applied a pre-restore record under the same seq does not count. The presence
+field that carries the digest arrives with delivery receipts; until then
+`applied` holds only the seq.
 
 `mm devices --format json` projects presence onto the existing contract
 fields: `device_id`, `device_name`, `registered`, `last_seen` (=
@@ -141,18 +164,27 @@ lock. Read-only inspection creates nothing and closes before output.
 
 73B activates history on 1.x. Exact columns, readers and migrations are in
 [the history schema routing table](../invariants/sync.md#schema-columns-and-readers)
-and statedb.py's migration 1; the other four tables are empty and provisional
+and statedb.py's migration 1; the other tables are empty and provisional
 until their owning Tracks, which may re-create them without raising the
 history compatibility gate.
 
 | Table | Holds | Readers |
 |---|---|---|
 | meta | compatibility, import marker, pending import, legacy file stats (future fleet keys arrive with their owners) | statedb, mm log |
-| ledger | source/path, sha, canonical vv, size, mtime, deleted, pending; no content | 75A publish, 78A classification |
-| cursors | peer, applied_seq, hash, gap_seq, gap_since | 77A pull, 81A status, 75A presence |
-| own_log | seq, prev, hash, parts, bytes, epoch time | 75A publish, 76A compaction/reconciliation |
-| displaced | replaced versions, bytes cleared at 30 days; metadata and expired flag retained forever | 78A mm displaced, 76A expiry, simulator INV2 |
+| `ledger` | `(source, path) → sha, canonical vv, size, mtime, deleted, pending`; no content: the version each local file corresponds to | 75A publish, 78A classification, preview |
+| `cursors` | `peer → applied_seq, hash, gap_seq, gap_since, fork (kind, first_seen)` | 77A pull, 81A status, 75A presence, diag |
+| `applied` | `(peer, seq, family, digest)` for every family applied or covered | pull |
+| `own_log` | `seq → family, digest, prev, parts, bytes, created_at` | 75A publish, 76A compaction/reconciliation, heal, restore detection |
+| `intents` | `(kind, seq, family, nparts)`, one row per attempted publication family | publish, reconcile, compaction |
+| `displaced` | replaced local versions (bytes, reason, time, cause, peer); bytes cleared at 30 days, metadata and expired flag retained | `mm displaced`, gc, status, the fork warning, simulator INV2 |
 | history | per-file outcomes, one-time legacy JSONL import, newest 20,000 rows per known class (no shared rotation) | mm log only; sync receipts need their own retained state |
+
+`applied` keeps a few dozen bytes per applied record for the life of the peer's
+namespace, so a late, duplicate or resurrected family is always recognised by
+its name and digest. `cursors.fork` is written once, by the first fork evidence
+for a peer (§6), and `mm status` and `mm diag` list the peer until its
+namespace is retired. `displaced.cause` is `fork` for a version a peer's fork
+displaced (§4) and `peer` names that peer.
 
 [Conflict policies](conflict-policies.md) in 2.1 adds base (three-way merge
 bases), conflicts (held versions), and `mm conflicts --suggest`. Usage,
@@ -202,6 +234,21 @@ version `L`, which is `ledger.vv`, plus `me` if the local bytes differ from
 
 Per-path rules, three-way merge and `ask` arrive with conflict policies (2.1).
 
+**Counter reuse after a restore.** An equal vector with a different sha is
+concurrent: a restored device can republish counters it already used, and the
+two versions resolve like any concurrent pair. Limitation: a version derived
+from a pre-restore edit can dominate a post-restore edit of the same path.
+Readers holding the dominating version ignore the post-restore edit and, when
+fork evidence exists for that peer (§6), record it in `displaced` with
+`cause = fork`, so the fork warning names it and its expiry. The rule keeps every
+entry of that peer's families at or after the first fork seq that classifies as
+`ignore`, including when the evidence arrives *after* the entry was ignored, so it
+also keeps a dominated ancestor (the pre-restore version the dominating one was
+derived from); the cost is a few extra `displaced` rows for 30 days. An entry is
+retained once, and never again after its row expires. The restored
+device keeps the post-restore edit current until it rejoins (§9), and rejoin
+lists it in `displaced` with its expiry.
+
 **Symmetry invariant (load-bearing).** Every automatic resolution is a pure
 function of the unordered pair of versions (plus the base, from 2.1). Two
 devices that resolve the same pair independently produce identical bytes,
@@ -220,18 +267,55 @@ sources are wiped, or is retired instead.
 ## 5. Publish (push)
 
 1. Lock, then reconcile own storage (§9).
-2. Scan sources strictly and diff against the ledger. If nothing changed,
-   refresh presence if due and stop.
+2. Scan sources strictly and diff against the ledger. If nothing changed and no
+   own slot is torn (step 4), refresh presence if due and stop.
 3. Build commit `seq = last + 1` with `prev`. Content is the exact scanned
    bytes, verified unchanged before sealing (the existing upload-verification
    rule).
-4. Write each part with exclusive create (`os.link`; temp files named
-   `.mm-tmp-*`). The commit exists once its last part exists.
-5. In one transaction: ledger updates, `own_log` row, history rows. A crash
+4. Draw a fresh family. Record an **intent row** `(kind, seq, family, nparts)`
+   in local state, then write each part with exclusive create (`os.link`; temp
+   files named `.mm-tmp-*`). The commit exists once its last part exists. On
+   `EEXIST` for any part, the parts already written stay (a torn family of this
+   device's own), the publisher draws a fresh family and links the same sealed
+   parts under the new names (the family is not in the associated data, so no
+   re-seal is needed); after 3 attempts it fails loudly: "could not allocate a
+   fresh record name for seq N after 3 attempts; another writer may share this
+   device id; run `mm diag`". It never overwrites an existing file.
+5. In one transaction: ledger updates, `own_log` row (with the family and
+   digest), the published family's intent row cleared, history rows. A crash
    between steps 4 and 5 is recovered by §9's own-log replay.
 6. Best effort: ask Syncthing to rescan `dev/<me>`. Write presence. In an
    attended push only, take a snapshot and compact if due (§6); `autopush`
    never snapshots.
+
+**Torn publish.** A crash can leave an own slot with only some of a family's
+parts. The next slot `seq` is *torn* when it holds no complete own commit
+family and every incomplete family at it is named by an intent row: this device
+provably started it. A torn slot is closed by writing a **fresh complete
+family at the same seq**, re-authored from the unchanged ledger and the current
+files, even when that commit has zero entries (peers wait on the seq
+otherwise). Closure waits for the folder to sync (Syncthing idle with nothing
+needed for record files; a peer's presence refresh alone never completes a
+record and does not hold the gate), exactly like skip-ahead: an intent row proves some copy of this state
+started the family, and a backup can carry the row back after the slot was
+later closed, so while redelivery may still complete the slot the push stays
+pending `own-records-in-flight` instead of superseding it into a fork. The torn family's parts are never completed, overwritten or deleted
+by the push, and they stay readable to a peer that already holds them. The same
+rule applies to a snapshot: an incomplete own snapshot family at the current
+seq that an intent row names is closed by a fresh family. Any other incomplete
+own family at the slot, one the device cannot prove it wrote, is in flight
+(records still arriving after a restore): the push is pending
+(`own-records-in-flight`) and never writes at that seq (§9) — with one escape:
+once the folder is synced and no receipt claims the seq, an *attended* push (or
+`mm push --snapshot` for a snapshot slot) may supersede it like a torn slot,
+because its missing parts can only ever come from this device and intent rows
+themselves can be rolled back by a state restore; `autopush` stays pending. If
+a clone later completes the old family, the two families fork visibly (§9).
+
+**Readers need no digest or total to tell a torn publish from a pending one.**
+Both look the same to a reader, an incomplete family, and both resolve the same
+way: wait for the missing parts, or for the owner's fresh family or a snapshot
+that covers the seq (§6). `IncompleteParts` carries nothing more.
 
 ## 6. Snapshots and compaction
 
@@ -242,28 +326,112 @@ whole state (about 330 MB sealed for this Mac's 33k files), Syncthing gets no
 block deltas from sealed files, and at this fleet's cadence of roughly two
 pushes a day a weekly trigger would ship that to every peer every week. Nor
 does a hook snapshot: sealing 33k files under the lock would blow the
-`autopush` budget. It deletes its own commits at or below its **previous**
-snapshot's seq once they are 14 days old, and keeps its two newest snapshots.
+`autopush` budget.
+
+**Compaction deletes only what the owner can prove it wrote.** A family is
+proven when `own_log` names it (a commit), when this device recorded it as its
+own snapshot, or when an intent row names it (a torn or superseded attempt). Among those it deletes commit families at or below its **previous**
+snapshot's seq once they are 14 days old, and snapshot families older than its
+two newest distinct snapshot seqs (one family per seq counts). It never deletes
+a family it cannot prove it wrote, at any seq: that may be the last copy of a
+record a restored device is still waiting for.
+
+**Slot rule.** A slot `(device, kind, seq)` may hold several families. Each is
+judged from its names alone: a family is complete when every index of its one
+part count is present. Only complete families are opened, and only a complete
+readable family counts.
+
+- An *incomplete* family is pending and ignored while a complete family exists
+  at the slot; if it later completes it is a late family (below).
+- An *unreadable* family (authentication or parse failure, or one family name
+  with differing part counts) beside a complete readable family is ignored with
+  a `mm diag` warning, for readers and for the owner. Alone at a slot it keeps
+  the stalled-unreadable rule in the table below.
+- Two complete commit families at one slot with *different payload digests* are
+  fork evidence. Equal digests are one record, however the files are named.
+- A snapshot slot may hold two complete families; that is not fork evidence.
+  Fallback and retirement coverage use the newest complete snapshot, by
+  (seq, `created_at`, family); a joiner picks by (`created_at`, device id, seq,
+  family).
 
 **Reader rule** for peer `P`, with `next = cursor[P] + 1`:
 
 | Situation | Action |
 |---|---|
-| commit `next` is complete | apply it |
-| `next` is missing and `next ≤` P's newest complete snapshot seq | load that snapshot: classify every entry; set `cursor[P]`; raise each other cursor to `max(cursor[Q], snapshot.cursors[Q])` |
-| `next` is missing and beyond P's snapshot | pending; record `gap_since` |
-| `next` is complete but unreadable (authentication or parse failure) | stop at it with an always-visible warning; skip to a later snapshot when one appears |
+| a complete readable family exists at `next` | apply every one not yet applied, once each (keyed by payload digest), in family-name order; the cursor moves to `next` |
+| `next` has no complete readable family and `next ≤` P's newest complete snapshot seq | load that snapshot: classify every entry; set `cursor[P]`; raise each other cursor to `max(cursor[Q], snapshot.cursors[Q])` |
+| `next` has no complete family and is beyond P's snapshot | pending; record `gap_since` |
+| `next` has an unreadable family and no complete one | stop at it with an always-visible warning; skip to a later snapshot when one appears |
 
 The owner's remedy for an unreadable commit is `mm push --snapshot`.
 
-Chain checks run only inside the retained window: the oldest surviving
-commit's `prev` is compared with the newest snapshot's `prev` at that seq,
-never with a compacted file.
+**Late families.** A complete readable family at or below the cursor that the
+reader has neither applied nor covered is applied when it is first seen
+complete (a restored device republishing a seq the reader already applied, or a
+family that finished arriving after the reader moved past its slot). It is
+applied exactly once, and the cursor does not move. A late family's `prev` is
+checked once, when it is applied.
+
+**Cover rule.** When a reader loads a peer's own snapshot, a commit family at a
+covered slot counts as *covered* only if its digest was applied, or it lies on
+the `prev` chain of that peer's snapshot (the snapshot's `prev` names the commit
+at its seq; walk each retained family's `prev` down by digest, recording a seq
+only when a retained family at that seq carries the named digest — a digest is
+never assigned to a seq by arithmetic, so a skip-ahead commit whose `prev`
+names an older seq ends the walk there). A cursor raised
+for `Q` by *another* device's snapshot covers no family of `Q`'s. Every other
+complete family at a covered slot is a late family. So "covered" means
+incorporated, never merely "at or below a seq", and an unknown family that was
+incomplete or complete when the cursor jumped is still applied once complete.
+
+**Chain check.** A family's `prev` is compared with *every* applied family at
+`seq - 1` (any match passes), or with that peer's own snapshot `prev` when
+`seq - 1` is covered by that snapshot; when neither exists it is not checked.
+There is no chain-anchor wait: a commit after a cursor raised by another
+device's snapshot applies immediately.
+
+**Fork evidence is a warning, never a refusal.** A reader treats these as
+evidence about a peer: a second complete family with a different digest at a
+slot, a `prev` that fails its check, a commit conflict copy under that peer,
+and an applied family that vanished from storage while a different digest holds
+its slot. The reader keeps applying every record it can. The first pull that
+sees evidence writes `cursors.fork (kind, first_seen)` and warns in every mode,
+and `mm status` / `mm diag` list the peer until its namespace is retired.
+While any version the fork displaced (§4) is unexpired and unrestored, **every**
+push and pull, attended or automatic, warns again with the peer, the displaced
+count and the earliest expiry date, and leaves a breadcrumb that `mm status`
+shows. Remedy texts (peer names go through `safety`):
+
+- two complete families with different digests: "<peer> has two different
+  records for push #<seq> (restored from a backup?); both versions were kept;
+  run `mm rejoin` on <peer>"; when the families come from more than one host:
+  "<peer> is used by more than one machine (record <seq> exists twice); run `mm
+  rejoin` on each machine using this id";
+- an applied family missing and a different digest at its slot: "<peer>
+  republished an earlier sequence (restored from a backup?); both versions were
+  kept";
+- a `prev` that fails its check: "<peer>'s record <seq> does not follow the
+  record applied before it; both versions were kept; run `mm diag`, then `mm
+  rejoin` on <peer>";
+- a commit conflict copy: "<peer>'s log has a conflicting copy of record <seq>;
+  run `mm diag`, then `mm rejoin` on <peer>".
+
+When displaced versions are at risk each text ends "; N displaced versions kept
+until <date>; see `mm displaced` before then".
+
+Once a rejoined device's presence names the superseded id (a field that arrives
+with `rejoin`), readers show "<old id> rejoined as <new id>; old records kept for
+history; retire after <date> with `mm devices retire <old id>`" instead of an
+active fork. The displaced-expiry alert stays separate.
 
 This rule needs no cross-device acknowledgements and never confuses
 "compacted" with "in flight". Presence `applied` cursors exist only for
 status. A pending gap becomes a visible warning in every mode after 24 h,
-per the data-at-risk rule.
+per the data-at-risk rule. Only the forked device refuses (§9).
+
+Chain checks run only inside the retained window: the oldest surviving
+commit's `prev` is compared with the newest snapshot's `prev` at that seq,
+never with a compacted file.
 
 ## 7. Portable paths
 
@@ -306,14 +474,103 @@ when someone needs different layouts per machine. Other sources are already root
 ## 9. Restore, crash and clone safety
 
 At the start of every push and pull, mm reads its own log listing and
-presence from storage.
+presence from storage, and its peers' presence and snapshots for what they say
+about this device. It decides in a fixed order: **(1)** refuse an own fork or a
+foreign host, **(2)** the own-directory row, **(3)** replay own records,
+**(4)** restored-device detection, **(5)** a torn own slot, **(6)** heal. Only
+the forked device refuses; its peers warn and keep applying (§6). Every message
+below is shown verbatim and ends with "See
+docs/designs/store-v2.md#9-restore-crash-and-clone-safety.".
 
-| Observation | Meaning | Action |
+| Observation | Meaning | Action and text |
 |---|---|---|
-| Own commits beyond `own_log`, same `host` | Crash after publication, restore from backup, or lost `state.db` | Apply own commits like a peer's, via `cursor[me]`: local files fast-forward to this device's own newer state; then continue, with `seq` resuming after the newest commit in storage and `prev` chained from it |
-| `dev/<me>/` absent while `own_log` is non-empty | This device was retired (§8) and Syncthing applied the deletion, or the folder was lost | Refuse; `mm rejoin` |
-| Own commits with a different `host` | Two machines share this device id (copied config or a migrated Mac) | Refuse; `mm rejoin` mints a new device id in the same fleet |
-| `prev` chain broken, or a conflict copy of a commit or `fleet.json` | Fork | Refuse with `mm diag` detail; no automatic repair |
+| Own commits beyond `own_log`, same `host` | Crash after publication, restore from backup, or lost `state.db` | Apply own commits like a peer's, via `cursor[me]`: local files fast-forward to this device's own newer state; then continue, with `seq` resuming after the newest commit in storage and `prev` chained from it. If storage holds a complete own **snapshot** beyond `own_log`, load it first like a peer snapshot (classify every entry, set `cursor[me]`), anchor `own_log` at its seq and `prev`, then replay retained own commits after it in seq order, so a backup older than the compaction floor loses nothing. Replay is contiguous: it stops at the first seq holding no complete own family (a hole left by partial redelivery) and never jumps it — restored-device detection owns the wait for the missing seqs, and no later snapshot is taken from a ledger that skipped a record its `prev` chain would mark covered for readers |
+| `dev/<me>/` absent while `own_log` is non-empty | This device was retired (§8) and Syncthing applied the deletion, or the folder was lost or is refilling after a restore | While Syncthing still has items for this folder: pending, `own-records-in-flight`: "this device's records have not arrived yet (restored from a backup?); waiting for Syncthing to restore them". Only when the folder is synced and `dev/<me>/` is still absent: refuse, `missing-own-directory`: "this device's folder is gone from storage and Syncthing has nothing left to deliver (retired?); its newest publish was <date>; run `mm rejoin`" |
+| Own commits or an own snapshot with a different `host` | Two machines share this device id (copied config or a migrated Mac) | Refuse, `fork-clone`: "another machine is using this device id; run `mm rejoin` on each machine using it" |
+| Own chain diverged on this host: a complete own family whose digest differs from `own_log` at its seq, a second complete own family with a different digest, or an own `prev` that does not chain to `own_log` | A restored copy republished a seq its earlier self already published | Refuse, `fork-restore`: "this Mac republished records another copy of it already published (restored from a backup?); run `mm rejoin` on this Mac" |
+| A conflict copy of an own commit or of `fleet.json` | Transport fork | Refuse, `fork`: "a conflicting copy of this device's log or of fleet.json exists; run `mm diag`, then `mm rejoin` on this Mac" |
+| Someone claims own records this device does not have (below) | This device was restored and its records are still arriving | Pending, `own-records-in-flight`: "this device's records through push #<N> have not arrived yet (restored from a backup?); waiting" |
+| An incomplete own family that an intent row names, at the next slot | The last push was interrupted | Pull reports pending, `torn-own-slot`: "the last push was interrupted; the next push completes it"; the next push closes the slot (§5) |
+| The own snapshot at `snapshot_seq`, or an own family above it, is no longer complete in storage | Another machine's rollback deleted records this device published | Heal, `own-records-lost`: "records this device published are missing from storage; the next `mm push` publishes a full snapshot (about the size of this device's synced data)" |
+
+`mm rejoin` continues under a new device id with the local bytes preserved as
+current or `displaced`; the old namespace stays readable until it is retired,
+and rejoin lists what it displaces, with expiry, tagged like a peer fork's.
+
+**Restored-device detection.** Before any publication (a commit, a snapshot or
+a rewrite of this device's own presence), reconcile computes `claimed`, the
+maximum of this device's own presence `published_seq` (when readable and from
+the same host), every peer's presence `applied[me]` and every complete peer
+snapshot's `cursors[me]` (read once per snapshot family and remembered by
+name). If `claimed` exceeds the newest `own_log` seq and this device's records
+through `claimed` are not all complete in storage (own commit families at those
+seqs, or an own snapshot covering them), push is pending with
+`own-records-in-flight`. A pull still applies peers and replays own records but
+does not rewrite presence. Waiting is correct while records are arriving; if
+they never return, the fallback is **skip-ahead**: once the folder is synced
+(Syncthing idle with nothing needed for record files, as in §5) and the records
+are still incomplete, the
+next *attended* push publishes at `claimed + 1` with `prev` set to the digest of
+the newest complete own family, and a forced snapshot at that seq, so readers
+waiting on the missing seqs fall back to the snapshot. Skip-ahead never writes
+over a family already occupying its target: it advances past slots holding a
+complete family (observed in storage, not thereby replayed — receipts alone
+could never grow the claim past a record no peer applied) and still waits at
+an incomplete one, and never past the largest seq the record grammar can name:
+receipts can name seqs, they cannot invent them.
+`autopush` stays pending
+with an always-visible warning until then. A device that publishes before any of
+its own records or a peer's receipt has arrived forks its id (row four); that is
+the one residual in the restore guidance below.
+
+**Heal.** While `dev/<me>/` exists, a missing own snapshot at `snapshot_seq` or
+a vanished family `own_log` recorded above it (that is not a proven torn slot)
+makes the next *attended* push publish a forced snapshot. A seq with no
+`own_log` row is a hole replay has not reached — in flight, never a heal:
+healing over it would publish a snapshot whose ledger never incorporated that
+record while its `prev` chain marks the record covered for readers.
+`autopush` and `pull` show the warning until then. Commits at or
+below `snapshot_seq` never trigger heal (compaction removes them by design), and
+an own presence behind own state only rewrites presence.
+
+### Restore guidance
+
+mm models what a restore leaves behind; it cannot make a store-folder restore
+safe. The supported setups differ by scope:
+
+| Scope | What rolls back | Outcome |
+|---|---|---|
+| State and sources only (the Syncthing folder and its database are intact) | `state.db` and source files | Row one replays own records; no fork, no rejoin |
+| Everything including an empty store folder (a new disk, or a folder and Syncthing database restored together) | Everything; peers refill the folder | Row two waits for Syncthing, detection waits for own records, then row one replays; converges with no fork |
+| Store folder restored under a live Syncthing database that remembers newer state | The folder only, behind the index | **Unsupported.** Syncthing can delete or never re-announce records the index believes it already delivered |
+| Store folder restored with a fresh Syncthing database | Old mutable files re-announced as new | **Unsupported.** Presence is rewritten by its owner, and resurrected compacted families are skipped by name |
+
+An unsupported restore is prevented by keeping the store folder and Syncthing's
+database out of backups. When one happens anyway, late families reconcile a
+restored device that republishes over its lost seqs and heal closes peers' gaps,
+but three residuals remain: a record no device had applied when the restore
+deleted it is gone fleet-wide; a backup taken before `fleet.json` arrived
+deletes it fleet-wide, so every device waits; and versions readers applied from
+records the rollback deleted stay divergent until the restored device
+republishes over them. These are accepted as limits of an unsupported setup.
+
+**After a restore:**
+
+1. Before backups, exclude `~/Sync/mind-meld` and Syncthing's database
+   directory (as printed by `syncthing paths`) from them. Do not exclude
+   `config.xml` or its keys.
+2. After a restore and before any agent session, comment out the mm hook lines
+   listed in the README integration section.
+3. Start Syncthing and wait until `mm status` shows no `own-records-in-flight`
+   line and Syncthing reports the folder idle with nothing needed.
+4. Run `mm pull`, then restore the hook lines.
+5. If no peer is reachable, stay at step 3 and do not push. If no peer can
+   return, run `mm rejoin`.
+
+A machine that publishes before Syncthing has returned any of its own records
+or a peer's receipt forks its device id and refuses until `mm rejoin`. An edit
+made after such a restore can lose to a version derived from the pre-restore
+copy; mm keeps it in `displaced` and warns until it expires (§4, §6).
 
 ## 10. Syncthing integration
 
@@ -381,7 +638,9 @@ Syncthing:
 - whole-file delivery, in random order, with arbitrary delays;
 - the delete-then-rename ENOENT window, and deletions;
 - devices going offline;
-- restoring a device's disk to an earlier copy, and a cloned config;
+- restoring a device to an earlier copy: the whole disk (with the transport's
+  saved or current index), only its state and sources, or a fresh empty replica
+  that peers refill; and a cloned config;
 - conflict copies on concurrent writes to one path.
 
 A `hypothesis` `RuleBasedStateMachine` interleaves the following actions:

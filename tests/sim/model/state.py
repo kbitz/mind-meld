@@ -26,10 +26,29 @@ def path_key(source: str, path: str) -> str:
 class State:
     meta: dict = field(default_factory=dict)
     ledger: dict[str, dict] = field(default_factory=dict)
+    # peer -> {applied_seq, hash, gap_seq?, gap_since?, snapshot?: {seq, prev},
+    # fork?: {kind, seq, first_seen}}. Only applied_seq and hash are chain state.
     cursors: dict[str, dict] = field(default_factory=dict)
+    # Commit families this device applied, "<peer>:<seq>:<family>" ->
+    # {peer, seq, family, digest}. A late family is applied exactly when its digest is
+    # neither here nor on the peer's applied-snapshot prev chain.
+    applied: dict[str, dict] = field(default_factory=dict)
     own_log: dict[str, dict] = field(default_factory=dict)
+    # Write-ahead intent rows, one per attempted publication family:
+    # "<kind>:<seq>:<family>" -> {kind, seq, family, nparts}. Written before the first
+    # part is linked, cleared by the publish transaction; a row left behind proves this
+    # device itself started that family (a torn publish).
+    intents: dict[str, dict] = field(default_factory=dict)
     displaced: list[dict] = field(default_factory=list)
     history: list[dict] = field(default_factory=list)
+
+
+def intent_key(kind: str, seq: int, family: str) -> str:
+    return f"{kind}:{seq}:{family}"
+
+
+def applied_key(peer: str, seq: int, family: str) -> str:
+    return f"{peer}:{seq}:{family}"
 
 
 def row(entry: Entry, *, pending=False) -> dict:

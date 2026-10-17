@@ -161,3 +161,23 @@ def test_resolver_algebra_with_tombstones_vectors_and_mtime(path, data, mtimes, 
     assert core.resolve(a, b) == core.resolve(b, a)
     assert core.resolve(a, core.resolve(b, c)) == core.resolve(core.resolve(a, b), c)
     assert core.resolve(a, a) == a
+
+
+@pytest.mark.parametrize(
+    "flags,expected",
+    [
+        ({}, None),
+        ({"fleet_fork": True}, "fork"),
+        ({"own_fork": True}, "fork"),
+        ({"foreign_host": True}, "fork-clone"),
+        ({"chain_fork": True}, "fork-restore"),
+        ({"own_missing": True}, "missing-own-directory"),
+        # Strongest evidence first: a conflict copy, then a foreign host, then a chain
+        # that diverged on this host, then a missing own directory.
+        ({"own_fork": True, "foreign_host": True, "chain_fork": True}, "fork"),
+        ({"foreign_host": True, "chain_fork": True, "own_missing": True}, "fork-clone"),
+        ({"chain_fork": True, "own_missing": True}, "fork-restore"),
+    ],
+)
+def test_reconcile_refusal_codes_and_precedence(flags, expected):
+    assert core.reconcile_rule(**flags) == expected
