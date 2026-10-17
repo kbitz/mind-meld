@@ -805,7 +805,7 @@ def publish(
         while slot.complete and seq < layout.MAX_SEQ:
             seq += 1
             slot, slot_state = own_slot(ctx, state, ctx.view(), "commit", seq)
-        if slot.incomplete:
+        if slot.complete or slot.incomplete:
             return in_flight(seq, ctx)
     if slot_state == "in-flight":
         # An unproven incomplete family at the next slot (its intent row was lost,
