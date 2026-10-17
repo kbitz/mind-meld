@@ -802,9 +802,7 @@ def publish(
         # synced and no receipt claims the seq, an attended push may supersede it,
         # exactly like skip-ahead; autopush stays pending. If a clone later completes
         # the old family, the two families fork visibly (§9 row three/four).
-        if not (
-            attended and claimed is None and slot.incomplete and ctx.folder_synced()
-        ):
+        if not (attended and claimed is None and slot.incomplete and ctx.folder_synced()):
             return in_flight(seq, ctx)
         slot_state = "torn"
     torn = slot_state == "torn"
