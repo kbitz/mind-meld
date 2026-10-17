@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld import pullhistory, upgrade
+from mind_meld import pullhistory, statedb, upgrade
 
 # ── Isolation fixtures ────────────────────────────────────────────────────
 
@@ -583,7 +583,7 @@ class TestRacePin:
     correct shape.
     """
 
-    def test_two_processes_exactly_one_row(self, tmp_path):
+    def test_two_processes_exactly_one_row(self, tmp_path, monkeypatch):
         # Use a distinct subdir from the autouse fixture's `config-mm` so we
         # don't collide with its mkdir.
         cache_dir = tmp_path / "race-cache"
@@ -604,11 +604,12 @@ class TestRacePin:
             os.environ["MM_TEST_CACHE_DIR"] = {str(cache_dir)!r}
 
             from pathlib import Path
-            from mind_meld import upgrade, pullhistory
+            from mind_meld import upgrade, pullhistory, statedb
             cache_dir = Path({str(cache_dir)!r})
             upgrade.CACHE_DIR = cache_dir
             upgrade.CACHE_PATH = cache_dir / "upgrade-state.json"
             pullhistory.HISTORY_DIR = cache_dir
+            statedb.DB_DIR = cache_dir
 
             # Force __version__ to 0.9.4 so transition fires (subprocess imports
             # might otherwise read 0.0.0+dev from a source-tree install).
@@ -654,18 +655,8 @@ class TestRacePin:
                 f"p2={p2.returncode} err={err2!r}"
             )
 
-        # Load pullhistory rows from the shared dir
-        history = cache_dir / "pull-history.jsonl"
-        if not history.exists():
-            pytest.fail("pull-history.jsonl was never written")
-
-        rows = []
-        with open(history) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rows.append(json.loads(line))
+        monkeypatch.setattr(statedb, "DB_DIR", cache_dir)
+        rows = pullhistory.read_records()
         upgrade_rows = [r for r in rows if r.get("verb") == "self-upgrade"]
         assert len(upgrade_rows) == 1, (
             f"expected exactly 1 self-upgrade row under flock-protected "

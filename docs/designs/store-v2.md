@@ -129,23 +129,34 @@ subprocess reader stays unchanged.
 
 ## 3. Local state: `~/.config/mind-meld/state.db`
 
-SQLite through the standard-library `sqlite3`: WAL, `busy_timeout`, mode
-0600, and a `user_version` schema number with forward-only migrations. The
-mm lockfile still serializes commands, and SQLite transactions make each
-step atomic.
+SQLite through the lazily imported standard-library `sqlite3`: rollback journal
+(`journal_mode=DELETE` only at file creation), `busy_timeout=5000`, mode 0600,
+`synchronous=FULL` without fullfsync. History has no hard macOS power-loss
+durability promise. 75A re-decides journal mode and fullfsync with measured
+ledger data; connect never resets a later migration's journal mode.
+Forward-only atomic migrations use user_version; meta.compat_version gates
+only incompatible reader changes. Newer compatible schemas remain usable.
+The mm lockfile serializes commands; each write transaction is the innermost
+lock. Read-only inspection creates nothing and closes before output.
+
+73B activates history on 1.x. Exact columns, readers and migrations are in
+[the history schema routing table](../invariants/sync.md#schema-columns-and-readers)
+and statedb.py's migration 1; the other four tables are empty and provisional
+until their owning Tracks, which may re-create them without raising the
+history compatibility gate.
 
 | Table | Holds | Readers |
 |---|---|---|
-| `meta` | device id, fleet id, host, schema version | every command |
-| `ledger` | `(source, path) → sha, vv, mtime, deleted`: the version each local file corresponds to | push (authoring), pull (classification), preview |
-| `cursors` | `peer → applied_seq, gap_seq, gap_since` | pull, status, presence |
-| `own_log` | `seq → prev, parts, bytes, created_at` | push, compaction, restore detection |
-| `displaced` | replaced local versions (bytes, reason, time), kept 30 days | `mm displaced`, gc |
-| `history` | per-file push/pull outcomes; imported once from `pull-history.jsonl{,.1}`, best effort: the 1 MB rotation usually leaves only the last push's rows | `mm log`, `mm conflicts --suggest` |
+| meta | compatibility, import marker, pending import, legacy file stats (future fleet keys arrive with their owners) | statedb, mm log |
+| ledger | source/path, sha, canonical vv, size, mtime, deleted, pending; no content | 75A publish, 78A classification |
+| cursors | peer, applied_seq, hash, gap_seq, gap_since | 77A pull, 81A status, 75A presence |
+| own_log | seq, prev, hash, parts, bytes, epoch time | 75A publish, 76A compaction/reconciliation |
+| displaced | replaced versions, bytes cleared at 30 days; metadata and expired flag retained forever | 78A mm displaced, 76A expiry, simulator INV2 |
+| history | per-file outcomes, one-time legacy JSONL import, newest 20,000 rows per known class (no shared rotation) | mm log only; sync receipts need their own retained state |
 
-[Conflict policies](conflict-policies.md) adds `base` (three-way merge bases)
-and `conflicts` (held versions). Usage, identity, upgrade and token caches
-stay in their existing JSON files.
+[Conflict policies](conflict-policies.md) in 2.1 adds base (three-way merge
+bases), conflicts (held versions), and `mm conflicts --suggest`. Usage,
+identity, upgrade and token caches stay in their existing JSON files.
 
 ## 4. Causal versions
 

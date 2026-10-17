@@ -12,7 +12,8 @@ bearing lock-order rules.
 
 Lock-order rule (caller's responsibility): NEVER acquire the mm lockfile
 while holding a ``locked_json_rmw`` context. Release the JSON's flock
-BEFORE appending to ``pullhistory.jsonl`` or any other locked resource.
+BEFORE a ``statedb`` write transaction or any other locked resource.
+A statedb write transaction is always the innermost lock.
 This helper cannot enforce that — it cannot see which other locks the
 caller holds — but the rule applies anywhere this helper is used.
 

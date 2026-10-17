@@ -63,6 +63,7 @@ from mind_meld import (
     seen_sources,
     sidecar,
     skill_link,
+    statedb,
     updateprogress,
     upgrade,
 )
@@ -128,6 +129,7 @@ from mind_meld.errors import (
     NEWER_STORAGE_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
+    SQLITE_UNAVAILABLE_REMEDY,
     ConfigError,
     CryptoError,
     KeyringUnavailableError,
@@ -1780,72 +1782,73 @@ def _upload_changed_blobs(
     always pass it. Source type and cap come from trusted local config,
     never from a source name string.
     """
-    bytes_transferred = 0
-    for rel_path, info in to_upload.items():
-        file_path = base_path / rel_path
-        try:
-            revision = read_file_revision(
-                file_path,
-                max_file_size=max_file_size,
-                retain_bytes=True,
-                source_name=src_name,
-                source_type=source_type,
-                base=base_path,
+    with pullhistory.batch():
+        bytes_transferred = 0
+        for rel_path, info in to_upload.items():
+            file_path = base_path / rel_path
+            try:
+                revision = read_file_revision(
+                    file_path,
+                    max_file_size=max_file_size,
+                    retain_bytes=True,
+                    source_name=src_name,
+                    source_type=source_type,
+                    base=base_path,
+                )
+            except _ManifestFileTooLarge as e:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=rel_path,
+                        problem="changed while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from e
+            assert revision.data is not None
+            # Only freshly scanned local revisions enter this upload path;
+            # loaded manifests (whose mtime may normalize to None) must never.
+            advertised_sha = info.get("sha256")
+            advertised_size = info.get("size")
+            advertised_mtime = info.get("mtime")
+            mtime_ok = isinstance(advertised_mtime, str) and (
+                revision.mtime_iso == advertised_mtime
+                or _upload_mtime_matches(revision.mtime_iso, advertised_mtime)
             )
-        except _ManifestFileTooLarge as e:
-            raise SnapshotError(
-                snapshot_refusal(
+            if (
+                revision.digest != advertised_sha
+                or revision.size != advertised_size
+                or len(revision.data) != advertised_size
+                or hashlib.sha256(revision.data).hexdigest() != advertised_sha
+                or not mtime_ok
+            ):
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=src_name,
+                        rel_path=rel_path,
+                        problem="changed while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                )
+
+            enc_data = encrypt(revision.data, passphrase, memory_kb)
+            bkey = blob_key(device_id, info["sha256"])
+            backend.put(bkey, enc_data)
+            bytes_transferred += len(enc_data)
+
+            if src_name is not None:
+                pullhistory.append(
+                    verb="push",
+                    device=device_id,
                     source=src_name,
                     rel_path=rel_path,
-                    problem="changed while being read",
-                    next_action="Wait for the writer to finish, then run mm push.",
+                    action="uploaded",
+                    local_sha=info.get("sha256"),
                 )
-            ) from e
-        assert revision.data is not None
-        # Only freshly scanned local revisions enter this upload path;
-        # loaded manifests (whose mtime may normalize to None) must never.
-        advertised_sha = info.get("sha256")
-        advertised_size = info.get("size")
-        advertised_mtime = info.get("mtime")
-        mtime_ok = isinstance(advertised_mtime, str) and (
-            revision.mtime_iso == advertised_mtime
-            or _upload_mtime_matches(revision.mtime_iso, advertised_mtime)
-        )
-        if (
-            revision.digest != advertised_sha
-            or revision.size != advertised_size
-            or len(revision.data) != advertised_size
-            or hashlib.sha256(revision.data).hexdigest() != advertised_sha
-            or not mtime_ok
-        ):
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=src_name,
-                    rel_path=rel_path,
-                    problem="changed while being read",
-                    next_action="Wait for the writer to finish, then run mm push.",
-                )
-            )
 
-        enc_data = encrypt(revision.data, passphrase, memory_kb)
-        bkey = blob_key(device_id, info["sha256"])
-        backend.put(bkey, enc_data)
-        bytes_transferred += len(enc_data)
+            if verbose:
+                console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
 
-        if src_name is not None:
-            pullhistory.append(
-                verb="push",
-                device=device_id,
-                source=src_name,
-                rel_path=rel_path,
-                action="uploaded",
-                local_sha=info.get("sha256"),
-            )
-
-        if verbose:
-            console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
-
-    return bytes_transferred
+        return bytes_transferred
 
 
 def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
@@ -3962,116 +3965,121 @@ def push(
     mm status for recorded capture/publication evidence. Exit 1 means sync or
     required maintenance stopped; exit 2 means invalid arguments.
     """
-    config = _get_config(read_only=dry_run)
-    _maybe_prompt_migration(config, read_only=dry_run)
-    # Re-load in case the migration prompt mutated config on disk so the
-    # current command sees the new exclude_patterns.
-    if not dry_run:
-        config = _get_config(read_only=False)
-    passphrase = _get_passphrase_or_exit()
-    pending: list[str] = []
-    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-    attempt = attemptlog.Attempt()
-    core_finished = False
-    stop_cause = "error"
-    stop_errno = None
+    with pullhistory.command_scope(attended=True):
+        config = _get_config(read_only=dry_run)
+        _maybe_prompt_migration(config, read_only=dry_run)
+        # Re-load in case the migration prompt mutated config on disk so the
+        # current command sees the new exclude_patterns.
+        if not dry_run:
+            config = _get_config(read_only=False)
+        passphrase = _get_passphrase_or_exit()
+        pending: list[str] = []
+        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+        attempt = attemptlog.Attempt()
+        core_finished = False
+        stop_cause = "error"
+        stop_errno = None
 
-    try:
-        acquire_lock()
-    except LockError as e:
-        _error(str(e))
-
-    try:
-        backend = get_backend(config)
         try:
-            memory_kb = _init_crypto_session(
-                backend, passphrase, config, read_only=dry_run, pending=pending
-            )
-        except MindMeldError as e:
-            _error(str(e) + refusal_suffix)
+            acquire_lock()
+        except LockError as e:
+            _error(str(e))
+
         try:
-            result = _push_core(
-                config,
-                passphrase,
-                memory_kb,
-                verbose,
-                dry_run,
-                preview_notes=pending,
-                attended=True,
-                attempt=attempt,
-            )
-            core_finished = True
-        except SnapshotError as e:
-            stop_cause = "snapshot-refused"
-            _error(str(e) + refusal_suffix)
-        except (OSError, MindMeldError) as e:
-            if isinstance(e, (OSError, StorageError)):
-                stop_cause = "storage-error"
-                stop_errno = attemptlog.storage_errno(e)
-            if dry_run:
-                _error(str(e) + refusal_suffix)
-            _error(
-                f"Push (push-failed): content was not pushed — {e}. "
-                f"Repair the sync failure and retry mm push. See {HOST_USAGE_CAPTURE_URL}"
-            )
-
-        if dry_run:
-            for note in pending:
-                console.print(safe_str(note))
-            console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
-            console.print(
-                "Not previewed: host-usage capture, the mm-events activity row a real push "
-                "appends, post-push GC of orphaned blobs, and upload re-reads."
-            )
-
-        # Usage-only publication leaves obsolete day-file blobs for the next
-        # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
-        if not dry_run and result and result.content_changed:
+            if not dry_run and not pullhistory.failed():
+                pullhistory.record_failure(statedb.recover_if_needed())
+            backend = get_backend(config)
             try:
-                gc_count = _do_gc(
-                    config,
-                    passphrase,
-                    memory_kb,
-                    dry_run=False,
-                    verbose=False,
-                    emit_retention_summary=False,
+                memory_kb = _init_crypto_session(
+                    backend, passphrase, config, read_only=dry_run, pending=pending
                 )
-                if gc_count:
-                    console.print(f"  GC: deleted {gc_count} orphaned blobs.")
-            except typer.Exit:
-                if not result.host_usage_published:
-                    raise
-                stderr_console.print(
-                    "mm: warning: Host usage was published; post-publication GC stopped. "
-                    "Run mm gc for details."
-                )
-            except (OSError, MindMeldError) as e:
-                stderr_console.print(
-                    f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
-                )
-    except (KeyboardInterrupt, typer.Abort):
-        # Only a storage-error record may carry errno.
-        stop_cause, stop_errno = "interrupted", None
-        raise
-    finally:
-        try:
-            if not dry_run and attempt.outcome is not None:
-                if not core_finished:
-                    attempt.stopped(stop_cause, errno_name=stop_errno)
-                try:
-                    attemptlog.write(attempt.outcome)
-                except Exception as e:
-                    stderr_console.print(
-                        "mm: notice: could not durably record this attended capture attempt at "
-                        f"{safe_str(_home_relative_path(attemptlog.record_path()))} "
-                        f"({_exception_text(e)}); check mm status"
+            except MindMeldError as e:
+                _error(str(e) + refusal_suffix)
+            try:
+                # One history transaction per push; per-source batches join it.
+                with pullhistory.batch():
+                    result = _push_core(
+                        config,
+                        passphrase,
+                        memory_kb,
+                        verbose,
+                        dry_run,
+                        preview_notes=pending,
+                        attended=True,
+                        attempt=attempt,
                     )
+                core_finished = True
+            except SnapshotError as e:
+                stop_cause = "snapshot-refused"
+                _error(str(e) + refusal_suffix)
+            except (OSError, MindMeldError) as e:
+                if isinstance(e, (OSError, StorageError)):
+                    stop_cause = "storage-error"
+                    stop_errno = attemptlog.storage_errno(e)
+                if dry_run:
+                    _error(str(e) + refusal_suffix)
+                _error(
+                    f"Push (push-failed): content was not pushed — {e}. "
+                    f"Repair the sync failure and retry mm push. See {HOST_USAGE_CAPTURE_URL}"
+                )
+
+            if dry_run:
+                for note in pending:
+                    console.print(safe_str(note))
+                console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
+                console.print(
+                    "Not previewed: host-usage capture, the mm-events activity row a real push "
+                    "appends, post-push GC of orphaned blobs, and upload re-reads."
+                )
+
+            # Usage-only publication leaves obsolete day-file blobs for the next
+            # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
+            if not dry_run and result and result.content_changed:
+                try:
+                    gc_count = _do_gc(
+                        config,
+                        passphrase,
+                        memory_kb,
+                        dry_run=False,
+                        verbose=False,
+                        emit_retention_summary=False,
+                    )
+                    if gc_count:
+                        console.print(f"  GC: deleted {gc_count} orphaned blobs.")
+                except typer.Exit:
+                    if not result.host_usage_published:
+                        raise
+                    stderr_console.print(
+                        "mm: warning: Host usage was published; post-publication GC stopped. "
+                        "Run mm gc for details."
+                    )
+                except (OSError, MindMeldError) as e:
+                    stderr_console.print(
+                        f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
+                    )
+        except (KeyboardInterrupt, typer.Abort):
+            # Only a storage-error record may carry errno.
+            stop_cause, stop_errno = "interrupted", None
+            raise
         finally:
-            release_lock()
-        # Failed attended attempts need the update or nudge too; previews never
-        # fetch, install or write it.
-        if not dry_run and not isinstance(sys.exception(), KeyboardInterrupt):
-            upgrade.update_or_nudge(config, attended=True)
+            try:
+                if not dry_run and attempt.outcome is not None:
+                    if not core_finished:
+                        attempt.stopped(stop_cause, errno_name=stop_errno)
+                    try:
+                        attemptlog.write(attempt.outcome)
+                    except Exception as e:
+                        stderr_console.print(
+                            "mm: notice: could not durably record this attended capture attempt at "
+                            f"{safe_str(_home_relative_path(attemptlog.record_path()))} "
+                            f"({_exception_text(e)}); check mm status"
+                        )
+            finally:
+                release_lock()
+            # Failed attended attempts need the update or nudge too; previews never
+            # fetch, install or write it.
+            if not dry_run and not isinstance(sys.exception(), KeyboardInterrupt):
+                upgrade.update_or_nudge(config, attended=True)
 
 
 def _ensure_device_registered(
@@ -4821,56 +4829,59 @@ def pull(
     Exit codes: 0 completed (warnings may indicate an incomplete preview),
     1 stopped, 2 usage error, 3 conflicts or failures predicted in fail mode.
     """
-    config = _get_config(read_only=dry_run)
-    _maybe_prompt_migration(config, read_only=dry_run)
-    # Re-load in case the migration prompt mutated config on disk so this
-    # pull sees the new exclude_patterns.
-    if not dry_run:
-        config = _get_config(read_only=False)
-    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-    passphrase = _get_passphrase_or_exit()
+    with pullhistory.command_scope(attended=True):
+        config = _get_config(read_only=dry_run)
+        _maybe_prompt_migration(config, read_only=dry_run)
+        # Re-load in case the migration prompt mutated config on disk so this
+        # pull sees the new exclude_patterns.
+        if not dry_run:
+            config = _get_config(read_only=False)
+        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+        passphrase = _get_passphrase_or_exit()
 
-    try:
-        acquire_lock()
-    except LockError as e:
-        _error(str(e))
-
-    try:
-        backend = get_backend(config)
         try:
-            pending: list[str] = []
-            memory_kb = _init_crypto_session(
-                backend, passphrase, config, read_only=dry_run, pending=pending
-            )
-            for note in pending:
-                console.print(safe_str(note))
-        except MindMeldError as e:
-            _error(str(e) + refusal_suffix)
-        _pull_core(
-            config,
-            passphrase,
-            memory_kb,
-            from_device,
-            source,
-            verbose,
-            dry_run,
-            conflict_mode=conflict_mode,
-        )
-        if dry_run:
-            console.print(DRY_RUN_COMPLETE)
-            console.print(PULL_NOT_PREVIEWED)
-    except MindMeldError as e:
-        if dry_run:
-            _error(str(e) + refusal_suffix)
-        raise
-    finally:
-        release_lock()
+            acquire_lock()
+        except LockError as e:
+            _error(str(e))
 
-    # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
-    # the lock is released so the cold-cache HTTP fetch never blocks pull
-    # progress and the update can take the lock for itself.
-    if not dry_run:
-        upgrade.update_or_nudge(config, attended=True)
+        try:
+            if not dry_run and not pullhistory.failed():
+                pullhistory.record_failure(statedb.recover_if_needed())
+            backend = get_backend(config)
+            try:
+                pending: list[str] = []
+                memory_kb = _init_crypto_session(
+                    backend, passphrase, config, read_only=dry_run, pending=pending
+                )
+                for note in pending:
+                    console.print(safe_str(note))
+            except MindMeldError as e:
+                _error(str(e) + refusal_suffix)
+            _pull_core(
+                config,
+                passphrase,
+                memory_kb,
+                from_device,
+                source,
+                verbose,
+                dry_run,
+                conflict_mode=conflict_mode,
+            )
+            if dry_run:
+                console.print(DRY_RUN_COMPLETE)
+                console.print(PULL_NOT_PREVIEWED)
+        except MindMeldError as e:
+            if dry_run:
+                _error(str(e) + refusal_suffix)
+            raise
+        finally:
+            release_lock()
+
+        # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
+        # the lock is released so the cold-cache HTTP fetch never blocks pull
+        # progress and the update can take the lock for itself.
+        if not dry_run:
+            upgrade.update_or_nudge(config, attended=True)
 
 
 @dataclass
@@ -5648,454 +5659,470 @@ def _pull_core(
     When quiet=True, load-bearing warnings still reach stderr; cosmetic
     progress chatter is suppressed.
     """
-    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-    interactive_resolve_flag = conflict_mode == "prompt"
-    start = time.time()
-    my_device_id = config["device"]["id"]
-    backend = get_backend(config)
+    with pullhistory.batch():
+        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+        interactive_resolve_flag = conflict_mode == "prompt"
+        start = time.time()
+        my_device_id = config["device"]["id"]
+        backend = get_backend(config)
 
-    # Track 12A: shared accumulator for inline keep-canonical decisions, drained
-    # once after the whole device loop. Only allocated in interactive (`prompt`)
-    # mode — non-interactive pulls (default keep-both, autopull) never populate
-    # it, so None keeps the bump machinery a no-op down the whole call chain.
-    pending_inline_bumps: dict[Path, float] | None = {} if interactive_resolve_flag else None
+        # Track 12A: shared accumulator for inline keep-canonical decisions, drained
+        # once after the whole device loop. Only allocated in interactive (`prompt`)
+        # mode — non-interactive pulls (default keep-both, autopull) never populate
+        # it, so None keeps the bump machinery a no-op down the whole call chain.
+        pending_inline_bumps: dict[Path, float] | None = {} if interactive_resolve_flag else None
 
-    # Track 5E gate: refuse pull if any peer is pre-v0.9.2 OR has a
-    # corrupt device.json (we can't read its version). Runs BEFORE the
-    # pre-inversion migration sweep so we don't accidentally migrate
-    # files in a refusal scenario where the user is about to upgrade
-    # their peers and re-pull. Exits via _error → typer.Exit(1).
-    _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
+        # Track 5E gate: refuse pull if any peer is pre-v0.9.2 OR has a
+        # corrupt device.json (we can't read its version). Runs BEFORE the
+        # pre-inversion migration sweep so we don't accidentally migrate
+        # files in a refusal scenario where the user is about to upgrade
+        # their peers and re-pull. Exits via _error → typer.Exit(1).
+        _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
 
-    # Pre-inversion conflict-file migration. Runs once per pull under the
-    # already-held mm lockfile — safe against autopull racing with another
-    # discovery walk. mm pull is about to potentially produce NEW (post-
-    # inversion) conflict files via `_apply_conflict`; without this sweep,
-    # the user's tree would end up with a mix of pre-inversion and post-
-    # inversion files indistinguishable except by mtime — and resolve's
-    # dual-mode dispatch needs the prefix, not the timestamp.
-    if not dry_run:
-        resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
+        # Pre-inversion conflict-file migration. Runs once per pull under the
+        # already-held mm lockfile — safe against autopull racing with another
+        # discovery walk. mm pull is about to potentially produce NEW (post-
+        # inversion) conflict files via `_apply_conflict`; without this sweep,
+        # the user's tree would end up with a mix of pre-inversion and post-
+        # inversion files indistinguishable except by mtime — and resolve's
+        # dual-mode dispatch needs the prefix, not the timestamp.
+        if not dry_run:
+            resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
-    # Widened to carry path + type per source. Type is load-bearing for
-    # the sync-log gate in _pull_one_source — keying on type (not name)
-    # lets users rename the claude source without losing per-project logs.
-    pull_resolution = resolve_sources(config)
-    pull_sources = list(pull_resolution.available)
-    pull_sources.extend(
-        src
-        for src in pull_resolution.selected
-        if src["name"] in MM_INTERNAL_SOURCE_NAMES and src not in pull_sources
-    )
-    local_sources_map: dict[str, dict[str, Any]] = {
-        src_cfg["name"]: {
-            "path": Path(src_cfg["path"]).expanduser().absolute(),
-            "type": src_cfg["type"],
+        # Widened to carry path + type per source. Type is load-bearing for
+        # the sync-log gate in _pull_one_source — keying on type (not name)
+        # lets users rename the claude source without losing per-project logs.
+        pull_resolution = resolve_sources(config)
+        pull_sources = list(pull_resolution.available)
+        pull_sources.extend(
+            src
+            for src in pull_resolution.selected
+            if src["name"] in MM_INTERNAL_SOURCE_NAMES and src not in pull_sources
+        )
+        local_sources_map: dict[str, dict[str, Any]] = {
+            src_cfg["name"]: {
+                "path": Path(src_cfg["path"]).expanduser().absolute(),
+                "type": src_cfg["type"],
+            }
+            for src_cfg in pull_sources
         }
-        for src_cfg in pull_sources
-    }
 
-    all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
-    if from_device and not pull_targets:
-        if not quiet:
-            _error(f"Device not found: {from_device}" + refusal_suffix)
-    if not pull_targets:
-        if not quiet:
-            console.print("[yellow]No other devices found to pull from.[/yellow]")
-        if dry_run and not quiet:
-            console.print("No changes predicted.")
-        return PullResult(elapsed=time.time() - start)
+        all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
+        if from_device and not pull_targets:
+            if not quiet:
+                _error(f"Device not found: {from_device}" + refusal_suffix)
+        if not pull_targets:
+            if not quiet:
+                console.print("[yellow]No other devices found to pull from.[/yellow]")
+            if dry_run and not quiet:
+                console.print("No changes predicted.")
+            return PullResult(elapsed=time.time() - start)
 
-    manifest_cache, corrupt_peers = _prefetch_manifests(backend, all_devices, passphrase, memory_kb)
+        manifest_cache, corrupt_peers = _prefetch_manifests(
+            backend, all_devices, passphrase, memory_kb
+        )
 
-    # Consumer-boundary exclude_patterns filter for pull. Drops excluded
-    # paths from each peer manifest before tombstone collection AND before
-    # the per-source download loop. Without this, a peer who hasn't yet
-    # adopted the local exclude_patterns ships an excluded file in their
-    # manifest, and pull would either download it (defeating the exclude)
-    # or surface it as a conflict. Filter HERE, not in
-    # `_fetch_remote_manifest` — `mm gc` reads this device's raw manifest
-    # via that path to compute referenced blobs, and a filtered manifest
-    # there would mark live own blobs as orphans (codex-2 #1).
-    # Same disable-then-exclude order as _push_core. The disabled-sources
-    # filter strips entire `sources.<name>` entries so the per-peer
-    # download loop never tries to land a disabled source's files locally.
-    # P0 invariant — see _filter_disabled_sources docstring.
-    disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
-    if disabled_sources:
-        manifest_cache = {
-            did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
-            for did, m in manifest_cache.items()
-        }
-    # Pull never walks local trees for nested checkouts: it probes only the
-    # local ancestors of incoming peer paths, so it never writes into one.
-    nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
-    exclude_map, skip_prefixes = _build_exclude_map(config, nested_roots=nested_roots)
-    # Always run: conflict-shaped names and `.extend-root` are stripped even
-    # when no source declares exclude_patterns (claude-only installs).
-    filtered_cache: dict[str, dict | None] = {}
-    for did, m in manifest_cache.items():
-        if m is None:
-            filtered_cache[did] = None
-            continue
-        filtered = _filter_excluded_paths(m, exclude_map, skip_prefixes)
-        # Log "excluded" per peer-path so `mm log --action excluded`
-        # shows what the user is NOT pulling because of their config.
-        #
-        # 5E ship-fix: skip logging in quiet (autopull/autopush) mode.
-        # Without this gate, autopull writes one record per peer ×
-        # source × excluded-path tuple on every hook fire — at
-        # ~100 projects × hourly pulls, the 1MB pullhistory cap
-        # rotates within hours and evicts real `written / merged /
-        # conflicted / failed` records to `.1`. The forensic-aid
-        # contract becomes useless. Interactive `mm pull` still
-        # logs the full set so users can audit their excludes.
-        # A nested checkout logs one record per root and peer, not per file,
-        # whether files or deletions under it were skipped.
-        if not quiet and not dry_run:
-            logged_roots: set[tuple[str, str]] = set()
+        # Consumer-boundary exclude_patterns filter for pull. Drops excluded
+        # paths from each peer manifest before tombstone collection AND before
+        # the per-source download loop. Without this, a peer who hasn't yet
+        # adopted the local exclude_patterns ships an excluded file in their
+        # manifest, and pull would either download it (defeating the exclude)
+        # or surface it as a conflict. Filter HERE, not in
+        # `_fetch_remote_manifest` — `mm gc` reads this device's raw manifest
+        # via that path to compute referenced blobs, and a filtered manifest
+        # there would mark live own blobs as orphans (codex-2 #1).
+        # Same disable-then-exclude order as _push_core. The disabled-sources
+        # filter strips entire `sources.<name>` entries so the per-peer
+        # download loop never tries to land a disabled source's files locally.
+        # P0 invariant — see _filter_disabled_sources docstring.
+        disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
+        if disabled_sources:
+            manifest_cache = {
+                did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
+                for did, m in manifest_cache.items()
+            }
+        # Pull never walks local trees for nested checkouts: it probes only the
+        # local ancestors of incoming peer paths, so it never writes into one.
+        nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
+        exclude_map, skip_prefixes = _build_exclude_map(config, nested_roots=nested_roots)
+        # Always run: conflict-shaped names and `.extend-root` are stripped even
+        # when no source declares exclude_patterns (claude-only installs).
+        filtered_cache: dict[str, dict | None] = {}
+        for did, m in manifest_cache.items():
+            if m is None:
+                filtered_cache[did] = None
+                continue
+            filtered = _filter_excluded_paths(m, exclude_map, skip_prefixes)
+            # Log "excluded" per peer-path so `mm log --action excluded`
+            # shows what the user is NOT pulling because of their config.
+            #
+            # 5E ship-fix: skip logging in quiet (autopull/autopush) mode.
+            # Without this gate, autopull writes one record per peer ×
+            # source × excluded-path tuple on every hook fire — at
+            # ~100 projects × hourly pulls would needlessly fill the excluded
+            # class budget. Interactive `mm pull` still
+            # logs the full set so users can audit their excludes.
+            # A nested checkout logs one record per root and peer, not per file,
+            # whether files or deletions under it were skipped.
+            if not quiet and not dry_run:
+                logged_roots: set[tuple[str, str]] = set()
 
-            def checkout_root(src_name: str, rel_path: str) -> str | None:
-                return next(
-                    (
-                        r
-                        for r in nested_roots.get(src_name, [])
-                        if _under_skip_prefix(rel_path, [r])
-                    ),
-                    None,
-                )
-
-            def log_root(src_name: str, root: str) -> None:
-                if (src_name, root) not in logged_roots:
-                    logged_roots.add((src_name, root))
-                    pullhistory.append(
-                        verb="pull", device=did, source=src_name, rel_path=root, action="excluded"
+                def checkout_root(src_name: str, rel_path: str) -> str | None:
+                    return next(
+                        (
+                            r
+                            for r in nested_roots.get(src_name, [])
+                            if _under_skip_prefix(rel_path, [r])
+                        ),
+                        None,
                     )
 
-            for src_name, src_data in m.get("sources", {}).items():
-                kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
-                for rel_path, info in src_data.get("files", {}).items():
-                    if rel_path in kept:
+                def log_root(src_name: str, root: str) -> None:
+                    if (src_name, root) not in logged_roots:
+                        logged_roots.add((src_name, root))
+                        pullhistory.append(
+                            verb="pull",
+                            device=did,
+                            source=src_name,
+                            rel_path=root,
+                            action="excluded",
+                        )
+
+                for src_name, src_data in m.get("sources", {}).items():
+                    kept = filtered.get("sources", {}).get(src_name, {}).get("files", {})
+                    for rel_path, info in src_data.get("files", {}).items():
+                        if rel_path in kept:
+                            continue
+                        if root := checkout_root(src_name, rel_path):
+                            log_root(src_name, root)
+                            continue
+                        pullhistory.append(
+                            verb="pull",
+                            device=did,
+                            source=src_name,
+                            rel_path=rel_path,
+                            action="excluded",
+                            remote_sha=info.get("sha256"),
+                        )
+                for key in m.get("tombstones", {}):
+                    if not isinstance(key, str) or key in filtered.get("tombstones", {}):
                         continue
+                    src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
                     if root := checkout_root(src_name, rel_path):
                         log_root(src_name, root)
-                        continue
-                    pullhistory.append(
-                        verb="pull",
-                        device=did,
-                        source=src_name,
-                        rel_path=rel_path,
-                        action="excluded",
-                        remote_sha=info.get("sha256"),
+            filtered_cache[did] = filtered
+        manifest_cache = filtered_cache
+
+        # Group 7 preflight #6 + D11: pull-time case-collision detection.
+        # On case-insensitive local FS (APFS default, NTFS), two manifest
+        # entries that differ only in casing (peer A "Projects/x.md" + peer B
+        # "projects/x.md") would resolve to the same inode locally — the
+        # second would silently overwrite or alias the first. Detect per
+        # source, emit `mm: warning:` per cluster, drop all-but-lex-first
+        # from each peer manifest. Codex outside-voice T5: a Linux peer can
+        # legitimately have both names; we don't normalize manifest keys
+        # globally — we only skip the duplicate WRITE on case-insensitive
+        # consumers. The raw manifest stays intact for future cross-platform
+        # peers.
+        case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
+        if case_collisions:
+            for src_name, clusters in case_collisions.items():
+                for paths in clusters.values():
+                    # src_name and paths come from peer manifests — sanitize
+                    # before render (Group 7 preflight #1 sweep extension).
+                    safe_kept = safe_str(paths[0])
+                    safe_dropped = ", ".join(safe_str(p) for p in paths[1:])
+                    stderr_console.print(
+                        f"mm: warning: case-collision in source "
+                        f"'{safe_str(src_name)}' on case-insensitive FS — "
+                        f"keeping '{safe_kept}', skipping [{safe_dropped}] "
+                        f"(Linux peer can legitimately push both; this device "
+                        f"can only represent one)"
                     )
-            for key in m.get("tombstones", {}):
-                if not isinstance(key, str) or key in filtered.get("tombstones", {}):
-                    continue
-                src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
-                if root := checkout_root(src_name, rel_path):
-                    log_root(src_name, root)
-        filtered_cache[did] = filtered
-    manifest_cache = filtered_cache
+            manifest_cache = _drop_case_collisions_from_manifests(manifest_cache, case_collisions)
 
-    # Group 7 preflight #6 + D11: pull-time case-collision detection.
-    # On case-insensitive local FS (APFS default, NTFS), two manifest
-    # entries that differ only in casing (peer A "Projects/x.md" + peer B
-    # "projects/x.md") would resolve to the same inode locally — the
-    # second would silently overwrite or alias the first. Detect per
-    # source, emit `mm: warning:` per cluster, drop all-but-lex-first
-    # from each peer manifest. Codex outside-voice T5: a Linux peer can
-    # legitimately have both names; we don't normalize manifest keys
-    # globally — we only skip the duplicate WRITE on case-insensitive
-    # consumers. The raw manifest stays intact for future cross-platform
-    # peers.
-    case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
-    if case_collisions:
-        for src_name, clusters in case_collisions.items():
-            for paths in clusters.values():
-                # src_name and paths come from peer manifests — sanitize
-                # before render (Group 7 preflight #1 sweep extension).
-                safe_kept = safe_str(paths[0])
-                safe_dropped = ", ".join(safe_str(p) for p in paths[1:])
-                stderr_console.print(
-                    f"mm: warning: case-collision in source "
-                    f"'{safe_str(src_name)}' on case-insensitive FS — "
-                    f"keeping '{safe_kept}', skipping [{safe_dropped}] "
-                    f"(Linux peer can legitimately push both; this device "
-                    f"can only represent one)"
-                )
-        manifest_cache = _drop_case_collisions_from_manifests(manifest_cache, case_collisions)
-
-    all_tombstones = collect_tombstones(
-        list(manifest_cache.keys()),
-        lambda did: manifest_cache.get(did),
-    )
-
-    if dry_run and not quiet and (not source_filter or source_filter == "mm-events"):
-        for src in pull_resolution.selected:
-            if src["name"] in pull_resolution.would_create and any(
-                manifest_cache.get(device["device_id"], {})
-                .get("sources", {})
-                .get("mm-events", {})
-                .get("files")
-                for device in pull_targets
-                if manifest_cache.get(device["device_id"]) is not None
-            ):
-                console.print(
-                    f"mm pull will create {safe_str(src['path'])} (0700) "
-                    "for incoming mm-events files."
-                )
-
-    planner = None
-    planned_unknown = []
-    if dry_run or conflict_mode == "fail":
-        planner, planned_unknown = _plan_pull(
-            pull_targets,
-            manifest_cache,
-            local_sources_map,
-            source_filter,
-            all_tombstones,
+        all_tombstones = collect_tombstones(
+            list(manifest_cache.keys()),
+            lambda did: manifest_cache.get(did),
         )
-    if conflict_mode == "fail":
-        assert planner is not None
-        predicted = _fail_mode_refusals(planner.predictions)
-        if predicted:
-            _print_pull_summary(
-                PullResult(), corrupt_peers, planned_unknown, [], [], quiet, verbose, dry_run=True
-            )
-            _print_preflight_conflicts(predicted, quiet)
-            if dry_run:
-                stderr_console.print(DRY_RUN_REFUSAL.strip())
-            raise typer.Exit(3)
 
-    # Aggregate accumulators. Load-bearing warnings go through lists,
-    # routed to stderr by _print_pull_summary. The try/finally below
-    # guarantees _print_pull_summary runs even on unexpected exceptions
-    # so accumulated warnings (corrupt peers, unknown sources, fsync
-    # failures) still reach stderr — preserving the v0.8.1 visible-
-    # failure contract.
-    per_source_results: list[_PerSourceResult] = []
-    unknown_sources: list[_UnknownSourceWarning] = []
-    touched_parents: set[Path] = set()
-    device_names: list[str] = []
-    fsync_warnings: list[_FsyncWarning] = []
-    total_written = total_merged = total_skipped = total_conflicted = 0
-    total_failed = total_skipped_unknown_source = bytes_transferred = 0
-
-    in_flight: _ApplyReporter | None = None
-    per_source: _PerSourceResult | None = None
-    accounted = False
-    interruption: Literal["interrupted", "aborted"] | None = None
-
-    def _account_source(per_source: _PerSourceResult) -> None:
-        nonlocal bytes_transferred, total_written, total_merged, total_skipped
-        nonlocal total_conflicted, total_failed, touched_parents
-        per_source_results.append(per_source)
-        bytes_transferred += per_source.bytes_transferred
-        touched_parents |= per_source.touched_parents
-        total_written += len(per_source.outcomes["written"])
-        total_merged += len(per_source.outcomes["merged"]) + len(
-            per_source.outcomes["merged-via-lcs"]
-        )
-        total_skipped += len(per_source.outcomes["skipped"])
-        total_conflicted += len(per_source.outcomes["conflicted"])
-        total_failed += len(per_source.outcomes["failed"])
-
-    try:
-        for device in pull_targets:
-            did = device["device_id"]
-            dname = device["device_name"]
-            if not quiet and not dry_run:
-                console.print(f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]")
-
-            remote_manifest = manifest_cache.get(did)
-            if remote_manifest is None:
-                if not quiet:
-                    console.print(f"  [yellow]No manifest for {safe_str(dname)}[/yellow]")
-                continue
-
-            device_had_changes = False
-
-            for src_name, src_data in remote_manifest.get("sources", {}).items():
-                if source_filter and src_name != source_filter:
-                    continue
-
-                if src_name not in local_sources_map:
-                    total_skipped_unknown_source += 1
-                    unknown_sources.append(
-                        _UnknownSourceWarning(src_name=src_name, device_name=dname)
-                    )
-                    continue
-
-                src_info = local_sources_map[src_name]
-                base_path = src_info["path"]
-                src_type = src_info["type"]
-                if verbose and not quiet and not dry_run:
+        if dry_run and not quiet and (not source_filter or source_filter == "mm-events"):
+            for src in pull_resolution.selected:
+                if src["name"] in pull_resolution.would_create and any(
+                    manifest_cache.get(device["device_id"], {})
+                    .get("sources", {})
+                    .get("mm-events", {})
+                    .get("files")
+                    for device in pull_targets
+                    if manifest_cache.get(device["device_id"]) is not None
+                ):
                     console.print(
-                        f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
+                        f"mm pull will create {safe_str(src['path'])} (0700) "
+                        "for incoming mm-events files."
                     )
 
-                in_flight = _ApplyReporter(
-                    device_name=dname,
-                    src_name=src_name,
-                    outcomes=_empty_outcomes(),
-                    pending_inline_bumps=pending_inline_bumps,
+        planner = None
+        planned_unknown = []
+        if dry_run or conflict_mode == "fail":
+            planner, planned_unknown = _plan_pull(
+                pull_targets,
+                manifest_cache,
+                local_sources_map,
+                source_filter,
+                all_tombstones,
+            )
+        if conflict_mode == "fail":
+            assert planner is not None
+            predicted = _fail_mode_refusals(planner.predictions)
+            if predicted:
+                _print_pull_summary(
+                    PullResult(),
+                    corrupt_peers,
+                    planned_unknown,
+                    [],
+                    [],
+                    quiet,
+                    verbose,
+                    dry_run=True,
                 )
-                per_source = None
-                accounted = False
-                per_source = _pull_one_source(
-                    backend,
-                    src_name=src_name,
-                    src_type=src_type,
-                    src_data=src_data,
-                    did=did,
-                    dname=dname,
-                    base_path=base_path,
-                    all_tombstones=all_tombstones,
-                    passphrase=passphrase,
-                    memory_kb=memory_kb,
-                    interactive_resolve=interactive_resolve_flag,
-                    dry_run=dry_run,
-                    verbose_console=(verbose and not quiet),
-                    quiet=quiet,
-                    devices=all_devices,
-                    pending_inline_bumps=pending_inline_bumps,
-                    reporter=in_flight,
-                    predictions=(
-                        [
-                            p
-                            for p in planner.predictions
-                            if p.device_id == did and p.src_name == src_name
-                        ]
-                        if planner is not None
-                        else None
-                    ),
-                )
-
+                _print_preflight_conflicts(predicted, quiet)
                 if dry_run:
-                    per_source_results.append(per_source)
-                    if not quiet and any(p.outcome != "unchanged" for p in per_source.predictions):
-                        console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
-                        _print_pull_prediction(per_source.predictions, base_path, src_name)
-                    in_flight = None
-                    continue
+                    stderr_console.print(DRY_RUN_REFUSAL.strip())
+                raise typer.Exit(3)
 
-                if not per_source.had_changes:
-                    in_flight = None
-                    if verbose and not quiet:
-                        console.print(
-                            f"  [green]Up to date with "
-                            f"{safe_str(dname)}/{safe_str(src_name)}.[/green]"
-                        )
-                    continue
+        # Aggregate accumulators. Load-bearing warnings go through lists,
+        # routed to stderr by _print_pull_summary. The try/finally below
+        # guarantees _print_pull_summary runs even on unexpected exceptions
+        # so accumulated warnings (corrupt peers, unknown sources, fsync
+        # failures) still reach stderr — preserving the v0.8.1 visible-
+        # failure contract.
+        per_source_results: list[_PerSourceResult] = []
+        unknown_sources: list[_UnknownSourceWarning] = []
+        touched_parents: set[Path] = set()
+        device_names: list[str] = []
+        fsync_warnings: list[_FsyncWarning] = []
+        total_written = total_merged = total_skipped = total_conflicted = 0
+        total_failed = total_skipped_unknown_source = bytes_transferred = 0
 
-                _account_source(per_source)
-                accounted = True
-                device_had_changes = True
+        in_flight: _ApplyReporter | None = None
+        per_source: _PerSourceResult | None = None
+        accounted = False
+        interruption: Literal["interrupted", "aborted"] | None = None
 
-                _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
-                in_flight = None
+        def _account_source(per_source: _PerSourceResult) -> None:
+            nonlocal bytes_transferred, total_written, total_merged, total_skipped
+            nonlocal total_conflicted, total_failed, touched_parents
+            per_source_results.append(per_source)
+            bytes_transferred += per_source.bytes_transferred
+            touched_parents |= per_source.touched_parents
+            total_written += len(per_source.outcomes["written"])
+            total_merged += len(per_source.outcomes["merged"]) + len(
+                per_source.outcomes["merged-via-lcs"]
+            )
+            total_skipped += len(per_source.outcomes["skipped"])
+            total_conflicted += len(per_source.outcomes["conflicted"])
+            total_failed += len(per_source.outcomes["failed"])
 
-            if device_had_changes:
-                device_names.append(dname)
-                # Clean up iCloud/Dropbox manifest conflict copies is best-
-                # effort: a failure here just leaves dup conflict copies on
-                # disk for the next pull to retry. Swallowing protects
-                # accumulated warnings from the visible-failure contract.
-                # Skip after a contained apply failure so an alternate
-                # conflict-copy of this device's manifest remains for retry.
-                device_failed = any(
-                    r.device_id == did and r.outcomes["failed"] for r in per_source_results
-                )
-                if not device_failed:
-                    try:
-                        _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
-                    except (OSError, StorageError) as e:
-                        msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
-                        if quiet:
-                            print(f"mm: warning: {msg}", file=sys.stderr)
-                        else:
-                            console.print(f"  [yellow]warning:[/yellow] {msg}")
-
-        fsync_warnings = _fsync_touched_parents(touched_parents)
-
-        # Track 12A: end-of-pull-batch drain. Every peer has been walked, so
-        # the recorded bump value beats all of them at once. INSIDE the try:
-        # a typer.Abort() from the inline (a)bort choice propagates past this
-        # point straight to `finally`, intentionally skipping the drain —
-        # abort means the user does not trust this pull, so half-made
-        # keep-canonical decisions are not broadcast to the fleet.
-        _drain_inline_bumps(pending_inline_bumps)
-    except BaseException as exc:
-        # A finally-with-access-to-the-error: preserve completed publications
-        # for every exception class, then re-raise the ORIGINAL exception.
-        # Ctrl-C waits for bounded directory fsync. A second Ctrl-C during
-        # recovery can replace the first traceback (accepted residual window).
-        if in_flight is not None:
-            if per_source is None:
-                assert in_flight.outcomes is not None
-                per_source = _PerSourceResult(
-                    src_name=src_name,
-                    device_name=dname,
-                    device_id=did,
-                    outcomes=in_flight.outcomes,
-                    bytes_transferred=in_flight.bytes_transferred,
-                    touched_parents=in_flight.touched_parents,
-                    claude_sync_base=str(base_path) if src_type == "claude" else None,
-                )
-            if not accounted:
-                _account_source(per_source)
-        fsync_warnings = _fsync_touched_parents(touched_parents)
-        if in_flight is not None:
-            try:
-                _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
-            except (Exception, SystemExit):
-                pass
-        interruption = "aborted" if isinstance(exc, typer.Abort) else "interrupted"
-        raise
-    finally:
-        # Even if an unexpected exception propagates from the loop above,
-        # emit accumulated load-bearing warnings to stderr. The v0.8.1
-        # contract requires corrupt-peer / unknown-source / fsync-failure
-        # warnings to survive quiet mode AND partial pulls.
-        _partial_result = PullResult(
-            total_written=total_written,
-            total_merged=total_merged,
-            total_skipped=total_skipped,
-            total_conflicted=total_conflicted,
-            total_failed=total_failed,
-            total_skipped_unknown_source=total_skipped_unknown_source,
-            bytes_transferred=bytes_transferred,
-            device_names=device_names,
-            elapsed=time.time() - start,
-            durability_fsync_failures=len(fsync_warnings),
-            corrupt_peer_count=len(corrupt_peers),
-        )
-        exception_in_flight = sys.exc_info()[0] is not None
         try:
-            _print_pull_summary(
-                _partial_result,
-                corrupt_peers=corrupt_peers,
-                unknown_sources=unknown_sources,
-                fsync_warnings=fsync_warnings,
-                per_source_results=per_source_results,
-                quiet=quiet,
-                verbose=verbose,
-                interruption=interruption,
-                dry_run=dry_run,
-            )
-        except (Exception, SystemExit):
-            if not exception_in_flight:
-                raise
+            for device in pull_targets:
+                did = device["device_id"]
+                dname = device["device_name"]
+                if not quiet and not dry_run:
+                    console.print(
+                        f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]"
+                    )
 
-    if dry_run and not quiet:
-        assert planner is not None
-        console.print(pullplan.totals(planner.predictions))
-        if corrupt_peers:
-            console.print(
-                f"Preview incomplete: {len(corrupt_peers)} peer(s) could not be "
-                "inspected (see the warnings above)."
+                remote_manifest = manifest_cache.get(did)
+                if remote_manifest is None:
+                    if not quiet:
+                        console.print(f"  [yellow]No manifest for {safe_str(dname)}[/yellow]")
+                    continue
+
+                device_had_changes = False
+
+                for src_name, src_data in remote_manifest.get("sources", {}).items():
+                    if source_filter and src_name != source_filter:
+                        continue
+
+                    if src_name not in local_sources_map:
+                        total_skipped_unknown_source += 1
+                        unknown_sources.append(
+                            _UnknownSourceWarning(src_name=src_name, device_name=dname)
+                        )
+                        continue
+
+                    src_info = local_sources_map[src_name]
+                    base_path = src_info["path"]
+                    src_type = src_info["type"]
+                    if verbose and not quiet and not dry_run:
+                        console.print(
+                            f"  [bold]Source '{safe_str(src_name)}' ({safe_str(base_path)}):[/bold]"
+                        )
+
+                    in_flight = _ApplyReporter(
+                        device_name=dname,
+                        src_name=src_name,
+                        outcomes=_empty_outcomes(),
+                        pending_inline_bumps=pending_inline_bumps,
+                    )
+                    per_source = None
+                    accounted = False
+                    per_source = _pull_one_source(
+                        backend,
+                        src_name=src_name,
+                        src_type=src_type,
+                        src_data=src_data,
+                        did=did,
+                        dname=dname,
+                        base_path=base_path,
+                        all_tombstones=all_tombstones,
+                        passphrase=passphrase,
+                        memory_kb=memory_kb,
+                        interactive_resolve=interactive_resolve_flag,
+                        dry_run=dry_run,
+                        verbose_console=(verbose and not quiet),
+                        quiet=quiet,
+                        devices=all_devices,
+                        pending_inline_bumps=pending_inline_bumps,
+                        reporter=in_flight,
+                        predictions=(
+                            [
+                                p
+                                for p in planner.predictions
+                                if p.device_id == did and p.src_name == src_name
+                            ]
+                            if planner is not None
+                            else None
+                        ),
+                    )
+
+                    if dry_run:
+                        per_source_results.append(per_source)
+                        if not quiet and any(
+                            p.outcome != "unchanged" for p in per_source.predictions
+                        ):
+                            console.print(f"  Dry run for {safe_str(dname)}/{safe_str(src_name)}:")
+                            _print_pull_prediction(per_source.predictions, base_path, src_name)
+                        in_flight = None
+                        continue
+
+                    if not per_source.had_changes:
+                        in_flight = None
+                        if verbose and not quiet:
+                            console.print(
+                                f"  [green]Up to date with "
+                                f"{safe_str(dname)}/{safe_str(src_name)}.[/green]"
+                            )
+                        continue
+
+                    _account_source(per_source)
+                    accounted = True
+                    device_had_changes = True
+
+                    _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
+                    in_flight = None
+
+                if device_had_changes:
+                    device_names.append(dname)
+                    # Clean up iCloud/Dropbox manifest conflict copies is best-
+                    # effort: a failure here just leaves dup conflict copies on
+                    # disk for the next pull to retry. Swallowing protects
+                    # accumulated warnings from the visible-failure contract.
+                    # Skip after a contained apply failure so an alternate
+                    # conflict-copy of this device's manifest remains for retry.
+                    device_failed = any(
+                        r.device_id == did and r.outcomes["failed"] for r in per_source_results
+                    )
+                    if not device_failed:
+                        try:
+                            _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
+                        except (OSError, StorageError) as e:
+                            msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
+                            if quiet:
+                                print(f"mm: warning: {msg}", file=sys.stderr)
+                            else:
+                                console.print(f"  [yellow]warning:[/yellow] {msg}")
+
+            fsync_warnings = _fsync_touched_parents(touched_parents)
+
+            # Track 12A: end-of-pull-batch drain. Every peer has been walked, so
+            # the recorded bump value beats all of them at once. INSIDE the try:
+            # a typer.Abort() from the inline (a)bort choice propagates past this
+            # point straight to `finally`, intentionally skipping the drain —
+            # abort means the user does not trust this pull, so half-made
+            # keep-canonical decisions are not broadcast to the fleet.
+            _drain_inline_bumps(pending_inline_bumps)
+        except BaseException as exc:
+            # A finally-with-access-to-the-error: preserve completed publications
+            # for every exception class, then re-raise the ORIGINAL exception.
+            # Ctrl-C waits for bounded directory fsync. A second Ctrl-C during
+            # recovery can replace the first traceback (accepted residual window).
+            if in_flight is not None:
+                if per_source is None:
+                    assert in_flight.outcomes is not None
+                    per_source = _PerSourceResult(
+                        src_name=src_name,
+                        device_name=dname,
+                        device_id=did,
+                        outcomes=in_flight.outcomes,
+                        bytes_transferred=in_flight.bytes_transferred,
+                        touched_parents=in_flight.touched_parents,
+                        claude_sync_base=str(base_path) if src_type == "claude" else None,
+                    )
+                if not accounted:
+                    _account_source(per_source)
+            fsync_warnings = _fsync_touched_parents(touched_parents)
+            if in_flight is not None:
+                try:
+                    _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
+                except (Exception, SystemExit):
+                    pass
+            interruption = "aborted" if isinstance(exc, typer.Abort) else "interrupted"
+            raise
+        finally:
+            # Even if an unexpected exception propagates from the loop above,
+            # emit accumulated load-bearing warnings to stderr. The v0.8.1
+            # contract requires corrupt-peer / unknown-source / fsync-failure
+            # warnings to survive quiet mode AND partial pulls.
+            _partial_result = PullResult(
+                total_written=total_written,
+                total_merged=total_merged,
+                total_skipped=total_skipped,
+                total_conflicted=total_conflicted,
+                total_failed=total_failed,
+                total_skipped_unknown_source=total_skipped_unknown_source,
+                bytes_transferred=bytes_transferred,
+                device_names=device_names,
+                elapsed=time.time() - start,
+                durability_fsync_failures=len(fsync_warnings),
+                corrupt_peer_count=len(corrupt_peers),
             )
-    return _partial_result
+            exception_in_flight = sys.exc_info()[0] is not None
+            try:
+                _print_pull_summary(
+                    _partial_result,
+                    corrupt_peers=corrupt_peers,
+                    unknown_sources=unknown_sources,
+                    fsync_warnings=fsync_warnings,
+                    per_source_results=per_source_results,
+                    quiet=quiet,
+                    verbose=verbose,
+                    interruption=interruption,
+                    dry_run=dry_run,
+                )
+            except (Exception, SystemExit):
+                if not exception_in_flight:
+                    raise
+
+        if dry_run and not quiet:
+            assert planner is not None
+            console.print(pullplan.totals(planner.predictions))
+            if corrupt_peers:
+                console.print(
+                    f"Preview incomplete: {len(corrupt_peers)} peer(s) could not be "
+                    "inspected (see the warnings above)."
+                )
+        return _partial_result
 
 
 # ── status ────────────────────────────────────────────────────────────
@@ -6707,10 +6734,7 @@ def _cursor_store_detail_clause(detail: dict | None) -> str | None:
             f"to Conductor's cursor-sdk-store, or {_CURSOR_DISABLE}"
         )
     if cause == "sqlite_unavailable":
-        return (
-            "mm's Python has no usable sqlite3 module; "
-            "reinstall mm as described in the README Install section"
-        )
+        return SQLITE_UNAVAILABLE_REMEDY
     if cause == "sqlite_pragma":
         return (
             f"mm's Python links SQLite {_sqlite_version()}, which lacks a required "
@@ -9401,245 +9425,258 @@ def recapture(
     substantive-change gate passes without a special case. Partial recovery
     exits 4. Zero discovered repositories writes nothing and exits 1.
     """
-    days = _parse_recapture_window(window)
-    config = _get_config(read_only=dry_run)
-    _maybe_prompt_migration(config, read_only=dry_run)
-    if not dry_run:
-        config = _get_config(read_only=False)
-    refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-    passphrase = _get_passphrase_or_exit()
+    with pullhistory.command_scope(attended=True):
+        days = _parse_recapture_window(window)
+        config = _get_config(read_only=dry_run)
+        _maybe_prompt_migration(config, read_only=dry_run)
+        if not dry_run:
+            config = _get_config(read_only=False)
+        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+        passphrase = _get_passphrase_or_exit()
 
-    try:
-        acquire_lock()
-    except LockError as e:
-        _error(str(e))
+        try:
+            acquire_lock()
+        except LockError as e:
+            _error(str(e))
 
-    try:
-        backend = get_backend(config)
         try:
-            pending: list[str] = []
-            memory_kb = _init_crypto_session(
-                backend, passphrase, config, read_only=dry_run, pending=pending
-            )
-            for note in pending:
-                console.print(safe_str(note))
-        except MindMeldError as e:
-            _error(str(e) + refusal_suffix)
-        try:
-            resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
-            sources = resolution.available
-            for src in resolution.selected:
-                if src["name"] == "mm-events" and src not in sources:
-                    raise SnapshotError(
-                        _config_module._missing_custom_mm_events_message(src["path"])
-                    )
-        except SnapshotError as e:
-            suffix = refusal_suffix
-            _error(f"{e} No recapture rows were written.{suffix}")
-        disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
-        if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
-            state = "disabled" if "mm-events" in disabled else "not configured"
-            stderr_console.print(
-                "[red]Error:[/red] recapture requires the 'mm-events' source, "
-                f"but it is {state} on this Mac."
-            )
-            if dry_run:
-                stderr_console.print("Fix (changes config): mm enable-source mm-events")
-                stderr_console.print(
-                    f"Then preview again: mm recapture --dry-run {safe_str(window)}"
+            if not dry_run and not pullhistory.failed():
+                pullhistory.record_failure(statedb.recover_if_needed())
+            backend = get_backend(config)
+            try:
+                pending: list[str] = []
+                memory_kb = _init_crypto_session(
+                    backend, passphrase, config, read_only=dry_run, pending=pending
                 )
-                stderr_console.print(DRY_RUN_REFUSAL.strip())
-            else:
-                stderr_console.print("Fix: mm enable-source mm-events")
-                stderr_console.print(f"Then retry: mm recapture {safe_str(window)}")
-            raise typer.Exit(1)
+                for note in pending:
+                    console.print(safe_str(note))
+            except MindMeldError as e:
+                _error(str(e) + refusal_suffix)
+            try:
+                resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
+                sources = resolution.available
+                for src in resolution.selected:
+                    if src["name"] == "mm-events" and src not in sources:
+                        raise SnapshotError(
+                            _config_module._missing_custom_mm_events_message(src["path"])
+                        )
+            except SnapshotError as e:
+                suffix = refusal_suffix
+                _error(f"{e} No recapture rows were written.{suffix}")
+            disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
+            if "mm-events" in disabled or not any(s.get("name") == "mm-events" for s in sources):
+                state = "disabled" if "mm-events" in disabled else "not configured"
+                stderr_console.print(
+                    "[red]Error:[/red] recapture requires the 'mm-events' source, "
+                    f"but it is {state} on this Mac."
+                )
+                if dry_run:
+                    stderr_console.print("Fix (changes config): mm enable-source mm-events")
+                    stderr_console.print(
+                        f"Then preview again: mm recapture --dry-run {safe_str(window)}"
+                    )
+                    stderr_console.print(DRY_RUN_REFUSAL.strip())
+                else:
+                    stderr_console.print("Fix: mm enable-source mm-events")
+                    stderr_console.print(f"Then retry: mm recapture {safe_str(window)}")
+                raise typer.Exit(1)
 
-        since = datetime.now(timezone.utc) - timedelta(days=days)
-        prepared = events_tail._prepare_recapture(
-            config, sources, config["device"]["id"], since=since
-        )
-        assert prepared is not None  # mm-events availability was checked above.
-
-        n_roots = len(prepared.root_discovery.roots)
-        skipped = prepared.walk_budget_aborts + prepared.walk_errors
-        records, new_records = _recapture_commit_stats(prepared.git_rows, prepared.events_dir)
-        until = prepared.until
-        since_day = prepared.since.date().isoformat()
-        until_day = until.date().isoformat()
-
-        if dry_run:
-            row_bytes = sum(
-                len(json.dumps(row, sort_keys=True).encode("utf-8")) for row in prepared.git_rows
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            prepared = events_tail._prepare_recapture(
+                config, sources, config["device"]["id"], since=since
             )
-            console.print("[bold]Recapture dry-run[/bold] — no commits written or uploaded.")
-            console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
-            console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
-            non_benign_skip = False
-            if prepared.git_rows:
-                for entry in prepared.git_rows[0].get("skipped", []):
-                    reason = entry["reason"]
-                    if reason == events.WALK_SKIP_NO_COMMITS:
-                        reason = "no commits yet (benign)"
-                    else:
-                        non_benign_skip = True
-                    console.print(f"    skipped: {safe_str(entry['path'])} — {safe_str(reason)}")
-            if non_benign_skip:
-                console.print(f"  See {GIT_WALK_FAILURES_URL}")
-            console.print(f"  Commit records:   {len(records)} captured")
-            console.print(f"  Estimated size:   {row_bytes} bytes")
+            assert prepared is not None  # mm-events availability was checked above.
+
+            n_roots = len(prepared.root_discovery.roots)
+            skipped = prepared.walk_budget_aborts + prepared.walk_errors
+            records, new_records = _recapture_commit_stats(prepared.git_rows, prepared.events_dir)
+            until = prepared.until
+            since_day = prepared.since.date().isoformat()
+            until_day = until.date().isoformat()
+
+            if dry_run:
+                row_bytes = sum(
+                    len(json.dumps(row, sort_keys=True).encode("utf-8"))
+                    for row in prepared.git_rows
+                )
+                console.print("[bold]Recapture dry-run[/bold] — no commits written or uploaded.")
+                console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
+                console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
+                non_benign_skip = False
+                if prepared.git_rows:
+                    for entry in prepared.git_rows[0].get("skipped", []):
+                        reason = entry["reason"]
+                        if reason == events.WALK_SKIP_NO_COMMITS:
+                            reason = "no commits yet (benign)"
+                        else:
+                            non_benign_skip = True
+                        console.print(
+                            f"    skipped: {safe_str(entry['path'])} — {safe_str(reason)}"
+                        )
+                if non_benign_skip:
+                    console.print(f"  See {GIT_WALK_FAILURES_URL}")
+                console.print(f"  Commit records:   {len(records)} captured")
+                console.print(f"  Estimated size:   {row_bytes} bytes")
+                if n_roots == 0:
+                    console.print(
+                        "Recapture stopped: no Git repositories were discovered on this Mac. "
+                        "Add their absolute paths under [retro].repo_roots, verify with "
+                        f"'mm diag', then preview again: mm recapture --dry-run {safe_str(window)}"
+                    )
+                    stderr_console.print(DRY_RUN_REFUSAL.strip())
+                    raise typer.Exit(1)
+                if skipped:
+                    console.print(
+                        f"Preview incomplete: {skipped} repositories could not be walked "
+                        "(see the skipped lines above)."
+                    )
+                if prepared.root_discovery.exceeded:
+                    console.print(
+                        "Preview incomplete: repository discovery exceeded its budget; "
+                        "more repositories may exist."
+                    )
+                if prepared.root_discovery.errors:
+                    reasons = "; ".join(
+                        safe_str(reason) for reason in prepared.root_discovery.errors
+                    )
+                    console.print(
+                        f"Preview incomplete: repository discovery reported errors: {reasons}"
+                    )
+                console.print(DRY_RUN_COMPLETE)
+                console.print(RECAPTURE_NOT_PREVIEWED)
+                return
+
             if n_roots == 0:
                 console.print(
                     "Recapture stopped: no Git repositories were discovered on this Mac. "
                     "Add their absolute paths under [retro].repo_roots, verify with "
-                    f"'mm diag', then preview again: mm recapture --dry-run {safe_str(window)}"
+                    "'mm diag', then retry."
                 )
-                stderr_console.print(DRY_RUN_REFUSAL.strip())
                 raise typer.Exit(1)
-            if skipped:
-                console.print(
-                    f"Preview incomplete: {skipped} repositories could not be walked "
-                    "(see the skipped lines above)."
-                )
-            if prepared.root_discovery.exceeded:
-                console.print(
-                    "Preview incomplete: repository discovery exceeded its budget; "
-                    "more repositories may exist."
-                )
-            if prepared.root_discovery.errors:
-                reasons = "; ".join(safe_str(reason) for reason in prepared.root_discovery.errors)
-                console.print(
-                    f"Preview incomplete: repository discovery reported errors: {reasons}"
-                )
-            console.print(DRY_RUN_COMPLETE)
-            console.print(RECAPTURE_NOT_PREVIEWED)
-            return
 
-        if n_roots == 0:
-            console.print(
-                "Recapture stopped: no Git repositories were discovered on this Mac. "
-                "Add their absolute paths under [retro].repo_roots, verify with "
-                "'mm diag', then retry."
+            device_id = config["device"]["id"]
+            appended = events.write_push_event(
+                prepared.events_dir,
+                device_id,
+                prepared.git_rows,
+                max_file_size=config["sync"]["max_file_size"],
             )
-            raise typer.Exit(1)
+            if isinstance(appended, events.EventAppendSkipped):
+                _error(
+                    "Recapture stopped: event batch was not written. Fix sync.max_file_size "
+                    "or shrink the day file, then retry mm recapture."
+                )
 
-        device_id = config["device"]["id"]
-        appended = events.write_push_event(
-            prepared.events_dir,
-            device_id,
-            prepared.git_rows,
-            max_file_size=config["sync"]["max_file_size"],
-        )
-        if isinstance(appended, events.EventAppendSkipped):
-            _error(
-                "Recapture stopped: event batch was not written. Fix sync.max_file_size "
-                "or shrink the day file, then retry mm recapture."
-            )
+            try:
+                with pullhistory.batch():
+                    result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
+            except SnapshotError as e:
+                console.print(
+                    "Recapture was written locally but not synced. "
+                    "Fix the snapshot refusal below, then run 'mm push'."
+                )
+                _error(str(e))
+            except typer.Exit:
+                console.print(
+                    "Recapture was written locally but not synced. "
+                    "Fix the storage error above, then run 'mm push'."
+                )
+                raise
 
-        try:
-            result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
-        except SnapshotError as e:
-            console.print(
-                "Recapture was written locally but not synced. "
-                "Fix the snapshot refusal below, then run 'mm push'."
+            synced = result is not None
+            if not synced:
+                console.print(
+                    "Recapture was written locally but not synced. "
+                    "Fix the storage error above, then run 'mm push'."
+                )
+                raise typer.Exit(1)
+
+            _notice_recapture_host_usage(config, sources)
+            partial = (
+                prepared.root_discovery.exceeded
+                or bool(prepared.root_discovery.errors)
+                or skipped > 0
             )
-            _error(str(e))
-        except typer.Exit:
+            n_scanned_ok = n_roots - skipped
+            if partial:
+                narrower = "7d" if days > 7 else "1d"
+                console.print(
+                    f"Recapture incomplete: captured {len(records)} commit records "
+                    f"from {n_scanned_ok} of {n_roots} repositories for "
+                    f"{since_day} → {until_day}."
+                )
+                if prepared.walk_errors:
+                    n = prepared.walk_errors
+                    noun = "repository was" if n == 1 else "repositories were"
+                    console.print(
+                        f"{n} {noun} skipped because the Git walk failed for those repositories. "
+                        "Check current repository failures: mm recapture --dry-run, "
+                        f"then retry mm recapture {window}. See {GIT_WALK_FAILURES_URL}"
+                    )
+                if prepared.walk_budget_aborts:
+                    n = prepared.walk_budget_aborts
+                    noun = "repository was" if n == 1 else "repositories were"
+                    console.print(
+                        f"{n} {noun} skipped because the Git walk exceeded its budget. "
+                        f"Retry a narrower window: mm recapture {narrower}"
+                    )
+                if prepared.root_discovery.exceeded:
+                    console.print(
+                        "Git repository discovery was incomplete. "
+                        f"Retry a narrower window: mm recapture {narrower}"
+                    )
+                elif prepared.root_discovery.errors:
+                    console.print(
+                        "Git repository discovery reported errors. "
+                        f"Check mm diag, then retry mm recapture {window}"
+                    )
+                raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
+
+            if not records:
+                console.print(
+                    f"Recapture complete: scanned {n_roots} repositories but found "
+                    f"no commits dated {since_day} → {until_day}. "
+                    "No retro output will change."
+                )
+                return
+
+            if not new_records:
+                console.print(
+                    "Recapture found no commits that were not already recorded. "
+                    f"This Mac's events log already covers {since_day} → {until_day} "
+                    f"for all {n_roots} repositories it can see.\n"
+                    "If the retro is still short, the gap is on another Mac "
+                    "(mm devices) or in a repo discovery cannot see "
+                    "(mm diag, then [retro] repo_roots)."
+                )
+                return
+
+            oldest = _oldest_commit_date(new_records)
+            cover_days = days
+            if oldest is not None:
+                cover_days = max(days, (until.date() - oldest.date()).days + 1)
+                cover_days = min(cover_days, events.RECAPTURE_WINDOW_MAX_DAYS)
+            console.print("[bold green]Recapture complete.[/bold green]")
+            console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
+            console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
+            console.print(f"  Commit records:   {len(records)} captured")
+            console.print(f"  Synced:           {'yes' if synced else 'no'}")
+            console.print("")
             console.print(
-                "Recapture was written locally but not synced. "
-                "Fix the storage error above, then run 'mm push'."
+                "Retros window by the COMMIT's date, not by when mm captured it, so a short"
             )
+            console.print("window will not show the older recoveries:")
+            console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
+            console.print("  mm retro-fleet 7d    # covers the last 7 days only")
+        except MindMeldError as e:
+            if dry_run:
+                _error(str(e) + refusal_suffix)
             raise
+        finally:
+            release_lock()
 
-        synced = result is not None
-        if not synced:
-            console.print(
-                "Recapture was written locally but not synced. "
-                "Fix the storage error above, then run 'mm push'."
-            )
-            raise typer.Exit(1)
-
-        _notice_recapture_host_usage(config, sources)
-        partial = (
-            prepared.root_discovery.exceeded or bool(prepared.root_discovery.errors) or skipped > 0
-        )
-        n_scanned_ok = n_roots - skipped
-        if partial:
-            narrower = "7d" if days > 7 else "1d"
-            console.print(
-                f"Recapture incomplete: captured {len(records)} commit records "
-                f"from {n_scanned_ok} of {n_roots} repositories for "
-                f"{since_day} → {until_day}."
-            )
-            if prepared.walk_errors:
-                n = prepared.walk_errors
-                noun = "repository was" if n == 1 else "repositories were"
-                console.print(
-                    f"{n} {noun} skipped because the Git walk failed for those repositories. "
-                    "Check current repository failures: mm recapture --dry-run, "
-                    f"then retry mm recapture {window}. See {GIT_WALK_FAILURES_URL}"
-                )
-            if prepared.walk_budget_aborts:
-                n = prepared.walk_budget_aborts
-                noun = "repository was" if n == 1 else "repositories were"
-                console.print(
-                    f"{n} {noun} skipped because the Git walk exceeded its budget. "
-                    f"Retry a narrower window: mm recapture {narrower}"
-                )
-            if prepared.root_discovery.exceeded:
-                console.print(
-                    "Git repository discovery was incomplete. "
-                    f"Retry a narrower window: mm recapture {narrower}"
-                )
-            elif prepared.root_discovery.errors:
-                console.print(
-                    "Git repository discovery reported errors. "
-                    f"Check mm diag, then retry mm recapture {window}"
-                )
-            raise typer.Exit(RECAPTURE_EXIT_PARTIAL)
-
-        if not records:
-            console.print(
-                f"Recapture complete: scanned {n_roots} repositories but found "
-                f"no commits dated {since_day} → {until_day}. "
-                "No retro output will change."
-            )
-            return
-
-        if not new_records:
-            console.print(
-                "Recapture found no commits that were not already recorded. "
-                f"This Mac's events log already covers {since_day} → {until_day} "
-                f"for all {n_roots} repositories it can see.\n"
-                "If the retro is still short, the gap is on another Mac "
-                "(mm devices) or in a repo discovery cannot see "
-                "(mm diag, then [retro] repo_roots)."
-            )
-            return
-
-        oldest = _oldest_commit_date(new_records)
-        cover_days = days
-        if oldest is not None:
-            cover_days = max(days, (until.date() - oldest.date()).days + 1)
-            cover_days = min(cover_days, events.RECAPTURE_WINDOW_MAX_DAYS)
-        console.print("[bold green]Recapture complete.[/bold green]")
-        console.print(f"  Window scanned:   {since_day} → {until_day} ({days}d)")
-        console.print(f"  Repositories:     {n_roots} scanned, {skipped} skipped")
-        console.print(f"  Commit records:   {len(records)} captured")
-        console.print(f"  Synced:           {'yes' if synced else 'no'}")
-        console.print("")
-        console.print("Retros window by the COMMIT's date, not by when mm captured it, so a short")
-        console.print("window will not show the older recoveries:")
-        console.print(f"  mm retro-fleet {cover_days}d   # covers everything just recaptured")
-        console.print("  mm retro-fleet 7d    # covers the last 7 days only")
-    except MindMeldError as e:
-        if dry_run:
-            _error(str(e) + refusal_suffix)
-        raise
-    finally:
-        release_lock()
-
-    if not dry_run:
-        upgrade.emit_nudge_if_due(config)
+        if not dry_run:
+            upgrade.emit_nudge_if_due(config)
 
 
 # ── update ────────────────────────────────────────────────────────────
@@ -9967,7 +10004,7 @@ def log_cmd(
     verb: _LogVerb | None = typer.Option(
         None,
         "--verb",
-        help="Filter by pull or push.",
+        help="Filter by pull, push or self-upgrade.",
         case_sensitive=False,
     ),
     limit: int = typer.Option(
@@ -9982,11 +10019,12 @@ def log_cmd(
 ) -> None:
     """Query the pull/push history log.
 
-    Records every per-file pull and push action to
-    ~/.config/mind-meld/pull-history.jsonl. Useful for "what conflicted on
-    date X" audits even after the .sync-conflict-* files are resolved
-    or reaped, and for "what is my exclude_patterns actually filtering"
-    via `mm log --action excluded`.
+    Reads ~/.config/mind-meld/state.db after its one-time legacy
+    pull-history.jsonl import; before that, reads the JSONL. Keeps the newest
+    20,000 rows per (verb, action) class. --limit 0 materializes every matching
+    row in one snapshot and closes the connection before printing; memory grows
+    with retained history. Useful for conflict diagnosis and exclusion audits
+    via `mm log --action excluded`. Inspection writes nothing.
     """
     if since:
         try:
@@ -10004,29 +10042,15 @@ def log_cmd(
         _error(f"--format must be 'table' or 'jsonl', got {fmt!r}")
         return  # unreachable
 
-    rows: list[dict] = []
-    for rec in pullhistory.read_records():
-        if source and rec.get("source") != source:
-            continue
-        if action and rec.get("action") != action:
-            continue
-        if verb and rec.get("verb") != verb:
-            continue
-        if since_dt is not None:
-            try:
-                rec_ts = datetime.fromisoformat(rec.get("ts", ""))
-            except (TypeError, ValueError):
-                continue
-            if rec_ts.tzinfo is None:
-                rec_ts = rec_ts.replace(tzinfo=timezone.utc)
-            if rec_ts < since_dt:
-                continue
-        rows.append(rec)
-
-    # Most-recent-first; cap to limit.
-    rows.sort(key=lambda r: r.get("ts", ""), reverse=True)
-    if limit > 0:
-        rows = rows[:limit]
+    try:
+        rows = pullhistory.query(
+            source=source, action=action, verb=verb, since=since_dt, limit=limit
+        )
+    except statedb.StateDBError as exc:
+        typer.echo(safety.safe_terminal_str(pullhistory.explain(exc)), err=True)
+        raise typer.Exit(1) from None
+    for notice in rows.notices:
+        typer.echo(safety.safe_terminal_str(pullhistory.explain(notice)), err=True)
 
     if not rows:
         if fmt_lower == "jsonl":
@@ -10041,7 +10065,7 @@ def log_cmd(
             typer.echo(_json.dumps(r, sort_keys=True))
         return
 
-    table = Table(title=f"mm log ({len(rows)} entries)")
+    table = Table(title=f"mm log ({len(rows)} entries · {rows.origin})")
     table.add_column("ts", overflow="fold")
     table.add_column("verb")
     table.add_column("action")
@@ -10057,20 +10081,20 @@ def log_cmd(
             old = r.get("old_version", "?")
             new = r.get("new_version", "?")
             table.add_row(
-                r.get("ts", "?"),
-                verb,
+                safe_str(r.get("ts", "?")),
+                safe_str(verb),
                 "—",
                 "—",
                 "—",
-                f"{old} → {new}",
+                safe_str(f"{old} → {new}"),
             )
         else:
             table.add_row(
-                r.get("ts", "?"),
-                verb,
-                r.get("action", "?"),
-                r.get("source", "?"),
-                r.get("rel_path", "?"),
+                safe_str(r.get("ts", "?")),
+                safe_str(verb),
+                safe_str(r.get("action", "?")),
+                safe_str(r.get("source", "?")),
+                safe_str(r.get("rel_path", "?")),
                 "",
             )
     console.print(table)
@@ -10906,84 +10930,90 @@ def autopull() -> None:
     stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
     config, crypto init failure, unexpected bug inside `_pull_core`.
     """
-    with _auto_command_scope("pull", typer_exit_outcome="fleet-refused") as setup:
-        if setup is None:
-            return
+    with pullhistory.command_scope(attended=False):
+        with _auto_command_scope("pull", typer_exit_outcome="fleet-refused") as setup:
+            if setup is None:
+                return
 
-        result = _pull_core(
-            setup.config,
-            setup.passphrase,
-            setup.memory_kb,
-            quiet=True,
-            conflict_mode="keep-both",
-        )
+            if not pullhistory.failed():
+                pullhistory.record_failure(statedb.recover_if_needed())
 
-        if result.total_applied:
-            parts = []
-            if result.total_written:
-                parts.append(f"{result.total_written} written")
-            if result.total_merged:
-                parts.append(f"{result.total_merged} merged")
-            if result.total_conflicted:
-                parts.append(f"{result.total_conflicted} conflicts")
-            src_display = ", ".join(result.device_names)
-            total = result.total_applied
-            print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
-            if result.total_conflicted:
+            result = _pull_core(
+                setup.config,
+                setup.passphrase,
+                setup.memory_kb,
+                quiet=True,
+                conflict_mode="keep-both",
+            )
+
+            if result.total_applied:
+                parts = []
+                if result.total_written:
+                    parts.append(f"{result.total_written} written")
+                if result.total_merged:
+                    parts.append(f"{result.total_merged} merged")
+                if result.total_conflicted:
+                    parts.append(f"{result.total_conflicted} conflicts")
+                src_display = ", ".join(result.device_names)
+                total = result.total_applied
+                print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
+                if result.total_conflicted:
+                    print(
+                        f"mm: {result.total_conflicted} conflicts - run 'mm conflicts' to review",
+                        file=sys.stderr,
+                    )
+            if result.total_skipped_unknown_source:
                 print(
-                    f"mm: {result.total_conflicted} conflicts - run 'mm conflicts' to review",
+                    f"mm: skipped {result.total_skipped_unknown_source} unknown "
+                    "source(s) - run 'mm sources' to reconcile config",
                     file=sys.stderr,
                 )
-        if result.total_skipped_unknown_source:
-            print(
-                f"mm: skipped {result.total_skipped_unknown_source} unknown "
-                "source(s) - run 'mm sources' to reconcile config",
-                file=sys.stderr,
-            )
-        if result.total_failed:
-            # Per-file failures (decrypt error, conflict rename failure, write
-            # failure, ValueError on corrupted device_id) increment total_failed
-            # in _apply_incoming_file. Without this stderr surface, autopull's
-            # quiet contract silently swallows the summary too — exactly the
-            # silent-failure pattern Track 1A's helper-level audit was meant
-            # to close.
-            print(
-                f"mm: {result.total_failed} file(s) failed to apply - "
-                "see the warnings above; they retry on the next pull",
-                file=sys.stderr,
-            )
+            if result.total_failed:
+                # Per-file failures (decrypt error, conflict rename failure, write
+                # failure, ValueError on corrupted device_id) increment total_failed
+                # in _apply_incoming_file. Without this stderr surface, autopull's
+                # quiet contract silently swallows the summary too — exactly the
+                # silent-failure pattern Track 1A's helper-level audit was meant
+                # to close.
+                print(
+                    f"mm: {result.total_failed} file(s) failed to apply - "
+                    "see the warnings above; they retry on the next pull",
+                    file=sys.stderr,
+                )
 
-        # Degraded outcome: pull succeeded overall but some part of it is
-        # at-risk. Mirrors the v0.8.1 `no-sources` autopush breadcrumb
-        # pattern — without a distinct outcome, `mm status` shows the last
-        # run as "success" indefinitely while data may not survive crash
-        # (fsync) or may be partition-drifting (corrupt peers, unknown
-        # sources, per-file failures). Stderr warnings for the same signals
-        # already fire in _print_pull_summary (corrupt_peers/fsync_warnings)
-        # and in the total_skipped_unknown_source / total_failed prints
-        # earlier in this function. The breadcrumb makes the degradation
-        # state persistent for monitoring on top of `mm status` / `mm diag`.
-        degradations: list[str] = []
-        if result.durability_fsync_failures:
-            degradations.append(f"fsync failed on {result.durability_fsync_failures} parent dir(s)")
-        if result.corrupt_peer_count:
-            degradations.append(f"{result.corrupt_peer_count} corrupt peer manifest(s)")
-        if result.total_skipped_unknown_source:
-            degradations.append(f"{result.total_skipped_unknown_source} unknown source(s)")
-        if result.total_failed:
-            degradations.append(f"{result.total_failed} file(s) failed")
+            # Degraded outcome: pull succeeded overall but some part of it is
+            # at-risk. Mirrors the v0.8.1 `no-sources` autopush breadcrumb
+            # pattern — without a distinct outcome, `mm status` shows the last
+            # run as "success" indefinitely while data may not survive crash
+            # (fsync) or may be partition-drifting (corrupt peers, unknown
+            # sources, per-file failures). Stderr warnings for the same signals
+            # already fire in _print_pull_summary (corrupt_peers/fsync_warnings)
+            # and in the total_skipped_unknown_source / total_failed prints
+            # earlier in this function. The breadcrumb makes the degradation
+            # state persistent for monitoring on top of `mm status` / `mm diag`.
+            degradations: list[str] = []
+            if result.durability_fsync_failures:
+                degradations.append(
+                    f"fsync failed on {result.durability_fsync_failures} parent dir(s)"
+                )
+            if result.corrupt_peer_count:
+                degradations.append(f"{result.corrupt_peer_count} corrupt peer manifest(s)")
+            if result.total_skipped_unknown_source:
+                degradations.append(f"{result.total_skipped_unknown_source} unknown source(s)")
+            if result.total_failed:
+                degradations.append(f"{result.total_failed} file(s) failed")
 
-        if degradations:
-            _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
-        else:
-            _write_autorun_breadcrumb("pull", "success")
+            if degradations:
+                _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
+            else:
+                _write_autorun_breadcrumb("pull", "success")
 
-        # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
-        # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
-        # doesn't stack on sync latency. Unattended: a due update is spawned
-        # detached and says nothing; the nudge prints only when no update can
-        # run AND the 24h re-nudge gate permits.
-        upgrade.update_or_nudge(setup.config, attended=False)
+            # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
+            # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
+            # doesn't stack on sync latency. Unattended: a due update is spawned
+            # detached and says nothing; the nudge prints only when no update can
+            # run AND the 24h re-nudge gate permits.
+            upgrade.update_or_nudge(setup.config, attended=False)
 
 
 @app.command()
@@ -10996,54 +11026,59 @@ def autopush() -> None:
     config, crypto init failure, unexpected bug inside `_push_core`. No
     auto-GC on autopush (prevents blob-deletion hole).
     """
-    with _auto_command_scope("push", typer_exit_outcome="refused") as setup:
-        if setup is None:
-            return
+    with pullhistory.command_scope(attended=False):
+        with _auto_command_scope("push", typer_exit_outcome="refused") as setup:
+            if setup is None:
+                return
 
-        result = _push_core(
-            setup.config,
-            setup.passphrase,
-            setup.memory_kb,
-            quiet=True,
-        )
+            if not pullhistory.failed():
+                pullhistory.record_failure(statedb.recover_if_needed())
 
-        if result is None and not get_sources(setup.config):
-            # Distinguish "broken config no-op" from "nothing to push" no-op
-            # in the breadcrumb. _push_core already printed the stderr warning;
-            # if `mm status` only sees "success" forever, monitoring never
-            # catches the wedge.
-            _write_autorun_breadcrumb("push", "no-sources")
-            return
+            with pullhistory.batch():
+                result = _push_core(
+                    setup.config,
+                    setup.passphrase,
+                    setup.memory_kb,
+                    quiet=True,
+                )
 
-        if result:
-            total = result.total_new + result.total_modified + result.total_deleted
-            if total:
-                parts = []
-                if result.total_new:
-                    parts.append(f"{result.total_new} new")
-                if result.total_modified:
-                    parts.append(f"{result.total_modified} modified")
-                if result.total_deleted:
-                    parts.append(f"{result.total_deleted} deleted")
-                print(f"mm: pushed {total} files ({', '.join(parts)})")
+            if result is None and not get_sources(setup.config):
+                # Distinguish "broken config no-op" from "nothing to push" no-op
+                # in the breadcrumb. _push_core already printed the stderr warning;
+                # if `mm status` only sees "success" forever, monitoring never
+                # catches the wedge.
+                _write_autorun_breadcrumb("push", "no-sources")
+                return
 
-        # Persist events-tail degradation the same way autopull persists its
-        # own (see the `degradations` list in `autopull` below). The tail is
-        # forensic-only and swallows its failures behind a `mm: notice:` line,
-        # but autopush runs unattended from a Claude Code hook — that stderr
-        # reaches nobody, so pre-v0.12.16 the breadcrumb said `success` while
-        # the retro pipeline was dead, and `mm status` repeated it. Same
-        # argument docs/invariants/sync.md makes for the `no-sources` breadcrumb:
-        # without this, `mm status` only ever sees `success` and monitoring
-        # built on top of it never catches the wedge.
-        events_degradations = result.events_degradations if result else []
-        if events_degradations:
-            _write_autorun_breadcrumb("push", "degraded", "; ".join(events_degradations))
-        else:
-            _write_autorun_breadcrumb("push", "success")
+            if result:
+                total = result.total_new + result.total_modified + result.total_deleted
+                if total:
+                    parts = []
+                    if result.total_new:
+                        parts.append(f"{result.total_new} new")
+                    if result.total_modified:
+                        parts.append(f"{result.total_modified} modified")
+                    if result.total_deleted:
+                        parts.append(f"{result.total_deleted} deleted")
+                    print(f"mm: pushed {total} files ({', '.join(parts)})")
 
-        # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
-        upgrade.update_or_nudge(setup.config, attended=False)
+            # Persist events-tail degradation the same way autopull persists its
+            # own (see the `degradations` list in `autopull` below). The tail is
+            # forensic-only and swallows its failures behind a `mm: notice:` line,
+            # but autopush runs unattended from a Claude Code hook — that stderr
+            # reaches nobody, so pre-v0.12.16 the breadcrumb said `success` while
+            # the retro pipeline was dead, and `mm status` repeated it. Same
+            # argument docs/invariants/sync.md makes for the `no-sources` breadcrumb:
+            # without this, `mm status` only ever sees `success` and monitoring
+            # built on top of it never catches the wedge.
+            events_degradations = result.events_degradations if result else []
+            if events_degradations:
+                _write_autorun_breadcrumb("push", "degraded", "; ".join(events_degradations))
+            else:
+                _write_autorun_breadcrumb("push", "success")
+
+            # Seam 2 — self-update or nudge at the TAIL (mirrors autopull).
+            upgrade.update_or_nudge(setup.config, attended=False)
 
 
 # ── helpers ───────────────────────────────────────────────────────────

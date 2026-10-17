@@ -20,8 +20,9 @@ Read BEFORE editing any of these:
 - `src/mind_meld/seen_sources.py`
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
+- `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_manifest_fuzz.py`.
 
 ---
 
@@ -290,7 +291,9 @@ cache rationale and generator measurements live in
 **v1.8.0 rollout.** Until every active Mac has migrated and pushed, each attended
 `mm pull` on a migrated Mac logs one `excluded` row per file an unmigrated peer
 still lists under these globs: about 8,000 rows / 2 MB on the measured Mac.
-This exceeds pull-history's 1 MB cap, rotates it and evicts earlier history.
+Before Track 73B this exceeded the shared 1 MB cap and evicted earlier
+history. The table now retains 20,000 excluded rows independently of conflicts;
+legacy backup copies stay readable with jq (not mm log).
 [Back up history and upgrade, migrate and push every active Mac before the next
 attended pull on any of them](../../README.md#v180-scope-trim).
 Auto-update installs per Mac. A default-config Mac publishes the trim on its
@@ -575,8 +578,177 @@ A Linux peer can legitimately have BOTH `Projects/x.md` AND `projects/x.md` (cas
 
 Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download loop, AFTER the disabled-sources / exclude-patterns filter chain. Per-cluster `mm: warning:` to stderr names the kept and dropped paths so the user sees what was skipped (visible-failure contract).
 
-## Pull/push history log (v0.9.1)
-`pullhistory.append(verb, device, source, rel_path, action, ...)` writes one JSONL line to `~/.config/mind-meld/pull-history.jsonl` (mode 0600, fcntl.flock-guarded, 1MB cap with line-boundary rotation to `.1`). Wired into `_pull_core` (per-outcome from `_pull_one_source` + `excluded` from the consumer-boundary filter) and `_upload_changed_blobs` (`uploaded`). Failures are swallowed — history is forensic-only, never block sync. `mm log` queries with `--source / --since / --action / --verb / --limit / --format` filters. Reader tolerates a torn first line in `.1` (crash-mid-rotate fingerprint).
+## Pull/push history log (Track 73B)
+
+`pullhistory` owns the forensic `history` table in the local, never-synced
+`~/.config/mind-meld/state.db` (0600; a directory statedb creates is 0700, an
+existing one keeps its mode). `statedb` is a leaf:
+standard library plus `fsutil` only, lazy `sqlite3`, no cached connections.
+`connect(read_only=...)` closes on exit. `transaction` uses explicit
+BEGIN IMMEDIATE / COMMIT / ROLLBACK and refuses nesting. Every SQL statement
+in history runs under `statedb.translate`, including execute/fetch failures.
+Error classification checks extended SQLITE_READONLY_ROLLBACK (776) first,
+then primary codes (`code & 0xFF`): busy/locked, corrupt/not-a-database, or
+unclassified. Missing sqlite3 has the same reinstall remedy as the Cursor reader.
+
+New files use exclusive, no-follow creation at 0600; existing files must be
+regular and are tightened by path, never opened outside SQLite (closing an
+extra descriptor could drop SQLite's POSIX locks). The pytest account-state
+write guard runs before every writable open or filesystem mutation. Busy
+wait is 5000 ms (`BUSY_TIMEOUT_MS`; contention tests use 100 ms).
+`synchronous=FULL`, without `fullfsync`, applies per writable connection.
+Only an empty new database gets persistent `auto_vacuum=INCREMENTAL` and
+`journal_mode=DELETE`, outside a transaction. Connect never resets journal
+mode: 75A may migrate it to WAL after measuring ledger durability. No foreign
+keys exist. 76A decides when to run incremental_vacuum.
+
+Migrations are forward-only tuples of individual SQL statements, all pending
+steps and `user_version` changes in one transaction. The script execution API
+is forbidden because its implicit commit breaks migration atomicity. Before
+migration or persistent settings, `meta.compat_version` refuses a file requiring
+more than this build's schema v1. Newer compatible `user_version` values are
+used as-is, never migrated backward. Only changes to released readers' tables
+(`meta`, `history`) require a compatibility bump. Read-only opens never migrate,
+import, create files or change settings. A zero-byte file, version 0, absent DB
+or missing import marker uses the legacy JSONL reader. The URI is percent-quoted
+and has `mode=ro`. A hot rollback journal raises the typed read-only error;
+every non-preview push/pull/auto command and `mm recapture` repairs it under the
+mm lock before work, even on an unchanged sync. Recovery failures never fail
+sync. `mm log` rechecks compat_version inside its read snapshot, and every
+write transaction rechecks it after BEGIN IMMEDIATE; malformed
+stored values (compat_version, legacy_jsonl_stat, a row's extra) are corrupt.
+
+A statedb write transaction is always the **innermost** lock: never acquire the
+mm lockfile or upgrade-state's flock inside one. statedb itself takes neither.
+History can be written outside the mm lock (the self-upgrade hook releases its
+upgrade flock first); the four 2.0 tables may be written only under the mm lock
+by their delivering Tracks.
+
+`append` and `append_self_upgrade` retain their legacy dict shapes; `sidecar=`
+is removed, but imported sidecar keys survive. `row` stamps `ts` at append time.
+`write_rows(conn, rows)` only inserts inside its caller's transaction, rejects
+unknown new keys and never imports, prunes or commits. Every UTF-8-encodable
+string goes into its named history column; other values, unknown legacy keys
+and lone surrogates go into sorted, ASCII-escaped JSON `extra`. NULL columns
+are omitted when decoding, preserving absent versus explicit-null keys.
+`ts_us` is integer UTC microseconds (naive timestamps are UTC), NULL on parse
+failure. It and `id` are private and never emitted.
+
+The first flush stats both legacy files, then imports `.1` then live
+`pull-history.jsonl`, skipping invalid JSON/UTF-8 (and over-deep) lines and
+individual malformed rows (SQLite TOOBIG, CONSTRAINT, MISMATCH, RANGE or a
+non-SQLite row error), and commits the import marker with the rows. Any other
+SQLite failure, or one that ended the transaction (FULL, IOERR), aborts the
+whole flush so a later flush retries the import; it never autocommits a part. The files remain inert. Non-ENOENT OS errors abort the entire
+legacy import, but still set `history_imported` and sanitized
+`history_import_pending`: new rows stay visible, `mm log` notices, and a later
+flush or maintenance retries the whole import exactly once. Deferred rows get
+ids below the current minimum. Successful import records each legacy file's
+size and mtime_ns (or absence) taken before reading, without inode/device, so
+an older mm's append during the import also fires the notice. `mm log` stats both files;
+a changed or newly present file yields the stale-binary notice, evidence of
+past divergence rather than proof an older mm still runs. Moving both aside
+silences it. Neither import nor log reads `~/mm-history-backup/` copies.
+
+`batch()` buffers in a ContextVar, binds its database path at entry, joins an
+outer batch, flushes at 1000 rows and in finally, including SystemExit and
+KeyboardInterrupt (which still propagate). Empty batches never connect.
+`_pull_core` covers bookkeeping and exclusions; each `_push_core` call (push,
+autopush, recapture) is one batch, so per-source upload batches join it.
+A failed flush drops its buffer without retry. `command_scope`, entered before
+config/transition handling, skips every later history write and recovery after
+the first failure: at most one busy timeout per command. Attended push/pull/
+recapture print one plain `mm: notice: history not recorded ...` line; auto commands stay
+silent. History swallows Exception only; the pytest write guard and other
+BaseExceptions propagate. Nothing new is persisted for failure reporting.
+
+Retention keeps the newest 20,000 ids **per known (verb, action) class**, NULL
+matched with IS; unknown future classes are never pruned by an older binary.
+Per-file push `uploaded` rows stay; no summary action exists. This replaces the
+shared 1 MB ring: excluded rows cannot evict conflicted rows. About 8,000
+excluded rows per attended pull means at least two complete exclusion audits;
+conflicted rows generally cover years. Measured ~263–400 bytes per row and
+roughly ten full classes suggest ~80 MB, a workload estimate, not a bound.
+Re-measure for 75A/77A receipts. History is forensic: receipts read by sync logic
+belong in their owner's table or a separately retained class. A SIGKILL or
+power loss can drop up to 999 buffered rows; a failed flush drops its buffer.
+History makes no hard power-loss durability claim on macOS: rollback-journal
+corruption is possible. Measured 4,500 commits cost 1,640 ms versus 5.1 ms
+batched; eight 1000-row fullfsync commits cost 124 ms. 75A re-decides durability
+before ledger use.
+
+`read_records()` materializes insertion order; an explicit path stays the
+tolerant JSONL reader. `query` filters in SQL (ts_us for --since), orders
+`ts DESC, id ASC` and applies positive limits (clamped to SQLite's integer
+range). A filter value that is not UTF-8-encodable matches no table row (such
+values live in `extra`). The legacy path retains the
+same filtering and stable sort. All matching compact tuples are loaded in one
+read transaction, then the connection closes before decoding/printing.
+`--limit 0` memory grows with retained rows; no paging or partial stdout on
+read errors. Table titles name state.db or legacy pull-history.jsonl. Cells use
+safe_str; jsonl keeps raw sorted-key legacy objects. Errors are one plain,
+sanitized stderr line, exit 1, empty stdout. `pullhistory.explain` owns pinned
+error/notice strings and errors.STATEDB_HELP_URL.
+
+**History-only remedy boundary:** the corrupt-database move-aside advice in
+README is valid only while the four provisional tables remain unused. 75A
+must replace it before writing the first ledger row; 76A owns authoritative
+recovery with pending publications and unexpired displaced content preserved.
+
+### Schema columns and readers
+
+All six tables and four indexes are migration 1's pinned DDL in statedb.py;
+tests assert table_info and index_list independently.
+
+| Table | Columns and readers / delivering Track |
+|---|---|
+| meta | key/value: compat_version gates every connection; history_imported selects history; history_import_pending reports deferred import; legacy_jsonl_stat feeds the two-file stale-binary notice (73B). No other keys yet. |
+| history | id orders insertions/prune/ties, ts renders and sorts, ts_us filters --since, verb/device/source/rel_path/action/local_sha/remote_sha/extra reconstruct mm log rows (73B); old_version/new_version live in extra. |
+| ledger | source/path key; sha/vv/mtime/deleted/pending: 75A Publish: ledger authoring, commits and presence, and 78A Causal classification, symmetric resolution and displaced; size: 75A simulator INV7. vv is sorted compact canonical JSON; no content bytes. |
+| cursors | peer/applied_seq/hash/gap_seq/gap_since: 77A Apply cursors, gap rule and snapshot bootstrap; hash anchors chains, NULL after snapshot raise. 81A Delivery receipts, device projection and retirement reads status; 75A presence reads applied. |
+| own_log | seq/prev/hash/parts/bytes: 75A publish; hash chains prev. time: integer epoch seconds for 76A Snapshots, compaction and own-storage reconciliation (14-day compaction). No redundant created_at. |
+| displaced | id/source/path/sha/vv/size/mtime/deleted/content/reason/time/expired: 78A mm displaced and classification; 76A compaction expiry; simulator INV2 reads expired/sha/time. size remains visible after expiry. |
+
+ledger, cursors, own_log and displaced are **provisional and empty** until their
+Tracks. Their owner may DROP and re-CREATE its table in a migration following
+73C, 74B or its own review without raising compat_version: released binaries
+read history only. 75A's adapter/oracle must preserve INV7 byte-integrity and
+causal coverage for an unpublished edit, deletion and pending resolution with
+the metadata-only ledger; current source bytes cannot substitute for old ledger
+content. `expire_displaced` is unit-tested only until 76A calls it inside its
+transaction: at 30 days it clears content and sets expired, never deletes rows
+or changes metadata.
+
+### History API recipes
+
+These fenced Python blocks are extracted and executed by tests against an
+isolated DB_DIR. Read through the public query API:
+
+```python
+from mind_meld import pullhistory, statedb
+records = pullhistory.query(limit=5)
+```
+
+A batch flush imports, inserts and prunes in one transaction:
+
+```python
+rows = [pullhistory.row(verb="push", device="example", source="gstack",
+                       rel_path="note.md", action="uploaded")]
+with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+    pullhistory.import_if_needed(conn)
+    pullhistory.write_rows(conn, rows)
+    pullhistory.prune(conn)
+```
+
+75A inserts receipts inside its publish transaction, closes the connection,
+then maintains separately. Best-effort maintenance cannot roll back publish:
+
+```python
+with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+    # 75A's ledger and own_log updates belong in this transaction too.
+    pullhistory.write_rows(conn, rows)
+pullhistory.maintain_best_effort()
+```
 
 ## Corrupt-manifest recovery (load-bearing)
 `_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. Older copies can predate this device's latest deletions, so `_recover_prior_manifest` merges the local sidecar into the prior (tombstones, source retention, nested-checkout freeze) with a warning, even in autopush, that also says recent deletions may be lost when no usable sidecar exists. Like other recovered priors, it freezes nested-checkout entries only when their blob is still stored. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.

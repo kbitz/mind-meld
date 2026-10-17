@@ -22,6 +22,11 @@ LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-runn
 KEYRING_UNAVAILABLE_URL = (
     "https://github.com/kbitz/mind-meld#auto-commands-skip-keyring-locked-or-unavailable"
 )
+STATEDB_HELP_URL = "https://github.com/kbitz/mind-meld#history-database-statedb"
+SQLITE_UNAVAILABLE_REMEDY = (
+    "mm's Python has no usable sqlite3 module; "
+    "reinstall mm as described in the README Install section"
+)
 
 
 class MindMeldError(Exception):
