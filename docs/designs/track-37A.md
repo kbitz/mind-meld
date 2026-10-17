@@ -60,7 +60,8 @@ resolve to site-packages, and `devices --format json` against a real
 
 (Extended by Track 73A: the candidates are now `python3.13`, `python3.14`,
 `python3.12`, `python3.11`, `python3`, and the notice fires only when the
-pick is neither CI interpreter, 3.13 on macOS or 3.14 on Linux.)
+pick is neither CI interpreter (3.13, the macOS job's, or 3.14, the Linux
+job's), whatever the host OS.)
 
 Staleness is a content hash of `pyproject.toml` + interpreter identity +
 a policy version, written to a marker after a successful install, under
