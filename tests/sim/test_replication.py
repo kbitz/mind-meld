@@ -463,6 +463,13 @@ class LifecycleMachine(CoreMachine):
         """An operator's remedy before the final settle: a device a restore or clone
         forked refuses until it runs ``mm rejoin`` (store-v2 section 9), within MAX_IDS."""
         if sys.exc_info()[0] is None:
+            # Fork evidence may still be in flight: drain and pull first so refusals
+            # surface before the remedy, not mid-settle after it.
+            for d in self.fleet.ordered():
+                self.fleet.transport.set_online(d.name, True)
+            self.fleet.transport.drain()
+            for d in self.fleet.participants():
+                self.fleet.action(d.name, "pull")
             # Counted in the summary: the quiescent floor measures post-remedy state,
             # and the count keeps that visible instead of silent.
             remedied = False
@@ -477,6 +484,23 @@ class LifecycleMachine(CoreMachine):
                     remedied = True
             if remedied:
                 self.invocation.remedies += 1
+            # With identities exhausted (MAX_IDS) a refused device cannot rejoin, so
+            # two-participant quiescence is unreachable for this example: settle what
+            # remains without quiescent credit instead of failing reachability.
+            try:
+                participants = self.fleet.participants()
+                self.invocation.settle_seconds.append(
+                    settle(self.fleet, min_participants=min(2, len(participants)))
+                )
+                if len(participants) >= 2:
+                    self.invocation.quiescent += 1
+                self.invocation.coverage.update(self.fleet.coverage)
+                self.invocation.action_seconds.extend(self.fleet.action_seconds)
+            finally:
+                if hypothesis.control.currently_in_test_context():
+                    note(self.fleet.diagnostics())
+                shutil.rmtree(self.fleet.root)
+            return
         super().teardown()
 
     @rule(device=st.integers(0, 3))

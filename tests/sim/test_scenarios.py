@@ -1682,6 +1682,39 @@ def test_regression_presence_refresh_does_not_starve_torn_closure(
             ACTIVE.reset(token)
 
 
+def test_regression_fork_at_a_recovery_snapshot_anchor_refuses(
+    tmp_path, sim_write_guard, monkeypatch
+):
+    # Deep-search counterexample, minimized: own-snapshot recovery anchored own_log at
+    # the snapshot's prev without comparing it to the complete family actually at
+    # that seq (from the republished branch), so the forked device published presence
+    # instead of refusing fork-restore (INV6).
+    from mind_meld.store import format as codec
+
+    from .store_fleet import PART_BYTES
+    from .test_replication import ACTIVE, Invocation, LifecycleMachine
+
+    monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
+    token = ACTIVE.set(Invocation(tmp_path / "replay", sim_write_guard))
+    state = LifecycleMachine()
+    try:
+        state.lifecycle_witness(case=0)
+        state.crash_rule(device=1, parts=0, snapshot=True)
+        state.backup_rule(device=0)
+        state.torn_rule(device=2)
+        state.settle_rule()
+        state.join_rule(choice=0)
+        state.time_advance(seconds=2592000)
+        state.retire_rule(device=2)
+        state.restore_rule(device=0, policy="saved")
+        state.crash_rule(device=0, parts=2, snapshot=False)
+    finally:
+        try:
+            state.teardown()
+        finally:
+            ACTIVE.reset(token)
+
+
 def test_regression_restore_discards_an_unpublished_union_edit(
     tmp_path, sim_write_guard, monkeypatch
 ):

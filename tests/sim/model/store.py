@@ -540,16 +540,37 @@ def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcom
                 warnings=tuple(warnings),
             )
     # Fork evidence at or below a recovery snapshot still refuses: loading the
-    # snapshot would skip those commits, so check every recorded seq first.
+    # snapshot would skip those commits, so check every recorded seq first. Two
+    # complete families with distinct digests at one seq are a fork with or without
+    # an own_log row.
+    seen_digests: dict[int, str] = {}
     for found in commits:
         known = state.own_log.get(str(found.seq))
         if known and known["hash"] != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+        if seen_digests.setdefault(found.seq, found.digest) != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+        # A broken prev link is fork evidence even when every digest matches its
+        # own_log row: the other branch's record at seq-1 may already be compacted.
+        previous = state.own_log.get(str(found.seq - 1))
+        if (
+            found.seq > 1
+            and previous is not None
+            and found.record.header["prev"] != previous["hash"]
+        ):
             return refuse(ctx, core.reconcile_rule(chain_fork=True))
     # Own-snapshot recovery: a complete own snapshot beyond own_log loads like a peer's,
     # anchors own_log at its seq and prev, and only later own commits replay after it.
     covered = 0
     newest = view.latest_snapshot(ctx.device_id)
     if newest is not None and newest.seq > max(map(int, state.own_log), default=0):
+        # The anchor itself is fork evidence checked: a complete family at the
+        # snapshot's seq whose digest is not the snapshot's prev is another branch.
+        anchor_prev = newest.record.header["prev"]
+        if anchor_prev is not None and any(
+            found.seq == newest.seq and found.digest != anchor_prev for found in commits
+        ):
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
         load_snapshot(ctx, view, ctx.device_id, newest)
         created = newest.record.header["created_at"]
         with ctx.state.transaction() as updated:
