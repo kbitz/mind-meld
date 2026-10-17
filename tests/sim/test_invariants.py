@@ -29,7 +29,7 @@ from .model.registry import (
     validate_registry,
 )
 from .model.state import FileState, State, StateSeam, row
-from .model.store import Outcome
+from .model.store import Outcome, owner_text
 from .store_fleet import Clock
 from .transport import File
 
@@ -183,7 +183,7 @@ def test_single_writer_exceptions_and_temp_rejection(observed_fleet):
     f = observed_fleet
     file = File(b"x", 0, 0o600)
     for operation, path in (
-        ("push", "dev/aaaaaaaa/log/000000000001.enc"),
+        ("push", "dev/aaaaaaaa/log/000000000001.0badf00d.enc"),
         ("create_fleet", "fleet.json"),
         ("join", ".stignore"),
     ):
@@ -208,11 +208,11 @@ def test_ordering_outcomes_ground_truth_and_warnings(observed_fleet):
             f, obs(operation="join" if outcome.status == "waiting" else "pull", outcome=outcome)
         )
     inv4_ordering_never_fails(
-        f, obs(outcome=Outcome("refused", reason="foreign-host"), ground_truth={"foreign-host"})
+        f, obs(outcome=Outcome("refused", reason="fork-clone"), ground_truth={"fork-clone"})
     )
     for outcome in (
         Outcome("error"),
-        Outcome("refused", reason="foreign-host"),
+        Outcome("refused", reason="fork-clone"),
         Outcome("stalled-unreadable"),
     ):
         with pytest.raises(InvariantError) as raised:
@@ -237,10 +237,22 @@ def test_aged_gap_rejects_unrelated_warning(observed_fleet, warning):
             f, obs(state=state, outcome=Outcome("pending", warnings=(warning,)))
         )
     assert raised.value.invariant == 4
-    for gap_warning in ("gap older than 24 hours", "chain anchor gap older than 24 hours"):
+    inv4_ordering_never_fails(
+        f,
+        obs(state=state, outcome=Outcome("pending", warnings=(warning, "gap older than 24 hours"))),
+    )
+    # The chain-anchor wait is gone, so its warning no longer satisfies the clause.
+    with pytest.raises(InvariantError) as raised:
         inv4_ordering_never_fails(
-            f, obs(state=state, outcome=Outcome("pending", warnings=(warning, gap_warning)))
+            f,
+            obs(
+                state=state,
+                outcome=Outcome(
+                    "pending", warnings=(warning, "chain anchor gap older than 24 hours")
+                ),
+            ),
         )
+    assert raised.value.invariant == 4
 
 
 @pytest.mark.parametrize("fork", ["previous", "known"])
@@ -270,9 +282,10 @@ def test_own_chain_refusal_ground_truth(store_fleet, fork, operation):
                 (a.replica_root / key).unlink()
     store.write_record(ctx, "commit", seq, payload)
     result = f.action("a", operation)
-    assert (result.status, result.reason) == ("refused", "fork")
+    assert (result.status, result.reason) == ("refused", "fork-restore")
+    assert result.warnings[0] == owner_text("fork-restore")
     observation = f.last_observation
-    assert "fork" in observation.ground_truth
+    assert "fork-restore" in observation.ground_truth
     with pytest.raises(InvariantError) as raised:
         inv6_fork_safety(f, replace(observation, outcome=Outcome("published")))
     assert raised.value.invariant == 6
@@ -334,9 +347,10 @@ def test_source_write_rejects_missing_or_false_piece(store_fleet, writer):
 
 def test_fork_safety_does_not_vacuously_accept_any_refusal(observed_fleet):
     f = observed_fleet
-    inv6_fork_safety(f, obs(ground_truth={"fork"}, outcome=Outcome("refused", reason="fork")))
+    for truth in ("fork", "fork-restore", "fork-clone"):
+        inv6_fork_safety(f, obs(ground_truth={truth}, outcome=Outcome("refused", reason=truth)))
     with pytest.raises(InvariantError) as raised:
-        inv6_fork_safety(f, obs(ground_truth={"foreign-host"}))
+        inv6_fork_safety(f, obs(ground_truth={"fork-clone"}))
     assert raised.value.invariant == 6
 
 
@@ -492,7 +506,7 @@ def test_plaintext_and_invalid_envelope_mutants(store_fleet):
     d = store_fleet.devices["a"]
     for path, data in [
         ("foreign", b"plaintext"),
-        ("dev/" + d.mm_id + "/log/000000000001.enc", b"\x03bad"),
+        ("dev/" + d.mm_id + "/log/000000000001.0badf00d.enc", b"\x03bad"),
     ]:
         with pytest.raises(InvariantError) as raised:
             replica_integrity(store_fleet, d, {path: File(data, 0, 0o600)})
@@ -500,6 +514,64 @@ def test_plaintext_and_invalid_envelope_mutants(store_fleet):
     marker = b"sim-marker-alpha-0001"
     with pytest.raises(InvariantError, match="plaintext marker"):
         replica_integrity(store_fleet, d, {"bad": File(marker, 0, 0o600)})
+
+
+def test_replica_integrity_keyless_refill_branches(store_fleet):
+    # Value: protects=the keyless-replica branch relaxes only authentication, never
+    # shape: a refilling replica (no fleet.json yet) cannot open records, but foreign
+    # files and non-envelope bytes still fail INV3, and the same bytes fail once keys
+    # exist; fails_when=the keys-None skip also swallows authentication after join or
+    # shape checks while keyless; why_new=fresh-replica restore creates keyless
+    # replicas; seam=hand-built trees; no_claim=none.
+    f = store_fleet
+    fresh = f.add_device("c")  # Never joined: no fleet.json, keys are None.
+    assert f.keys(fresh) is None
+    sealed = {"dev/" + fresh.mm_id + "/log/000000000001.0badf00d.enc": File(b"\x03bad", 0, 0o600)}
+    replica_integrity(f, fresh, sealed)  # Shape only: nothing can be opened yet.
+    with pytest.raises(InvariantError) as raised:
+        replica_integrity(f, fresh, {"foreign": File(b"plaintext", 0, 0o600)})
+    assert raised.value.invariant == 3
+    with pytest.raises(InvariantError) as raised:
+        replica_integrity(f, fresh, {"dev/x/log/bad.enc": File(b"plaintext", 0, 0o600)})
+    assert raised.value.invariant == 3
+    joined = f.devices["a"]
+    with pytest.raises(InvariantError) as raised:
+        replica_integrity(f, joined, sealed)  # With keys, the same bytes must authenticate.
+    assert raised.value.invariant == 3
+
+
+def test_published_rolled_back_version_stays_a_quiescent_target(observed_fleet):
+    # Value: protects=INV7 keeps demanding convergence on a version that was published
+    # before its author restored, even when no complete record carries it at
+    # quiescence; fails_when='published' is re-derived by scanning surviving records
+    # (or by vector alone) instead of the historical publication record; why_new=the
+    # rolled-back exemption is new and must not excuse published loss; seam=hand
+    # observation; no_claim=none.
+    f = observed_fleet
+    version = f.oracle.add("claude", "notes.txt", b"published", "a", vv={"aaaaaaaa": 2})
+    # The publication feed: a record carried this version (no surviving record needed).
+    f.oracle.add(
+        "claude",
+        "notes.txt",
+        b"published",
+        "a",
+        user=False,
+        authored=True,
+        identity="aaaaaaaa",
+        vv={"aaaaaaaa": 2},
+    )
+    unpublished = f.oracle.add("claude", "other.txt", b"local", "a", vv={"aaaaaaaa": 1})
+    f.oracle.rolled_back |= {version.event, unpublished.event}
+    for device in f.ordered():
+        put(f, device.name, "notes.txt", b"stale")
+    # The unpublished version is exempt, but the published one still fails INV7.
+    with pytest.raises(InvariantError) as raised:
+        inv7_quiescent(f)
+    assert raised.value.invariant == 7
+    assert raised.value.subject[:2] == ("claude", "notes.txt")
+    for device in f.ordered():
+        put(f, device.name, "notes.txt", b"published")
+    inv7_quiescent(f)  # Converged on the published version; the local one is exempt.
 
 
 def test_known_gap_rows_have_replay_and_owner():
@@ -532,6 +604,8 @@ def test_each_real_registry_piece_dispatches_without_model_fallback(tmp_path, pi
         lambda: "hardware-a",
         None,
         registry,
+        family_source=lambda: "0badf00d",
+        folder_synced=lambda: True,
     )
     assert ctx.call(piece, fixture_argument=1) == "sentinel"
     assert calls == [("a", {"fixture_argument": 1})]
@@ -772,9 +846,7 @@ def test_unreadable_requires_corruption_scenario(observed_fleet, operation):
     "name,kwargs,unexpected",
     [
         ("test_gap_non_utf8_union", {"path": "MEMORY.md"}, 3),
-        ("test_gap_restore_saved", {}, 4),
-        ("test_gap_restore_current", {}, 6),
-        ("test_gap_partial_own_commit", {}, 7),
+        ("test_gap_restore_current_residual", {"case": "unapplied-deleted", "invariant": 2}, 6),
         ("test_gap_retire_delayed_active_presence", {}, 4),
     ],
 )
@@ -807,7 +879,11 @@ def test_absent_delete_does_not_suppress_quiescent_causal_check(observed_fleet):
 
 
 @pytest.mark.parametrize("known_anchor", [True, False])
-def test_fork_refusal_uses_refusal_cursor_and_known_anchor(store_fleet, known_anchor):
+def test_reader_refusal_naming_a_peer_is_never_valid(store_fleet, known_anchor):
+    # Value: protects=readers never refuse a peer fork (owner decision, 73C gate);
+    # fails_when=INV4 still accepts a refusal that names a peer, with or without a
+    # known chain anchor; why_new=the amended INV4 drops reader refusals; seam=none;
+    # no_claim=owner refusals, which INV6 keeps.
     from mind_meld.store import format as codec
 
     from .invariants import context_for
@@ -835,12 +911,9 @@ def test_fork_refusal_uses_refusal_cursor_and_known_anchor(store_fleet, known_an
         replica_before=read_tree(b.replica_root),
         outcome=Outcome("refused", peer=a.mm_id, reason="fork"),
     )
-    if known_anchor:
+    with pytest.raises(InvariantError) as raised:
         inv4_ordering_never_fails(f, observation)
-    else:
-        with pytest.raises(InvariantError) as raised:
-            inv4_ordering_never_fails(f, observation)
-        assert raised.value.invariant == 4
+    assert raised.value.invariant == 4
 
 
 @pytest.mark.parametrize("family", ["complete", "partial", "corrupt"])
@@ -963,3 +1036,126 @@ def test_identical_edit_cannot_hide_later_dominating_version(observed_fleet):
     for device in f.ordered():
         put(f, device.name, "notes.txt", b"beta")
     inv7_quiescent(f)
+
+
+def test_family_source_is_deterministic_and_not_monotonic(tmp_path, sim_write_guard):
+    # Value: protects=apply order never assumes a later family sorts later; fails_when=the
+    # simulator hands out a monotonic counter and hides family-order bugs; why_new=the
+    # family source is new; seam=none; no_claim=the real publisher's secure random.
+    from .store_fleet import StoreFleet
+
+    def draws(root):
+        fleet = StoreFleet(root, write_guard=sim_write_guard)
+        return [fleet.next_family() for _ in range(32)]
+
+    first, second = draws(tmp_path / "one"), draws(tmp_path / "two")
+    assert first == second  # A replayed trace sees the same families.
+    assert len(set(first)) == 32 and all(len(f) == 8 for f in first)
+    assert first != sorted(first) and first != sorted(first, reverse=True)
+    fleet = StoreFleet(tmp_path / "three", write_guard=sim_write_guard)
+    fleet.force_families("ffffffff", "00000000")  # The collision hook is consumed first.
+    assert [fleet.next_family() for _ in range(3)] == ["ffffffff", "00000000", first[0]]
+    seen = []
+    fleet.family_hook = seen.append
+    assert fleet.next_family() == first[1] and seen == [first[1]]
+
+
+def test_reader_picks_the_newest_complete_snapshot_family_at_a_seq(store_fleet):
+    # Value: protects=two complete snapshot families at one seq are not fork evidence
+    # and the reader picks by (seq, created_at, family); fails_when=selection takes
+    # the first family in name order, or an older snapshot at the same seq, so a
+    # fallback or retire check reads stale snapshot cursors; why_new=the owner
+    # writes at most one complete snapshot family per seq, so no ordinary witness
+    # ever shows a reader two; seam=write_record fault injection, as in the
+    # ground-truth tests above; no_claim=snapshot entry classification on fallback,
+    # covered by the scenario witnesses.
+    from mind_meld.store import format as codec
+
+    from .invariants import context_for, settle
+    from .model import store
+    from .store_fleet import CONTENTS
+
+    f = store_fleet
+    a, b = f.devices["a"], f.devices["b"]
+    a.edit("notes.txt", CONTENTS[1])
+    f.action("a", "push", attended=False)  # Commit 1, and no snapshot at seq 1 yet.
+    ctx = context_for(f, a)
+    prev = ctx.state.read().own_log["1"]["hash"]
+
+    def write_snapshot():
+        payload = codec.encode_snapshot(
+            store.header(ctx, "snapshot", 1, prev, ()),
+            (),
+            expected=ctx.context(a.mm_id, "snapshot", 1),
+        )
+        return store.write_record(ctx, "snapshot", 1, payload)
+
+    older = write_snapshot()
+    f.advance(1)
+    newer = write_snapshot()
+    tied = write_snapshot()  # Same created_at as newer; the family name decides.
+    assert len({older.family, newer.family, tied.family}) == 3
+    f.transport.scan("a")  # The injected files bypassed the publisher's scan.
+    f.drain()
+    latest = context_for(f, b).view().latest_snapshot(a.mm_id)
+    assert latest is not None and latest.seq == 1
+    assert latest.family == max(newer.family, tied.family)
+    assert latest.family != older.family
+    # Two snapshot families at a seq never refuse a reader or the owner.
+    assert f.action("b", "pull").status == "applied"
+    assert (b.source_root / "notes.txt").read_bytes() == CONTENTS[1]
+    settle(f, min_participants=2)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"index_policy": "saved", "scope": "state"},
+        {"index_policy": "current", "scope": "fresh-replica"},
+        {"scope": "bogus"},
+        {"index_policy": "other"},
+    ],
+)
+def test_restore_scope_and_index_policy_are_validated(store_fleet, kwargs):
+    # Value: protects=the scopes stay independent of the index policy; fails_when=a
+    # state/fresh-replica restore silently accepts an index policy or disk restores
+    # without one; why_new=restore scopes are new; seam=none.
+    f = store_fleet
+    a = f.devices["a"]
+    backup = f.snapshot(a)
+    before = FileState(a.state_root).read()
+    with pytest.raises(ValueError, match="restore"):
+        f.restore(a, backup, **kwargs)
+    assert FileState(a.state_root).read() == before
+
+
+def test_incomplete_families_are_never_opened_on_the_hot_path(store_fleet, monkeypatch):
+    # Value: protects=a torn family costs no decryption per pull; fails_when=readers open
+    # every present part to judge completeness; why_new=completeness comes from names;
+    # seam=a counting wrapper around open_record; no_claim=mm diag's full validation.
+    from mind_meld.store import format as codec
+
+    from .test_scenarios import multipart_edit
+
+    f = store_fleet
+    a = f.devices["a"]
+    multipart_edit(a)
+    f.action("a", "push", crash_parts=1, attended=False)
+    f.drain()
+    opened = []
+    real = codec.open_record
+
+    def counting(parts, keys, *, expected, **kwargs):
+        opened.append((expected.kind, expected.device_id))
+        return real(parts, keys, expected=expected, **kwargs)
+
+    monkeypatch.setattr(codec, "open_record", counting)
+    f.action("b", "pull")
+    assert ("snapshot", a.mm_id) in opened  # Complete records are opened ...
+    assert ("commit", a.mm_id) not in opened  # ... the torn commit family is not.
+    # Once its parts are all present the family is opened exactly then.
+    f.action("a", "push", attended=False)
+    f.drain()
+    f.action("b", "pull")
+    assert ("commit", a.mm_id) in opened

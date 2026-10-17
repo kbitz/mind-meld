@@ -27,7 +27,7 @@ from mind_meld.store import format as codec
 
 from .invariants import KNOWN_DESIGN_GAPS, settle
 from .model.registry import default_registry
-from .store_fleet import CONTENTS, DAY, PART_BYTES, PATHS, StoreFleet
+from .store_fleet import CONTENTS, DAY, MAX_IDS, PART_BYTES, PATHS, StoreFleet
 
 settings.register_profile(
     "sim-bounded",
@@ -69,6 +69,7 @@ class Invocation:
     steps: int = 0
     coverage: set[str] = field(default_factory=set)
     quiescent: int = 0
+    remedies: int = 0  # Examples whose teardown rejoined at least one refused device.
     settle_seconds: list[float] = field(default_factory=list)
     action_seconds: list[float] = field(default_factory=list)
 
@@ -275,6 +276,7 @@ def run_machine(
             "wall_seconds": duration,
             "local_ceiling_seconds": 60,
             "quiescent_examples": invocation.quiescent,
+            "teardown_remedy_examples": invocation.remedies,
             "coverage": sorted(invocation.coverage),
             "step_seconds": sum(invocation.action_seconds) / max(1, len(invocation.action_seconds)),
             "settle_seconds": sum(invocation.settle_seconds)
@@ -298,6 +300,9 @@ LIFECYCLE_HARD = {
     "retire",
     "fork-refusal",
     "crash-recovery",
+    "torn-supersede",
+    "late-family",
+    "heal-snapshot",
 }
 
 
@@ -332,7 +337,7 @@ class LifecycleMachine(CoreMachine):
                 self.fleet.action(name, "publish_snapshot")
             self.fleet.drain()
             assert self.fleet.action("a", "retire", target=c.mm_id).status == "retired"
-        else:
+        elif case == 3:
             self.fleet.devices["a"].edit("notes.txt", CONTENTS[1])
             self.fleet.action("a", "push", crash_state=True, attended=False)
             self.fleet.action("a", "push")
@@ -342,7 +347,7 @@ class LifecycleMachine(CoreMachine):
     @rule(choice=st.integers(0, 3))
     def join_rule(self, choice):
         self.tick()
-        if len(self.fleet.devices) < 4 and len(self.fleet.ids) < 6:
+        if len(self.fleet.devices) < 4 and len(self.fleet.ids) < MAX_IDS:
             name = next(n for n in ("c", "d") if n not in self.fleet.devices)
             self.fleet.add_device(name)
         unjoined = [
@@ -375,7 +380,7 @@ class LifecycleMachine(CoreMachine):
         d = self.device(device)
         meta = self.fleet.state_factory(d.state_root).read().meta
         if (
-            len(self.fleet.ids) < 6
+            len(self.fleet.ids) < MAX_IDS
             and (meta.get("refused") or meta.get("retired"))
             and not self.fleet.transport.unfinished(d.name)
         ):
@@ -388,14 +393,46 @@ class LifecycleMachine(CoreMachine):
         if not self.fleet.transport.unfinished(d.name):
             self.backups[d.name] = self.fleet.snapshot(d)
 
-    @rule(device=st.integers(0, 3), policy=st.sampled_from(["saved", "current"]))
+    @rule(
+        device=st.integers(0, 3),
+        policy=st.sampled_from(["saved", "current", "state", "fresh-replica"]),
+    )
     def restore_rule(self, device, policy):
         self.tick()
         d = self.device(device)
         if "restore-" + policy in KNOWN_DESIGN_GAPS:
             return  # Exact divergent histories remain in strict deterministic regressions.
+        if policy == "fresh-replica" and not any(
+            (other.replica_root / "fleet.json").exists()
+            for other in self.fleet.ordered()
+            if other is not d
+        ):
+            return  # Peers refill an emptied replica; with no surviving copy there is no store.
+        if policy == "fresh-replica":
+            # KNOWN_DESIGN_GAPS[fresh-replica-unreplicated]: emptying the replica
+            # destroys own records no peer has synced yet.
+            own = (
+                {
+                    p.relative_to(d.replica_root).as_posix()
+                    for p in (d.replica_root / "dev" / d.mm_id).rglob("*.enc")
+                }
+                if (d.replica_root / "dev" / d.mm_id).exists()
+                else set()
+            )
+            peer_held = set()
+            for other in self.fleet.ordered():
+                if other is not d:
+                    peer_held |= {
+                        p.relative_to(other.replica_root).as_posix()
+                        for p in other.replica_root.rglob("*.enc")
+                    }
+            if own - peer_held:
+                return
         if d.name in self.backups and not self.fleet.transport.unfinished(d.name):
-            self.fleet.restore(d, self.backups[d.name], index_policy=policy)
+            if policy in ("saved", "current"):
+                self.fleet.restore(d, self.backups[d.name], index_policy=policy)
+            else:
+                self.fleet.restore(d, self.backups[d.name], scope=policy)
 
     @rule(device=st.integers(0, 3))
     def retire_rule(self, device):
@@ -422,12 +459,62 @@ class LifecycleMachine(CoreMachine):
         self.fleet.drain()
         self.fleet.action(actor.name, "retire", target=target.mm_id)
 
+    def teardown(self):
+        """An operator's remedy before the final settle: a device a restore or clone
+        forked refuses until it runs ``mm rejoin`` (store-v2 section 9), within MAX_IDS."""
+        if sys.exc_info()[0] is None:
+            # Counted in the summary: the quiescent floor measures post-remedy state,
+            # and the count keeps that visible instead of silent.
+            remedied = False
+            for d in self.fleet.ordered():
+                meta = self.fleet.state_factory(d.state_root).read().meta
+                if (
+                    meta.get("refused")
+                    and len(self.fleet.ids) < MAX_IDS
+                    and not self.fleet.transport.unfinished(d.name)
+                ):
+                    self.fleet.rejoin(d)
+                    remedied = True
+            if remedied:
+                self.invocation.remedies += 1
+        super().teardown()
+
+    @rule(device=st.integers(0, 3))
+    def torn_rule(self, device):
+        """Torn own slot: a crash after k of n parts, closed by the next push."""
+        self.tick()
+        d = self.device(device)
+        if d in self.fleet.participants() and not self.fleet.transport.unfinished(d.name):
+            # Fresh ASCII per path keeps the commit multipart and avoids the pinned
+            # non-UTF-8 union gap that random edits also stay clear of.
+            for path in PATHS:
+                d.edit(path, path[:1].encode() * 450 + b"%02x" % (len(self.fleet.steps) % 256))
+            self.fleet.action(d.name, "push", crash_parts=1, attended=False)
+            self.fleet.action(d.name, "push")
+
+    @rule(device=st.integers(0, 3))
+    def heal_rule(self, device):
+        """Another machine's rollback deleted this device's newest record above its
+        snapshot floor: the next attended push publishes the snapshot readers fall back to."""
+        self.tick()
+        d = self.device(device)
+        if d not in self.fleet.participants() or self.fleet.transport.unfinished(d.name):
+            return
+        state = self.fleet.state_factory(d.state_root).read()
+        head = max(map(int, state.own_log), default=0)
+        if head <= state.meta.get("snapshot_seq", 0):
+            return
+        families = list(d.replica_root.glob(f"dev/{d.mm_id}/log/{head:012d}.*.enc"))
+        for path in families:
+            path.unlink()
+        if families:
+            self.fleet.transport.scan(d.name)
+            self.fleet.action(d.name, "push")
+
     @rule(device=st.integers(0, 3), snapshot=st.booleans(), parts=st.integers(0, 2))
     def crash_rule(self, device, snapshot, parts=0):
         self.tick()
         d = self.device(device)
-        if parts and not snapshot and "partial-own-commit" in KNOWN_DESIGN_GAPS:
-            return
         if d in self.fleet.participants() and not self.fleet.transport.unfinished(d.name):
             d.edit("other.txt", CONTENTS[2])
             self.fleet.action(
