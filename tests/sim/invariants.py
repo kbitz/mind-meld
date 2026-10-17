@@ -166,11 +166,13 @@ class Oracle:
         # compaction or a later deletion of the record cannot un-publish it, and the
         # sha keeps counter-reused vectors with different bytes distinct.
         self.published_ever: set[tuple] = set()
-        # Versions whose causal identity (bytes and vector) a disk restore destroyed:
-        # before it only the restored device carried that identity, and nothing does after.
-        # INV2's ``excluded`` judges holders by line-set containment, so a union version
-        # that deleted lines looks held by any superset elsewhere; INV7 demands exact
-        # bytes under a vector and needs this exact-identity record of the loss.
+        # Versions whose causal identity (bytes and vector) a saved disk restore
+        # destroyed: before it only the restored device carried that identity (no other
+        # ledger, displaced row, or record complete over the other replicas' merged
+        # files), and the restored device does not carry it after. INV2's ``excluded``
+        # judges holders by line-set containment, so a union version that deleted lines
+        # looks held by any superset elsewhere; INV7 demands exact bytes under a vector
+        # and needs this exact-identity record of the loss.
         self.destroyed: set[int] = set()
         self.last_holders: dict[int, list[str]] = {}
 
@@ -284,6 +286,13 @@ class Oracle:
         ]
         if missing and not quiescent:
             records = record_versions(fleet)
+            # A family whose parts are split across replicas is recoverable too: the
+            # transport reassembles it (the restore exclusion judges carriers the same way).
+            records += [
+                (e.metadata["source"], e.metadata["path"], e.content, "split")
+                for found in merged_records(fleet, fleet.ordered())
+                for e in found.record.entries
+            ]
             for event, version in sorted(self.versions.items()):
                 holders = [
                     name + ":record"
@@ -447,23 +456,40 @@ def version_identity(source, path, data, vv):
     return (source, path, sha(data), frozenset((vv or {}).items()))
 
 
-def carried_identities(fleet, device):
-    """Version identities ``device`` still carries: its ledger rows, its live displaced
-    rows and every entry of a complete record in its replica. Source bytes alone carry
-    none: an older version, or a union superset, can hold the same lines under another
-    vector."""
-    state = state_for(fleet, device).read()
-    rows = list(state.ledger.values()) + [v for v in state.displaced if not v.get("expired")]
-    result = {version_identity(r["source"], r["path"], r.get("content"), r.get("vv")) for r in rows}
-    ctx = context_for(fleet, device)
-    if ctx.keys is not None:
-        for found in complete_families(ctx.keys, replica_files(ctx)):
-            result |= {
-                version_identity(
-                    e.metadata["source"], e.metadata["path"], e.content, e.metadata["vv"]
-                )
-                for e in found.record.entries
-            }
+def merged_records(fleet, devices):
+    """Complete authenticated families over the merged replica files of ``devices``.
+
+    Parts are immutable and named by family, so merging never mixes two families, and a
+    family whose parts are split across these replicas counts: the transport
+    reassembles it.
+    """
+    files, keys = {}, None
+    for device in devices:
+        ctx = context_for(fleet, device)
+        if ctx.keys is not None:
+            keys = keys or ctx.keys
+            files.update(replica_files(ctx))
+    return [] if keys is None else complete_families(keys, files)
+
+
+def carried_identities(fleet, devices):
+    """Version identities ``devices`` carry together: their ledger rows, live displaced
+    rows and every entry of a record complete over their merged replica files. Source
+    bytes alone carry none: an older version, or a union superset, can hold the same
+    lines under another vector."""
+    result = set()
+    for device in devices:
+        state = state_for(fleet, device).read()
+        rows = list(state.ledger.values())
+        rows += [v for v in state.displaced if not v.get("expired")]
+        result |= {
+            version_identity(r["source"], r["path"], r.get("content"), r.get("vv")) for r in rows
+        }
+    for found in merged_records(fleet, devices):
+        result |= {
+            version_identity(e.metadata["source"], e.metadata["path"], e.content, e.metadata["vv"])
+            for e in found.record.entries
+        }
     return result
 
 
@@ -515,6 +541,28 @@ def ground_truth(ctx: Context, state: State, tree: dict) -> set[str]:
     if ctx.keys is None:
         return result
     hashes = {int(seq): value["hash"] for seq, value in state.own_log.items()}
+    own_snapshots = [
+        found
+        for found in complete_families(
+            ctx.keys,
+            {key: file.data for key, file in tree.items()},
+            only=lambda device, kind, seq: (device, kind) == (ctx.device_id, "snapshot"),
+        )
+        if found.suffix == ""
+    ]
+    newest = max(
+        own_snapshots,
+        key=lambda f: (f.seq, f.record.header["created_at"], f.family),
+        default=None,
+    )
+    if (
+        newest is not None
+        and newest.seq > max(hashes, default=0)
+        and newest.record.header["prev"] is not None
+    ):
+        # §9 row 1: a complete own snapshot beyond own_log anchors own_log at its seq and
+        # prev, so row 4 judges the own families at and above it against that anchor.
+        hashes[newest.seq] = newest.record.header["prev"]
     by_seq = {}
     for found in complete_families(
         ctx.keys,
@@ -540,13 +588,8 @@ def ground_truth(ctx: Context, state: State, tree: dict) -> set[str]:
             # Reconciliation can replay an unseen prefix before discovering a fork.
             hashes[seq] = digest
     # A snapshot-only clone is ground-truth fork-clone too, not only commits/presence.
-    for found in complete_families(
-        ctx.keys,
-        {key: file.data for key, file in tree.items()},
-        only=lambda device, kind, seq: (device, kind) == (ctx.device_id, "snapshot"),
-    ):
-        if found.suffix == "" and found.record.header["host"] != ctx.host:
-            result.add("fork-clone")
+    if any(found.record.header["host"] != ctx.host for found in own_snapshots):
+        result.add("fork-clone")
     try:
         presence = ctx.load(ctx.device_id, "presence", 0)
     except envelope.StoreError:
@@ -763,8 +806,8 @@ def inv7_quiescent(fleet):
         author's tree, stays a target — unless the restore destroyed every holder
         (INV2's ``excluded`` set): a record that existed only on an emptied replica
         is gone the same way INV2 already excuses, and demanding its bytes would
-        contradict that exclusion. ``destroyed`` is a disk restore's loss judged by
-        exact identity: a union version that deleted lines, carried only by the
+        contradict that exclusion. ``destroyed`` is a saved disk restore's loss judged
+        by exact identity: a union version that deleted lines, carried only by the
         restored device's record, is gone even while a superset or an older version
         with the same bytes survives elsewhere.
         """

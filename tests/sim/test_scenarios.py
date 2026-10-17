@@ -1796,19 +1796,22 @@ def test_restore_keeps_only_published_deletions_as_convergence_targets(store_fle
 @pytest.mark.parametrize("delivered", [False, True])
 def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(store_fleet, delivered):
     # Value: protects=INV7 stops demanding a union version whose only carrier a restore
-    # destroyed, and keeps demanding one a peer's replica already holds;
-    # fails_when=the restore's loss record judges holders by line-set containment (a
-    # superset elsewhere "holds" a version that deleted lines) or by bytes without the
-    # vector; why_new=a deep-search counterexample on events.jsonl; seam=none;
-    # no_claim=INV2's line-based restore exclusion, which is unchanged.
+    # destroyed, keeps demanding one a peer's replica already holds, and never excuses
+    # a peer's unpublished edit; fails_when=the restore's loss record judges holders by
+    # line-set containment (a superset elsewhere "holds" a version that deleted lines)
+    # or drops the restored-device-carried condition; why_new=a deep-search
+    # counterexample on events.jsonl; seam=none; no_claim=bytes-without-vector
+    # identity (test_regression_union_deletion_lost_to_a_saved_restore pins that).
     f = store_fleet
-    a = f.devices["a"]
+    a, b = f.devices["a"], f.devices["b"]
     union = CONTENTS[3] + CONTENTS[6]  # alpha, bravo, space
     a.edit("events.jsonl", union)
     settle(f, min_participants=2)
     backup = f.snapshot(a)
     a.edit("events.jsonl", CONTENTS[3])  # Deletes the space line.
     f.action("a", "push", attended=False)
+    b.edit("notes.txt", CONTENTS[2])  # A peer's live edit: unpublished, carried by no row.
+    peer_edit = max(e for e, v in f.oracle.versions.items() if v.device == "b")
     if delivered:
         for choice in f.transport.pending():
             if choice.dst == "b" and "/log/" in choice.path:
@@ -1821,10 +1824,51 @@ def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(store
     f.restore(a, backup, index_policy="saved")
     assert not set(deletion) & f.oracle.excluded  # INV2's union holders still count.
     assert bool(set(deletion) & f.oracle.destroyed) is not delivered
+    assert peer_edit not in f.oracle.destroyed  # Only what the restored device carried.
     settle(f, min_participants=2)
     expected = CONTENTS[3] if delivered else union
     for d in f.participants():
         assert (d.source_root / "events.jsonl").read_bytes() == expected
+
+
+@pytest.mark.parametrize("path", ["events.jsonl", "notes.txt"])
+def test_restore_counts_a_family_split_across_peers_as_held(store_fleet, path):
+    # Value: protects=a multipart own commit whose parts only peers hold, split between
+    # them, is neither excused nor lost after a saved restore: peers reassemble it and
+    # converge on it; fails_when=the restore or INV2 judges carriers one replica at a
+    # time (a false INV2 or INV7 failure); why_new=review of the restore loss record;
+    # seam=none; no_claim=native Syncthing block exchange between peers.
+    f = store_fleet
+    c = join_extra(f)
+    a, b = f.devices["a"], f.devices["b"]
+    a.edit(path, CONTENTS[3] + CONTENTS[6] if path == "events.jsonl" else CONTENTS[1])
+    settle(f, min_participants=3)
+    backup = f.snapshot(a)
+    target = CONTENTS[3] if path == "events.jsonl" else b"n" * 450
+    for other in ("notes.txt", "other.txt", "MEMORY.md", "events.jsonl"):
+        if other != path:
+            a.edit(other, other[:1].encode() * 450)  # Forces a multipart commit.
+    a.edit(path, target)
+    f.action("a", "push", attended=False)
+    parts = sorted({ch.path for ch in f.transport.pending() if "/log/" in ch.path})
+    assert len(parts) > 1
+    deliver_where(f, b, lambda p: p == parts[0])
+    deliver_where(f, c, lambda p: p in parts[1:])
+    lost = [
+        e
+        for e, v in f.oracle.versions.items()
+        if v.path == path and v.data == target and v.device == "a"
+    ]
+    f.restore(a, backup, index_policy="saved")
+    assert lost and not set(lost) & (f.oracle.excluded | f.oracle.destroyed)
+    f.transport.set_online(a.name, False)
+    a.edit("other.txt", CONTENTS[2])
+    assert f.action("a", "push", attended=False).status == "published"  # A new family.
+    f.transport.drain()  # b and c exchange parts while a stays offline.
+    for d in (b, c):
+        f.action(d.name, "pull")
+        assert (d.source_root / path).read_bytes() == target
+    settle(f, min_participants=2)
 
 
 def test_regression_union_deletion_lost_to_a_saved_restore(tmp_path, sim_write_guard, monkeypatch):
@@ -2992,3 +3036,160 @@ def test_gap_retire_delayed_active_presence(store_fleet):
     f.drain()
     with expected_gap(1):
         settle(f, min_participants=2)
+
+
+# --- Coverage-audit witnesses (store-v2 §5, §9): the unproven-family escapes, fork
+# checks beneath a recovery snapshot, and family-keyed trust in an unreadable record.
+
+
+def test_unproven_torn_slot_waits_on_autopush_and_closes_on_an_attended_push(store_fleet):
+    # Value: protects=an unproven incomplete own family wedges only autopush: pull names
+    # it, autopush waits, an attended synced push supersedes it; fails_when=the escape
+    # drops its attended guard or goes, or pull stops reporting the blocked slot;
+    # why_new=of eight torn and restore witnesses probed, none pinned autopush waiting
+    # or the pull report; seam=none; no_claim=real crash timing and Syncthing's idle
+    # signal (modelled as no pending deliveries).
+    f = store_fleet
+    a = f.devices["a"]
+    backup = f.snapshot(a)  # Taken before the crash: no intent row.
+    multipart_edit(a)
+    assert f.action("a", "push", crash_parts=1, attended=False).status == "crashed"
+    f.drain()
+    f.restore(a, backup, scope="state")  # Drops the intent row; the torn part stays.
+    torn = own_log_parts(a)
+    assert len(torn) == 1 and not FileState(a.state_root).read().intents
+    blocked = owner_text("own-records-in-flight", claimed=1)
+    pulled = f.action("a", "pull")
+    assert (pulled.status, pulled.peer, pulled.gap_seq, pulled.reason) == (
+        "pending",
+        a.mm_id,
+        1,
+        "own-records-in-flight",
+    )
+    assert blocked in pulled.warnings
+    waited = f.action("a", "push", attended=False)
+    assert (waited.status, waited.reason, waited.gap_seq) == ("pending", "own-records-in-flight", 1)
+    assert own_log_parts(a) == torn  # Autopush never writes at the slot.
+    closed = f.action("a", "push")  # Attended, synced, and no receipt claims the seq.
+    assert (closed.status, closed.seq, closed.events) == ("published", 1, ("torn-supersede",))
+    assert torn.items() <= own_log_parts(a).items()  # The unproven family is untouched.
+    assert blocked not in f.action("a", "pull").warnings
+    f.drain()
+    assert f.action("b", "pull").status == "applied"
+    settle(f, min_participants=2)
+
+
+def two_branches_at_push_one(f, *, alpha_snapshot):
+    """Alpha reaches b, a is restored (saved) and republishes push #1 as bravo."""
+    a, b = f.devices["a"], f.devices["b"]
+    backup = f.snapshot(a)
+    a.edit("notes.txt", CONTENTS[1])  # Alpha at push #1.
+    f.action("a", "push", attended=False)
+    if alpha_snapshot:
+        f.action("a", "publish_snapshot")  # Its prev names alpha.
+    deliver_where(f, b, lambda path: alpha_snapshot or "/log/" in path)
+    f.restore(a, backup, index_policy="saved")
+    a.edit("notes.txt", CONTENTS[2])  # Bravo reuses push #1.
+    f.action("a", "push", attended=False)
+    return a, b, backup
+
+
+def test_own_snapshot_recovery_refuses_two_own_families_below_it(store_fleet):
+    # Value: protects=two complete own families with different digests below a recovery
+    # snapshot refuse fork-restore with no own_log row naming either; fails_when=the
+    # distinct-digest pre-check goes and recovery loads the snapshot, skipping the
+    # forked seq; why_new=that check's mutant survived all nine fork and recovery
+    # witnesses; seam=none; no_claim=native redelivery order.
+    f = store_fleet
+    a, _, backup = two_branches_at_push_one(f, alpha_snapshot=False)
+    a.edit("other.txt", CONTENTS[3])
+    f.action("a", "push", attended=False)  # Push #2 on the bravo branch.
+    f.action("a", "publish_snapshot")  # The recovery snapshot, above the forked seq.
+    f.drain()  # Alpha's push #1 reaches a.
+    f.restore(a, backup, scope="state")  # No own_log row names either branch.
+    result = f.action("a", "pull")
+    assert (result.status, result.reason) == ("refused", "fork-restore")
+    assert result.warnings[0] == owner_text("fork-restore")
+    assert "fork-restore" in f.last_observation.ground_truth
+
+
+def test_own_snapshot_recovery_refuses_a_branch_its_anchor_contradicts(store_fleet):
+    # Value: protects=a recovery snapshot whose prev names another family than the only
+    # complete own family at its seq refuses fork-restore (§9 rows 1 and 4);
+    # fails_when=the anchor-prev check goes and recovery adopts the other branch,
+    # skipping this device's own commit; why_new=that check's mutant survived all nine
+    # fork and recovery witnesses; seam=none; no_claim=that random search reaches this.
+    # Red when written (coverage audit, 2026-10-17): the model refused as §9 says, but
+    # INV4 rejected the refusal because ground truth never applied row 1's anchor; the
+    # checker now does, and the ground-truth assertion below pins it.
+    f = store_fleet
+    a, b, backup = two_branches_at_push_one(f, alpha_snapshot=True)
+    for path in list(b.replica_root.glob(f"dev/{a.mm_id}/log/000000000001.*.enc")):
+        path.unlink()  # Alpha's commit is gone (a rollback elsewhere); its snapshot is not.
+    f.transport.scan("b")
+    f.drain()  # Alpha's snapshot reaches a.
+    f.restore(a, backup, scope="state")  # No own_log row names either branch.
+    result = f.action("a", "pull")
+    assert (result.status, result.reason) == ("refused", "fork-restore")
+    assert result.warnings[0] == owner_text("fork-restore")
+    assert "fork-restore" in f.last_observation.ground_truth
+
+
+@pytest.mark.parametrize("operation", ["pull", "publish_snapshot"])
+def test_unreadable_own_family_this_device_did_not_record_stalls(store_fleet, operation):
+    # Value: protects=trust in an unreadable own commit is keyed by the family own_log
+    # names: another family alone at the slot stalls, even a forced snapshot, with the
+    # diag and rejoin text; fails_when=trust falls back to the seq, so push --snapshot
+    # seals over a record this device never wrote; why_new=no test asserted the
+    # untrusted branch or its text; seam=none; no_claim=cryptographic writer
+    # authentication.
+    from mind_meld.store import layout
+
+    f = store_fleet
+    a = f.devices["a"]
+    a.edit("notes.txt", CONTENTS[1])
+    f.action("a", "push", attended=False)
+    f.allow_corruption = True
+    (recorded,) = a.replica_root.glob(f"dev/{a.mm_id}/log/000000000001.*.enc")
+    name = layout.parse_record_key(recorded.relative_to(a.replica_root).as_posix())
+    assert name.family == FileState(a.state_root).read().own_log["1"]["family"]
+    data = recorded.read_bytes()
+    recorded.with_name("000000000001.baadf00d.enc").write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+    recorded.unlink()  # Only an unreadable family this device did not record remains.
+    f.transport.scan("a")
+    result = f.action("a", operation, **({"force": True} if operation != "pull" else {}))
+    assert (result.status, result.peer, result.gap_seq) == ("stalled-unreadable", a.mm_id, 1)
+    assert result.warnings == (
+        "unreadable own commit this device did not record; run `mm diag`, "
+        "then `mm rejoin` if it persists",
+    )
+
+
+def test_operator_snapshot_supersedes_an_unproven_torn_snapshot_once_synced(store_fleet):
+    # Value: protects=`mm push --snapshot` is not wedged by an incomplete own snapshot
+    # family it cannot prove it wrote, once synced and unclaimed; fails_when=snapshot()
+    # loses its supersede escape and pends at that seq; why_new=its mutant survived the
+    # eight torn and restore witnesses probed; seam=none; no_claim=real crash timing and
+    # the torn family's later compaction.
+    from .invariants import context_for
+
+    f = store_fleet
+    a = f.devices["a"]
+    multipart_edit(a)
+    f.action("a", "push", attended=False)  # Push #1: the ledger now seals multipart.
+    backup = f.snapshot(a)  # own_log {1}; no snapshot intent row yet.
+    assert f.action("a", "publish_snapshot", crash_parts=1).status == "crashed"
+    f.drain()
+    f.restore(a, backup, scope="state")  # Drops the intent row; the torn part stays.
+    torn = own_log_parts(a, "snap")
+    slot = context_for(f, a).view().slot(a.mm_id, "snapshot", 1)
+    assert (len(slot.complete), len(slot.incomplete)) == (0, 1)
+    assert not FileState(a.state_root).read().intents
+    result = f.action("a", "publish_snapshot")
+    assert (result.status, result.seq) == ("published", 1)
+    assert torn.items() <= own_log_parts(a, "snap").items()  # Never completed or overwritten.
+    slot = context_for(f, a).view().slot(a.mm_id, "snapshot", 1)
+    assert (len(slot.complete), len(slot.incomplete)) == (1, 1)
+    f.drain()
+    assert f.action("b", "pull").status == "applied"
+    settle(f, min_participants=2)

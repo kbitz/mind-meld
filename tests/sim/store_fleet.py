@@ -305,6 +305,7 @@ class StoreFleet:
         from .invariants import (
             carried_identities,
             contains,
+            merged_records,
             record_versions,
             source_inventory,
             version_identity,
@@ -335,8 +336,12 @@ class StoreFleet:
             for (source, path), file in source_inventory(d).items()
         ]
         records = record_versions(self)
+        others = [d for d in self.ordered() if d is not device]
+        # A family split across other replicas still counts: the transport reassembles it.
         external += [
-            (source, path, data) for source, path, data, name in records if name != device.name
+            (e.metadata["source"], e.metadata["path"], e.content)
+            for found in merged_records(self, others)
+            for e in found.record.entries
         ]
         external += [
             (v["source"], v["path"], v["content"])
@@ -368,11 +373,10 @@ class StoreFleet:
                 for source, path, data in external
             )
         ]
-        if scope == "disk":
-            carried_before = carried_identities(self, device)
-            carried_elsewhere = set().union(
-                *(carried_identities(self, d) for d in self.ordered() if d is not device)
-            )
+        saved_disk = scope == "disk" and index_policy == "saved"
+        if saved_disk:
+            carried_before = carried_identities(self, [device])
+            carried_elsewhere = carried_identities(self, others)
         installed = snapshot if scope == "disk" else self.scoped_snapshot(device, snapshot, scope)
         backup = copy_snapshot(self.root, installed, device.root)
         if scope == "fresh-replica":
@@ -402,13 +406,15 @@ class StoreFleet:
             ):
                 self.oracle.excluded.add(event)
         # INV7's exact-identity loss: only this device carried the version's bytes under
-        # its vector (a record no peer received yet), and the restore removed it, so no
-        # replica holds a copy the transport could redeliver. Only a disk restore: the
-        # owner rolled the whole disk back outside mm. A fresh-replica restore emptying
-        # the only copy is mm's own recovery step, the pinned
+        # its vector (a record no peer received yet, and no family complete over the other
+        # replicas' merged parts), and the restore removed it. Only a saved disk restore:
+        # the owner rolled the whole disk back outside mm, and the restored index stops
+        # announcing what the backup lacks, so the transport cannot redeliver it (a
+        # current index keeps announcing it). A fresh-replica restore emptying the only
+        # copy is mm's own recovery step, the pinned
         # KNOWN_DESIGN_GAPS[fresh-replica-unreplicated], and INV7 keeps demanding it.
-        if scope == "disk":
-            carried_after = carried_identities(self, device)
+        if saved_disk:
+            carried_after = carried_identities(self, [device])
             for event, version in sorted(self.oracle.versions.items()):
                 identity = version_identity(version.source, version.path, version.data, version.vv)
                 if (
