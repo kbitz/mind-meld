@@ -4,7 +4,7 @@ Read BEFORE editing:
 
 - `src/mind_meld/store/envelope.py` — `FleetKeys` / `RecordContext` / `create_fleet` / `unlock_fleet` / `seal_part` / `open_part` / `StoreError`
 - `src/mind_meld/store/format.py` — `Entry` / `Record` / `IncompleteParts` / `host_fingerprint` / `encode_commit` / `decode_commit` / `encode_snapshot` / `decode_snapshot` / `encode_presence` / `decode_presence` / `seal_record` / `open_record`
-- `src/mind_meld/store/layout.py` — `RecordName` / `KeyClassification` / `record_key` / `parse_record_key` / `classify_keys`
+- `src/mind_meld/store/layout.py` — `RecordName` / `KeyClassification` / `record_key` / `parse_record_key` / `classify_keys` / `group_record_names`
 - `src/mind_meld/crypto.py` — `derive_key`
 
 Tests: `tests/test_store_format.py` (T01–T17), `tests/test_crypto.py`,
@@ -127,9 +127,14 @@ both stop at 999999999999. Part indices are 1-based, count 1..512.
 Presence always uses seq=0, part=1, nparts=1. Changing any bound identity
 fails authentication (noncanonical contexts fail earlier).
 
-Renaming, moving between devices/kinds or renumbering fails. Replaying a
-whole authentic record **at its original slot** can still decode. Later
-stateful apply/lifecycle work owns freshness, chain equality and fork refusal.
+Renaming, moving between devices/kinds or renumbering fails. The record
+family in a commit or snapshot name is **not** in the associated data: a file
+renamed to another fleet, device, kind, seq, part or part count fails
+authentication, and the payload digest (not the family) is the record identity
+for de-duplication and fork comparison. Binding the family is assigned to Track
+80A with its version-byte change. Replaying a whole authentic record **at its
+original slot** can still decode. Later stateful apply/lifecycle work owns
+freshness, chain equality and fork handling.
 
 ## Logical record framing
 
@@ -205,9 +210,13 @@ other invalid present parts are errors even when other parts are absent.
 Reordered complete sets assemble identically. Verify total length and final
 SHA256(P), then decode the complete record before returning any payload.
 Hybrid parts with individually valid tags/content hashes still refuse.
-Callers pass every present part for one (device, kind, seq) slot to a single
-`open_record` call: part families with different counts at one slot refuse as
-`invalid_parts`, and layout does not flag them as forks.
+Callers group present parts by `(device, kind, seq, family)`
+(`layout.group_record_names`) and pass each family's parts to its own
+`open_record` call. Families at one slot are distinct records, not a fork by
+themselves, and one family name has exactly one part count: parts of one family
+that disagree on the count refuse as `invalid_parts`. A caller judges a family
+complete from its names (every index of one count present) and opens only
+complete families; layout flags no family as a fork.
 
 | Limit | Bytes/count |
 |---|---|
@@ -235,14 +244,18 @@ Canonical record keys only:
 ```text
 fleet.json                          # plaintext verified header
 .stignore                           # control file; never decrypt
-dev/<lowerhex8>/log/<12-digit seq>.enc
-dev/<lowerhex8>/snap/<12-digit seq>.enc
-dev/<lowerhex8>/log|snap/<seq>.<part>of<count>.enc
+dev/<lowerhex8>/log/<12-digit seq>.<lowerhex8 family>.enc
+dev/<lowerhex8>/snap/<12-digit seq>.<lowerhex8 family>.enc
+dev/<lowerhex8>/log|snap/<seq>.<family>.<part>of<count>.enc
 dev/<lowerhex8>/presence.enc
 ```
 
-Single part has no suffix. Multipart needs 2..512 parts, unpadded decimal
-indices and 1 ≤ part ≤ count. No traversal, case/width changes or normalization.
+The family is exactly 8 lowercase hex characters, fresh for each publication of
+a commit or snapshot; presence has none. All parts of one publication share one
+family and one part count, and a slot `(device, kind, seq)` can hold several
+families. Single part has no part suffix. Multipart needs 2..512 parts, unpadded
+decimal indices and 1 ≤ part ≤ count. A name without a family is foreign. No
+traversal, case/width changes or normalization.
 Construct v3 record keys only with `record_key`; use its constants for controls.
 `storage/keys.py` remains the validated builder for the 1.x namespace; neither
 namespace allows raw f-strings at call sites.
@@ -258,7 +271,8 @@ are fork signals. Date/time must be valid; modifiedBy is 1..64 ASCII
 alphanumeric characters, not necessarily a full Syncthing device ID.
 Snapshot/presence copies, temps, malformed near matches and directory keys
 remain foreign without a new fork policy. Future callers must sanitize names
-before displaying them, preserve evidence and implement loud fork refusal.
+before displaying them and preserve evidence; only the forked device refuses —
+peers warn and keep applying (store-v2 §6, §9).
 
 ## Public API
 
@@ -274,8 +288,9 @@ before displaying them, preserve evidence and implement loud fork refusal.
 | format: `host_fingerprint` | Explicit fleet ID and supplied machine ID; returns lowerhex32 |
 | format: `seal_record` | Logical bytes, keys, expected **anchor** part1/count1; validates record and yields `(full_part_context, sealed_bytes)`; work occurs on iteration |
 | format: `open_record` | Iterable of `(independent full_part_context, sealed_bytes)`, keys, expected anchor part1/count1, optional known `nparts`; returns original validated P bytes or `IncompleteParts` |
-| layout: `record_key` | Device/kind/seq, part/count defaults 1; canonical str, or safe ValueError for invalid caller components |
-| layout: `parse_record_key` / `classify_keys` | Untrusted key/file-key iterable; `RecordName | None` / `KeyClassification` facts |
+| layout: `record_key` | Device/kind/seq, part/count defaults 1, keyword `family` (required for commit and snapshot, rejected for presence); canonical str, or safe ValueError for invalid caller components |
+| layout: `parse_record_key` / `classify_keys` | Untrusted key/file-key iterable; `RecordName | None` (carries `family`) / `KeyClassification` facts |
+| layout: `group_record_names` | `(key, RecordName)` pairs such as `KeyClassification.records`; dict keyed by `(device, kind, seq, family)` in sorted order, each value the pairs in supplied order. Pure: no I/O, no completeness judgement |
 
 An unknown empty log/snapshot set returns `IncompleteParts(None, None)`.
 A known count returns exact missing indices; presence intrinsically knows
@@ -296,12 +311,14 @@ data and the distinct `IncompleteParts` result for valid missing input.
 | `invalid_fleet` | Malformed current header/KDF, or empty/unencodable passphrase input; check the passphrase, then preserve the header and inspect the fleet |
 | `authentication` | Wrong secret, expected identity or altered bytes; these are indistinguishable. Check passphrase/context and preserve inputs |
 | `invalid_payload` | Malformed compression/framing/schema/content hash; preserve inputs and inspect the producer |
-| `invalid_parts` | Mixed/duplicate/misnamed dimensions, wrapper or whole-record digest disagreement; preserve inputs and inspect identities |
+| `invalid_parts` | Mixed/duplicate/misnamed dimensions, wrapper or whole-record digest disagreement, or a builder call with a missing, malformed or presence family; preserve inputs and inspect identities |
 | `resource_limit` | Bound exceeded or native derivation unavailable; inspect record/producer/machine resources, do not truncate or reinitialize |
 | `IncompleteParts` | Valid absent pieces; wait for remaining parts |
 
-Invalid builder arguments raise safe `ValueError` with `invalid_parts` guidance:
-the standard-library-only layout has no crypto dependency. Parse/classify
+Invalid builder arguments raise safe `ValueError` with `invalid_parts` guidance,
+and each family mistake (missing for a commit or snapshot, not 8 lowercase hex,
+given for presence) has its own problem, cause and fix text: the
+standard-library-only layout has no crypto dependency. Parse/classify
 untrusted names instead; foreign names are facts, not exceptions. No decoder
 repairs storage, touches keyrings/state DB or silently creates a new fleet.
 
@@ -333,6 +350,7 @@ fleet_bytes, created_keys = envelope.create_fleet(passphrase)
 keys = envelope.unlock_fleet(fleet_bytes, passphrase)
 assert keys == created_keys
 device = "a1b2c3d4"
+family = "0badf00d"  # the publisher draws a fresh one per publication
 anchor = envelope.RecordContext(keys.fleet_id, device, "commit", 1)
 content = b"x" * (codec.MAX_PART_BYTES + 1)
 header = {
@@ -349,15 +367,18 @@ entry = codec.Entry({
 payload = codec.encode_commit(header, [entry], expected=anchor)
 named = []
 for part_context, sealed in codec.seal_record(payload, keys, expected=anchor):
-    name = layout.record_key(device, "commit", 1,
+    name = layout.record_key(device, "commit", 1, family=family,
                              part=part_context.part, nparts=part_context.nparts)
     named.append((name, sealed))
 
 def expected_parts(named_inputs):
+    # Group by (device, kind, seq, family); each family opens on its own.
+    named_inputs = list(named_inputs)
+    records = [(name, layout.parse_record_key(name)) for name, _ in named_inputs]
+    assert all(parsed is not None for _, parsed in records)
+    assert len(layout.group_record_names(records)) == 1  # one slot, one family here
     parts = []
-    for name, sealed in named_inputs:
-        parsed = layout.parse_record_key(name)
-        assert parsed is not None
+    for (_, parsed), (_, sealed) in zip(records, named_inputs):
         expected = envelope.RecordContext(keys.fleet_id, parsed.device_id,
             parsed.kind, parsed.seq, parsed.part, parsed.nparts)
         parts.append((expected, sealed))
@@ -375,7 +396,7 @@ assert record.entries == (entry,)
 renamed = []
 for name, sealed in named:
     parsed = layout.parse_record_key(name)
-    renamed.append((layout.record_key(device, "commit", 2,
+    renamed.append((layout.record_key(device, "commit", 2, family=family,
         part=parsed.part, nparts=parsed.nparts), sealed))
 try:
     codec.open_record(expected_parts(renamed), keys, expected=replace(anchor, seq=2))

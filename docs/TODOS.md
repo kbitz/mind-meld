@@ -44,6 +44,58 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=73C] Model Syncthing 2.1 counter dominance for restored-index rewrites
+- **Why:** the fixture's restore approximation is optimistic for same-name rewrites. Family names make commits immune, but presence still uses one name.
+- **Context:** an optional fake-transport mode where a restored device's write to an existing name dominates (Syncthing `max(old+1, now)`, v2.1.0 `lib/protocol/vector.go`) instead of minting a conflict copy. Source: Track 73C /autoplan. Revisit when native conformance work starts or a presence rollback is observed.
+
+### [plan-eng-review:track=73C] Keep the store folder and Syncthing's database out of backups automatically
+- **Why:** a restored store folder rolls back the fleet under the current index policy or forks under the saved one; the design now declares that setup unsupported and relies on the exclusion.
+- **Context:** `tmutil addexclusion` for `~/Sync/mind-meld` and Syncthing's database directory at `mm init --new-fleet` and `mm join`, `mm diag` reporting the exclusion, and Linux guidance. Owner Tracks: 80A (init and join) and 82A (diag). Revisit when those Tracks are planned.
+
+### [plan-eng-review:track=73C] Implement restored-device detection in the product (design and model delivered by 73C)
+- **Why:** approved at the 73C gate; the store-v2 §9 design and the simulator model carry it, product code does not yet.
+- **Context:** product reconcile and publish implement the rule: pending `own-records-in-flight` while the own presence, a peer's `applied[me]` or a peer snapshot cursor exceeds `own_log` and the records are not all here; skip-ahead plus a forced snapshot after the folder syncs. Owner Track: 76A. Revisit when 76A is planned.
+
+### [plan-eng-review:track=73C] Add a restore drill to the soak and cutover runbook
+- **Why:** the model cannot replace a real restore.
+- **Context:** on the soak machines, restore one machine with each supported scope (state only, fresh replica) and record the outcome. Owner Track: 84A (soak). Revisit when the soak checklist is written.
+
+### [plan-eng-review:track=73C] Relay versions lost by a current-policy rollback
+- **Why:** closes the residual where versions readers applied from records a rollback deleted stay divergent because the restored device never republishes over them.
+- **Context:** readers re-publish (original vectors, no `+me`) ledger rows whose source record vanished above the peer's newest snapshot, gated on a present peer presence; ledger `origin`. Deferred at 73C (no demand). Revisit when a current-policy restore is observed on the soak or after cutover.
+
+### [plan-eng-review:track=73C] Run a native Syncthing restore experiment on the soak
+- **Why:** restore semantics are modelled, not observed (tests/sim/README: no daemon conformance).
+- **Context:** two machines, both index policies, offline peers, publish before redelivery; record what Syncthing actually does. Revisit when the soak machines run Syncthing.
+
+### [plan-eng-review:track=73C] Bind the record family into the associated data with the version byte
+- **Why:** a uniform "a renamed file fails authentication" guarantee at the cheapest moment, before release. Today the family is a name only; the payload digest is the record identity.
+- **Context:** Track 80A adds the family to the record AAD together with its version-byte change; the publisher then re-seals on an `EEXIST` retry; regenerate the T04 vectors once.
+
+### [plan-eng-review:track=73C] Amend later store cards for the 73C design rules
+- **Why:** the cards still describe reader refusal, chain-anchor waits and seq-only names.
+- **Context:** /roadmap amends 73B (schema: `own_log` family and digest, the applied-family set, `cursors.fork`, intent rows, `displaced` cause and peer), 75A (publisher draws from an injected `family_source`, writes intent rows, retry contract), 76A (heal, torn slot, own-fork rules, own-snapshot recovery, proven-only compaction, the own-directory row keyed on sync state), 77A (reader rule, cover rule, chain-anchor removal, receipts rule), 78A (`mm displaced` restore and fork-tagged rows), 80A (AAD family binding, rejoin `supersedes`, join tie-break, re-seal on retry), 81A (receipt codec, status fork listing, retire coverage tie-break) and 82A (diag fork evidence beyond conflict copies). Revisit at the next /roadmap run.
+
+### [plan-eng-review:track=73C] Current-policy restore residuals stay pinned (`restore-current` row)
+- **Why:** the sim README triage rule requires an inbox item per confirmed gap.
+- **Context:** the re-scoped `restore-current` gap row pins an unapplied record deleted fleet-wide, a header deleted by a pre-header backup, and applied versions not republished over, with the owner's disposition: "owner-accepted 2026-10-16 (73C gate uc2a): unsupported setup, prevented by keeping the store folder and Syncthing's database out of backups; revisit when relay or backup exclusion lands". Revisit when relay or backup exclusion lands, or the owner changes the disposition.
+
+### [review:track=73C] Reader and reporting refinements deferred from the 73C review
+- **Why:** three review findings are real but need product-code shape 75A/77A will settle, and none loses bytes today.
+- **Context:** (1) fork evidence records the first-seen seq, not the earliest — record/upgrade to the earliest seq so fork-tainted displacement uses the right boundary; (2) a second complete snapshot family at an already-loaded seq is never scanned by `read` — decide whether readers scan late snapshot families; (3) an honest skip-ahead commit's `prev` fails against a reader that applied the lost record, producing a repeating fork warning whose remedy names `mm rejoin` — consider a skip marker (the covered-chain arithmetic fabrication was fixed in 73C review). Read first: `note_fork`, `read`, `prev_follows` in `tests/sim/model/store.py`. Revisit when 75A/77A implement the reader.
+
+### [review:track=73C] Aged escape for an unproven incomplete family at the next slot
+- **Why:** a permanently incomplete own family the device cannot prove it wrote wedges publishing forever; 73C review added pull reporting (`own-records-in-flight`) but no aged, operator-confirmed quarantine.
+- **Context:** never auto-supersede (that is the unsafe write detection exists to prevent); the escape needs an age threshold, a diagnosis distinguishing proven-torn from unproven, and INV4/INV6 room. Read first: `own_slot`, `_torn`, reconcile's `blocked` reporting. Revisit in 75A/77A.
+
+### [review:track=73C] Fresh-replica restore can empty the only copy of an unreplicated own record (`fresh-replica-unreplicated` row)
+- **Why:** the sim README triage rule requires an inbox item per confirmed gap.
+- **Context:** a crash can complete a record only on its author's replica; emptying that replica (fresh-replica restore) before any peer syncs it destroys the version fleet-wide while the author's rolled-back counter can later be reused. Pinned strict in `test_gap_fresh_replica_unreplicated_own_record`, gated in random search, with the owner's disposition recorded in `KNOWN_DESIGN_GAPS`. Revisit when recovery (76A/77A) can refuse or wait for replication before emptying.
+
+### [review:track=73C] Simulator hardening and cost items from the 73C review
+- **Why:** model-only defects and search cost found in review; none changes a 73C verdict, all would mislead or slow later Tracks.
+- **Context:** unknown record sources crash classification with `KeyError` instead of a sealed-envelope failure; classify applies entries one at a time without the design's per-record transaction boundary; a symlink escaping a source root raises `ValueError` out of `read`; retire ignores replica `last_active` clock skew; checker and model history scans (`note`, `retain_ignored_by_fork`, per-action `ground_truth`) are quadratic in trace length and dominate deep-run wall time; `Context.own` should become a typed dataclass; history retention and fsync publication order belong in the 75A state/shell design (§3 lists no history table); `claimed` trusts peer receipts transitively beyond the MAX_SEQ bound added in review. Revisit per item when its Track implements the area, or when the deep profile breaches its ~1h budget.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-15

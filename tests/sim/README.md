@@ -56,6 +56,38 @@ hard-state reachability independently of the invariant checks. Missing states
 fail as `REACHABILITY`, naming macro rules, initialize witnesses or logical
 time jumps as remedies. At least half of lifecycle examples must settle with
 two participants; deterministic scenarios require at least two at quiescence.
+Lifecycle teardown applies the documented `mm rejoin` remedy to refused
+devices before the final settle; the summary's `teardown_remedy_examples`
+counts how many examples needed it, so the floor's post-remedy meaning stays
+visible.
+
+## Restore and torn-publish rules
+
+Each rule in [store-v2](../../docs/designs/store-v2.md) §5, §6 and §9 has a
+deterministic witness; copy a command to watch the rule hold. Mutant rows name
+the invariant that fires first when the rule is broken. Nodes live in
+[test_scenarios.py](test_scenarios.py) unless noted.
+
+| Rule | Witness (copy-paste) |
+|---|---|
+| Names carry a per-publication family; grouping by `(device, kind, seq, family)` (§1, §2) | `./bin/check tests/test_store_format.py -- -k TestLayout71C` |
+| A torn own slot closes with a fresh complete family, even with zero entries; closure waits for the folder to sync, and an intent row restored from a backup does not prove the slot torn (§5) | `./bin/check tests/sim/test_scenarios.py::test_gap_partial_own_commit tests/sim/test_scenarios.py::test_torn_slot_closes_with_a_zero_entry_commit tests/sim/test_scenarios.py::test_intent_row_restored_from_a_backup_does_not_prove_a_torn_slot` |
+| An incomplete own family the device cannot prove it wrote is in flight, never superseded (§5, §9) | `./bin/check tests/sim/test_scenarios.py -- -k stays_pending`; unproven-supersede mutant: `./bin/check tests/sim/test_mutants.py -- -k in_flight_witness` |
+| `EEXIST` retries under a fresh family; exhaustion is loud; no part is ever overwritten (§5) | `./bin/check tests/sim/test_scenarios.py -- -k exclusive_create`; overwrite mutant (INV4): `./bin/check tests/sim/test_mutants.py -- -k overwrite-part` |
+| Only complete families count; an unreadable family beside a complete one is ignored with a warning (§6) | `./bin/check tests/sim/test_scenarios.py -- -k "torn_family_beside or unreadable_family_beside"`; mixing mutant (INV4): `./bin/check tests/sim/test_mutants.py -- -k mix-families` |
+| Apply order follows names; equal digests are one record (§6) | `./bin/check tests/sim/test_scenarios.py -- -k "same_slot_families or renamed_copy"` |
+| A late family applies once; a peer fork warns and never refuses (§6) | `./bin/check tests/sim/test_scenarios.py::test_gap_restore_saved tests/sim/test_scenarios.py::test_gap_restore_current`; skip mutant (INV1): `./bin/check tests/sim/test_mutants.py -- -k skip-late-family`; refusing mutant (INV4): `./bin/check tests/sim/test_mutants.py -- -k reader-refuses-peer-fork`; double-apply mutant (INV7): `./bin/check tests/sim/test_mutants.py -- -k reapply-applied-family` |
+| A snapshot cursor covers only applied or chain families; there is no chain-anchor wait (§6) | `./bin/check tests/sim/test_scenarios.py -- -k "snapshot_cursor_covers or applies_without_a_chain_anchor"`; count-incomplete mutant (INV7): `./bin/check tests/sim/test_mutants.py -- -k count-incomplete` |
+| A dominated post-restore edit is kept in `displaced` and the warning repeats until expiry or restore (§4, §6) | `./bin/check tests/sim/test_scenarios.py -- -k "fork_displaced or dominating_version_arrives"` |
+| Only the forked device refuses: `fork-restore`, `fork-clone`, `fork` — a foreign own snapshot is a clone too (§9) | `./bin/check tests/sim/test_invariants.py::test_own_chain_refusal_ground_truth tests/sim/test_scenarios.py::test_clone_before_first_presence_commit_fork_scope_and_rejoin tests/sim/test_scenarios.py::test_snapshot_only_clone_refuses_as_a_clone` |
+| `state` restore replays own records with no fork (§9) | `./bin/check tests/sim/test_scenarios.py::test_state_restore_replays_own_records_and_converges` |
+| `fresh-replica` restore waits on Syncthing, never advises rejoin; a retired device refuses once synced (§9) | `./bin/check tests/sim/test_scenarios.py -- -k "fresh_replica_restore or retire_age"`; detection-disabled kill: `./bin/check tests/sim/test_mutants.py -- -k detection_witness` |
+| Skip-ahead when own records never return (§9) | `./bin/check tests/sim/test_scenarios.py::test_attended_push_skips_ahead_when_own_records_never_return` |
+| Own-snapshot recovery from a backup older than the compaction floor (§9) | `./bin/check tests/sim/test_scenarios.py -- -k compaction_floor` |
+| Compaction deletes only proven own families (§6) | `./bin/check tests/sim/test_scenarios.py::test_compaction_deletes_only_families_it_can_prove`; unproven-delete mutant (INV2): `./bin/check tests/sim/test_mutants.py -- -k delete-unproven-incomplete` |
+| Heal and `torn-own-slot` reporting; replay is contiguous and heal never snapshots over an in-flight hole (§9) | `./bin/check tests/sim/test_scenarios.py -- -k "lost_own_records or below_a_complete or torn_own_slot_is or partial_copy_is_not_covered"`; disabled-heal mutant (INV1): `./bin/check tests/sim/test_mutants.py -- -k disable-heal` |
+| Accepted current-policy residuals stay pinned (§9) | `./bin/check tests/sim/test_scenarios.py -- -k restore_current_residual` |
+| Model texts and reason codes match the design verbatim (§6, §9) | `./bin/check tests/sim/test_scenarios.py -- -k verbatim` |
 
 ## V2 API
 
@@ -63,7 +95,8 @@ two participants; deterministic scenarios require at least two at quiescence.
 or legacy harness. Its roots and write guard are explicit. `add_device` allocates
 local fixture storage and a fresh transport index; `join` is a store operation.
 Transport names are alphanumeric, identities are deterministic eight-hex
-values, and runs permit four devices and six total identities. The whole-run
+values, and runs permit four devices and eight total identities (four
+devices plus four rejoins). The whole-run
 part cap is derived in [store_fleet.py](store_fleet.py) from the content/path,
 vector and cursor caps; snapshots remain below the 512-part format limit.
 
@@ -77,14 +110,18 @@ vector and cursor caps; snapshots remain below the 512-part format limit.
 | `fleet.action(actor, 'retire', target=id)` | Pending unless age and active snapshot coverage qualify; remove target namespace only | Read logical now |
 | `fleet.rejoin(device)` | Allocate a fresh ID; registered rejoin owns the observed identity/state reset and bootstrap, preserving displaced/history | Read logical now |
 | `fleet.snapshot(device)` | Opaque local disk **backup**, including persisted state and index; requires idle device | None |
-| `fleet.restore(device, backup, index_policy='saved'/'current')` | Restore disk; reset saved index or retain current index; last-copy oracle exclusion is narrowly witnessed | None |
+| `fleet.restore(device, backup, scope='disk', index_policy='saved'/'current')` | Restore the whole disk; reset the saved index or retain the current one; last-copy oracle exclusion is narrowly witnessed | None |
+| `fleet.restore(device, backup, scope='state')` | Roll back sources and state only; the replica and the transport index stay intact (no `index_policy`) | None |
+| `fleet.restore(device, backup, scope='fresh-replica')` | Roll back sources and state, empty the replica and reset the transport index; peers refill it (no `index_policy`) | None |
+| `fleet.next_family()` / `fleet.force_families(*families)` / `fleet.family_hook` | The adapter's `family_source`: `sha256(run salt ‖ fleet counter)[:8]`, deterministic, non-monotonic and held by the fleet, never on a device disk; the hook returns chosen families first, and `family_hook` runs on every draw so a name can collide on purpose | None |
+| `fleet.folder_synced(name)` | The adapter's `folder_synced`: no transport deliveries are pending to this device (Syncthing idle, nothing needed) | None |
 | `fleet.clone(device, name)` | Copy disk/index/id, new live hardware identity; no legacy config | None |
 | `fleet.advance(seconds)` | Advance one logical seconds clock for every protocol time field | Explicit advance |
 | `fleet.transport.advance(seconds)` | Advance delivery scheduling only | Transport clock only |
 | `fleet.drain()` / `settle(fleet, min_participants=2)` | Bounded drain; settle finishes replacements, onlines all, passes delays, then push/drain/pull/drain rounds | Transport advance only |
 
 Every store action reconstructs its adapter from injected roots, state seam,
-keys, clock and live machine-id provider. Only unlocked keys keyed by the
+keys, clock, live machine-id provider, `family_source` and `folder_synced`. Only unlocked keys keyed by the
 header bytes are cached in the model. File state commits ledger, own log and
 history atomically through one replacement; it promises seam operations, not
 a database schema or durability under power loss. Transport scans use a
@@ -109,10 +146,10 @@ they are not published fleet causal versions.
 | INV1 convergence | §4/6/12; O1 | Quiescence / `inv1_convergence` | Drop later peer commit |
 | INV2 no-silent-loss | §4/9/12; O1/O5 | Every step + Q / `Oracle.check` | Overwrite unpublished edit; lose path while bytes survive elsewhere |
 | INV3 single-writer | §1/8/12; O4 | Every store action / `inv3_single_writer`, `replica_integrity` | Peer namespace write; plaintext/invalid envelope |
-| INV4 ordering-never-fails | §6/9/12; O3/O5 | Store observation / `inv4_ordering_never_fails` | Missing becomes error; refuse everything |
+| INV4 ordering-never-fails | §6/9/12; O3/O5 | Store observation / `inv4_ordering_never_fails` | Missing becomes error; refuse everything; a reader that refuses a peer fork |
 | INV5 termination | §4/12; O1 | Settle bounded by 3 × participants + 2 / `settle` | Local-wins ping-pong |
 | INV6 fork-safety | §9/12; O5 | Store observation / `inv6_fork_safety` | Skip live host/fork checks |
-| INV7 causal-fidelity | §4; O1.1 | Every store observation + Q / `inv7_causal_fidelity`, `inv7_observed_inputs`, `inv7_quiescent` | Missing unpublished increment; forged history/effects; treat dominance as concurrent; resurrect tombstone |
+| INV7 causal-fidelity | §4; O1.1 | Every store observation + Q / `inv7_causal_fidelity`, `inv7_observed_inputs`, `inv7_quiescent` | Missing unpublished increment; forged history/effects; treat dominance as concurrent; resurrect tombstone; count an incomplete family; apply a family twice |
 
 Same-sha actions merge vectors without source I/O. Equal vectors with different
 sha resolve concurrently and emit counter reuse. A pending resolution stores
@@ -137,6 +174,23 @@ to the initial snapshot of a fresh join/rejoin. Existing drop-later and path-los
 mutants now trip INV7 earlier; their original INV1/INV2 clauses are independently
 checked on the same broken state.
 
+Two amendments to the checkers came with the family names. **INV4** no longer
+accepts a reader's refusal of a peer's fork, nor the chain-anchor warning:
+only the forked device refuses, and a refusal must be this device's own `fork`,
+`fork-restore`, `fork-clone` or `missing-own-directory`, read from disk and live
+hardware. **INV7** receipts name the family: a family applied at the next seq
+moves the cursor, and one applied at or below the cursor (a second family at the
+slot, or a late one) is legal only when its digest is not already applied and
+leaves the cursor alone. Every other clause is unchanged, and every existing
+mutant is still killed by the same invariant. One oracle correction came from the
+deep search: a user deletion that no record carries and whose author's tree has
+the file back (a restore, or the replay of the restored device's own record, undid
+it) exists nowhere and is not a quiescent convergence target; a published deletion,
+or one still in effect in its author's tree, stays one. INV2 already preserves every
+user deletion, so its restore exclusion is unchanged. The checkers group parts by
+`(device, kind, seq, family)` through `layout.group_record_names` but keep their
+own opening and completeness logic, independent of the model's `View`.
+
 Replica audits authenticate canonical records and known fork signals. The
 transport can also produce encrypted presence/snapshot conflict copies,
 including nested copies. These must have the transport's exact conflict-name
@@ -149,31 +203,49 @@ nonempty pool markers (at least 16 bytes) must never appear in replica bytes.
 The authoritative table is [KNOWN_DESIGN_GAPS in invariants.py](invariants.py).
 Each row has a design section, SPEC outcome, dependent Tracks, owner decision,
 strict regression node and the exact randomly generated case it gates. The
-row/strict-xfail mapping is tested one to one. Both restore variants remain
-pinned following UC2 approval; approval of a checkable INV6 did not waive
-restore recovery. The current table also pins non-UTF-8 union loss and the
-unspecified completion of a partial own commit. A fifth gap pins retirement
-while an active peer's refreshed presence is delayed: local presence cannot
-establish the full active set, and a covering snapshot need not reach that peer
-through the gap-driven reader rule. Random retirement keeps E4's fully delivered,
-snapshot-covered precondition; the delayed-presence schedule is pinned separately.
+row/strict-xfail mapping is tested one to one. Restore recovery and the partial
+own commit are designed and ordinary tests now (store-v2 §5, §6, §9; see
+[Restore and torn-publish rules](#restore-and-torn-publish-rules)). Four rows
+remain.
+
+- `restore-current`: a current-policy store restore (the store folder rolled
+  back under a live Syncthing index) is an **unsupported setup**, owner-accepted
+  2026-10-16 and prevented by keeping the store folder and Syncthing's database
+  out of backups; revisit when relay or backup exclusion lands. One strict
+  parametrized node pins its three residuals at their first-firing invariants:
+  an unapplied record deleted fleet-wide (INV2), a backup from before
+  `fleet.json` arrived (INV4: every device waits), and applied versions the
+  restored device never republishes over (INV1). Random current-policy restores
+  stay gated by this row.
+- `non-utf8-union`: non-UTF-8 union input loses bytes.
+- `retire-delayed-presence`: retirement while an active peer's refreshed
+  presence is delayed. Local presence cannot establish the full active set, and
+  a covering snapshot need not reach that peer through the gap-driven reader
+  rule. Random retirement keeps E4's fully delivered, snapshot-covered
+  precondition; the delayed-presence schedule is pinned separately.
+- `fresh-replica-unreplicated`: emptying a replica whose own records no peer
+  holds yet destroys their only copy, owner-accepted 2026-10-16. Random
+  fresh-replica restores require every own record file to exist on a peer;
+  revisit when recovery can refuse or wait for replication.
 
 Only the designated boundary's checked invariant becomes `ExpectedDesignGap`;
-earlier or unrelated invariant failures cannot satisfy an xfail. A successful
-saved restore with peer redelivery and own-log replay has a separate deterministic
-witness. Random restore remains conservatively gated for both policies because
-later generated publication can occur before redelivery and enter the pinned
-divergence; this does not claim either restore design gap is repaired.
+earlier or unrelated invariant failures cannot satisfy an xfail. Random restore
+runs the saved, `state` and `fresh-replica` scopes (a `fresh-replica` restore needs a
+surviving peer copy of the fleet, because a store with no surviving replica is lost,
+not restored); a device a restore forks
+(publishing before any of its own records or a peer's receipt has arrived)
+refuses, and the lifecycle machine applies the documented remedy, `mm rejoin`,
+before its final settle.
 
 Example row shape (the table itself remains the source of truth):
 
 ```python
-"partial-own-commit": {
-    "section": "§1 write-once, §5 steps 4/5, §9 row 1",
-    "outcome": "O1/O3/O5", "tracks": "75A/76A",
-    "decision": "confirmed underspecified crash recovery; owner decision pending",
-    "node": "test_scenarios.py::test_gap_partial_own_commit",
-    "gates": "push crash after k of n parts with 0 < k < n",
+"restore-current": {
+    "section": "§4, §9 rows 1/4",
+    "outcome": "O1/O5", "tracks": "75A/76A/78A/80A",
+    "decision": "owner-accepted 2026-10-16 (73C gate uc2a): unsupported setup, ...",
+    "node": "test_scenarios.py::test_gap_restore_current_residual",
+    "gates": "restore current",
 }
 ```
 
@@ -187,10 +259,12 @@ decision. Green model CI with nonempty gaps cannot accept SPEC O1, O3 or O5.
 
 Conservative readings, registered before search:
 
-- Partial own commit: do not overwrite any exclusively created part. A full
-  record before local state commit replays via §9; an incomplete occupied
-  sequence waits. The latter now has a confirmed strict gap. Partial snapshots
-  are not bootstrap candidates; complete commits still permit convergence.
+- Partial own commit: never complete, overwrite or delete a part. A full record
+  before local state commit replays via §9. An incomplete own family that an
+  intent row names was started by this device and is closed by a fresh complete
+  family at the same seq; any other incomplete own family is in flight and the
+  push waits. Partial snapshots are not bootstrap candidates; complete commits
+  still permit convergence.
 - A still-alive retiree must be inactive at least 30 days. Active means an
   unretired presence newer than 30 days, plus the actor; every such device's
   newest complete snapshot must cover the retiree's last advertised/named seq.
@@ -202,10 +276,11 @@ Conservative readings, registered before search:
 - Before `fleet.json`, join/push waits; fork signals still take precedence.
 - Equal vv with unequal sha is concurrent, never dominance. It remains a
   design question for §4/9 despite safe model classification.
-- Snapshots are write-once by own seq. Adopting a peer entry alone does not
-  overwrite an existing same-seq snapshot; retirement coverage requires a
-  genuinely newer snapshot. A snapshot raises other seq cursors, but without
-  their hashes a later commit waits for a complete chain anchor.
+- Snapshots are write-once per family. Adopting a peer entry alone does not
+  overwrite an existing snapshot; retirement coverage requires a genuinely newer
+  snapshot. A snapshot raises other seq cursors and covers none of their
+  families; a later commit of theirs applies at once, its `prev` unchecked when
+  neither an applied family nor their own snapshot names the previous record.
 - A corrupted own commit with a trusted own-log row stalls visibly; forced
   snapshot may seal trusted current state. Without trusted state, the model
   does not fabricate recovery. The deterministic corruption scenario propagates
@@ -268,10 +343,13 @@ contract. Collection validates signatures and provenance; real-labelled pieces
 must execute, with no model fallback. The seam offers `read()` and atomic
 `transaction()` over ledger, cursors, own log, displaced and persisted history.
 An adapter accepts state seam, clock, live machine-id provider, replica/source
-roots and fleet keys directly, without `CliRunner` or `activate()`.
+roots, fleet keys, a `family_source` (a fresh 8-hex family per publication) and a
+`folder_synced` callback directly, without `CliRunner` or `activate()`. The real
+publisher draws from an injected `family_source`; the seam also carries the
+write-ahead `intents`, the `applied` family set and `cursors.fork`.
 
 Read/reconcile/snapshot application writes one `record-applied` history receipt
-(`peer`, `kind`, `seq`) after its per-entry `pull-entry` rows, in the same state
+(`peer`, `kind`, `seq`, `family`) after its per-entry `pull-entry` rows, in the same state
 transaction as cursor advancement. INV7 authenticates that record, requires one
 classification per entry, and reconciles all cursor and own-log changes. Publish
 retains its `publish` receipt; these are checker inputs, never unchecked proof.
@@ -577,7 +655,7 @@ on it; the existing live soak does not by itself calibrate every hazard.
 | Conflicts | [Conflicting changes](https://docs.syncthing.net/users/syncing.html#conflicting-changes), [2.1.0 `WinsConflict`](https://github.com/syncthing/syncthing/blob/v2.1.0/lib/protocol/bep_fileinfo.go#L208-L226) | Preserves differing concurrent bytes and propagates copies; deterministic fixture timestamp/identity, not native device-ID arithmetic. |
 | Deletes | [FAQ: synced changes](https://docs.syncthing.net/users/faq.html#what-is-syncthing) | Explicit tombstone events and retained ancestry; no native index implementation. |
 | Offline transfer / relay | [FAQ: synchronization](https://docs.syncthing.net/users/faq.html#is-synchronization-fast) | Online holders relay captured full payloads; no topology/discovery/network timings. |
-| Restore/index mismatch | [FAQ: folder marker](https://docs.syncthing.net/users/faq.html#i-am-seeing-the-error-message-folder-marker-missing-what-do-i-do) | Explicit saved/current index policies and retained queue; not native backup/recovery conformance. |
+| Restore/index mismatch | [FAQ: folder marker](https://docs.syncthing.net/users/faq.html#i-am-seeing-the-error-message-folder-marker-missing-what-do-i-do), [2.1.0 `Counter`/`max(old+1, now)`](https://github.com/syncthing/syncthing/blob/v2.1.0/lib/protocol/vector.go) | Explicit saved/current index policies and retained queue, plus the `state` and `fresh-replica` scopes; not native backup/recovery conformance. Syncthing 2.1 gives a rewrite of an existing name the counter `max(old+1, now)`, so a restored device's rewrite silently dominates and mints no conflict copy; the fixture's same-name conflict copies are therefore optimistic for mutable files, and record names carry a per-publication family so commits are immune. Presence keeps one name. |
 
 For concurrent heads, higher captured mtime wins, then smaller lexical
 transport identity; same-author ties use event ID. These fixture keys never
