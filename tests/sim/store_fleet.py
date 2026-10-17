@@ -32,10 +32,13 @@ CONTENTS = (
     b"sim-marker-binary0005\xff\n",
 )
 MARKERS = tuple(data if i in (3, 4) else data[:20] for i, data in enumerate(CONTENTS) if data)
-# Four devices plus up to four rejoins. 6 left room for two rejoins once the fleet was
-# full, and restores add fork-and-rejoin paths; PART_BYTES stays at its 1024 floor
-# (the snapshot cap moves 7724 -> 7980 bytes), so sealing is unchanged.
-MAX_IDS = 8
+# Four devices plus up to four rejoins. The old cap of six left room for two rejoins
+# once the fleet was full, and restores add fork-and-rejoin paths; PART_BYTES stays
+# at its 1024 floor (the snapshot cap moves 7724 -> 7980 bytes), so sealing is
+# unchanged.
+MAX_DEVICES = 4
+MAX_REJOINS = 4
+MAX_IDS = MAX_DEVICES + MAX_REJOINS
 # Snapshot cap: 4 paths, each <= all pool lines + MAX_IDS counters; <= 100 steps
 # per example => counters <= 10000. 2048-byte header/cursor allowance and
 # 1024 bytes metadata per path. Divide by 512, round up; floor 1024 permits
