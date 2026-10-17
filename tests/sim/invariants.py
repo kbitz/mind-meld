@@ -23,23 +23,20 @@ from .model.store import Context, Outcome
 from .store_fleet import DAY, MARKERS, STIGNORE
 from .transport import read_tree
 
-# Owner approved UC2's checkable invariant, and explicitly kept both restore
-# counterexamples pinned. Rows are removed only when their design fix lands.
+# A current-policy store restore (the store folder rolled back under a live Syncthing
+# index) is an unsupported setup. The owner accepted its residuals at the 73C gate;
+# the strict regression pins them until relay or backup exclusion lands.
 KNOWN_DESIGN_GAPS = {
-    "restore-saved": {
-        "section": "§4, §9 rows 1/4",
-        "outcome": "O1/O5",
-        "tracks": "75A/76A/78A/80A",
-        "decision": "UC2 accepted; fix pending",
-        "node": "test_scenarios.py::test_gap_restore_saved",
-        "gates": "restore saved",
-    },
     "restore-current": {
         "section": "§4, §9 rows 1/4",
         "outcome": "O1/O5",
         "tracks": "75A/76A/78A/80A",
-        "decision": "UC2 accepted; fix pending",
-        "node": "test_scenarios.py::test_gap_restore_current",
+        "decision": (
+            "owner-accepted 2026-10-16 (73C gate uc2a): unsupported setup, prevented by "
+            "keeping the store folder and Syncthing's database out of backups; revisit "
+            "when relay or backup exclusion lands"
+        ),
+        "node": "test_scenarios.py::test_gap_restore_current_residual",
         "gates": "restore current",
     },
 }
@@ -51,14 +48,6 @@ KNOWN_DESIGN_GAPS["non-utf8-union"] = {
     "node": "test_scenarios.py::test_gap_non_utf8_union",
     "gates": "non-UTF-8 union input in random edit",
 }
-KNOWN_DESIGN_GAPS["partial-own-commit"] = {
-    "section": "§1 write-once, §5 steps 4/5, §9 row 1",
-    "outcome": "O1/O3/O5",
-    "tracks": "75A/76A",
-    "decision": "confirmed underspecified crash recovery; owner decision pending",
-    "node": "test_scenarios.py::test_gap_partial_own_commit",
-    "gates": "push crash after k of n parts with 0 < k < n",
-}
 KNOWN_DESIGN_GAPS["retire-delayed-presence"] = {
     "section": "§4 authored-only logs, §6 reader table, §8 active-device coverage",
     "outcome": "O1.1",
@@ -66,6 +55,19 @@ KNOWN_DESIGN_GAPS["retire-delayed-presence"] = {
     "decision": "confirmed E23 counterexample; owner design decision pending",
     "node": "test_scenarios.py::test_gap_retire_delayed_active_presence",
     "gates": "random retirement requires fully delivered active presence and covering snapshots",
+}
+KNOWN_DESIGN_GAPS["fresh-replica-unreplicated"] = {
+    "section": "§9 fresh-replica restore",
+    "outcome": "O1/O5",
+    "tracks": "76A/77A",
+    "decision": (
+        "owner-accepted 2026-10-16 (73C review): emptying a replica whose own records "
+        "no peer holds yet destroys their only copy; gated in random search like the "
+        "surviving-peer-copy precondition; revisit when recovery can refuse or wait "
+        "for replication"
+    ),
+    "node": "test_scenarios.py::test_gap_fresh_replica_unreplicated_own_record",
+    "gates": "fresh-replica restore requires every own record file to exist on a peer",
 }
 
 NAMES = {
@@ -155,6 +157,23 @@ class Oracle:
         self.versions: dict[int, Version] = {}
         self.edges: dict[int, set[int]] = {}
         self.excluded: set[int] = set()
+        # User versions a restore actually undid on their device (authored after the
+        # backup point, by causal counter). A restore can undo one that was never
+        # published; INV7 then must not demand its bytes.
+        self.rolled_back: set[int] = set()
+        # (source, path, sha, vv) of every version ever carried by a published record,
+        # recorded when the publication is observed. Publication is a historical fact:
+        # compaction or a later deletion of the record cannot un-publish it, and the
+        # sha keeps counter-reused vectors with different bytes distinct.
+        self.published_ever: set[tuple] = set()
+        # Versions whose causal identity (bytes and vector) a disk restore destroyed:
+        # before it only the restored device carried that identity (no other ledger,
+        # displaced row, or record complete over the other replicas' merged files), and
+        # the restored device does not carry it after. INV2's ``excluded``
+        # judges holders by line-set containment, so a union version that deleted lines
+        # looks held by any superset elsewhere; INV7 demands exact bytes under a vector
+        # and needs this exact-identity record of the loss.
+        self.destroyed: set[int] = set()
         self.last_holders: dict[int, list[str]] = {}
 
     def add(
@@ -183,6 +202,8 @@ class Oracle:
             piece,
         )
         self.versions[version.event] = version
+        if not version.user and version.authored:
+            self.published_ever.add((source, path, sha(data), frozenset(version.vv.items())))
         return version
 
     def user_action(self, fleet, device, source, path, data):
@@ -265,6 +286,13 @@ class Oracle:
         ]
         if missing and not quiescent:
             records = record_versions(fleet)
+            # A family whose parts are split across replicas is recoverable too: the
+            # transport reassembles it (the restore exclusion judges carriers the same way).
+            records += [
+                (e.metadata["source"], e.metadata["path"], e.content, "split")
+                for found in merged_records(fleet, fleet.ordered())
+                for e in found.record.entries
+            ]
             for event, version in sorted(self.versions.items()):
                 holders = [
                     name + ":record"
@@ -337,7 +365,137 @@ def context_for(fleet, device):
         lambda: device.hardware_id,
         fleet.keys(device),
         fleet.registry,
+        family_source=fleet.next_family,
+        folder_synced=lambda: fleet.folder_synced(device.name),
     )
+
+
+CONFLICT_COPY = re.compile(r"(.+?)((?:\.sync-conflict-\d{8}-\d{6}-[A-Za-z0-9]+)+)\.enc")
+
+
+@dataclass(frozen=True)
+class Found:
+    """One complete authenticated family seen by the checkers."""
+
+    device: str
+    kind: str
+    seq: int
+    family: str
+    suffix: str  # "" for a canonical name, else the exact conflict-copy suffix
+    payload: bytes
+    record: object
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(self.payload).hexdigest()
+
+
+def complete_families(keys, files, *, only=None):
+    """Every complete, authenticated commit/snapshot family, judged independently.
+
+    ``files`` maps replica keys to bytes. Canonical names and conflict copies are
+    grouped separately by ``(device, kind, seq, family)`` (a copy keeps its
+    original identity plus the exact conflict suffix); a family is judged only by
+    its own parts and never mixed with a competing family at the same slot.
+    ``only(device, kind, seq)`` narrows what is opened. Grouping uses the shared
+    pure ``layout.group_record_names`` (production code pinned by the T13 layout
+    tests); completeness and authentication judgment here is independent of the
+    model's View. Returns ``Found`` records in sorted identity order.
+    """
+    by_suffix = {}
+    for path in sorted(files):
+        name, suffix = layout.parse_record_key(path), ""
+        if name is None:
+            match = CONFLICT_COPY.fullmatch(path)
+            name = layout.parse_record_key(match[1] + ".enc") if match else None
+            suffix = match[2] if match else ""
+        if (
+            name is not None
+            and name.kind in ("commit", "snapshot")
+            and (only is None or only(name.device_id, name.kind, name.seq))
+        ):
+            by_suffix.setdefault(suffix, []).append((path, name))
+    result = []
+    for suffix, pairs in sorted(by_suffix.items()):
+        for (device, kind, seq, family), members in layout.group_record_names(pairs).items():
+            # Completeness from names first: an incomplete or mixed-count family is
+            # never opened (it could not authenticate as one record anyway).
+            counts = {name.nparts for _, name in members}
+            if len(counts) != 1 or {name.part for _, name in members} != set(
+                range(1, next(iter(counts)) + 1)
+            ):
+                continue
+            parts = [
+                (
+                    envelope.RecordContext(
+                        keys.fleet_id, device, kind, seq, name.part, name.nparts
+                    ),
+                    files[path],
+                )
+                for path, name in members
+            ]
+            expected = envelope.RecordContext(keys.fleet_id, device, kind, seq)
+            try:
+                payload = codec.open_record(parts, keys, expected=expected)
+                if not isinstance(payload, bytes):
+                    continue
+                decode = codec.decode_commit if kind == "commit" else codec.decode_snapshot
+                record = decode(payload, expected=expected)
+            except envelope.StoreError:
+                continue
+            result.append(Found(device, kind, seq, family, suffix, payload, record))
+    return result
+
+
+def replica_files(ctx):
+    return {key: (ctx.replica_root / key).read_bytes() for key in ctx.file_keys()}
+
+
+def version_identity(source, path, data, vv):
+    """INV7's causal identity of a version: its bytes under its vector, never bytes alone."""
+    return (source, path, sha(data), frozenset((vv or {}).items()))
+
+
+def merged_records(fleet, devices):
+    """Complete authenticated families of ``devices``: each replica's own, plus those
+    complete only over their merged replica files.
+
+    Parts are immutable and named by family, so merging never mixes two families, and a
+    family whose parts are split across these replicas counts: the transport
+    reassembles it. Each replica's own families are kept as well, so a different
+    (corrupt or colliding) part under the same name elsewhere never shadows a family
+    one replica holds completely.
+    """
+    found, files, keys = [], {}, None
+    for device in devices:
+        ctx = context_for(fleet, device)
+        if ctx.keys is not None:
+            keys = keys or ctx.keys
+            own = replica_files(ctx)
+            found += complete_families(ctx.keys, own)
+            files.update(own)
+    return found if keys is None else found + complete_families(keys, files)
+
+
+def carried_identities(fleet, devices):
+    """Version identities ``devices`` carry together: their ledger rows, live displaced
+    rows and every entry of a record complete over their merged replica files. Source
+    bytes alone carry none: an older version, or a union superset, can hold the same
+    lines under another vector."""
+    result = set()
+    for device in devices:
+        state = state_for(fleet, device).read()
+        rows = list(state.ledger.values())
+        rows += [v for v in state.displaced if not v.get("expired")]
+        result |= {
+            version_identity(r["source"], r["path"], r.get("content"), r.get("vv")) for r in rows
+        }
+    for found in merged_records(fleet, devices):
+        result |= {
+            version_identity(e.metadata["source"], e.metadata["path"], e.content, e.metadata["vv"])
+            for e in found.record.entries
+        }
+    return result
 
 
 def record_versions(fleet):
@@ -346,41 +504,12 @@ def record_versions(fleet):
         ctx = context_for(fleet, device)
         if ctx.keys is None:
             continue
-        for peer in sorted({n.device_id for n in ctx.names().values()}):
-            for kind in ("commit", "snapshot"):
-                for _, _, record in ctx.records(peer, kind):
-                    result.extend(
-                        (e.metadata["source"], e.metadata["path"], e.content, device.name)
-                        for e in record.entries
-                    )
-        # Conflict copies retain their original authenticated identity. Only a
-        # complete, readable family counts; never mix parts from competing copies.
-        families = {}
-        for path in ctx.file_keys():
-            match = re.fullmatch(r"(.+?)((?:\.sync-conflict-\d{8}-\d{6}-[A-Za-z0-9]+)+)\.enc", path)
-            name = layout.parse_record_key(match[1] + ".enc") if match else None
-            if name is None or name.kind not in ("commit", "snapshot"):
-                continue
-            family_identity = (name.device_id, name.kind, name.seq, name.nparts, match[2])
-            expected = envelope.RecordContext(
-                ctx.keys.fleet_id, name.device_id, name.kind, name.seq, name.part, name.nparts
-            )
-            families.setdefault(family_identity, []).append(
-                (expected, (ctx.replica_root / path).read_bytes())
-            )
-        for (peer, kind, seq, _, _), parts in sorted(families.items()):
-            expected = ctx.context(peer, kind, seq)
-            try:
-                payload = codec.open_record(parts, ctx.keys, expected=expected)
-                if not isinstance(payload, bytes):
-                    continue
-                decode = codec.decode_commit if kind == "commit" else codec.decode_snapshot
-                record = decode(payload, expected=expected)
-            except envelope.StoreError:
-                continue
+        # Canonical records and conflict copies alike: only a complete, readable
+        # family counts, and parts of competing families are never mixed.
+        for found in complete_families(ctx.keys, replica_files(ctx)):
             result.extend(
                 (e.metadata["source"], e.metadata["path"], e.content, device.name)
-                for e in record.entries
+                for e in found.record.entries
             )
     return result
 
@@ -408,7 +537,7 @@ def ground_truth(ctx: Context, state: State, tree: dict) -> set[str]:
     result = set()
     for fork in layout.classify_keys(sorted(tree)).forks:
         if fork.startswith("fleet.") or fork.startswith("dev/" + ctx.device_id + "/"):
-            result.add("fork")
+            result.add("fork")  # A transport conflict copy of a commit or fleet.json.
     names = {
         key: name for key in sorted(tree) if (name := layout.parse_record_key(key)) is not None
     }
@@ -417,38 +546,55 @@ def ground_truth(ctx: Context, state: State, tree: dict) -> set[str]:
     if ctx.keys is None:
         return result
     hashes = {int(seq): value["hash"] for seq, value in state.own_log.items()}
-    sequences = sorted(
-        {n.seq for n in names.values() if (n.device_id, n.kind) == (ctx.device_id, "commit")}
+    own_snapshots = [
+        found
+        for found in complete_families(
+            ctx.keys,
+            {key: file.data for key, file in tree.items()},
+            only=lambda device, kind, seq: (device, kind) == (ctx.device_id, "snapshot"),
+        )
+        if found.suffix == ""
+    ]
+    newest = max(
+        own_snapshots,
+        key=lambda f: (f.seq, f.record.header["created_at"], f.family),
+        default=None,
     )
-    for seq in sequences:
-        expected = envelope.RecordContext(ctx.keys.fleet_id, ctx.device_id, "commit", seq)
-        parts = [
-            (
-                envelope.RecordContext(
-                    ctx.keys.fleet_id, ctx.device_id, "commit", seq, name.part, name.nparts
-                ),
-                tree[key].data,
-            )
-            for key, name in names.items()
-            if (name.device_id, name.kind, name.seq) == (ctx.device_id, "commit", seq)
-        ]
-        try:
-            payload = codec.open_record(parts, ctx.keys, expected=expected)
-            if not isinstance(payload, bytes):
-                continue
-            record = codec.decode_commit(payload, expected=expected)
-        except envelope.StoreError:
+    if (
+        newest is not None
+        and newest.seq > max(hashes, default=0)
+        and newest.record.header["prev"] is not None
+    ):
+        # §9 row 1: a complete own snapshot beyond own_log anchors own_log at its seq and
+        # prev, so row 4 judges the own families at and above it against that anchor.
+        hashes[newest.seq] = newest.record.header["prev"]
+    by_seq = {}
+    for found in complete_families(
+        ctx.keys,
+        {key: file.data for key, file in tree.items()},
+        only=lambda device, kind, seq: (device, kind) == (ctx.device_id, "commit"),
+    ):
+        if found.suffix == "":
+            by_seq.setdefault(found.seq, []).append(found)
+    for seq in sorted(by_seq):
+        families = by_seq[seq]
+        if any(found.record.header["host"] != ctx.host for found in families):
+            result.add("fork-clone")  # A record published from another host.
+        digests = {found.digest for found in families}
+        if len(digests) > 1:
+            result.add("fork-restore")  # Two complete own families, different payloads.
             continue
-        if record.header["host"] != ctx.host:
-            result.add("foreign-host")
-        digest = hashlib.sha256(payload).hexdigest()
+        digest, record = next(iter(digests)), families[0].record
         if (seq > 1 and seq - 1 in hashes and record.header["prev"] != hashes[seq - 1]) or (
             seq in hashes and hashes[seq] != digest
         ):
-            result.add("fork")
+            result.add("fork-restore")
         else:
             # Reconciliation can replay an unseen prefix before discovering a fork.
             hashes[seq] = digest
+    # A snapshot-only clone is ground-truth fork-clone too, not only commits/presence.
+    if any(found.record.header["host"] != ctx.host for found in own_snapshots):
+        result.add("fork-clone")
     try:
         presence = ctx.load(ctx.device_id, "presence", 0)
     except envelope.StoreError:
@@ -460,7 +606,7 @@ def ground_truth(ctx: Context, state: State, tree: dict) -> set[str]:
         ]
         != ctx.host
     ):
-        result.add("foreign-host")
+        result.add("fork-clone")
     return result
 
 
@@ -514,8 +660,10 @@ def replica_integrity(fleet, device, tree):
                     envelope.unlock_fleet(file.data, "simulated-v2-passphrase")
                     continue
                 name = layout.parse_record_key(stem + ".enc")
-        if file.data[:1] != b"\x03" or name is None or keys is None:
+        if file.data[:1] != b"\x03" or name is None:
             fail(fleet, 3, path, "expected envelope 0x03 record")
+        if keys is None:
+            continue  # fleet.json has not arrived (a refilling replica): nothing to open yet.
         expected = envelope.RecordContext(
             keys.fleet_id, name.device_id, name.kind, name.seq, name.part, name.nparts
         )
@@ -534,30 +682,19 @@ def inv4_ordering_never_fails(fleet, obs):
         if not (fleet.allow_corruption and outcome.status == "stalled-unreadable"):
             fail(fleet, 4, obs.device, vars(outcome))
     if outcome.status == "refused":
-        valid = outcome.reason in obs.ground_truth
-        if outcome.peer is not None:
-            ctx = context_for(fleet, fleet.devices[obs.device])
-            peer_fork = any(
-                k.startswith("dev/" + outcome.peer + "/")
-                for k in layout.classify_keys(sorted(obs.replica_before)).forks
-            )
-            cursor = obs.state.cursors.get(outcome.peer, {"applied_seq": 0, "hash": None})
-            try:
-                payload = ctx.load(outcome.peer, "commit", cursor["applied_seq"] + 1)
-            except envelope.StoreError:
-                payload = None
-            chain_fork = (
-                (cursor["applied_seq"] == 0 or cursor["hash"] is not None)
-                and isinstance(payload, bytes)
-                and codec.decode_commit(
-                    payload, expected=ctx.context(outcome.peer, "commit", cursor["applied_seq"] + 1)
-                ).header["prev"]
-                != cursor["hash"]
-            )
-            valid |= outcome.reason == "fork" and (peer_fork or chain_fork)
-        if not valid:
+        # Only the forked device refuses (INV6): a refusal must be this device's own fork,
+        # clone or retirement, read from disk and live hardware. A reader never refuses a
+        # peer's fork or chain, so a refusal naming a peer is never valid.
+        if outcome.peer is not None or outcome.reason not in obs.ground_truth:
             fail(
-                fleet, 4, obs.device, {"refusal": outcome.reason, "ground_truth": obs.ground_truth}
+                fleet,
+                4,
+                obs.device,
+                {
+                    "refusal": outcome.reason,
+                    "peer": outcome.peer,
+                    "ground_truth": obs.ground_truth,
+                },
             )
     for peer, cursor in sorted(obs.state.cursors.items()):
         if (
@@ -565,10 +702,7 @@ def inv4_ordering_never_fails(fleet, obs):
             and cursor.get("gap_since") is not None
             and fleet.clock.now - cursor["gap_since"] > DAY
         ):
-            if not any(
-                warning in ("gap older than 24 hours", "chain anchor gap older than 24 hours")
-                for warning in outcome.warnings
-            ):
+            if "gap older than 24 hours" not in outcome.warnings:
                 fail(
                     fleet,
                     4,
@@ -584,7 +718,7 @@ def inv4_ordering_never_fails(fleet, obs):
 
 
 def inv6_fork_safety(fleet, obs):
-    if obs.ground_truth & {"foreign-host", "fork"}:
+    if obs.ground_truth & {"fork", "fork-restore", "fork-clone"}:
         changed = [
             p
             for p in sorted(obs.replica_after)
@@ -665,11 +799,46 @@ def inv7_causal_fidelity(fleet, obs):
 def inv7_quiescent(fleet):
     participants = {d.name for d in fleet.participants()}
     paths = sorted({(v.source, v.path) for v in fleet.oracle.versions.values() if v.authored})
+
+    def undone(version):
+        """A rolled-back user version that was never published and its author no longer holds.
+
+        A restore (or the later replay of the restored device's own record) can undo an
+        unpublished local edit or deletion. It then exists nowhere and is not a target,
+        however INV2's line-set `contains` counts it preserved. A version ever carried
+        by a published record (``published_ever``, keyed with the content sha so
+        counter reuse cannot conflate two versions), or one still in effect in its
+        author's tree, stays a target — unless the restore destroyed every holder
+        (INV2's ``excluded`` set): a record that existed only on an emptied replica
+        is gone the same way INV2 already excuses, and demanding its bytes would
+        contradict that exclusion. ``destroyed`` is a disk restore's loss judged by
+        exact identity: a union version that deleted lines, carried only by the
+        restored device's record, is gone even while a superset or an older version
+        with the same bytes survives elsewhere.
+        """
+        if version.event in fleet.oracle.excluded or version.event in fleet.oracle.destroyed:
+            return True
+        if version.event not in fleet.oracle.rolled_back:
+            return False
+        author = fleet.devices.get(version.device)
+        if author is None:
+            return False
+        held = source_inventory(author).get((version.source, version.path))
+        if (held.data if held is not None else None) == version.data:
+            return False
+        return (
+            version.source,
+            version.path,
+            sha(version.data),
+            frozenset(version.vv.items()),
+        ) not in fleet.oracle.published_ever
+
     for source, path in paths:
         authored = [
             v
             for _, v in sorted(fleet.oracle.versions.items())
             if v.authored
+            and not undone(v)
             and (
                 not v.user
                 or (
@@ -709,8 +878,12 @@ def inv7_quiescent(fleet):
                 )
 
 
-def observed_record(fleet, obs, peer, kind, seq, *, published=False, required=True):
-    """Authenticate the observation's bytes, independently of model read/history."""
+def observed_record(fleet, obs, peer, kind, seq, *, family=None, published=False, required=True):
+    """Authenticate the observation's bytes, independently of model read/history.
+
+    The receipt names the family it applied; a lookup without one (an indirectly
+    raised cursor) takes the lexically first complete family at the slot.
+    """
     keys = fleet.keys(fleet.devices[obs.device])
     trees = (
         (obs.replica_after, obs.replica_before)
@@ -718,26 +891,13 @@ def observed_record(fleet, obs, peer, kind, seq, *, published=False, required=Tr
         else (obs.replica_before, obs.replica_after)
     )
     for tree in trees:
-        parts = []
-        for path, file in sorted(tree.items()):
-            name = layout.parse_record_key(path)
-            if name and (name.device_id, name.kind, name.seq) == (peer, kind, seq):
-                parts.append(
-                    (
-                        envelope.RecordContext(
-                            keys.fleet_id, peer, kind, seq, name.part, name.nparts
-                        ),
-                        file.data,
-                    )
-                )
-        expected = envelope.RecordContext(keys.fleet_id, peer, kind, seq)
-        try:
-            payload = codec.open_record(parts, keys, expected=expected)
-        except envelope.StoreError:
-            continue
-        if isinstance(payload, bytes):
-            decode = codec.decode_commit if kind == "commit" else codec.decode_snapshot
-            return payload, decode(payload, expected=expected)
+        for found in complete_families(
+            keys,
+            {path: file.data for path, file in tree.items()},
+            only=lambda d, k, n: (d, k, n) == (peer, kind, seq),
+        ):
+            if found.suffix == "" and family in (None, found.family):
+                return found.payload, found.record
     if required:
         fail(fleet, 7, (peer, kind, seq), "applied history has no authenticated record")
     return None
@@ -749,6 +909,12 @@ def inv7_observed_inputs(fleet, obs):
     Record receipts supply grouping, not truth: every entry is authenticated,
     every local input is reconstructed, and cursor/ledger/source effects must
     reconcile to the observation. Omitting an entire receipt cannot hide progress.
+
+    A commit receipt names its family. A family at cursor + 1 moves the cursor; one at
+    or below it (a second family at the slot, or a late family) is legal only when its
+    digest is not already in the applied set and leaves the cursor alone. The applied
+    set starts from the before-state's persisted rows (the one model-supplied baseline)
+    and grows by this observation's authenticated receipts.
     """
     ledger = deepcopy(obs.before_state.ledger)
     files = {
@@ -756,6 +922,10 @@ def inv7_observed_inputs(fleet, obs):
         for (s, p), v in obs.sources_before[obs.device].items()
     }
     cursors = {p: (r["applied_seq"], r["hash"]) for p, r in obs.before_state.cursors.items()}
+    applied = {
+        (r["peer"], r["seq"], r["family"], r["digest"]) for r in obs.before_state.applied.values()
+    }
+    applied_digests = {(peer, digest) for peer, _, _, digest in applied}
     own_records = {seq: r["hash"] for seq, r in obs.before_state.own_log.items()}
     identity = obs.before_identity
     bootstrap_pending = obs.operation == "join" and not obs.before_state.meta.get("joined")
@@ -794,6 +964,8 @@ def inv7_observed_inputs(fleet, obs):
             )
             identity, bootstrap_pending = obs.identity, True
             ledger, cursors = {}, {}
+            applied = set()
+            applied_digests = set()
             own_records = {}
         elif operation == "joined":
             require(
@@ -808,19 +980,58 @@ def inv7_observed_inputs(fleet, obs):
             peer = identity if published else event["peer"]
             kind = "commit" if published else event["kind"]
             payload, record = observed_record(
-                fleet, obs, peer, kind, event["seq"], published=published
+                fleet,
+                obs,
+                peer,
+                kind,
+                event["seq"],
+                family=event.get("family"),
+                published=published,
             )
             digest = hashlib.sha256(payload).hexdigest()
+            if kind == "snapshot" and peer == identity and not published:
+                # Own-snapshot recovery: own_log is anchored at the snapshot's seq and
+                # prev (the digest of the commit at that seq).
+                own_records[str(event["seq"])] = record.header["prev"]
+            if kind == "snapshot" and peer != identity and not published:
+                # Covered families persist in `applied` (§3): walk the snapshot's prev
+                # chain over authenticated families, digest for digest, independently.
+                keys = fleet.keys(fleet.devices[obs.device])
+                chain_seq, chain_digest = event["seq"], record.header["prev"]
+                while chain_seq >= 1 and chain_digest is not None:
+                    found = None
+                    for tree in (obs.replica_before, obs.replica_after):
+                        for candidate in complete_families(
+                            keys,
+                            {path: file.data for path, file in tree.items()},
+                            only=lambda d, k, n, s=chain_seq: (d, k, n) == (peer, "commit", s),
+                        ):
+                            if candidate.suffix == "" and candidate.digest == chain_digest:
+                                found = candidate
+                                break
+                        if found is not None:
+                            break
+                    if found is None:
+                        break
+                    applied.add((peer, chain_seq, found.family, chain_digest))
+                    applied_digests.add((peer, chain_digest))
+                    chain_digest = found.record.header["prev"]
+                    chain_seq -= 1
             if kind == "commit":
                 if peer == identity:
                     own_records[str(event["seq"])] = digest
                     authored.extend((identity, entry) for entry in record.entries)
                 else:
-                    require(
-                        event["seq"] == cursors.get(peer, (0, None))[0] + 1,
-                        (peer, event["seq"]),
-                        "commit skipped a sequence without a covering snapshot",
-                    )
+                    cursor_seq = cursors.get(peer, (0, None))[0]
+                    if event["seq"] != cursor_seq + 1:
+                        require(
+                            event["seq"] <= cursor_seq and (peer, digest) not in applied_digests,
+                            (peer, event["seq"]),
+                            "commit skipped a sequence without a covering snapshot, "
+                            "or re-applied a family already applied",
+                        )
+                    applied.add((peer, event["seq"], event.get("family"), digest))
+                    applied_digests.add((peer, digest))
             if published:
                 require(not pending, obs.device, "unbound classification before publication")
                 for entry in record.entries:
@@ -935,7 +1146,11 @@ def inv7_observed_inputs(fleet, obs):
                             files[key] = (result["content"], result["mtime"])
                 pending = []
                 bootstrap_pending = False
-            cursors[peer] = (event["seq"], digest if kind == "commit" else record.header["prev"])
+            if kind == "snapshot" or published or event["seq"] > cursors.get(peer, (0, None))[0]:
+                cursors[peer] = (
+                    event["seq"],
+                    digest if kind == "commit" else record.header["prev"],
+                )
             if kind == "snapshot":
                 for other, seq in sorted(record.header["cursors"].items()):
                     if seq > cursors.get(other, (0, None))[0]:
@@ -957,17 +1172,20 @@ def inv7_observed_inputs(fleet, obs):
     }
     require(files == actual_files, obs.device, "source effects differ from reconstructed history")
     actual_cursors = {p: (r["applied_seq"], r["hash"]) for p, r in obs.state.cursors.items()}
-    # An indirect snapshot cursor may acquire its missing anchor before a fork
-    # refusal, without applying another record. Only authenticated bytes can
-    # justify that hash-only transition; an established hash cannot change.
-    for peer, (seq, digest) in sorted(cursors.items()):
-        if seq and digest is None and actual_cursors.get(peer) != (seq, None):
-            cursors[peer] = (seq, anchor_hash(peer, seq))
     require(
         {p: value for p, value in cursors.items() if value != (0, None)}
         == {p: value for p, value in actual_cursors.items() if value != (0, None)},
         obs.device,
         {"expected_cursors": cursors, "observed_cursors": actual_cursors},
+    )
+    # The persisted applied set is verified, not just seeded from: a model that
+    # drops or invents a row would otherwise poison the next action's baseline (the
+    # model never prunes rows, so equality is exact).
+    require(
+        applied
+        == {(r["peer"], r["seq"], r["family"], r["digest"]) for r in obs.state.applied.values()},
+        obs.device,
+        "persisted applied set differs from authenticated receipts",
     )
     return authored
 

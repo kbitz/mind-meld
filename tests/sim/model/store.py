@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -17,7 +17,40 @@ from mind_meld.store import format as codec
 from ..store_fleet import DAY, PASSPHRASE, STIGNORE
 from ..transport import owned_path
 from . import core
-from .state import StateSeam, from_row, path_key, row
+from .state import StateSeam, applied_key, from_row, intent_key, path_key, row
+
+
+class PublishError(RuntimeError):
+    """A publisher failure that must be loud (name allocation exhausted)."""
+
+
+@dataclass(frozen=True)
+class FamilyRecord:
+    """One complete, readable family at a slot, decoded and digested."""
+
+    device: str
+    kind: str
+    seq: int
+    family: str
+    payload: bytes
+    record: codec.Record
+    digest: str
+    parts: int
+
+
+@dataclass(frozen=True)
+class Slot:
+    """Every family a slot holds, judged from names; only ``complete`` was opened."""
+
+    complete: tuple[FamilyRecord, ...] = ()
+    incomplete: tuple[str, ...] = ()
+    unreadable: tuple[str, ...] = ()
+
+
+MAX_NAME_ATTEMPTS = 3
+# How long replaced bytes stay restorable in ``displaced`` (the retire activity
+# window further down is a different 30 days).
+DISPLACED_RETENTION = 30 * DAY
 
 
 @dataclass(frozen=True)
@@ -44,6 +77,15 @@ class Context:
     registry: dict
     executed: list[str] = field(default_factory=list)
     active: list[str] = field(default_factory=list)
+    # Fleet-held inputs, never on a device disk: a fresh record family per
+    # publication, and whether Syncthing has nothing left to deliver here.
+    family_source: Callable[[], str] | None = None
+    folder_synced: Callable[[], bool] = lambda: True
+    # Per-action facts reconcile derives for publish/read/presence: ``in_flight``
+    # (claimed seq whose own records have not all arrived), ``skip_ahead`` (the folder is
+    # synced, so an attended push may skip ahead), ``lost`` (own records vanished from
+    # storage: heal) and ``torn`` (a proven torn own slot). Reset by every reconcile.
+    own: dict = field(default_factory=dict)
 
     def call(self, piece: str, **kwargs):
         self.executed.append(piece)
@@ -84,18 +126,26 @@ class Context:
         walk(self.replica_root, "")
         return tuple(result)
 
-    def names(self) -> dict[str, layout.RecordName]:
+    def names(self, keys=None) -> dict[str, layout.RecordName]:
         return {
             key: parsed
-            for key in self.file_keys()
+            for key in (self.file_keys() if keys is None else keys)
             if (parsed := layout.parse_record_key(key)) is not None
         }
 
-    def load(self, device: str, kind: str, seq: int, *, names=None):
-        """ENOENT is rescued only at the read site; every part family is supplied."""
+    def load(self, device: str, kind: str, seq: int, family: str | None = None, *, names=None):
+        """Open ONE family's parts. ENOENT is rescued only at this read site.
+
+        Presence has no family. Parts of other families at the slot are never mixed in.
+        """
         parts = []
         for key, parsed in (self.names() if names is None else names).items():
-            if (parsed.device_id, parsed.kind, parsed.seq) == (device, kind, seq):
+            if (parsed.device_id, parsed.kind, parsed.seq, parsed.family) == (
+                device,
+                kind,
+                seq,
+                family,
+            ):
                 try:
                     data = (self.replica_root / key).read_bytes()
                 except FileNotFoundError:
@@ -106,24 +156,8 @@ class Context:
                 parts.append((expected, data))
         return codec.open_record(parts, self.keys, expected=self.context(device, kind, seq))
 
-    def records(self, device: str, kind: str, *, names=None, errors=None):
-        names = self.names() if names is None else names
-        result = []
-        for seq in sorted(
-            {n.seq for n in names.values() if (n.device_id, n.kind) == (device, kind)}
-        ):
-            try:
-                payload = self.load(device, kind, seq, names=names)
-            except envelope.StoreError:
-                if errors is not None:
-                    errors.append(seq)
-                continue
-            if isinstance(payload, bytes):
-                decoder = codec.decode_commit if kind == "commit" else codec.decode_snapshot
-                result.append(
-                    (seq, payload, decoder(payload, expected=self.context(device, kind, seq)))
-                )
-        return result
+    def view(self, keys=None) -> "View":
+        return View(self, keys)
 
     def source(self, source: str, path: str) -> tuple[bytes | None, float]:
         target = owned_path(self.source_roots[source], path)
@@ -131,6 +165,94 @@ class Context:
             return target.read_bytes(), target.stat().st_mtime
         except FileNotFoundError:
             return None, 0
+
+
+class View:
+    """Read-only per-action view of one replica.
+
+    Names are grouped by ``(device, kind, seq, family)`` through
+    ``layout.group_record_names``; completeness is judged from the names and only
+    complete families are opened (and remembered), so a torn family costs no
+    decryption on the hot path. A family that fails to open, or whose name set
+    carries differing part counts, is unreadable by name. Build one view after any
+    write the action made: it never refreshes itself.
+    """
+
+    def __init__(self, ctx: Context, keys=None):
+        self.ctx = ctx
+        self.names = ctx.names(keys)
+        self.groups = layout.group_record_names(self.names.items())
+        self._families: dict[tuple[str, str, int], list[str]] = {}
+        for device, kind, seq, family in self.groups:
+            self._families.setdefault((device, kind, seq), []).append(family)
+        self._slots: dict[tuple[str, str, int], Slot] = {}
+
+    def devices(self) -> set[str]:
+        return {device for device, _, _, _ in self.groups}
+
+    def seqs(self, device: str, kind: str) -> list[int]:
+        return sorted({seq for (d, k, seq) in self._families if (d, k) == (device, kind)})
+
+    def slot(self, device: str, kind: str, seq: int) -> Slot:
+        identity = (device, kind, seq)
+        if identity not in self._slots:
+            complete, incomplete, unreadable = [], [], []
+            for family in sorted(self._families.get(identity, ())):
+                items = self.groups[(device, kind, seq, family)]
+                counts = {name.nparts for _, name in items}
+                if len(counts) != 1:
+                    unreadable.append(family)  # One family name has exactly one part count.
+                elif {name.part for _, name in items} != set(range(1, next(iter(counts)) + 1)):
+                    incomplete.append(family)
+                else:
+                    opened = self._open(device, kind, seq, family, items)
+                    if isinstance(opened, FamilyRecord):
+                        complete.append(opened)
+                    else:
+                        (incomplete if opened == "incomplete" else unreadable).append(family)
+            self._slots[identity] = Slot(tuple(complete), tuple(incomplete), tuple(unreadable))
+        return self._slots[identity]
+
+    def _open(self, device, kind, seq, family, items):
+        ctx = self.ctx
+        try:
+            payload = ctx.load(device, kind, seq, family, names=dict(items))
+            if not isinstance(payload, bytes):
+                return "incomplete"  # A part vanished in a replacement window.
+            decoder = codec.decode_commit if kind == "commit" else codec.decode_snapshot
+            record = decoder(payload, expected=ctx.context(device, kind, seq))
+        except envelope.StoreError:
+            return "unreadable"
+        return FamilyRecord(
+            device,
+            kind,
+            seq,
+            family,
+            payload,
+            record,
+            hashlib.sha256(payload).hexdigest(),
+            max(name.nparts for _, name in items),
+        )
+
+    def latest_snapshot(self, device: str) -> FamilyRecord | None:
+        """Newest complete snapshot by (seq, created_at, family)."""
+        return max(
+            self.records(device, "snapshot"),
+            key=lambda r: (r.seq, r.record.header["created_at"], r.family),
+            default=None,
+        )
+
+    def records(self, device: str, kind: str, errors: list | None = None) -> list[FamilyRecord]:
+        """Complete families in (seq, family) order; unreadable ones go to ``errors``."""
+        result = []
+        for seq in self.seqs(device, kind):
+            slot = self.slot(device, kind, seq)
+            result.extend(slot.complete)
+            if errors is not None and not slot.complete:
+                # Alone at a slot an unreadable family stalls; beside a complete one it
+                # is ignored (the diag warning belongs to the caller).
+                errors.extend((seq, family) for family in slot.unreadable)
+        return result
 
 
 def header(ctx: Context, kind: str, seq: int, prev: str | None, entries) -> dict:
@@ -151,26 +273,106 @@ def header(ctx: Context, kind: str, seq: int, prev: str | None, entries) -> dict
     return value
 
 
-def write_record(ctx: Context, kind: str, seq: int, payload: bytes, *, crash_parts=None) -> int:
+@dataclass(frozen=True)
+class Written:
+    family: str
+    linked: int
+    total: int
+
+    @property
+    def complete(self) -> bool:
+        return self.linked == self.total
+
+
+def write_record(ctx: Context, kind: str, seq: int, payload: bytes, *, crash_parts=None) -> Written:
+    """Link every part of one fresh family, recording a write-ahead intent row first.
+
+    One intent row per attempted family, written before its first part is linked
+    and left in place until the publishing transaction clears it: a row that
+    survives a crash proves this device started that family. ``crash_parts`` stops
+    after that many parts. On ``EEXIST`` for any part the parts already linked stay
+    (a torn family of this device's own), a fresh family is drawn and the same
+    sealed parts are linked under it; after ``MAX_NAME_ATTEMPTS`` the failure is loud.
+    """
     parts = tuple(
         codec.seal_record(payload, ctx.keys, expected=ctx.context(ctx.device_id, kind, seq))
     )
-    for index, (part, data) in enumerate(parts):
-        if crash_parts is not None and index >= crash_parts:
-            return 0
-        key = layout.record_key(ctx.device_id, kind, seq, part=part.part, nparts=part.nparts)
-        target = owned_path(ctx.replica_root, key)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.parent / ".mm-tmp-publish"
-        temp.write_bytes(data)
+    for _ in range(MAX_NAME_ATTEMPTS):
+        family = ctx.family_source()
+        with ctx.state.transaction() as state:
+            state.intents[intent_key(kind, seq, family)] = {
+                "kind": kind,
+                "seq": seq,
+                "family": family,
+                "nparts": len(parts),
+            }
+        linked = 0
         try:
-            os.link(temp, target)
-        finally:
-            temp.unlink()
-    return len(parts)
+            for index, (part, data) in enumerate(parts):
+                if crash_parts is not None and index >= crash_parts:
+                    break
+                key = layout.record_key(
+                    ctx.device_id, kind, seq, part=part.part, nparts=part.nparts, family=family
+                )
+                target = owned_path(ctx.replica_root, key)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp = target.parent / f".mm-tmp-publish-{part.part}"
+                temp.write_bytes(data)
+                try:
+                    os.link(temp, target)
+                finally:
+                    temp.unlink()
+                linked += 1
+        except FileExistsError:
+            continue
+        return Written(family, linked, len(parts))
+    raise PublishError(
+        f"could not allocate a fresh record name for seq {seq} after {MAX_NAME_ATTEMPTS} "
+        "attempts; another writer may share this device id; run `mm diag`"
+    )
 
 
-def refuse(ctx: Context, reason: str) -> Outcome:
+DOCS_ANCHOR = "docs/designs/store-v2.md#9-restore-crash-and-clone-safety"
+# Verbatim owner-side texts, one per §9 row; every text is anchored at DOCS_ANCHOR in
+# the design doc. Peer names would go through ``safety`` in the product.
+OWNER_TEXTS = {
+    "fork": (
+        "a conflicting copy of this device's log or of fleet.json exists; "
+        "run `mm diag`, then `mm rejoin` on this Mac"
+    ),
+    "fork-restore": (
+        "this Mac republished records another copy of it already published "
+        "(restored from a backup?); run `mm rejoin` on this Mac"
+    ),
+    "fork-clone": (
+        "another machine is using this device id; run `mm rejoin` on each machine using it"
+    ),
+    "own-records-lost": (
+        "records this device published are missing from storage; the next `mm push` "
+        "publishes a full snapshot (about the size of this device's synced data)"
+    ),
+    "own-records-in-flight": (
+        "this device's records through push #{claimed} have not arrived yet "
+        "(restored from a backup?); waiting"
+    ),
+    "own-records-in-flight-folder": (
+        "this device's records have not arrived yet (restored from a backup?); "
+        "waiting for Syncthing to restore them"
+    ),
+    "torn-own-slot": "the last push was interrupted; the next push completes it",
+    "missing-own-directory": (
+        "this device's folder is gone from storage and Syncthing has nothing left to "
+        "deliver (retired?); its newest publish was {date}; run `mm rejoin`"
+    ),
+}
+
+
+def owner_text(code: str, **fields) -> str:
+    """The row's text plus the pointer every §9 message ends with."""
+    return OWNER_TEXTS[code].format(**fields) + f" See {DOCS_ANCHOR}."
+
+
+def refuse(ctx: Context, reason: str, **fields) -> Outcome:
     with ctx.state.transaction() as state:
         state.meta["refused"] = reason
         aged_gap = any(
@@ -178,7 +380,10 @@ def refuse(ctx: Context, reason: str) -> Outcome:
             for cursor in state.cursors.values()
         )
     return Outcome(
-        "refused", reason=reason, warnings=("gap older than 24 hours",) if aged_gap else ()
+        "refused",
+        reason=reason,
+        warnings=(owner_text(reason, **fields),)
+        + (("gap older than 24 hours",) if aged_gap else ()),
     )
 
 
@@ -197,18 +402,72 @@ def create_fleet(ctx: Context, **kwargs) -> Outcome:
     return Outcome("published", seq=0)
 
 
+def newest_publish_date(state) -> str:
+    rows = [r for r in state.own_log.values() if r.get("created_at")]
+    return max(rows, key=lambda r: r["time"])["created_at"][:10] if rows else "unknown"
+
+
+def claimed_seq(ctx: Context, view: View, own_published: int) -> int:
+    """The highest own seq anyone says exists: this device's own presence, every peer's
+    ``applied[me]`` receipt and every complete peer snapshot's ``cursors[me]``."""
+    claimed = own_published
+    for peer in sorted(view.devices() - {ctx.device_id}):
+        try:
+            payload = ctx.load(peer, "presence", 0, names=view.names)
+            if isinstance(payload, bytes):
+                value = codec.decode_presence(payload, expected=ctx.context(peer, "presence", 0))
+                claimed = max(claimed, value["applied"].get(ctx.device_id, 0))
+        except envelope.StoreError:
+            pass
+        for snapshot in view.records(peer, "snapshot"):
+            claimed = max(claimed, snapshot.record.header["cursors"].get(ctx.device_id, 0))
+    return claimed
+
+
+def own_records_lost(ctx: Context, view: View, state) -> bool:
+    """Heal trigger: the own snapshot at ``meta.snapshot_seq`` is no longer complete in
+    storage, or a family ``own_log`` recorded above it has vanished or gone incomplete.
+    A seq with no ``own_log`` row is a hole replay has not reached: its records are in
+    flight and restored-device detection owns the wait, so heal never snapshots over
+    it (the snapshot's ledger never incorporated that record, yet its ``prev`` chain
+    would mark it covered for readers). A proven torn slot is not a loss. Commits at
+    or below the snapshot are compacted by design and never trigger heal."""
+    floor = state.meta.get("snapshot_seq", 0)
+    if not any(r.seq == floor for r in view.records(ctx.device_id, "snapshot")):
+        return True
+    head = max(map(int, state.own_log), default=0)
+    for seq in range(floor + 1, head + 1):
+        row = state.own_log.get(str(seq))
+        if row is None:
+            continue  # A hole: in flight, never a heal.
+        slot = view.slot(ctx.device_id, "commit", seq)
+        if slot.complete:
+            if not any(f.digest == row["hash"] for f in slot.complete):
+                return True  # The family this device recorded is gone.
+            continue
+        if own_slot(ctx, state, view, "commit", seq)[1] != "torn":
+            return True
+    return False
+
+
 def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcome:
+    """§9: refusal first, then row 2 (own directory), own-snapshot and own-commit replay,
+    then restored-device detection, then heal and torn-slot facts for the publisher."""
+    ctx.own = {}
     paths = ctx.file_keys()
-    names = ctx.names()
+    view = ctx.view(paths)
+    names = view.names
     forks = layout.classify_keys(paths).forks
     own_prefix = "dev/" + ctx.device_id + "/"
     fleet_fork = any(p.startswith("fleet.sync-conflict-") for p in forks)
     own_fork = any(p.startswith(own_prefix) for p in forks)
     if fleet_fork or own_fork:
-        return refuse(ctx, "fork")
+        return refuse(ctx, core.reconcile_rule(fleet_fork=fleet_fork, own_fork=own_fork))
     if ctx.keys is None:
+        if ctx.state.read().meta.get("joined") and not ctx.folder_synced():
+            return Outcome("pending", reason="fleet-header")  # Refilling from peers.
         return Outcome("waiting", reason="fleet-header")
-    foreign = False
+    foreign, own_published = False, 0
     try:
         raw_presence = ctx.load(ctx.device_id, "presence", 0, names=names)
         if isinstance(raw_presence, bytes):
@@ -216,6 +475,7 @@ def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcom
                 raw_presence, expected=ctx.context(ctx.device_id, "presence", 0)
             )
             foreign = value["host"] != ctx.host
+            own_published = 0 if foreign else value["published_seq"]
     except envelope.StoreError:
         return Outcome(
             "stalled-unreadable",
@@ -224,60 +484,162 @@ def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcom
             warnings=("unreadable own presence",),
         )
     unreadable = []
-    commits = ctx.records(ctx.device_id, "commit", names=names, errors=unreadable)
-    foreign |= any(record.header["host"] != ctx.host for _, _, record in commits)
-    state = ctx.state.read()
-    reason = core.reconcile_rule(
-        fleet_fork=fleet_fork,
-        own_fork=own_fork,
-        foreign_host=foreign,
-        own_missing=bool(state.own_log)
-        and not any(n.device_id == ctx.device_id for n in names.values()),
+    commits = view.records(ctx.device_id, "commit", errors=unreadable)
+    beside = [
+        seq
+        for seq in view.seqs(ctx.device_id, "commit")
+        if view.slot(ctx.device_id, "commit", seq).complete
+        and view.slot(ctx.device_id, "commit", seq).unreadable
+    ]
+    foreign |= any(c.record.header["host"] != ctx.host for c in commits)
+    # A snapshot-only clone is a clone: an own snapshot from another host refuses too,
+    # before own-snapshot recovery could adopt it as this device's anchor.
+    foreign |= any(
+        c.record.header["host"] != ctx.host for c in view.records(ctx.device_id, "snapshot")
     )
+    state = ctx.state.read()
+    reason = core.reconcile_rule(fleet_fork=fleet_fork, own_fork=own_fork, foreign_host=foreign)
     if reason:
         return refuse(ctx, reason)
-    warnings = []
-    own_snapshots = ctx.records(ctx.device_id, "snapshot", names=names)
-    latest_snapshot = own_snapshots[-1][0] if own_snapshots else -1
+    if state.own_log and not any(n.device_id == ctx.device_id for n in names.values()):
+        # Row 2: while Syncthing still has items for this device the folder is refilling
+        # (a restored backup); only a synced folder that still lacks dev/<me>/ is a
+        # retirement.
+        if not ctx.folder_synced():
+            return Outcome(
+                "pending",
+                peer=ctx.device_id,
+                reason="own-records-in-flight",
+                warnings=(owner_text("own-records-in-flight-folder"),),
+            )
+        return refuse(ctx, core.reconcile_rule(own_missing=True), date=newest_publish_date(state))
+    warnings = [unreadable_beside_text(ctx.device_id, seq) for seq in beside]
+    own_snapshots = view.records(ctx.device_id, "snapshot")
+    latest_snapshot = max((c.seq for c in own_snapshots), default=-1)
     if unreadable:
-        warnings.append("unreadable own commit; owner: push --snapshot")
-        trusted = all(str(seq) in state.own_log for seq in unreadable)
-        if not trusted or (not allow_known_unreadable and max(unreadable) > latest_snapshot):
+        # Trusted = this device recorded THAT family at the seq; keyed by family, so a
+        # different unreadable family alone at a slot stalls instead of being waved through.
+        trusted = all(
+            state.own_log.get(str(seq), {}).get("family") == family for seq, family in unreadable
+        )
+        # Only a trusted unreadable family can be healed by a snapshot; an untrusted one
+        # stalls even a forced snapshot, so its remedy must not name that command.
+        warnings.append(
+            "unreadable own commit; owner: push --snapshot"
+            if trusted
+            else "unreadable own commit this device did not record; run `mm diag`, "
+            "then `mm rejoin` if it persists"
+        )
+        if not trusted or (
+            not allow_known_unreadable and max(seq for seq, _ in unreadable) > latest_snapshot
+        ):
             return Outcome(
                 "stalled-unreadable",
                 peer=ctx.device_id,
-                gap_seq=unreadable[0],
+                gap_seq=unreadable[0][0],
                 warnings=tuple(warnings),
             )
-    for seq, payload, record in commits:
-        previous = state.own_log.get(str(seq - 1))
-        if seq > 1 and previous and record.header["prev"] != previous["hash"]:
-            return refuse(ctx, "fork")
+    # Fork evidence at or below a recovery snapshot still refuses: loading the
+    # snapshot would skip those commits, so check every recorded seq first. Two
+    # complete families with distinct digests at one seq are a fork with or without
+    # an own_log row.
+    seen_digests: dict[int, str] = {}
+    for found in commits:
+        known = state.own_log.get(str(found.seq))
+        if known and known["hash"] != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+        if seen_digests.setdefault(found.seq, found.digest) != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+        # A broken prev link is fork evidence even when every digest matches its
+        # own_log row: the other branch's record at seq-1 may already be compacted.
+        previous = state.own_log.get(str(found.seq - 1))
+        if (
+            found.seq > 1
+            and previous is not None
+            and found.record.header["prev"] != previous["hash"]
+        ):
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+    # Own-snapshot recovery: a complete own snapshot beyond own_log loads like a peer's,
+    # anchors own_log at its seq and prev, and only later own commits replay after it.
+    covered = 0
+    newest = view.latest_snapshot(ctx.device_id)
+    if newest is not None and newest.seq > max(map(int, state.own_log), default=0):
+        # The anchor itself is fork evidence checked: a complete family at the
+        # snapshot's seq whose digest is not the snapshot's prev is another branch.
+        anchor_prev = newest.record.header["prev"]
+        if anchor_prev is not None and any(
+            found.seq == newest.seq and found.digest != anchor_prev for found in commits
+        ):
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
+        load_snapshot(ctx, view, ctx.device_id, newest)
+        created = newest.record.header["created_at"]
+        with ctx.state.transaction() as updated:
+            updated.own_log[str(newest.seq)] = {
+                "hash": newest.record.header["prev"],
+                "family": None,
+                "prev": None,
+                "created_at": created,
+                "time": int(datetime.fromisoformat(created).timestamp()),
+                "bytes": 0,
+                "parts": 0,
+            }
+            # Record every complete own snapshot's chosen family, not only the newest:
+            # compaction may delete only families this device can prove it wrote, and an
+            # older snapshot this device published must not become undeletable forever
+            # just because recovery loaded a newer one.
+            recorded = updated.meta.setdefault("snapshots", {})
+            for other in own_snapshots:
+                winner = recorded.get(str(other.seq))
+                if winner is None or other is max(
+                    (r for r in own_snapshots if r.seq == other.seq),
+                    key=lambda r: (r.record.header["created_at"], r.family),
+                ):
+                    recorded[str(other.seq)] = other.family
+            updated.intents.pop(intent_key("snapshot", newest.seq, newest.family), None)
+            updated.history.append({"operation": "own-snapshot-recovery", "seq": newest.seq})
+        covered, state = newest.seq, ctx.state.read()
+    for found in commits:
+        seq, record = found.seq, found.record
+        if seq <= covered:
+            continue  # Covered by the own snapshot just loaded.
         known = state.own_log.get(str(seq))
-        if known and known["hash"] != hashlib.sha256(payload).hexdigest():
-            return refuse(ctx, "fork")
+        if known and known["hash"] != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
         if known:
             continue
+        # Replay is contiguous: it stops at the first seq holding no complete own
+        # family, so a partially redelivered log is never jumped. The hole's records
+        # are in flight; restored-device detection below owns the wait (and a later
+        # heal snapshot can never claim to incorporate a record replay skipped).
+        if seq > max(map(int, state.own_log), default=covered) + 1:
+            break
+        previous = state.own_log.get(str(seq - 1))
+        if seq > 1 and previous and record.header["prev"] != previous["hash"]:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
         for incoming in record.entries:
             ctx.call("classify", incoming=incoming, peer=ctx.device_id, seq=seq)
         with ctx.state.transaction() as updated:
-            digest = hashlib.sha256(payload).hexdigest()
             updated.history.append(
-                {"operation": "record-applied", "peer": ctx.device_id, "kind": "commit", "seq": seq}
+                {
+                    "operation": "record-applied",
+                    "peer": ctx.device_id,
+                    "kind": "commit",
+                    "seq": seq,
+                    "family": found.family,
+                }
             )
             updated.own_log[str(seq)] = {
-                "hash": digest,
+                "hash": found.digest,
+                "family": found.family,
                 "prev": record.header["prev"],
                 "created_at": record.header["created_at"],
                 "time": int(datetime.fromisoformat(record.header["created_at"]).timestamp()),
-                "bytes": len(payload),
-                "parts": max(
-                    n.nparts
-                    for n in names.values()
-                    if n.device_id == ctx.device_id and n.kind == "commit" and n.seq == seq
-                ),
+                "bytes": len(found.payload),
+                "parts": found.parts,
             }
-            updated.cursors[ctx.device_id] = {"applied_seq": seq, "hash": digest}
+            if seq > updated.cursors.get(ctx.device_id, {"applied_seq": 0})["applied_seq"]:
+                updated.cursors[ctx.device_id] = {"applied_seq": seq, "hash": found.digest}
+            updated.intents.pop(intent_key("commit", seq, found.family), None)
         state = ctx.state.read()
         with ctx.state.transaction() as updated:
             updated.history.append({"operation": "own-replay", "seq": seq})
@@ -285,14 +647,58 @@ def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcom
         with ctx.state.transaction() as updated:
             updated.meta["snapshot_seq"] = latest_snapshot
             updated.history.append({"operation": "snapshot-recovery", "seq": latest_snapshot})
+    state = ctx.state.read()
+    head = max(map(int, state.own_log), default=0)
+    # Restored-device detection: someone says records through ``claimed`` exist but they
+    # are not all here yet (after replay and snapshot recovery they would be in own_log).
+    claimed = claimed_seq(ctx, view, own_published)
+    if claimed > head:
+        ctx.own["in_flight"] = claimed
+        # Receipts can name seqs, they cannot invent them: never skip to a seq the
+        # record grammar cannot name, whatever a peer's cursor claims.
+        ctx.own["skip_ahead"] = ctx.folder_synced() and claimed < layout.MAX_SEQ
+    if own_records_lost(ctx, view, state):
+        ctx.own["lost"] = True
+    torn = _torn(ctx, state, view, head)
+    if torn is not None:
+        ctx.own["torn"] = torn
+    elif claimed <= head:
+        # No claim covers the next slot, but an incomplete family this device cannot
+        # prove it wrote sits there: publishing is wedged until it completes or the
+        # operator acts. Pull must say so instead of reporting clean.
+        slot, slot_state = own_slot(ctx, state, view, "commit", head + 1)
+        if slot_state == "in-flight" and not slot.complete:
+            ctx.own["blocked"] = head + 1
     return Outcome("applied", warnings=tuple(warnings))
 
 
+def _torn(ctx: Context, state, view: View, head: int) -> int | None:
+    """The seq of a proven torn own slot (next commit slot, or the current snapshot)."""
+    if own_slot(ctx, state, view, "commit", head + 1)[1] == "torn":
+        return head + 1
+    slot, slot_state = own_slot(ctx, state, view, "snapshot", head)
+    return head if not slot.complete and slot_state == "torn" else None
+
+
 def presence(ctx: Context, *, changed=False, **kwargs) -> Outcome:
+    if ctx.own.get("in_flight") is not None:
+        return Outcome("unchanged")  # Never rewrite presence while own records are in flight.
     state = ctx.state.read()
-    if not changed and ctx.clock.now - state.meta.get("presence_time", 0) < 3600:
-        return Outcome("unchanged")
     seq = max(map(int, state.own_log), default=0)
+    if not changed and ctx.clock.now - state.meta.get("presence_time", 0) < 3600:
+        # An own presence behind own state needs only a rewrite, never a heal.
+        try:
+            raw = ctx.load(ctx.device_id, "presence", 0)
+            behind = isinstance(raw, bytes) and (
+                codec.decode_presence(raw, expected=ctx.context(ctx.device_id, "presence", 0))[
+                    "published_seq"
+                ]
+                < seq
+            )
+        except envelope.StoreError:
+            behind = False
+        if not behind:
+            return Outcome("unchanged")
     value = {
         "device_id": ctx.device_id,
         "device_name": ctx.name,
@@ -347,6 +753,42 @@ def authored_entries(ctx: Context) -> tuple[codec.Entry, ...]:
     return tuple(result)
 
 
+def own_slot(ctx: Context, state, view: View, kind: str, seq: int) -> tuple[Slot, str]:
+    """Classify this device's next slot: ``free``, ``torn`` or ``in-flight``.
+
+    ``torn``: no complete family and every incomplete one is named by an intent row,
+    so this device provably started it and a fresh family may take the slot.
+    ``in-flight``: some incomplete family is not provably this device's own (for
+    example records still arriving after a restore): never write at that seq.
+    """
+    slot = view.slot(ctx.device_id, kind, seq)
+    if not slot.incomplete:
+        return slot, "free"
+    proven = [intent_key(kind, seq, family) in state.intents for family in slot.incomplete]
+    return slot, "torn" if all(proven) else "in-flight"
+
+
+def in_flight(seq: int, ctx: Context) -> Outcome:
+    return Outcome(
+        "pending",
+        peer=ctx.device_id,
+        gap_seq=seq,
+        reason="own-records-in-flight",
+        warnings=(owner_text("own-records-in-flight", claimed=seq),),
+    )
+
+
+def newest_complete_own_digest(ctx: Context, view: View, state) -> str:
+    """``prev`` of a skip-ahead commit: the newest own family still complete in storage,
+    else the newest own_log row; a device with neither has nothing readers could check."""
+    commits = view.records(ctx.device_id, "commit")
+    if commits:
+        return commits[-1].digest
+    if state.own_log:
+        return state.own_log[str(max(map(int, state.own_log)))]["hash"]
+    return "0" * 64
+
+
 def publish(
     ctx: Context,
     *,
@@ -355,13 +797,60 @@ def publish(
     attended=True,
     allow_known_unreadable=False,
     checked=None,
+    skip_ok=None,
     **kwargs,
 ) -> Outcome:
+    """§5. Order after reconcile: own-fork refusal (done), restored-device detection,
+    torn-slot handling, then heal. An attended push may skip ahead of records that never
+    return once the folder is synced; autopush stays pending."""
     reconciled = checked or ctx.call("reconcile", allow_known_unreadable=allow_known_unreadable)
     if reconciled.status != "applied":
         return reconciled
+    skip_ok = attended if skip_ok is None else skip_ok
+    state = ctx.state.read()
+    head = max(map(int, state.own_log), default=0)
+    claimed, lost = ctx.own.get("in_flight"), ctx.own.get("lost")
+    skip = False
+    if claimed is not None:
+        if not (skip_ok and ctx.own.get("skip_ahead")):
+            return in_flight(claimed, ctx)
+        skip = True
+    seq = claimed + 1 if skip else head + 1
+    slot, slot_state = own_slot(ctx, state, ctx.view(), "commit", seq)
+    if skip:
+        # The claim can lag storage: a complete family already occupies the skip
+        # target (unreplayed behind the hole). Advance past observed complete slots
+        # without treating them as replayed; an incomplete one may still complete,
+        # so it still waits. Receipts alone would never grow the claim past a
+        # record no peer applied.
+        while slot.complete and seq < layout.MAX_SEQ:
+            seq += 1
+            slot, slot_state = own_slot(ctx, state, ctx.view(), "commit", seq)
+        if slot.complete or slot.incomplete:
+            return in_flight(seq, ctx)
+    if slot_state == "in-flight":
+        # An unproven incomplete family at the next slot (its intent row was lost,
+        # e.g. a state restore to a pre-crash backup) would wedge publishing forever:
+        # its missing parts can only ever come from this device. Once the folder is
+        # synced and no receipt claims the seq, an attended push may supersede it,
+        # exactly like skip-ahead; autopush stays pending. If a clone later completes
+        # the old family, the two families fork visibly (§9 row three/four).
+        if not (attended and claimed is None and slot.incomplete and ctx.folder_synced()):
+            return in_flight(seq, ctx)
+        slot_state = "torn"
+    torn = slot_state == "torn"
+    if torn and not ctx.folder_synced():
+        # An intent row proves some copy of this state started the family; a backup
+        # can carry the row back after the slot was later closed. While redelivery
+        # may still complete the slot, superseding would fork this device, so torn
+        # closure waits for the folder to sync, exactly like skip-ahead.
+        return in_flight(seq, ctx)
     entries = authored_entries(ctx)
-    if not entries:
+    heal_text = (owner_text("own-records-lost"),) if lost else ()
+    # A torn snapshot at the current head is reported by pull as "the next push
+    # completes it"; an attended push must actually close it, not return unchanged.
+    torn_snapshot = not torn and ctx.own.get("torn") is not None and ctx.own["torn"] == head
+    if not entries and not torn and not skip:
         ctx.call(
             "presence",
             changed=bool(reconciled.warnings)
@@ -369,22 +858,33 @@ def publish(
                 r.get("operation") == "snapshot-recovery" for r in ctx.state.read().history[-1:]
             ),
         )
-        return Outcome("unchanged", warnings=reconciled.warnings)
-    state = ctx.state.read()
-    seq = max(map(int, state.own_log), default=0) + 1
-    # Conservative partial-own-commit reading: don't overwrite any published part.
-    if any(
-        n.device_id == ctx.device_id and n.kind == "commit" and n.seq == seq
-        for n in ctx.names().values()
-    ):
-        return Outcome("pending", peer=ctx.device_id, gap_seq=seq, reason="partial-own-commit")
-    prev = state.own_log[str(seq - 1)]["hash"] if seq > 1 else None
+        healed = ctx.call("snapshot", force=True) if attended and (lost or torn_snapshot) else None
+        closed = healed is not None and healed.status == "published"
+        return Outcome(
+            "published" if closed else "unchanged",
+            seq=healed.seq if closed else None,
+            warnings=reconciled.warnings + heal_text + fork_warnings(ctx),
+            events=(
+                (("heal-snapshot",) if lost else ())
+                + (("torn-supersede",) if torn_snapshot else ())
+            )
+            if closed
+            else (),
+        )
+    # A proven torn slot closes with a fresh complete family even when the unchanged
+    # ledger and files author nothing, and a skip-ahead commit exists to anchor a forced
+    # snapshot: peers wait on those seqs otherwise.
+    prev = (
+        newest_complete_own_digest(ctx, ctx.view(), state)
+        if skip
+        else (state.own_log[str(seq - 1)]["hash"] if seq > 1 else None)
+    )
     expected = ctx.context(ctx.device_id, "commit", seq)
     payload = codec.encode_commit(
         header(ctx, "commit", seq, prev, entries), entries, expected=expected
     )
-    parts = write_record(ctx, "commit", seq, payload, crash_parts=crash_parts)
-    if not parts or crash_state:
+    written = write_record(ctx, "commit", seq, payload, crash_parts=crash_parts)
+    if not written.complete or crash_state:
         return Outcome("crashed", seq=seq)
     digest = hashlib.sha256(payload).hexdigest()
     with ctx.state.transaction() as updated:
@@ -394,34 +894,63 @@ def publish(
             )
         updated.own_log[str(seq)] = {
             "hash": digest,
+            "family": written.family,
             "prev": prev,
             "time": ctx.clock.now,
             "created_at": ctx.clock.iso,
             "bytes": len(payload),
-            "parts": parts,
+            "parts": written.total,
         }
         updated.cursors[ctx.device_id] = {"applied_seq": seq, "hash": digest}
-        updated.history.append({"operation": "publish", "seq": seq})
+        updated.history.append({"operation": "publish", "seq": seq, "family": written.family})
+        updated.intents.pop(intent_key("commit", seq, written.family), None)
+    ctx.own["in_flight"] = None  # This device has now published past what was claimed.
     ctx.call("presence", changed=True)
-    if attended:
-        complete = ctx.records(ctx.device_id, "snapshot")
-        last_seq, last_bytes = (complete[-1][0], len(complete[-1][1])) if complete else (0, 0)
+    forced = skip or (attended and lost)
+    if attended and not forced:
+        complete = ctx.view().records(ctx.device_id, "snapshot")
+        last_seq, last_bytes = (complete[-1].seq, len(complete[-1].payload)) if complete else (0, 0)
         new_rows = [r for n, r in sorted(ctx.state.read().own_log.items()) if int(n) > last_seq]
-        if core.snapshot_due(sum(r["bytes"] for r in new_rows), len(new_rows), last_bytes):
-            ctx.call("snapshot", force=True)
-    return Outcome("published", seq=seq, warnings=reconciled.warnings)
+        forced = core.snapshot_due(sum(r["bytes"] for r in new_rows), len(new_rows), last_bytes)
+    healed = None
+    if forced:
+        healed = ctx.call("snapshot", force=True)
+    events = (
+        (("torn-supersede",) if torn else ())
+        + (("skip-ahead",) if skip else ())
+        + (("heal-snapshot",) if lost and healed is not None else ())
+    )
+    return Outcome(
+        "published",
+        seq=seq,
+        warnings=reconciled.warnings + (() if skip else heal_text) + fork_warnings(ctx),
+        events=events,
+    )
 
 
-def displace(state, version: codec.Entry | None, now: int, reason: str) -> None:
+def displace(
+    state, version: codec.Entry | None, now: int, reason: str, *, cause=None, peer=None
+) -> None:
+    """Keep replaced bytes 30 days. ``cause="fork"`` + ``peer`` tags a version a peer's
+    fork displaced, so the repeating fork warning can name and count it."""
     if version is not None and version.content is not None:
-        state.displaced.append({**row(version), "time": now, "reason": reason})
+        value = {**row(version), "time": now, "reason": reason}
+        if cause is not None:
+            value.update(cause=cause, peer=peer)
+        state.displaced.append(value)
 
 
 def resolve(ctx: Context, *, local, incoming, **kwargs):
     return core.resolve(local, incoming)
 
 
-def classify(ctx: Context, *, incoming: codec.Entry, peer: str, seq: int, **kwargs) -> str:
+def classify(
+    ctx: Context, *, incoming: codec.Entry, peer: str, seq: int, fork=False, **kwargs
+) -> str:
+    """§4 table. ``fork``: the entry comes from a family at or after a peer's first fork
+    seq, so an incoming version this device dominates is kept in ``displaced`` instead
+    of being dropped (counter reuse after a restore can make a post-restore edit look
+    derived from the pre-restore one)."""
     meta = incoming.metadata
     key = path_key(meta["source"], meta["path"])
     state = ctx.state.read()
@@ -470,6 +999,8 @@ def classify(ctx: Context, *, incoming: codec.Entry, peer: str, seq: int, **kwar
                 core.resolver_name(meta["path"]) == "newest" or data is None
             ):
                 displace(updated, incoming, ctx.clock.now, "resolution-loser")
+        if action == "ignore" and fork:
+            displace(updated, incoming, ctx.clock.now, "ignored-fork", cause="fork", peer=peer)
         if action != "ignore":
             updated.ledger[key] = row(chosen, pending=pending)
         updated.history.append(
@@ -506,16 +1037,23 @@ def snapshot(
     reconciled = ctx.call("reconcile", allow_known_unreadable=force)
     if reconciled.status != "applied":
         return reconciled
-    result = ctx.call("publish", attended=False, allow_known_unreadable=force, checked=reconciled)
+    result = ctx.call(
+        "publish", attended=False, skip_ok=True, allow_known_unreadable=force, checked=reconciled
+    )
     if result.status not in ("published", "unchanged"):
         return result
     state = ctx.state.read()
     seq = max(map(int, state.own_log), default=0)
-    if any(
-        n.device_id == ctx.device_id and n.kind == "snapshot" and n.seq == seq
-        for n in ctx.names().values()
-    ):
+    slot, slot_state = own_slot(ctx, state, ctx.view(), "snapshot", seq)
+    if slot.complete:
         return Outcome("unchanged", seq=seq)
+    if slot_state == "in-flight":
+        # Same unproven-incomplete escape as publish: a snapshot is operator-invoked
+        # (`mm push --snapshot`), so once synced and unclaimed it may supersede.
+        if not (slot.incomplete and ctx.folder_synced() and ctx.own.get("in_flight") is None):
+            return in_flight(seq, ctx)
+    if slot_state == "torn" and not ctx.folder_synced():
+        return in_flight(seq, ctx)  # Torn closure waits for sync, as in publish.
     entries = tuple(
         core.entry(
             value["source"],
@@ -531,38 +1069,78 @@ def snapshot(
     payload = codec.encode_snapshot(
         header(ctx, "snapshot", seq, prev, entries), entries, expected=expected
     )
-    if not write_record(ctx, "snapshot", seq, payload, crash_parts=crash_parts) or crash_state:
+    written = write_record(ctx, "snapshot", seq, payload, crash_parts=crash_parts)
+    if not written.complete or crash_state:
         return Outcome("crashed", seq=seq)
     with ctx.state.transaction() as updated:
         updated.meta["snapshot_seq"] = seq
+        updated.meta.setdefault("snapshots", {})[str(seq)] = written.family
+        updated.intents.pop(intent_key("snapshot", seq, written.family), None)
     ctx.call("presence", changed=True)
     ctx.call("compact", checked=reconciled)
-    return Outcome("published", seq=seq, warnings=reconciled.warnings)
+    return Outcome(
+        "published",
+        seq=seq,
+        warnings=reconciled.warnings,
+        events=("torn-supersede",) if slot_state == "torn" else (),
+    )
 
 
 def compact(ctx: Context, *, checked=None, **kwargs) -> Outcome:
     checked = checked or ctx.call("reconcile")
     if checked.status != "applied":
         return checked
-    snaps = ctx.records(ctx.device_id, "snapshot")
-    previous = snaps[-2][0] if len(snaps) > 1 else -1
+    seqs = sorted({r.seq for r in ctx.view().records(ctx.device_id, "snapshot")})
+    previous = seqs[-2] if len(seqs) > 1 else -1
     state = ctx.state.read()
     removed = False
+    # Only an own family this device can prove it wrote may be deleted: the family
+    # named in own_log (a commit) or meta.snapshots (a snapshot), or one an intent row
+    # names (a torn or superseded attempt). Any other own family, at any seq, is kept.
+    proven = {(v["kind"], v["seq"], v["family"]) for v in state.intents.values()}
+    for seq, row_ in state.own_log.items():
+        if row_.get("family"):
+            proven.add(("commit", int(seq), row_["family"]))
+    for seq, family in state.meta.get("snapshots", {}).items():
+        proven.add(("snapshot", int(seq), family))
+    # Commits an own snapshot covered (recovery anchored own_log past them without a
+    # row each) are proven by that snapshot's prev chain, digest for digest; without
+    # this they could never be deleted after a restore older than the floor.
+    view = ctx.view()
+    chain = covered_chain(view, ctx.device_id, state.cursors.get(ctx.device_id, {}).get("snapshot"))
+    chain_times = {}
+    for seq, digest in chain.items():
+        for found in view.slot(ctx.device_id, "commit", seq).complete:
+            if found.digest == digest:
+                proven.add(("commit", seq, found.family))
+                chain_times[seq] = int(
+                    datetime.fromisoformat(found.record.header["created_at"]).timestamp()
+                )
     for key, name in ctx.names().items():
-        if name.device_id != ctx.device_id:
+        if name.device_id != ctx.device_id or (name.kind, name.seq, name.family) not in proven:
             continue
         own = state.own_log.get(str(name.seq))
+        authored = own["time"] if own is not None else chain_times.get(name.seq)
         if (name.kind == "snapshot" and name.seq < previous) or (
             name.kind == "commit"
             and name.seq <= previous
-            and own is not None
-            and ctx.clock.now - own["time"] >= 14 * DAY
+            and authored is not None
+            and ctx.clock.now - authored >= 14 * DAY
         ):
             (ctx.replica_root / key).unlink()
             removed = True
+    remaining = {
+        (n.kind, n.seq, n.family) for n in ctx.names().values() if n.device_id == ctx.device_id
+    }
     with ctx.state.transaction() as updated:
+        # An intent row whose family no longer exists in storage has nothing left to prove.
+        for key, value in list(updated.intents.items()):
+            if (value["kind"], value["seq"], value["family"]) not in remaining and (
+                value["seq"] <= previous
+            ):
+                del updated.intents[key]
         for value in updated.displaced:
-            if ctx.clock.now - value["time"] >= 30 * DAY:
+            if ctx.clock.now - value["time"] >= DISPLACED_RETENTION:
                 value["expired"] = True
                 value["content"] = None
     return Outcome(
@@ -570,54 +1148,342 @@ def compact(ctx: Context, *, checked=None, **kwargs) -> Outcome:
     )
 
 
-def load_snapshot(ctx: Context, peer: str, snapshot_record) -> None:
-    seq, _, record = snapshot_record
+GAP_KEYS = ("gap_seq", "gap_since")
+
+
+def moved_cursor(old: dict | None, **fields) -> dict:
+    """A cursor update keeps ``fork`` and ``snapshot`` and drops a stale gap."""
+    kept = {k: v for k, v in (old or {}).items() if k not in GAP_KEYS}
+    return {**{"applied_seq": 0, "hash": None}, **kept, **fields}
+
+
+def load_snapshot(ctx: Context, view: View, peer: str, found: FamilyRecord) -> None:
+    """Fallback rule: classify every entry, set this peer's cursor, raise the others'.
+
+    Cursors raised for other devices cover no families: a family of theirs that is not
+    applied (or on their own snapshot's prev chain) is still a late family later.
+    """
+    seq, record = found.seq, found.record
     for incoming in record.entries:
         ctx.call("classify", incoming=incoming, peer=peer, seq=seq)
+    # §3: `applied` holds every family applied OR covered. Persist the covered
+    # chain now: coverage rebuilt from files on every pull would vanish when a
+    # chain link is compacted, and the family would classify again as late. Own
+    # recovery anchors covered commits in own_log instead, never in applied.
+    covered = (
+        covered_chain(view, peer, {"seq": seq, "prev": record.header["prev"]})
+        if peer != ctx.device_id
+        else {}
+    )
     with ctx.state.transaction() as state:
+        for covered_seq, digest in sorted(covered.items()):
+            for family_record in view.slot(peer, "commit", covered_seq).complete:
+                if family_record.digest == digest:
+                    state.applied[applied_key(peer, covered_seq, family_record.family)] = {
+                        "peer": peer,
+                        "seq": covered_seq,
+                        "family": family_record.family,
+                        "digest": digest,
+                    }
         state.history.append(
-            {"operation": "record-applied", "peer": peer, "kind": "snapshot", "seq": seq}
+            {
+                "operation": "record-applied",
+                "peer": peer,
+                "kind": "snapshot",
+                "seq": seq,
+                "family": found.family,
+            }
         )
-        state.cursors[peer] = {"applied_seq": seq, "hash": record.header["prev"]}
+        state.cursors[peer] = moved_cursor(
+            state.cursors.get(peer),
+            applied_seq=seq,
+            hash=record.header["prev"],
+            snapshot={"seq": seq, "prev": record.header["prev"]},
+        )
         for other, cursor in sorted(record.header["cursors"].items()):
             existing = state.cursors.get(other, {"applied_seq": 0, "hash": None})
             if cursor > existing["applied_seq"]:
                 # The wire snapshot carries seq cursors, not other-peer hashes.
-                candidates = [r for r in ctx.records(other, "commit") if r[0] == cursor]
-                anchors = [r for r in ctx.records(other, "snapshot") if r[0] == cursor]
+                candidates = view.slot(other, "commit", cursor).complete
+                anchors = [r for r in view.records(other, "snapshot") if r.seq == cursor]
                 digest = (
-                    hashlib.sha256(candidates[0][1]).hexdigest()
+                    candidates[0].digest
                     if candidates
-                    else anchors[0][2].header["prev"]
+                    else anchors[0].record.header["prev"]
                     if anchors
                     else None
                 )
-                state.cursors[other] = {"applied_seq": cursor, "hash": digest}
+                state.cursors[other] = moved_cursor(
+                    state.cursors.get(other), applied_seq=cursor, hash=digest
+                )
+
+
+def covered_chain(view: View, peer: str, snapshot: dict | None) -> dict[int, str]:
+    """seq -> digest along the prev chain of the peer's own applied snapshot.
+
+    Walks digest-by-digest through retained families; a seq is recorded only when a
+    retained family at that seq carries the named digest, and the walk stops at the
+    first seq that does not (compacted, or skipped by a skip-ahead commit whose
+    ``prev`` names an older seq). Only these families count as covered: a digest is
+    never assigned to a seq by arithmetic.
+    """
+    chain: dict[int, str] = {}
+    if not snapshot or snapshot["prev"] is None:
+        return chain
+    seq, digest = snapshot["seq"], snapshot["prev"]
+    while True:
+        family = next(
+            (f for f in view.slot(peer, "commit", seq).complete if f.digest == digest), None
+        )
+        if family is None:
+            break
+        chain[seq] = digest
+        if seq == 1 or family.record.header["prev"] is None:
+            break
+        seq, digest = seq - 1, family.record.header["prev"]
+    return chain
+
+
+def applied_digests(state, peer: str, seq: int | None = None) -> set[str]:
+    return {
+        r["digest"]
+        for r in state.applied.values()
+        if r["peer"] == peer and (seq is None or r["seq"] == seq)
+    }
+
+
+def prev_follows(state, peer: str, found: FamilyRecord, chain: dict[int, str]) -> bool | None:
+    """§6: ``prev`` must match ANY applied family at seq-1, or the peer's own snapshot
+    ``prev`` there; with neither it is not checked (None). The chain-anchor wait is gone."""
+    prev = found.record.header["prev"]
+    if found.seq == 1:
+        return prev is None
+    known = applied_digests(state, peer, found.seq - 1)
+    if found.seq - 1 in chain:
+        known.add(chain[found.seq - 1])
+    return None if not known else prev in known
+
+
+def note_fork(ctx: Context, peer: str, kind: str, seq: int, *, clone=False) -> bool:
+    """Record the FIRST fork evidence for a peer (``cursors.fork``). True when new."""
+    if "fork" in ctx.state.read().cursors.get(peer, {}):
+        return False
+    with ctx.state.transaction() as state:
+        cursor = state.cursors.setdefault(peer, {"applied_seq": 0, "hash": None})
+        cursor["fork"] = {"kind": kind, "seq": seq, "first_seen": ctx.clock.now, "clone": clone}
+    return True
+
+
+def fork_evidence(ctx: Context, view: View, state, peer: str, fork_keys) -> tuple | None:
+    """Earliest (seq, kind, clone) evidence in storage, never a refusal.
+
+    ``conflict-copy``: a transport copy of the peer's commit. ``family``: two complete
+    families with different payloads (both in storage). ``republished``: an applied
+    family is gone from storage and a different digest holds its slot.
+    """
+    found = []
+    for key in fork_keys:
+        if key.startswith("dev/" + peer + "/log/"):
+            found.append((int(key.rsplit("/", 1)[1].split(".")[0]), "conflict-copy", False))
+    chain = covered_chain(view, peer, state.cursors.get(peer, {}).get("snapshot"))
+    for seq in view.seqs(peer, "commit"):
+        families = view.slot(peer, "commit", seq).complete
+        present = {f.digest for f in families}
+        known = applied_digests(state, peer, seq) | ({chain[seq]} if seq in chain else set())
+        if len(present | known) > 1:
+            hosts = {f.record.header["host"] for f in families}
+            kind = "republished" if known - present else "family"
+            found.append((seq, kind, kind == "family" and len(hosts) > 1))
+    return min(found, key=lambda item: (item[0], item[1])) if found else None
+
+
+def unreadable_beside_text(device: str, seq: int) -> str:
+    """An unreadable family beside a complete readable one is ignored, with a diag note."""
+    return (
+        f"{device} record {seq} has an unreadable copy beside a complete one; "
+        "ignored; run `mm diag`"
+    )
+
+
+def retain_ignored_by_fork(ctx: Context, peer: str) -> int:
+    """Fork evidence can arrive after an entry was already ignored as dominated.
+
+    Every entry of this peer at or after its first fork seq that classified as
+    ``ignore`` (kept in the persisted history receipts) is recorded in ``displaced``
+    with ``cause = fork``, once, unless the same bytes are already current or kept.
+    """
+    state = ctx.state.read()
+    fork = state.cursors.get(peer, {}).get("fork")
+    if not fork:
+        return 0
+    # Once only: an expired fork row still names the version, so it is never re-retained.
+    kept = {
+        (v["source"], v["path"], v["sha"])
+        for v in state.displaced
+        if v["content"] is not None or (v.get("cause") == "fork" and v.get("peer") == peer)
+    }
+    pending = []
+    for value in state.history:
+        if value.get("operation") != "pull-entry" or value["peer"] != peer:
+            continue
+        incoming = value["incoming"]
+        if value["action"] != "ignore" or value["seq"] < fork["seq"] or incoming["deleted"]:
+            continue
+        identity = (incoming["source"], incoming["path"], incoming["sha"])
+        current, _ = ctx.source(incoming["source"], incoming["path"])
+        if identity in kept or current == incoming["content"]:
+            continue
+        kept.add(identity)
+        pending.append(from_row(incoming))
+    if pending:
+        with ctx.state.transaction() as updated:
+            for version in pending:
+                displace(updated, version, ctx.clock.now, "ignored-fork", cause="fork", peer=peer)
+    return len(pending)
+
+
+def fork_text(peer: str, fork: dict, live: list[dict]) -> str:
+    """Reader-side remedy text. ``peer`` is a device id here; the product routes the
+    display name through ``safety`` (``safe_terminal_str`` for single-line stderr)."""
+    seq, kind = fork["seq"], fork["kind"]
+    if kind == "conflict-copy":
+        text = (
+            f"{peer}'s log has a conflicting copy of record {seq}; run `mm diag`, "
+            f"then `mm rejoin` on {peer}"
+        )
+    elif kind == "republished":
+        text = (
+            f"{peer} republished an earlier sequence (restored from a backup?); "
+            "both versions were kept"
+        )
+    elif kind == "prev":
+        text = (
+            f"{peer}'s record {seq} does not follow the record applied before it; both "
+            f"versions were kept; run `mm diag`, then `mm rejoin` on {peer}"
+        )
+    elif fork.get("clone"):
+        text = (
+            f"{peer} is used by more than one machine (record {seq} exists twice); "
+            "run `mm rejoin` on each machine using this id"
+        )
+    else:
+        text = (
+            f"{peer} has two different records for push #{seq} (restored from a backup?); "
+            f"both versions were kept; run `mm rejoin` on {peer}"
+        )
+    if live:
+        earliest = min(value["time"] for value in live) + DISPLACED_RETENTION
+        date = datetime.fromtimestamp(earliest, timezone.utc).date().isoformat()
+        text += (
+            f"; {len(live)} displaced version{'s' if len(live) != 1 else ''} kept until "
+            f"{date}; see `mm displaced` before then"
+        )
+    return text
+
+
+def fork_warnings(ctx: Context, *, new=()) -> tuple[str, ...]:
+    """Warn on the pull that first sees evidence, then on EVERY push and pull while a
+    version the peer's fork displaced is unexpired and unrestored; keep one breadcrumb
+    for ``mm status``. Data-at-risk text is never quiet-gated."""
+    state = ctx.state.read()
+    texts, crumbs = [], {}
+    for peer, cursor in sorted(state.cursors.items()):
+        fork = cursor.get("fork")
+        if not fork:
+            continue
+        live = [
+            v
+            for v in state.displaced
+            if v.get("cause") == "fork"
+            and v.get("peer") == peer
+            and not v.get("expired")
+            and not v.get("restored")
+        ]
+        if live or peer in new:
+            texts.append(fork_text(peer, fork, live))
+        if live:
+            crumbs[peer] = {
+                "displaced": len(live),
+                "earliest": min(v["time"] for v in live) + DISPLACED_RETENTION,
+            }
+    if state.meta.get("fork_breadcrumb", {}) != crumbs:
+        with ctx.state.transaction() as updated:
+            if crumbs:
+                updated.meta["fork_breadcrumb"] = crumbs
+            else:
+                updated.meta.pop("fork_breadcrumb", None)
+    return tuple(texts)
+
+
+def apply_commit(
+    ctx: Context, peer: str, found: FamilyRecord, chain: dict[int, str], events: list[str]
+) -> None:
+    """Apply one complete family once. At cursor+1 it moves the cursor; at or below it
+    (a second family at the slot, or a late one) the cursor stays and the receipt says so.
+    ``prev`` is checked once, here; a failure is fork evidence and never a refusal."""
+    state = ctx.state.read()
+    forward = found.seq == state.cursors.get(peer, {"applied_seq": 0})["applied_seq"] + 1
+    if not forward:
+        events.append("late-family")  # At or below the cursor: a second or late family.
+    if prev_follows(state, peer, found, chain) is False:
+        if note_fork(ctx, peer, "prev", found.seq):
+            events.append("fork-evidence")
+    fork = ctx.state.read().cursors.get(peer, {}).get("fork")
+    taint = fork is not None and found.seq >= fork["seq"]
+    for incoming in found.record.entries:
+        action = ctx.call(
+            "classify",
+            incoming=incoming,
+            peer=peer,
+            seq=found.seq,
+            family=found.family,
+            fork=taint,
+        )
+        if action == "resolve":
+            events.append("concurrent-" + core.resolver_name(incoming.metadata["path"]))
+        if action == "bootstrap-delete":
+            events.append("bootstrap-inversion")
+    with ctx.state.transaction() as updated:
+        updated.history.append(
+            {
+                "operation": "record-applied",
+                "peer": peer,
+                "kind": "commit",
+                "seq": found.seq,
+                "family": found.family,
+            }
+        )
+        updated.applied[applied_key(peer, found.seq, found.family)] = {
+            "peer": peer,
+            "seq": found.seq,
+            "family": found.family,
+            "digest": found.digest,
+        }
+        if forward:
+            updated.cursors[peer] = moved_cursor(
+                updated.cursors.get(peer), applied_seq=found.seq, hash=found.digest
+            )
 
 
 def read(ctx: Context, **kwargs) -> Outcome:
+    """§6 reader. Every complete readable family is applied once, in (seq, family)
+    order; a peer fork is evidence and a warning, never a refusal."""
     checked = ctx.call("reconcile")
     if checked.status != "applied":
         return checked
-    events, warnings, pending, refusals = [], [], [], []
-    changed = False
-    names = ctx.names()
-    fork_keys = layout.classify_keys(
-        sorted(
-            p.relative_to(ctx.replica_root).as_posix()
-            for p in ctx.replica_root.rglob("*")
-            if p.is_file()
-        )
-    ).forks
+    events, warnings, pending = [], [], []
+    changed, new_forks = False, set()
+    paths = ctx.file_keys()
+    view = ctx.view(paths)
+    names = view.names
+    fork_keys = layout.classify_keys(paths).forks
     peers = sorted(
-        (
-            {n.device_id for n in names.values()}
-            | {p.split("/")[1] for p in fork_keys if p.startswith("dev/")}
-        )
+        (view.devices() | {p.split("/")[1] for p in fork_keys if p.startswith("dev/")})
         - {ctx.device_id}
     )
     for peer in peers:
         advertised = 0
+        had_fork = "fork" in ctx.state.read().cursors.get(peer, {})
         try:
             payload = ctx.load(peer, "presence", 0, names=names)
             if isinstance(payload, bytes):
@@ -626,17 +1492,29 @@ def read(ctx: Context, **kwargs) -> Outcome:
                 )["published_seq"]
         except envelope.StoreError:
             warnings.append("unreadable peer presence")
-        snapshots = ctx.records(peer, "snapshot", names=names)
-        latest = snapshots[-1] if snapshots else None
-        peer_forks = [p for p in fork_keys if p.startswith("dev/" + peer + "/")]
-        fork_seq = min((int(p.split("/")[-1].split(".")[0]) for p in peer_forks), default=None)
+        latest = view.latest_snapshot(peer)
+        evidence = fork_evidence(ctx, view, ctx.state.read(), peer, fork_keys)
+        if evidence and note_fork(ctx, peer, evidence[1], evidence[0], clone=evidence[2]):
+            new_forks.add(peer)
+            events.append("fork-evidence")
+        chain = covered_chain(view, peer, ctx.state.read().cursors.get(peer, {}).get("snapshot"))
+        # Late families: complete, at or below the cursor, neither applied nor covered.
+        state = ctx.state.read()
+        cursor = state.cursors.get(peer, {"applied_seq": 0})
+        seen = applied_digests(state, peer)
+        for found in view.records(peer, "commit"):
+            if (
+                found.seq <= cursor["applied_seq"]
+                and found.digest not in seen
+                and chain.get(found.seq) != found.digest
+            ):
+                apply_commit(ctx, peer, found, chain, events)
+                seen.add(found.digest)
+                changed = True
         for _ in range(1000):
             state = ctx.state.read()
             cursor = state.cursors.get(peer, {"applied_seq": 0, "hash": None})
             seq = cursor["applied_seq"] + 1
-            if fork_seq is not None and seq >= fork_seq:
-                refusals.append((peer, "fork"))
-                break
             known_seq = max(
                 [
                     n.seq
@@ -649,75 +1527,31 @@ def read(ctx: Context, **kwargs) -> Outcome:
             )
             if seq > known_seq:
                 break
-            unreadable = False
-            try:
-                payload = ctx.load(peer, "commit", seq, names=names)
-            except envelope.StoreError:
-                unreadable, payload = True, None
+            slot = view.slot(peer, "commit", seq)
+            unreadable = not slot.complete and bool(slot.unreadable)
             if unreadable:
                 warnings.append("unreadable commit; owner: push --snapshot")
+            elif slot.complete and slot.unreadable:
+                warnings.append(unreadable_beside_text(peer, seq))
             rule = core.reader_rule(
                 seq,
-                complete=isinstance(payload, bytes),
+                complete=bool(slot.complete),
                 unreadable=unreadable,
-                snapshot_seq=None if latest is None else latest[0],
+                snapshot_seq=None if latest is None else latest.seq,
             )
-            if rule == "snapshot" and fork_seq is not None and latest[0] >= fork_seq:
-                refusals.append((peer, "fork"))
-                break
             if rule == "snapshot":
-                load_snapshot(ctx, peer, latest)
+                load_snapshot(ctx, view, peer, latest)
+                chain = covered_chain(view, peer, ctx.state.read().cursors[peer]["snapshot"])
                 changed = True
                 events.append("snapshot-fallback")
                 continue
             if rule == "commit":
-                if cursor["hash"] is None and cursor["applied_seq"] > 0:
-                    anchors = [r for r in snapshots if r[0] == cursor["applied_seq"]]
-                    try:
-                        anchor = ctx.load(peer, "commit", cursor["applied_seq"], names=names)
-                    except envelope.StoreError:
-                        anchor = None
-                    if isinstance(anchor, bytes) or anchors:
-                        digest = (
-                            hashlib.sha256(anchor).hexdigest()
-                            if isinstance(anchor, bytes)
-                            else anchors[-1][2].header["prev"]
-                        )
-                        cursor = {**cursor, "hash": digest}
-                        with ctx.state.transaction() as updated:
-                            updated.cursors[peer] = cursor
-                record = codec.decode_commit(payload, expected=ctx.context(peer, "commit", seq))
-                if record.header["prev"] != cursor["hash"]:
-                    # Indirect snapshot cursors have no chain anchor; wait for one.
-                    if cursor["hash"] is None and cursor["applied_seq"] > 0:
-                        if latest is not None and latest[0] >= seq:
-                            load_snapshot(ctx, peer, latest)
-                            events.append("snapshot-fallback")
-                            continue
-                        since = cursor.get("gap_since", ctx.clock.now)
-                        with ctx.state.transaction() as updated:
-                            updated.cursors[peer] = {**cursor, "gap_seq": seq, "gap_since": since}
-                        if ctx.clock.now - since > DAY:
-                            warnings.append("chain anchor gap older than 24 hours")
-                        pending.append((peer, seq, "chain-anchor"))
-                        break
-                    refusals.append((peer, "fork"))
-                    break
                 changed = True
-                for incoming in record.entries:
-                    action = ctx.call("classify", incoming=incoming, peer=peer, seq=seq)
-                    if action == "resolve":
-                        events.append("concurrent-" + core.resolver_name(incoming.metadata["path"]))
-                    if action == "bootstrap-delete":
-                        events.append("bootstrap-inversion")
-                with ctx.state.transaction() as updated:
-                    updated.history.append(
-                        {"operation": "record-applied", "peer": peer, "kind": "commit", "seq": seq}
-                    )
-                    updated.cursors[peer] = {
-                        "applied_seq": seq,
-                        "hash": hashlib.sha256(payload).hexdigest(),
-                    }
+                seen = applied_digests(ctx.state.read(), peer)
+                for found in slot.complete:
+                    if found.digest not in seen:  # Equal digests are one record.
+                        apply_commit(ctx, peer, found, chain, events)
+                        seen.add(found.digest)
                 continue
             since = cursor.get("gap_since", ctx.clock.now)
             with ctx.state.transaction() as updated:
@@ -729,17 +1563,26 @@ def read(ctx: Context, **kwargs) -> Outcome:
             pending.append((peer, seq, rule))
             events.append("gap-pending")
             break
+        if not had_fork and "fork" in ctx.state.read().cursors.get(peer, {}):
+            new_forks.add(peer)  # Evidence found while applying (for example a bad prev).
+        retain_ignored_by_fork(ctx, peer)
     ctx.call("presence", changed=changed)
-    if refusals:
-        state = ctx.state.read()
-        for refused_peer, _ in refusals:
-            since = state.cursors.get(refused_peer, {}).get("gap_since")
-            if since is not None and ctx.clock.now - since > DAY:
-                warnings.append("gap older than 24 hours")
-        peer, reason = refusals[0]
-        return Outcome(
-            "refused", peer=peer, reason=reason, warnings=tuple(warnings), events=tuple(events)
-        )
+    warnings.extend(fork_warnings(ctx, new=new_forks))
+    own = ctx.own
+    if own.get("lost"):
+        warnings.append(owner_text("own-records-lost"))  # Visible in pull until healed.
+    if own.get("in_flight") is not None:
+        # Peers and own replay were applied above; presence was not rewritten.
+        warnings.append(owner_text("own-records-in-flight", claimed=own["in_flight"]))
+        pending.append((ctx.device_id, own["in_flight"], "own-records-in-flight"))
+    if own.get("torn") is not None:
+        warnings.append(owner_text("torn-own-slot"))
+        pending.append((ctx.device_id, own["torn"], "torn-own-slot"))
+    if own.get("blocked") is not None:
+        # An unproven incomplete family wedges the next slot; pull names it instead
+        # of reporting clean while publishing can never proceed.
+        warnings.append(owner_text("own-records-in-flight", claimed=own["blocked"]))
+        pending.append((ctx.device_id, own["blocked"], "own-records-in-flight"))
     if pending:
         peer, seq, reason = pending[0]
         return Outcome(
@@ -757,16 +1600,19 @@ def join(ctx: Context, **kwargs) -> Outcome:
     if ctx.keys is None:
         return Outcome("waiting", reason="fleet-header")
     (ctx.replica_root / ".stignore").write_bytes(STIGNORE)
+    view = ctx.view()
     candidates = [
-        r + (peer,)
-        for peer in sorted({n.device_id for n in ctx.names().values()})
+        found
+        for peer in sorted(view.devices())
         if peer != ctx.device_id
-        for r in ctx.records(peer, "snapshot")
+        for found in view.records(peer, "snapshot")
     ]
-    # Freshest = greatest logical created_at; tie: device id, then sequence.
+    # Freshest = greatest logical created_at; tie: device id, then sequence, then family.
     if candidates:
-        newest = max(candidates, key=lambda r: (r[2].header["created_at"], r[3], r[0]))
-        load_snapshot(ctx, newest[3], newest[:3])
+        newest = max(
+            candidates, key=lambda r: (r.record.header["created_at"], r.device, r.seq, r.family)
+        )
+        load_snapshot(ctx, view, newest.device, newest)
     with ctx.state.transaction() as state:
         state.meta.update(joined=True, registered=ctx.clock.iso, snapshot_seq=0)
         state.history.append({"operation": "joined"})
@@ -780,11 +1626,19 @@ def rejoin(ctx: Context, *, new_id, **kwargs) -> Outcome:
     with ctx.state.transaction() as state:
         state.ledger.clear()
         state.cursors.clear()
+        state.applied.clear()
         state.own_log.clear()
+        state.intents.clear()
         state.meta = {"device_id": new_id}
         state.history.append({"operation": "rejoin", "old_id": ctx.device_id, "new_id": new_id})
-    ctx.device_id = new_id
-    return ctx.call("join")
+    old_id, ctx.device_id = ctx.device_id, new_id
+    kept = len(ctx.state.read().displaced)
+    result = ctx.call("join")
+    with ctx.state.transaction() as state:
+        # Rejoin lists what it displaces, tagged like a peer fork's displacement.
+        for value in state.displaced[kept:]:
+            value.update(cause="fork", peer=old_id)
+    return result
 
 
 def retire(ctx: Context, *, target, **kwargs) -> Outcome:
@@ -809,7 +1663,8 @@ def retire(ctx: Context, *, target, **kwargs) -> Outcome:
             if n.device_id == target and n.kind in ("commit", "snapshot")
         ]
     )
-    peers = sorted({n.device_id for n in ctx.names().values()})
+    view = ctx.view()
+    peers = sorted(view.devices())
     for peer in peers:
         if peer == target:
             continue
@@ -822,8 +1677,8 @@ def retire(ctx: Context, *, target, **kwargs) -> Outcome:
             or ctx.clock.now - datetime.fromisoformat(value["last_active"]).timestamp() < 30 * DAY
         )
         if active:
-            snapshots = ctx.records(peer, "snapshot")
-            if not snapshots or snapshots[-1][2].header["cursors"].get(target, 0) < last_seq:
+            newest = view.latest_snapshot(peer)
+            if newest is None or newest.record.header["cursors"].get(target, 0) < last_seq:
                 return Outcome("pending", peer=target, reason="snapshot-coverage")
     directory = owned_path(ctx.replica_root, "dev/" + target)
     if directory.exists():

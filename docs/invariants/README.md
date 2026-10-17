@@ -20,7 +20,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `store/__init__.py` | Inert v3 package; no eager imports or lifecycle wiring |
 | `store/envelope.py` | (71C) Verified fleet header/keycheck, explicit keys/context, envelope 0x03, bounded authenticated decoding and safe store errors |
 | `store/format.py` | (71C) Commit/snapshot/presence schemas and frames, host fingerprint, whole-record digest and authenticated multipart assembly |
-| `store/layout.py` | (71C) Canonical record keys, parsed identity and inclusive foreign/fork classification; standard library only |
+| `store/layout.py` | (71C) Canonical record keys (commit and snapshot names carry a per-publication family), parsed identity, pure grouping by `(device, kind, seq, family)` and inclusive foreign/fork classification; standard library only |
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
 | `devices.py` | Device registry, short-id generation and lookup |
 | `events.py` | mm-events log: git-root discovery, git/session walkers, budgets; (61A) shared day scan and publication projection; (64A) size- and origin-guarded `write_push_event` (`EventAppendSkipped`, `GIT_SNAPSHOT_ORIGIN_INIT`) |
@@ -76,7 +76,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `tests/sim/` replication simulator, any change under `src/mind_meld/store/`, or a store adapter | [Replication fixtures](../../tests/sim/README.md) and `docs/invariants/store.md`; run `./bin/check tests/sim` |
 | `store/__init__.py` / `store/envelope.py:FleetKeys` / `RecordContext` / `create_fleet` / `unlock_fleet` / `seal_part` / `open_part` / `StoreError` | `docs/invariants/store.md` |
 | `store/format.py:Entry` / `Record` / `IncompleteParts` / `host_fingerprint` / `encode_commit` / `decode_commit` / `encode_snapshot` / `decode_snapshot` / `encode_presence` / `decode_presence` / `seal_record` / `open_record` | `docs/invariants/store.md` |
-| `store/layout.py:RecordName` / `KeyClassification` / `record_key` / `parse_record_key` / `classify_keys` | `docs/invariants/store.md` |
+| `store/layout.py:RecordName` / `KeyClassification` / `record_key` / `parse_record_key` / `classify_keys` / `group_record_names` | `docs/invariants/store.md` |
 | `crypto.py:derive_key` | `docs/invariants/store.md` and `docs/invariants/init-devices.md`; legacy defaults/session/cache remain unchanged |
 | `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `_publication_remedy` / `push` (attempt finally) / `aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `config.py:UsageCaptureReadiness` / `usage_capture_readiness` / `usage_capture_remedy` / `cli.py:_reader_capture_readiness` / `_usage_capture_needs_upgrade` / `_usage_capture_remedy` / `_print_usage_push_mode` / `_push_result_or_none` / `PushResult.content_changed` / `PushResult.content_files` / `PushResult.content_accepted` / `PushResult.host_usage_published` / `events.py:GIT_SNAPSHOT_ORIGIN_INIT` / `write_push_event` (batch origin guard) / `events_tail.py:_capture_event_snapshots` (`origin`) / `_run_events_tail` (`capture_activity`) / `cli.py:_push_core` (`attended`, `host_row_appended`, `capture_activity`, content gate) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |

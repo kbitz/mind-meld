@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.1 | 2026-10-17 | **Installing 1.11.1 does not change how `mm` syncs.** The store design and its test model now describe how a restored machine and a publish torn by a crash recover. Nothing in `mm` calls that code yet. |
 | 1.11.0 | 2026-10-16 | **On Linux, `mm autopull` and `mm autopush` skip a locked or missing Secret Service keyring instead of waiting on an unlock dialog.** They print one remedy, record the skip, and exit 0. `mm status` shows that hint on the next run. `mm diag` reports whether the keyring can answer. |
 | 1.10.0 | 2026-10-16 | **Pull and push history no longer disappears when one class of rows fills the log.** `mm log` reads a private local database that keeps each history class on its own, including excluded files and per-file uploads. |
 | 1.9.1 | 2026-10-15 | **The `mm update` spinner keeps moving during quiet clone and wheel-build steps.** Phase names and percentages still change only when the installer reports progress. |

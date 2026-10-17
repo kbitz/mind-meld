@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.1] - 2026-10-17
+
+**Installing 1.11.1 does not change how `mm` syncs.** The store design and its test model now describe how a restored machine and a publish torn by a crash recover. Nothing in `mm` calls that code yet.
+
+### Added
+
+- Record names in the unreleased store layout can carry a per-publication family. Current sync does not write those names.
+- The store design states what a restored machine does, how an interrupted publish closes, and which restore cases stay unsupported. The test model checks those rules.
+
+### Upgrade notes
+
+- Commands, flags, and synced storage are unchanged. An older mm keeps working beside this one.
+
 ## [1.11.0] - 2026-10-16
 
 **On Linux, `mm autopull` and `mm autopush` skip a locked or missing Secret Service keyring instead of waiting on an unlock dialog.** They print one remedy, record the skip, and exit 0. `mm status` shows that hint on the next run. `mm diag` reports whether the keyring can answer.
