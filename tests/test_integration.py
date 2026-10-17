@@ -7810,6 +7810,10 @@ def _record_preview_mutation(event, args):
         return
     records, lock_path, *declared = active
     exemptions = ([lock_path] if lock_path is not None else []) + list(declared)
+    if event == "sqlite3.connect":
+        if "mode=ro" not in str(args[0]):
+            records.append((event, repr(args)))
+        return
     if event in {"socket.connect", "urllib.Request", "subprocess.Popen", "os.posix_spawn"}:
         records.append((event, repr(args)))
         return
@@ -7959,7 +7963,8 @@ def push_preview56(tmp_path, monkeypatch):
         "claude": claude,
         "upgrade": upgrade,
         "cache": cache,
-        "history": pullhistory.HISTORY_DIR / "pull-history.jsonl",
+        "history": pullhistory.read_records,
+        "history_baseline": [],
         "fetches": fetches,
         "keyring_writes": keyring_writes,
     }
@@ -8200,12 +8205,20 @@ def _publish_peer62(env, device, files, *, tombstones=None):
 def preview62(push_preview56, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from mind_meld import identity, seen_sources, token_usage
+    from mind_meld import identity, pullhistory, seen_sources, token_usage
     from mind_meld.skills.retro_fleet import aggregator
     from mind_meld.storage.keys import blob_key
     from tests.test_host_skill_discovery import _ok_payload
 
     env = push_preview56
+    pullhistory.append(
+        verb="pull",
+        device="history-seed",
+        source="gstack",
+        rel_path="history-fixture.md",
+        action="written",
+    )
+    env["history_baseline"] = env["history"]()
     memory = env["claude"] / "projects/-Users-kb-myapp/memory"
     env["legacy"] = memory / "role.sync-conflict-20260101-120000-abcd1234.md"
     env["legacy"].write_text("old peer bytes")
@@ -8437,16 +8450,12 @@ def test_transition_deferred62(preview62, argv):
     env = preview62
     exemptions = (env["identity"],) if argv[0] == "retro-fleet" else ()
     assert env["audit"](list(argv), exemptions=exemptions).exit_code == 0
-    assert not env["history"].exists()
+    assert env["history"]() == env["history_baseline"]
     for _ in range(2):
         env["upgrade"]._reset_for_tests()
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, (result.output, result.exception)
-    transitions = [
-        json.loads(line)
-        for line in env["history"].read_text().splitlines()
-        if json.loads(line)["verb"] == "self-upgrade"
-    ]
+    transitions = [row for row in env["history"]() if row["verb"] == "self-upgrade"]
     assert len(transitions) == 1
     assert transitions[0]["old_version"] == "0.0.1"
 
@@ -8531,7 +8540,7 @@ def test_real_pull_keeps_migration_and_history62(preview62):
         .exists()
     )
     assert resolveflow._inversion_marker_path().exists()
-    rows = [json.loads(line) for line in preview62["history"].read_text().splitlines()]
+    rows = preview62["history"]()
     assert any(row.get("action") == "excluded" for row in rows)
 
 
@@ -8790,7 +8799,7 @@ def test_preview_tty_notice62(preview62, monkeypatch, command):
     )
     assert preview62["legacy"].exists()
     assert not cli_module.resolveflow._inversion_marker_path().exists()
-    assert not preview62["history"].exists()
+    assert preview62["history"]() == preview62["history_baseline"]
 
 
 @pytest.mark.parametrize("command", ["pull", "gc", "recapture"])
@@ -9129,16 +9138,16 @@ class TestPushPreviewNoMutation56A:
         env["cache"]["last_seen_self_version"] = "0.0.1"
         env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
         _assert_preview_complete(env["invoke"]())
-        assert not env["history"].exists()
+        assert env["history"]() == env["history_baseline"]
         env["upgrade"]._reset_for_tests()
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0, result.output
-        assert not env["history"].exists()
+        assert env["history"]() == env["history_baseline"]
         for _ in range(2):
             env["upgrade"]._reset_for_tests()
             result = runner.invoke(app, ["push"])
             assert result.exit_code == 0, result.output
-        rows = [json.loads(line) for line in env["history"].read_text().splitlines()]
+        rows = env["history"]()
         transitions = [row for row in rows if row["verb"] == "self-upgrade"]
         assert len(transitions) == 1
         assert transitions[0]["old_version"] == "0.0.1"
@@ -9350,7 +9359,7 @@ class TestPushPreviewNoMutation56A:
         assert env["events"].is_dir()
         assert not copy.exists()
         assert "root_salt_fp" in tomllib.loads(env["config_path"].read_text())["crypto"]
-        rows = [json.loads(line) for line in env["history"].read_text().splitlines()]
+        rows = env["history"]()
         assert len([row for row in rows if row["verb"] == "self-upgrade"]) == 1
         cache = json.loads(env["upgrade"].CACHE_PATH.read_text())
         assert cache["last_nudged_version"] == "99.0.0"
@@ -11675,3 +11684,486 @@ def test_unattended_push_still_fails_loudly_when_post_acceptance_maintenance_fai
     assert (crumb["outcome"], crumb["detail"]) == ("failed", "OSError")
     # Acceptance already happened, so the failure cannot roll the content back.
     assert rel in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
+
+
+@pytest.fixture(params=["legacy", "table"])
+def history73(request):
+    from mind_meld import pullhistory
+
+    rows = [
+        {
+            "ts": "2026-01-02T00:00:00+00:00",
+            "verb": "pull",
+            "action": "conflicted",
+            "source": "claude",
+            "rel_path": "one",
+            "sidecar": "legacy-name",
+        },
+        {
+            "ts": "2026-01-02T00:00:00+00:00",
+            "verb": "pull",
+            "action": "excluded",
+            "source": "gstack",
+            "rel_path": "two",
+            "unknown": [1],
+        },
+        {
+            "ts": "2026-01-01T00:00:00",
+            "verb": "self-upgrade",
+            "old_version": "1",
+            "new_version": "2",
+        },
+        {"ts": "invalid", "verb": "push", "action": "uploaded", "source": 4, "rel_path": "\udcff"},
+        {"verb": "pull", "action": None},
+    ]
+    path = pullhistory.history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"torn\n"
+        + b"\xff\n"
+        + b"".join(json.dumps(r, sort_keys=True).encode() + b"\n" for r in rows)
+    )
+    if request.param == "table":
+        pullhistory.maintain_best_effort()
+    return rows, request.param
+
+
+@pytest.mark.parametrize(
+    "argv,indices",
+    [
+        ([], [3, 0, 1, 2, 4]),
+        (["--action", "conflicted"], [0]),
+        (["--action", "excluded", "--source", "gstack"], [1]),
+        (["--verb", "self-upgrade"], [2]),
+        (["--since", "2026-01-02"], [0, 1]),
+        # Generated by /ship test coverage audit (Track 73B).
+        # Value: protects=--since treats a naive legacy ts as UTC on both read paths;
+        # fails_when=_timestamp_us drops naive rows or reads them as local time;
+        # why_new=the 2026-01-02 row cannot tell UTC, local or dropped apart;
+        # seam=none; no_claim=local-time misreads on a UTC host (identical there)
+        (["--since", "2026-01-01"], [0, 1, 2]),
+        (["--since", "2026-01-01T00:00:00.000001"], [0, 1]),
+        (["--limit", "2"], [3, 0]),
+    ],
+)
+def test_log_legacy_and_table_contract73(history73, argv, indices):
+    rows, _ = history73
+    result = runner.invoke(app, ["log", "--format", "jsonl", *argv])
+    assert result.exit_code == 0, result.exception
+    assert result.stdout == "".join(json.dumps(rows[i], sort_keys=True) + "\n" for i in indices)
+    assert result.stderr == ""
+
+
+def test_log_title_and_safe_cells73(history73):
+    from mind_meld import pullhistory
+
+    rows, origin = history73
+    result = runner.invoke(app, ["log", "--verb", "self-upgrade"])
+    assert result.exit_code == 0
+    assert ("state.db" if origin == "table" else "legacy pull-history.jsonl") in result.stdout
+    pullhistory.append(
+        verb="pull", device="d", source="s", rel_path="\x1b[31m[bold]x[/bold]", action="written"
+    )
+    result = runner.invoke(app, ["log", "--action", "written"])
+    assert result.exit_code == 0
+    assert "[bold]x[/bold]" in result.stdout
+    assert "\x1b" not in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["hot", "busy", "too-new", "unavailable", "corrupt", "other"])
+def test_log_errors_plain_empty_stdout73(kind, tmp_path, monkeypatch):
+    import sqlite3
+
+    from mind_meld import pullhistory, statedb
+    from tests.test_statedb import make_hot_journal
+
+    pullhistory.maintain_best_effort()
+    monkeypatch.setattr(statedb, "BUSY_TIMEOUT_MS", 100)
+    locker = None
+    if kind == "hot":
+        make_hot_journal(statedb.db_path(), tmp_path)
+        expected = statedb.StateDBHotJournal("SQLITE_READONLY_ROLLBACK")
+    elif kind == "busy":
+        locker = sqlite3.connect(statedb.db_path())
+        locker.execute("BEGIN EXCLUSIVE")
+        expected = statedb.StateDBBusy("SQLITE_BUSY")
+    elif kind == "too-new":
+        with statedb.connect(read_only=False) as conn:
+            conn.execute("UPDATE meta SET value='2' WHERE key='compat_version'")
+        expected = statedb.StateDBTooNew(2)
+    elif kind == "unavailable":
+        monkeypatch.setitem(sys.modules, "sqlite3", None)
+        expected = statedb.StateDBUnavailable("sqlite_unavailable")
+    elif kind == "corrupt":
+        statedb.db_path().write_bytes(b"not sqlite")
+        expected = statedb.StateDBCorrupt("SQLITE_NOTADB")
+    else:
+        original = pullhistory._meta
+
+        def broken(conn):
+            original(conn)
+            conn.execute("SELECT * FROM missing_table")
+
+        monkeypatch.setattr(pullhistory, "_meta", broken)
+        expected = statedb.StateDBError("SQLITE_ERROR")
+    try:
+        result = runner.invoke(app, ["log", "--format", "jsonl"])
+    finally:
+        if locker:
+            locker.close()
+    assert result.exit_code == 1, result.exception
+    assert result.stdout == ""
+    assert result.stderr == pullhistory.explain(expected) + "\n"
+    assert len(result.stderr.splitlines()) == 1
+    if kind != "corrupt":
+        assert "move state.db" not in result.stderr
+
+
+def test_log_no_sqlite_no_database_and_version73(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sqlite3", None)
+    assert runner.invoke(app, ["log", "--format", "jsonl"]).exit_code == 0
+    assert runner.invoke(app, ["--version"]).exit_code == 0
+
+
+def test_log_zero_byte_fallback_write_free_then_migrate73(history73):
+    from mind_meld import pullhistory, statedb
+
+    rows, _ = history73
+    statedb.db_path().write_bytes(b"")
+    before = _preview_tree(statedb.DB_DIR)
+    result = runner.invoke(app, ["log", "--format", "jsonl"])
+    assert result.exit_code == 0
+    assert result.stdout == "".join(
+        json.dumps(rows[i], sort_keys=True) + "\n" for i in (3, 0, 1, 2, 4)
+    )
+    assert _preview_tree(statedb.DB_DIR) == before
+    pullhistory.append_self_upgrade(device="d", old_version="1", new_version="2")
+    assert pullhistory.query().origin == "state.db"
+
+
+def test_log_stale_notice_write_free_and_silenced73(history73):
+    from mind_meld import pullhistory
+
+    pullhistory.maintain_best_effort()
+    path = pullhistory.history_path()
+    with path.open("ab") as file:
+        file.write(b'{"stale":true}\n')
+    before = _preview_tree(path.parent)
+    result = runner.invoke(app, ["log", "--format", "jsonl"])
+    assert result.exit_code == 0
+    assert "by an older mm" in result.stderr
+    assert _preview_tree(path.parent) == before
+    path.rename(path.with_suffix(".aside"))
+    assert runner.invoke(app, ["log", "--format", "jsonl"]).stderr == ""
+
+
+def test_log_unbounded_complete_and_no_read_lock73(monkeypatch):
+    from mind_meld import pullhistory, statedb
+
+    rows = [
+        {"ts": "2026-01-01", "rel_path": str(i)} if i % 3 else {"rel_path": str(i)}
+        for i in range(12000)
+    ]
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        pullhistory.import_if_needed(conn)
+        pullhistory.write_rows(conn, rows)
+    # Output-time exclusive writer must succeed: the reader has closed already.
+    original = cli_module.typer.echo
+    checked = False
+
+    def echo(*args, **kwargs):
+        nonlocal checked
+        if not checked and not kwargs.get("err"):
+            with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+                conn.execute("INSERT INTO meta (key,value) VALUES ('output-check','ok')")
+            checked = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module.typer, "echo", echo)
+    result = runner.invoke(app, ["log", "--limit", "0", "--format", "jsonl"])
+    assert result.exit_code == 0, result.exception
+    assert [json.loads(line) for line in result.stdout.splitlines()] == sorted(
+        rows, key=lambda r: r.get("ts", ""), reverse=True
+    )
+    assert checked
+
+
+# "autopush" row generated by /ship test coverage audit (Track 73B).
+# Value: protects=autopush stays silent when its history flush fails (d3a);
+# fails_when=autopush enters command_scope(attended=True); why_new=only pull and
+# autopull were parametrized; seam=none; no_claim=a real busy database (write_rows
+# is patched to raise)
+@pytest.mark.parametrize("command", ["pull", "autopull", "autopush"])
+def test_history_failure_attended_only73(push_preview56, monkeypatch, command):
+    from mind_meld import pullhistory, statedb
+
+    env = push_preview56
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    if command == "autopush":
+        memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+        memory.mkdir(parents=True, exist_ok=True)
+        (memory / "local-73.md").write_text("local")
+    _publish_peer62(
+        env,
+        "peer-73",
+        {
+            ("claude", "projects/-Users-kb-myapp/memory/new-73.md"): (
+                b"peer",
+                "2026-10-16T00:00:00+00:00",
+            )
+        },
+    )
+    attempts = []
+
+    def fail(*args):
+        attempts.append(1)
+        raise statedb.StateDBBusy("SQLITE_BUSY")
+
+    monkeypatch.setattr(pullhistory, "write_rows", fail)
+    result = runner.invoke(app, [command])
+    assert attempts == [1], result.output  # the flush really failed, once
+    assert result.exit_code == 0, result.exception
+    assert result.stderr.count("mm: notice: history not recorded") == (
+        1 if command == "pull" else 0
+    )
+
+
+def test_unchanged_push_recovers_hot_history73(push_preview56, tmp_path):
+    from mind_meld import statedb
+    from tests.test_statedb import make_hot_journal
+
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    make_hot_journal(statedb.db_path(), tmp_path)
+    assert runner.invoke(app, ["log"]).exit_code == 1
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.exception
+    assert not statedb.db_path().with_name("state.db-journal").exists()
+    assert runner.invoke(app, ["log"]).exit_code == 0
+
+
+def test_pull_preview_legacy_never_creates_database73(push_preview56):
+    from mind_meld import pullhistory, statedb
+
+    path = pullhistory.history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"legacy":true}\n')
+    result = runner.invoke(app, ["pull", "--dry-run"])
+    assert result.exit_code == 0, result.exception
+    assert not statedb.db_path().exists()
+
+
+def test_log_populated_database_audit73(preview62):
+    from mind_meld import pullhistory
+
+    pullhistory.append_self_upgrade(device="d", old_version="1", new_version="2")
+    result = preview62["audit"](["log"])
+    assert result.exit_code == 0, result.exception
+    assert "state.db" in result.stdout
+
+
+def test_preview_audit_catches_writable_sqlite73(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "audit.db"
+    records = []
+    token = _PREVIEW_AUDIT.set((records, None))
+    try:
+        sqlite3.connect(path).close()
+    finally:
+        _PREVIEW_AUDIT.reset(token)
+    assert any(event == "sqlite3.connect" for event, _ in records)
+
+
+def test_transition_and_busy_database_one_stall73(push_preview56, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+
+    from mind_meld import pullhistory, statedb
+
+    env = push_preview56
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    cache = env["upgrade"]._empty_cache()
+    cache.update(
+        last_seen_self_version="0.0.1",
+        latest_version="1.9.1",
+        checked_at=datetime.now(timezone.utc).isoformat(),
+    )
+    env["upgrade"].CACHE_PATH.write_text(json.dumps(cache))
+    env["upgrade"]._reset_for_tests()
+    monkeypatch.setattr(statedb, "BUSY_TIMEOUT_MS", 100)
+    original = statedb.connect
+    opens = []
+
+    @contextmanager
+    def counted(*, read_only):
+        if not read_only:
+            opens.append(1)
+        with original(read_only=read_only) as conn:
+            yield conn
+
+    monkeypatch.setattr(statedb, "connect", counted)
+    with sqlite3.connect(statedb.db_path()) as locker:
+        locker.execute("BEGIN IMMEDIATE")
+        locker.execute("INSERT INTO meta (key,value) VALUES ('locked','yes')")
+        result = runner.invoke(app, ["push"])
+        assert result.exit_code == 0, result.exception
+        assert opens == [1]
+        assert result.stderr.count("mm: notice: history not recorded") == 1
+    assert not any(r.get("old_version") == "0.0.1" for r in pullhistory.read_records())
+
+
+def test_attended_pull_2500_excluded_three_flushes73(push_preview56, monkeypatch):
+    from mind_meld import pullhistory
+    from mind_meld.storage.keys import manifest_key
+
+    env = push_preview56
+    cfg = env["config"]
+    cfg["sync"]["sources"][0]["exclude_patterns"] = ["projects/*/memory/excluded-*"]
+    save_config(cfg, env["config_path"])
+    cli_module._init_crypto_session(env["backend"], PASSPHRASE, cfg, read_only=False)
+    peer = _publish_peer62(env, "peer-73", {})
+    peer["sources"] = {
+        "claude": {
+            "files": {
+                f"projects/-Users-kb-myapp/memory/excluded-{i}.md": {
+                    "sha256": "a" * 64,
+                    "size": 1,
+                    "mtime": "2026-10-16T00:00:00+00:00",
+                }
+                for i in range(2500)
+            }
+        }
+    }
+    env["backend"].put(
+        manifest_key("peer-73"), encrypt(serialize_manifest(peer), PASSPHRASE, MEMORY_KB)
+    )
+    original = pullhistory.write_rows
+    counts = []
+
+    def counted(conn, rows):
+        counts.append(len(rows))
+        return original(conn, rows)
+
+    monkeypatch.setattr(pullhistory, "write_rows", counted)
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 0, result.exception
+    assert counts == [1000, 1000, 500], result.output
+    assert len(pullhistory.query(action="excluded", limit=0)) == 2500
+
+
+@pytest.mark.parametrize(
+    "code,name,kind", [(5, "SQLITE_BUSY", "busy"), (779, "SQLITE_CORRUPT_INDEX", "corrupt")]
+)
+def test_query_time_error_no_partial_stdout73(monkeypatch, code, name, kind):
+    import sqlite3
+
+    from mind_meld import pullhistory, statedb
+
+    pullhistory.append_self_upgrade(device="d", old_version="1", new_version="2")
+
+    def broken(conn):
+        error = sqlite3.OperationalError("injected during query")
+        error.sqlite_errorcode = code
+        error.sqlite_errorname = name
+        raise error
+
+    monkeypatch.setattr(pullhistory, "_meta", broken)
+    result = runner.invoke(app, ["log", "--format", "jsonl"])
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    cls = statedb.StateDBBusy if kind == "busy" else statedb.StateDBCorrupt
+    assert result.stderr == pullhistory.explain(cls(name)) + "\n"
+
+
+@pytest.mark.parametrize("command", ["push", "autopush"])
+def test_push_uploads_share_one_history_flush73(push_preview56, monkeypatch, command):
+    from mind_meld import pullhistory
+
+    env = push_preview56
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    memory.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        (memory / f"batch-{i}.md").write_text(str(i))
+    events = env["events"] / "events"
+    events.mkdir(parents=True, exist_ok=True)
+    (events / "batch-73.jsonl").write_text('{"batch":73}\n')
+    original, flushes = pullhistory.write_rows, []
+
+    def counted(conn, rows):
+        flushes.append(rows)
+        return original(conn, rows)
+
+    monkeypatch.setattr(pullhistory, "write_rows", counted)
+    result = runner.invoke(app, [command])
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert len(flushes) == 1, [len(rows) for rows in flushes]
+    uploaded = [r for r in flushes[0] if r.get("action") == "uploaded"]
+    assert len(uploaded) >= 6
+    assert {r["source"] for r in uploaded} >= {"claude", "mm-events"}
+
+
+def test_log_huge_limit_and_unencodable_source73():
+    from mind_meld import pullhistory
+
+    pullhistory.append_self_upgrade(device="d", old_version="1", new_version="2")
+    result = runner.invoke(app, ["log", "--format", "jsonl", "--limit", "99999999999999999999"])
+    assert result.exit_code == 0, result.exception
+    assert len(result.stdout.splitlines()) == 1
+    result = runner.invoke(app, ["log", "--format", "jsonl", "--source", "\udcff"])
+    assert result.exit_code == 0, result.exception
+    assert result.stdout == ""
+
+
+def test_log_malformed_row_is_one_line_error73():
+    from mind_meld import pullhistory, statedb
+
+    pullhistory.append_self_upgrade(device="d", old_version="1", new_version="2")
+    with statedb.connect(read_only=False) as conn:
+        conn.execute("UPDATE history SET extra='not json'")
+    result = runner.invoke(app, ["log", "--format", "jsonl"])
+    assert result.exit_code == 1, result.exception
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1
+    assert result.stderr.startswith("mm: error: ") and "is damaged" in result.stderr
+
+
+def test_recapture_enters_history_scope_and_recovery73(preview62, monkeypatch):
+    from mind_meld import statedb
+
+    calls = []
+
+    def recover():
+        calls.append(1)
+        return statedb.StateDBBusy("SQLITE_BUSY")
+
+    monkeypatch.setattr(statedb, "recover_if_needed", recover)
+    result = runner.invoke(app, ["recapture", "1d"])
+    assert calls == [1], (result.output, result.exception)
+    assert result.stderr.count("mm: notice: history not recorded") == 1
+    preview = runner.invoke(app, ["recapture", "--dry-run", "1d"])
+    assert calls == [1], preview.output
+
+
+@pytest.mark.parametrize(
+    "argv,repaired",
+    [
+        (["push"], True),
+        (["pull"], True),
+        (["autopush"], True),
+        (["autopull"], True),
+        (["push", "--dry-run"], False),
+        (["pull", "--dry-run"], False),
+    ],
+)
+def test_hot_history_recovery_per_command73(push_preview56, tmp_path, argv, repaired):
+    from mind_meld import statedb
+    from tests.test_statedb import make_hot_journal
+
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    make_hot_journal(statedb.db_path(), tmp_path)
+    journal = statedb.db_path().with_name("state.db-journal")
+    before = journal.read_bytes()
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert (not journal.exists()) if repaired else journal.read_bytes() == before

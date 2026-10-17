@@ -126,10 +126,11 @@ Interchangeability).
   version derived from the pre-restore copy; mm keeps it in `displaced` and
   warns until it expires (30 days).
 - 1.x is frozen at cutover: the GC repair and the scope trim are the last
-  planned 1.x releases, plus one owner-approved exception — Muse host
-  support as a single minor (new reader name and sync source; no new host
-  family, which the 1.x contract reserves for a MAJOR). After 2.0 ships, 1.x
-  gets no fixes and the iCloud folder is deleted two weeks after cutover.
+  planned 1.x releases, plus two owner-approved exceptions, each a single
+  minor: Muse host support (new reader name and sync source; no new host
+  family, which the 1.x contract reserves for a MAJOR) and Track 73B's local
+  history database (see Release policy). After 2.0 ships, 1.x gets no fixes
+  and the iCloud folder is deleted two weeks after cutover.
 
 ## Non-goals and later work
 - Windows and non-Arch Linux distributions. Revisit when such a machine needs
@@ -148,6 +149,7 @@ Interchangeability).
 - Public beta. Revisit when a second person asks to run mm.
 
 ## Release policy
+- Owner-approved 1.x exception: Track 73B activates the local history database in the next MINOR release, with downgrade care documented in README Upgrading.
 - Strict SemVer has applied since 1.0.0, chosen before any public stage, on
   the [Compatibility (1.x) contract](invariants/auto-upgrade.md#compatibility-1x).
   The 2.0 rewrite of the invariants defines the 2.x contract.

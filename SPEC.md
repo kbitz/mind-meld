@@ -319,7 +319,7 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -460,7 +460,7 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 3. Fetch device list.
 4. Print: local file count, remote file count per device, pending pushes, pending pulls.
 5. If `--source` is given, show changes for that source only. Otherwise group changes by source.
-6. Print the last `autopull` / `autopush` breadcrumb (timestamp + outcome + `detail`), surfacing the `no-sources` and `degraded` outcomes the auto commands write.
+6. Print the last `autopull` / `autopush` breadcrumb (timestamp + outcome + `detail`), surfacing the `no-sources` and `degraded` outcomes the auto commands write. After a `keyring-locked` or `keyring-no-collection` skip (Track 73A), add a one-line hint linking the README's keyring troubleshooting entry.
 7. **Staleness marker (v0.12.21).** A breadcrumb older than 48h renders as `stale — no autorun in Nh`. The breadcrumb is written from *inside* the command, so any failure before typer's runner — a module-scope `ImportError` being the obvious one — writes nothing at all and step 6 would otherwise report the last `success` forever. This is the one degradation neither the `no-sources` nor the `degraded` breadcrumb can cover, because both are written by code that never ran. Best-effort: a missing or unparseable timestamp yields no marker rather than an error.
 
 ### `mm sources`
@@ -693,12 +693,15 @@ failure contract exists to prevent.
 
 ### Pull / push history log
 
-`mm log` queries `~/.config/mind-meld/pull-history.jsonl` (mode 0600,
-fcntl.flock-guarded appends, 1MB cap with line-boundary rotation to
-`.1`). Records every per-file pull/push action: `written` / `merged` /
-`skipped` / `conflicted` / `excluded` / `uploaded` / `failed`. Forensic
-audit trail; `mm log` failures (disk full, perms flip) NEVER block a
-calling pull/push.
+`mm log` queries local `~/.config/mind-meld/state.db` (0600, rollback journal,
+forward migrations), falling back to legacy `pull-history.jsonl{,.1}` before
+the first writer imports them once. Per-file actions include `written`, `merged`,
+`merged-via-lcs`, `skipped`, `conflicted`, `excluded`, `uploaded`, `failed`, plus
+the separate self-upgrade row shape. Retention keeps 20,000 rows per known
+(verb, action) class. Writers batch 1000 rows; history failures never block sync.
+Inspection opens read-only and materializes its snapshot before printing.
+See [history invariants](docs/invariants/sync.md#pullpush-history-log-track-73b)
+for import, compatibility, errors and lock order.
 
 ### Sync Log (`.mind-meld-log.md`)
 
@@ -855,6 +858,7 @@ typer >= 0.9
 cryptography >= 42.0
 argon2-cffi >= 23.1
 keyring >= 25.0
+secretstorage >= 3.4  # Linux only (sys_platform == "linux"); prompt-free Secret Service read
 rich >= 13.0          # pretty terminal output
 ```
 

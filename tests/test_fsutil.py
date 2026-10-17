@@ -195,6 +195,8 @@ class TestAtomicWriteBytes:
 class TestFsyncFd:
     def test_darwin_uses_fullfsync(self, tmp_path, monkeypatch):
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+        # Linux fcntl has no F_FULLFSYNC; supply Darwin's value (Track 73A).
+        monkeypatch.setattr(fsutil.fcntl, "F_FULLFSYNC", 51, raising=False)
         fcntl_calls: list[tuple[int, int]] = []
         fsync_calls: list[int] = []
 
@@ -220,6 +222,7 @@ class TestFsyncFd:
     def test_darwin_fullfsync_unsupported_falls_back_to_fsync(self, tmp_path, monkeypatch, code):
         """On Darwin, each documented "unsupported" F_FULLFSYNC errno falls back to os.fsync."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+        monkeypatch.setattr(fsutil.fcntl, "F_FULLFSYNC", 51, raising=False)
         fsync_calls: list[int] = []
 
         def unsupported_fcntl(fd, op, *args):
@@ -238,6 +241,7 @@ class TestFsyncFd:
     def test_darwin_fullfsync_real_io_error_propagates(self, tmp_path, monkeypatch):
         """On Darwin, a non-ENOTSUP OSError from F_FULLFSYNC must NOT fall back."""
         monkeypatch.setattr(fsutil, "_IS_DARWIN", True)
+        monkeypatch.setattr(fsutil.fcntl, "F_FULLFSYNC", 51, raising=False)
 
         def real_io_error(fd, op, *args):
             raise OSError(errno.EIO, "real I/O error")

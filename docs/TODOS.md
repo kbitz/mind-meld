@@ -96,6 +96,130 @@ here by hand, use the H3 form.
 - **Why:** model-only defects and search cost found in review; none changes a 73C verdict, all would mislead or slow later Tracks.
 - **Context:** unknown record sources crash classification with `KeyError` instead of a sealed-envelope failure; classify applies entries one at a time without the design's per-record transaction boundary; a symlink escaping a source root raises `ValueError` out of `read`; retire ignores replica `last_active` clock skew; checker and model history scans (`note`, `retain_ignored_by_fork`, per-action `ground_truth`) are quadratic in trace length and dominate deep-run wall time; `Context.own` should become a typed dataclass; history retention and fsync publication order belong in the 75A state/shell design (§3 lists no history table); `claimed` trusts peer receipts transitively beyond the MAX_SEQ bound added in review. Revisit per item when its Track implements the area, or when the deep profile breaches its ~1h budget.
 
+### [manual] Bound the non-interactive keyring read with a timeout backstop
+- **Why:** Track 73A's lock-state check covers gnome-keyring's locked and missing default collection and locked items. It cannot see prompt paths that do not use the Secret Service `Unlock` API, such as KeePassXC's "confirm access" dialog or a stalled D-Bus activation. A hook would still wait on those.
+- **Hypothesis (untested):** Run the auto commands' keyring read under a bounded wait (for example a daemon thread joined with a few-second timeout) and record `keyring-locked` with reason `timeout` when it expires. Backend-agnostic, but a thread enters the hook path, the dialog still opens on screen, and the abandoned thread holds a D-Bus connection until process exit.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Supported desktops (docs/SPEC.md) are Keychain and an unlocked Secret Service collection on Arch-based Linux (Omarchy ships gnome-keyring). KeePassXC is outside the supported set. Start in `crypto.get_passphrase(non_interactive=True)`. Depends on Track 73A. Revisit trigger: an autopull or autopush stall observed on a supported desktop that the 73A lock-state check does not explain. Source: /autoplan Track 73A, CEO E1 (2026-10-16).
+
+### [manual] Omarchy qualification checkpoint before Track 80A (for /roadmap)
+- **Why:** A small native run on the owner's Omarchy machine (pipx install, actual keyring backend selected, login and reboot behavior, a hook invocation, manual recovery) before 80A builds the Linux passphrase flow.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Source: /autoplan Track 73A, Codex CEO voice C1 (2026-10-16); not a 73A merge gate. Trigger: a Linux machine joins the owner's desk.
+
+### [manual] Proposed owner acceptance for Track 73A at the 2.0 soak — PENDING owner confirmation
+- **Why:** Live owner acceptance that Linux hooks skip (not hang) on a locked Secret Service collection and recover after unlock. Filed as **PROPOSED, pending owner confirmation** — ac1 was not answered at the /autoplan gate (2026-10-16), so this is NOT a required acceptance entry. A new acceptance entry counts only after the owner confirms it directly. Do not mark REQUIRED without that confirmation.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** On an install made by 2.0's `init --new-fleet` or `join`: lock the Secret Service collection, run `mm autopull`, record the stderr line, `mm status`, `mm diag --json` and timestamps; unlock, rerun, record success and the recovery time (target under 2 minutes); record which unlock path worked, whether the keyring has a password, and whether full-disk encryption is on. Draft script below (verify each command on the machine first; it deletes nothing).
+
+```bash
+#!/usr/bin/env bash
+# Track 73A owner acceptance: Linux only, deletes nothing.
+set -euo pipefail
+[ "$(uname -s)" = Linux ] || { echo "refusing: Linux only" >&2; exit 1; }
+command -v mm >/dev/null && command -v busctl >/dev/null
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+echo "start $(ts)"; mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "keyring has a password? (y/n)"; read -r KR_PW; echo "full-disk encryption on? (y/n)"; read -r FDE
+busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
+  org.freedesktop.Secret.Service Lock ao 1 /org/freedesktop/secrets/aliases/default
+echo "locked $(ts)"; mm autopull || true; mm status | grep -i "auto-pull" || true
+mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "Unlock the keyring now (desktop keyring manager, or: secret-tool lookup service mind-meld username passphrase >/dev/null). Press Enter when done."; read -r _
+echo "unlocked $(ts)"; mm autopull; echo "recovered $(ts)"
+mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
+echo "record: keyring_password=$KR_PW fde=$FDE"
+```
+
+### [manual] Owner for store-v2 section 11 prose outside pyproject.toml (for /roadmap)
+- **Why:** store-v2 §11's remaining platform prose has no owning Track: README prerequisites (`README.md` "macOS with iCloud Drive"), init help, "other Mac" strings, the root SPEC overview, and AGENTS.md principles. For /roadmap to assign (likely 84A).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Source: /autoplan Track 73A deferred items (2026-10-16). 73A updated only the CI line and keyring-related prose.
+
+### [manual] Attended commands that agents run can block on a locked Linux keyring
+- **Why:** `mm status` (which AGENTS.md tells agents to run) reads the passphrase interactively before rendering; on a locked Secret Service collection it raises a desktop prompt or fails at getpass on a non-TTY. Consider a non-interactive-first read when stdin is not a TTY.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Trigger: an agent-run attended command observed blocking on the soak machine. Source: /autoplan Track 73A Eng M4 (2026-10-16).
+
+### [manual] Track 80A owns the 2.0 default storage path ~/Sync/mind-meld (for /roadmap, UC1)
+- **Why:** Gate answer UC1 accepted (2026-10-16): the `~/Sync/mind-meld` 2.0 default path moved out of Track 73A to Track 80A. First reader is `mm init --new-fleet`. 73A deliberately did not touch `config.DEFAULT_STORAGE_PATH`. For /roadmap to add to the 80A card.
+- **Effort:** S
+- **Priority:** P2
+
+### [manual] Track 84A owns pyproject.toml description, keywords and classifiers (for /roadmap, UC2)
+- **Why:** Gate answer UC2 accepted (2026-10-16): `pyproject.toml` description, keywords and classifiers moved out of Track 73A to Track 84A, which must list `pyproject.toml` in its touches. 73A only added the `secretstorage` dependency.
+- **Effort:** S
+- **Priority:** P3
+
+### [manual] Audit Python 3.14 Path.exists / is_dir / is_file callers for swallowed errors
+- **Why:** On Python 3.14, `Path.exists()`, `is_dir()` and `is_file()` call `os.path.*` and return False for any `OSError`; on 3.13 they raise `PermissionError`/`EIO`. Any strict path that relied on the raise now reads an unreadable directory as absent, and with truth-based manifests that could publish deletions. Linux CI runs 3.14 and pipx installs already resolve 3.14 on Macs that have it.
+- **Hypothesis (untested):** The strict manifest walkers already use explicit `lstat`/`stat` mode checks (`walk_claude_source` strict branch), and `events.latest_event_rows` re-stats after `is_dir()`; no unsafe strict caller is known. An AST sweep of the ~100 `src/` call sites, classifying each as strict, preview or best-effort, would confirm it.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Found by Track 73A's portable-linux job (PR #213): three tests that injected faults through `Path.stat` stopped firing on 3.14 and were moved to `Path.lstat` / `os.stat`. Revisit trigger: before Track 80A's Linux flow, or any strict-path change that calls `exists()`/`is_dir()`/`is_file()`.
+
+### [manual] macOS hook with a locked Keychain and no UI reports no-passphrase, not keyring-locked
+- **Why:** keyring's macOS backend maps only `-128` (user denied) to `KeyringLocked`. A locked login keychain in an SSH or launchd session returns `errSecInteractionNotAllowed` (`-25308`), which keyring raises as a plain `KeyringError`; the non-interactive read treats that as no value, so the hook records `no-passphrase` and the README's `mm diag` advice shows nothing Keychain-specific.
+- **Hypothesis (untested):** Inspect the swallowed `KeyringError`'s `__cause__` for the macOS status and map `-25308` to `KeyringUnavailableError("locked", "keychain")` with an unlock-the-keychain remedy.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 73A Red Team / adversarial review (PR #213). Not a regression: the old wording also said "keyring empty". Revisit trigger: an owner hook run over SSH or from a launchd agent on a fleet Mac records `no-passphrase` while the passphrase is in the Keychain.
+
+### [plan-ceo-review:track=73B] Report state.db health in `mm diag`
+
+- **What:** `mm diag` prints one `state.db` line: schema `user_version`, file size, history rows per `(verb, action)` class, whether `meta.history_imported` is set, and whether a hot journal is present.
+- **Why:** history writes are forensic and swallow their failures (sync invariants, "Pull/push history log"), so a broken or locked `state.db` is invisible until the owner runs `mm log` and sees nothing new.
+- **Pros:** one read-only query; turns a silent forensic failure into a visible line where the owner already looks.
+- **Cons:** another diag line to keep accurate; 2.0 adds ledger and cursor health that 82A's diag work should own anyway.
+- **Context:** Track 73B created `state.db` (rollback journal; owner decision uc1a at its /autoplan gate, 2026-10-16). No state.db problem has been observed yet.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** the owner reports a missing or stale `mm log` history, or 82A starts its `mm diag` work, whichever comes first.
+- **Source:** [plan-ceo-review:track=73B] E2.
+
+### [plan-ceo-review:track=73B] 75A card note: INV7 equivalence and the authoritative-state remedy
+
+- **What:** (a) Track 75A's `SQLiteState` adapter and oracle keep `tests/sim/invariants.py` INV7's byte-integrity and causal checks with a metadata-only ledger (no `content` column), with cases for an unpublished edit, a deletion and a pending resolution. Rebuilding `content` from current source bytes, or narrowing INV7 (`ledger == obs.state.ledger`, line 950) without equivalent coverage, is not allowed. (b) Before the first ledger row is written, replace 73B's `StateDBCorrupt` "move `state.db*` aside" advice, which is valid only for a history-only database. Track 76A owns the authoritative-state recovery contract: preserve the database, refuse unsafe continuation, and prove recovery with pending publications and unexpired displaced content present.
+- **Why:** Track 73B's ledger stores `sha, vv, size, mtime, deleted, pending` but no bytes; an unpublished edit makes current source bytes differ from the ledger's version, so a naive adapter either fails or hides real defects. Moving an authoritative `state.db` aside discards causal vectors, pending obligations, cursors and displaced bytes.
+- **Pros:** keeps the 1.3 GB sync set out of `state.db` without weakening the simulator's acceptance evidence; no destructive remedy outlives its premise.
+- **Cons:** more adapter and oracle work inside 75A; a recovery contract for 76A.
+- **Context:** decided at Track 73B's /autoplan (spec review round 2; CEO dual voices, Codex findings 2 and 3), 2026-10-16.
+- **Effort:** human M / CC S (inside 75A and 76A).
+- **Priority:** P1 (75A and 76A acceptance).
+- **Revisit when:** /roadmap next regenerates 75A's and 76A's cards.
+- **Also (Eng G7):** `history` is forensic only and its per-class prune never touches a class an older binary does not know; any 2.0 receipt that sync logic reads (the model's `record-applied`, `pull-entry`, `own-replay`, and the presence check that reads `history[-1:]`, `tests/sim/model/store.py:369`) must live in its owning Track's table or in a class with its own retention.
+- **Source:** [plan-ceo-review:track=73B] spec review 2, Consistency 3; CEO voices V9, V10; [plan-eng-review:track=73B] G7.
+
+### [plan-ceo-review:track=73B] Remove `fsutil.flock_append_jsonl(on_locked=)`
+
+- **What:** delete the `on_locked` callback parameter and its test (`tests/test_fsutil.py:348-368`).
+- **Why:** Track 73B removed pull-history's 1 MB rotation, its only production caller; the parameter is now dead code in a shared write helper.
+- **Pros:** one less swallowed-exception path in the test-write-guarded helper.
+- **Cons:** touches `fsutil.py` and `tests/test_fsutil.py`, which Tracks 73A and 74A also edit.
+- **Context:** kept by Track 73B's /autoplan (spec review round 3) to avoid colliding with 73A and 74A.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** Track 74A lands, or the next change to `flock_append_jsonl`.
+- **Source:** [plan-ceo-review:track=73B] spec review 3, Consistency 2.
+
+### [review:track=73B] Import legacy history only under the mm lock
+
+- **What:** run the one-time `pull-history.jsonl{,.1}` import only from a flush that holds the mm lockfile. Either queue the transition hook's self-upgrade row into the command's batch, or let a standalone flush insert without importing until a locked flush or `recover_if_needed` imports.
+- **Why:** the first post-upgrade history write is usually the self-upgrade row. `run_transition_hook` writes it as a standalone flush before `acquire_lock()` (`_get_config`, `_auto_command_setup`). A pre-73B process that already holds the mm lock can keep appending JSONL after the import. Those rows never reach the table, and `mm log` then shows the stale-binary notice even when PATH is fine.
+- **Pros:** the import is serialized against every pre-73B writer; the notice then means an old binary really ran later.
+- **Cons:** the self-upgrade row path changes; an import deferred until a locked command is slightly later.
+- **Context:** red-team finding during Track 73B's /review-and-prep, 2026-10-16. Stat-before-read (fixed in 73B) makes such appends fire the notice instead of disappearing silently, and README Upgrading describes the notice as evidence of past divergence. Impact is forensic only.
+- **Effort:** human S / CC S.
+- **Priority:** P3.
+- **Revisit when:** an owner reports a stale-binary notice on a Mac whose `which -a mm` is clean, or the next change to `pullhistory` import or `run_transition_hook`.
+- **Source:** [review:track=73B] red-team finding 2.
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-15

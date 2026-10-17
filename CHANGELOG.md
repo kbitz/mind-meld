@@ -2,6 +2,42 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.0] - 2026-10-16
+
+**On Linux, `mm autopull` and `mm autopush` skip a locked or missing Secret Service keyring instead of waiting on an unlock dialog.** They print one remedy, record the skip, and exit 0. `mm status` shows that hint on the next run. `mm diag` reports whether the keyring can answer.
+
+### Added
+
+- `mm diag` and `mm diag --json` gain a `keyring` object: backend, member, secret service state, item, and error. Backend names are module paths such as `keyring.backends.SecretService.Keyring`. A failed lookup reads `unknown`.
+- Linux installs require `secretstorage` 3.4 or newer.
+- CI runs the portable suite on Ubuntu with Python 3.14, and a real gnome-keyring test on Arch. `bin/check` tries `python3.13`, then `python3.14`.
+
+### Changed
+
+- Linux hooks skip on a locked or missing Secret Service collection. A locked collection records `keyring-locked` with detail `locked`. A missing default collection records `keyring-no-collection`. When `MINDMELD_PASSPHRASE` is set, that value is used.
+- macOS hooks that hit a denied Keychain now report `keyring-locked` with detail `denied`. That case used to surface as `no-passphrase` ("keyring empty").
+- The `no-passphrase` message keeps the `no passphrase available` prefix, then names the backend. The breadcrumb detail records that same backend label, or `unknown` when the lookup fails.
+
+### Upgrade notes
+
+- Synced storage is unchanged. An older mm on Linux can still wait on the desktop unlock dialog.
+
+## [1.10.0] - 2026-10-16
+
+**Pull and push history no longer disappears when one class of rows fills the log.** `mm log` reads a private local database that keeps each history class on its own, including excluded files and per-file uploads.
+
+### Added
+
+- The first history write imports `~/.config/mind-meld/pull-history.jsonl` and its rotated `.1` once into `state.db` (mode 0600). Until that write, `mm log` still reads the JSONL files and names which source it used.
+
+### Changed
+
+- Attended push, pull, and recapture repair an interrupted history write and print at most one notice when history cannot be recorded. Autopush and autopull stay quiet. Previews do not create or touch the database.
+
+### Upgrade notes
+
+- The database stays on this Mac and is not synced. An older mm shows only JSONL history, and rows that older binary appends are not imported again after you upgrade. After the first attended pull on 1.10.0, `mm log --limit 5` should name `state.db`, the file mode should be 600, and there should be no stale-binary notice. README Upgrading has the backup steps.
+
 ## [1.9.1] - 2026-10-15
 
 **The `mm update` spinner keeps moving during quiet clone and wheel-build steps.** Phase names and percentages still change only when the installer reports progress.

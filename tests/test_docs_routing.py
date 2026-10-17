@@ -982,6 +982,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "mm_version",
     "config",
     "crypto_init",
+    "keyring",
     "root_salt_drift",
     "sidecar",
     "storage_inventory",
@@ -1142,6 +1143,38 @@ def test_ci_yml_invokes_bin_check_as_a_command() -> None:
     assert "./bin/check --no-bootstrap" in body, (
         "ci.yml must invoke ./bin/check --no-bootstrap as a command, not "
         "only mention bin/check in a comment"
+    )
+
+
+def _ci_job(body: str, name: str) -> str:
+    """Text of one top-level job in ci.yml (two-space indented key)."""
+    match = re.search(rf"(?m)^  {re.escape(name)}:\n((?:(?:    .*)?\n)+)", body + "\n")
+    assert match, f"ci.yml has no {name!r} job"
+    return match.group(1)
+
+
+def test_ci_yml_runs_the_three_track_73a_jobs() -> None:
+    """Track 73A: `ci` (macOS, 3.13; the name may be a required check),
+    `portable-linux` (Ubuntu, 3.14) and `secret-service-live` (the live
+    keyring test in Arch, as an unprivileged user, with the live flag)."""
+    body = _code_without_comments((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    mac = _ci_job(body, "ci")
+    assert "runs-on: macos-latest" in mac
+    assert 'python-version: "3.13"' in mac
+    linux = _ci_job(body, "portable-linux")
+    assert "runs-on: ubuntu-latest" in linux
+    assert 'python-version: "3.14"' in linux
+    assert "./bin/check --no-bootstrap" in linux
+    # The wheel smoke runs diag with the session bus removed, on one line.
+    assert re.search(r"env -u DBUS_SESSION_BUS_ADDRESS\b[^\n]*\bmm\b[^\n]*diag --json", linux)
+    live = _ci_job(body, "secret-service-live")
+    assert "image: archlinux:latest" in live
+    # One step: unprivileged user (gnome-keyring aborts as root), the live
+    # flag, and the live test file, so none can drift onto another step.
+    assert re.search(
+        r"runuser -u mmtest --\s+env\b[^\n]*\bMM_LIVE_SECRET_SERVICE=1\b[^\n]*\n"
+        r"\s*\./bin/check\b[^\n]*tests/test_secret_service_live\.py",
+        live,
     )
 
 

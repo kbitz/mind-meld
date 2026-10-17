@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -123,60 +124,163 @@ class TestInterpreter:
 
         assert mod.python_version("python") is None
 
-    def test_prefers_3_13_when_present(self, tmp_path: Path, monkeypatch) -> None:
+    def test_prefers_3_13_when_both_ci_pythons_present(self, tmp_path: Path, monkeypatch) -> None:
+        """A Mac with 3.13 and 3.14 keeps the macOS CI interpreter (Track 73A)."""
         mod = load_check()
         bindir = tmp_path / "bin"
+        _stub_python(bindir, "python3.14", "3.14.7")
         _stub_python(bindir, "python3.13", "3.13.15")
-        _stub_python(bindir, "python3", "3.14.7")
+        _stub_python(bindir, "python3", "3.12.9")
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
         path, ver = mod.resolve_interpreter()
         assert path.endswith("python3.13")
         assert ver[:2] == (3, 13)
 
-    def test_only_3_14_notices_and_succeeds(self, tmp_path: Path, monkeypatch, capsys) -> None:
+    def test_driver_finds_named_python3_14(self, tmp_path: Path, monkeypatch, capsys) -> None:
+        """A 3.14-only host (Linux CI shape) resolves via the named candidate."""
         mod = load_check()
         bindir = tmp_path / "bin"
-        _stub_python(bindir, "python3", "3.14.7")
+        _stub_python(bindir, "python3.14", "3.14.7")
+        _stub_python(bindir, "python3", "3.9.6")
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
         path, ver = mod.resolve_interpreter()
+        assert path.endswith("python3.14")
         assert ver[:2] == (3, 14)
         err = capsys.readouterr().err
         assert "interpreter" in err
-        assert "notice:" in err
-        assert "CI pins 3.13" in err
+        # 3.14 is a CI interpreter now: no divergence notice.
+        assert "notice:" not in err
 
-    def test_nothing_ge_311_fails_without_recommending_xcode_select(
+    def test_non_ci_version_notice_names_both_ci_interpreters(
         self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        mod = load_check()
+        bindir = tmp_path / "bin"
+        _stub_python(bindir, "python3.12", "3.12.9")
+        monkeypatch.setenv("PATH", str(bindir))
+        monkeypatch.delenv("MM_PYTHON", raising=False)
+        _path, ver = mod.resolve_interpreter()
+        assert ver[:2] == (3, 12)
+        err = capsys.readouterr().err
+        assert "notice:" in err
+        assert "3.13 on macOS" in err
+        assert "3.14 on Linux" in err
+
+    # Extended by the /ship test coverage audit (pass 1): platform parametrization.
+    # Value: protects=the driver's real no-Python exit prints the remedy for the
+    # host OS; fails_when=resolve_interpreter or _fix_no_python stops reading
+    # sys.platform; why_new=the OS test passes platform explicitly and this one
+    # only checked "3.14", which both remedies contain; seam=none;
+    # no_claim=a real Linux host (sys.platform is patched)
+    @pytest.mark.parametrize(
+        "platform,expect,forbid",
+        [
+            ("darwin", "do not run xcode-select --install", "distro Python"),
+            ("linux", "install a distro Python 3.11+", "xcode-select --install"),
+        ],
+    )
+    def test_nothing_ge_311_fails_naming_3_14(
+        self, tmp_path: Path, monkeypatch, capsys, platform: str, expect: str, forbid: str
     ) -> None:
         mod = load_check()
         bindir = tmp_path / "bin"
         _stub_python(bindir, "python3", "3.9.6")
         monkeypatch.setenv("PATH", str(bindir))
         monkeypatch.delenv("MM_PYTHON", raising=False)
-        monkeypatch.delenv("CONDUCTOR_IS_LOCAL", raising=False)
+        monkeypatch.setattr(mod.sys, "platform", platform)
         with pytest.raises(SystemExit) as ei:
             mod.resolve_interpreter()
         assert ei.value.code != 0
         err = capsys.readouterr().err
-        assert "do not run xcode-select" in err
         assert ">= 3.11" in err or ">=3.11" in err
+        assert "python3.14" in err  # looked-for list names the new candidate
+        assert "3.14" in err  # remedy names 3.14 on every OS
+        assert expect in err
+        assert forbid not in err
 
-    def test_cloud_workspace_remedy_is_not_xcode_select(
-        self, tmp_path: Path, monkeypatch, capsys
-    ) -> None:
+    def test_no_python_remedy_chosen_by_os(self) -> None:
         mod = load_check()
+        darwin = mod._fix_no_python([], platform="darwin")
+        assert "install Python 3.13 or 3.14" in darwin
+        assert "do not run xcode-select --install" in darwin
+        linux = mod._fix_no_python([], platform="linux")
+        assert "distro Python 3.11+" in linux
+        assert "3.14 preferred" in linux
+        assert "xcode-select --install" not in linux
+
+    def test_launcher_and_driver_candidate_parity(self) -> None:
+        import re
+
+        mod = load_check()
+        text = (ROOT / "bin" / "check").read_text(encoding="utf-8")
+        match = re.search(r"for cand in ([^;]+); do", text)
+        assert match, "launcher candidate loop not found"
+        assert tuple(match.group(1).split()) == mod.CANDIDATES
+        assert "python3.14" in text
+
+    @pytest.mark.parametrize(
+        "uname,expect,forbid",
+        [
+            ("Darwin", "do not run xcode-select --install", "distro Python"),
+            ("Linux", "install a distro Python 3.11+", "xcode-select --install"),
+        ],
+    )
+    def test_launcher_no_python_remedy_by_os(
+        self, tmp_path: Path, uname: str, expect: str, forbid: str
+    ) -> None:
+        """The POSIX launcher picks its no-Python remedy from `uname -s`."""
         bindir = tmp_path / "bin"
-        _stub_python(bindir, "python3", "3.9.6")
-        monkeypatch.setenv("PATH", str(bindir))
-        monkeypatch.delenv("MM_PYTHON", raising=False)
-        monkeypatch.setenv("CONDUCTOR_IS_LOCAL", "0")
-        with pytest.raises(SystemExit):
-            mod.resolve_interpreter()
-        err = capsys.readouterr().err
-        assert "Linux cloud workspace" in err
-        assert "xcode-select --install" not in err
+        bindir.mkdir(parents=True)
+        dirname = shutil.which("dirname")
+        assert dirname, "dirname not on PATH"
+        (bindir / "dirname").symlink_to(dirname)
+        stub = bindir / "uname"
+        stub.write_text(f"#!/bin/sh\necho {uname}\n", encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        proc = subprocess.run(
+            ["/bin/sh", str(ROOT / "bin" / "check"), "--help"],
+            env={"PATH": str(bindir), "HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 1, proc.stderr
+        assert "looked for python3.13, python3.14," in proc.stderr
+        assert expect in proc.stderr
+        assert forbid not in proc.stderr
+
+    def test_launcher_finds_named_python3_14(self, tmp_path: Path) -> None:
+        """The POSIX launcher execs the driver under a stub python3.14."""
+        bindir = tmp_path / "bin"
+        bindir.mkdir(parents=True)
+        marker = tmp_path / "stub-argv.txt"
+        stub = bindir / "python3.14"
+        stub.write_text(
+            '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$MM_STUB_MARKER"\necho 3.14.7\n',
+            encoding="utf-8",
+        )
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+        # PATH holds only the stub and `dirname`: a host /usr/bin/python3.13
+        # would otherwise win under the 3.13-first candidate order.
+        dirname = shutil.which("dirname")
+        assert dirname, "dirname not on PATH"
+        (bindir / "dirname").symlink_to(dirname)
+        env = os.environ.copy()
+        env["PATH"] = str(bindir)
+        env.pop("MM_PYTHON", None)
+        env["MM_STUB_MARKER"] = str(marker)
+        proc = subprocess.run(
+            ["/bin/sh", str(ROOT / "bin" / "check"), "--help"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert marker.exists(), "launcher did not exec the python3.14 stub"
+        assert "_check.py" in marker.read_text(encoding="utf-8")
 
 
 class TestBootstrap:

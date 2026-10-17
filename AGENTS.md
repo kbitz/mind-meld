@@ -7,7 +7,7 @@ Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack a
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
 
 ## Stack
-Python 3.11+, typer, cryptography, argon2-cffi, keyring, rich, packaging.
+Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), rich, packaging.
 
 ## Key Principles
 - No API server. The CLI talks directly to iCloud Drive through the local filesystem.
@@ -80,7 +80,7 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 
 ## CI
 
-`.github/workflows/ci.yml` runs portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13; see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
+`.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
 
 ## Commands
 

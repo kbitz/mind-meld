@@ -1251,7 +1251,13 @@ def installed_inventory():
     roots += [Path.home() / ".config/opencode"]
     roots += [
         Path.home() / p
-        for p in ("Library/Mobile Documents", "Library/CloudStorage", "Desktop", "Documents")
+        for p in (
+            "Library/Mobile Documents",
+            "Library/CloudStorage",
+            "Desktop",
+            "Documents",
+            "Sync",
+        )
     ]
     roots += [Path(data["storage"]["path"]).expanduser()]
     provenance = dict(

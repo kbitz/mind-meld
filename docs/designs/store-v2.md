@@ -152,21 +152,32 @@ subprocess reader stays unchanged.
 
 ## 3. Local state: `~/.config/mind-meld/state.db`
 
-SQLite through the standard-library `sqlite3`: WAL, `busy_timeout`, mode
-0600, and a `user_version` schema number with forward-only migrations. The
-mm lockfile still serializes commands, and SQLite transactions make each
-step atomic.
+SQLite through the lazily imported standard-library `sqlite3`: rollback journal
+(`journal_mode=DELETE` only at file creation), `busy_timeout=5000`, mode 0600,
+`synchronous=FULL` without fullfsync. History has no hard macOS power-loss
+durability promise. 75A re-decides journal mode and fullfsync with measured
+ledger data; connect never resets a later migration's journal mode.
+Forward-only atomic migrations use user_version; meta.compat_version gates
+only incompatible reader changes. Newer compatible schemas remain usable.
+The mm lockfile serializes commands; each write transaction is the innermost
+lock. Read-only inspection creates nothing and closes before output.
+
+73B activates history on 1.x. Exact columns, readers and migrations are in
+[the history schema routing table](../invariants/sync.md#schema-columns-and-readers)
+and statedb.py's migration 1; the other tables are empty and provisional
+until their owning Tracks, which may re-create them without raising the
+history compatibility gate.
 
 | Table | Holds | Readers |
 |---|---|---|
-| `meta` | device id, fleet id, host, schema version | every command |
-| `ledger` | `(source, path) → sha, vv, mtime, deleted`: the version each local file corresponds to | push (authoring), pull (classification), preview |
-| `cursors` | `peer → applied_seq, gap_seq, gap_since, fork (kind, first_seen)` | pull, status, diag, presence |
+| meta | compatibility, import marker, pending import, legacy file stats (future fleet keys arrive with their owners) | statedb, mm log |
+| `ledger` | `(source, path) → sha, canonical vv, size, mtime, deleted, pending`; no content: the version each local file corresponds to | 75A publish, 78A classification, preview |
+| `cursors` | `peer → applied_seq, hash, gap_seq, gap_since, fork (kind, first_seen)` | 77A pull, 81A status, 75A presence, diag |
 | `applied` | `(peer, seq, family, digest)` for every family applied or covered | pull |
-| `own_log` | `seq → family, digest, prev, parts, bytes, created_at` | reconcile, push, compaction, heal, restore detection |
+| `own_log` | `seq → family, digest, prev, parts, bytes, created_at` | 75A publish, 76A compaction/reconciliation, heal, restore detection |
 | `intents` | `(kind, seq, family, nparts)`, one row per attempted publication family | publish, reconcile, compaction |
-| `displaced` | replaced local versions (bytes, reason, time, cause, peer), kept 30 days | `mm displaced`, gc, status, the fork warning |
-| `history` | per-file push/pull outcomes; imported once from `pull-history.jsonl{,.1}`, best effort: the 1 MB rotation usually leaves only the last push's rows | `mm log`, `mm conflicts --suggest` |
+| `displaced` | replaced local versions (bytes, reason, time, cause, peer); bytes cleared at 30 days, metadata and expired flag retained | `mm displaced`, gc, status, the fork warning, simulator INV2 |
+| history | per-file outcomes, one-time legacy JSONL import, newest 20,000 rows per known class (no shared rotation) | mm log only; sync receipts need their own retained state |
 
 `applied` keeps a few dozen bytes per applied record for the life of the peer's
 namespace, so a late, duplicate or resurrected family is always recognised by
@@ -175,9 +186,9 @@ for a peer (§6), and `mm status` and `mm diag` list the peer until its
 namespace is retired. `displaced.cause` is `fork` for a version a peer's fork
 displaced (§4) and `peer` names that peer.
 
-[Conflict policies](conflict-policies.md) adds `base` (three-way merge bases)
-and `conflicts` (held versions). Usage, identity, upgrade and token caches
-stay in their existing JSON files.
+[Conflict policies](conflict-policies.md) in 2.1 adds base (three-way merge
+bases), conflicts (held versions), and `mm conflicts --suggest`. Usage,
+identity, upgrade and token caches stay in their existing JSON files.
 
 ## 4. Causal versions
 

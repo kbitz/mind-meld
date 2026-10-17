@@ -29,16 +29,47 @@ rely on their background update to bring a Mac current. Updating one Mac protect
 peer namespaces only from that Mac's GC; other arrival-order limitations of the
 1.x store remain.
 
+**Local history database (Track 73B):** the first history write after upgrading
+imports `~/.config/mind-meld/pull-history.jsonl` and `.1` once into local
+`state.db`. Before that first write, `mm log` still reads JSONL. New rows go only
+to the database; the legacy files remain untouched. The table keeps 20,000 rows
+per (verb, action) class, including per-file uploaded rows. The [history
+remedies](#history-database-statedb) cover interrupted writes and import notices.
+
+Downgrading to an older mm shows only its JSONL history; it cannot see database
+rows. After re-upgrading, rows the older binary appended to either legacy file
+are **not** imported again. `mm log` notices changes to either file: this shows
+past divergence, not proof that an old binary still runs. Check `which -a mm`
+and fix PATH on that Mac. To inspect and keep those rows before moving both
+legacy files aside (with no mm running):
+
+```bash
+jq -c . ~/.config/mind-meld/pull-history.jsonl.1 ~/.config/mind-meld/pull-history.jsonl
+mkdir -p ~/mm-history-backup
+for name in pull-history.jsonl pull-history.jsonl.1; do
+  if [ -f "$HOME/.config/mind-meld/$name" ]; then
+    mv "$HOME/.config/mind-meld/$name" "$HOME/mm-history-backup/$name.$(date +%Y%m%d-%H%M%S)"
+  fi
+done
+```
+
+These copies remain readable with `jq -c . ~/mm-history-backup/pull-history*`;
+neither the importer nor `mm log` reads backup directories. Keep state.db too
+if you need the history recorded by the newer version. Moving only one legacy
+file may leave a stale-binary notice for the other.
+
 <a id="v180-scope-trim"></a>
 
 **v1.8.0:** gstack defaults exclude generated output. Complete this checklist
 on every active Mac before the next attended `mm pull` on any of them:
 
 1. Before the release lands on each Mac, copy its pull-history files aside.
-   A migrated Mac's attended pull can log about 8,000 excluded peer files,
-   rotating the 1 MB history and evicting earlier records until peers publish
-   their smaller manifests.
-2. Update each Mac and check `mm --version` (expect 1.8.0).
+   Before Track 73B, about 8,000 excluded peer rows per attended pull could
+   rotate the shared 1 MB history and evict earlier records. The database now
+   keeps 20,000 excluded rows independently of conflict history. Keep existing
+   `~/mm-history-backup/` copies: inspect them with `jq -c .
+   ~/mm-history-backup/pull-history*`; neither import nor `mm log` reads them.
+2. Update each Mac and check `mm --version` (1.8.0 or newer).
 3. Run `mm migrate-config`, then `mm push`. A Mac without explicit
    `[[sync.sources]]` reports nothing to migrate; it already uses the new defaults.
 4. Run `mm status` on each Mac: no migration warning and no pending gstack deletions.
@@ -209,7 +240,7 @@ If your storage path is **not** under iCloud Drive (e.g. a custom local folder o
 
 ## Claude Code Integration
 
-Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt and stay silent when already in sync. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
+Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt for input and stay silent when already in sync. On Linux with the Secret Service keyring backend they also never open a desktop unlock prompt: a locked or missing collection skips the run with a `keyring-locked` / `keyring-no-collection` breadcrumb instead (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)). Other backends (KWallet, KeePassXC, keyring's libsecret backend), macOS Keychain access dialogs, and a stalled D-Bus session can still block. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
 
 Add the following to your **global** `~/.claude/CLAUDE.md` to have Claude automatically sync at the start and end of each conversation:
 
@@ -233,7 +264,7 @@ mm autopush
 \`\`\`
 
 - **No output:** Nothing to push. Say goodbye normally.
-- **Any output:** Tell the user what was pushed.
+- **Any output:** Tell the user what was pushed; surface skips, warnings and their suggested fixes.
 
 If `mm` is not installed, both commands will fail silently — no action needed.
 ```
@@ -242,7 +273,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 - `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed.
-- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error (so they never block Claude Code).
+- Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, upgrade the producing Mac to v0.14.17+ and run mm push. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
@@ -344,8 +375,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
-| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h. Prints one extra line when a `retro-fleet` skill link is broken |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
+| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h, with a hint after a [keyring skip](#auto-commands-skip-keyring-locked-or-unavailable). Prints one extra line when a `retro-fleet` skill link is broken |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -353,7 +384,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
-| `mm log` | Query the per-file pull/push history. Filter with `--source`, `--since`, `--action {written\|merged\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push}`, `--limit`; `--format {jsonl\|table}` |
+| `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
@@ -725,6 +756,64 @@ Managing conflicts:
 
 ## Troubleshooting
 
+### History database (state.db)
+
+History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
+(a directory mm creates is 0700; an existing `~/.config/mind-meld` keeps its
+mode). It records pull/push outcomes and self-upgrades, keeping the newest
+20,000 rows per known (verb, action) class. Excluded/uploaded traffic
+cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
+workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
+rows in one snapshot, closes the connection, then prints; memory grows with
+retained history. An absent, empty or not-yet-imported database falls back to
+legacy JSONL without writing anything.
+
+The first history writer imports `.1` then live JSONL once, leaving both files
+in place. Invalid lines are skipped. An unreadable legacy file yields
+`mm: notice: legacy history ... is not imported yet`; new rows remain visible.
+Repair the file's access or I/O problem; a later writer retries the entire import
+without duplication. `mm log` never repairs or imports. A changed legacy file
+after import triggers the stale-binary notice; see [Upgrading](#upgrading) to
+inspect, preserve and move both files aside after fixing PATH.
+
+`mm: notice: history not recorded` means that command dropped its attempted
+history rows; sync is unaffected and those rows are not replayed. Attended
+push, pull and recapture print it once; auto commands stay silent. A busy database means wait
+for the other command, then retry. A newer incompatible schema means run
+`mm update`; if `mm --version` is already newer, check `which -a mm`. A Python
+without usable sqlite3 needs an mm reinstall from [Install](#install).
+
+An interrupted write can leave `state.db-journal`. `mm log` refuses it without
+writing; the next non-preview `mm pull` or `mm push` repairs it even if sync is
+unchanged. For repair without syncing, with no mm running:
+
+```bash
+sqlite3 'file:'"$HOME"'/.config/mind-meld/state.db?mode=rw' 'PRAGMA user_version;'
+```
+
+`mode=rw` refuses an absent file instead of creating a world-readable database.
+Do not delete the journal separately. History uses a rollback journal with
+synchronous=FULL, without macOS fullfsync; it makes no hard power-loss durability
+claim. A killed process can lose up to 999 buffered rows; power loss can also
+corrupt the database.
+
+For a damaged database **while it holds history only**, with no mm running,
+move the database and all its companion files aside together:
+
+```bash
+history_save="$HOME/mm-history-backup/state-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$history_save"
+for history_file in "$HOME/.config/mind-meld/state.db" "$HOME/.config/mind-meld/"state.db-*; do
+  if [ -e "$history_file" ]; then mv "$history_file" "$history_save/"; fi
+done
+```
+
+History recorded since import is lost from `mm log`; the next write re-imports
+the remaining legacy JSONL. Preserve the moved files for investigation. This
+remedy expires before ledger/displaced state is activated by the 2.0 Tracks;
+those Tracks must supply authoritative-state recovery first.
+
+
 ### A gstack file doesn't reach my other Mac
 
 Check the [gstack default exclusions](#syncing-gstack) and run `mm sources`
@@ -750,6 +839,69 @@ ps -p 12345 -o etime=,tty=,command=
 
 An mm older than v1.5.2 printed advice to `remove <path>`. That advice is
 obsolete: keep the lockfile and wait for the operation to finish.
+
+### Auto commands skip: keyring locked or unavailable
+
+`mm autopull` / `mm autopush` read the passphrase without prompting. When the
+desktop keyring cannot answer without opening a prompt, the run skips with
+exit 0, one `mm: <verb> skipped - …` line on stderr, and a breadcrumb that
+`mm status` surfaces. Nothing is half-synced; rerun the auto command after
+fixing the keyring state. `mm diag` reports what the keyring side looks like
+(`keyring` in `--json`: module-qualified backend and member class paths such
+as `keyring.backends.SecretService.Keyring`, `secret_service`, `item`,
+`error`) without reading the secret or prompting — run it first. Diag
+reflects the shell it runs in; a hook runs in the agent's environment
+(session bus, `PYTHON_KEYRING_BACKEND`), so compare with the backend the
+`no-passphrase` breadcrumb recorded in `mm status`.
+
+The four passphrase outcomes in `mm status` / the breadcrumb:
+
+| Outcome | Meaning |
+|---|---|
+| `keyring-locked` (`locked`) | The Secret Service collection is locked. |
+| `keyring-locked` (`denied`) | The keyring refused access (macOS Keychain denial, or another backend reporting locked). |
+| `keyring-no-collection` | There is no default Secret Service collection to read from. |
+| `keyring-error` | The keyring read failed some other way; see `auto<verb>.log` next to the breadcrumb. |
+| `no-passphrase` | The keyring answered with nothing (or could not be read) and `MINDMELD_PASSPHRASE` is unset. The stderr line and the breadcrumb detail name the backend the hook saw. |
+
+**Linux.** Prerequisites: `mm` via pipx (Arch: `python-pipx`), plus
+`libsecret` and `gnome-keyring` (Arch package names; on Ubuntu the
+`secret-tool` command is in `libsecret-tools`). For `keyring-locked`, unlock
+the login keyring in the desktop session. Asking the keyring for an item
+makes it offer the unlock dialog:
+
+```bash
+secret-tool lookup service mind-meld username passphrase >/dev/null
+```
+
+(That lookup route is documented from the Secret Service API; it is marked
+verified only after the fleet soak.) Durable fixes so hooks stop depending on
+a manual unlock: turn desktop autologin off so PAM unlocks the keyring at
+login (keeps the keyring encrypted), or use a blank-password login keyring,
+as Omarchy may install. A blank password stores **every** secret in the login
+keyring unencrypted on disk — browser, Wi-Fi and SSH passphrases, other
+apps' tokens, not only mm's passphrase — so it relies entirely on full-disk
+encryption.
+
+For `keyring-no-collection`, store the passphrase once, which also creates
+the default collection through the desktop prompt:
+
+```bash
+secret-tool store --label=mind-meld service mind-meld username passphrase application 'Python keyring library'
+```
+
+**macOS.** For `keyring-locked` with detail `denied`, run `mm pull` or
+`mm push` in a terminal in your desktop session and choose **Always Allow**
+on the Keychain access dialog; later auto runs then read without asking.
+
+**Fallbacks (any OS).** `MINDMELD_PASSPHRASE` is used only when the keyring
+cannot answer without prompting (or yields nothing). Export it where the
+agent process starts, not in an interactive shell the agent does not read.
+It is a plaintext secret in the process environment, inherited by every
+agent subprocess — prefer fixing the keyring. `PYTHON_KEYRING_BACKEND` can
+pin a different keyring backend if discovery picks the wrong one;
+`mm diag` shows which backend and member were actually selected. After any
+fix, confirm with `mm diag`, then rerun `mm autopull` / `mm autopush`.
 
 ### Newer or damaged storage format
 
@@ -825,7 +977,7 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.13.0); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -1503,18 +1655,40 @@ rm -rf ~/.local/share/mind-meld
 # Config, device identity, caches, and TTL markers.
 rm -rf ~/.config/mind-meld
 
-# Keychain entry (service `mind-meld`, account `passphrase`).
-security delete-generic-password -s mind-meld -a passphrase
+# Keychain entry (macOS; service `mind-meld`, account `passphrase`).
+command -v security >/dev/null && security delete-generic-password -s mind-meld -a passphrase
+
+# Secret Service entry (Linux).
+command -v secret-tool >/dev/null && secret-tool clear service mind-meld username passphrase
 ```
 
 Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
 
-CI uses one job on `macos-latest` with Python 3.13. It runs
-`./bin/check --no-bootstrap` for the portable checks, verifies the real Keychain
-backend, and builds the wheel into a disposable venv for `mm --version` and
-`python -m mind_meld.cli` smokes. The pip cache is keyed on `pyproject.toml`.
+CI uses three jobs. `ci` runs on `macos-latest` with Python 3.13: the
+portable checks (`./bin/check --no-bootstrap`), a real-Keychain backend
+assertion, and a wheel smoke in a disposable venv. `portable-linux` runs the
+same portable checks plus a wheel smoke on `ubuntu-latest` with Python 3.14,
+so macOS-only code fails before it lands. `secret-service-live` runs the
+opt-in live keyring test against a real gnome-keyring in an Arch container.
+The Pythons differ on purpose: 3.13 is the macOS fleet's interpreter, 3.14 is
+the newest portable target, and `./bin/check` accepts either (it notices when
+you run a third one). The pip cache is keyed on `pyproject.toml`.
+
+The live keyring test also runs locally on a Linux box with `dbus`,
+`gnome-keyring` and `libsecret` installed:
+
+```
+MM_LIVE_SECRET_SERVICE=1 ./bin/check --tests tests/test_secret_service_live.py
+```
+
+Each scenario runs under its own `dbus-run-session` with a throwaway HOME —
+it never touches your desktop keyring — and with the flag set a missing tool
+fails the test rather than skipping it, so the flag fails by design on macOS.
+Without the flag the live scenarios skip and only the portable
+process-teardown tests run. Run it as a non-root user: gnome-keyring-daemon
+aborts as root in a container ("error dropping process capabilities").
 
 From a clone (no environment required):
 
@@ -1528,7 +1702,7 @@ That command bootstraps `.venv` if needed, then runs `ruff check .`, `ruff forma
 ./bin/check tests/test_config.py
 ```
 
-A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. `MM_SIM_DEEP=1` selects the random 1000-example replication-model profile; see [replication fixtures](tests/sim/README.md). See `./bin/check --help`.
+A scoped pytest still lints the whole repo (ruff is ~0.07s). `--tests` skips lint; `--lint` skips pytest. Use `--serial` to disable pytest-xdist. `MM_PYTHON` selects the bootstrap interpreter; `MM_VENV` validates and uses an existing environment without mutating it; `VIRTUAL_ENV` and `--no-bootstrap` use the current environment. `MM_PYTEST_WORKERS` sets the xdist worker count. `MM_LIVE_SECRET_SERVICE=1` enables the live keyring test above. `MM_SIM_DEEP=1` selects the random 1000-example replication-model profile; see [replication fixtures](tests/sim/README.md). See `./bin/check --help`.
 
 Manual fallback (separate lines; quote `'.[dev]'` — macOS zsh globs it):
 

@@ -244,7 +244,7 @@ the push itself skips the update tail entirely.
 **A sync's outcome never depends on the update.** `update_or_nudge` raises
 nothing and sets no exit code: a failed install is a `mm: notice:`. The new
 version takes effect on the next mm process; nothing re-execs. The existing
-transition hook then writes the `self-upgrade` pull-history row, so the
+transition hook then writes the `self-upgrade` state.db history row, so the
 automatic path needed no new logging.
 The exception boundary covers the check, install, cache bookkeeping and
 fallback nudge, including interrupted HTTP responses and a closed stderr.
@@ -344,7 +344,10 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
 upgrade-state's flock; RELEASE upgrade-state's flock BEFORE appending to
-pullhistory. Transition detection runs OUTSIDE the mm lock by design — its
+state.db history. A statedb write transaction is always the innermost lock: never
+acquire the mm lockfile or upgrade-state flock inside one. History alone may
+write outside the mm lock; the four provisional 2.0 tables require it.
+Transition detection runs OUTSIDE the mm lock by design — its
 correctness is bounded by upgrade-state's own flock. The attended self-update
 takes the mm lock FIRST and claims its attempt second, for the same reason.
 
@@ -355,7 +358,7 @@ takes the mm lock FIRST and claims its attempt second, for the same reason.
   today; future "new feature" hints). Adding non-data-at-risk signals to `warning:` would dilute the
   warning class.
 
-**`pullhistory` schema extension.** New `verb: "self-upgrade"` row class peer to
+**`pullhistory` schema extension (now in state.db).** New `verb: "self-upgrade"` row class peer to
 pull/push, with `old_version`/`new_version` (NO source/rel_path/action). Written
 via `pullhistory.append_self_upgrade(...)` (NOT extending `append()` — separate
 event class, separate function). Contract violations silent-skip (NOT assert) so
@@ -477,8 +480,8 @@ Host readers remain best-effort: vendor format repairs are PATCH or MINOR.
 Framework-owned `--help`, completion options and parse-error presentation are
 excluded from the CLI golden; their usage errors remain documented exit 2.
 The supported Python floor is `requires-python`; CI qualifies Python 3.13
-only. A higher floor is MINOR with Upgrade notes, not evidence that other
-interpreters were tested.
+(macOS) and 3.14 (Linux) only. A higher floor is MINOR with Upgrade notes, not
+evidence that other interpreters were tested.
 
 **Exit outcomes:** [one README table](../../README.md#exit-codes) is the
 operator reference, including post-parse value errors (1), usage errors (2),

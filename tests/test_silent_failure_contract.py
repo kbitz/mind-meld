@@ -55,7 +55,7 @@ def test_git_walk_degradation_names_current_failure_check():
 
 def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypatch):
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.console, "width", 240)
+    monkeypatch.setattr(cli_module.console, "_width", 240)
     now = datetime.now(timezone.utc).isoformat()
     _mm_events.write_push_event(
         tmp_path / "mm-events" / "events",
@@ -873,7 +873,190 @@ def test_autopull_no_passphrase_prints_skipped_line(tmp_path, monkeypatch):
     assert r.exit_code == 0
     assert "pull skipped" in (r.stderr or "")
     assert "no passphrase available" in (r.stderr or "")
+    assert "(backend keyring.backends.fail.Keyring)" in (r.stderr or "")
     assert not (iso / "autopull.log").exists()
+    # Track 73A: the detail records the backend this hook process saw.
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert entry.get("outcome") == "no-passphrase"
+    assert entry.get("detail") == "keyring.backends.fail.Keyring"
+
+
+# ─── Track 73A: keyring-locked auto-command skips (end-to-end) ──────────
+#
+# Portable seam: a real keyring Secret Service backend object (it
+# constructs on macOS) over a fake secretstorage module, with
+# keyring.get_password patched to raise if called. Runs in every CI job.
+
+_KEYRING_URL = "https://github.com/kbitz/mind-meld#auto-commands-skip-keyring-locked-or-unavailable"
+
+
+def _keyring_skip_scenario(harness, reason: str) -> None:
+    from tests.conftest import _FakeDBusError
+
+    if reason == "locked":
+        harness.locked = True
+    elif reason == "no-default-collection":
+        harness.collection_error = harness.ItemNotFoundException("no alias")
+    elif reason == "locked-race":
+        harness.items = [harness.make_item(error=harness.LockedException("locked"))]
+    elif reason == "is-locked":
+        harness.items = [
+            harness.make_item(error=_FakeDBusError("org.freedesktop.Secret.Error.IsLocked"))
+        ]
+    else:  # pragma: no cover - parametrize guard
+        raise AssertionError(reason)
+
+
+@pytest.mark.parametrize("verb", ["pull", "push"])
+@pytest.mark.parametrize("reason", ["locked", "no-default-collection", "locked-race", "is-locked"])
+def test_auto_command_skips_when_keyring_cannot_answer(
+    tmp_path, monkeypatch, ss_harness, verb, reason
+):
+    from tests.conftest import _ss_member, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    _keyring_skip_scenario(ss_harness, reason)
+    _use_backend(monkeypatch, _ss_member())
+
+    r = runner.invoke(app, [f"auto{verb}"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    if reason == "no-default-collection":
+        expected = (
+            f"mm: {verb} skipped - keyring has no default collection; "
+            "create one and store the passphrase with secret-tool, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    else:
+        expected = (
+            f"mm: {verb} skipped - keyring locked "
+            "(Secret Service collection is locked); "
+            "unlock your login keyring in the desktop session, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    assert expected in (r.stderr or "").splitlines()
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), verb)
+    if reason == "no-default-collection":
+        assert entry.get("outcome") == "keyring-no-collection"
+        assert entry.get("detail") is None
+    else:
+        assert entry.get("outcome") == "keyring-locked"
+        assert entry.get("detail") == "locked"
+    assert not (iso / f"auto{verb}.log").exists()
+    assert ss_harness.prompt_calls == []
+
+
+@pytest.mark.parametrize("verb", ["pull", "push"])
+@pytest.mark.parametrize("kind", ["keychain", "other"])
+def test_auto_command_skips_when_keyring_denies(tmp_path, monkeypatch, verb, kind):
+    """KeyringLocked from a non-Secret-Service backend -> keyring-locked/denied."""
+    from keyring.errors import KeyringLocked
+
+    from tests.conftest import _FakeBackend, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    module = "keyring.backends.macOS" if kind == "keychain" else "keyring.backends.kwallet"
+    backend_cls = type("Keyring", (_FakeBackend,), {"__module__": module})
+    _use_backend(monkeypatch, backend_cls(error=KeyringLocked("denied")))
+
+    r = runner.invoke(app, [f"auto{verb}"])
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    if kind == "keychain":
+        expected = (
+            f"mm: {verb} skipped - keyring locked (Keychain access was denied); "
+            f"run mm {verb} in a terminal in your desktop session and choose "
+            f"Always Allow, then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    else:
+        expected = (
+            f"mm: {verb} skipped - keyring locked (desktop keyring refused access); "
+            "unlock or allow access in your desktop keyring, "
+            f"then rerun mm auto{verb}. See {_KEYRING_URL}"
+        )
+    assert expected in (r.stderr or "").splitlines()
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), verb)
+    assert (entry.get("outcome"), entry.get("detail")) == ("keyring-locked", "denied")
+    assert not (iso / f"auto{verb}.log").exists()
+
+
+def test_autopull_no_passphrase_records_unknown_backend(tmp_path, monkeypatch):
+    """A backend lookup that raises records detail `unknown` (D1 label)."""
+    import keyring
+    from keyring.errors import NoKeyringError
+
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+
+    def no_backend():
+        raise NoKeyringError("no backend")
+
+    monkeypatch.setattr(keyring, "get_keyring", no_backend)
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0
+    assert "(backend unknown)" in (r.stderr or "")
+    entry = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert (entry.get("outcome"), entry.get("detail")) == ("no-passphrase", "unknown")
+
+
+@pytest.mark.parametrize(
+    "outcome,detail",
+    [
+        ("keyring-no-collection", ""),
+        ("keyring-locked", ""),
+        ("keyring-locked", "denied"),
+        ("keyring-locked", "bogus"),
+        ("no-passphrase", "keyring.backends.fail.Keyring"),  # control: no hint
+    ],
+)
+def test_status_hint_for_every_keyring_outcome(tmp_path, monkeypatch, outcome, detail):
+    """Spec 3.4: both outcomes hint, with or without a (known) detail."""
+    _setup_real_config(tmp_path, monkeypatch)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    # _width, not width: the property setter makes undo pin the computed
+    # width for the rest of the worker.
+    monkeypatch.setattr(cli_module.console, "_width", 240)
+    cli_module._write_autorun_breadcrumb("pull", outcome, detail)
+
+    r = runner.invoke(app, ["status"])
+    assert r.exit_code == 0, r.output
+    hint = f"The last auto-pull was skipped: keyring locked or unavailable; see {_KEYRING_URL}"
+    assert (hint in r.stdout) is outcome.startswith("keyring-")
+
+
+def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):
+    import keyring
+
+    from tests.conftest import _ss_member, _use_backend
+
+    _setup_real_config(tmp_path, monkeypatch)
+    _redirect_sidecar(monkeypatch, tmp_path)
+    # _width, not width: the property setter makes undo pin the computed
+    # width for the rest of the worker.
+    monkeypatch.setattr(cli_module.console, "_width", 240)
+
+    control = runner.invoke(app, ["status"])
+    assert control.exit_code == 0, control.output
+    assert "was skipped: keyring locked or unavailable" not in control.stdout
+
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    ss_harness.locked = True
+    _use_backend(monkeypatch, _ss_member())
+    skipped = runner.invoke(app, ["autopull"])
+    assert skipped.exit_code == 0
+
+    # status reads the passphrase interactively first; give it the env
+    # value and a non-exploding keyring.get_password again.
+    monkeypatch.setattr(keyring, "get_password", lambda *a, **kw: None)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert (
+        f"The last auto-pull was skipped: keyring locked or unavailable; see {_KEYRING_URL}"
+    ) in result.stdout
 
 
 def test_pull_conflict_mode_prompt_threads_interactive_flag(tmp_path, monkeypatch):

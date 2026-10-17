@@ -15,7 +15,7 @@ under the mm-events synced source. Four supported event types:
 
 The events log itself is the cursor (no separate cursor file): the most
 recent `mm-push` event's `ts` answers "since when do I scan?" on the next
-push. Pattern matches `pullhistory.py` (the log file is the state of truth).
+push. History in `pullhistory.py` is forensic only and is not this cursor.
 
 Same-push upload semantics. `_push_core` captures attended host usage before
 its manifest scan, then runs the activity tail only when needed and rebuilds
@@ -826,9 +826,9 @@ def _classify_git_root(path: Path) -> bool:
     Accepts a normal clone (``.git`` directory containing ``HEAD``) and a
     worktree or submodule (``.git`` file whose first line is ``gitdir:``
     pointing at an existing git dir). Wrapped in ``OSError`` because on
-    Python 3.11 (the declared floor) ``Path.exists()`` / ``Path.is_dir()``
-    raise ``PermissionError`` on an unreadable directory; on 3.13+ they
-    return False. CI runs 3.13 only, so this cannot reproduce there.
+    Python 3.11-3.13 ``Path.exists()`` / ``Path.is_dir()`` raise
+    ``PermissionError`` on an unreadable directory; on 3.14+ they return
+    False. CI runs 3.13 (macOS) and 3.14 (Linux).
     """
     try:
         git = path / ".git"
@@ -1503,7 +1503,8 @@ def last_push_ts(events_dir: Path, device_id: str) -> datetime:
     absent / no usable mm-push found, returns
     ``now - INITIAL_CURSOR_LOOKBACK_DAYS``.
 
-    Pattern matches pullhistory.py: the log file IS the state of truth. No
+    The mm-events log file IS the cursor state of truth (state.db history is
+    forensic only). No
     separate cursor file means no separate flock domain (A3 + A4
     elimination)."""
     return resolve_push_cursor(events_dir, device_id).since

@@ -29,7 +29,10 @@ where `self-version` had no flock domain.
 
 Lock-order invariants (load-bearing):
   1. NEVER acquire the mm lockfile while holding upgrade-state's flock.
-  2. RELEASE upgrade-state's flock BEFORE appending to pullhistory.jsonl.
+  2. RELEASE upgrade-state's flock BEFORE writing state.db history; its write
+     transaction is always the innermost lock. Never acquire the mm lockfile
+     or upgrade-state flock inside it. History may write outside the mm lock;
+     provisional ledger/cursors/own_log/displaced writes require the mm lock.
   3. Transition detection runs OUTSIDE the mm lockfile by design — its
      correctness is bounded by upgrade-state's own flock. Status and push
      preview skip this hook so inspection does not consume transitions.

@@ -18,8 +18,11 @@ from pathlib import Path
 
 POLICY_VERSION = 1
 MIN_VERSION = (3, 11)
-PREFERRED_VERSION = (3, 13)
-CANDIDATES = ("python3.13", "python3.12", "python3.11", "python3")
+# CI runs 3.13 on macOS and 3.14 on Linux (Track 73A); either is preferred.
+# 3.13 is tried first so a Mac with both keeps matching the macOS CI job
+# (and its existing .venv); a 3.14-only Linux host still picks 3.14.
+CI_VERSIONS = ((3, 13), (3, 14))
+CANDIDATES = ("python3.13", "python3.14", "python3.12", "python3.11", "python3")
 OWNER_NAME = ".mm-check-owner"
 OWNER_BODY = "mind-meld-bin-check\n"
 STAMP_NAME = ".mm-check-stamp"
@@ -94,20 +97,21 @@ def parse_argv(argv: list[str]) -> Args:
     return args
 
 
-def is_cloud_workspace() -> bool:
-    return os.environ.get("CONDUCTOR_IS_LOCAL") == "0"
-
-
-def _fix_no_python(found: list[str]) -> str:
-    lines = [
-        "install Python 3.13 (or 3.12 / 3.11) and put it on PATH.",
-        "do not run xcode-select --install: /usr/bin/python3 is 3.9.6,",
-        "below requires-python >=3.11, and that advice causes a second failure.",
-    ]
-    if is_cloud_workspace():
+def _fix_no_python(found: list[str], platform: str | None = None) -> str:
+    """Remedy chosen by OS; both name 3.14 (Track 73A)."""
+    if platform is None:
+        platform = sys.platform
+    if platform == "darwin":
         lines = [
-            "install Python 3.13 (or 3.12 / 3.11) and put it on PATH.",
-            "this is a Linux cloud workspace; brew / xcode-select will not help.",
+            "install Python 3.13 or 3.14 (3.12 / 3.11 also work) and put it on PATH.",
+            "do not run xcode-select --install: /usr/bin/python3 is 3.9.6,",
+            "below requires-python >=3.11, and that advice causes a second failure.",
+        ]
+    else:
+        lines = [
+            "install a distro Python 3.11+ (3.14 preferred) and put it on PATH.",
+            "use your package manager (e.g. pacman / apt python3);",
+            "brew / xcode-select advice does not apply on Linux.",
         ]
     if found:
         lines.insert(0, "found: " + "; ".join(found))
@@ -168,9 +172,10 @@ def _which(name: str) -> str | None:
 
 
 def resolve_interpreter() -> tuple[str, tuple[int, int, int]]:
-    """Prefer 3.13 for CI parity. NOTICE, never hard-fail, on any other
-    minor that satisfies requires-python (>=3.11, no upper bound).
-    Classifiers are metadata, not a compatibility bound.
+    """Prefer a CI interpreter (3.13, then 3.14) for parity. NOTICE,
+    never hard-fail, on any other minor that satisfies requires-python
+    (>=3.11, no upper bound). Classifiers are metadata, not a
+    compatibility bound.
     """
     explicit = os.environ.get("MM_PYTHON")
     ordered: list[str] = []
@@ -198,18 +203,18 @@ def resolve_interpreter() -> tuple[str, tuple[int, int, int]]:
     if picked is None:
         die(
             "no Python >= 3.11 on PATH",
-            "looked for python3.13, python3.12, python3.11, python3"
-            + (f"; MM_PYTHON={explicit}" if explicit else ""),
+            "looked for " + ", ".join(CANDIDATES) + (f"; MM_PYTHON={explicit}" if explicit else ""),
             _fix_no_python(found_notes),
         )
 
     path, ver = picked
     log("interpreter %s (%d.%d.%d)" % (path, ver[0], ver[1], ver[2]))
-    if ver[:2] != PREFERRED_VERSION:
+    if ver[:2] not in CI_VERSIONS:
         log(
-            "notice: CI pins 3.13; requires-python is >=3.11 with no upper "
-            "bound, so this is allowed. A local-green / CI-red mystery "
-            "starts here if they diverge."
+            "notice: CI uses Python 3.13 on macOS and 3.14 on Linux; "
+            "requires-python is >=3.11 with no upper bound, so this is "
+            "allowed. A local-green / CI-red mystery starts here if "
+            "they diverge."
         )
     return path, ver
 
@@ -490,12 +495,11 @@ flags:
   --rebuild        recreate an owned .venv, then install
 
 env:
-  MM_PYTHON        interpreter for the venv (default: python3.13, then 3.12,
-                   3.11, python3). Printed unconditionally.
+  MM_PYTHON        interpreter for the venv (default: python3.13, then 3.14,
+                   3.12, 3.11, python3). Printed unconditionally.
   MM_VENV          validate-and-use or fail; never mutated
   MM_PYTEST_WORKERS  xdist worker count (default: auto)
   VIRTUAL_ENV      treated like --no-bootstrap when set
-  CONDUCTOR_IS_LOCAL  0 = cloud workspace; remedy lines drop brew advice
 
 manual fallback (separate lines; quote '.[dev]' — macOS zsh globs it):
 """
