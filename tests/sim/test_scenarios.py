@@ -1793,8 +1793,12 @@ def test_restore_keeps_only_published_deletions_as_convergence_targets(store_fle
         assert (path.read_bytes() if path.exists() else None) == expected
 
 
-@pytest.mark.parametrize("delivered", [False, True])
-def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(store_fleet, delivered):
+@pytest.mark.parametrize(
+    ("delivered", "policy"), [(False, "saved"), (True, "saved"), (False, "current")]
+)
+def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(
+    store_fleet, delivered, policy
+):
     # Value: protects=INV7 stops demanding a union version whose only carrier a restore
     # destroyed, keeps demanding one a peer's replica already holds, and never excuses
     # a peer's unpublished edit; fails_when=the restore's loss record judges holders by
@@ -1821,7 +1825,8 @@ def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(store
         for e, v in f.oracle.versions.items()
         if v.path == "events.jsonl" and v.data == CONTENTS[3] and v.device == "a"
     ]
-    f.restore(a, backup, index_policy="saved")
+    # Under either index policy the restore's scan announces the lost record's deletion.
+    f.restore(a, backup, index_policy=policy)
     assert not set(deletion) & f.oracle.excluded  # INV2's union holders still count.
     assert bool(set(deletion) & f.oracle.destroyed) is not delivered
     assert peer_edit not in f.oracle.destroyed  # Only what the restored device carried.

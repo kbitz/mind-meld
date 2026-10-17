@@ -373,8 +373,7 @@ class StoreFleet:
                 for source, path, data in external
             )
         ]
-        saved_disk = scope == "disk" and index_policy == "saved"
-        if saved_disk:
+        if scope == "disk":
             carried_before = carried_identities(self, [device])
             carried_elsewhere = carried_identities(self, others)
         installed = snapshot if scope == "disk" else self.scoped_snapshot(device, snapshot, scope)
@@ -407,13 +406,13 @@ class StoreFleet:
                 self.oracle.excluded.add(event)
         # INV7's exact-identity loss: only this device carried the version's bytes under
         # its vector (a record no peer received yet, and no family complete over the other
-        # replicas' merged parts), and the restore removed it. Only a saved disk restore:
-        # the owner rolled the whole disk back outside mm, and the restored index stops
-        # announcing what the backup lacks, so the transport cannot redeliver it (a
-        # current index keeps announcing it). A fresh-replica restore emptying the only
-        # copy is mm's own recovery step, the pinned
-        # KNOWN_DESIGN_GAPS[fresh-replica-unreplicated], and INV7 keeps demanding it.
-        if saved_disk:
+        # replicas' merged parts), and the restore removed it. Only a disk restore: the
+        # owner rolled the whole disk back outside mm, and under either index policy the
+        # restore's scan announces the lost record files' deletion, so nothing redelivers
+        # them. A fresh-replica restore emptying the only copy is mm's own recovery step,
+        # the pinned KNOWN_DESIGN_GAPS[fresh-replica-unreplicated], and INV7 keeps
+        # demanding it.
+        if scope == "disk":
             carried_after = carried_identities(self, [device])
             for event, version in sorted(self.oracle.versions.items()):
                 identity = version_identity(version.source, version.path, version.data, version.vv)

@@ -166,10 +166,10 @@ class Oracle:
         # compaction or a later deletion of the record cannot un-publish it, and the
         # sha keeps counter-reused vectors with different bytes distinct.
         self.published_ever: set[tuple] = set()
-        # Versions whose causal identity (bytes and vector) a saved disk restore
-        # destroyed: before it only the restored device carried that identity (no other
-        # ledger, displaced row, or record complete over the other replicas' merged
-        # files), and the restored device does not carry it after. INV2's ``excluded``
+        # Versions whose causal identity (bytes and vector) a disk restore destroyed:
+        # before it only the restored device carried that identity (no other ledger,
+        # displaced row, or record complete over the other replicas' merged files), and
+        # the restored device does not carry it after. INV2's ``excluded``
         # judges holders by line-set containment, so a union version that deleted lines
         # looks held by any superset elsewhere; INV7 demands exact bytes under a vector
         # and needs this exact-identity record of the loss.
@@ -457,19 +457,24 @@ def version_identity(source, path, data, vv):
 
 
 def merged_records(fleet, devices):
-    """Complete authenticated families over the merged replica files of ``devices``.
+    """Complete authenticated families of ``devices``: each replica's own, plus those
+    complete only over their merged replica files.
 
     Parts are immutable and named by family, so merging never mixes two families, and a
     family whose parts are split across these replicas counts: the transport
-    reassembles it.
+    reassembles it. Each replica's own families are kept as well, so a different
+    (corrupt or colliding) part under the same name elsewhere never shadows a family
+    one replica holds completely.
     """
-    files, keys = {}, None
+    found, files, keys = [], {}, None
     for device in devices:
         ctx = context_for(fleet, device)
         if ctx.keys is not None:
             keys = keys or ctx.keys
-            files.update(replica_files(ctx))
-    return [] if keys is None else complete_families(keys, files)
+            own = replica_files(ctx)
+            found += complete_families(ctx.keys, own)
+            files.update(own)
+    return found if keys is None else found + complete_families(keys, files)
 
 
 def carried_identities(fleet, devices):
@@ -806,8 +811,8 @@ def inv7_quiescent(fleet):
         author's tree, stays a target — unless the restore destroyed every holder
         (INV2's ``excluded`` set): a record that existed only on an emptied replica
         is gone the same way INV2 already excuses, and demanding its bytes would
-        contradict that exclusion. ``destroyed`` is a saved disk restore's loss judged
-        by exact identity: a union version that deleted lines, carried only by the
+        contradict that exclusion. ``destroyed`` is a disk restore's loss judged by
+        exact identity: a union version that deleted lines, carried only by the
         restored device's record, is gone even while a superset or an older version
         with the same bytes survives elsewhere.
         """

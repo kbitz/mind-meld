@@ -56,10 +56,12 @@ hard-state reachability independently of the invariant checks. Missing states
 fail as `REACHABILITY`, naming macro rules, initialize witnesses or logical
 time jumps as remedies. At least half of lifecycle examples must settle with
 two participants; deterministic scenarios require at least two at quiescence.
-Lifecycle teardown applies the documented `mm rejoin` remedy to refused
-devices before the final settle; the summary's `teardown_remedy_examples`
-counts how many examples needed it, so the floor's post-remedy meaning stays
-visible.
+Lifecycle teardown first drains and pulls so in-flight fork evidence surfaces,
+then applies the documented `mm rejoin` remedy to refused devices before the
+final settle; the summary's `teardown_remedy_examples` counts how many examples
+needed it, so the floor's post-remedy meaning stays visible. With identities
+exhausted (`MAX_IDS`) a refused device cannot rejoin, and an example left with
+fewer than two participants settles without quiescent credit.
 
 ## Restore and torn-publish rules
 
@@ -72,7 +74,7 @@ the invariant that fires first when the rule is broken. Nodes live in
 |---|---|
 | Names carry a per-publication family; grouping by `(device, kind, seq, family)` (§1, §2) | `./bin/check tests/test_store_format.py -- -k TestLayout71C` |
 | A torn own slot closes with a fresh complete family, even with zero entries; closure waits for the folder to sync, and an intent row restored from a backup does not prove the slot torn (§5) | `./bin/check tests/sim/test_scenarios.py::test_gap_partial_own_commit tests/sim/test_scenarios.py::test_torn_slot_closes_with_a_zero_entry_commit tests/sim/test_scenarios.py::test_intent_row_restored_from_a_backup_does_not_prove_a_torn_slot` |
-| An incomplete own family the device cannot prove it wrote is in flight, never superseded (§5, §9) | `./bin/check tests/sim/test_scenarios.py -- -k stays_pending`; unproven-supersede mutant: `./bin/check tests/sim/test_mutants.py -- -k in_flight_witness` |
+| An incomplete own family the device cannot prove it wrote is in flight while its records may still arrive; once the folder is synced and no receipt claims the seq, only an attended push (or `mm push --snapshot`) supersedes it, and `autopush` stays pending (§5, §9) | `./bin/check tests/sim/test_scenarios.py -- -k stays_pending`; attended escape: `./bin/check tests/sim/test_scenarios.py -- -k "unproven_torn_slot_waits or operator_snapshot_supersedes"`; unproven-supersede mutant: `./bin/check tests/sim/test_mutants.py -- -k in_flight_witness` |
 | `EEXIST` retries under a fresh family; exhaustion is loud; no part is ever overwritten (§5) | `./bin/check tests/sim/test_scenarios.py -- -k exclusive_create`; overwrite mutant (INV4): `./bin/check tests/sim/test_mutants.py -- -k overwrite-part` |
 | Only complete families count; an unreadable family beside a complete one is ignored with a warning (§6) | `./bin/check tests/sim/test_scenarios.py -- -k "torn_family_beside or unreadable_family_beside"`; mixing mutant (INV4): `./bin/check tests/sim/test_mutants.py -- -k mix-families` |
 | Apply order follows names; equal digests are one record (§6) | `./bin/check tests/sim/test_scenarios.py -- -k "same_slot_families or renamed_copy"` |
@@ -114,7 +116,7 @@ vector and cursor caps; snapshots remain below the 512-part format limit.
 | `fleet.restore(device, backup, scope='state')` | Roll back sources and state only; the replica and the transport index stay intact (no `index_policy`) | None |
 | `fleet.restore(device, backup, scope='fresh-replica')` | Roll back sources and state, empty the replica and reset the transport index; peers refill it (no `index_policy`) | None |
 | `fleet.next_family()` / `fleet.force_families(*families)` / `fleet.family_hook` | The adapter's `family_source`: `sha256(run salt ‖ fleet counter)[:8]`, deterministic, non-monotonic and held by the fleet, never on a device disk; the hook returns chosen families first, and `family_hook` runs on every draw so a name can collide on purpose | None |
-| `fleet.folder_synced(name)` | The adapter's `folder_synced`: no transport deliveries are pending to this device (Syncthing idle, nothing needed) | None |
+| `fleet.folder_synced(name)` | The adapter's `folder_synced`: no transport deliveries other than presence refreshes are pending to this device (Syncthing idle, nothing needed); a presence arrival never completes a record, so it does not hold the gate | None |
 | `fleet.clone(device, name)` | Copy disk/index/id, new live hardware identity; no legacy config | None |
 | `fleet.advance(seconds)` | Advance one logical seconds clock for every protocol time field | Explicit advance |
 | `fleet.transport.advance(seconds)` | Advance delivery scheduling only | Transport clock only |
@@ -155,9 +157,10 @@ Same-sha actions merge vectors without source I/O. Equal vectors with different
 sha resolve concurrently and emit counter reuse. A pending resolution stores
 `vv=max(L,R)`; only its next publish increments `me`, even if bytes match the
 ledger sha. Fast-forwards clear pending. Store resolutions never count as user
-supersession. During execution a complete readable replica record can preserve
-an edit; at quiescence it must be current, displaced, expired after 30 days,
-or transitively user-superseded. Restore excludes a version only when the
+supersession. During execution a complete readable replica record, or a family
+complete over the replicas' merged parts, can preserve an edit; at quiescence
+it must be current, displaced, expired after 30 days, or transitively
+user-superseded. Restore excludes a version only when the
 restored device had its last file/record/displaced witness and rollback removed
 it. Path and source identities always match. Complete authenticated conflict-copy
 families also count as transient records; incomplete or corrupt copies do not.
@@ -188,7 +191,7 @@ the file back (a restore, or the replay of the restored device's own record, und
 it) exists nowhere and is not a quiescent convergence target; a published deletion,
 or one still in effect in its author's tree, stays one. INV2 already preserves every
 user deletion, so its restore exclusion is unchanged. A second came the same way: a
-saved disk restore also records, by exact identity (bytes under their vector,
+disk restore also records, by exact identity (bytes under their vector,
 carried by a ledger row, a live displaced row or a record complete over the
 replicas' merged parts), the versions only the restored device carried and the
 rollback removed. INV7 stops demanding those. INV2's line-set exclusion cannot see
@@ -275,7 +278,10 @@ Conservative readings, registered before search:
   intent row names was started by this device and is closed by a fresh complete
   family at the same seq; any other incomplete own family is in flight and the
   push waits. Partial snapshots are not bootstrap candidates; complete commits
-  still permit convergence.
+  still permit convergence. Deep search later found that a state restore can
+  drop the intent row and wedge the slot, so once the folder is synced and no
+  receipt claims the seq, an attended push supersedes it like a torn slot;
+  `autopush` keeps waiting.
 - A still-alive retiree must be inactive at least 30 days. Active means an
   unretired presence newer than 30 days, plus the actor; every such device's
   newest complete snapshot must cover the retiree's last advertised/named seq.
