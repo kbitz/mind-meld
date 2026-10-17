@@ -187,7 +187,13 @@ deep search: a user deletion that no record carries and whose author's tree has
 the file back (a restore, or the replay of the restored device's own record, undid
 it) exists nowhere and is not a quiescent convergence target; a published deletion,
 or one still in effect in its author's tree, stays one. INV2 already preserves every
-user deletion, so its restore exclusion is unchanged. The checkers group parts by
+user deletion, so its restore exclusion is unchanged. A second came the same way: a
+disk restore also records, by exact identity (bytes under their vector, carried by a
+ledger row, live displaced row or complete record), the versions only the restored
+device carried and the rollback removed. INV7 stops demanding those. INV2's
+line-set exclusion cannot see this loss for a union file: a version that deleted
+lines looks held by any superset elsewhere. A fresh-replica restore's loss is not
+excused this way; it stays the pinned `fresh-replica-unreplicated` gap. The checkers group parts by
 `(device, kind, seq, family)` through `layout.group_record_names` but keep their
 own opening and completeness logic, independent of the model's `View`.
 

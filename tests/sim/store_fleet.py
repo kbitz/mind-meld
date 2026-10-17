@@ -302,7 +302,13 @@ class StoreFleet:
         so peers refill it; neither takes an ``index_policy``.
         """
         from .disk import copy_snapshot, discard_backup
-        from .invariants import contains, record_versions, source_inventory
+        from .invariants import (
+            carried_identities,
+            contains,
+            record_versions,
+            source_inventory,
+            version_identity,
+        )
 
         self.idle(device, "restore")
         if scope not in ("disk", "state", "fresh-replica"):
@@ -362,6 +368,11 @@ class StoreFleet:
                 for source, path, data in external
             )
         ]
+        if scope == "disk":
+            carried_before = carried_identities(self, device)
+            carried_elsewhere = set().union(
+                *(carried_identities(self, d) for d in self.ordered() if d is not device)
+            )
         installed = snapshot if scope == "disk" else self.scoped_snapshot(device, snapshot, scope)
         backup = copy_snapshot(self.root, installed, device.root)
         if scope == "fresh-replica":
@@ -390,6 +401,22 @@ class StoreFleet:
                 for source, path, data in restored
             ):
                 self.oracle.excluded.add(event)
+        # INV7's exact-identity loss: only this device carried the version's bytes under
+        # its vector (a record no peer received yet), and the restore removed it, so no
+        # replica holds a copy the transport could redeliver. Only a disk restore: the
+        # owner rolled the whole disk back outside mm. A fresh-replica restore emptying
+        # the only copy is mm's own recovery step, the pinned
+        # KNOWN_DESIGN_GAPS[fresh-replica-unreplicated], and INV7 keeps demanding it.
+        if scope == "disk":
+            carried_after = carried_identities(self, device)
+            for event, version in sorted(self.oracle.versions.items()):
+                identity = version_identity(version.source, version.path, version.data, version.vv)
+                if (
+                    identity in carried_before
+                    and identity not in carried_elsewhere
+                    and identity not in carried_after
+                ):
+                    self.oracle.destroyed.add(event)
         # Only versions this rollback actually undid: authored after the backup point,
         # causally. A user version's own counter is linear per path, so it postdates
         # the backup exactly when it exceeds the restored ledger's counter for that

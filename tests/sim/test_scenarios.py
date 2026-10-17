@@ -1793,6 +1793,68 @@ def test_restore_keeps_only_published_deletions_as_convergence_targets(store_fle
         assert (path.read_bytes() if path.exists() else None) == expected
 
 
+@pytest.mark.parametrize("delivered", [False, True])
+def test_restore_drops_a_union_line_deletion_only_when_no_peer_received_it(store_fleet, delivered):
+    # Value: protects=INV7 stops demanding a union version whose only carrier a restore
+    # destroyed, and keeps demanding one a peer's replica already holds;
+    # fails_when=the restore's loss record judges holders by line-set containment (a
+    # superset elsewhere "holds" a version that deleted lines) or by bytes without the
+    # vector; why_new=a deep-search counterexample on events.jsonl; seam=none;
+    # no_claim=INV2's line-based restore exclusion, which is unchanged.
+    f = store_fleet
+    a = f.devices["a"]
+    union = CONTENTS[3] + CONTENTS[6]  # alpha, bravo, space
+    a.edit("events.jsonl", union)
+    settle(f, min_participants=2)
+    backup = f.snapshot(a)
+    a.edit("events.jsonl", CONTENTS[3])  # Deletes the space line.
+    f.action("a", "push", attended=False)
+    if delivered:
+        for choice in f.transport.pending():
+            if choice.dst == "b" and "/log/" in choice.path:
+                f.transport.deliver(choice)
+    deletion = [
+        e
+        for e, v in f.oracle.versions.items()
+        if v.path == "events.jsonl" and v.data == CONTENTS[3] and v.device == "a"
+    ]
+    f.restore(a, backup, index_policy="saved")
+    assert not set(deletion) & f.oracle.excluded  # INV2's union holders still count.
+    assert bool(set(deletion) & f.oracle.destroyed) is not delivered
+    settle(f, min_participants=2)
+    expected = CONTENTS[3] if delivered else union
+    for d in f.participants():
+        assert (d.source_root / "events.jsonl").read_bytes() == expected
+
+
+def test_regression_union_deletion_lost_to_a_saved_restore(tmp_path, sim_write_guard, monkeypatch):
+    # Deep-search counterexample, minimized: a union line deletion was published only on
+    # the device a saved disk restore then rolled back; a superset (and an older version
+    # with the same bytes) elsewhere made it look held, so INV7 demanded bytes nobody
+    # carried under that vector.
+    from mind_meld.store import format as codec
+
+    from .store_fleet import PART_BYTES
+    from .test_replication import ACTIVE, Invocation, LifecycleMachine
+
+    monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
+    token = ACTIVE.set(Invocation(tmp_path / "replay", sim_write_guard))
+    state = LifecycleMachine()
+    try:
+        state.core_witness(case=3)
+        state.lifecycle_witness(case=3)
+        state.torn_rule(device=1)
+        state.backup_rule(device=3)
+        state.edit(content=3, device=1, old_mtime=True, path=3)
+        state.store(device=1, operation="push")
+        state.restore_rule(device=1, policy="saved")
+    finally:
+        try:
+            state.teardown()
+        finally:
+            ACTIVE.reset(token)
+
+
 def test_regression_retired_edit_remains_local(tmp_path, sim_write_guard, monkeypatch):
     from mind_meld.store import format as codec
 

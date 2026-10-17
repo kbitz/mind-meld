@@ -166,6 +166,12 @@ class Oracle:
         # compaction or a later deletion of the record cannot un-publish it, and the
         # sha keeps counter-reused vectors with different bytes distinct.
         self.published_ever: set[tuple] = set()
+        # Versions whose causal identity (bytes and vector) a disk restore destroyed:
+        # before it only the restored device carried that identity, and nothing does after.
+        # INV2's ``excluded`` judges holders by line-set containment, so a union version
+        # that deleted lines looks held by any superset elsewhere; INV7 demands exact
+        # bytes under a vector and needs this exact-identity record of the loss.
+        self.destroyed: set[int] = set()
         self.last_holders: dict[int, list[str]] = {}
 
     def add(
@@ -434,6 +440,31 @@ def complete_families(keys, files, *, only=None):
 
 def replica_files(ctx):
     return {key: (ctx.replica_root / key).read_bytes() for key in ctx.file_keys()}
+
+
+def version_identity(source, path, data, vv):
+    """INV7's causal identity of a version: its bytes under its vector, never bytes alone."""
+    return (source, path, sha(data), frozenset((vv or {}).items()))
+
+
+def carried_identities(fleet, device):
+    """Version identities ``device`` still carries: its ledger rows, its live displaced
+    rows and every entry of a complete record in its replica. Source bytes alone carry
+    none: an older version, or a union superset, can hold the same lines under another
+    vector."""
+    state = state_for(fleet, device).read()
+    rows = list(state.ledger.values()) + [v for v in state.displaced if not v.get("expired")]
+    result = {version_identity(r["source"], r["path"], r.get("content"), r.get("vv")) for r in rows}
+    ctx = context_for(fleet, device)
+    if ctx.keys is not None:
+        for found in complete_families(ctx.keys, replica_files(ctx)):
+            result |= {
+                version_identity(
+                    e.metadata["source"], e.metadata["path"], e.content, e.metadata["vv"]
+                )
+                for e in found.record.entries
+            }
+    return result
 
 
 def record_versions(fleet):
@@ -732,9 +763,12 @@ def inv7_quiescent(fleet):
         author's tree, stays a target — unless the restore destroyed every holder
         (INV2's ``excluded`` set): a record that existed only on an emptied replica
         is gone the same way INV2 already excuses, and demanding its bytes would
-        contradict that exclusion.
+        contradict that exclusion. ``destroyed`` is a disk restore's loss judged by
+        exact identity: a union version that deleted lines, carried only by the
+        restored device's record, is gone even while a superset or an older version
+        with the same bytes survives elsewhere.
         """
-        if version.event in fleet.oracle.excluded:
+        if version.event in fleet.oracle.excluded or version.event in fleet.oracle.destroyed:
             return True
         if version.event not in fleet.oracle.rolled_back:
             return False
