@@ -198,7 +198,9 @@ rollback removed. INV7 stops demanding those. INV2's line-set exclusion cannot s
 this loss for a union file: a version that deleted lines looks held by any superset
 elsewhere. A fresh-replica restore's loss is not excused this way; it stays the
 pinned `fresh-replica-unreplicated` gap. Both restore judgments count a family whose
-parts are split across other replicas as held, since the transport reassembles it.
+parts are split across other replicas as held, since the transport reassembles it,
+and a family one replica holds completely stays held even when another replica has
+a different part under the same name.
 Ground truth applies §9 row 1's anchor: a complete own snapshot beyond `own_log`
 anchors its seq at its `prev`, so a family there with another digest, or a `prev`
 above it that does not chain to it, is `fork-restore`. The checkers group parts by
