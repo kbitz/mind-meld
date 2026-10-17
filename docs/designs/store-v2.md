@@ -511,9 +511,11 @@ they never return, the fallback is **skip-ahead**: once the folder is synced
 next *attended* push publishes at `claimed + 1` with `prev` set to the digest of
 the newest complete own family, and a forced snapshot at that seq, so readers
 waiting on the missing seqs fall back to the snapshot. Skip-ahead never writes
-over a family already occupying `claimed + 1` (the claim lagged storage; the
-push stays pending and the claim grows), and never past the largest seq the
-record grammar can name: receipts can name seqs, they cannot invent them.
+over a family already occupying its target: it advances past slots holding a
+complete family (observed in storage, not thereby replayed — receipts alone
+could never grow the claim past a record no peer applied) and still waits at
+an incomplete one, and never past the largest seq the record grammar can name:
+receipts can name seqs, they cannot invent them.
 `autopush` stays pending
 with an always-visible warning until then. A device that publishes before any of
 its own records or a peer's receipt has arrived forks its id (row four); that is

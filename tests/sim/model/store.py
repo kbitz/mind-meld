@@ -539,6 +539,12 @@ def reconcile(ctx: Context, *, allow_known_unreadable=False, **kwargs) -> Outcom
                 gap_seq=unreadable[0][0],
                 warnings=tuple(warnings),
             )
+    # Fork evidence at or below a recovery snapshot still refuses: loading the
+    # snapshot would skip those commits, so check every recorded seq first.
+    for found in commits:
+        known = state.own_log.get(str(found.seq))
+        if known and known["hash"] != found.digest:
+            return refuse(ctx, core.reconcile_rule(chain_fork=True))
     # Own-snapshot recovery: a complete own snapshot beyond own_log loads like a peer's,
     # anchors own_log at its seq and prev, and only later own commits replay after it.
     covered = 0
@@ -790,11 +796,17 @@ def publish(
         skip = True
     seq = claimed + 1 if skip else head + 1
     slot, slot_state = own_slot(ctx, state, ctx.view(), "commit", seq)
-    if skip and (slot.complete or slot.incomplete):
-        # The claim lagged storage: a family already occupies the skip target (still
-        # arriving, or complete but unreplayed behind the hole). Never write over it;
-        # the claim grows once it lands.
-        return in_flight(seq, ctx)
+    if skip:
+        # The claim can lag storage: a complete family already occupies the skip
+        # target (unreplayed behind the hole). Advance past observed complete slots
+        # without treating them as replayed; an incomplete one may still complete,
+        # so it still waits. Receipts alone would never grow the claim past a
+        # record no peer applied.
+        while slot.complete and seq < layout.MAX_SEQ:
+            seq += 1
+            slot, slot_state = own_slot(ctx, state, ctx.view(), "commit", seq)
+        if slot.incomplete:
+            return in_flight(seq, ctx)
     if slot_state == "in-flight":
         # An unproven incomplete family at the next slot (its intent row was lost,
         # e.g. a state restore to a pre-crash backup) would wedge publishing forever:
@@ -814,6 +826,9 @@ def publish(
         return in_flight(seq, ctx)
     entries = authored_entries(ctx)
     heal_text = (owner_text("own-records-lost"),) if lost else ()
+    # A torn snapshot at the current head is reported by pull as "the next push
+    # completes it"; an attended push must actually close it, not return unchanged.
+    torn_snapshot = not torn and ctx.own.get("torn") is not None and ctx.own["torn"] == head
     if not entries and not torn and not skip:
         ctx.call(
             "presence",
@@ -822,12 +837,18 @@ def publish(
                 r.get("operation") == "snapshot-recovery" for r in ctx.state.read().history[-1:]
             ),
         )
-        healed = ctx.call("snapshot", force=True) if attended and lost else None
+        healed = ctx.call("snapshot", force=True) if attended and (lost or torn_snapshot) else None
+        closed = healed is not None and healed.status == "published"
         return Outcome(
-            "published" if healed and healed.status == "published" else "unchanged",
-            seq=healed.seq if healed and healed.status == "published" else None,
+            "published" if closed else "unchanged",
+            seq=healed.seq if closed else None,
             warnings=reconciled.warnings + heal_text + fork_warnings(ctx),
-            events=("heal-snapshot",) if healed and healed.status == "published" else (),
+            events=(
+                (("heal-snapshot",) if lost else ())
+                + (("torn-supersede",) if torn_snapshot else ())
+            )
+            if closed
+            else (),
         )
     # A proven torn slot closes with a fresh complete family even when the unchanged
     # ledger and files author nothing, and a skip-ahead commit exists to anchor a forced
@@ -1124,7 +1145,25 @@ def load_snapshot(ctx: Context, view: View, peer: str, found: FamilyRecord) -> N
     seq, record = found.seq, found.record
     for incoming in record.entries:
         ctx.call("classify", incoming=incoming, peer=peer, seq=seq)
+    # §3: `applied` holds every family applied OR covered. Persist the covered
+    # chain now: coverage rebuilt from files on every pull would vanish when a
+    # chain link is compacted, and the family would classify again as late. Own
+    # recovery anchors covered commits in own_log instead, never in applied.
+    covered = (
+        covered_chain(view, peer, {"seq": seq, "prev": record.header["prev"]})
+        if peer != ctx.device_id
+        else {}
+    )
     with ctx.state.transaction() as state:
+        for covered_seq, digest in sorted(covered.items()):
+            for family_record in view.slot(peer, "commit", covered_seq).complete:
+                if family_record.digest == digest:
+                    state.applied[applied_key(peer, covered_seq, family_record.family)] = {
+                        "peer": peer,
+                        "seq": covered_seq,
+                        "family": family_record.family,
+                        "digest": digest,
+                    }
         state.history.append(
             {
                 "operation": "record-applied",

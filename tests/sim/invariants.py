@@ -911,6 +911,30 @@ def inv7_observed_inputs(fleet, obs):
                 # Own-snapshot recovery: own_log is anchored at the snapshot's seq and
                 # prev (the digest of the commit at that seq).
                 own_records[str(event["seq"])] = record.header["prev"]
+            if kind == "snapshot" and peer != identity and not published:
+                # Covered families persist in `applied` (§3): walk the snapshot's prev
+                # chain over authenticated families, digest for digest, independently.
+                keys = fleet.keys(fleet.devices[obs.device])
+                chain_seq, chain_digest = event["seq"], record.header["prev"]
+                while chain_seq >= 1 and chain_digest is not None:
+                    found = None
+                    for tree in (obs.replica_before, obs.replica_after):
+                        for candidate in complete_families(
+                            keys,
+                            {path: file.data for path, file in tree.items()},
+                            only=lambda d, k, n, s=chain_seq: (d, k, n) == (peer, "commit", s),
+                        ):
+                            if candidate.suffix == "" and candidate.digest == chain_digest:
+                                found = candidate
+                                break
+                        if found is not None:
+                            break
+                    if found is None:
+                        break
+                    applied.add((peer, chain_seq, found.family, chain_digest))
+                    applied_digests.add((peer, chain_digest))
+                    chain_digest = found.record.header["prev"]
+                    chain_seq -= 1
             if kind == "commit":
                 if peer == identity:
                     own_records[str(event["seq"])] = digest

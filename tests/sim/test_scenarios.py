@@ -1365,6 +1365,78 @@ def test_snapshot_only_clone_refuses_as_a_clone(store_fleet):
     assert (result.status, result.reason) == ("refused", "fork-clone")
 
 
+def test_fork_below_a_recovery_snapshot_still_refuses(store_fleet):
+    # Value: protects=own-snapshot recovery never launders a same-host fork below the
+    # snapshot; fails_when=recovery loads the snapshot and skips the forked seq's
+    # digest check, changing files instead of refusing fork-restore; why_new=recovery
+    # is new and runs before replay; seam=saved restore plus selective redelivery;
+    # no_claim=native delivery order.
+    f = store_fleet
+    a, b = f.devices["a"], f.devices["b"]
+    backup = f.snapshot(a)
+    a.edit("notes.txt", CONTENTS[1])  # alpha at push #1
+    f.action("a", "push", attended=False)
+    a.edit("notes.txt", CONTENTS[3])
+    f.action("a", "push", attended=False)  # Push #2 on the alpha branch.
+    f.action("a", "publish_snapshot")  # Snapshot at seq 2, alpha branch.
+    deliver_where(f, b, lambda path: True)  # b alone holds the alpha branch + snapshot.
+    f.restore(a, backup, index_policy="saved")
+    a.edit("notes.txt", CONTENTS[2])  # bravo reuses push #1
+    f.action("a", "push", attended=False)
+    f.drain()  # Alpha family and its snapshot redeliver to a.
+    result = f.action("a", "pull")
+    assert (result.status, result.reason) == ("refused", "fork-restore")
+
+
+def test_skip_ahead_advances_past_a_complete_unreplayed_slot(store_fleet):
+    # Value: protects=skip-ahead is not wedged when the claim lagged storage and a
+    # complete own record already occupies claimed + 1 behind a permanent hole;
+    # fails_when=the push pends forever at the occupied slot because no receipt can
+    # grow the claim past a record no peer applied; why_new=skip slot inspection is
+    # new; seam=state restore plus fleet-wide record deletion; no_claim=none.
+    f = store_fleet
+    a, b = f.devices["a"], f.devices["b"]
+    a.edit("notes.txt", CONTENTS[1])
+    f.action("a", "push", attended=False)  # Push #1.
+    f.drain()
+    f.action("b", "pull")
+    backup = f.snapshot(a)
+    a.edit("notes.txt", CONTENTS[2])
+    f.action("a", "push", attended=False)  # Push #2.
+    deliver_where(f, b, lambda path: "/log/000000000002." in path)
+    f.action("b", "pull")  # b's receipt claims push #2.
+    a.edit("notes.txt", CONTENTS[3])
+    f.action("a", "push", crash_state=True, attended=False)  # Push #3 complete, unrecorded.
+    for device in (a, b):  # Push #2 is then lost fleet-wide (a rollback elsewhere).
+        for path in list(device.replica_root.glob(f"dev/{a.mm_id}/log/000000000002.*.enc")):
+            path.unlink()
+        f.transport.scan(device.name)
+    f.restore(a, backup, scope="state")  # own_log back to push #1; replica keeps #3.
+    f.drain()
+    result = f.action("a", "push")  # Attended: skip past the occupied slot.
+    assert result.status == "published" and result.seq == 4, result
+    assert "skip-ahead" in result.events
+    settle(f, min_participants=2)
+
+
+def test_torn_snapshot_is_closed_by_the_next_attended_push(store_fleet):
+    # Value: protects=pull's "the next push completes it" is true for a torn snapshot,
+    # not only a torn commit; fails_when=an attended push with nothing to publish
+    # returns unchanged and the torn-own-slot warning repeats forever; why_new=torn
+    # snapshot detection postdates the commit-slot closure; seam=none; no_claim=none.
+    f = store_fleet
+    a = f.devices["a"]
+    multipart_edit(a)
+    f.action("a", "push", attended=False)
+    f.action("a", "publish_snapshot", crash_parts=1)  # Torn multipart snapshot.
+    f.drain()
+    assert owner_text("torn-own-slot") in f.action("a", "pull").warnings
+    result = f.action("a", "push")  # Attended, nothing new to publish.
+    assert (result.status, result.events) == ("published", ("torn-supersede",))
+    assert owner_text("torn-own-slot") not in f.action("a", "pull").warnings
+    settle(f, min_participants=2)
+
+
 def test_torn_own_slot_is_reported_until_the_next_push_completes_it(store_fleet):
     # Value: protects=the owner is told a push was interrupted; fails_when=a pull after
     # a crash is silent; why_new=reason codes are new; seam=none; no_claim=none beyond
