@@ -3,12 +3,14 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc`
+- `src/mind_meld/crypto.py` — `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `store_passphrase_in_keyring`
+- `src/mind_meld/errors.py` — `KeyringUnavailableError`
 - `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `_devices_write_lock`
 - `src/mind_meld/storage/local.py` — `LocalBackend.put_exclusive` / `find_conflict_copies`
 - `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes` / `safe_terminal_str`
 - Anywhere a peer-controlled string is rendered (filename, path, source name, device name, `str(e)` exception tail) — use `safe_str` in Rich markup, `safe_text` for diff content, and `safe_terminal_str` for single-line plain stderr
 
-Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`, `tests/test_recovery.py`.
+Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`, `tests/test_recovery.py`; keyring reads: `tests/test_crypto.py`, `tests/test_diag.py`, `tests/test_secret_service_live.py` (live, opt-in).
 
 ---
 
@@ -56,6 +58,89 @@ Sweep covers ~30 print sites: pull-prediction widget, upload progress, conflict 
 
 ## `store_passphrase_in_keyring` PYTEST_CURRENT_TEST guard (load-bearing, v0.11.11)
 A test-fixture passphrase (`pw123`) reached a real fleet's macOS Keychain through a path that bypassed conftest's `_isolate_keyring` autouse fixture (most likely a non-pytest harness or manual init against a placeholder storage path), wedging `mm pull` until the user manually overwrote the entry. Production `crypto.store_passphrase_in_keyring` now short-circuits to `False` when `os.environ.get("PYTEST_CURRENT_TEST")` is truthy. pytest sets that variable on every test phase and it's inherited by subprocesses, so any test-orchestrated path (in-process, subprocess, `python -c '...'` from a test, REPL under pytest) physically cannot reach `keyring.set_password` against the real macOS Keychain. Real-CLI `mm init` from a user shell is unaffected. Failure mode under the guard is the existing "[yellow]No keyring available[/yellow]" warning path — recoverable via `MINDMELD_PASSPHRASE` env var or re-running init in a clean env, strictly better than the silent passphrase poisoning the guard prevents. Existing `TestStorePassphraseInKeyringExceptNarrow` pins `monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)` so they exercise the real-CLI write path past the guard; new `TestStorePassphrasePytestGuard` pins both branches.
+
+## Non-interactive keyring reads (Track 73A)
+
+`crypto.get_passphrase(non_interactive=True)` is the hook path
+(`autopull`/`autopush`). On keyring's Secret Service backend it must never
+send `Unlock`, `Prompt` or `CreateCollection` and never call
+`keyring.get_password`: keyring's own read unlocks a locked collection and
+creates a missing default one, and secretstorage waits on that desktop
+dialog with no timeout, so an agent hook would hang. `_read_secret_service`
+reads the collection directly through secretstorage instead: open the
+member's preferred (else default-alias) collection, raise
+`KeyringUnavailableError("no-default-collection", "secret-service")` when it
+does not exist, `("locked", ...)` when it is locked or the item read reports
+locked (`LockedException`, or a D-Bus error named
+`org.freedesktop.Secret.Error.IsLocked`), else first-match `search_items` +
+`get_secret` in keyring's configured scheme. The attended (interactive) path
+is unchanged and may still raise a desktop unlock prompt.
+
+**Chainer walk rules.** `_non_interactive_keyring_read` walks
+`ChainerBackend.backends` read exactly once (it recomputes discovery per
+access), in keyring's priority order; a non-chainer backend walks as a
+single member. A value ends the walk. A member yielding no value — `None`,
+or a `KeyringError` from the family `get_passphrase` has always swallowed —
+moves to the next member. `KeyringUnavailableError` (locked /
+no-default-collection from a Secret Service member, `denied` below) stops
+the walk and propagates. Every other exception propagates (v0.8.9
+narrow-catch contract). Any `keyring.errors.KeyringLocked` from a
+non-Secret-Service member becomes `keyring-locked` downstream:
+`KeyringUnavailableError("denied", "keychain")` when the member's class
+module starts with `keyring.backends.macOS` (string check, so Linux never
+imports that backend), else `("denied", "other")`.
+
+**Env fallback and connect parity.** `MINDMELD_PASSPHRASE` is used whenever
+the keyring cannot answer without prompting: on `KeyringUnavailableError`
+the env value wins if set, else the error reaches `_auto_command_setup`'s
+skip arm. Connect errors keep exact parity with keyring: `dbus_init`
+failures propagate untouched (keyring calls it outside its `InitError`
+wrapper, so the outcome stays `keyring-error`), while a non-`ItemNotFound`
+`SecretStorageException` from opening the collection is treated like
+keyring's swallowed `InitError` — the member yields no value. Errors from
+`is_locked()` and from the item read (other D-Bus errors, `OSError`,
+`UnicodeDecodeError`) propagate. An empty-string secret is returned as is,
+matching keyring.
+
+**Stored-item contract.** The reader finds the passphrase by keyring's
+configured scheme (`member.schemes[member.scheme]`): default
+`service=mind-meld`, `username=passphrase`; KeePassXC scheme
+`Title=mind-meld`, `UserName=passphrase`. Writers must keep storing under
+that scheme — `store_passphrase_in_keyring` does so through keyring today.
+Track 80A's Linux passphrase flow must keep this contract or update the
+reader with it; the README's `secret-tool store` recovery command writes the
+same attributes (plus keyring's `application` attribute).
+
+The `secretstorage>=3.4` floor exists because only 3.4+ maps a missing
+collection's D-Bus `UnknownObject` reply to `ItemNotFoundException`; 3.3.x
+raised a raw D-Bus error, which surfaced as `keyring-error` instead of
+`keyring-no-collection`.
+
+**Diag probe.** `crypto._secret_service_state()` reports module-qualified
+backend/member class paths (`_backend_label`; every keyring backend class is
+named `Keyring`, so bare names identify nothing) and closed-vocabulary
+`secret_service` / `item` states for `mm diag` (`keyring` key); `backend` is
+`unavailable` without the keyring package and `unknown` when discovery
+raises. It never reads a secret (`search_items` only,
+for presence), never prompts, and degrades any exception to
+`unknown` + the exception class name. `cli.py` calls it module-qualified
+(`crypto._secret_service_state()`) so test patches on the owner module
+reach it.
+
+**Residuals (accepted, not covered by the narrow read).** KWallet,
+KeePassXC's own confirm-access dialogs, and keyring's libsecret backend can
+still prompt inside `member.get_password`; macOS Keychain access dialogs
+can still appear for attended reads (the auto path converts a denial, it
+cannot pre-empt the dialog); a stalled D-Bus session can still block hooks
+and `mm diag` (no timeout backstop — deferred, see TODOS). Attended
+commands agents run (e.g. `mm status`) still read interactively first.
+
+Tests: `TestNonInteractiveSecretServiceRead`, `TestNonInteractiveOtherBackends`,
+`TestNonInteractiveChainerWalk`, `TestSecretServiceState`,
+`TestKeyringUnavailableRender`, `TestKeyringLibraryContract` in
+`tests/test_crypto.py`; CliRunner skip + status-hint tests in
+`tests/test_silent_failure_contract.py`; `tests/test_secret_service_live.py`
+(real gnome-keyring, `MM_LIVE_SECRET_SERVICE=1`, CI `secret-service-live`).
 
 ## Verified crypto repair and read-only inspection (Tracks 56A/60A)
 

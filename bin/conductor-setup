@@ -9,8 +9,8 @@
 # log dir, etc). The pre-warm itself is backgrounded: trap EXIT does not
 # fire until the child terminates, so a hung pip in the foreground would
 # still stall create. The next ./bin/check serializes on the bootstrap
-# lock if this job is still running. CONDUCTOR_IS_LOCAL is echoed here;
-# remedy-line branching lives in bin/_check.py.
+# lock if this job is still running. CONDUCTOR_IS_LOCAL is echoed here
+# for the log only; bin/check picks its no-Python remedy by OS (Track 73A).
 
 trap 'exit 0' EXIT
 

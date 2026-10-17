@@ -31,7 +31,7 @@ if [ -n "${MM_PYTHON:-}" ]; then
 fi
 
 if [ -z "$launcher_py" ]; then
-  for cand in python3.13 python3.12 python3.11 python3; do
+  for cand in python3.13 python3.14 python3.12 python3.11 python3; do
     if command -v "$cand" >/dev/null 2>&1; then
       launcher_py=$(command -v "$cand")
       break
@@ -40,19 +40,20 @@ if [ -z "$launcher_py" ]; then
 fi
 
 if [ -z "$launcher_py" ]; then
-  if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
     printf '%s\n' \
       "bin/check: no Python interpreter on PATH." \
-      "cause: looked for python3.13, python3.12, python3.11, python3." \
-      "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
-      "     this is a Linux cloud workspace; brew / xcode-select will not help." >&2
+      "cause: looked for python3.13, python3.14, python3.12, python3.11, python3." \
+      "fix: install Python 3.13 or 3.14 (3.12 / 3.11 also work) and put it on PATH." \
+      "     do not run xcode-select --install: /usr/bin/python3 is 3.9.6," \
+      "     below requires-python >=3.11, and that advice causes a second failure." >&2
   else
     printf '%s\n' \
       "bin/check: no Python interpreter on PATH." \
-      "cause: looked for python3.13, python3.12, python3.11, python3." \
-      "fix: install Python 3.13 (or 3.12 / 3.11) and put it on PATH." \
-      "     do not run xcode-select --install: /usr/bin/python3 is 3.9.6," \
-      "     below requires-python >=3.11, and that advice causes a second failure." >&2
+      "cause: looked for python3.13, python3.14, python3.12, python3.11, python3." \
+      "fix: install a distro Python 3.11+ (3.14 preferred) and put it on PATH." \
+      "     use your package manager (e.g. pacman / apt python3);" \
+      "     brew / xcode-select advice does not apply on Linux." >&2
   fi
   exit 1
 fi

@@ -127,9 +127,24 @@ def _isolate_keyring(monkeypatch) -> None:
     get_passphrase() checks keyring first; a stale passphrase stored from a
     real mm session would override test env vars and make integration tests
     nondeterministic. Force keyring to report "not available" in every test.
+
+    Track 73A's non-interactive reader walks `keyring.get_keyring()`
+    members instead of calling `keyring.get_password`, so the backend is
+    pinned to keyring's fail backend too. Tests that need a backend
+    inject one by patching `keyring.get_keyring` themselves. A developer's
+    PYTHON_KEYRING_BACKEND / KEYRING_PROPERTY_* (e.g. a KeePassXC scheme)
+    would reshape backends the tests construct, so they are cleared.
     """
+    import os
+
+    import keyring.backends.fail
+
+    for name in list(os.environ):
+        if name == "PYTHON_KEYRING_BACKEND" or name.startswith("KEYRING_PROPERTY_"):
+            monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr("keyring.get_password", lambda *a, **kw: None)
     monkeypatch.setattr("keyring.set_password", lambda *a, **kw: None)
+    monkeypatch.setattr("keyring.get_keyring", lambda: keyring.backends.fail.Keyring())
 
 
 @pytest.fixture(autouse=True)
@@ -560,6 +575,216 @@ def _setup_real_config(tmp_path, monkeypatch):
     _redirect_lock(monkeypatch, tmp_path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     return claude_dir
+
+
+# ─── Track 73A non-interactive keyring fakes ─────────────────────────────
+#
+# Shared by tests/test_crypto.py (unit) and
+# tests/test_silent_failure_contract.py (CliRunner end-to-end). The fake
+# `secretstorage` module family is installed in sys.modules per test;
+# prompt surfaces are spies that fail the test if reached.
+
+
+class _FakeBackend:
+    """Non-Secret-Service keyring backend with a scripted get_password."""
+
+    def __init__(self, value=None, error=None):
+        self.value = value
+        self.error = error
+        self.calls = 0
+        self.seen: list[tuple[str, str]] = []
+
+    def get_password(self, service, username):
+        self.calls += 1
+        self.seen.append((service, username))
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+class _FakeDBusError(Exception):
+    """Stand-in for jeepney's DBusErrorResponse: carries a `.name`."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
+class _SecretStorageHarness:
+    """Fake secretstorage module family with scripted collection state."""
+
+    def __init__(self) -> None:
+        self.items: list = []
+        self.locked = False
+        self.collection_error: BaseException | None = None
+        self.is_locked_error: BaseException | None = None
+        self.dbus_init_error: BaseException | None = None
+        self.searches: list[dict] = []
+        self.collection_paths: list[str] = []
+        self.prompt_calls: list[str] = []
+        self.dbus_init_calls = 0
+        # Exception classes are (re)created by install().
+        self.SecretStorageException: type[Exception] | None = None
+        self.ItemNotFoundException: type[Exception] | None = None
+        self.LockedException: type[Exception] | None = None
+        self.NotAvailable: type[Exception] | None = None
+
+    def make_item(self, secret: bytes = b"stored-pw", error: BaseException | None = None):
+        harness = self
+
+        class _Item:
+            def get_secret(self):
+                if error is not None:
+                    raise error
+                return secret
+
+            def unlock(self):
+                harness.prompt_calls.append("item.unlock")
+                raise AssertionError("non-interactive read called item.unlock()")
+
+        return _Item()
+
+    def install(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        harness = self
+
+        class SecretStorageException(Exception):
+            pass
+
+        class ItemNotFoundException(SecretStorageException):
+            pass
+
+        class LockedException(SecretStorageException):
+            pass
+
+        class SecretServiceNotAvailableException(SecretStorageException):
+            pass
+
+        self.SecretStorageException = SecretStorageException
+        self.ItemNotFoundException = ItemNotFoundException
+        self.LockedException = LockedException
+        self.NotAvailable = SecretServiceNotAvailableException
+
+        def prompt_spy(name):
+            def _spy(*a, **kw):
+                harness.prompt_calls.append(name)
+                raise AssertionError(f"non-interactive read reached {name}()")
+
+            return _spy
+
+        class _Conn:
+            def close(self):
+                pass
+
+        class _Collection:
+            def __init__(self, conn, path="/org/freedesktop/secrets/aliases/default"):
+                if harness.collection_error is not None:
+                    raise harness.collection_error
+                self.connection = conn
+                harness.collection_paths.append(path)
+
+            def is_locked(self):
+                if harness.is_locked_error is not None:
+                    raise harness.is_locked_error
+                return harness.locked
+
+            def unlock(self):
+                return prompt_spy("collection.unlock")()
+
+            def search_items(self, attributes):
+                harness.searches.append(dict(attributes))
+                return iter(list(harness.items))
+
+        def dbus_init():
+            harness.dbus_init_calls += 1
+            if harness.dbus_init_error is not None:
+                raise harness.dbus_init_error
+            return _Conn()
+
+        ss = types.ModuleType("secretstorage")
+        coll_mod = types.ModuleType("secretstorage.collection")
+        exc_mod = types.ModuleType("secretstorage.exceptions")
+        exc_mod.SecretStorageException = SecretStorageException
+        exc_mod.ItemNotFoundException = ItemNotFoundException
+        exc_mod.LockedException = LockedException
+        exc_mod.SecretServiceNotAvailableException = SecretServiceNotAvailableException
+        coll_mod.DEFAULT_COLLECTION = "/org/freedesktop/secrets/aliases/default"
+        coll_mod.Collection = _Collection
+        coll_mod.create_collection = prompt_spy("create_collection")
+        coll_mod.get_default_collection = prompt_spy("get_default_collection")
+        ss.Collection = _Collection
+        ss.dbus_init = dbus_init
+        ss.create_collection = prompt_spy("create_collection")
+        ss.get_default_collection = prompt_spy("get_default_collection")
+        ss.collection = coll_mod
+        ss.exceptions = exc_mod
+        # secretstorage.util holds the prompt runner; crypto never imports
+        # it, so reaching it means a regression routed through a prompt.
+        util_mod = types.ModuleType("secretstorage.util")
+        util_mod.exec_prompt = prompt_spy("exec_prompt")
+        util_mod.unlock_objects = prompt_spy("unlock_objects")
+        ss.util = util_mod
+        # keyring's SecretService module binds secretstorage at import (the
+        # real one on Linux, none on macOS). Import it BEFORE the fakes enter
+        # sys.modules, so it never binds a fake that undo would then keep;
+        # then rebind it so a regression that routes a Secret Service member
+        # through keyring's own read hits the spies, not a session keyring.
+        import keyring.backends.SecretService as _keyring_ss
+
+        monkeypatch.setitem(sys.modules, "secretstorage", ss)
+        monkeypatch.setitem(sys.modules, "secretstorage.collection", coll_mod)
+        monkeypatch.setitem(sys.modules, "secretstorage.exceptions", exc_mod)
+        monkeypatch.setitem(sys.modules, "secretstorage.util", util_mod)
+        monkeypatch.setattr(_keyring_ss, "secretstorage", ss, raising=False)
+        monkeypatch.setattr(_keyring_ss, "exceptions", exc_mod, raising=False)
+
+
+def _ss_member(scheme: str | None = None, preferred_collection: str | None = None):
+    """A real keyring Secret Service backend object (constructs anywhere)."""
+    from keyring.backends.SecretService import Keyring as _SSKeyring
+
+    member = _SSKeyring()
+    if scheme is not None:
+        member.scheme = scheme
+    if preferred_collection is not None:
+        member.preferred_collection = preferred_collection
+    return member
+
+
+def _chainer(members: list):
+    """(ChainerBackend instance, backends-access log) over fixed members."""
+    from keyring.backends.chainer import ChainerBackend
+
+    calls: list[int] = []
+
+    class _Chainer(ChainerBackend):
+        @property
+        def backends(self):  # noqa: D102 - counting test double
+            calls.append(1)
+            return list(members)
+
+    return _Chainer(), calls
+
+
+def _use_backend(monkeypatch, backend) -> None:
+    import keyring
+
+    monkeypatch.setattr(keyring, "get_keyring", lambda: backend)
+
+    def _no_global_get_password(*a, **kw):
+        raise AssertionError("non-interactive read called keyring.get_password()")
+
+    monkeypatch.setattr(keyring, "get_password", _no_global_get_password)
+
+
+@pytest.fixture
+def ss_harness(monkeypatch) -> _SecretStorageHarness:
+    harness = _SecretStorageHarness()
+    harness.install(monkeypatch)
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    return harness
 
 
 @pytest.fixture

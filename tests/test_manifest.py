@@ -2627,7 +2627,16 @@ class TestStrictWalkers:
                 raise PermissionError("denied")
             return real_stat(self, *a, **kw)
 
+        real_lstat = Path.lstat
+
+        def lboom(self):
+            # Python 3.14's Path.lstat bypasses Path.stat (calls os.lstat).
+            if self == path:
+                raise PermissionError("denied")
+            return real_lstat(self)
+
         monkeypatch.setattr(Path, "stat", boom)
+        monkeypatch.setattr(Path, "lstat", lboom)
         with pytest.raises(SnapshotError):
             _record_file(path, tmp_path, 1_000_000, on_skip=None, strict=True, source_name="claude")
 

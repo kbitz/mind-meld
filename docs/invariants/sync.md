@@ -88,6 +88,8 @@ Adding own-device GC to autopush or a status nudge is deferred work.
 
 **`autopush` writes a `no-sources` breadcrumb (v0.8.1)** when `get_sources(config)` returns empty, distinguishing "broken config no-op" from "nothing to push" no-op. Without this, `mm status` only sees `outcome: "success"` forever and monitoring on top of it never catches the wedge.
 
+**Keyring skips (Track 73A).** `_auto_command_setup` catches `KeyringUnavailableError` before `CryptoError`: one `mm: <verb> skipped - <remedy>` stderr line in every mode (same shape as `no-passphrase`), exit 0, no `auto<verb>.log` entry, and a `keyring-locked` breadcrumb (detail `locked` or `denied`) or `keyring-no-collection` (no detail). `mm status` prints a post-hoc hint after the `Last auto-<verb>` line for both outcomes, with or without a detail. The reader contract — why the keyring cannot answer, the chainer walk, env fallback and residuals — lives in [init-devices.md "Non-interactive keyring reads (Track 73A)"](init-devices.md#non-interactive-keyring-reads-track-73a). The pre-existing `keyring-error` arm (unexpected exception kinds) and `no-passphrase` outcome name are unchanged; the no-passphrase message now names the backend after its pinned prefix, and its breadcrumb detail records the module-qualified backend the hook process saw (`crypto._keyring_backend_label()`; readers: `mm status`, `mm diag` `last_autorun`), because hooks run in the agent's environment, which a terminal `mm diag` may not share.
+
 ## Atomic write publication failures
 
 [`fsutil.py`](../../src/mind_meld/fsutil.py)'s `atomic_write_bytes` publishes at

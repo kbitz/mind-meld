@@ -480,8 +480,8 @@ Host readers remain best-effort: vendor format repairs are PATCH or MINOR.
 Framework-owned `--help`, completion options and parse-error presentation are
 excluded from the CLI golden; their usage errors remain documented exit 2.
 The supported Python floor is `requires-python`; CI qualifies Python 3.13
-only. A higher floor is MINOR with Upgrade notes, not evidence that other
-interpreters were tested.
+(macOS) and 3.14 (Linux) only. A higher floor is MINOR with Upgrade notes, not
+evidence that other interpreters were tested.
 
 **Exit outcomes:** [one README table](../../README.md#exit-codes) is the
 operator reference, including post-parse value errors (1), usage errors (2),

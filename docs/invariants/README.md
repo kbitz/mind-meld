@@ -16,7 +16,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `cli.py` | Every `@app.command()` shell, `_pull_core` / `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `_apply_*` family, `init`, `status`, `diag`, the `autopull`/`autopush` pair |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes |
-| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, crypto-init bootstrap |
+| `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, (73A) the prompt-free hook keyring read and the `mm diag` keyring probe, crypto-init bootstrap |
 | `store/__init__.py` | Inert v3 package; no eager imports or lifecycle wiring |
 | `store/envelope.py` | (71C) Verified fleet header/keycheck, explicit keys/context, envelope 0x03, bounded authenticated decoding and safe store errors |
 | `store/format.py` | (71C) Commit/snapshot/presence schemas and frames, host fingerprint, whole-record digest and authenticated multipart assembly |
@@ -110,7 +110,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc` / (its peer-controlled blob-key prints) | `docs/invariants/init-devices.md` and `docs/invariants/sync.md` (Own-device blob collection) |
 | `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
-| `crypto.py:store_passphrase_in_keyring` / keyring path | `docs/invariants/init-devices.md` |
+| `crypto.py:store_passphrase_in_keyring` / `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `errors.py:KeyringUnavailableError` / keyring path | `docs/invariants/init-devices.md` |
 | `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
 | `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
 | `upgrade.py:cached_upgrade_view` / `cli.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |

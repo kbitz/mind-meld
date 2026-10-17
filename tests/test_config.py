@@ -2187,6 +2187,16 @@ class TestSourceBootstrapPreview56A:
         monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
         monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
         monkeypatch.setattr(Path, "stat", stat)
+        # Python 3.14's Path.lstat calls os.lstat directly instead of
+        # self.stat(follow_symlinks=False); inject the fault on both seams.
+        original_lstat = Path.lstat
+
+        def lstat(path):
+            if path == root:
+                raise OSError(errno.EIO, "stat failed")
+            return original_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
         with pytest.raises(SnapshotError, match="could not be created.*EIO"):
             resolve_sources({}, strict=True, bootstrap=False)
         with pytest.raises(FileNotFoundError):

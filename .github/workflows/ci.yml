@@ -91,3 +91,104 @@ jobs:
               exit 1
             fi
           fi
+
+  portable-linux:
+    # Track 73A: the portable suite on Linux/Python 3.14, so later 2.0
+    # Tracks cannot land macOS-only code unseen. No Keychain assertion
+    # (that's the macOS job's); the live keyring test stays opt-in and
+    # skips here — secret-service-live owns it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Portable checks
+        run: |
+          python -c "import sys; print('setup-python:', sys.executable, sys.version)"
+          MM_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export MM_PYTHON
+          echo "MM_PYTHON=$MM_PYTHON"
+          ./bin/check --no-bootstrap
+
+      - name: Build and smoke the wheel
+        # Throwaway venv + HOME, no session bus: `mm diag --json` must
+        # still emit valid JSON with the keyring probe at n/a.
+        run: |
+          python -m pip install build
+          python -m build
+          smoke=$(mktemp -d)
+          python -m venv "$smoke/venv"
+          "$smoke/venv/bin/python" -m pip install dist/*.whl
+          "$smoke/venv/bin/mm" --version
+          "$smoke/venv/bin/python" -c 'import secretstorage'
+          iso_home=$(mktemp -d)
+          if ! env -u DBUS_SESSION_BUS_ADDRESS HOME="$iso_home" "$smoke/venv/bin/mm" diag --json > /tmp/diag.out 2>/tmp/diag.err; then
+            echo "::error::mm diag --json failed without a session bus"
+            cat /tmp/diag.err
+            exit 1
+          fi
+          if grep -q 'Traceback' /tmp/diag.err; then
+            echo "::error::mm diag --json crashed without a session bus"
+            cat /tmp/diag.err
+            exit 1
+          fi
+          "$smoke/venv/bin/python" -c "
+          import json
+          payload = json.load(open('/tmp/diag.out'))
+          keyring = payload['keyring']
+          assert keyring['secret_service'] == 'n/a', keyring
+          print(keyring)
+          "
+
+  secret-service-live:
+    # Track 73A: the only real-D-Bus evidence before the 2.0 soak. Runs
+    # tests/test_secret_service_live.py against a real gnome-keyring in
+    # an Arch container (the supported Linux flavor). The test fails —
+    # never skips — when its tools are missing under the live flag.
+    # gnome-keyring-daemon aborts as container root ("error dropping process
+    # capabilities"): it keeps only CAP_IPC_LOCK, which Docker's default set
+    # lacks. The test runs as an unprivileged user, like a desktop session;
+    # IPC_LOCK lets the daemon keep mlock if the package grants it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: archlinux:latest
+      options: --cap-add=IPC_LOCK
+    steps:
+      # One full upgrade before checkout (git included): a bare `pacman -Sy`
+      # followed by installs is an Arch partial upgrade.
+      - name: Install system packages
+        run: pacman -Syu --noconfirm git python python-pip gnome-keyring libsecret dbus
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Create venv and install (PEP 668 externally-managed Python)
+        run: |
+          python -m venv /opt/mm-venv
+          /opt/mm-venv/bin/python -m pip install --upgrade pip
+          /opt/mm-venv/bin/python -m pip install -e '.[dev]'
+
+      - name: Create an unprivileged test user
+        run: |
+          useradd --create-home mmtest
+          chown -R mmtest: "$GITHUB_WORKSPACE" /opt/mm-venv
+
+      - name: Live Secret Service test
+        run: >-
+          runuser -u mmtest --
+          env HOME=/home/mmtest MM_PYTHON=/opt/mm-venv/bin/python MM_LIVE_SECRET_SERVICE=1
+          ./bin/check --no-bootstrap --tests tests/test_secret_service_live.py
