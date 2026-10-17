@@ -796,7 +796,17 @@ def publish(
         # the claim grows once it lands.
         return in_flight(seq, ctx)
     if slot_state == "in-flight":
-        return in_flight(seq, ctx)
+        # An unproven incomplete family at the next slot (its intent row was lost,
+        # e.g. a state restore to a pre-crash backup) would wedge publishing forever:
+        # its missing parts can only ever come from this device. Once the folder is
+        # synced and no receipt claims the seq, an attended push may supersede it,
+        # exactly like skip-ahead; autopush stays pending. If a clone later completes
+        # the old family, the two families fork visibly (§9 row three/four).
+        if not (
+            attended and claimed is None and slot.incomplete and ctx.folder_synced()
+        ):
+            return in_flight(seq, ctx)
+        slot_state = "torn"
     torn = slot_state == "torn"
     if torn and not ctx.folder_synced():
         # An intent row proves some copy of this state started the family; a backup
@@ -998,7 +1008,10 @@ def snapshot(
     if slot.complete:
         return Outcome("unchanged", seq=seq)
     if slot_state == "in-flight":
-        return in_flight(seq, ctx)
+        # Same unproven-incomplete escape as publish: a snapshot is operator-invoked
+        # (`mm push --snapshot`), so once synced and unclaimed it may supersede.
+        if not (slot.incomplete and ctx.folder_synced() and ctx.own.get("in_flight") is None):
+            return in_flight(seq, ctx)
     if slot_state == "torn" and not ctx.folder_synced():
         return in_flight(seq, ctx)  # Torn closure waits for sync, as in publish.
     entries = tuple(

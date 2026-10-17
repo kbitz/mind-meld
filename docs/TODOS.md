@@ -84,10 +84,6 @@ here by hand, use the H3 form.
 - **Why:** three review findings are real but need product-code shape 75A/77A will settle, and none loses bytes today.
 - **Context:** (1) fork evidence records the first-seen seq, not the earliest — record/upgrade to the earliest seq so fork-tainted displacement uses the right boundary; (2) a second complete snapshot family at an already-loaded seq is never scanned by `read` — decide whether readers scan late snapshot families; (3) an honest skip-ahead commit's `prev` fails against a reader that applied the lost record, producing a repeating fork warning whose remedy names `mm rejoin` — consider a skip marker (the covered-chain arithmetic fabrication was fixed in 73C review). Read first: `note_fork`, `read`, `prev_follows` in `tests/sim/model/store.py`. Revisit when 75A/77A implement the reader.
 
-### [review:track=73C] Aged escape for an unproven incomplete family at the next slot
-- **Why:** a permanently incomplete own family the device cannot prove it wrote wedges publishing forever; 73C review added pull reporting (`own-records-in-flight`) but no aged, operator-confirmed quarantine.
-- **Context:** never auto-supersede (that is the unsafe write detection exists to prevent); the escape needs an age threshold, a diagnosis distinguishing proven-torn from unproven, and INV4/INV6 room. Read first: `own_slot`, `_torn`, reconcile's `blocked` reporting. Revisit in 75A/77A.
-
 ### [review:track=73C] Fresh-replica restore can empty the only copy of an unreplicated own record (`fresh-replica-unreplicated` row)
 - **Why:** the sim README triage rule requires an inbox item per confirmed gap.
 - **Context:** a crash can complete a record only on its author's replica; emptying that replica (fresh-replica restore) before any peer syncs it destroys the version fleet-wide while the author's rolled-back counter can later be reused. Pinned strict in `test_gap_fresh_replica_unreplicated_own_record`, gated in random search, with the owner's disposition recorded in `KNOWN_DESIGN_GAPS`. Revisit when recovery (76A/77A) can refuse or wait for replication before emptying.

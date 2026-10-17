@@ -304,7 +304,12 @@ rule applies to a snapshot: an incomplete own snapshot family at the current
 seq that an intent row names is closed by a fresh family. Any other incomplete
 own family at the slot, one the device cannot prove it wrote, is in flight
 (records still arriving after a restore): the push is pending
-(`own-records-in-flight`) and never writes at that seq (§9).
+(`own-records-in-flight`) and never writes at that seq (§9) — with one escape:
+once the folder is synced and no receipt claims the seq, an *attended* push (or
+`mm push --snapshot` for a snapshot slot) may supersede it like a torn slot,
+because its missing parts can only ever come from this device and intent rows
+themselves can be rolled back by a state restore; `autopush` stays pending. If
+a clone later completes the old family, the two families fork visibly (§9).
 
 **Readers need no digest or total to tell a torn publish from a pending one.**
 Both look the same to a reader, an incomplete family, and both resolve the same

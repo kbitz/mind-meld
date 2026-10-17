@@ -1554,6 +1554,36 @@ def test_gap_fresh_replica_unreplicated_own_record(tmp_path, sim_write_guard, mo
         ACTIVE.reset(token)
 
 
+def test_regression_unproven_torn_slot_after_state_restore_still_settles(
+    tmp_path, sim_write_guard, monkeypatch
+):
+    # Deep-search counterexample, minimized: a torn crash's closure waited for sync,
+    # a state restore to a pre-crash backup then dropped the intent row, and the
+    # unproven incomplete family wedged publishing forever (INV5). The attended
+    # synced-and-unclaimed supersede is the escape.
+    from mind_meld.store import format as codec
+
+    from .store_fleet import PART_BYTES
+    from .test_replication import ACTIVE, Invocation, LifecycleMachine
+
+    monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
+    token = ACTIVE.set(Invocation(tmp_path / "replay", sim_write_guard))
+    state = LifecycleMachine()
+    try:
+        state.lifecycle_witness(case=0)
+        state.backup_rule(device=0)
+        state.crash_rule(device=2, parts=0, snapshot=True)
+        state.torn_rule(device=3)
+        state.restore_rule(device=0, policy="state")
+        state.delete(device=2, path=1)
+        state.crash_rule(device=3, parts=1, snapshot=False)
+    finally:
+        try:
+            state.teardown()
+        finally:
+            ACTIVE.reset(token)
+
+
 def test_regression_restore_discards_an_unpublished_union_edit(
     tmp_path, sim_write_guard, monkeypatch
 ):
