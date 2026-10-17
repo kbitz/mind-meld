@@ -508,7 +508,8 @@ seqs, or an own snapshot covering them), push is pending with
 `own-records-in-flight`. A pull still applies peers and replays own records but
 does not rewrite presence. Waiting is correct while records are arriving; if
 they never return, the fallback is **skip-ahead**: once the folder is synced
-(Syncthing idle with nothing needed) and the records are still incomplete, the
+(Syncthing idle with nothing needed for record files, as in §5) and the records
+are still incomplete, the
 next *attended* push publishes at `claimed + 1` with `prev` set to the digest of
 the newest complete own family, and a forced snapshot at that seq, so readers
 waiting on the missing seqs fall back to the snapshot. Skip-ahead never writes
