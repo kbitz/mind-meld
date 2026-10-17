@@ -295,7 +295,8 @@ provably started it. A torn slot is closed by writing a **fresh complete
 family at the same seq**, re-authored from the unchanged ledger and the current
 files, even when that commit has zero entries (peers wait on the seq
 otherwise). Closure waits for the folder to sync (Syncthing idle with nothing
-needed), exactly like skip-ahead: an intent row proves some copy of this state
+needed for record files; a peer's presence refresh alone never completes a
+record and does not hold the gate), exactly like skip-ahead: an intent row proves some copy of this state
 started the family, and a backup can carry the row back after the slot was
 later closed, so while redelivery may still complete the slot the push stays
 pending `own-records-in-flight` instead of superseding it into a fork. The torn family's parts are never completed, overwritten or deleted

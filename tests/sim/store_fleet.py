@@ -159,8 +159,17 @@ class StoreFleet:
         self.forced_families.extend(families)
 
     def folder_synced(self, name: str) -> bool:
-        """Model of Syncthing reporting an idle folder with nothing needed here."""
-        return not any(choice.dst == name for choice in self.transport.pending())
+        """Model of Syncthing reporting an idle folder with nothing needed here.
+
+        Presence files do not count: peers refresh presence on their own clock and a
+        presence arrival can never complete a record, so it must not hold the
+        torn/skip-ahead sync gate (in settle, hourly presence refresh under large
+        clock advances would otherwise starve torn closure forever).
+        """
+        return not any(
+            choice.dst == name and not choice.path.endswith("presence.enc")
+            for choice in self.transport.pending()
+        )
 
     def keys(self, device: StoreDevice) -> envelope.FleetKeys | None:
         try:

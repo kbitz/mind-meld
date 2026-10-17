@@ -1656,6 +1656,32 @@ def test_regression_unproven_torn_slot_after_state_restore_still_settles(
             ACTIVE.reset(token)
 
 
+def test_regression_presence_refresh_does_not_starve_torn_closure(
+    tmp_path, sim_write_guard, monkeypatch
+):
+    # Deep-search counterexample, minimized: settle's large clock advances made a
+    # peer rewrite its presence every round, so the folder never read synced and a
+    # torn slot never closed (INV5). Presence arrivals cannot complete a record and
+    # do not hold the sync gate.
+    from mind_meld.store import format as codec
+
+    from .store_fleet import PART_BYTES
+    from .test_replication import ACTIVE, Invocation, LifecycleMachine
+
+    monkeypatch.setattr(codec, "MAX_PART_BYTES", PART_BYTES)
+    token = ACTIVE.set(Invocation(tmp_path / "replay", sim_write_guard))
+    state = LifecycleMachine()
+    try:
+        state.lifecycle_witness(case=0)
+        state.crash_rule(device=1, parts=0, snapshot=True)
+        state.torn_rule(device=2)
+    finally:
+        try:
+            state.teardown()
+        finally:
+            ACTIVE.reset(token)
+
+
 def test_regression_restore_discards_an_unpublished_union_edit(
     tmp_path, sim_write_guard, monkeypatch
 ):
