@@ -44,179 +44,42 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:track=73C] Model Syncthing 2.1 counter dominance for restored-index rewrites
-- **Why:** the fixture's restore approximation is optimistic for same-name rewrites. Family names make commits immune, but presence still uses one name.
-- **Context:** an optional fake-transport mode where a restored device's write to an existing name dominates (Syncthing `max(old+1, now)`, v2.1.0 `lib/protocol/vector.go`) instead of minting a conflict copy. Source: Track 73C /autoplan. Revisit when native conformance work starts or a presence rollback is observed.
-
-### [plan-eng-review:track=73C] Keep the store folder and Syncthing's database out of backups automatically
-- **Why:** a restored store folder rolls back the fleet under the current index policy or forks under the saved one; the design now declares that setup unsupported and relies on the exclusion.
-- **Context:** `tmutil addexclusion` for `~/Sync/mind-meld` and Syncthing's database directory at `mm init --new-fleet` and `mm join`, `mm diag` reporting the exclusion, and Linux guidance. Owner Tracks: 80A (init and join) and 82A (diag). Revisit when those Tracks are planned.
-
-### [plan-eng-review:track=73C] Implement restored-device detection in the product (design and model delivered by 73C)
-- **Why:** approved at the 73C gate; the store-v2 §9 design and the simulator model carry it, product code does not yet.
-- **Context:** product reconcile and publish implement the rule: pending `own-records-in-flight` while the own presence, a peer's `applied[me]` or a peer snapshot cursor exceeds `own_log` and the records are not all here; skip-ahead plus a forced snapshot after the folder syncs. Owner Track: 76A. Revisit when 76A is planned.
-
-### [plan-eng-review:track=73C] Add a restore drill to the soak and cutover runbook
-- **Why:** the model cannot replace a real restore.
-- **Context:** on the soak machines, restore one machine with each supported scope (state only, fresh replica) and record the outcome. Owner Track: 84A (soak). Revisit when the soak checklist is written.
-
-### [plan-eng-review:track=73C] Relay versions lost by a current-policy rollback
-- **Why:** closes the residual where versions readers applied from records a rollback deleted stay divergent because the restored device never republishes over them.
-- **Context:** readers re-publish (original vectors, no `+me`) ledger rows whose source record vanished above the peer's newest snapshot, gated on a present peer presence; ledger `origin`. Deferred at 73C (no demand). Revisit when a current-policy restore is observed on the soak or after cutover.
-
-### [plan-eng-review:track=73C] Run a native Syncthing restore experiment on the soak
-- **Why:** restore semantics are modelled, not observed (tests/sim/README: no daemon conformance).
-- **Context:** two machines, both index policies, offline peers, publish before redelivery; record what Syncthing actually does. Revisit when the soak machines run Syncthing.
-
-### [plan-eng-review:track=73C] Bind the record family into the associated data with the version byte
-- **Why:** a uniform "a renamed file fails authentication" guarantee at the cheapest moment, before release. Today the family is a name only; the payload digest is the record identity.
-- **Context:** Track 80A adds the family to the record AAD together with its version-byte change; the publisher then re-seals on an `EEXIST` retry; regenerate the T04 vectors once.
-
-### [plan-eng-review:track=73C] Amend later store cards for the 73C design rules
-- **Why:** the cards still describe reader refusal, chain-anchor waits and seq-only names.
-- **Context:** /roadmap amends 73B (schema: `own_log` family and digest, the applied-family set, `cursors.fork`, intent rows, `displaced` cause and peer), 75A (publisher draws from an injected `family_source`, writes intent rows, retry contract), 76A (heal, torn slot, own-fork rules, own-snapshot recovery, proven-only compaction, the own-directory row keyed on sync state), 77A (reader rule, cover rule, chain-anchor removal, receipts rule), 78A (`mm displaced` restore and fork-tagged rows), 80A (AAD family binding, rejoin `supersedes`, join tie-break, re-seal on retry), 81A (receipt codec, status fork listing, retire coverage tie-break) and 82A (diag fork evidence beyond conflict copies). Revisit at the next /roadmap run.
-
-### [plan-eng-review:track=73C] Current-policy restore residuals stay pinned (`restore-current` row)
-- **Why:** the sim README triage rule requires an inbox item per confirmed gap.
-- **Context:** the re-scoped `restore-current` gap row pins an unapplied record deleted fleet-wide, a header deleted by a pre-header backup, and applied versions not republished over, with the owner's disposition: "owner-accepted 2026-10-16 (73C gate uc2a): unsupported setup, prevented by keeping the store folder and Syncthing's database out of backups; revisit when relay or backup exclusion lands". Revisit when relay or backup exclusion lands, or the owner changes the disposition.
-
-### [review:track=73C] Reader and reporting refinements deferred from the 73C review
-- **Why:** three review findings are real but need product-code shape 75A/77A will settle, and none loses bytes today.
-- **Context:** (1) fork evidence records the first-seen seq, not the earliest — record/upgrade to the earliest seq so fork-tainted displacement uses the right boundary; (2) a second complete snapshot family at an already-loaded seq is never scanned by `read` — decide whether readers scan late snapshot families; (3) an honest skip-ahead commit's `prev` fails against a reader that applied the lost record, producing a repeating fork warning whose remedy names `mm rejoin` — consider a skip marker (the covered-chain arithmetic fabrication was fixed in 73C review). Read first: `note_fork`, `read`, `prev_follows` in `tests/sim/model/store.py`. Revisit when 75A/77A implement the reader.
-
-### [review:track=73C] Fresh-replica restore can empty the only copy of an unreplicated own record (`fresh-replica-unreplicated` row)
-- **Why:** the sim README triage rule requires an inbox item per confirmed gap.
-- **Context:** a crash can complete a record only on its author's replica; emptying that replica (fresh-replica restore) before any peer syncs it destroys the version fleet-wide while the author's rolled-back counter can later be reused. Pinned strict in `test_gap_fresh_replica_unreplicated_own_record`, gated in random search, with the owner's disposition recorded in `KNOWN_DESIGN_GAPS`. Revisit when recovery (76A/77A) can refuse or wait for replication before emptying.
-
-### [review:track=73C] Simulator hardening and cost items from the 73C review
-- **Why:** model-only defects and search cost found in review; none changes a 73C verdict, all would mislead or slow later Tracks.
-- **Context:** unknown record sources crash classification with `KeyError` instead of a sealed-envelope failure; classify applies entries one at a time without the design's per-record transaction boundary; a symlink escaping a source root raises `ValueError` out of `read`; retire ignores replica `last_active` clock skew; checker and model history scans (`note`, `retain_ignored_by_fork`, per-action `ground_truth`) are quadratic in trace length and dominate deep-run wall time; `Context.own` should become a typed dataclass; history retention and fsync publication order belong in the 75A state/shell design (§3 lists no history table); `claimed` trusts peer receipts transitively beyond the MAX_SEQ bound added in review. Revisit per item when its Track implements the area, or when the deep profile breaches its ~1h budget.
-
-### [manual] Bound the non-interactive keyring read with a timeout backstop
-- **Why:** Track 73A's lock-state check covers gnome-keyring's locked and missing default collection and locked items. It cannot see prompt paths that do not use the Secret Service `Unlock` API, such as KeePassXC's "confirm access" dialog or a stalled D-Bus activation. A hook would still wait on those.
-- **Hypothesis (untested):** Run the auto commands' keyring read under a bounded wait (for example a daemon thread joined with a few-second timeout) and record `keyring-locked` with reason `timeout` when it expires. Backend-agnostic, but a thread enters the hook path, the dialog still opens on screen, and the abandoned thread holds a D-Bus connection until process exit.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Supported desktops (docs/SPEC.md) are Keychain and an unlocked Secret Service collection on Arch-based Linux (Omarchy ships gnome-keyring). KeePassXC is outside the supported set. Start in `crypto.get_passphrase(non_interactive=True)`. Depends on Track 73A. Revisit trigger: an autopull or autopush stall observed on a supported desktop that the 73A lock-state check does not explain. Source: /autoplan Track 73A, CEO E1 (2026-10-16).
-
-### [manual] Omarchy qualification checkpoint before Track 80A (for /roadmap)
-- **Why:** A small native run on the owner's Omarchy machine (pipx install, actual keyring backend selected, login and reboot behavior, a hook invocation, manual recovery) before 80A builds the Linux passphrase flow.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Source: /autoplan Track 73A, Codex CEO voice C1 (2026-10-16); not a 73A merge gate. Trigger: a Linux machine joins the owner's desk.
-
-### [manual] Proposed owner acceptance for Track 73A at the 2.0 soak — PENDING owner confirmation
-- **Why:** Live owner acceptance that Linux hooks skip (not hang) on a locked Secret Service collection and recover after unlock. Filed as **PROPOSED, pending owner confirmation** — ac1 was not answered at the /autoplan gate (2026-10-16), so this is NOT a required acceptance entry. A new acceptance entry counts only after the owner confirms it directly. Do not mark REQUIRED without that confirmation.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** On an install made by 2.0's `init --new-fleet` or `join`: lock the Secret Service collection, run `mm autopull`, record the stderr line, `mm status`, `mm diag --json` and timestamps; unlock, rerun, record success and the recovery time (target under 2 minutes); record which unlock path worked, whether the keyring has a password, and whether full-disk encryption is on. Draft script below (verify each command on the machine first; it deletes nothing).
-
-```bash
-#!/usr/bin/env bash
-# Track 73A owner acceptance: Linux only, deletes nothing.
-set -euo pipefail
-[ "$(uname -s)" = Linux ] || { echo "refusing: Linux only" >&2; exit 1; }
-command -v mm >/dev/null && command -v busctl >/dev/null
-ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-echo "start $(ts)"; mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
-echo "keyring has a password? (y/n)"; read -r KR_PW; echo "full-disk encryption on? (y/n)"; read -r FDE
-busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
-  org.freedesktop.Secret.Service Lock ao 1 /org/freedesktop/secrets/aliases/default
-echo "locked $(ts)"; mm autopull || true; mm status | grep -i "auto-pull" || true
-mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
-echo "Unlock the keyring now (desktop keyring manager, or: secret-tool lookup service mind-meld username passphrase >/dev/null). Press Enter when done."; read -r _
-echo "unlocked $(ts)"; mm autopull; echo "recovered $(ts)"
-mm diag --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["keyring"])'
-echo "record: keyring_password=$KR_PW fde=$FDE"
-```
-
-### [manual] Owner for store-v2 section 11 prose outside pyproject.toml (for /roadmap)
-- **Why:** store-v2 §11's remaining platform prose has no owning Track: README prerequisites (`README.md` "macOS with iCloud Drive"), init help, "other Mac" strings, the root SPEC overview, and AGENTS.md principles. For /roadmap to assign (likely 84A).
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Source: /autoplan Track 73A deferred items (2026-10-16). 73A updated only the CI line and keyring-related prose.
-
-### [manual] Attended commands that agents run can block on a locked Linux keyring
-- **Why:** `mm status` (which AGENTS.md tells agents to run) reads the passphrase interactively before rendering; on a locked Secret Service collection it raises a desktop prompt or fails at getpass on a non-TTY. Consider a non-interactive-first read when stdin is not a TTY.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Trigger: an agent-run attended command observed blocking on the soak machine. Source: /autoplan Track 73A Eng M4 (2026-10-16).
-
-### [manual] Track 80A owns the 2.0 default storage path ~/Sync/mind-meld (for /roadmap, UC1)
-- **Why:** Gate answer UC1 accepted (2026-10-16): the `~/Sync/mind-meld` 2.0 default path moved out of Track 73A to Track 80A. First reader is `mm init --new-fleet`. 73A deliberately did not touch `config.DEFAULT_STORAGE_PATH`. For /roadmap to add to the 80A card.
-- **Effort:** S
-- **Priority:** P2
-
-### [manual] Track 84A owns pyproject.toml description, keywords and classifiers (for /roadmap, UC2)
-- **Why:** Gate answer UC2 accepted (2026-10-16): `pyproject.toml` description, keywords and classifiers moved out of Track 73A to Track 84A, which must list `pyproject.toml` in its touches. 73A only added the `secretstorage` dependency.
-- **Effort:** S
-- **Priority:** P3
-
-### [manual] Audit Python 3.14 Path.exists / is_dir / is_file callers for swallowed errors
-- **Why:** On Python 3.14, `Path.exists()`, `is_dir()` and `is_file()` call `os.path.*` and return False for any `OSError`; on 3.13 they raise `PermissionError`/`EIO`. Any strict path that relied on the raise now reads an unreadable directory as absent, and with truth-based manifests that could publish deletions. Linux CI runs 3.14 and pipx installs already resolve 3.14 on Macs that have it.
-- **Hypothesis (untested):** The strict manifest walkers already use explicit `lstat`/`stat` mode checks (`walk_claude_source` strict branch), and `events.latest_event_rows` re-stats after `is_dir()`; no unsafe strict caller is known. An AST sweep of the ~100 `src/` call sites, classifying each as strict, preview or best-effort, would confirm it.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Found by Track 73A's portable-linux job (PR #213): three tests that injected faults through `Path.stat` stopped firing on 3.14 and were moved to `Path.lstat` / `os.stat`. Revisit trigger: before Track 80A's Linux flow, or any strict-path change that calls `exists()`/`is_dir()`/`is_file()`.
-
-### [manual] macOS hook with a locked Keychain and no UI reports no-passphrase, not keyring-locked
-- **Why:** keyring's macOS backend maps only `-128` (user denied) to `KeyringLocked`. A locked login keychain in an SSH or launchd session returns `errSecInteractionNotAllowed` (`-25308`), which keyring raises as a plain `KeyringError`; the non-interactive read treats that as no value, so the hook records `no-passphrase` and the README's `mm diag` advice shows nothing Keychain-specific.
-- **Hypothesis (untested):** Inspect the swallowed `KeyringError`'s `__cause__` for the macOS status and map `-25308` to `KeyringUnavailableError("locked", "keychain")` with an unlock-the-keychain remedy.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 73A Red Team / adversarial review (PR #213). Not a regression: the old wording also said "keyring empty". Revisit trigger: an owner hook run over SSH or from a launchd agent on a fleet Mac records `no-passphrase` while the passphrase is in the Keychain.
-
-### [plan-ceo-review:track=73B] Report state.db health in `mm diag`
-
-- **What:** `mm diag` prints one `state.db` line: schema `user_version`, file size, history rows per `(verb, action)` class, whether `meta.history_imported` is set, and whether a hot journal is present.
-- **Why:** history writes are forensic and swallow their failures (sync invariants, "Pull/push history log"), so a broken or locked `state.db` is invisible until the owner runs `mm log` and sees nothing new.
-- **Pros:** one read-only query; turns a silent forensic failure into a visible line where the owner already looks.
-- **Cons:** another diag line to keep accurate; 2.0 adds ledger and cursor health that 82A's diag work should own anyway.
-- **Context:** Track 73B created `state.db` (rollback journal; owner decision uc1a at its /autoplan gate, 2026-10-16). No state.db problem has been observed yet.
-- **Effort:** human S / CC S.
-- **Priority:** P3.
-- **Revisit when:** the owner reports a missing or stale `mm log` history, or 82A starts its `mm diag` work, whichever comes first.
-- **Source:** [plan-ceo-review:track=73B] E2.
-
-### [plan-ceo-review:track=73B] 75A card note: INV7 equivalence and the authoritative-state remedy
-
-- **What:** (a) Track 75A's `SQLiteState` adapter and oracle keep `tests/sim/invariants.py` INV7's byte-integrity and causal checks with a metadata-only ledger (no `content` column), with cases for an unpublished edit, a deletion and a pending resolution. Rebuilding `content` from current source bytes, or narrowing INV7 (`ledger == obs.state.ledger`, line 950) without equivalent coverage, is not allowed. (b) Before the first ledger row is written, replace 73B's `StateDBCorrupt` "move `state.db*` aside" advice, which is valid only for a history-only database. Track 76A owns the authoritative-state recovery contract: preserve the database, refuse unsafe continuation, and prove recovery with pending publications and unexpired displaced content present.
-- **Why:** Track 73B's ledger stores `sha, vv, size, mtime, deleted, pending` but no bytes; an unpublished edit makes current source bytes differ from the ledger's version, so a naive adapter either fails or hides real defects. Moving an authoritative `state.db` aside discards causal vectors, pending obligations, cursors and displaced bytes.
-- **Pros:** keeps the 1.3 GB sync set out of `state.db` without weakening the simulator's acceptance evidence; no destructive remedy outlives its premise.
-- **Cons:** more adapter and oracle work inside 75A; a recovery contract for 76A.
-- **Context:** decided at Track 73B's /autoplan (spec review round 2; CEO dual voices, Codex findings 2 and 3), 2026-10-16.
-- **Effort:** human M / CC S (inside 75A and 76A).
-- **Priority:** P1 (75A and 76A acceptance).
-- **Revisit when:** /roadmap next regenerates 75A's and 76A's cards.
-- **Also (Eng G7):** `history` is forensic only and its per-class prune never touches a class an older binary does not know; any 2.0 receipt that sync logic reads (the model's `record-applied`, `pull-entry`, `own-replay`, and the presence check that reads `history[-1:]`, `tests/sim/model/store.py:369`) must live in its owning Track's table or in a class with its own retention.
-- **Source:** [plan-ceo-review:track=73B] spec review 2, Consistency 3; CEO voices V9, V10; [plan-eng-review:track=73B] G7.
-
-### [plan-ceo-review:track=73B] Remove `fsutil.flock_append_jsonl(on_locked=)`
-
-- **What:** delete the `on_locked` callback parameter and its test (`tests/test_fsutil.py:348-368`).
-- **Why:** Track 73B removed pull-history's 1 MB rotation, its only production caller; the parameter is now dead code in a shared write helper.
-- **Pros:** one less swallowed-exception path in the test-write-guarded helper.
-- **Cons:** touches `fsutil.py` and `tests/test_fsutil.py`, which Tracks 73A and 74A also edit.
-- **Context:** kept by Track 73B's /autoplan (spec review round 3) to avoid colliding with 73A and 74A.
-- **Effort:** human S / CC S.
-- **Priority:** P3.
-- **Revisit when:** Track 74A lands, or the next change to `flock_append_jsonl`.
-- **Source:** [plan-ceo-review:track=73B] spec review 3, Consistency 2.
-
-### [review:track=73B] Import legacy history only under the mm lock
-
-- **What:** run the one-time `pull-history.jsonl{,.1}` import only from a flush that holds the mm lockfile. Either queue the transition hook's self-upgrade row into the command's batch, or let a standalone flush insert without importing until a locked flush or `recover_if_needed` imports.
-- **Why:** the first post-upgrade history write is usually the self-upgrade row. `run_transition_hook` writes it as a standalone flush before `acquire_lock()` (`_get_config`, `_auto_command_setup`). A pre-73B process that already holds the mm lock can keep appending JSONL after the import. Those rows never reach the table, and `mm log` then shows the stale-binary notice even when PATH is fine.
-- **Pros:** the import is serialized against every pre-73B writer; the notice then means an old binary really ran later.
-- **Cons:** the self-upgrade row path changes; an import deferred until a locked command is slightly later.
-- **Context:** red-team finding during Track 73B's /review-and-prep, 2026-10-16. Stat-before-read (fixed in 73B) makes such appends fire the notice instead of disappearing silently, and README Upgrading describes the notice as evidence of past divergence. Impact is forensic only.
-- **Effort:** human S / CC S.
-- **Priority:** P3.
-- **Revisit when:** an owner reports a stale-binary notice on a Mac whose `which -a mm` is clean, or the next change to `pullhistory` import or `run_transition_hook`.
-- **Source:** [review:track=73B] red-team finding 2.
-
 
 ## Drain records
+
+### Roadmap drain — 2026-10-18
+
+Composed with the `/project-spec` amendment of 2026-10-18 (owner-approved trims: Syncthing stays owner-managed, inactivity-only retirement, newest-wins for non-UTF-8 union input, deep simulator run once on the release candidate, no further restore modeling, Future items without a trigger killed).
+
+25 inbox items: **10 placed, 0 deferred, 13 killed, 2 discharged**. Authored-false rate: 2 / (10 + 2) = 17% (both discharges are gap-recording items whose rows already exist). Verification baseline: `223f1b8` (v1.11.1). Tracks 73A (v1.11.0, PR #213), 73B (v1.10.0, PR #214) and 73C (v1.11.1, PR #215) were recorded independently in shipped history, with v1.9.1 (PR #212) under additional release history; Group 73 is tombstoned. Leftover plan: the retirement-design Track (74B) was killed by the amendment, with its non-UTF-8 decision moved to 78A and its coverage question deferred to Future; the Syncthing Track (82A) was split, its read-only half folded into 81A and its managed half deferred. Future 53 → 23 (32 killed, 2 added). No active pins were declared.
+
+| Inbox item | Disposition |
+|---|---|
+| [plan-eng-review:track=73C] Model Syncthing 2.1 counter dominance for restored-index rewrites | kill: restore modeling refused by the 2026-10-18 spec amendment; native conformance stays in Future ("Check the fake Syncthing transport against a real Syncthing") |
+| [plan-eng-review:track=73C] Keep the store folder and Syncthing's database out of backups automatically | place → Track 80A (exclusion at init and join, Linux guidance) and Track 81A (diag reports it) |
+| [plan-eng-review:track=73C] Implement restored-device detection in the product (design and model delivered by 73C) | place → Track 76A |
+| [plan-eng-review:track=73C] Add a restore drill to the soak and cutover runbook | kill: restore drills are a spec non-goal since 2026-10-18 (revisit when a restore is observed on the fleet) |
+| [plan-eng-review:track=73C] Relay versions lost by a current-policy rollback | kill: relays are a spec non-goal since 2026-10-18; the residual stays owner-accepted in `KNOWN_DESIGN_GAPS["restore-current"]` |
+| [plan-eng-review:track=73C] Run a native Syncthing restore experiment on the soak | kill: native restore experiments are a spec non-goal since 2026-10-18 |
+| [plan-eng-review:track=73C] Bind the record family into the associated data with the version byte | place → Track 80A (wire decisions before the first fleet.json) |
+| [plan-eng-review:track=73C] Amend later store cards for the 73C design rules | place → Tracks 75A (with the 73B schema items, since 73B shipped), 76A, 77A, 78A, 80A and 81A; the 82A diag item moved to 81A; the retire coverage tie-break fell with the coverage rule |
+| [plan-eng-review:track=73C] Current-policy restore residuals stay pinned (`restore-current` row) | discharged@223f1b8: `tests/sim/invariants.py` `KNOWN_DESIGN_GAPS["restore-current"]` carries the owner's uc2a disposition; backup exclusion lands in Track 80A |
+| [review:track=73C] Reader and reporting refinements deferred from the 73C review | kill: unobserved model findings; reversible (a warning or a boundary, no bytes lost per the item); reopen if it manifests when 77A implements the reader |
+| [review:track=73C] Fresh-replica restore can empty the only copy of an unreplicated own record (`fresh-replica-unreplicated` row) | discharged@223f1b8: `KNOWN_DESIGN_GAPS["fresh-replica-unreplicated"]` carries the owner's 2026-10-16 disposition; the item existed to satisfy the triage rule |
+| [review:track=73C] Simulator hardening and cost items from the 73C review | kill: simulator evidence is sized to the owner's fleet (spec, 2026-10-18); model-only defects, unobserved; reopen per item if one misleads a store Track |
+| [manual] Bound the non-interactive keyring read with a timeout backstop | kill: unobserved; reversible (a hook stall on an unsupported keyring); reopen if it manifests |
+| [manual] Omarchy qualification checkpoint before Track 80A (for /roadmap) | place → Track 80A Done-when (trigger met: the owner's Linux machine exists, 2026-10-18) |
+| [manual] Proposed owner acceptance for Track 73A at the 2.0 soak — PENDING owner confirmation | kill: never confirmed by the owner; the O1.2 soak record covers any manual keyring step on the Linux machine |
+| [manual] Owner for store-v2 section 11 prose outside pyproject.toml (for /roadmap) | place → Track 83A |
+| [manual] Attended commands that agents run can block on a locked Linux keyring | kill: unobserved; reversible; reopen if observed on the soak machine |
+| [manual] Track 80A owns the 2.0 default storage path ~/Sync/mind-meld (for /roadmap, UC1) | place → Track 80A |
+| [manual] Track 84A owns pyproject.toml description, keywords and classifiers (for /roadmap, UC2) | place → Track 83A (formerly numbered 84A) |
+| [manual] Audit Python 3.14 Path.exists / is_dir / is_file callers for swallowed errors | kill: unobserved; reversible (2.0 deletions keep bytes in `displaced` for 30 days, and the strict walkers already use explicit stat calls per the item); reopen if it manifests |
+| [manual] macOS hook with a locked Keychain and no UI reports no-passphrase, not keyring-locked | kill: unobserved; inconsequential (remedy wording); reopen if an SSH or launchd hook records it |
+| [plan-ceo-review:track=73B] Report state.db health in `mm diag` | kill: unobserved; forensic; reopen if `mm log` history goes missing |
+| [plan-ceo-review:track=73B] 75A card note: INV7 equivalence and the authoritative-state remedy | place → Track 75A (INV7 adapter cases; preserve-and-refuse remedy before the first ledger row; receipt tables) |
+| [plan-ceo-review:track=73B] Remove `fsutil.flock_append_jsonl(on_locked=)` | place → Track 74A (revisit trigger was 74A) |
+| [review:track=73B] Import legacy history only under the mm lock | kill: unobserved; forensic only per the item; reopen on a stale-binary notice with a clean `which -a mm` |
 
 ### Roadmap drain — 2026-10-15
 

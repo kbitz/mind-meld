@@ -15,6 +15,14 @@
 >   stay as they are.
 > - 2026-10-11: trim the sync scope before 2.0. Generator output (venvs, app
 >   bundles, archives, QA evidence) is not sync data; see P1.
+> - 2026-10-18: size 2.0 to the owner's fleet ([project spec](../SPEC.md)
+>   amendment). The owner pairs machines and sets the folder options in
+>   Syncthing; mm reads and reports Syncthing's state. Invite codes, mesh
+>   healing, relays, folder setup through the REST API and scan-after-push
+>   (§8, §10, decisions 2 and 5) stay here as deferred design. `mm devices
+>   retire` checks 30 days of inactivity only, without the §8 coverage rule;
+>   union input that is not UTF-8 resolves newest-wins with the loser in
+>   `displaced`.
 
 ## Outcome
 
@@ -447,6 +455,9 @@ when someone needs different layouts per machine. Other sources are already root
 
 ## 8. Fleet lifecycle
 
+> Scope (2026-10-18): `mm invite`, mesh healing and the retire coverage rule
+> below are deferred design; see the maintainer decisions.
+
 - **`mm init --new-fleet [PATH]`.** Refuses unless the folder holds no
   `fleet.json` and no `dev/`. Prompts for the passphrase twice, writes
   `fleet.json` exclusively, publishes a snapshot and presence, and sets up
@@ -573,6 +584,10 @@ made after such a restore can lose to a version derived from the pre-restore
 copy; mm keeps it in `displaced` and warns until it expires (§4, §6).
 
 ## 10. Syncthing integration
+
+> Scope (2026-10-18): 2.0 implements discovery, read-only status and the
+> `mm diag` lint. Folder setup, scan-after-push, mesh healing and the relay
+> below are deferred design; see the maintainer decisions.
 
 `syncthing.py` is a leaf module with no CLI imports.
 

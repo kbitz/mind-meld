@@ -14,6 +14,9 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 - **Publication-status precision requires an observed user problem.** A status/diag publication-evidence Track needs a wrong or permanently unknown status line a user actually saw. A synthetic probe alone does not admit that work.
 - **1.x is frozen at cutover (spec, 2026-10-11).** The GC repair and the scope trim are the last 1.x store changes. New work on the iCloud store, mtime-ordered apply or conflict sidecars is refused; file it against the 2.0 store or kill it.
 
+- **Syncthing stays owner-managed (spec, 2026-10-18).** mm discovers Syncthing and reads its state for `mm status` and `mm diag`. Invite codes, mesh healing, relays, folder configuration through Syncthing's API and scan requests are refused until the spec's revisit trigger is observed.
+- **Simulator evidence is sized to the owner's fleet (spec, 2026-10-18).** A store Track proves itself with the bounded profile in CI; the deep profile runs once on the 2.0 release candidate. Further restore modeling, restore drills and native restore experiments are refused until a restore is observed on the fleet.
+
 ---
 
 ## In Progress
@@ -22,129 +25,58 @@ No active branches, sessions or PRs were declared for this regeneration.
 
 ## Current Plan
 
-_tombstone: 27, 70, 71, 72_
+_tombstone: 27, 70, 71, 72, 73_
 
 ### Phase 4: mm 2.0 on Syncthing
 
 **End-state:** The owner's macOS and Arch-based Linux machines sync agent context over one Syncthing folder of per-device, write-once encrypted commit logs, with the 1.x iCloud store deleted and the invariants rewritten; docs/SPEC.md outcomes O1 to O7 accepted on a live soak.
-**Groups:** 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84
+**Groups:** 74, 75, 76, 77, 78, 79, 80, 81, 82, 83
 
-#### Group 73: Linux platform, local state and the restore design
+#### Group 74: Suite-wide test write guard
 
 _Depends on: none_
 
-**This group delivers:** mm runs its portable checks on Linux with a desktop keyring that hooks never prompt; local sync state moves into SQLite; and the store design gains tested rules for a restored disk and a crash in the middle of a publish.
-
-##### Track 73A: Linux as a first-class platform
-_2 tasks . ~300 LOC . medium risk . 9 files_
-**Outcome:** The owner can install mm on an Arch-based Linux desktop, keep the passphrase in the Secret Service keyring, and have hooks skip quietly when the collection is locked.
-**Supports:** MVP-1, docs/SPEC.md supported conditions (macOS and Arch-based Linux) and O2.
-**Done when:** the default storage path is `~/Sync/mind-meld` on both OSes for the 2.0 store, without moving an existing 1.x iCloud install before cutover; auto commands on Linux check the collection's lock state first and record a `keyring-locked` breadcrumb instead of prompting; backend transport errors are caught; remedies name `secret-tool` beside `security`; an `ubuntu-latest` job runs `./bin/check` with the `F_FULLFSYNC` test fix and `~/Sync` in the protected-paths list; the Keychain and wheel smokes stay on macOS.
-_touches: src/mind_meld/crypto.py, src/mind_meld/config.py, .github/workflows/ci.yml, pyproject.toml, tests/test_crypto.py, tests/test_fsutil.py, tests/test_memory_contract.py, README.md, docs/invariants/init-devices.md_
-_blocked-by: Track 71C, Track 72B_
-_out: 74A, 83A_
-_read-first: docs/designs/store-v2.md, docs/invariants/init-devices.md, .github/workflows/ci.yml_
-_produces: a Linux-qualified keyring path and a portable CI job_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_crypto.py tests/test_fsutil.py tests/test_memory_contract.py tests/test_docs_routing.py_
-
-_Source: docs/designs/store-v2.md §11 and T8. The spec commits to Arch-based Linux (Omarchy); CI's Ubuntu runner is the portable Python check, not a second supported distribution. Re-verified at 573fb12: `config.DEFAULT_STORAGE_PATH` is still the iCloud folder, CI has only `macos-latest`, and no Secret Service handling exists. The "without moving a 1.x install" clause records the spec's 1.x freeze against §11's default-path change._
-
-- **Keyring and default path** -- Secret Service lock-state check in auto commands, transport-error handling, `secret-tool` remedies, the `~/Sync/mind-meld` default for the 2.0 store and `pyproject.toml` description and classifiers. The `brctl` auto-pin removal rides Track 83A. _src/mind_meld/crypto.py, src/mind_meld/config.py, pyproject.toml, tests/test_crypto.py, README.md, docs/invariants/init-devices.md, ~180 lines._ (M)
-- **Portable CI on Linux** -- Add the `ubuntu-latest` portable job; fix `tests/test_fsutil.py` to set `F_FULLFSYNC` with `raising=False`; add `~/Sync` to the memory-contract harness's protected paths. _.github/workflows/ci.yml, tests/test_fsutil.py, tests/test_memory_contract.py, ~120 lines._ (M)
-
-##### Track 73B: Local state database
-_2 tasks . ~500 LOC . medium risk . 8 files_
-**Outcome:** mm keeps its ledger, cursors, own-log, displaced versions and history in one SQLite file, and `mm log` reads from it.
-**Supports:** MVP-1, docs/SPEC.md O1 (the ledger is what makes fast-forwards possible).
-**Done when:** `statedb.py` is a leaf module opening `~/.config/mind-meld/state.db` with WAL, `busy_timeout`, mode 0600 and a `user_version` forward-only migration; the `meta`, `ledger`, `cursors`, `own_log`, `displaced` and `history` tables exist with their documented readers; `pull-history.jsonl{,.1}` is imported once, best effort; `mm log` reads `history`, and push `uploaded` rows can no longer crowd pull outcomes out of it; the module boundary test covers it.
-_touches: src/mind_meld/statedb.py (new), src/mind_meld/pullhistory.py, src/mind_meld/cli.py, tests/test_statedb.py (new), tests/test_pullhistory.py, tests/test_integration.py, docs/invariants/sync.md, docs/invariants/README.md_
-_blocked-by: Track 72B_
-_out: 74A, 75A_
-_read-first: docs/designs/store-v2.md, src/mind_meld/lockedjson.py, src/mind_meld/pullhistory.py_
-_produces: the `statedb` API the publish and apply Tracks write through_
-_session: fresh · effort: high · verify: ./bin/check tests/test_statedb.py tests/test_pullhistory.py tests/test_integration.py tests/test_module_boundaries.py tests/test_docs_routing.py_
-
-_Source: docs/designs/store-v2.md §3 and T2; Future bullet "Push `uploaded` rows crowd pull outcomes out of pull-history" (promoted 2026-10-11: the `history` table is the policy it asked for). Re-verified at 573fb12: no `statedb.py` exists._
-
-- **Schema and migrations** -- Tables, indexes, `user_version` migrations, connection helper honoring the mm lockfile, and the `displaced` 30-day expiry. _src/mind_meld/statedb.py, tests/test_statedb.py, docs/invariants/sync.md, docs/invariants/README.md, ~300 lines._ (M)
-- **History import and mm log** -- Import both rotation files once; keep upload rows in a bounded summary so pull outcomes survive; point `mm log` at the table and keep `pullhistory` writers until Track 83A removes them. _src/mind_meld/cli.py, src/mind_meld/pullhistory.py, tests/test_pullhistory.py, tests/test_integration.py, ~200 lines._ (M)
-
-##### Track 73C: Settle restore and partial-commit recovery in the store design
-_2 tasks . ~400 LOC . medium risk . 6 files_
-**Outcome:** The publish and reconciliation Tracks build on recovery rules that keep every recoverable edit after a disk restore or a crash in the middle of a publish, instead of on three pinned counterexamples.
-**Supports:** MVP-1, docs/SPEC.md O1 and O5; the approved Track 72A condition that 2.0.0 needs an empty or owner-accepted `KNOWN_DESIGN_GAPS` table.
-**Done when:** docs/designs/store-v2.md §4, §5 and §9 state a recovery rule for a restored device under both index policies (saved and current) and a completion or cleanup rule for an own commit left with k of n parts, including whether mixed part-count families at one slot signal a fork; the executable model implements them, and `test_gap_restore_saved`, `test_gap_restore_current` and `test_gap_partial_own_commit` pass as ordinary tests with their `KNOWN_DESIGN_GAPS` rows and random-run gates removed, or a row stays with the owner's recorded explicit disposition; invariants 1, 2 and 6 are unchanged; the bounded profile passes and a deep run's duration and result are recorded.
-_touches: docs/designs/store-v2.md, docs/invariants/store.md, tests/sim/model/store.py, tests/sim/invariants.py, tests/sim/test_scenarios.py, tests/sim/README.md_
-_out: 74B, 75A_
-_read-first: docs/designs/store-v2.md, tests/sim/README.md, tests/sim/invariants.py_
-_produces: §5 and §9 rules the real publisher and reconciliation implement_
-_session: fresh · effort: high · verify: ./bin/check tests/sim_
-
-_Source: inbox items "Decide saved-policy restore fork recovery without losing a recoverable edit", "Decide current-policy restore recovery after fleet-wide deletion and seq reuse" and "Specify recovery of a partial exclusively created own commit" ([plan-eng-review:track=72A], filed by PR #208); PR #203 backlog items 1 (mixed part-count families give no fork signal) and 9 (torn multipart publish recovery). The three strict pins are verified at 573fb12 in `tests/sim/invariants.py` `KNOWN_DESIGN_GAPS`. These are design decisions on unbuilt code that gate 2.0.0; the owner decides them at this Track's /autoplan._
-
-- **Restore recovery under both index policies** -- Amend §4 and §9 rows 1 and 4 so a device restored to an earlier disk that reuses a seq neither strands an edit as a readable peer record nor leaves participants with divergent files; implement it in the model and unpin both restore regressions. _docs/designs/store-v2.md, tests/sim/model/store.py, tests/sim/invariants.py, tests/sim/test_scenarios.py, ~250 lines._ (M)
-- **Partial own commit** -- Specify completion or cleanup when a crash leaves k of n exclusively created parts, without ever overwriting an existing part; decide whether mixed part-count families at one slot are a fork and whether `IncompleteParts` must expose the wrapper digest and total so a reader can tell a torn publish from a pending one. _docs/designs/store-v2.md, docs/invariants/store.md, tests/sim/model/store.py, tests/sim/test_scenarios.py, tests/sim/README.md, ~150 lines._ (M)
-
-#### Group 74: Suite-wide test write guard and the retirement design
-
-_Depends on: Group 73_
-
-**This group delivers:** no test, including the simulator once real store code runs in it, can write the owner's real mm state, agent homes or storage; and the store design defines who counts as active before a retirement and what happens to memory files that are not UTF-8.
+**This group delivers:** no test, including the simulator once real store code runs in it, can write the owner's real mm state, agent homes or storage.
 
 ##### Track 74A: Guard raw test writes to real account state
-_2 tasks . ~250 LOC . medium risk . 9 files_
+_3 tasks . ~270 LOC . medium risk . 9 files_
 **Outcome:** The owner can run the whole test suite, including the simulator with real store code, without any test writing to the real `~/.config/mind-meld`, a storage folder or an agent's home.
 **Supports:** MVP-1, docs/SPEC.md O1 (the simulator runs real store code) and the constraint that personal-use data is real data; completes the retained Track 71B acceptance.
-**Done when:** under pytest, every raw writer named in the routing README's C1 paragraph (`_log_unexpected`'s append, `LocalBackend.put_exclusive`/link and delete/unlink, caller-side mkdirs, direct lock creation, the `seen_sources` and `upgrade` state opens) refuses a path under the four real roots, a storage root configured in the real account config, or an agent destination (`~/.claude`, `~/.codex`, `~/.grok`, `~/.gstack`, `~/.local/share/muse`), with the home taken from `pwd`; a regression reproduces the 2026-10-08 `_log_unexpected` write and proves it refuses; the routing README's C1 paragraph records the closed guard; `./bin/check` passes.
+**Done when:** under pytest, every raw writer named in the routing README's C1 paragraph (`_log_unexpected`'s append, `LocalBackend.put_exclusive`/link and delete/unlink, caller-side mkdirs, direct lock creation, the `seen_sources` and `upgrade` state opens) refuses a path under the four real roots, a storage root configured in the real account config, or an agent destination (`~/.claude`, `~/.codex`, `~/.grok`, `~/.gstack`, `~/.local/share/muse`), with the home taken from `pwd`; a regression reproduces the 2026-10-08 `_log_unexpected` write and proves it refuses; the routing README's C1 paragraph records the closed guard; `fsutil.flock_append_jsonl` no longer takes `on_locked`; `./bin/check` passes.
 _touches: src/mind_meld/fsutil.py, src/mind_meld/cli.py, src/mind_meld/seen_sources.py, src/mind_meld/upgrade.py, src/mind_meld/lockfile.py, src/mind_meld/storage/local.py, tests/conftest.py, tests/test_fsutil.py, docs/invariants/README.md_
 _out: 75A_
 _read-first: docs/invariants/README.md, docs/invariants/init-devices.md, tests/conftest.py, src/mind_meld/fsutil.py_
 _produces: a suite-wide refusal every later test module inherits, so simulator safety can be claimed_
 _session: fresh · effort: high · verify: ./bin/check tests/test_fsutil.py tests/test_lockedjson.py tests/test_docs_routing.py_
 
-_Source: inbox "[review] Direct test writers can still touch real account state" (P1; owner decision D4, 2026-10-11). Formerly Track 71B: PR #204 (v1.7.1, `adfcc50`) delivered the shared-helper guard, and its receipt records "OUT-71B Track outcome | DEFERRED BY USER (D4) … Track 71B not accepted; 71D safety not claimed". Manifested: the 2026-10-08 leak of 252 crypto errors into the real autopush and autopull logs went through `_log_unexpected`'s raw `open(path, "a+b")`, still unguarded at 573fb12 (`cli.py` `_log_unexpected`)._
+_Source: inbox "[review] Direct test writers can still touch real account state" (P1; owner decision D4, 2026-10-11). Formerly Track 71B: PR #204 (v1.7.1, `adfcc50`) delivered the shared-helper guard, and its receipt records "OUT-71B Track outcome | DEFERRED BY USER (D4) … Track 71B not accepted; 71D safety not claimed". Manifested: the 2026-10-08 leak of 252 crypto errors into the real autopush and autopull logs went through `_log_unexpected`'s raw `open(path, "a+b")`, still unguarded at 223f1b8 (`cli.py` `_log_unexpected`). Inbox "[plan-ceo-review:track=73B] Remove `fsutil.flock_append_jsonl(on_locked=)`" (revisit trigger: this Track): Track 73B removed its only production caller; the parameter is still at 223f1b8._
 
-- **Extend the guard to raw writers and roots** -- Guard the named raw writers at one structural point or at each writer (decided at /autoplan), and add configured storage roots and agent destinations to the refused set. `storage/local.py` needs coverage only until Track 83A deletes it. _src/mind_meld/fsutil.py, src/mind_meld/cli.py, src/mind_meld/seen_sources.py, src/mind_meld/upgrade.py, src/mind_meld/lockfile.py, src/mind_meld/storage/local.py, tests/conftest.py, ~150 lines._ (M)
+- **Extend the guard to raw writers and roots** -- Guard the named raw writers at one structural point or at each writer (decided at /autoplan), and add configured storage roots and agent destinations to the refused set. `storage/local.py` needs coverage only until Track 82A deletes it. _src/mind_meld/fsutil.py, src/mind_meld/cli.py, src/mind_meld/seen_sources.py, src/mind_meld/upgrade.py, src/mind_meld/lockfile.py, src/mind_meld/storage/local.py, tests/conftest.py, ~150 lines._ (M)
 - **Pin the incident and close C1** -- A regression for the 2026-10-08 `_log_unexpected` path and one per named writer; rewrite the routing README's C1 paragraph. _tests/test_fsutil.py, docs/invariants/README.md, ~100 lines._ (M)
-
-##### Track 74B: Settle retirement membership and non-UTF-8 union in the store design
-_2 tasks . ~250 LOC . medium risk . 5 files_
-**Outcome:** Retiring a dead device and merging memory files can no longer silently lose state, because the design says who counts as active and what happens to bytes that are not UTF-8.
-**Supports:** MVP-1, docs/SPEC.md O1.1; the approved Track 72A gap-disposition condition for 2.0.0.
-**Done when:** store-v2 §8 (with §6 if the reader table must change) defines authoritative active membership or snapshot coverage for `mm devices retire`, so a peer with delayed presence still converges, and `test_gap_retire_delayed_active_presence` passes with its row and gate removed or carries the owner's recorded disposition; §4 decides non-UTF-8 input to the `.jsonl` and `MEMORY.md` union resolvers (preserve the bytes, or another symmetric outcome that keeps the loser in `displaced`) and `test_gap_non_utf8_union` passes the same way; invariants are unchanged; the bounded profile passes and a deep run is recorded.
-_touches: docs/designs/store-v2.md, tests/sim/model/store.py, tests/sim/invariants.py, tests/sim/test_scenarios.py, tests/sim/README.md_
-_out: 77A_
-_read-first: docs/designs/store-v2.md, tests/sim/README.md, src/mind_meld/merge.py_
-_produces: §4, §6 and §8 rules the reader, resolver and retire Tracks implement_
-_session: fresh · effort: high · verify: ./bin/check tests/sim_
-
-_Source: inbox "81A must define active membership before retirement under delayed presence" and "Preserve non-UTF-8 union bytes or obtain an explicit outcome decision" ([plan-eng-review:track=72A], filed by PR #208). Verified at 573fb12: both rows in `KNOWN_DESIGN_GAPS`; `merge.py` still decodes union input with `errors="replace"` (probe 2026-10-13: `merge_lines(b"caf\xe9 note\n", b"other\n")` returns U+FFFD)._
-
-- **Active membership before retirement** -- Define who counts as active and what snapshot must cover a retiree, or a recovery path, so a retire actor that sees stale presence cannot delete a namespace an active peer still needs; implement in the model. _docs/designs/store-v2.md, tests/sim/model/store.py, tests/sim/invariants.py, tests/sim/test_scenarios.py, ~180 lines._ (M)
-- **Non-UTF-8 union input** -- Decide and model the outcome for union inputs that are not valid UTF-8, keeping resolution a symmetric function of the pair. _docs/designs/store-v2.md, tests/sim/model/store.py, tests/sim/test_scenarios.py, tests/sim/README.md, ~70 lines._ (S)
+- **Drop the dead `on_locked` hook** -- Remove `flock_append_jsonl(on_locked=)` and its test. _src/mind_meld/fsutil.py, tests/test_fsutil.py, ~25 lines (del)._ (S)
 
 #### Group 75: Publish commits
 
-_Depends on: Group 73, Group 74_
+_Depends on: Group 74_
 
 **This group delivers:** `mm push` authors version-vectored entries from the ledger, writes self-contained, write-once commits to `dev/<me>/log/` and refreshes this device's presence; the simulator's publish and presence pieces become the real code.
 
 ##### Track 75A: Publish: ledger authoring, commits and presence
-_2 tasks . ~650 LOC . high risk . 8 files_
+_2 tasks . ~770 LOC . high risk . 11 files_
 **Outcome:** The owner's `mm push` writes one sealed commit per change set to this device's log, with content that travels inside the commit and a `prev` chain, and refreshes this device's presence record.
 **Supports:** MVP-1, docs/SPEC.md O1, O3 and O4.
-**Done when:** the §4 authoring table is implemented against the ledger (`{me: 1}` for new paths, incremented vectors for changes, tombstones for deletions guarded by `_prove_omitted_paths_absent`); the commit is written with exclusive create via `os.link` from `.mm-tmp-*` temp files, parts last, following Track 73C's partial-commit rule; ledger, `own_log` and `history` rows commit in one transaction, and only publish owns `seq` and `vv + me`; a pending resolution publishes even with an unchanged sha and then clears pending; presence is written at the publish refresh; the scan reuses the strict walkers, exclusions, nested-checkout freezing and upload verification; the `publish` and `presence` registry pieces are real, behind a statedb-backed `read` and atomic `transaction` seam that the remaining model pieces share, directly callable with injected state, clock, machine id, replica, source and key entry points (no CliRunner or activation); SQLite and real-process interruption evidence covers the publisher; the bounded and deep simulator profiles pass with deep duration and result recorded, and isolated `tests/sim` time is measured against its 180 s target.
-_touches: src/mind_meld/store/, src/mind_meld/cli.py, src/mind_meld/manifest.py, src/mind_meld/statedb.py, tests/test_publish.py (new), tests/sim/, tests/test_integration.py, docs/invariants/store.md_
+**Done when:** the §4 authoring table is implemented against the ledger (`{me: 1}` for new paths, incremented vectors for changes, tombstones for deletions guarded by `_prove_omitted_paths_absent`); commits follow store-v2 §5 as amended by Track 73C (a per-publication family drawn from an injected `family_source`, an intent row before the parts, exclusive create via `os.link` from `.mm-tmp-*` temp files with parts last, and re-sealing on an `EEXIST` retry); `state.db` migration 2 adds the 73C state (`own_log` family and digest, the applied-family set, `cursors.fork`, intent rows, `displaced` cause and peer), and receipts that sync logic reads live in their owning tables, never in forensic `history`; ledger, `own_log` and `history` rows commit in one transaction, and only publish owns `seq` and `vv + me`; a pending resolution publishes even with an unchanged sha and then clears pending; presence is written at the publish refresh; the scan reuses the strict walkers, exclusions, nested-checkout freezing and upload verification; before the first ledger row is written, the `StateDBCorrupt` remedy stops advising to move `state.db*` aside: mm preserves the database and refuses; the `publish` and `presence` registry pieces are real, behind a statedb-backed `read` and atomic `transaction` seam that the remaining model pieces share, directly callable with injected state, clock, machine id, replica, source and key entry points (no CliRunner or activation); the `SQLiteState` adapter keeps INV7's byte-integrity and causal checks with a metadata-only ledger, with cases for an unpublished edit, a deletion and a pending resolution; SQLite and real-process interruption evidence covers the publisher; the bounded simulator profile passes, and isolated `tests/sim` time is measured against its 180 s target.
+_touches: src/mind_meld/store/, src/mind_meld/cli.py, src/mind_meld/manifest.py, src/mind_meld/statedb.py, src/mind_meld/pullhistory.py, tests/test_publish.py (new), tests/test_statedb.py, tests/sim/, tests/test_integration.py, README.md, docs/invariants/store.md_
 _blocked-by: Track 71C, Track 72A, Track 73B, Track 73C, Track 74A_
 _out: 76A_
 _read-first: docs/designs/store-v2.md, docs/invariants/store.md, docs/invariants/sync.md, tests/sim/README.md, src/mind_meld/manifest.py_
 _produces: `store.publish`, the presence writer and the shared state seam the snapshot and apply Tracks extend_
-_session: fresh · effort: high · verify: ./bin/check tests/test_publish.py tests/sim tests/test_integration.py tests/test_docs_routing.py_
+_session: fresh · effort: high · verify: ./bin/check tests/test_publish.py tests/test_statedb.py tests/sim tests/test_integration.py tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §4 (authoring), §5 and T4; inbox "75A publish and presence must replace model pieces and supply the state seam" ([plan-eng-review:track=72A], V7/E12/E13/E25: presence writes move here from Track 81A); PR #208 completion row 46 (isolated `tests/sim` ≤180 s deferred by the owner to 75A). `tests/sim/model/registry.py` names 75A as the owner of `publish` and `presence`. Tracks 75A and 77A share `cli.py` and `store/`, so their landings are serialized by the Group chain._
+_Source: docs/designs/store-v2.md §4 (authoring), §5 and T4; inbox "75A publish and presence must replace model pieces and supply the state seam" ([plan-eng-review:track=72A], presence writes moved here from Track 81A); PR #208 completion row 46 (isolated `tests/sim` ≤180 s deferred by the owner to 75A). Inbox "[plan-eng-review:track=73C] Amend later store cards for the 73C design rules" (the 75A rules, plus the schema items it filed against Track 73B, which shipped before them) and "[plan-ceo-review:track=73B] 75A card note: INV7 equivalence and the authoritative-state remedy" (P1; Eng G7 on receipt tables). The remedy text is `pullhistory.py` "move state.db and every state.db-* file aside together" at 223f1b8. The deep simulator profile runs once on the 2.0 release candidate (spec, 2026-10-18). `tests/sim/model/registry.py` names 75A as the owner of `publish` and `presence`._
 
-- **Author and write commits** -- Scan strictly, diff against the ledger, author entries and tombstones, build the commit with `prev` and the host fingerprint, write parts with exclusive create, update the ledger in one transaction; preview (`--dry-run`) reports what would be authored and writes nothing. _src/mind_meld/store/publish.py, src/mind_meld/cli.py, src/mind_meld/manifest.py, src/mind_meld/statedb.py, tests/test_publish.py, tests/test_integration.py, docs/invariants/store.md, ~500 lines._ (L)
-- **Presence and the simulator seam** -- The presence writer at the publish refresh, the statedb-backed seam, the real `publish` and `presence` registry entries and the recorded bounded, deep and isolated runs. _src/mind_meld/store/, tests/sim/, ~150 lines._ (S)
+- **Author and write commits** -- Scan strictly, diff against the ledger, author entries and tombstones, build the commit with `prev` and the host fingerprint, write the family with its intent row and exclusive create, add `state.db` migration 2, update the ledger in one transaction, and replace the move-aside remedy; preview (`--dry-run`) reports what would be authored and writes nothing. _src/mind_meld/store/publish.py, src/mind_meld/cli.py, src/mind_meld/manifest.py, src/mind_meld/statedb.py, src/mind_meld/pullhistory.py, tests/test_publish.py, tests/test_statedb.py, tests/test_integration.py, README.md, docs/invariants/store.md, ~600 lines._ (L)
+- **Presence and the simulator seam** -- The presence writer at the publish refresh, the statedb-backed seam, the `SQLiteState` adapter with its INV7 cases, the real `publish` and `presence` registry entries and the recorded bounded and isolated runs. _src/mind_meld/store/, tests/sim/, ~170 lines._ (S)
 
 #### Group 76: Snapshots and restore safety
 
@@ -156,7 +88,7 @@ _Depends on: Group 75_
 _2 tasks . ~400 LOC . high risk . 6 files_
 **Outcome:** A device's log stays bounded without any cross-device acknowledgement, and a machine restored from backup, interrupted mid-publish or cloned cannot fork the fleet or lose a recoverable edit.
 **Supports:** MVP-1, docs/SPEC.md O5 and the accepted snapshot limitation.
-**Done when:** a snapshot is written when the log since the last one outgrows that snapshot or after 200 commits, only from an attended `mm push` or `mm push --snapshot`, never from `autopush`; commits at or below the previous snapshot's seq are deleted after 14 days and the two newest snapshots are kept; the snapshot header carries `cursors` and `prev`; chain checks run only inside the retained window; the §9 table, as amended by Track 73C, is implemented (own commits beyond `own_log` with the same host are applied and `seq` resumes after storage's newest commit; a different host refuses with `mm rejoin`; a missing `dev/<me>/` with a non-empty `own_log` refuses; a broken chain or conflict copy refuses with `mm diag` detail; restore and partial-commit recovery follow 73C); the `snapshot`, `compact` and `reconcile` registry pieces are real behind the shared seam with persisted observations, keeping write-once and own-namespace rules; real crash-interruption scenarios replace model protocol stops; bounded and deep runs are recorded.
+**Done when:** a snapshot is written when the log since the last one outgrows that snapshot or after 200 commits, only from an attended `mm push` or `mm push --snapshot`, never from `autopush`; only families proven by `own_log`, an intent row or the snapshot chain are compacted, commits at or below the previous snapshot's seq are deleted after 14 days and the two newest snapshots are kept; the snapshot header carries `cursors` and `prev`; the §9 table as amended by Track 73C is implemented: restored-device detection holds publication as pending `own-records-in-flight` while the own presence, a peer's `applied[me]` or a peer snapshot cursor exceeds `own_log` and those records have not all arrived, then skips ahead with a forced snapshot once the folder has synced; heal of a lost own commit or snapshot, torn-slot closure, own-fork refusal with `mm rejoin` and own-snapshot recovery follow §5 and §9; a missing `dev/<me>/` with a non-empty `own_log` refuses; the `snapshot`, `compact` and `reconcile` registry pieces are real behind the shared seam with persisted observations, keeping write-once and own-namespace rules; real crash-interruption scenarios replace model protocol stops; the bounded profile passes; the `restore-current` and `fresh-replica-unreplicated` rows keep their owner-accepted dispositions.
 _touches: src/mind_meld/store/, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_publish.py, tests/sim/, docs/invariants/store.md_
 _blocked-by: Track 75A_
 _out: 77A_
@@ -164,14 +96,14 @@ _read-first: docs/designs/store-v2.md, docs/invariants/store.md, tests/sim/READM
 _produces: bounded logs and the restore, clone and fork rules the apply Tracks rely on_
 _session: fresh · effort: high · verify: ./bin/check tests/test_publish.py tests/sim tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §6, §9 and T4 (snapshot half); inbox "76A must replace snapshot, compaction and own-storage reconciliation" ([plan-eng-review:track=72A]). The time trigger was removed on 2026-10-11: a snapshot is about 330 MB sealed on device 889e42c0 and Syncthing gets no block deltas from sealed files._
+_Source: docs/designs/store-v2.md §6, §9 and T4 (snapshot half); inbox "76A must replace snapshot, compaction and own-storage reconciliation" ([plan-eng-review:track=72A]); inbox "[plan-eng-review:track=73C] Implement restored-device detection in the product (design and model delivered by 73C)" and the 76A part of "Amend later store cards for the 73C design rules" (heal, torn slot, own-fork rules, own-snapshot recovery, proven-only compaction). The time trigger was removed on 2026-10-11: a snapshot is about 330 MB sealed on device 889e42c0 and Syncthing gets no block deltas from sealed files._
 
-- **Snapshots and compaction** -- Ratio and count triggers, attended-only, `--snapshot`, retention of the two newest snapshots, 14-day deletion of compacted commits, chain checks bounded to the retained window. _src/mind_meld/store/snapshot.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_publish.py, tests/sim/, docs/invariants/store.md, ~250 lines._ (M)
-- **Own-storage reconciliation** -- At the start of push and pull read the own log listing and presence and apply the amended §9 table, including restore and partial-commit recovery; the simulator's restore, clone and crash actions must refuse or recover as specified. _src/mind_meld/store/publish.py, tests/sim/, ~150 lines._ (M)
+- **Snapshots and compaction** -- Ratio and count triggers, attended-only, `--snapshot`, retention of the two newest snapshots, proven-only 14-day deletion of compacted commits, chain checks bounded to the retained window. _src/mind_meld/store/snapshot.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_publish.py, tests/sim/, docs/invariants/store.md, ~250 lines._ (M)
+- **Own-storage reconciliation** -- At the start of push and pull read the own log listing and presence and apply the amended §9 table, including restored-device detection, heal and torn-slot closure; the simulator's restore, clone and crash actions must refuse or recover as specified. _src/mind_meld/store/publish.py, tests/sim/, ~150 lines._ (M)
 
 #### Group 77: Apply peers' logs
 
-_Depends on: Group 74, Group 76_
+_Depends on: Group 76_
 
 **This group delivers:** `mm pull` reads each peer's commits in sequence, bootstraps from snapshots, and reports gaps as pending.
 
@@ -179,17 +111,17 @@ _Depends on: Group 74, Group 76_
 _2 tasks . ~350 LOC . high risk . 7 files_
 **Outcome:** The owner's `mm pull` applies every peer's commits in order, picks up from a snapshot when older commits were compacted, and says "waiting for push #N from X" instead of failing when something has not arrived.
 **Supports:** MVP-1, docs/SPEC.md O3.
-**Done when:** the §6 reader rule, with any change Track 74B made, is implemented per peer (apply the next complete commit; load the newest complete snapshot when the next commit is missing at or below its seq and raise every other cursor to the snapshot's cursors; a snapshot-raised cursor without a hash waits for a complete chain anchor; record `gap_since` when pending; stop with an always-visible warning on an unreadable commit and skip to a later snapshot); gap, parts and ENOENT states read as pending and hash chains are verified; a pending gap older than 24 h warns in every mode; a joiner bootstraps from the freshest complete peer snapshot; the `read` registry piece is real behind the shared seam with persisted per-entry history so invariant 7 observes each pull action; simulator invariant 4 holds; bounded and deep runs are recorded; native transport stays a separate qualification.
+**Done when:** the §6 reader rule as amended by Track 73C is implemented per peer (apply the next complete family in family order, treating incomplete and late families as pending; load the newest complete snapshot when the next commit is missing at or below its seq, raise every other cursor to the snapshot's cursors and apply the cover rule, with no chain-anchor wait; record `gap_since` when pending; stop with an always-visible warning on an unreadable commit and skip to a later snapshot); gap, parts and ENOENT states read as pending and hash chains are verified; a pending gap older than 24 h warns in every mode; a joiner bootstraps from the freshest complete peer snapshot; applied receipts carry the family digest per the receipts rule; the `read` registry piece is real behind the shared seam with persisted per-entry history so invariant 7 observes each pull action; simulator invariant 4 holds; the bounded profile passes; native transport stays a separate qualification.
 _touches: src/mind_meld/store/, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_apply.py (new), tests/sim/, tests/test_integration.py, docs/invariants/store.md_
-_blocked-by: Track 76A, Track 74B_
+_blocked-by: Track 76A_
 _out: 78A_
 _read-first: docs/designs/store-v2.md, docs/invariants/store.md, tests/sim/README.md_
 _produces: `store.apply` cursors the classification Track feeds entries through_
 _session: fresh · effort: high · verify: ./bin/check tests/test_apply.py tests/sim tests/test_integration.py tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §6 (reader rule), §8 (join bootstrap) and T5 (cursor half); inbox "77A must replace the peer reader behind observable injected entry points" ([plan-eng-review:track=72A])._
+_Source: docs/designs/store-v2.md §6 (reader rule and cover rule), §8 (join bootstrap) and T5 (cursor half); inbox "77A must replace the peer reader behind observable injected entry points" ([plan-eng-review:track=72A]) and the 77A part of "[plan-eng-review:track=73C] Amend later store cards for the 73C design rules" (reader rule, cover rule, chain-anchor removal, receipts rule). The 2026-10-18 amendment removed the dependency on the killed retirement-design Track (formerly 74B)._
 
-- **Cursors and the reader rule** -- Per-peer cursor advance, the snapshot fallback, `gap_seq` and `gap_since`, unreadable-commit handling and the 24 h data-at-risk warning, with the real `read` piece and its persisted history. _src/mind_meld/store/apply.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_apply.py, tests/sim/, docs/invariants/store.md, ~250 lines._ (M)
+- **Cursors and the reader rule** -- Per-peer cursor advance in family order, the snapshot fallback and cover rule, `gap_seq` and `gap_since`, unreadable-commit handling and the 24 h data-at-risk warning, with the real `read` piece and its persisted history. _src/mind_meld/store/apply.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_apply.py, tests/sim/, docs/invariants/store.md, ~250 lines._ (M)
 - **Snapshot bootstrap** -- Select the freshest complete peer snapshot for a device with no cursors, classify every entry through the next Track's rules, and raise cursors from the snapshot header. _src/mind_meld/store/apply.py, tests/test_apply.py, tests/test_integration.py, ~100 lines._ (S)
 
 #### Group 78: Causal classification
@@ -199,10 +131,10 @@ _Depends on: Group 77_
 **This group delivers:** peer edits to untouched files fast-forward, concurrent edits resolve symmetrically, deletions propagate, and replaced bytes land in `displaced`.
 
 ##### Track 78A: Causal classification, symmetric resolution and displaced
-_1 tasks . ~500 LOC . high risk . 7 files_
+_1 tasks . ~520 LOC . high risk . 7 files_
 **Outcome:** The owner sees a conflict only when two machines really changed the same file; everything else applies as a fast-forward, deletions stick, and nothing replaced is lost for 30 days.
-**Supports:** MVP-1, docs/SPEC.md O1.
-**Done when:** the §4 classification table is implemented (same sha merges vectors without I/O and keeps an existing publication obligation; dominance fast-forwards or deletes with the old bytes in `displaced` and clears pending; local dominance ignores; concurrency, including equal vectors with unequal sha, resolves); resolution is `merge_jsonl` for `.jsonl`, `merge_lines` for `MEMORY.md`, newest by mtime with the sha tiebreak otherwise, with non-UTF-8 input handled as Track 74B decided; live wins over a tombstone, and the bootstrap inversion moves never-ledgered local files matching a peer tombstone to `displaced`; every resolution is a pure function of the unordered pair and writes `sha=resolved`, `vv=max(L,R)` and `pending=true`, leaving the `me` increment to publish; peer display names pass through `safety`; `mm displaced` lists and restores entries; the `classify` and `resolve` registry pieces are real with persisted per-entry actions; simulator invariants 1, 2 and 5 hold; bounded and deep runs are recorded.
+**Supports:** MVP-1, docs/SPEC.md O1 and the accepted limitation on union merge of non-UTF-8 input.
+**Done when:** the §4 classification table is implemented (same sha merges vectors without I/O and keeps an existing publication obligation; dominance fast-forwards or deletes with the old bytes in `displaced` and clears pending; local dominance ignores; concurrency, including equal vectors with unequal sha, resolves); resolution is `merge_jsonl` for `.jsonl`, `merge_lines` for `MEMORY.md`, newest by mtime with the sha tiebreak otherwise; union input that is not valid UTF-8 resolves newest-wins with the sha tiebreak and the loser in `displaced`, and `test_gap_non_utf8_union` passes as an ordinary test with its `KNOWN_DESIGN_GAPS` row and random-run gate removed; live wins over a tombstone, and the bootstrap inversion moves never-ledgered local files matching a peer tombstone to `displaced`; every resolution is a pure function of the unordered pair and writes `sha=resolved`, `vv=max(L,R)` and `pending=true`, leaving the `me` increment to publish; peer display names pass through `safety`; `mm displaced` lists and restores entries, including fork-tagged rows; the `classify` and `resolve` registry pieces are real with persisted per-entry actions; simulator invariants 1, 2 and 5 hold; the bounded profile passes.
 _touches: src/mind_meld/store/, src/mind_meld/cli.py, src/mind_meld/merge.py, src/mind_meld/statedb.py, tests/test_apply.py, tests/sim/, docs/invariants/store.md_
 _blocked-by: Track 77A_
 _out: 79A_
@@ -210,9 +142,9 @@ _read-first: docs/designs/store-v2.md, docs/designs/conflict-policies.md, docs/i
 _produces: the symmetric resolver contract conflict policies (2.1) extend_
 _session: fresh · effort: high · verify: ./bin/check tests/test_apply.py tests/sim tests/test_merge.py tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §4 (classification, resolution, symmetry, bootstrap) and T5 (apply half); inbox "78A classification and resolution must honor the shared publication contract" ([plan-eng-review:track=72A], V7/E12/E13). The live-versus-tombstone rule and the bootstrap inversion were added on 2026-10-11 after the fleet's 15,415 tombstones were measured._
+_Source: docs/designs/store-v2.md §4 (classification, resolution, symmetry, bootstrap) and T5 (apply half); inbox "78A classification and resolution must honor the shared publication contract" ([plan-eng-review:track=72A], V7/E12/E13) and the 78A part of "[plan-eng-review:track=73C] Amend later store cards for the 73C design rules" (`mm displaced` restore and fork-tagged rows). The non-UTF-8 rule is the owner's 2026-10-18 decision (docs/SPEC.md accepted limitations), replacing the retirement-design Track formerly numbered 74B; `merge.py` still decodes union input with `errors="replace"` at 223f1b8. The live-versus-tombstone rule and the bootstrap inversion were added on 2026-10-11 after the fleet's 15,415 tombstones were measured._
 
-- **Classify and resolve** -- Version-vector comparison against the ledger plus unpublished local edits, the four actions, the three symmetric resolvers, the tombstone rules, the `displaced` writes, `mm displaced` and the real registry pieces; the merge module loses its LCS synthetic base once no caller remains. _src/mind_meld/store/apply.py, src/mind_meld/merge.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_apply.py, tests/sim/, docs/invariants/store.md, ~500 lines._ (L)
+- **Classify and resolve** -- Version-vector comparison against the ledger plus unpublished local edits, the four actions, the three symmetric resolvers with the non-UTF-8 fallback, the tombstone rules, the `displaced` writes, `mm displaced` and the real registry pieces; the merge module loses its LCS synthetic base once no caller remains. _src/mind_meld/store/apply.py, src/mind_meld/merge.py, src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_apply.py, tests/sim/, docs/invariants/store.md, ~520 lines._ (L)
 
 #### Group 79: Portable paths and previews
 
@@ -232,7 +164,7 @@ _read-first: docs/designs/store-v2.md, docs/invariants/sync.md, src/mind_meld/pu
 _produces: portable wire paths and previews the fleet Tracks can demonstrate_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_pull_helpers.py tests/test_integration.py tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §7 and T5 (preview half); Track 72A deferral V13 ("Check cross-OS context continuity on the owner's real layout before Track 79A … Do not add path aliases automatically"). On device 889e42c0 all 258 synced Claude project files live under `-Users-kb-`; 111 of 160 project folders are worktree paths that stay machine-specific by nature._
+_Source: docs/designs/store-v2.md §7 and T5 (preview half); Track 72A deferral V13 ("Check cross-OS context continuity on the owner's real layout before Track 79A … Do not add path aliases automatically"). On device 889e42c0 all 258 synced Claude project files live under `-Users-kb-`; 111 of 160 project folders are worktree paths that stay machine-specific by nature. The owner's Omarchy machine (2026-10-18) supplies the Linux folder names._
 
 - **Home-relative wire paths** -- Encode and decode the `~-` prefix for the `claude` source on both OSes after checking Claude Code's real folder naming on each; leave other sources root-relative. _src/mind_meld/manifest.py, src/mind_meld/store/, tests/test_pull_helpers.py, ~120 lines._ (M)
 - **Previews on the new store** -- Port `diff`, `pull --dry-run` and `push --dry-run` to cursors and the ledger; keep `COMMAND_INTENTS62` write boundaries. _src/mind_meld/pullplan.py, src/mind_meld/cli.py, tests/test_integration.py, docs/invariants/store.md, ~180 lines._ (M)
@@ -241,84 +173,63 @@ _Source: docs/designs/store-v2.md §7 and T5 (preview half); Track 72A deferral 
 
 _Depends on: Group 79_
 
-**This group delivers:** a fleet is created once and every other machine joins with one code.
+**This group delivers:** a fleet is created once, and every other machine joins after the owner pairs it in Syncthing.
 
 ##### Track 80A: Create and join a fleet
-_1 tasks . ~550 LOC . high risk . 8 files_
-**Outcome:** The owner runs `mm init --new-fleet` on one machine and `mm join <code>` on each other, and the joiner never creates `fleet.json`.
+_2 tasks . ~550 LOC . high risk . 10 files_
+**Outcome:** The owner runs `mm init --new-fleet` on one machine; on each other machine they pair it in Syncthing, accept the folder and run `mm join`, and the joiner never creates `fleet.json`.
 **Supports:** MVP-1, docs/SPEC.md O2 and O4.
-**Done when:** before the first `fleet.json` is written, the owner's decisions on binding the envelope version byte into the associated data, Unicode normalization of the passphrase, and an expected `fleet_id` argument to `unlock_fleet` are implemented and recorded in docs/invariants/store.md; `--new-fleet` refuses unless the folder holds no `fleet.json` and no `dev/`, prompts for the passphrase twice, writes `fleet.json` exclusively and publishes a snapshot and presence; `mm invite` prints a base32 code (fleet id, this device's Syncthing id, folder id, checksum) and waits for the joiner to appear; `mm join` waits for `fleet.json`, verifies the keycheck, records the fleet in config, bootstraps from the freshest complete peer snapshot, publishes its own snapshot and pulls; `mm rejoin` mints a new device id in the same fleet; clone timing checks hold; the `create_fleet`, `join` and `rejoin` registry pieces are real behind the shared seam with no model fallback under a real label; bounded and deep runs are recorded; the Syncthing pairing steps call the Syncthing Track's module or report its absence.
-_touches: src/mind_meld/cli.py, src/mind_meld/store/, src/mind_meld/config.py, src/mind_meld/crypto.py, tests/test_fleet.py (new), tests/test_integration.py, README.md, docs/invariants/init-devices.md_
+**Done when:** before the first `fleet.json` is written, the owner's decisions on binding the envelope version byte and the record family into the associated data, Unicode normalization of the passphrase, and an expected `fleet_id` argument to `unlock_fleet` are implemented and recorded in docs/invariants/store.md, with the T04 vectors regenerated once; the 2.0 default storage path is `~/Sync/mind-meld` on both OSes for new fleets, and a 1.x install is not moved; `--new-fleet` refuses unless the folder holds no `fleet.json` and no `dev/`, prompts for the passphrase twice, writes `fleet.json` exclusively, writes the `.stignore` and publishes a snapshot and presence; `mm join` tells the owner to pair the machine and accept the folder in Syncthing, waits for `fleet.json` with progress output, verifies the keycheck, records the fleet in config, writes the `.stignore`, bootstraps from the freshest complete peer snapshot, publishes its own snapshot and pulls; `mm rejoin` mints a new device id in the same fleet with `supersedes` and the 73C join tie-break; on macOS, init and join exclude the store folder and Syncthing's database from Time Machine, and the README gives the Linux equivalent; the simulator fixture honors a replica `.stignore`; clone timing checks hold; the `create_fleet`, `join` and `rejoin` registry pieces are real behind the shared seam with no model fallback under a real label; the bounded profile passes; the owner's native Omarchy run (pipx install, the keyring backend actually selected, login and reboot behavior, one hook run, manual recovery) is recorded in the PR before the Linux passphrase flow merges.
+_touches: src/mind_meld/cli.py, src/mind_meld/store/, src/mind_meld/config.py, src/mind_meld/crypto.py, tests/test_fleet.py (new), tests/test_integration.py, tests/sim/, README.md, docs/invariants/init-devices.md, docs/invariants/store.md_
 _blocked-by: Track 79A_
 _out: 81A_
 _read-first: docs/designs/store-v2.md, docs/invariants/init-devices.md, docs/invariants/store.md, tests/sim/README.md_
-_produces: fleet creation and join flows the presence and Syncthing Tracks complete_
+_produces: fleet creation and join flows the status and retirement Track completes_
 _session: fresh · effort: high · verify: ./bin/check tests/test_fleet.py tests/test_store_format.py tests/sim tests/test_integration.py tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §8 and T6 (lifecycle half); inbox "80A fleet creation, join and rejoin must replace model registry entries" ([plan-eng-review:track=72A]); PR #203 backlog items 7 (`unlock_fleet` takes no expected `fleet_id`), 11 (envelope version byte not bound into the AAD) and 12 (passphrase Unicode normalization), recorded only in that PR's body and receipt comment. Verified at 573fb12: `unlock_fleet(data, passphrase)`; `envelope._derive` and `crypto.derive_key` encode the passphrase without normalization; the AAD prefix is `b"mm-record-v3\0"` with no version byte._
+_Source: docs/designs/store-v2.md §8 and T6 (lifecycle half); inbox "80A fleet creation, join and rejoin must replace model registry entries" ([plan-eng-review:track=72A]); PR #203 backlog items 7, 11 and 12 (verified at 223f1b8: `unlock_fleet(data, passphrase)`, no passphrase normalization, AAD prefix `b"mm-record-v3\0"` with no version byte). Inbox: "[plan-eng-review:track=73C] Bind the record family into the associated data with the version byte", "Keep the store folder and Syncthing's database out of backups automatically", the 80A part of "Amend later store cards for the 73C design rules" (rejoin `supersedes`, join tie-break, re-seal on retry), "[manual] Track 80A owns the 2.0 default storage path ~/Sync/mind-meld" (UC1, 2026-10-16) and "[manual] Omarchy qualification checkpoint before Track 80A" (its trigger, a Linux machine on the owner's desk, was met by 2026-10-18). `mm invite` and mesh healing are spec non-goals since 2026-10-18._
 
-- **new-fleet, invite, join and rejoin** -- The three wire decisions, the four commands, the invite code format, the config `[fleet]` record, the passphrase and keycheck flow, the init-time refusal rules and the real registry pieces; previews of each must preserve their write boundaries. _src/mind_meld/cli.py, src/mind_meld/store/fleet.py, src/mind_meld/config.py, src/mind_meld/crypto.py, tests/test_fleet.py, tests/test_integration.py, README.md, docs/invariants/init-devices.md, ~550 lines._ (L)
+- **Wire decisions before the first fleet.json** -- Version byte and record family in the associated data, passphrase normalization, the expected `fleet_id`, regenerated T04 vectors. _src/mind_meld/crypto.py, src/mind_meld/store/, docs/invariants/store.md, ~100 lines._ (S)
+- **new-fleet, join and rejoin** -- The three commands, the config `[fleet]` record, the default path, the passphrase and keycheck flow, `.stignore`, backup exclusion, the init-time refusal rules and the real registry pieces; previews of each must preserve their write boundaries. _src/mind_meld/cli.py, src/mind_meld/store/fleet.py, src/mind_meld/config.py, tests/test_fleet.py, tests/test_integration.py, tests/sim/, README.md, docs/invariants/init-devices.md, ~450 lines._ (L)
 
-#### Group 81: Delivery receipts and retirement
+#### Group 81: Delivery receipts, Syncthing status and retirement
 
 _Depends on: Group 80_
 
-**This group delivers:** `mm status` says which machines have the latest push, `mm devices` keeps working for retro-fleet, and dead devices can be retired safely.
+**This group delivers:** `mm status` says which machines have the latest push and what Syncthing is doing, `mm diag` lints the folder, `mm devices` keeps working for retro-fleet, and dead devices can be retired.
 
-##### Track 81A: Delivery receipts, device projection and retirement
-_2 tasks . ~300 LOC . medium risk . 7 files_
-**Outcome:** The owner sees "laptop has your latest push; desktop is 2 pushes behind, last active 3h ago" in `mm status`, `mm devices` keeps working for retro-fleet, and a machine that has not pushed for 30 days can be retired.
-**Supports:** MVP-1, docs/SPEC.md O3 and O7.
-**Done when:** the pull path refreshes presence through Track 75A's writer when something changed and at most hourly otherwise; `mm status` renders delivery receipts and pending gaps per peer; `mm devices --format json` projects presence onto `device_id`, `device_name`, `registered`, `last_seen` and `last_seen_version` so retro-fleet's subprocess reader is unchanged; `mm devices retire <id>` requires 30 days of inactivity and the active-membership coverage rule from Track 74B, then deletes only `dev/<id>/`; the retired device refuses on its next run; the `retire` registry piece is real behind the shared seam with persisted action observations; bounded and deep runs are recorded; native retirement stays a separate qualification.
-_touches: src/mind_meld/cli.py, src/mind_meld/store/, src/mind_meld/devices.py, tests/test_fleet.py, tests/test_integration.py, README.md, docs/invariants/init-devices.md_
+##### Track 81A: Delivery receipts, Syncthing status and retirement
+_3 tasks . ~460 LOC . medium risk . 13 files_
+**Outcome:** The owner sees "laptop has your latest push; desktop is 2 pushes behind, last active 3h ago" and Syncthing's state in `mm status`, `mm diag` flags folder settings that would break sync, `mm devices` keeps working for retro-fleet, and a machine that has not pushed for 30 days can be retired.
+**Supports:** MVP-1, docs/SPEC.md O2.2, O3 and O7.
+**Done when:** the pull path refreshes presence through Track 75A's writer when something changed and at most hourly otherwise; `mm status` renders delivery receipts, pending gaps and fork listings per peer; `syncthing.py` is a leaf module that discovers the API key and address from `config.xml` on both OSes (falling back to `syncthing paths`), only reads Syncthing's REST API with time-bounded requests, and works, with status saying so, when Syncthing is absent; `mm status` reports reachability, folder state, need counts and connected peers; `mm diag` lints the folder options (`sendreceive`, versioning off, `maxConflicts` 10, `ignorePerms=false`, `order=alphabetic`), the `.stignore`, foreign files (Syncthing's `.stfolder/` and `.stignore`, in-flight `.mm-tmp-*` and `.DS_Store` are not foreign), fork evidence beyond conflict copies, the backup exclusion and the Syncthing version (2.1 or newer), and changes none of them; the README lists the folder options the owner sets; `mm devices --format json` projects presence onto `device_id`, `device_name`, `registered`, `last_seen` and `last_seen_version` so retro-fleet's subprocess reader is unchanged; `mm devices retire <id>` requires 30 days of inactivity, then deletes only `dev/<id>/`; the retired device refuses on its next run; `KNOWN_DESIGN_GAPS["retire-delayed-presence"]` records the owner's 2026-10-18 disposition (inactivity-only retirement, a docs/SPEC.md accepted limitation) and stays pinned; the `retire` registry piece is real behind the shared seam with persisted action observations; the bounded profile passes.
+_touches: src/mind_meld/syncthing.py (new), src/mind_meld/cli.py, src/mind_meld/store/, src/mind_meld/devices.py, tests/test_syncthing.py (new), tests/test_fleet.py, tests/test_integration.py, tests/test_diag.py, tests/test_module_boundaries.py, tests/sim/, README.md, docs/invariants/init-devices.md, docs/invariants/README.md_
 _blocked-by: Track 80A_
 _out: 82A_
-_read-first: docs/designs/store-v2.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, tests/sim/README.md_
-_produces: delivery receipts and the retirement rule the Syncthing Track reads for mesh healing_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_fleet.py tests/test_integration.py tests/test_retro_fleet_aggregator.py tests/sim tests/test_docs_routing.py_
+_read-first: docs/designs/store-v2.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, docs/invariants/README.md, tests/sim/README.md_
+_produces: delivery receipts, read-only Syncthing reporting and the retirement rule_
+_session: fresh · effort: medium · verify: ./bin/check tests/test_syncthing.py tests/test_fleet.py tests/test_diag.py tests/test_module_boundaries.py tests/test_integration.py tests/test_retro_fleet_aggregator.py tests/sim tests/test_docs_routing.py_
 
-_Source: docs/designs/store-v2.md §2 (presence), §8 (retire), §10 (status) and T6 (presence half); inbox "81A retire and delivery status must preserve simulator ownership boundaries" ([plan-eng-review:track=72A], E25 moves presence writing to 75A); Future bullet "Deregister/prune retired devices" (promoted 2026-10-11: `mm devices retire` is the prune it asked for)._
+_Source: docs/designs/store-v2.md §2 (presence), §8 (retire), §10 (status and diag) and T6/T7; inbox "81A retire and delivery status must preserve simulator ownership boundaries" ([plan-eng-review:track=72A], E25 moved presence writing to 75A); the 81A and 82A parts of "[plan-eng-review:track=73C] Amend later store cards for the 73C design rules" (receipt codec, status fork listing, diag fork evidence; the retire coverage tie-break fell with the coverage rule); PR #203 backlog item 3 (`.stfolder/`, `.mm-tmp-*` and `.DS_Store` classify as foreign; `layout.classify_keys` still exempts only `fleet.json` and `.stignore` at 223f1b8). The read-only half of the former Syncthing Track is folded in here; folder setup, scan-after-push, mesh healing and `mm relay add` are spec non-goals since 2026-10-18, and PR #203 item 8 (`syncthing_id` grammar before pairing) fell with mesh healing. Syncthing option semantics verified against docs.syncthing.net on 2026-10-11._
 
-- **Receipts and the devices projection** -- Pull-time presence refresh, the status renderer, the `devices --format json` projection and its contract test. _src/mind_meld/store/presence.py, src/mind_meld/cli.py, src/mind_meld/devices.py, tests/test_fleet.py, tests/test_integration.py, README.md, ~200 lines._ (M)
-- **mm devices retire** -- The inactivity and coverage checks, the only write outside `dev/<me>/`, the retired device's own refusal and the real `retire` piece. _src/mind_meld/cli.py, tests/test_fleet.py, docs/invariants/init-devices.md, ~100 lines._ (S)
+- **Receipts and the devices projection** -- Pull-time presence refresh, the status renderer for receipts, gaps and forks, the `devices --format json` projection and its contract test. _src/mind_meld/store/presence.py, src/mind_meld/cli.py, src/mind_meld/devices.py, tests/test_fleet.py, tests/test_integration.py, ~180 lines._ (M)
+- **Read-only Syncthing status and diag** -- Config discovery, a read-only REST client with timeouts, the status section, and the diag lint for folder options, `.stignore`, foreign files, fork evidence, backup exclusion and version. _src/mind_meld/syncthing.py, src/mind_meld/cli.py, tests/test_syncthing.py, tests/test_diag.py, tests/test_module_boundaries.py, README.md, docs/invariants/README.md, ~200 lines._ (M)
+- **mm devices retire** -- The inactivity check, the only write outside `dev/<me>/`, the retired device's own refusal, the gap row's disposition and the real `retire` piece. _src/mind_meld/cli.py, tests/test_fleet.py, tests/sim/, docs/invariants/init-devices.md, ~80 lines._ (S)
 
-#### Group 82: Syncthing integration
+#### Group 82: Remove the 1.x store
 
 _Depends on: Group 81_
 
-**This group delivers:** mm sets up and lints the Syncthing folder, heals the mesh, and asks Syncthing to scan after every push.
-
-##### Track 82A: Syncthing integration
-_2 tasks . ~500 LOC . medium risk . 8 files_
-**Outcome:** The owner pairs each machine with one other and mm fills in the rest of the mesh; `mm status` and `mm diag` report Syncthing's state and the folder settings.
-**Supports:** MVP-1, docs/SPEC.md O2 and O3.
-**Done when:** `syncthing.py` is a leaf module that discovers the API key and address from `config.xml` on both OSes (falling back to `syncthing paths`) and works, with status saying so, when Syncthing is absent; folder setup applies `~/Sync/mind-meld`, `sendreceive`, versioning off, `maxConflicts` 10, `ignorePerms=false`, `order=alphabetic` and the `.stignore`, and the simulator's fixture honors a replica `.stignore`; push posts a time-bounded `db/scan` for `dev/<me>`; pull adds any fleet device whose fresh, unretired presence carries an unknown Syncthing id that passes the device-id grammar, unless `[syncthing] manage = false`; `mm relay add` records a `receiveonly` peer; `mm diag` lints the folder settings, foreign files (Syncthing's own `.stfolder/` and `.stignore`, in-flight `.mm-tmp-*` and `.DS_Store` are not foreign), fork signals and the Syncthing version.
-_touches: src/mind_meld/syncthing.py (new), src/mind_meld/cli.py, tests/test_syncthing.py (new), tests/test_module_boundaries.py, tests/test_diag.py, tests/sim/, README.md, docs/invariants/README.md_
-_blocked-by: Track 81A_
-_out: 83A_
-_read-first: docs/designs/store-v2.md, docs/invariants/README.md, tests/sim/README.md, src/mind_meld/upgrade.py_
-_produces: the Syncthing automation the cutover runbook relies on_
-_session: fresh · effort: high · verify: ./bin/check tests/test_syncthing.py tests/test_module_boundaries.py tests/test_diag.py tests/sim tests/test_docs_routing.py_
-
-_Source: docs/designs/store-v2.md §10 and T7; PR #203 backlog items 3 (`.stfolder/`, `.mm-tmp-*` and `.DS_Store` classify as foreign; `layout.classify_keys` still exempts only `fleet.json` and `.stignore` at 573fb12) and 8 (`presence.syncthing_id` grammar is unvalidated and must never authorize pairing without freshness); tests/sim/README.md ("Store Tracks that write `.stignore` must add that check"). Syncthing option semantics verified against docs.syncthing.net on 2026-10-11. Untrusted peers stay excluded while syncthing#10528 and #10424 are open._
-
-- **Discovery, folder setup and scan-after-push** -- Config discovery, REST client with timeouts, folder creation and lint, `.stignore` and its simulator check, and the post-push scan. _src/mind_meld/syncthing.py, tests/test_syncthing.py, tests/test_module_boundaries.py, tests/sim/, ~250 lines._ (M)
-- **Mesh healing, relay, status and diag** -- Pending-device acceptance during `invite`, freshness-gated mesh healing during pull, `mm relay add`, and the status and diag sections. _src/mind_meld/syncthing.py, src/mind_meld/cli.py, tests/test_diag.py, README.md, docs/invariants/README.md, ~250 lines._ (M)
-
-#### Group 83: Remove the 1.x store
-
-_Depends on: Group 73, Group 82_
-
 **This group delivers:** the iCloud-era store, mtime-ordered apply and conflict sidecars are gone from the code.
 
-##### Track 83A: Delete the 1.x store and mtime-ordered apply
+##### Track 82A: Delete the 1.x store and mtime-ordered apply
 _3 tasks . ~2500 LOC . medium risk . 11 files_
 **Outcome:** mm 2.0 ships without the 1.x store, so no code path can read, repair or delete iCloud-era storage.
 **Supports:** MVP-1, docs/SPEC.md constraint "2.0 never reads 1.x storage" and the 1.x freeze.
 **Done when:** the `data/` blob store, `devices/` registry, `devices-write.lock`, crypto-init fetch and repair, `_do_gc` orphan reaping, last-push sidecar and corrupt-manifest recovery, `mm recover --abandon-manifest`, `brctl` auto-pin, the mtime skip gate, deferred inline bumps, `_bump_canonical_mtime_post_resolve`, `pullplan` mtime predictions, `.sync-conflict-*` minting, the v0/v1 eras, owner parsing, `_gc_old_conflict_files` and promote are deleted; the walker keeps a global exclusion for legacy `*.sync-conflict-*` names; envelope 0x02 reading is gone; their tests are deleted or rewritten; the module boundary test still passes.
 _touches: src/mind_meld/cli.py, src/mind_meld/storage/, src/mind_meld/crypto.py, src/mind_meld/retention.py, src/mind_meld/conflictmtime.py, src/mind_meld/pullplan.py, src/mind_meld/resolveflow.py, src/mind_meld/devices.py, src/mind_meld/merge.py, src/mind_meld/manifest.py, tests/_
-_blocked-by: Track 82A, Track 73A_
-_out: 84A_
+_blocked-by: Track 81A, Track 73A_
+_out: 83A_
 _read-first: docs/designs/store-v2.md, docs/invariants/README.md, docs/invariants/conflicts.md_
 _produces: a code base the invariant rewrite can describe truthfully_
 _session: fresh · effort: high · verify: ./bin/check_
@@ -329,28 +240,28 @@ _Source: docs/designs/store-v2.md "What 2.0 deletes" and T9 (code half). 2.0 has
 - **Delete mtime apply and sidecars** -- Remove the skip gate, deferred bumps, post-resolve mtime bump, mtime predictions, sidecar minting, eras, owner parsing, conflict GC and promote; keep the legacy-name walker exclusion. _src/mind_meld/conflictmtime.py, src/mind_meld/resolveflow.py, src/mind_meld/retention.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, src/mind_meld/manifest.py, ~800 lines (del)._ (S)
 - **Retire their tests** -- Delete or rewrite the tests that pinned the removed paths, keep the compat fixtures only where a refusal test still reads them, and keep `COMMAND_INTENTS62` current for the removed and added commands. _tests/, ~200 lines._ (M)
 
-#### Group 84: Rewrite the documentation for 2.0
+#### Group 83: Rewrite the documentation for 2.0
 
-_Depends on: Group 83_
+_Depends on: Group 82_
 
-**This group delivers:** the invariants, the 2.x compatibility contract, the architecture reference and AGENTS.md describe the 2.0 store, and the README carries the cutover runbook.
+**This group delivers:** the invariants, the 2.x compatibility contract, the architecture reference, AGENTS.md and the package metadata describe the 2.0 store, and the README carries the cutover runbook.
 
-##### Track 84A: Rewrite the invariants, SPEC and AGENTS.md for 2.0
-_3 tasks . ~800 LOC . low risk . 9 files_
+##### Track 83A: Rewrite the invariants, SPEC and AGENTS.md for 2.0
+_3 tasks . ~850 LOC . low risk . 11 files_
 **Outcome:** An agent or contributor reading the routing README, the invariants, the architecture reference and AGENTS.md learns the 2.0 rules and none of the deleted 1.x ones, and the owner has a cutover runbook to follow.
 **Supports:** MVP-1, docs/SPEC.md supporting-document map and release policy ("The 2.0 rewrite of the invariants defines the 2.x contract"); required before 2.0.0 is cut.
-**Done when:** `sync.md`, `init-devices.md` and `conflicts.md` describe the 2.0 store, version vectors, symmetric resolution and the fleet lifecycle, with the collector ban kept; `store.md` is routed from the README and the import-direction leaf list names `store/`; `auto-upgrade.md` defines the Compatibility (2.x) contract that replaces the 1.x one; the root `SPEC.md` architecture and data-model sections, including the gstack default exclusions, describe the 2.0 store and keep the CLI contract strings the docs routing test pins; AGENTS.md carries the store-v2 "AGENTS.md changes at 2.0" principles and rules, names `store/layout.record_key` in the storage-key rule, drops `recover --abandon-manifest` and adds the new commands; the README Upgrading notes carry the 2.0 cutover runbook, whose step 1 re-measures the gstack set before the first snapshot; `tests/test_docs_routing.py` passes.
-_touches: docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/conflicts.md, docs/invariants/README.md, docs/invariants/store.md, docs/invariants/auto-upgrade.md, SPEC.md, AGENTS.md, README.md_
-_blocked-by: Track 83A_
+**Done when:** `sync.md`, `init-devices.md` and `conflicts.md` describe the 2.0 store, version vectors, symmetric resolution and the fleet lifecycle, with the collector ban kept; `store.md` is routed from the README and the import-direction leaf list names `store/`; `auto-upgrade.md` defines the Compatibility (2.x) contract that replaces the 1.x one; the root `SPEC.md` architecture and data-model sections, including the gstack default exclusions, describe the 2.0 store and keep the CLI contract strings the docs routing test pins; AGENTS.md carries the store-v2 "AGENTS.md changes at 2.0" principles and rules, names `store/layout.record_key` in the storage-key rule, drops `recover --abandon-manifest` and adds the new commands; store-v2 §11's remaining platform prose (README prerequisites, init help, "other Mac" strings, the root SPEC overview, AGENTS.md principles) and the `pyproject.toml` description, keywords and classifiers describe macOS and Arch-based Linux on Syncthing; the README Upgrading notes carry the 2.0 cutover runbook, whose step 1 re-measures the gstack set before the first snapshot and which lists the Syncthing pairing and folder-option steps the owner performs; `tests/test_docs_routing.py` passes.
+_touches: docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/conflicts.md, docs/invariants/README.md, docs/invariants/store.md, docs/invariants/auto-upgrade.md, SPEC.md, AGENTS.md, README.md, pyproject.toml, src/mind_meld/cli.py_
+_blocked-by: Track 82A_
 _read-first: docs/designs/store-v2.md, docs/SPEC.md, docs/invariants/README.md, docs/invariants/auto-upgrade.md_
 _produces: documentation a 2.0 release can be cut against_
 _session: fresh · effort: high · verify: ./bin/check tests/test_docs_routing.py tests/test_module_boundaries.py_
 
-_Source: docs/designs/store-v2.md T9 (docs half), §13 and "AGENTS.md changes at 2.0"; docs/SPEC.md supporting-document map and release policy; PR #203 documentation debt (AGENTS.md storage-key rule omits `store/layout.record_key`; the routing README's leaf list omits `store/`), PR #207 documentation debt (root SPEC.md's gstack default list is stale) and inbox "[manual] Re-measure the gstack set at cutover step 1" (Track 72B autoplan CEO E3; method and 2026-10-12 baselines in that item's drain record). The spec itself is not rewritten here; a changed target goes through /project-spec._
+_Source: docs/designs/store-v2.md T9 (docs half), §11, §13 and "AGENTS.md changes at 2.0"; docs/SPEC.md supporting-document map and release policy; PR #203 documentation debt (AGENTS.md storage-key rule omits `store/layout.record_key`; the routing README's leaf list omits `store/`), PR #207 documentation debt (root SPEC.md's gstack default list is stale) and the "[manual] Re-measure the gstack set at cutover step 1" drain record (Track 72B autoplan CEO E3). Inbox "[manual] Owner for store-v2 section 11 prose outside pyproject.toml" and "[manual] Track 84A owns pyproject.toml description, keywords and classifiers" (UC2, 2026-10-16; that Track is this one). The spec itself is not rewritten here; a changed target goes through /project-spec._
 
 - **Invariants and routing** -- Rewrite the three invariant docs and the routing README rows for the store, apply and fleet modules, including the leaf list; keep a decision findable in shipped history only where one must survive the deletion. _docs/invariants/, ~400 lines._ (M)
 - **The 2.x compatibility contract** -- Replace "Compatibility (1.x)" in the auto-upgrade invariants with the 2.x contract: the `fleet.json` format gate, the record envelope and the host-family set. _docs/invariants/auto-upgrade.md, ~100 lines._ (S)
-- **SPEC, AGENTS.md and README** -- Replace the storage layout, manifest schema, encryption, conflict and gstack-default sections of the architecture reference; apply the AGENTS.md principle, rule and command changes; write the cutover runbook into the README Upgrading notes, with the gstack re-measure as step 1. _SPEC.md, AGENTS.md, README.md, ~300 lines._ (M)
+- **SPEC, AGENTS.md, README and package prose** -- Replace the storage layout, manifest schema, encryption, conflict and gstack-default sections of the architecture reference; apply the AGENTS.md principle, rule and command changes; rewrite the §11 platform prose, init help strings and `pyproject.toml` metadata; write the cutover runbook into the README Upgrading notes, with the gstack re-measure as step 1. _SPEC.md, AGENTS.md, README.md, pyproject.toml, src/mind_meld/cli.py, ~350 lines._ (M)
 
 ### Execution Map
 
@@ -360,30 +271,23 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 73 ← {}
-- Group 74 ← {73}
-- Group 75 ← {73, 74}
+- Group 74 ← {}
+- Group 75 ← {74}
 - Group 76 ← {75}
-- Group 77 ← {74, 76}
+- Group 77 ← {76}
 - Group 78 ← {77}
 - Group 79 ← {78}
 - Group 80 ← {79}
 - Group 81 ← {80}
 - Group 82 ← {81}
-- Group 83 ← {73, 82}
-- Group 84 ← {83}
+- Group 83 ← {82}
 ```
 
 Track detail per group:
 
 ```
-Group 73: Linux platform, local state and the restore design
-  +-- Track 73A ........... ~L . 2 tasks
-  +-- Track 73B ........... ~L . 2 tasks
-  +-- Track 73C ........... ~L . 2 tasks
-Group 74: Suite-wide test write guard and the retirement design
-  +-- Track 74A ........... ~L . 2 tasks
-  +-- Track 74B ........... ~M . 2 tasks
+Group 74: Suite-wide test write guard
+  +-- Track 74A ........... ~L . 3 tasks
 Group 75: Publish commits
   +-- Track 75A ........... ~L . 2 tasks
 Group 76: Snapshots and restore safety
@@ -395,24 +299,23 @@ Group 78: Causal classification
 Group 79: Portable paths and previews
   +-- Track 79A ........... ~L . 2 tasks
 Group 80: Create and join a fleet
-  +-- Track 80A ........... ~L . 1 task
-Group 81: Delivery receipts and retirement
-  +-- Track 81A ........... ~M . 2 tasks
-Group 82: Syncthing integration
-  +-- Track 82A ........... ~L . 2 tasks
-Group 83: Remove the 1.x store
+  +-- Track 80A ........... ~L . 2 tasks
+Group 81: Delivery receipts, Syncthing status and retirement
+  +-- Track 81A ........... ~L . 3 tasks
+Group 82: Remove the 1.x store
+  +-- Track 82A ........... ~L . 3 tasks
+Group 83: Rewrite the documentation for 2.0
   +-- Track 83A ........... ~L . 3 tasks
-Group 84: Rewrite the documentation for 2.0
-  +-- Track 84A ........... ~L . 3 tasks
 ```
 
-**Total: 12 groups . 15 tracks remaining.**
+**Total: 10 groups . 10 tracks remaining.**
 
 The 2.0.0 cut itself is not a Track: it is the acceptance of docs/SPEC.md O1
-to O7 on the one-week Mac plus Linux soak, recorded in PROGRESS.md
-`## Acceptance` by the owner, followed by the cutover runbook in store-v2 §13.
-The approved Track 72A condition also applies: 2.0.0 needs zero model pieces
-in `tests/sim/model/registry.py` and an empty or owner-accepted
+to O7 on the one-week Mac plus Linux soak, including one deep simulator run on
+the release candidate (O1.1), recorded in PROGRESS.md `## Acceptance` by the
+owner, followed by the cutover runbook in store-v2 §13. The approved Track 72A
+condition also applies: 2.0.0 needs zero model pieces in
+`tests/sim/model/registry.py` and an empty or owner-accepted
 `KNOWN_DESIGN_GAPS` table; a green simulator alone accepts none of O1, O3 or
 O5, and native transport, SQLite crash evidence and the soak keep their own
 gates. Conflict policies (2.1) and the resolver (2.2) wait in Future for that
@@ -427,7 +330,7 @@ native trials **0/48 UNSTARTED/INCONCLUSIVE**.
 
 ## Future
 
-Deferred: docs/roadmap-future.md (53 items)
+Deferred: docs/roadmap-future.md (23 items)
 
 ## Shipped
 

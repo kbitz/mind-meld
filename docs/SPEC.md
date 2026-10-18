@@ -10,6 +10,11 @@ Adopted 2026-10-11 by `/project-spec`, replacing the product sections of the
 root `SPEC.md` (now the 1.x architecture reference) and the 2026-03-18 review
 record archived as `docs/archive/mind-meld-v1.md`.
 
+Amended 2026-10-18 by `/project-spec` to size 2.0 to the owner's fleet: the
+owner pairs machines in Syncthing and mm only reads and reports Syncthing's
+state (O2), retirement checks inactivity only, and the deep simulator run moves
+to the release candidate (O1.1).
+
 ## Purpose
 Mind Meld (`mm`) keeps one person's AI coding-agent context identical across
 the machines they work on, with no server and nobody else able to read it:
@@ -24,8 +29,9 @@ machines join the fleet and the store stops fighting an eventually consistent,
 per-file transport. The design is [the 2.0 store](designs/store-v2.md).
 
 ## Audience and target
-- Current users: the owner only. Observed 2026-10-11: three registered Macs
-  (one inactive since 2026-08-11), no Linux machine yet.
+- Current users: the owner only. Observed 2026-10-18: three registered Macs
+  (one inactive since 2026-08-11) and one Arch-based (Omarchy) Linux machine
+  that waits for 2.0 to join.
 - Audience ceiling: potentially-public. The repository is MIT and forkable and
   the README stays readable by a newcomer, but no alpha group or public stage
   is planned.
@@ -36,9 +42,11 @@ per-file transport. The design is [the 2.0 store](designs/store-v2.md).
   or an unlocked Secret Service collection); up to a handful of machines with
   no always-on peer; sync sets of the order of 35k files and 1.3 GB raw before
   the scope trim; attended `mm push` and `mm pull` plus the documented Claude
-  Code and Codex hooks. The owner installs Syncthing, runs the cutover runbook,
-  resolves conflicts with `mm resolve`, retires dead devices and unlocks the
-  Linux keyring by hand, following mm's remedies.
+  Code and Codex hooks. The owner installs Syncthing, pairs each machine and
+  shares the folder in Syncthing with the folder options the README lists, runs
+  the cutover runbook, resolves conflicts with `mm resolve`, retires devices
+  they know are dead and unlocks the Linux keyring by hand, following mm's
+  remedies.
 - Current achieved stage and evidence: see PROGRESS.md `## Acceptance`.
 
 ## Stage outcomes
@@ -59,18 +67,21 @@ holds identical synced files.
 1. Peer edits to files this machine never touched apply as fast-forwards;
    concurrent edits resolve symmetrically and terminate; deletions propagate
    and replaced bytes stay in `displaced` for 30 days. Proven by the
-   replication simulator's invariants in CI.
+   replication simulator's invariants: the bounded profile in CI for every
+   store Track, and one deep run on the 2.0 release candidate whose duration
+   and result are recorded with the soak.
 2. Live soak: one Mac and one Linux machine run the 2.0 release candidate for
    one week with real hooks. The observed convergence, resolution events and
    any manual step are recorded in PROGRESS.md `## Acceptance`.
 
-### O2: A machine joins the fleet in two commands
-1. `mm init --new-fleet` on the first machine; `mm invite` there and
-   `mm join <code>` on each other machine. The joiner bootstraps from a peer
-   snapshot, never writes `fleet.json`, and mesh healing pairs it with every
-   fleet device. Observed on the soak machines.
-2. Syncthing's presence and folder settings are checked and reported by
-   `mm status` and `mm diag`, never assumed.
+### O2: A machine joins the fleet with one mm command after Syncthing pairing
+1. `mm init --new-fleet` on the first machine. On each other machine the owner
+   pairs it with a fleet machine in Syncthing and accepts the shared folder,
+   then runs `mm join`. The joiner waits for `fleet.json`, never writes it,
+   verifies the passphrase and bootstraps from a peer snapshot. Observed on the
+   soak machines.
+2. Syncthing's reachability and the folder settings mm relies on are read and
+   reported by `mm status` and `mm diag`, never assumed and never changed by mm.
 
 ### O3: Partial sync is a reported state, never an error
 1. A gap in a peer's log reads as pending; `mm status` names which machines
@@ -113,10 +124,10 @@ Interchangeability).
   explicit `mm devices retire` is the only cross-device delete.
 - Explicit push and pull; mm watches no files. Syncthing transports, mm decides.
 - Every automatic conflict resolution is a symmetric function of the versions.
-- Accepted manual steps: Syncthing install and pairing confirmation, the
-  cutover runbook, `mm resolve`, retiring dead devices, unlocking the Linux
-  keyring before hooks run, `mm rejoin` after a restored machine refuses with
-  a fork.
+- Accepted manual steps: Syncthing install, pairing each machine and sharing
+  the folder with the README's folder options, the cutover runbook,
+  `mm resolve`, retiring dead devices, unlocking the Linux keyring before hooks
+  run, `mm rejoin` after a restored machine refuses with a fork.
 - Known limits: paths outside the home folder stay machine-specific; a
   snapshot is a device's whole state (about 330 MB sealed today) and is taken
   only from an attended push; tombstones are never dropped; 2.0 never reads
@@ -124,12 +135,19 @@ Interchangeability).
   returned any of its own records or a peer's receipt forks its device id and
   refuses until `mm rejoin`. An edit made after such a restore can lose to a
   version derived from the pre-restore copy; mm keeps it in `displaced` and
-  warns until it expires (30 days).
+  warns until it expires (30 days). The store folder and Syncthing's database
+  are kept out of backups so a restore cannot roll back the fleet.
+- `mm devices retire` checks only that a device has been inactive for 30 days.
+  A machine that was itself offline for that whole window may miss the retired
+  device's last changes.
+- Union merge of `.jsonl` and `MEMORY.md` applies to UTF-8 text; other bytes
+  resolve newest-wins, with the losing version kept in `displaced`.
 - 1.x is frozen at cutover: the GC repair and the scope trim are the last
-  planned 1.x releases, plus two owner-approved exceptions, each a single
+  planned 1.x releases, plus three owner-approved exceptions, each a single
   minor: Muse host support (new reader name and sync source; no new host
-  family, which the 1.x contract reserves for a MAJOR) and Track 73B's local
-  history database (see Release policy). After 2.0 ships, 1.x gets no fixes
+  family, which the 1.x contract reserves for a MAJOR), Track 73B's local
+  history database (see Release policy) and Track 73A's Linux keyring handling
+  and CI (1.11.0, confirmed 2026-10-16). After 2.0 ships, 1.x gets no fixes
   and the iCloud folder is deleted two weeks after cutover.
 
 ## Non-goals and later work
@@ -140,6 +158,15 @@ Interchangeability).
 - Importing 1.x storage into 2.0. Cutover is a fresh start.
 - Syncthing untrusted or encrypted peers. Revisit when syncthing#10528 and
   syncthing#10424 close.
+- mm-managed Syncthing: invite codes, mesh healing, relays, folder
+  configuration through Syncthing's API and scan requests after push. The
+  owner pairs machines in Syncthing, whose Introducer option can fill in a
+  mesh; mm reads and reports. Revisit when the fleet grows past a handful of
+  machines, or manual pairing or folder settings cause an observed missed sync.
+- Active-membership coverage checks for `mm devices retire`. Revisit when a
+  retired device's changes are observed missing on a peer.
+- Restore drills, native restore experiments and further restore modeling
+  beyond the store-v2 §9 rule. Revisit when a restore is observed on the fleet.
 - Conflict policies (2.1) and the resolver (2.2), in [conflict
   policies](designs/conflict-policies.md). Later outcomes; they do not gate 2.0.
   Revisit when 2.0.0 is accepted.
@@ -183,7 +210,10 @@ Interchangeability).
 ## Supporting documents
 - Current:
   - [2.0 store design](designs/store-v2.md): the store, hazards, lifecycle,
-    verification and the Track list it proposes.
+    verification and the Track list it proposes. Where it describes
+    mm-managed Syncthing (§8 invite and mesh healing, §10 folder setup, scan
+    and relay) or retirement coverage, this spec's 2026-10-18 amendment
+    governs: those parts are deferred design, not 2.0 scope.
   - [Conflict policies](designs/conflict-policies.md): 2.1 and 2.2 design.
   - Root [`SPEC.md`](../SPEC.md): the 1.x architecture, data model and CLI
     contract that invariants, tests and code cite; the 2.0 docs Track replaces
