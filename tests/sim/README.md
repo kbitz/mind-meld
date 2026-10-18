@@ -721,7 +721,7 @@ must add that check.
 
 71D supplies the apparatus for SPEC O1/O3. Track 72A owns Hypothesis and the
 seven store invariants. Tracks 75A/77A adapt push/pull; 76A owns actual hardware,
-clone refusal and restore behavior; 80A replaces `_bootstrap_legacy`; 83A
+clone refusal and restore behavior; 80A replaces `_bootstrap_legacy`; 82A
 removes legacy wiring. The synthetic `hardware_id` is provisional fixture
 metadata until its actual product reader lands.
 

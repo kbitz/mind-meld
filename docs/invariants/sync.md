@@ -711,7 +711,7 @@ tests assert table_info and index_list independently.
 
 ledger, cursors, own_log and displaced are **provisional and empty** until their
 Tracks. Their owner may DROP and re-CREATE its table in a migration following
-73C, 74B or its own review without raising compat_version: released binaries
+73C or its own review without raising compat_version: released binaries
 read history only. 75A's adapter/oracle must preserve INV7 byte-integrity and
 causal coverage for an unpublished edit, deletion and pending resolution with
 the metadata-only ledger; current source bytes cannot substitute for old ledger
