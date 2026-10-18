@@ -127,7 +127,8 @@ Interchangeability).
 - Accepted manual steps: Syncthing install, pairing each machine and sharing
   the folder with the README's folder options, the cutover runbook,
   `mm resolve`, retiring dead devices, unlocking the Linux keyring before hooks
-  run, `mm rejoin` after a restored machine refuses with a fork.
+  run, excluding the store folder and Syncthing's database from backups on
+  Linux, `mm rejoin` after a restored machine refuses with a fork.
 - Known limits: paths outside the home folder stay machine-specific; a
   snapshot is a device's whole state (about 330 MB sealed today) and is taken
   only from an attended push; tombstones are never dropped; 2.0 never reads

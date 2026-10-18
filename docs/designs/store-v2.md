@@ -19,7 +19,9 @@
 >   amendment). The owner pairs machines and sets the folder options in
 >   Syncthing; mm reads and reports Syncthing's state. Invite codes, mesh
 >   healing, relays, folder setup through the REST API and scan-after-push
->   (§8, §10, decisions 2 and 5) stay here as deferred design. `mm devices
+>   (§8, §10, the §5 step 6 rescan, §13's invite step, the `invite` and
+>   `relay` commands under "AGENTS.md changes at 2.0", the Outcome's "two
+>   commands", and decisions 2 and 5) stay here as deferred design. `mm devices
 >   retire` checks 30 days of inactivity only, without the §8 coverage rule;
 >   union input that is not UTF-8 resolves newest-wins with the loser in
 >   `displaced`.
