@@ -111,7 +111,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `errors.py:KeyringUnavailableError` / keyring path | `docs/invariants/init-devices.md` |
-| `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
+| `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `_pytest_refused_roots` / `_pytest_config_stamp` / `_pytest_config_strings` / `_expand_pytest_root` / `_root_cache_identity` / `_pytest_resolved_roots` / `_pytest_root_anchors` / `_PYTEST_CONFIG_MAX_BYTES` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
 | `cli.py:_log_unexpected` / `_write_migration_breadcrumb` / `_apply_incoming_file` / `init` | [Test write guard](README.md#test-write-guard); `test_log_unexpected_refuses_protected_root`, `test_migration_write_refuses_protected_root`, `test_migration_unlink_refuses_protected_root`, `test_pull_apply_refuses_protected_root`, `test_init_storage_refuses_protected_root` |
 | `storage/local.py:LocalBackend.put` / `LocalBackend.put_exclusive` / `LocalBackend.delete` / `LocalBackend.delete_conflict_copies` | [Test write guard](README.md#test-write-guard); `test_local_put_refuses_protected_root`, `test_local_put_exclusive_refuses_protected_root`, `test_local_delete_refuses_protected_root`, `test_local_delete_conflict_copies_refuses_protected_root` |
 | `seen_sources.py:read` / `acknowledge` / `write` | [Test write guard](README.md#test-write-guard); `test_seen_read_refuses_protected_root`, `test_seen_acknowledge_refuses_protected_root`, `test_seen_write_refuses_protected_root` |
@@ -263,7 +263,8 @@ Already guarded: `atomic_write_bytes`, nonempty `flock_append_jsonl`,
 no-ops; snapshots and `fsync_dir` are read-only. Allowed-path lock, permission,
 publication, retry and durability contracts remain unchanged.
 `test_<writer>_refuses_protected_root` and `test_<writer>_tmp_control` give
-each writer its own discoverable refusal/control pair; the
+each writer its own discoverable refusal/control pair (`_spawn_pipx` has no
+`tmp_control`); the
 static `tests/test_write_guard_inventory.py` census detects unreviewed raw
 sites and checks same-function guard ordering, including seeded violations.
 Its primitives cover open/mkdir/makedirs, writes, unlink/rmdir/removedirs,
