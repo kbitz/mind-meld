@@ -274,7 +274,7 @@ def _pytest_refused_roots(
             resolver = _pytest_resolved_roots
             if identity is None:  # uncacheable root; see _root_cache_identity
                 resolver = _pytest_resolved_roots.__wrapped__
-            resolved = resolver(((root, key),), stamp, Path.cwd(), (identity,))[0][2]
+            resolved = resolver(((root, key),), stamp, (identity,))[0][2]
             if account is None:
                 account = home.resolve()
         except Exception as exc:
@@ -298,10 +298,12 @@ def _pytest_refused_roots(
 def _pytest_resolved_roots(
     roots: tuple[tuple[Path, str], ...],
     stamp: tuple[Path, int, int, Path],
-    cwd: Path,
     identities: tuple[object, ...],
 ) -> tuple[tuple[Path, str, Path], ...]:
-    """Resolve roots; stamp, cwd and identities are cache keys only.
+    """Resolve roots; stamp and identities are cache keys only.
+
+    Roots arrive absolute (relative config spellings re-expand against cwd per
+    call), so their resolution needs no cwd key.
 
     Live identities invalidate creation, removal and retargeting of stable root
     symlinks. Callers bypass this cache (via __wrapped__) when _root_cache_identity
@@ -320,7 +322,6 @@ def _pytest_resolved_roots(
 def _pytest_root_anchors(
     resolved_roots: tuple[tuple[Path, str, Path], ...],
     stamp: tuple[Path, int, int, Path],
-    cwd: Path,
     identities: tuple[object, ...],
 ) -> tuple[tuple[Path, str, os.stat_result, tuple[str, ...]], ...]:
     """Anchor identities for both spellings; same cache keys as _pytest_resolved_roots."""
@@ -340,9 +341,9 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
     Silent outside pytest: an absent/empty marker returns before any account,
     path or config lookup, including importing tomllib. Independent of conftest.
     Classify lexical/resolved locations, unfollowed entries inside resolved
-    parents and ancestor identities. Cached root resolutions/anchors also key
-    on cwd, config stamp and live identities; raw config strings re-expand per
-    call. This is an accident tripwire, not a malicious-test or symlink-race
+    parents and ancestor identities. Cached root resolutions/anchors key on the
+    absolute roots, config stamp and live identities; raw config strings
+    re-expand per call. This is an accident tripwire, not a malicious-test or symlink-race
     sandbox. See docs/invariants/README.md#test-write-guard.
     """
     test = os.environ.get("PYTEST_CURRENT_TEST")
@@ -395,9 +396,12 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
     try:
         entries = _mutated_entries(path)
         lexical = [Path(os.path.abspath(entry)) for entry in entries]
+        # Parts-prefix containment: is_relative_to rebuilds every parent per root.
+        lexical_roots = [(root, key, Path(os.path.abspath(root)).parts) for root, key in roots]
         for candidate in lexical:
-            for root, key in roots:
-                if candidate.is_relative_to(Path(os.path.abspath(root))):
+            parts = candidate.parts
+            for root, key, root_parts in lexical_roots:
+                if parts[: len(root_parts)] == root_parts:
                     raise protected(root, key)
         candidates = dict.fromkeys(lexical)
         for entry in entries:
@@ -423,19 +427,20 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
         resolver = (
             _pytest_resolved_roots if identities is not None else _pytest_resolved_roots.__wrapped__
         )
-        resolved_roots = resolver(roots, stamp, Path.cwd(), tuple(identities or ()))
+        resolved_roots = resolver(roots, stamp, tuple(identities or ()))
     except Exception as exc:
         raise unclassifiable(str(exc)) from (exc.__cause__ or exc)
+    candidate_parts = [candidate.parts for candidate in candidates]
     for root, key, resolved_root in resolved_roots:
-        for candidate in candidates:
-            if candidate.is_relative_to(resolved_root):
-                raise protected(root, key, alias=True)
+        root_parts = resolved_root.parts
+        if any(parts[: len(root_parts)] == root_parts for parts in candidate_parts):
+            raise protected(root, key, alias=True)
 
     try:
         anchor_reader = (
             _pytest_root_anchors if identities is not None else _pytest_root_anchors.__wrapped__
         )
-        anchors = anchor_reader(tuple(resolved_roots), stamp, Path.cwd(), tuple(identities or ()))
+        anchors = anchor_reader(tuple(resolved_roots), stamp, tuple(identities or ()))
     except Exception as exc:
         raise unclassifiable(str(exc)) from (exc.__cause__ or exc)
     try:

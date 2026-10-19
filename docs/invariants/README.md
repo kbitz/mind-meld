@@ -214,8 +214,9 @@ loop) fails the run once by name; the writer guard itself remains conftest-free.
 A configured root equal to `/`, the pwd home, or an ancestor of it refuses as
 a **configured-root lookup failure**, naming the root and the edit required.
 Raw strings cache by `(config path, st_mtime_ns, st_size, pwd home)` and
-re-expand per call. Resolved roots/anchors also key on cwd and live ancestor
-identities, invalidating stable link retargeting; a root whose first missing
+re-expand per call, relative spellings against the current cwd. Resolved
+roots/anchors key on those absolute roots and live ancestor identities,
+invalidating stable link retargeting; a root whose first missing
 component is a dangling symlink, or whose missing suffix contains `..`, is never
 cached, because links it resolves through can change without touching the anchor. Same-size rewrites with a
 changed mtime and chdir are tested. Config schema changes must update this
