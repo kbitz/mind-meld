@@ -26,7 +26,7 @@ import stat
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from mind_meld.errors import StorageError
@@ -331,7 +331,6 @@ def flock_append_jsonl(
     lines: Iterable[bytes],
     *,
     mode: int = 0o600,
-    on_locked: Callable[[int], None] | None = None,
     strict: bool = False,
     max_bytes: int | None = None,
 ) -> None:
@@ -358,9 +357,6 @@ def flock_append_jsonl(
       - `max_bytes` checks the whole batch, including any separator, under
         flock; `AppendSizeLimit` reports a skipped append without changing
         bytes and without creating a missing file.
-      - `on_locked(fd)` runs under flock AFTER the writes complete; it has no
-        production callers since history moved to state.db. Exceptions raised
-        from the callback are swallowed (same forensic-only stance).
     """
     payload = b"".join(line + b"\n" for line in lines)
     if not payload:
@@ -414,11 +410,6 @@ def flock_append_jsonl(
                 if strict and written != len(payload):
                     _restore_prefix()
                     raise OSError(f"short JSONL append: wrote {written} of {len(payload)} bytes")
-                if on_locked is not None:
-                    try:
-                        on_locked(fd)
-                    except Exception:
-                        pass  # forensic-only; never break the calling sync
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:

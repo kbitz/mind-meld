@@ -349,29 +349,6 @@ class TestFlockAppendJsonl:
         # mode applies to both creation AND any existing file (fchmod runs every call)
         assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
-    def test_on_locked_callback_runs_under_flock(self, tmp_path):
-        path = tmp_path / "log.jsonl"
-        captured: list[int] = []
-
-        def cb(fd):
-            captured.append(fd)
-            # If the callback truly runs under flock, the fd is open and writable
-            assert os.fstat(fd).st_size > 0  # data already written
-
-        fsutil.flock_append_jsonl(path, [b'{"a":1}'], on_locked=cb)
-        assert len(captured) == 1
-
-    def test_on_locked_exception_swallowed(self, tmp_path):
-        """Forensic-only contract: callback errors don't break callers."""
-        path = tmp_path / "log.jsonl"
-
-        def boom(fd):
-            raise RuntimeError("nope")
-
-        # MUST NOT raise
-        fsutil.flock_append_jsonl(path, [b'{"a":1}'], on_locked=boom)
-        assert path.read_bytes() == b'{"a":1}\n'
-
     def test_oserror_swallowed(self, tmp_path, monkeypatch):
         """Forensic-only contract: OSError on the underlying open / write
         path is swallowed so a wedged FS never breaks the calling sync."""
