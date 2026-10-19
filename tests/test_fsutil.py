@@ -1185,16 +1185,25 @@ def test_configured_root_empty_storage_tmp_control(toml, synthetic_account_home,
     assert all(key != "storage.path" for _, key in roots)
 
 
-@pytest.mark.parametrize("kind", ["unreadable", "directory", "oversize"])
+@pytest.mark.parametrize("kind", ["unreadable", "unsearchable", "directory", "oversize"])
 def test_configured_root_file_refuses_closed(
     kind, synthetic_account_home, tmp_path, monkeypatch, forbid_fs_mutations
 ):
     path = _plant_guard_config(synthetic_account_home, "")
+    restore_mode = os.chmod
     if kind == "directory":
         path.unlink()
         path.mkdir()
     elif kind == "oversize":
         path.write_bytes(b" " * (fsutil._PYTEST_CONFIG_MAX_BYTES + 1))
+    elif kind == "unsearchable":
+        # Value: protects=a config whose stat fails with EACCES refuses closed;
+        # fails_when=non-ENOENT stat errors count as "no config" and configured roots drop;
+        # why_new=the unreadable row fails at open after stat succeeds; seam=none;
+        # no_claim=skipped as root, which ignores directory search permission.
+        if os.geteuid() == 0:
+            pytest.skip("root ignores directory search permission")
+        restore_mode(path.parent, 0)
     else:
         original = Path.open
 
@@ -1204,15 +1213,22 @@ def test_configured_root_file_refuses_closed(
             return original(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", denied)
-    calls = forbid_fs_mutations()
     target = tmp_path / "safe"
-    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
-        fsutil.atomic_write_bytes(target, b"never")
+    try:
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            fsutil.atomic_write_bytes(target, b"never")
+    finally:
+        if kind == "unsearchable":
+            restore_mode(path.parent, 0o700)
     _assert_guard_diagnostic(caught.value, target, "configured-root lookup failed")
     assert repr(str(path)) in str(caught.value) and calls == []
-    assert {"unreadable": "permissions", "directory": "regular", "oversize": "cap"}[kind] in str(
-        caught.value
-    )
+    assert {
+        "unreadable": "permissions",
+        "unsearchable": "permissions",
+        "directory": "regular",
+        "oversize": "cap",
+    }[kind] in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -1299,14 +1315,21 @@ def test_configured_root_cache_same_size_rewrite_and_chdir(synthetic_account_hom
         fsutil.refuse_real_state_write_under_pytest(second / "bravo/file")
 
 
-@pytest.mark.parametrize("kind", ["agent", "configured", "configured-dotdot"])
+@pytest.mark.parametrize("kind", ["agent", "agent-live", "configured", "configured-dotdot"])
 def test_cached_roots_revalidate_retargeted_dangling_root(kind, synthetic_account_home, tmp_path):
     outside = tmp_path / "outside"
     (outside / "A").mkdir(parents=True)
     (outside / "B").mkdir()
+    if kind == "agent-live":
+        # Value: protects=retargeting a link inside an existing root's chain refreshes
+        # its cached resolution; fails_when=the cache key ignores the followed root
+        # identity and B/state writes pass; why_new=other rows dangle and bypass the
+        # cache; seam=none; no_claim=not a concurrent symlink-swap sandbox.
+        (outside / "A/state").mkdir()
+        (outside / "B/state").mkdir()
     current = outside / "current"
     current.symlink_to(outside / "A")
-    root = synthetic_account_home / (".claude" if kind == "agent" else "store-link")
+    root = synthetic_account_home / (".claude" if kind.startswith("agent") else "store-link")
     root.symlink_to(current / "state")
     if kind.startswith("configured"):
         # "missing/.." keeps a lexically missing component ahead of the link.
@@ -1389,14 +1412,20 @@ def test_guard_config_diagnostic_escapes_paths_only(synthetic_account_home):
     assert "never-display-this" not in message
 
 
-@pytest.mark.parametrize("failure", ["invalid", "unreadable"])
+@pytest.mark.parametrize("failure", ["invalid", "invalid-unmarked", "unreadable"])
 def test_session_config_preflight_names_file_once(
     failure, synthetic_account_home, capsys, monkeypatch
 ):
     from tests.conftest import pytest_sessionstart
 
     path = _plant_guard_config(synthetic_account_home, "[broken")
-    if failure == "unreadable":
+    if failure == "invalid-unmarked":
+        # Value: protects=the real session-start preflight, which runs with no pytest
+        # marker, still refuses a broken config and leaves no marker behind;
+        # fails_when=it stops supplying its own marker (silent no-op) or leaks it;
+        # why_new=other rows inherit this test's marker; seam=none; no_claim=xdist workers.
+        monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    elif failure == "unreadable":
         original = Path.open
 
         def denied(self, *args, **kwargs):
@@ -1405,23 +1434,33 @@ def test_session_config_preflight_names_file_once(
             return original(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", denied)
-    marker = os.environ["PYTEST_CURRENT_TEST"]
+    marker = os.environ.get("PYTEST_CURRENT_TEST")
     with pytest.raises(pytest.UsageError) as caught:
         pytest_sessionstart(SimpleNamespace(config=SimpleNamespace()))
     assert str(caught.value).count(str(path)) == 1
     assert "real account write-guard preflight" in str(caught.value)
-    assert capsys.readouterr().out == "" and os.environ["PYTEST_CURRENT_TEST"] == marker
+    assert capsys.readouterr().out == "" and os.environ.get("PYTEST_CURRENT_TEST") == marker
     # Workers rely on the controller's single preflight, never duplicate errors.
     pytest_sessionstart(SimpleNamespace(config=SimpleNamespace(workerinput={})))
 
 
-@pytest.mark.parametrize("failure", ["root-contains-home", "agent-root-loop"])
-def test_session_preflight_names_root_failures_once(failure, synthetic_account_home):
+@pytest.mark.parametrize("failure", ["root-contains-home", "agent-root-loop", "protected-tmpdir"])
+def test_session_preflight_names_root_failures_once(failure, synthetic_account_home, monkeypatch):
+    import tempfile
+
     from tests.conftest import pytest_sessionstart
 
     if failure == "root-contains-home":
         _plant_guard_config(synthetic_account_home, '[storage]\npath="~"')
         expected = "contains pwd account home"
+    elif failure == "protected-tmpdir":
+        # Value: protects=a temp dir inside a protected root fails the run once at preflight;
+        # fails_when=the probe stops living under gettempdir() or protected verdicts pass;
+        # why_new=other rows only exercise lookup failures; seam=none (tempfile.tempdir is
+        # documented stdlib config); no_claim=does not prove the TMPDIR remedy wording.
+        temp = synthetic_account_home / ".claude/tmp"
+        monkeypatch.setattr(tempfile, "tempdir", str(temp))
+        expected = f"protected account-state path under {str(synthetic_account_home / '.claude')!r}"
     else:
         loop = synthetic_account_home / ".gstack"
         loop.symlink_to(loop)
