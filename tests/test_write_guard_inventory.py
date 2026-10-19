@@ -29,12 +29,55 @@ PRIMITIVES = frozenset(
         "mkstemp",
         "symlink",
         "symlink_to",
+        "makedirs",
+        "removedirs",
+        "rmdir",
+        "chmod",
+        "lchmod",
+        "chown",
+        "lchown",
+        "utime",
+        "truncate",
+        "mkdtemp",
+        "NamedTemporaryFile",
+        "TemporaryDirectory",
+        # Receiver-qualified: bare copy/move/connect names are too common to match.
+        "shutil.rmtree",
+        "shutil.copy",
+        "shutil.copy2",
+        "shutil.copyfile",
+        "shutil.copytree",
+        "shutil.copymode",
+        "shutil.copystat",
+        "shutil.move",
+        "sqlite3.connect",
     }
 )
-CATEGORIES = frozenset({"guarded-here", "guarded-by-helper", "read-only", "own-guard", "residual"})
+# fd-only operations (fchmod, ftruncate, write) act on descriptors from census-tracked opens.
+QUALIFIED_MODULES = frozenset({"shutil", "sqlite3"})
+CATEGORIES = frozenset({"guarded-here", "read-only", "own-guard", "residual"})
 
 
 WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND", "O_TMPFILE"})
+
+
+def _callee(function, aliases):
+    """Primitive name for a call target, normalizing os.remove and qualified modules."""
+    if isinstance(function, ast.Name):
+        return aliases.get(function.id, function.id)
+    if not isinstance(function, ast.Attribute):
+        return ""
+    receiver = (
+        aliases.get(function.value.id, function.value.id)
+        if isinstance(function.value, ast.Name)
+        else ""
+    )
+    # os.remove is another spelling of unlink; list/set.remove is not.
+    if receiver == "os" and function.attr == "remove":
+        return "unlink"
+    if receiver in QUALIFIED_MODULES:
+        return f"{receiver}.{function.attr}"
+    return function.attr
 
 
 def _inventory(source, module):
@@ -50,18 +93,17 @@ def _inventory(source, module):
             "builtins",
             "tempfile",
             "pathlib",
+            *QUALIFIED_MODULES,
         }:
             for imported in node.names:
-                aliases[imported.asname or imported.name] = (
-                    "unlink" if node.module == "os" and imported.name == "remove" else imported.name
-                )
+                name = imported.name
+                if node.module == "os" and name == "remove":
+                    name = "unlink"
+                elif node.module in QUALIFIED_MODULES:
+                    name = f"{node.module}.{name}"
+                aliases[imported.asname or imported.name] = name
         elif isinstance(node, ast.Assign):
-            value = node.value
-            original = (
-                value.attr
-                if isinstance(value, ast.Attribute)
-                else (aliases.get(value.id, value.id) if isinstance(value, ast.Name) else "")
-            )
+            original = _callee(node.value, aliases)
             if original in PRIMITIVES:
                 for target in node.targets:
                     if isinstance(target, ast.Name):
@@ -97,22 +139,7 @@ def _inventory(source, module):
                 write_flags.add(self.owner())
 
         def visit_Call(self, node):
-            function = node.func
-            name = (
-                function.attr
-                if isinstance(function, ast.Attribute)
-                else (
-                    aliases.get(function.id, function.id) if isinstance(function, ast.Name) else ""
-                )
-            )
-            # os.remove is another spelling of unlink; list/set.remove is not.
-            if (
-                name == "remove"
-                and isinstance(function, ast.Attribute)
-                and isinstance(function.value, ast.Name)
-                and aliases.get(function.value.id, function.value.id) == "os"
-            ):
-                name = "unlink"
+            name = _callee(node.func, aliases)
             if name == "refuse_real_state_write_under_pytest":
                 guards.setdefault(self.owner(), []).append(node.lineno)
             if name in PRIMITIVES:
@@ -238,6 +265,7 @@ REVIEWED = {
         [
             "sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)",
             "open(path, 'a+b')",
+            "f.truncate()",
         ],
     ),
     "config.py:load_config": (
@@ -275,6 +303,20 @@ REVIEWED = {
             "val.replace('\\\\', '\\\\\\\\').replace('\"', '\\\\\"').replace('\\n', '\\\\n')",
             "val.replace('\\\\', '\\\\\\\\').replace('\"', '\\\\\"')",
             "val.replace('\\\\', '\\\\\\\\')",
+        ],
+    ),
+    "conflictmtime.py:_restore_mtime_best_effort": (
+        "residual",
+        "mtime-only restore outside frozen inventory; reached after guarded apply writes",
+        [
+            "os.utime(path, (ts, ts))",
+        ],
+    ),
+    "conflictmtime.py:_bump_canonical_mtime_post_resolve": (
+        "residual",
+        "mtime-only bump on a canonical file outside frozen inventory",
+        [
+            "os.utime(canonical, (target, target))",
         ],
     ),
     "crypto.py:_read_regular_nofollow": (
@@ -328,6 +370,7 @@ REVIEWED = {
         *_GUARDED,
         [
             "tempfile.mkstemp(dir=parent, suffix='.tmp')",
+            "os.chmod(tmp_name, mode)",
             "os.replace(tmp_name, path)",
             "os.unlink(tmp_name)",
         ],
@@ -359,6 +402,14 @@ REVIEWED = {
         *_READ_ONLY,
         [
             "os.open(str(path), os.O_RDONLY)",
+        ],
+    ),
+    "host_usage.py:_read_cursor_sqlite": (
+        "read-only",
+        "read-only SQLite URI (mode=ro); its RuntimeError guard refuses the real Conductor store",
+        [
+            "sqlite3.connect(uri, uri=True, isolation_level=None, "
+            "timeout=min(remaining, _CURSOR_SQLITE_BUSY_S))",
         ],
     ),
     "host_usage.py:_read_cursor_file": (
@@ -520,14 +571,14 @@ REVIEWED = {
     ),
     "resolveflow.py:_migrate_pre_inversion_conflict": (
         "residual",
-        "migration rename outside frozen inventory",
+        "migration rename (replaces any target) outside frozen inventory",
         [
             "path.rename(new_path)",
         ],
     ),
     "resolveflow.py:_promote_conflict_file": (
         "residual",
-        "promotion link/unlink outside frozen inventory",
+        "promotion link creates canonical content; link/unlink outside frozen inventory",
         [
             "os.link(cpath, target)",
             "os.link(cpath, target)",
@@ -536,7 +587,7 @@ REVIEWED = {
     ),
     "resolveflow.py:_resolve_interactive_loop": (
         "residual",
-        "interactive resolution renames/unlinks outside frozen inventory",
+        "interactive resolution renames overwrite canonical files; outside frozen inventory",
         [
             "cpath.rename(target_canonical)",
             "cpath.unlink()",
@@ -570,9 +621,10 @@ REVIEWED = {
     ),
     "retention.py:_gc_orphan_retros_dir": (
         "residual",
-        "retention unlink outside frozen inventory",
+        "retention unlink and empty-directory rmdir outside frozen inventory",
         [
             "path.unlink()",
+            "target.rmdir()",
         ],
     ),
     "seen_sources.py:read": (
@@ -682,6 +734,8 @@ REVIEWED = {
         [
             "path.parent.mkdir(parents=True, exist_ok=True, mode=448)",
             "os.open(path, os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 384)",
+            "sqlite3.connect(uri, uri=True, isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000)",
+            "os.chmod(path, 384)",
         ],
     ),
     "storage/local.py:LocalBackend.put": (
@@ -838,6 +892,15 @@ def test_raw_mutation_sites_are_reviewed():
         "    file_open(path, 'wb')\n",
         "def new_writer(path):\n    save = path.write_text\n    save('unsafe')\n",
         "import os as unix\ndef new_writer(path):\n    unix.remove(path)\n",
+        "import os\ndef new_writer(path):\n    os.makedirs(path)\n",
+        "def new_writer(path):\n    path.rmdir()\n",
+        "def new_writer(path):\n    path.chmod(0o600)\n",
+        "import os\ndef new_writer(path):\n    os.utime(path, None)\n",
+        "import tempfile\ndef new_writer(path):\n    tempfile.mkdtemp(dir=path)\n",
+        "import shutil as sh\ndef new_writer(src, dst):\n    sh.copyfile(src, dst)\n",
+        "from shutil import rmtree as nuke\ndef new_writer(path):\n    nuke(path)\n",
+        "import shutil\ndef new_writer(src, dst):\n    copy = shutil.copy2\n    copy(src, dst)\n",
+        "import sqlite3\ndef new_writer(path):\n    sqlite3.connect(path)\n",
     ],
 )
 def test_raw_mutation_census_detects_seeded_violation(source):

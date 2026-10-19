@@ -79,7 +79,7 @@ def read(initial: Iterable[str]) -> set[str]:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-    fsutil.refuse_real_state_write_under_pytest(seen_path())
+    fsutil.refuse_real_state_write_under_pytest(path)
     try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -148,7 +148,7 @@ def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
     initial_set = set(initial)
     path = seen_path()
 
-    fsutil.refuse_real_state_write_under_pytest(seen_path())
+    fsutil.refuse_real_state_write_under_pytest(path)
     try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:

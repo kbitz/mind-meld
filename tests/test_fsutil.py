@@ -1299,7 +1299,29 @@ def test_configured_root_cache_same_size_rewrite_and_chdir(synthetic_account_hom
         fsutil.refuse_real_state_write_under_pytest(second / "bravo/file")
 
 
-@pytest.mark.parametrize("raw", ["absolute", "~guard-user/store", "~/store"])
+@pytest.mark.parametrize("kind", ["agent", "configured"])
+def test_cached_roots_revalidate_retargeted_dangling_root(kind, synthetic_account_home, tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "A").mkdir(parents=True)
+    (outside / "B").mkdir()
+    current = outside / "current"
+    current.symlink_to(outside / "A")
+    root = synthetic_account_home / (".claude" if kind == "agent" else "store-link")
+    root.symlink_to(current / "state")
+    if kind == "configured":
+        _plant_guard_config(synthetic_account_home, f"[storage]\npath={json.dumps(str(root))}")
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(outside / "A/state/file")
+    current.unlink()
+    current.symlink_to(outside / "B")
+    path = outside / "B/state/file"
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.refuse_real_state_write_under_pytest(path)
+    _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias")
+    fsutil.refuse_real_state_write_under_pytest(outside / "A/state/file")
+
+
+@pytest.mark.parametrize("raw", ["absolute", "~guard-user/store", "~/store", "~//store"])
 def test_configured_root_production_parity(raw, synthetic_account_home, monkeypatch):
     from mind_meld import config
 
@@ -1322,7 +1344,6 @@ def test_configured_root_production_parity(raw, synthetic_account_home, monkeypa
 
 
 @pytest.mark.no_mm_events_isolation
-@pytest.mark.no_source_enabled_isolation
 @pytest.mark.owns_skill_paths
 def test_default_source_and_agent_roots_pin(synthetic_account_home):
     from mind_meld import config, skill_link
@@ -1332,18 +1353,24 @@ def test_default_source_and_agent_roots_pin(synthetic_account_home):
     _assert_root_coverage(values, synthetic_account_home)
     with pytest.raises(AssertionError, match="uncovered.*fsutil.*#test-write-guard"):
         _assert_root_coverage(["~/.new-agent/skills"], synthetic_account_home)
+    with pytest.raises(AssertionError, match="not home-anchored.*#test-write-guard"):
+        _assert_root_coverage(["/opt/new-agent/skills"], synthetic_account_home)
 
 
 def _assert_root_coverage(values, home):
     roots, _ = fsutil._pytest_refused_roots(home)
     for value in values:
-        if value == "~" or value.startswith("~/"):
-            path = fsutil._expand_pytest_root(value, home)
-            assert any(path.is_relative_to(root) for root, _ in roots), (
-                f"uncovered path {str(path)!r}: edit fsutil._pytest_refused_roots; "
-                "see docs/invariants/README.md#test-write-guard"
-            )
-            _assert_synthetic_destination(path, home)
+        assert value == "~" or value.startswith("~/"), (
+            f"default destination {value!r} is not home-anchored: classify it in "
+            "fsutil._pytest_refused_roots and this pin; "
+            "see docs/invariants/README.md#test-write-guard"
+        )
+        path = fsutil._expand_pytest_root(value, home)
+        assert any(path.is_relative_to(root) for root, _ in roots), (
+            f"uncovered path {str(path)!r}: edit fsutil._pytest_refused_roots; "
+            "see docs/invariants/README.md#test-write-guard"
+        )
+        _assert_synthetic_destination(path, home)
 
 
 def test_guard_config_diagnostic_escapes_paths_only(synthetic_account_home):
@@ -1376,13 +1403,31 @@ def test_session_config_preflight_names_file_once(
             return original(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", denied)
+    marker = os.environ["PYTEST_CURRENT_TEST"]
     with pytest.raises(pytest.UsageError) as caught:
         pytest_sessionstart(SimpleNamespace(config=SimpleNamespace()))
     assert str(caught.value).count(str(path)) == 1
-    assert "real account config preflight" in str(caught.value)
-    assert capsys.readouterr().out == ""
+    assert "real account write-guard preflight" in str(caught.value)
+    assert capsys.readouterr().out == "" and os.environ["PYTEST_CURRENT_TEST"] == marker
     # Workers rely on the controller's single preflight, never duplicate errors.
     pytest_sessionstart(SimpleNamespace(config=SimpleNamespace(workerinput={})))
+
+
+@pytest.mark.parametrize("failure", ["root-contains-home", "agent-root-loop"])
+def test_session_preflight_names_root_failures_once(failure, synthetic_account_home):
+    from tests.conftest import pytest_sessionstart
+
+    if failure == "root-contains-home":
+        _plant_guard_config(synthetic_account_home, '[storage]\npath="~"')
+        expected = "contains pwd account home"
+    else:
+        loop = synthetic_account_home / ".gstack"
+        loop.symlink_to(loop)
+        expected = repr(str(loop))
+    with pytest.raises(pytest.UsageError) as caught:
+        pytest_sessionstart(SimpleNamespace(config=SimpleNamespace()))
+    assert "real account write-guard preflight" in str(caught.value)
+    assert expected in str(caught.value)
 
 
 def test_configured_root_resolution_failure_has_chained_remedy(
@@ -1621,7 +1666,10 @@ def raw_writer_refusal(
 
 
 @pytest.fixture
-def raw_writer_control(synthetic_account_home, tmp_path, monkeypatch):
+def raw_writer_control(tmp_path, monkeypatch):
+    # The real pwd account stays guarded: an unisolated real-root write refuses.
+    monkeypatch.setenv("HOME", str(tmp_path / "control-home"))
+
     def check(writer, exists):
         path, invoke = _raw_writer_case(writer, tmp_path / "safe", monkeypatch, tmp_path, exists)
         if writer == "local_put_exclusive" and exists:
@@ -1779,6 +1827,22 @@ def test_update_log_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("update_log", raw_writer_exists)
 
 
+def test_spawn_pipx_refuses_protected_root(synthetic_account_home, monkeypatch, tmp_path):
+    """test_self_update disables the pipx guard; the log-path guard must still refuse."""
+    from mind_meld import upgrade
+
+    monkeypatch.setattr(upgrade, "_refuse_under_pytest", lambda: None)
+    monkeypatch.setattr(upgrade, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(upgrade.subprocess, "Popen", lambda *a, **kw: pytest.fail("spawned"))
+    root = synthetic_account_home / ".config/mind-meld"
+    log = root / upgrade.UPDATE_LOG_NAME
+    _assert_synthetic_destination(log, synthetic_account_home)
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        upgrade._spawn_pipx(["pipx", "upgrade", "fixture"], log)
+    _assert_guard_diagnostic(caught.value, log, "protected account-state path")
+    assert not root.exists()
+
+
 def test_acquire_lock_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
     raw_writer_refusal("acquire_lock", raw_writer_exists)
 
@@ -1900,6 +1964,7 @@ def test_log_unexpected_refuses_incident_through_auto_command_setup(
     monkeypatch.setattr(cli, "load_config", crash)
     _assert_synthetic_destination(target, synthetic_account_home)
     before = _tree_bytes_modes(root)
+    held_before = dict(lockfile._LOCK_FDS)
     calls = forbid_fs_mutations()
     with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
         with cli._auto_command_scope("pull", typer_exit_outcome="fleet-refused"):
@@ -1909,7 +1974,7 @@ def test_log_unexpected_refuses_incident_through_auto_command_setup(
     assert "unexpected config error" in capsys.readouterr().err
     assert calls == [] and _tree_bytes_modes(root) == before
     assert not cli._autorun_breadcrumb_path().exists()
-    assert not lockfile._LOCK_FDS
+    assert lockfile._LOCK_FDS == held_before
 
 
 def test_log_unexpected_refusal_releases_held_auto_command_lock(

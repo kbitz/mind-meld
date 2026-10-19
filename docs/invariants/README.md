@@ -115,7 +115,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:_log_unexpected` / `_write_migration_breadcrumb` / `_apply_incoming_file` / `init` | [Test write guard](README.md#test-write-guard); `test_log_unexpected_refuses_protected_root`, `test_migration_write_refuses_protected_root`, `test_migration_unlink_refuses_protected_root`, `test_pull_apply_refuses_protected_root`, `test_init_storage_refuses_protected_root` |
 | `storage/local.py:LocalBackend.put` / `LocalBackend.put_exclusive` / `LocalBackend.delete` / `LocalBackend.delete_conflict_copies` | [Test write guard](README.md#test-write-guard); `test_local_put_refuses_protected_root`, `test_local_put_exclusive_refuses_protected_root`, `test_local_delete_refuses_protected_root`, `test_local_delete_conflict_copies_refuses_protected_root` |
 | `seen_sources.py:read` / `acknowledge` / `write` | [Test write guard](README.md#test-write-guard); `test_seen_read_refuses_protected_root`, `test_seen_acknowledge_refuses_protected_root`, `test_seen_write_refuses_protected_root` |
-| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | [Test write guard](README.md#test-write-guard); `test_pipx_install_lock_refuses_protected_root`, `test_update_log_refuses_protected_root`; `_spawn_pipx` already refused by its pipx guard |
+| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | [Test write guard](README.md#test-write-guard); `test_pipx_install_lock_refuses_protected_root`, `test_update_log_refuses_protected_root`, `test_spawn_pipx_refuses_protected_root` (pipx guard disabled, as `test_self_update` does) |
 | `lockfile.py:acquire_lock` | [Test write guard](README.md#test-write-guard); `test_acquire_lock_refuses_protected_root` |
 | `devices.py:_devices_write_lock` | [Test write guard](README.md#test-write-guard); `test_devices_write_lock_refuses_protected_root` |
 | `config.py:save_config` / `_bootstrap_mm_events_path` | [Test write guard](README.md#test-write-guard); `test_save_config_refuses_protected_root`, `test_events_bootstrap_refuses_protected_root` |
@@ -187,9 +187,9 @@ All home-relative roots above use `pwd.getpwuid(os.getuid()).pw_dir`, never
 `$HOME`, `Path.home()` or patched config constants. A test that patches pwd
 retargets the guard. DEFAULT_SOURCES paths and AGENT_ROWS skills-root **values**
 are pinned against this helper by `test_default_source_and_agent_roots_pin`;
-its `no_mm_events_isolation`, `no_source_enabled_isolation`, and
-`owns_skill_paths` opt-outs preserve canonical inputs. Source-enabling fixtures
-must honor `no_source_enabled_isolation`. Adding a default destination requires updating the helper and its pin.
+its `no_mm_events_isolation` and `owns_skill_paths` opt-outs preserve canonical
+inputs, and a value that is not `~`-anchored fails the pin. Adding a default
+destination requires updating the helper and its pin.
 
 Configured roots use stdlib `tomllib`, imported lazily only after the active
 marker branch. Missing/empty config adds no roots. A non-regular, unreadable,
@@ -198,13 +198,14 @@ config refuses every guarded write. `storage`/`sync` must be tables,
 `sync.sources` a list of tables with string paths; duplicate keys are invalid
 TOML. Missing/non-string/empty `storage.path` adds no storage root. Repairs
 name the real config file and the offending path key, never credential values.
-The session preflight fails once before workers start on an unreadable or
-unparseable real config; the writer guard itself remains conftest-free.
+The session preflight runs the guard once before workers start, so any lookup
+failure (config, configured root, unreachable protected root such as a symlink
+loop) fails the run once by name; the writer guard itself remains conftest-free.
 
 | Config spelling | Guard expansion / production relationship |
 |---|---|
 | Absolute | Keep lexical and resolved spellings for classification. |
-| Bare `~`, `~/...` | Expand against pwd home. Deliberately differs from production `expanduser`, which honors a patched HOME. |
+| Bare `~`, `~/...` | Normalize like production (`~//x` is `~/x`), then expand against pwd home. Deliberately differs from production `expanduser`, which honors a patched HOME. |
 | `~user/...` | `pwd.getpwnam`; lookup failure refuses with a chained cause. |
 | Still relative | Resolve against `Path.cwd()`, matching production. |
 | Symlinked | Classify lexical location, resolved target and ancestor identity. Production mm-internal source paths retain their absolute, unresolved spelling; the guard additionally classifies the target. |
@@ -214,7 +215,9 @@ A configured root equal to `/`, the pwd home, or an ancestor of it refuses as
 a **configured-root lookup failure**, naming the root and the edit required.
 Raw strings cache by `(config path, st_mtime_ns, st_size, pwd home)` and
 re-expand per call. Resolved roots/anchors also key on cwd and live ancestor
-identities, invalidating stable link retargeting. Same-size rewrites with a
+identities, invalidating stable link retargeting; a root whose first missing
+component is a dangling symlink is never cached, because its target chain can
+change without touching the anchor. Same-size rewrites with a
 changed mtime and chdir are tested. Config schema changes must update this
 extractor and the scoped production-parity test (absolute, `~user`, and
 HOME-equals-pwd-home examples).
@@ -247,7 +250,7 @@ marker; it establishes neither suite-wide safety nor simulator safety.
 | `storage/local.py:LocalBackend.put` / `put_exclusive` | key path before mkdir/temp/link | exclusive EEXIST path also refuses |
 | `storage/local.py:LocalBackend.delete` / `delete_conflict_copies` | key path at entry | missing key and zero copies still refuse |
 | `seen_sources.py:read` / `acknowledge` / `write` | SEEN file before recovery/write mkdir | successful O_RDONLY read never guards |
-| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | lock/log path before mkdir/open | `_install_is_running` read-only; spawn already refuses earlier via its pipx guard |
+| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | lock/log path before mkdir/open | `_install_is_running` read-only; the pipx guard usually refuses spawn first, but `test_self_update` disables it, so the log-path guard has its own refusal test |
 | `lockfile.py:acquire_lock` / `devices.py:_devices_write_lock` | lock path before mkdir/open | release preserves lock inode |
 | `config.py:save_config` | config path before parent mkdir | — |
 | `config.py:_bootstrap_mm_events_path` | p before creation loop and before mode-tightening branch | existing 0700 root and inspection never guard |
@@ -262,9 +265,12 @@ publication, retry and durability contracts remain unchanged.
 `test_<writer>_refuses_protected_root` and `test_<writer>_tmp_control` give
 each writer its own discoverable refusal/control pair; the
 static `tests/test_write_guard_inventory.py` census detects unreviewed raw
-sites and checks same-function guard ordering, including a seeded violation.
-It recognizes stdlib import aliases and direct method aliases, and rejects
-writable os flags in reviewed read-only opens. It supplements behavioral
+sites and checks same-function guard ordering, including seeded violations.
+Its primitives cover open/mkdir/makedirs, writes, unlink/rmdir/removedirs,
+link/symlink/rename/replace, chmod/chown/utime/truncate, temp-file and
+temp-dir creation, `shutil` copy/move/rmtree and `sqlite3.connect`; fd-only
+operations ride on their tracked opens. It recognizes stdlib import aliases and
+direct method aliases, and rejects writable os flags in reviewed read-only opens. It supplements behavioral
 tests; it is not control-flow or sandbox proof.
 
 Copy this pattern for a new writer. Guard the written file (logs/config/
@@ -336,14 +342,17 @@ existing narrow hook-edit/store-open scope, not an eviction guarantee.
 
 Surviving residuals: missing/empty marker incl. collection-time and
 env-scrubbed subprocesses; concurrent symlink swap; malicious tests;
-worker-thread-local refusals; raw unlinks outside the inventory; future
-writers that skip the call — backstop-covered. Module-level test code can run
+worker-thread-local refusals; raw unlinks, renames and links outside the
+inventory; future writers that skip the call, which the census flags for its
+listed primitives. Module-level test code can run
 before a marker exists. A same-size, same-mtime config rewrite can retain the
 cached raw strings. A refusal in a worker thread need not fail its parent test.
-Raw retention, resolveflow promotion/migration/resolution, crypto conflict-copy,
+Raw retention unlinks and empty-directory rmdir, crypto conflict-copy,
 host_usage spool, and cli stale-copy/quarantine/migration-cleanup deletes stay
 outside this frozen inventory (P3 TODO, revisit on an observed deletion or
-near-miss). The os.devnull output open is a process sink, not account state.
+near-miss). So do resolveflow's promotion links and migration/resolution
+renames, which **overwrite** canonical files, and conflictmtime's mtime-only
+`os.utime`; the P3 TODO's revisit covers them too. The os.devnull output open is a process sink, not account state.
 New implementation-time finds belong here and in the reviewed census, not in
 the writer scope. Track 75A and later writers must adopt the call convention;
 82A deletes the temporary LocalBackend rows when that backend retires.

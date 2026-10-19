@@ -58,6 +58,18 @@ def _root_identity(root: Path) -> tuple[os.stat_result, tuple[str, ...]]:
     return info, root.relative_to(anchor).parts
 
 
+def _root_cache_identity(root: Path) -> tuple[int, int, int, int, tuple[str, ...]] | None:
+    """Live identity keying cached root resolutions, or None when they must not be cached.
+
+    A dangling symlink at the first missing component resolves through a chain
+    outside its anchor, which can be retargeted without changing the anchor.
+    """
+    info, missing = _root_identity(root)
+    if missing and os.path.lexists(root.parents[len(missing) - 1] / missing[0]):
+        return None
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing
+
+
 def _aliases_protected_root(
     path: Path,
     ancestors: Sequence[tuple[Path, os.stat_result]],
@@ -201,6 +213,7 @@ def _pytest_config_strings(stamp: tuple[Path, int, int, Path]) -> tuple[tuple[st
 
 def _expand_pytest_root(raw: str, home: Path) -> Path:
     """Expand path spellings without consulting HOME (unlike production expanduser)."""
+    raw = str(Path(raw))  # Normalize like production first: "~//x" means "~/x".
     if raw == "~" or raw.startswith("~/"):
         path = home / raw[2:] if raw != "~" else home
     elif raw.startswith("~"):
@@ -254,9 +267,11 @@ def _pytest_refused_roots(
                 "pwd lookup/current directory"
             ) from exc
         try:
-            info, missing = _root_identity(root)
-            identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing)
-            resolved = _pytest_resolved_roots(((root, key),), stamp, Path.cwd(), (identity,))[0][2]
+            identity = _root_cache_identity(root)
+            resolver = _pytest_resolved_roots
+            if identity is None:
+                resolver = _pytest_resolved_roots.__wrapped__  # dangling: never cache
+            resolved = resolver(((root, key),), stamp, Path.cwd(), (identity,))[0][2]
             if account is None:
                 account = home.resolve()
         except Exception as exc:
@@ -277,8 +292,17 @@ def _pytest_refused_roots(
 
 
 @lru_cache(maxsize=32)
-def _pytest_resolved_roots(roots, stamp, cwd, identities):
-    # Identities invalidate creation/removal/retargeting of stable root symlinks.
+def _pytest_resolved_roots(
+    roots: tuple[tuple[Path, str], ...],
+    stamp: tuple[Path, int, int, Path],
+    cwd: Path,
+    identities: tuple[object, ...],
+) -> tuple[tuple[Path, str, Path], ...]:
+    """Resolve roots; stamp, cwd and identities are cache keys only.
+
+    Live identities invalidate creation, removal and retargeting of stable root
+    symlinks. Callers bypass this cache (via __wrapped__) for dangling roots.
+    """
     resolved = []
     for root, key in roots:
         try:
@@ -289,7 +313,13 @@ def _pytest_resolved_roots(roots, stamp, cwd, identities):
 
 
 @lru_cache(maxsize=32)
-def _pytest_root_anchors(resolved_roots, stamp, cwd, identities):
+def _pytest_root_anchors(
+    resolved_roots: tuple[tuple[Path, str, Path], ...],
+    stamp: tuple[Path, int, int, Path],
+    cwd: Path,
+    identities: tuple[object, ...],
+) -> tuple[tuple[Path, str, os.stat_result, tuple[str, ...]], ...]:
+    """Anchor identities for both spellings; same cache keys as _pytest_resolved_roots."""
     anchors = []
     for root, key, resolved in resolved_roots:
         try:
@@ -378,13 +408,13 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
     identities = []
     for root, key in roots:
         try:
-            info, missing = _root_identity(root)
-            identities.append(
-                (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing)
-            )
+            identity = _root_cache_identity(root)
         except Exception:
-            identities = None
+            identity = None
+        if identity is None:
+            identities = None  # Resolve uncached; lookup failures surface below.
             break
+        identities.append(identity)
     try:
         resolver = (
             _pytest_resolved_roots if identities is not None else _pytest_resolved_roots.__wrapped__

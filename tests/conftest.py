@@ -23,19 +23,32 @@ _TEST_MEMORY_KB = 1024
 
 
 def pytest_sessionstart(session):
-    """Check real config once in the controller, before collection or workers."""
+    """Run the real write guard once in the controller, before collection or workers.
+
+    A broken real config or an unreachable protected root then fails the run
+    once, naming the cause, instead of refusing every guarded write.
+    """
     if hasattr(session.config, "workerinput"):
         return
     import os
+    import tempfile
     from pathlib import Path
 
     from mind_meld import fsutil
 
+    previous = os.environ.get("PYTEST_CURRENT_TEST")
+    os.environ["PYTEST_CURRENT_TEST"] = "pytest_sessionstart preflight"
     try:
-        home = Path(fsutil.pwd.getpwuid(os.getuid()).pw_dir)
-        fsutil._pytest_config_strings(fsutil._pytest_config_stamp(home))
-    except Exception as exc:
-        raise pytest.UsageError(f"real account config preflight failed: {exc}") from exc
+        fsutil.refuse_real_state_write_under_pytest(
+            Path(tempfile.gettempdir()) / "mm-guard-preflight" / "probe"
+        )
+    except fsutil.PytestRealStateWriteError as exc:
+        raise pytest.UsageError(f"real account write-guard preflight failed: {exc}") from exc
+    finally:
+        if previous is None:
+            del os.environ["PYTEST_CURRENT_TEST"]
+        else:
+            os.environ["PYTEST_CURRENT_TEST"] = previous
 
 
 @pytest.fixture
@@ -530,12 +543,8 @@ def _isolate_mm_events_path(request, monkeypatch, tmp_path) -> None:
 
 
 def pytest_configure(config) -> None:
-    """Register canonical-input opt-outs for source fixtures and guard pins."""
-    config.addinivalue_line(
-        "markers",
-        "no_source_enabled_isolation: preserve canonical source inputs for the guard coverage pin; "
-        "source-enabling fixtures must step aside",
-    )
+    """Register the `no_mm_events_isolation` marker so pytest doesn't
+    warn about unknown markers."""
     config.addinivalue_line(
         "markers",
         "no_mm_events_isolation: opt out of the autouse "
