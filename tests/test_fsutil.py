@@ -1299,7 +1299,7 @@ def test_configured_root_cache_same_size_rewrite_and_chdir(synthetic_account_hom
         fsutil.refuse_real_state_write_under_pytest(second / "bravo/file")
 
 
-@pytest.mark.parametrize("kind", ["agent", "configured"])
+@pytest.mark.parametrize("kind", ["agent", "configured", "configured-dotdot"])
 def test_cached_roots_revalidate_retargeted_dangling_root(kind, synthetic_account_home, tmp_path):
     outside = tmp_path / "outside"
     (outside / "A").mkdir(parents=True)
@@ -1308,8 +1308,10 @@ def test_cached_roots_revalidate_retargeted_dangling_root(kind, synthetic_accoun
     current.symlink_to(outside / "A")
     root = synthetic_account_home / (".claude" if kind == "agent" else "store-link")
     root.symlink_to(current / "state")
-    if kind == "configured":
-        _plant_guard_config(synthetic_account_home, f"[storage]\npath={json.dumps(str(root))}")
+    if kind.startswith("configured"):
+        # "missing/.." keeps a lexically missing component ahead of the link.
+        raw = "~/missing/../store-link" if kind == "configured-dotdot" else str(root)
+        _plant_guard_config(synthetic_account_home, f"[storage]\npath={json.dumps(raw)}")
     with pytest.raises(fsutil.PytestRealStateWriteError):
         fsutil.refuse_real_state_write_under_pytest(outside / "A/state/file")
     current.unlink()

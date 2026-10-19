@@ -216,8 +216,8 @@ a **configured-root lookup failure**, naming the root and the edit required.
 Raw strings cache by `(config path, st_mtime_ns, st_size, pwd home)` and
 re-expand per call. Resolved roots/anchors also key on cwd and live ancestor
 identities, invalidating stable link retargeting; a root whose first missing
-component is a dangling symlink is never cached, because its target chain can
-change without touching the anchor. Same-size rewrites with a
+component is a dangling symlink, or whose missing suffix contains `..`, is never
+cached, because links it resolves through can change without touching the anchor. Same-size rewrites with a
 changed mtime and chdir are tested. Config schema changes must update this
 extractor and the scoped production-parity test (absolute, `~user`, and
 HOME-equals-pwd-home examples).
@@ -267,9 +267,9 @@ each writer its own discoverable refusal/control pair; the
 static `tests/test_write_guard_inventory.py` census detects unreviewed raw
 sites and checks same-function guard ordering, including seeded violations.
 Its primitives cover open/mkdir/makedirs, writes, unlink/rmdir/removedirs,
-link/symlink/rename/replace, chmod/chown/utime/truncate, temp-file and
-temp-dir creation, `shutil` copy/move/rmtree and `sqlite3.connect`; fd-only
-operations ride on their tracked opens. It recognizes stdlib import aliases and
+link/symlink/rename/renames/replace, chmod/chown/utime/truncate, temp-file and
+temp-dir creation, `shutil` copy/move/rmtree/archive helpers and
+`sqlite3.connect`; fd-only operations ride on their tracked opens. It recognizes stdlib import aliases and
 direct method aliases, and rejects writable os flags in reviewed read-only opens. It supplements behavioral
 tests; it is not control-flow or sandbox proof.
 

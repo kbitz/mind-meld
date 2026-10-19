@@ -50,7 +50,10 @@ PRIMITIVES = frozenset(
         "shutil.copymode",
         "shutil.copystat",
         "shutil.move",
+        "shutil.make_archive",
+        "shutil.unpack_archive",
         "sqlite3.connect",
+        "renames",
     }
 )
 # fd-only operations (fchmod, ftruncate, write) act on descriptors from census-tracked opens.
@@ -75,9 +78,9 @@ def _callee(function, aliases):
     # os.remove is another spelling of unlink; list/set.remove is not.
     if receiver == "os" and function.attr == "remove":
         return "unlink"
-    if receiver in QUALIFIED_MODULES:
-        return f"{receiver}.{function.attr}"
-    return function.attr
+    qualified = f"{receiver}.{function.attr}"
+    # Qualified names not listed fall back to the bare name (shutil.chown -> chown).
+    return qualified if qualified in PRIMITIVES else function.attr
 
 
 def _inventory(source, module):
@@ -99,7 +102,7 @@ def _inventory(source, module):
                 name = imported.name
                 if node.module == "os" and name == "remove":
                     name = "unlink"
-                elif node.module in QUALIFIED_MODULES:
+                elif f"{node.module}.{name}" in PRIMITIVES:
                     name = f"{node.module}.{name}"
                 aliases[imported.asname or imported.name] = name
         elif isinstance(node, ast.Assign):
@@ -901,6 +904,9 @@ def test_raw_mutation_sites_are_reviewed():
         "from shutil import rmtree as nuke\ndef new_writer(path):\n    nuke(path)\n",
         "import shutil\ndef new_writer(src, dst):\n    copy = shutil.copy2\n    copy(src, dst)\n",
         "import sqlite3\ndef new_writer(path):\n    sqlite3.connect(path)\n",
+        "import shutil\ndef new_writer(path):\n    shutil.chown(path, 'nobody')\n",
+        "from shutil import chown\ndef new_writer(path):\n    chown(path, 'nobody')\n",
+        "import os\ndef new_writer(a, b):\n    os.renames(a, b)\n",
     ],
 )
 def test_raw_mutation_census_detects_seeded_violation(source):

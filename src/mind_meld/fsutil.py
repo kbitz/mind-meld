@@ -61,11 +61,14 @@ def _root_identity(root: Path) -> tuple[os.stat_result, tuple[str, ...]]:
 def _root_cache_identity(root: Path) -> tuple[int, int, int, int, tuple[str, ...]] | None:
     """Live identity keying cached root resolutions, or None when they must not be cached.
 
-    A dangling symlink at the first missing component resolves through a chain
-    outside its anchor, which can be retargeted without changing the anchor.
+    A dangling symlink at the first missing component, or a ``..`` after one,
+    resolves through links outside its anchor that can be retargeted without
+    changing the anchor.
     """
     info, missing = _root_identity(root)
-    if missing and os.path.lexists(root.parents[len(missing) - 1] / missing[0]):
+    if missing and (
+        ".." in missing or os.path.lexists(root.parents[len(missing) - 1] / missing[0])
+    ):
         return None
     return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing
 

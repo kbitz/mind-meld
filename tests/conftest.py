@@ -36,14 +36,16 @@ def pytest_sessionstart(session):
 
     from mind_meld import fsutil
 
+    temp = tempfile.gettempdir()
     previous = os.environ.get("PYTEST_CURRENT_TEST")
     os.environ["PYTEST_CURRENT_TEST"] = "pytest_sessionstart preflight"
     try:
-        fsutil.refuse_real_state_write_under_pytest(
-            Path(tempfile.gettempdir()) / "mm-guard-preflight" / "probe"
-        )
+        fsutil.refuse_real_state_write_under_pytest(Path(temp) / "mm-guard-preflight" / "probe")
     except fsutil.PytestRealStateWriteError as exc:
-        raise pytest.UsageError(f"real account write-guard preflight failed: {exc}") from exc
+        raise pytest.UsageError(
+            f"real account write-guard preflight failed (probe under temp dir {temp!r}; "
+            f"if that directory is itself protected, point TMPDIR elsewhere): {exc}"
+        ) from exc
     finally:
         if previous is None:
             del os.environ["PYTEST_CURRENT_TEST"]
