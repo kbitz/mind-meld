@@ -1,10 +1,17 @@
+> SUPERSEDED as the 2.0 design on 2026-10-19 by the [current project
+> spec](../SPEC.md): 2.0 carries the 1.x store onto Syncthing instead. Current
+> only as evidence for that work: the "Why a new store" hazard table, §7
+> portable paths, §10 Syncthing folder options and §11 Linux. Everything else
+> is historical rationale, not a source of current scope, scheduling or release
+> policy. It stays at this path while `tests/sim` reads it.
+
 # mm 2.0 store: per-device encrypted logs over Syncthing
 
 > Written 2026-10-09/10 against `98e9a69` (v1.6.0). Admitted to
 > [the roadmap](../ROADMAP.md) as Phase 4 on 2026-10-11. This design replaces
 > the 1.x storage format and moves mm from iCloud Drive to Syncthing.
 > Conflict policies, three-way merge and the resolver UI build on it: see
-> [conflict policies](conflict-policies.md).
+> [conflict policies](../archive/conflict-policies.md).
 >
 > **Maintainer decisions:**
 > - 2026-10-09: breaking changes are acceptable in this MAJOR. Prefer the
@@ -196,7 +203,7 @@ for a peer (§6), and `mm status` and `mm diag` list the peer until its
 namespace is retired. `displaced.cause` is `fork` for a version a peer's fork
 displaced (§4) and `peer` names that peer.
 
-[Conflict policies](conflict-policies.md) in 2.1 adds base (three-way merge
+[Conflict policies](../archive/conflict-policies.md) in 2.1 adds base (three-way merge
 bases), conflicts (held versions), and `mm conflicts --suggest`. Usage,
 identity, upgrade and token caches stay in their existing JSON files.
 

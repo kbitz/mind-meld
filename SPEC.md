@@ -6,8 +6,8 @@
 > architecture, data model and CLI contract that the invariants, tests and
 > code cite. Its former Problem, Goals and Non-Goals sections are superseded
 > by the project spec. Project Structure, Implementation Order and the
-> original push algorithm are historical. The 2.0 store replaces the storage
-> sections; see [docs/designs/store-v2.md](docs/designs/store-v2.md).
+> original push algorithm are historical. 2.0 carries this store onto a
+> Syncthing folder (docs/SPEC.md, 2026-10-19); the store-v2 design is superseded.
 
 **License:** MIT
 **Status:** 1.x — Production/Stable

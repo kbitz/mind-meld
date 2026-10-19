@@ -98,9 +98,11 @@ A migrated explicit config keeps these globs until removed by hand, which
 brings back the migration warning and attended prompt.
 
 **v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
-interoperate with no wire or storage migration. The
-[Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x)
-now defines the stable surfaces. `b` / `both` still leave both conflict files
+interoperate with no wire or storage migration. That release defined stable
+surfaces in the
+[Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x).
+[docs/SPEC.md](docs/SPEC.md#release-policy) retired that contract on 2026-10-19
+except the storage-format refusal. `b` / `both` still leave both conflict files
 on disk, without the retired alias notice. Newer-format storage refuses with
 an upgrade remedy. Once v1.0.0 is tagged, a regression ships as 1.0.1: the
 upgrade nudge never downgrades.
@@ -171,7 +173,7 @@ automatic update downgrades an install for you.
 
 ## Versioning and compatibility
 
-The [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x) defines stable formats, CLI and machine-readable surfaces, release classifications, and downgrade rules.
+Mind Meld has one user and makes no compatibility promise beyond its storage formats: an older mm refuses storage written in a format it cannot read and tells you to upgrade. Commands, flags, config keys and output can change in any release; the [Upgrading](#upgrading) notes say what to do. The release policy is in [docs/SPEC.md](docs/SPEC.md#release-policy).
 
 ## Exit codes
 
@@ -317,7 +319,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Muse
 
-`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names; a dedicated `Muse` row arrives with the 2.0 compatibility contract. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
+`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names. This release has no separate Muse row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
 ### Grok usage in fleet retro
 
@@ -471,7 +473,7 @@ If `~/.gstack` is detected during `mm init`, it is automatically added as a sync
   `*.whl`, `*.so`, `*.dylib`, `*.pak`, `*.dmg`.
 
 The generated-output trim saves about 30% of the gstack set's sealed bytes on
-the measured Mac (a per-file proxy for 2.0 snapshots); in 1.x it means about
+the measured Mac. In 1.x it means about
 23% fewer gstack manifest entries plus own storage reclaimed by an attended
 content-changing push's GC. [Measurement and matching caveats](docs/invariants/sync.md#bulk-generator-output).
 Those directory names are skipped at any depth inside a project; removing a
@@ -810,8 +812,8 @@ done
 
 History recorded since import is lost from `mm log`; the next write re-imports
 the remaining legacy JSONL. Preserve the moved files for investigation. This
-remedy expires before ledger/displaced state is activated by the 2.0 Tracks;
-those Tracks must supply authoritative-state recovery first.
+remedy expires before Track 87A stores a per-peer sync base in `state.db`.
+That Track has to supply recovery for the base before this move-aside is safe.
 
 
 ### A gstack file doesn't reach my other Mac

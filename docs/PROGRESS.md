@@ -186,6 +186,7 @@ earn a version bump. Release automation never writes this section.
 | Checkpoint or stage | Date | Evidence | Recorded by |
 |---|---|---|---|
 | baseline: MVP-1 on the 1.x iCloud store (macOS only) achieved; the 2.0 target (Syncthing, macOS + Linux) has no acceptance evidence yet | 2026-10-11 | Three registered devices in the iCloud store (`mm devices`), 108 recorded pushes from device 889e42c0 since 2026-04, release rows 1.0.0 to 1.7.0 above; no 2.0 checkpoint, soak or two-Mac acceptance has run | /project-spec, confirmed by the owner |
+| baseline: docs/SPEC.md rewritten (sync and fleet usage reporting are the two products; 2.0 carries the 1.x store onto Syncthing instead of store-v2; standalone Grok Build removed; Muse gets its own family; the 1.x compatibility contract retired; command output follows O8). MVP-1 on iCloud (macOS) stays achieved; the Syncthing target has no acceptance evidence | 2026-10-19 | Device 889e42c0 on mm 1.11.2 (`mm status`, `mm diag`, `mm push --dry-run`): the last attended push was refused (`push-failed (snapshot-refused)`, 15:02 UTC) after uploading content, leaving about 19k changes unpublished, while the same tree previews cleanly; retro git capture incomplete since 2026-10-09 (git-root discovery exceeds its time budget, 0 roots found); Codex usage snapshot skipped on its deadline. O6's default exclusions shipped in 1.8.0; the owner dropped its separate acceptance record, S13 and Track 70A's item 14B | /project-spec, confirmed by the owner |
 
 ## Current phase: v0.x → v1.0
 

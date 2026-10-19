@@ -9,6 +9,12 @@ for qualification; the remaining work packages are preserved in
 The [2026-09-30 inbox drain](../TODOS.md#roadmap-drain--2026-09-30) records their
 routing. Later work packages receive implementation Tracks after qualification.
 
+> **Scope (2026-10-19):** [docs/SPEC.md](../SPEC.md) defers Codex and
+> cross-agent memory sync. The fleet-parity qualification was dropped that
+> day. The work-package row links to the
+> [drain](../TODOS.md#roadmap-drain--2026-10-19) that records the drop.
+> This file remains Track 68A evidence.
+
 ## Outcome and scope
 
 First make Claude and Codex comparable for memory capture, recall, and sync
@@ -174,15 +180,15 @@ walker; documentation alone does not prove fleet path portability. See
 
 Each row maps to a work package routed from the TODO inbox. The linked work
 package defines its tasks; this table defines the deliverable and the evidence
-needed to finish it. All
-packages are pending. The prototype is part of qualification and the bridge
+needed to finish it. The fleet-parity row records a dropped package, not an
+open one. The prototype is part of qualification and the bridge
 package, not permission to deploy an incomplete sync protocol.
 
 | Work package | Depends on | Deliverable | Exit gate |
 |---|---|---|---|
 | [Qualify Codex memory portability and recall](../ROADMAP.md#track-68a-qualify-codex-memory-portability-and-recall) | None | Versioned adapter contract, sanitized live-source fixtures, isolated import/recall prototype | Native lifecycle measured; forgetting and ancestry capabilities established; unsafe integration candidates rejected |
 | [Deliver Codex memory sync across Macs](../roadmap-future.md#codex-memory-sync) | Qualification | Export, encrypted transfer, receiving consumer, retirement and provenance controls | Two-way Codex recall; deterministic forgetting, echo and hostile-content gates below pass; native regeneration preserves the qualified behavior |
-| [Qualify Claude and Codex memory parity across the fleet](../roadmap-future.md#memory-fleet-parity) | Codex transport | Dated two-Mac CLI/Conductor qualification report and regression tests | Full parity matrix, including offline forgetting, same-agent re-export and the hostile-content checks on the live two-Mac and Conductor path, passes on supported versions |
+| [Qualify Claude and Codex memory parity across the fleet](../TODOS.md#roadmap-drain--2026-10-19) | Codex transport | Dated two-Mac CLI/Conductor qualification report and regression tests | Full parity matrix, including offline forgetting, same-agent re-export and the hostile-content checks on the live two-Mac and Conductor path, passes on supported versions |
 | [Share project memories between Claude and Codex](../roadmap-future.md#cross-agent-memory) | Fleet parity | Project identity, shared recall view, startup integration, required forget control | Fresh-session recall in both directions; live cross-agent forgetting and echo tests and the deterministic hostile-content tests pass; unsupported ancestry cannot auto-publish |
 | [Establish Cursor's memory capability and portability contract](../roadmap-future.md#cursor-memory-contract) | Codex qualification for discovery; parity/bridge for integration | Measured capability matrix and qualified adapter or documented shared-view consumer | Same isolation, forgetting, echo and hostile-content gates; discovery alone does not claim Cursor implementation is complete |
 
