@@ -75,7 +75,7 @@ from typing import Any, Iterator
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
-from mind_meld import __version__, lockfile, pullhistory, updateprogress
+from mind_meld import __version__, fsutil, lockfile, pullhistory, updateprogress
 from mind_meld.errors import LockError
 from mind_meld.lockedjson import locked_json_rmw, locked_json_snapshot
 from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
@@ -810,6 +810,7 @@ def _pipx_install_lock() -> Iterator[int]:
     LOCK_UN here: that would release the shared lock before the child exits.
     Never unlink the file, which would let contenders lock different inodes.
     """
+    fsutil.refuse_real_state_write_under_pytest(CACHE_DIR / INSTALL_LOCK_NAME)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(CACHE_DIR / INSTALL_LOCK_NAME), os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -1122,6 +1123,7 @@ def _spawn_pipx(argv: list[str], log_path: Path) -> None:
     """
     _refuse_under_pytest()
     with _pipx_install_lock() as install_fd:
+        fsutil.refuse_real_state_write_under_pytest(log_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
@@ -1148,6 +1150,7 @@ def _write_update_log(argv: list[str], output: str) -> None:
     """Keep the last foreground automatic attempt's output. Best-effort."""
     try:
         path = update_log_path()
+        fsutil.refuse_real_state_write_under_pytest(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as log:

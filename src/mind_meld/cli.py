@@ -2636,6 +2636,7 @@ def _apply_incoming_file(
             )
         return "skipped"
 
+    fsutil.refuse_real_state_write_under_pytest(local_path)
     try:
         if not local_path.parent.is_dir():
             ancestor = _first_existing_ancestor(local_path.parent)
@@ -3559,6 +3560,7 @@ def init() -> None:
     # Storage path first: we need a backend to probe mm-crypto-init.
     storage_path = typer.prompt("Storage folder path", default=DEFAULT_STORAGE_PATH)
     full_path = Path(storage_path).expanduser()
+    fsutil.refuse_real_state_write_under_pytest(full_path)
     full_path.mkdir(parents=True, exist_ok=True)
     console.print(f"  Storage: {full_path}")
 
@@ -10488,13 +10490,14 @@ def _migration_state_path() -> Path:
 
 
 def _write_migration_breadcrumb(missing: list[str]) -> None:
-    """Best-effort write of the missing-excludes signal. Never raises.
+    """Best-effort write; never raises except the pytest guard BaseException.
 
     Skipped when no sources are missing (delete the file so stale
     breadcrumbs don't outlive their cause). Called from autopull/autopush
     on every run; cost is one stat + (rarely) one write.
     """
     path = _migration_state_path()
+    fsutil.refuse_real_state_write_under_pytest(path)
     if not missing:
         try:
             path.unlink()
@@ -10677,10 +10680,12 @@ def _log_unexpected(verb: str, exc: BaseException) -> None:
 
     Any failure here is swallowed; the caller has already emitted the
     one-line stderr message, and a broken log file must never crash the hook.
+    The pytest write guard BaseException deliberately escapes this boundary.
     """
     try:
-        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
         path = _auto_log_path(verb)
+        fsutil.refuse_real_state_write_under_pytest(path)
+        sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
         block = (
             f"--- {datetime.now(timezone.utc).isoformat()} mm {__version__} "
             f"auto{verb}\n"

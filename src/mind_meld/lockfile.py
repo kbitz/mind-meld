@@ -23,7 +23,7 @@ import fcntl
 import os
 from pathlib import Path
 
-from mind_meld import errors
+from mind_meld import errors, fsutil
 from mind_meld.config import LOCK_PATH
 from mind_meld.errors import LockError
 
@@ -85,6 +85,7 @@ def acquire_lock(path: Path | None = None) -> None:
         filesystem error.
     """
     lock_path = path or LOCK_PATH
+    fsutil.refuse_real_state_write_under_pytest(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     key = _resolve_key(lock_path)
 

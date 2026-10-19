@@ -22,6 +22,37 @@ _TEST_ROOT_SALT = bytes(range(16))
 _TEST_MEMORY_KB = 1024
 
 
+def pytest_sessionstart(session):
+    """Run the real write guard once in the controller, before collection or workers.
+
+    A broken real config or an unreachable protected root then fails the run
+    once, naming the cause, instead of refusing every guarded write.
+    """
+    if hasattr(session.config, "workerinput"):
+        return
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from mind_meld import fsutil
+
+    temp = tempfile.gettempdir()
+    previous = os.environ.get("PYTEST_CURRENT_TEST")
+    os.environ["PYTEST_CURRENT_TEST"] = "pytest_sessionstart preflight"
+    try:
+        fsutil.refuse_real_state_write_under_pytest(Path(temp) / "mm-guard-preflight" / "probe")
+    except fsutil.PytestRealStateWriteError as exc:
+        raise pytest.UsageError(
+            f"real account write-guard preflight failed (probe under temp dir {temp!r}; "
+            f"if that directory is itself protected, point TMPDIR elsewhere): {exc}"
+        ) from exc
+    finally:
+        if previous is None:
+            del os.environ["PYTEST_CURRENT_TEST"]
+        else:
+            os.environ["PYTEST_CURRENT_TEST"] = previous
+
+
 @pytest.fixture
 def synthetic_account_home(monkeypatch, tmp_path):
     """Guard regressions use account roots in tmp_path, never the actual account."""
@@ -32,6 +63,13 @@ def synthetic_account_home(monkeypatch, tmp_path):
     account = tmp_path / "account"
     account.mkdir()
     monkeypatch.setattr(fsutil.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir=str(account)))
+
+    def named_account(name):
+        if name == "guard-user":
+            return SimpleNamespace(pw_dir=str(account))
+        raise KeyError(name)
+
+    monkeypatch.setattr(fsutil.pwd, "getpwnam", named_account)
     monkeypatch.setenv("HOME", str(tmp_path / "different-home"))
     return account
 
@@ -42,15 +80,47 @@ def synthetic_account_home(monkeypatch, tmp_path):
         "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
         "Sync/mind-meld",
         ".local/share/mind-meld",
+        ".claude",
+        ".codex",
+        ".grok",
+        ".gstack",
+        ".gstack-extend",
+        ".cursor",
+        ".local/share/muse",
+        "configured-storage",
+        "configured-source",
     ),
-    ids=("config", "icloud", "syncthing", "events"),
+    ids=(
+        "config",
+        "icloud",
+        "syncthing",
+        "events",
+        "claude",
+        "codex",
+        "grok",
+        "gstack",
+        "gstack-extend",
+        "cursor",
+        "muse",
+        "configured-storage",
+        "configured-source",
+    ),
 )
 def synthetic_state_root(request, synthetic_account_home):
+    if request.param.startswith("configured-"):
+        import json
+
+        root = synthetic_account_home / request.param
+        config = synthetic_account_home / ".config/mind-meld/config.toml"
+        config.parent.mkdir(parents=True)
+        prefix = "[storage]\n" if request.param == "configured-storage" else "[[sync.sources]]\n"
+        config.write_text(prefix + "path=" + json.dumps(str(root)))
+        return root
     return synthetic_account_home / request.param
 
 
 @pytest.fixture
-def forbid_fs_mutations(monkeypatch):
+def forbid_fs_mutations(monkeypatch, request):
     """Install only after synthetic sentinels are prepared; permit read-only opens."""
     import builtins
     import io
@@ -60,10 +130,17 @@ def forbid_fs_mutations(monkeypatch):
 
     calls = []
 
+    def assert_no_mutations():
+        assert not calls, f"denied mutation attempts before guard: {calls!r}"
+
+    request.addfinalizer(assert_no_mutations)
+
     def install():
         def denied(*args, **kwargs):
             calls.append((args, kwargs))
-            raise AssertionError("mutation reached before test write guard refusal")
+            raise AssertionError(
+                f"mutation reached before guard; denied mutation attempts: {calls!r}"
+            )
 
         real_os_open = os.open
 
