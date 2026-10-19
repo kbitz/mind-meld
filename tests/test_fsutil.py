@@ -1250,16 +1250,16 @@ def test_configured_root_refuses_expanded_destination(
     }[spelling]
     if spelling == "legacy":
         text = f"[sync]\nclaude_dir={json.dumps(raw)}"
-        key = "sync.claude_dir"
+        field = "sync.claude_dir"
     elif spelling == "disabled":
         text = (
             '[sync]\ndisabled_sources=["custom"]\n[[sync.sources]]\n'
             f'name="custom"\npath={json.dumps(raw)}'
         )
-        key = "sync.sources[0].path"
+        field = "sync.sources[0].path"
     else:
         text = f"[storage]\npath={json.dumps(raw)}"
-        key = "storage.path"
+        field = "storage.path"
     config_path = _plant_guard_config(home, text)
     path = custom / "missing/file"
     calls = forbid_fs_mutations()
@@ -1267,7 +1267,7 @@ def test_configured_root_refuses_expanded_destination(
         fsutil.atomic_write_bytes(path, b"never")
     _assert_guard_diagnostic(caught.value, path, "protected account-state path")
     message = str(caught.value)
-    for value in (str(custom), key, str(config_path), str(home)):
+    for value in (str(custom), field, str(config_path), str(home)):
         assert repr(value) in message
     assert "$HOME is ignored" in message and calls == []
 
