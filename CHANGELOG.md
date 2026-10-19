@@ -2,6 +2,18 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.2] - 2026-10-19
+
+**Pytest can no longer write this Mac's real Mind Meld account state, configured storage, or agent folders through the remaining raw writers.** A test that reaches those paths stops before the writer creates or changes anything. `mm` itself is unchanged: the check runs only while pytest is running.
+
+### Fixed
+
+- Under pytest, the raw writers that could still append to real autopush logs, configs, storage, and agent directories now refuse those paths before they create or change anything. A missing or unreadable config fails closed. Outside pytest, `mm` does not run this check.
+
+### Upgrade notes
+
+- Commands, flags, and synced storage are unchanged. An older mm keeps working beside this one.
+
 ## [1.11.1] - 2026-10-17
 
 **Installing 1.11.1 does not change how `mm` syncs.** The store design and its test model now describe how a restored machine and a publish torn by a crash recover. Nothing in `mm` calls that code yet.
