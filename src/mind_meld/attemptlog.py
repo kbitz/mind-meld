@@ -103,6 +103,7 @@ def write(outcome: CaptureOutcome) -> None:
         "row_ts": outcome.appended[1]["ts"] if outcome.appended is not None else None,
         "errno": outcome.errno_name,
     }
+    fsutil.refuse_real_state_write_under_pytest(record_path())
     sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
     fsutil.atomic_write_bytes(
         record_path(), json.dumps(record, sort_keys=True).encode(), mode=0o600, fsync=True

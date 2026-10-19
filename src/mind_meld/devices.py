@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from mind_meld import __version__
+from mind_meld import __version__, fsutil
 from mind_meld.errors import StorageError
 from mind_meld.storage.keys import DEVICES_PREFIX, device_key
 from mind_meld.storage.local import LocalBackend
@@ -54,6 +54,7 @@ def _devices_write_lock() -> Iterator[None]:
     lets the user catch a stuck-process scenario before a future non-
     deterministic field starts losing data.
     """
+    fsutil.refuse_real_state_write_under_pytest(DEVICES_WRITE_LOCK)
     DEVICES_WRITE_LOCK.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(DEVICES_WRITE_LOCK), os.O_WRONLY | os.O_CREAT, 0o600)
     locked = False

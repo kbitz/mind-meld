@@ -160,6 +160,7 @@ def _ensure_inversion_marker() -> float | None:
     try:
         if path.exists():
             return float(path.read_text().strip())
+        fsutil.refuse_real_state_write_under_pytest(path)
         sidecar.SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
         marker_ts = time.time()
         # Atomic write so a crash mid-create doesn't leave a partial

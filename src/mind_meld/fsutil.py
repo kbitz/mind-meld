@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Iterable, Sequence
+from functools import lru_cache
 from pathlib import Path
 
 from mind_meld.errors import StorageError
@@ -108,22 +109,216 @@ def _mutated_entries(path: Path) -> list[Path]:
     return entries
 
 
-def refuse_real_state_write_under_pytest(path: Path) -> None:
-    """Tripwire for shared-helper writes, independent of test isolation fixtures.
+# One MiB is generous for a hand-authored CLI config, while bounding test-only reads.
+_PYTEST_CONFIG_MAX_BYTES = 1024 * 1024
+_PYTEST_RECOVERY = "No write occurred. Fix the destination/config and rerun; nothing to clean up."
 
-    Protect lexical locations, resolved destinations, the destination entry
-    inside its resolved parent and existing ancestor identities (including case
-    aliases). This is not a malicious-test sandbox or a guarantee against
-    concurrent symlink replacement; see the routing doc.
+
+def _pytest_config_stamp(home: Path) -> tuple[Path, int, int, Path]:
+    path = home / ".config/mind-meld/config.toml"
+    try:
+        info = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return path, -1, -1, home
+    except OSError as exc:
+        raise ValueError(
+            f"real config {str(path)!r} is unreadable; "
+            "restore read/search permissions on that file and its parents"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(
+            f"real config {str(path)!r} is not a regular file; "
+            "replace it with a regular TOML config"
+        )
+    if info.st_size > _PYTEST_CONFIG_MAX_BYTES:
+        raise ValueError(
+            f"real config {str(path)!r} exceeds _PYTEST_CONFIG_MAX_BYTES "
+            f"({_PYTEST_CONFIG_MAX_BYTES}); reduce that config below the cap"
+        )
+    return path, info.st_mtime_ns, info.st_size, home
+
+
+@lru_cache(maxsize=16)
+def _pytest_config_strings(stamp: tuple[Path, int, int, Path]) -> tuple[tuple[str, str], ...]:
+    """Cache raw path strings only; no settings values or expanded paths survive."""
+    path, _, size, _ = stamp
+    if size == -1:
+        return ()
+    try:
+        with path.open("rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("not a regular file")
+            raw = stream.read(_PYTEST_CONFIG_MAX_BYTES + 1)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"real config {str(path)!r} is unreadable; "
+            "restore a readable regular TOML file and its parent permissions"
+        ) from exc
+    if len(raw) > _PYTEST_CONFIG_MAX_BYTES:
+        raise ValueError(
+            f"real config {str(path)!r} exceeds _PYTEST_CONFIG_MAX_BYTES; "
+            "reduce that config below the cap"
+        )
+    # Deliberately lazy: the production guard's inactive branch never imports TOML.
+    import tomllib
+
+    try:
+        config = tomllib.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError(
+            f"real config {str(path)!r} has invalid TOML; "
+            "fix its TOML syntax, encoding, duplicate keys or excessive nesting"
+        ) from exc
+
+    def malformed(key: str, edit: str) -> ValueError:
+        return ValueError(f"real config {str(path)!r}: {key!r} {edit}")
+
+    for key in ("storage", "sync"):
+        if key in config and not isinstance(config[key], dict):
+            raise malformed(key, "must be a table; replace the scalar with a TOML table")
+    roots = []
+    storage = config.get("storage", {}).get("path")
+    if isinstance(storage, str) and storage:
+        roots.append(("storage.path", storage))
+    sync = config.get("sync", {})
+    if "claude_dir" in sync:
+        legacy = sync["claude_dir"]
+        if not isinstance(legacy, str):
+            raise malformed(
+                "sync.claude_dir", "must be a path string; fix or remove the legacy key"
+            )
+        roots.append(("sync.claude_dir", legacy))
+    if "sources" in sync:
+        if not isinstance(sync["sources"], list):
+            raise malformed("sync.sources", "must be a list; use [[sync.sources]] tables")
+        for index, source in enumerate(sync["sources"]):
+            key = f"sync.sources[{index}].path"
+            if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+                raise malformed(key, "must be a path string; add or fix that source's path")
+            roots.append((key, source["path"]))
+    return tuple(roots)
+
+
+def _expand_pytest_root(raw: str, home: Path) -> Path:
+    """Expand path spellings without consulting HOME (unlike production expanduser)."""
+    if raw == "~" or raw.startswith("~/"):
+        path = home / raw[2:] if raw != "~" else home
+    elif raw.startswith("~"):
+        user, _, suffix = raw[1:].partition("/")
+        user_home = pwd.getpwnam(user).pw_dir
+        if not isinstance(user_home, str) or not Path(user_home).is_absolute():
+            raise ValueError("named account home must be absolute")
+        path = Path(user_home) / suffix
+    else:
+        path = Path(raw)
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _pytest_refused_roots(
+    home: Path,
+) -> tuple[tuple[tuple[Path, str], ...], tuple[Path, int, int, Path]]:
+    """Single refused-root inventory shared by the classifier and its pins.
+
+    Raw strings cache by (real config path, mtime_ns, size, pwd home); expansion
+    happens each call, so cwd and named-account changes cannot stale the roots.
+    Disabled explicit sources remain real user data. Only path-typed values are
+    retained or displayed. Config schema changes must update this extractor.
+    """
+    roots = [
+        (home / suffix, suffix)
+        for suffix in (
+            ".config/mind-meld",
+            "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
+            "Sync/mind-meld",
+            ".local/share/mind-meld",
+            ".claude",
+            ".codex",
+            ".grok",
+            ".gstack",
+            ".gstack-extend",
+            ".cursor",
+            ".local/share/muse",
+        )
+    ]
+    stamp = _pytest_config_stamp(home)
+    config_path = stamp[0]
+    account = None
+    for key, raw in _pytest_config_strings(stamp):
+        try:
+            root = _expand_pytest_root(raw, home)
+        except Exception as exc:
+            raise ValueError(
+                f"real config {str(config_path)!r}: path expansion failed "
+                f"for configured root {raw!r} from {key!r}; "
+                "edit that path to an existing named account or fix its "
+                "pwd lookup/current directory"
+            ) from exc
+        try:
+            info, missing = _root_identity(root)
+            identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing)
+            resolved = _pytest_resolved_roots(((root, key),), stamp, Path.cwd(), (identity,))[0][2]
+            if account is None:
+                account = home.resolve()
+        except Exception as exc:
+            raise ValueError(
+                f"real config {str(config_path)!r}: configured-root resolution failed "
+                f"for {str(root)!r} from {key!r}; "
+                "edit that path to fix its permissions, invalid spelling or symlink chain"
+            ) from exc
+        if account.is_relative_to(resolved):
+            raise ValueError(
+                f"real config {str(config_path)!r}: configured root {raw!r} "
+                f"(resolved {str(resolved)!r}) "
+                f"from {key!r} contains pwd account home {str(home)!r}; "
+                "edit that path to a narrower destination below or outside the account home"
+            ) from ValueError("configured root contains the account home")
+        roots.append((root, key))
+    return tuple(roots), stamp
+
+
+@lru_cache(maxsize=32)
+def _pytest_resolved_roots(roots, stamp, cwd, identities):
+    # Identities invalidate creation/removal/retargeting of stable root symlinks.
+    resolved = []
+    for root, key in roots:
+        try:
+            resolved.append((root, key, root.resolve()))
+        except Exception as exc:
+            raise ValueError(f"protected root {str(root)!r}") from exc
+    return tuple(resolved)
+
+
+@lru_cache(maxsize=32)
+def _pytest_root_anchors(resolved_roots, stamp, cwd, identities):
+    anchors = []
+    for root, key, resolved in resolved_roots:
+        try:
+            for spelling in dict.fromkeys((root, resolved)):
+                anchors.append((root, key, *_root_identity(spelling)))
+        except Exception as exc:
+            raise ValueError(f"protected root {str(root)!r}") from exc
+    return tuple(anchors)
+
+
+def refuse_real_state_write_under_pytest(path: Path) -> None:
+    """Refuse inventoried writes to real account, agent and configured state.
+
+    Silent outside pytest: an absent/empty marker returns before any account,
+    path or config lookup, including importing tomllib. Independent of conftest.
+    Classify lexical/resolved locations, unfollowed entries inside resolved
+    parents and ancestor identities. Cached root resolutions/anchors also key
+    on cwd, config stamp and live identities; raw config strings re-expand per
+    call. This is an accident tripwire, not a malicious-test or symlink-race
+    sandbox. See docs/invariants/README.md#test-write-guard.
     """
     test = os.environ.get("PYTEST_CURRENT_TEST")
     if not test:
-        return  # Production does no account lookup or filesystem classification.
+        return
 
-    def refusal(cause: str, remedy: str = "") -> PytestRealStateWriteError:
+    def refusal(cause: str, remedy: str) -> PytestRealStateWriteError:
         return PytestRealStateWriteError(
             f"Test write guard refused {str(path)!r}; PYTEST_CURRENT_TEST={test!r}: "
-            f"{cause}. {remedy}Isolate write destinations under tmp_path. "
+            f"{cause}. {remedy}. {_PYTEST_RECOVERY} "
             "See docs/invariants/README.md#test-write-guard"
         )
 
@@ -137,30 +332,39 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
     except Exception as exc:
         raise refusal(
             "account-home lookup failed (pwd.getpwuid(os.getuid()).pw_dir)",
-            "Repair the account-home lookup or its unusable directory. ",
+            "Repair the account-home lookup or its unusable directory; "
+            "isolate destinations under tmp_path",
+        ) from exc
+
+    try:
+        roots, stamp = _pytest_refused_roots(home)
+    except Exception as exc:
+        raise refusal(
+            f"configured-root lookup failed: {exc}", "Repair the real config path described above"
         ) from exc
 
     def unclassifiable(subject: str) -> PytestRealStateWriteError:
         return refusal(
             f"path-resolution failed while classifying {subject}",
-            "Repair the path lookup, permissions or symlink chain. ",
+            "Repair the path lookup, permissions or symlink chain; "
+            "isolate destinations under tmp_path",
         )
 
-    roots = (
-        home / ".config/mind-meld",
-        home / "Library/Mobile Documents/com~apple~CloudDocs/mind-meld",
-        home / "Sync/mind-meld",
-        home / ".local/share/mind-meld",
-    )
+    def protected(root, key, alias=False):
+        return refusal(
+            f"protected account-state path{' or alias' if alias else ''} under {str(root)!r}; "
+            f"matched root={str(root)!r}, source key={key!r}, real config={str(stamp[0])!r}, "
+            f"pwd account home={str(home)!r}; $HOME is ignored",
+            "Isolate write destinations under tmp_path and keep the isolation fixtures enabled",
+        )
+
     try:
         entries = _mutated_entries(path)
         lexical = [Path(os.path.abspath(entry)) for entry in entries]
         for candidate in lexical:
-            for root in roots:
+            for root, key in roots:
                 if candidate.is_relative_to(Path(os.path.abspath(root))):
-                    raise refusal(f"protected account-state path under {root}")
-        # Temps, renames and mkdirs act inside the resolved parent, so classify
-        # the unfollowed entry there as well as the fully resolved target.
+                    raise protected(root, key)
         candidates = dict.fromkeys(lexical)
         for entry in entries:
             candidates[entry.resolve()] = None
@@ -169,35 +373,43 @@ def refuse_real_state_write_under_pytest(path: Path) -> None:
     except Exception as exc:
         raise unclassifiable("the write destination") from exc
 
-    # Every containment verdict precedes identity lookups, so an unrelated
-    # unreadable root cannot mask a definite protected destination.
-    resolved_roots = []
-    for root in roots:
+    # Validate live anchor identities before cache reuse. Defer lookup failures
+    # until after containment so an unrelated inaccessible root cannot mask a hit.
+    identities = []
+    for root, key in roots:
         try:
-            resolved_roots.append((root, root.resolve()))
-        except Exception as exc:
-            raise unclassifiable(f"protected root {root}") from exc
-    for root, resolved_root in resolved_roots:
+            info, missing = _root_identity(root)
+            identities.append(
+                (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, missing)
+            )
+        except Exception:
+            identities = None
+            break
+    try:
+        resolver = (
+            _pytest_resolved_roots if identities is not None else _pytest_resolved_roots.__wrapped__
+        )
+        resolved_roots = resolver(roots, stamp, Path.cwd(), tuple(identities or ()))
+    except Exception as exc:
+        raise unclassifiable(str(exc)) from (exc.__cause__ or exc)
+    for root, key, resolved_root in resolved_roots:
         for candidate in candidates:
             if candidate.is_relative_to(resolved_root):
-                raise refusal(f"protected account-state path or alias under {root}")
+                raise protected(root, key, alias=True)
 
-    # Anchor both spellings: a root linked to an absent target is still
-    # reachable through a case alias of that target.
-    anchors = []
-    for root, resolved_root in resolved_roots:
-        try:
-            for spelling in dict.fromkeys((root, resolved_root)):
-                anchors.append((root, *_root_identity(spelling)))
-        except Exception as exc:
-            raise unclassifiable(f"protected root {root}") from exc
-
+    try:
+        anchor_reader = (
+            _pytest_root_anchors if identities is not None else _pytest_root_anchors.__wrapped__
+        )
+        anchors = anchor_reader(tuple(resolved_roots), stamp, Path.cwd(), tuple(identities or ()))
+    except Exception as exc:
+        raise unclassifiable(str(exc)) from (exc.__cause__ or exc)
     try:
         for candidate in candidates:
             ancestors = list(_existing_ancestors(candidate))
-            for root, info, missing in anchors:
+            for root, key, info, missing in anchors:
                 if _aliases_protected_root(candidate, ancestors, info, missing):
-                    raise refusal(f"protected account-state path or alias under {root}")
+                    raise protected(root, key, alias=True)
     except Exception as exc:
         raise unclassifiable("the write destination") from exc
 

@@ -79,6 +79,7 @@ def read(initial: Iterable[str]) -> set[str]:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    fsutil.refuse_real_state_write_under_pytest(seen_path())
     try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -147,6 +148,7 @@ def acknowledge(names: Iterable[str], *, initial: Iterable[str]) -> set[str]:
     initial_set = set(initial)
     path = seen_path()
 
+    fsutil.refuse_real_state_write_under_pytest(seen_path())
     try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -210,6 +212,7 @@ def write(seen: Iterable[str]) -> None:
     # the StorageError catch, a disk-full / permission flip / bad temp dir
     # would crash mm status / enable-source / disable-source through a
     # non-load-bearing tracker.
+    fsutil.refuse_real_state_write_under_pytest(seen_path())
     try:
         SEEN_DIR.mkdir(parents=True, exist_ok=True)
         fsutil.atomic_write_bytes(seen_path(), data, fsync=False, mode=0o600)

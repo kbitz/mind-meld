@@ -60,6 +60,7 @@ class LocalBackend:
 
     def put(self, key: str, data: bytes) -> None:
         path = self.root / key
+        fsutil.refuse_real_state_write_under_pytest(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         # All storage keys hold encrypted secrets (blobs, manifests,
         # devices, crypto-init) — explicit 0600 so new files aren't
@@ -81,6 +82,7 @@ class LocalBackend:
         need: atomicity (readers never see a partial file) and exclusivity.
         """
         path = self.root / key
+        fsutil.refuse_real_state_write_under_pytest(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         try:
@@ -135,6 +137,7 @@ class LocalBackend:
 
     def delete(self, key: str) -> None:
         path = self.root / key
+        fsutil.refuse_real_state_write_under_pytest(path)
         if path.exists():
             try:
                 path.unlink()
@@ -242,6 +245,7 @@ class LocalBackend:
 
         Returns the count deleted.
         """
+        fsutil.refuse_real_state_write_under_pytest(self.root / key)
         copies = self.find_conflict_copies(key, is_valid)
         for c in copies:
             c.unlink(missing_ok=True)

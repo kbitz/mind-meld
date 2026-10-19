@@ -44,6 +44,21 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=74A] Guard raw unlinks outside the 74A inventory
+- **Description:** Track 74A (autoplan 2026-10-18) guards the C1-named writers; raw unlink sites in retention.py, resolveflow.py promotions, crypto.py conflict-copy deletion, host_usage.py spool handling and cli.py stale-copy/quarantine paths stay unguarded under pytest because their destinations are test-isolated today and their file creation goes through guarded helpers.
+- **Why:** A future test reaching one of these with a real destination could delete real files under pytest without tripping the guard.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Revisit trigger: an observed test-run deletion or a near-miss through one of these sites, or the 75A store writers adopting the same unlink patterns. Without that manifestation this stays deferred per the planning demand gate.
+
+
+### [roadmap:track=74A] Narrow the 74A and 71B safety claims and carry the guard obligation to 75A
+- **Description:** Run /roadmap to amend Track 74A's Outcome and _produces_ and the retained 71B acceptance wording to the named writers under an active pytest marker. Put the before-first-mutation fsutil guard call and static-inventory review obligation on Track 75A's new writers.
+- **Why:** A finite writer inventory plus a discovery backstop does not establish suite-wide or simulator safety; future store writers must adopt the convention explicitly.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** UC2 approved at the 2026-10-18 autoplan gate (owner: rec). Track 74A narrows the invariant README now; ROADMAP.md remains reserved to /roadmap. Revisit when /roadmap next regenerates the 74A/75A cards, before citing 74A as 75A acceptance evidence.
+
 
 ## Drain records
 

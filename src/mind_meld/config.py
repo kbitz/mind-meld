@@ -1010,6 +1010,7 @@ def _bootstrap_mm_events_path(
         try:
             info = p.lstat()
         except FileNotFoundError:
+            fsutil.refuse_real_state_write_under_pytest(p)
             missing = [p]
             ancestor = p.parent
             while not ancestor.exists():
@@ -1043,6 +1044,7 @@ def _bootstrap_mm_events_path(
         return created
 
     if info.st_mode & 0o077:
+        fsutil.refuse_real_state_write_under_pytest(p)
         try:
             fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
             try:
@@ -1059,6 +1061,7 @@ def _bootstrap_mm_events_path(
 def save_config(config: dict[str, Any], path: Path | None = None) -> None:
     """Write config dict as TOML."""
     config_path = path or CONFIG_PATH
+    fsutil.refuse_real_state_write_under_pytest(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = []

@@ -520,10 +520,16 @@ class TestRotatableSpool:
 
 def _assert_guard_diagnostic(error, path, cause):
     message = str(error)
-    assert str(path) in message
-    assert os.environ["PYTEST_CURRENT_TEST"] in message
+    assert repr(str(path)) in message
+    assert repr(os.environ["PYTEST_CURRENT_TEST"]) in message
     assert cause in message
-    assert "tmp_path" in message
+    if cause.startswith("configured-root"):
+        assert "tmp_path" not in message and "real config" in message
+    else:
+        assert "tmp_path" in message
+    assert (
+        "No write occurred. Fix the destination/config and rerun; nothing to clean up." in message
+    )
     assert "docs/invariants/README.md#test-write-guard" in message
     assert not isinstance(error, Exception), "forensic Exception handlers must not swallow refusal"
     if cause.startswith("protected account-state"):
@@ -541,6 +547,26 @@ class TestRealStateWriteGuard:
             monkeypatch.setenv("PYTEST_CURRENT_TEST", marker)
         monkeypatch.setattr(fsutil.pwd, "getpwuid", lambda uid: pytest.fail("inactive pwd lookup"))
         monkeypatch.setattr(Path, "resolve", lambda *a, **kw: pytest.fail("inactive path lookup"))
+        import builtins
+
+        original_import = builtins.__import__
+
+        def no_toml(name, *args, **kwargs):
+            assert name != "tomllib", "inactive guard imported tomllib"
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", no_toml)
+        monkeypatch.setattr(
+            fsutil, "_pytest_config_stamp", lambda *a: pytest.fail("inactive config lookup")
+        )
+        original_open = Path.open
+
+        def no_config_open(path, *args, **kwargs):
+            if path.name == "config.toml":
+                pytest.fail("inactive config open")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", no_config_open)
         target = tmp_path / "allowed"
         fsutil.atomic_write_bytes(target, b"production control")
         assert target.read_bytes() == b"production control"
@@ -761,11 +787,12 @@ class TestRealStateWriteGuard:
         relative = synthetic_state_root.relative_to(synthetic_account_home)
         alias = synthetic_account_home.joinpath(*(part.swapcase() for part in relative.parts))
         path = alias / "absent" / "new"
+        before = sorted(synthetic_account_home.iterdir())
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
             fsutil.atomic_write_bytes(path, b"refused")
         _assert_guard_diagnostic(caught.value, path, "protected account-state path or alias under")
-        assert calls == [] and not any(synthetic_account_home.iterdir())
+        assert calls == [] and sorted(synthetic_account_home.iterdir()) == before
 
     @pytest.mark.parametrize("helper", ["atomic", "append", "strict-append", "spool"])
     @pytest.mark.parametrize("exists", [False, True])
@@ -900,7 +927,7 @@ class TestRealStateWriteGuard:
                 fsutil.atomic_write_bytes(path, b"refused")
         finally:
             restore_mode(library, 0o700)
-        _assert_guard_diagnostic(caught.value, path, f"classifying protected root {icloud}")
+        _assert_guard_diagnostic(caught.value, path, f"classifying protected root {str(icloud)!r}")
         assert "Repair the path lookup" in str(caught.value)
         assert isinstance(caught.value.__cause__, PermissionError) and calls == []
 
@@ -955,7 +982,7 @@ class TestRealStateWriteGuard:
         finally:
             restore_mode(library, 0o700)
         _assert_guard_diagnostic(
-            caught.value, path, f"protected account-state path or alias under {events}"
+            caught.value, path, f"protected account-state path or alias under {str(events)!r}"
         )
         assert calls == [] and not (events / "new").exists()
 
@@ -976,7 +1003,9 @@ class TestRealStateWriteGuard:
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
             fsutil.refuse_real_state_write_under_pytest(path)
         _assert_guard_diagnostic(
-            caught.value, path, f"protected account-state path under {home / '.config/mind-meld'}"
+            caught.value,
+            path,
+            f"protected account-state path under {str(home / '.config/mind-meld')!r}",
         )
         assert calls == []
 
@@ -1091,3 +1120,839 @@ def test_conftest_free_cli_breadcrumb_refusal_and_safe_control(tmp_path, existin
     assert "breadcrumb completed" in control.stdout
     assert json.loads(safe.read_bytes())["pull"]["outcome"] == "success"
     assert stat.S_IMODE(safe.stat().st_mode) == 0o600
+
+
+def _plant_guard_config(home, text):
+    path = home / ".config/mind-meld/config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _assert_synthetic_destination(path, home):
+    roots, _ = fsutil._pytest_refused_roots(home)
+    assert any(path.is_relative_to(root) and root.is_relative_to(home) for root, _ in roots)
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.refuse_real_state_write_under_pytest(path)
+    _assert_guard_diagnostic(caught.value, path, "protected account-state path")
+
+
+@pytest.mark.parametrize(
+    ("toml", "remedy"),
+    [
+        ("storage = 1", "must be a table"),
+        ("sync = 1", "must be a table"),
+        ("[sync]\nsources = 1", "must be a list"),
+        ("[sync]\nsources = [1]", "add or fix"),
+        ('[[sync.sources]]\nname = "custom"', "add or fix"),
+        ("[[sync.sources]]\npath = 1", "add or fix"),
+        ('[storage]\npath="one"\npath="two"', "duplicate keys"),
+        ("[broken", "TOML syntax"),
+        ("[storage]\npath=" + "[" * 2000 + "0" + "]" * 2000, "excessive nesting"),
+        ("[sync]\nclaude_dir=1", "legacy key"),
+    ],
+    ids=[
+        "storage-shape",
+        "sync-shape",
+        "sources-shape",
+        "source-shape",
+        "missing-path",
+        "non-string-path",
+        "duplicate-key",
+        "parse-error",
+        "excessive-nesting",
+        "legacy-shape",
+    ],
+)
+def test_configured_root_malformed_refuses_closed(
+    toml, remedy, synthetic_account_home, tmp_path, forbid_fs_mutations
+):
+    config_path = _plant_guard_config(synthetic_account_home, toml)
+    target = tmp_path / "otherwise-safe"
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.atomic_write_bytes(target, b"never")
+    _assert_guard_diagnostic(caught.value, target, "configured-root lookup failed")
+    assert repr(str(config_path)) in str(caught.value) and remedy in str(caught.value)
+    assert caught.value.__cause__ is not None and calls == []
+
+
+@pytest.mark.parametrize("toml", ["", "[storage]", "[storage]\npath=1", '[storage]\npath=""'])
+def test_configured_root_empty_storage_tmp_control(toml, synthetic_account_home, tmp_path):
+    _plant_guard_config(synthetic_account_home, toml)
+    fsutil.atomic_write_bytes(tmp_path / "allowed", b"allowed")
+    roots, _ = fsutil._pytest_refused_roots(synthetic_account_home)
+    assert all(key != "storage.path" for _, key in roots)
+
+
+@pytest.mark.parametrize("kind", ["unreadable", "directory", "oversize"])
+def test_configured_root_file_refuses_closed(
+    kind, synthetic_account_home, tmp_path, monkeypatch, forbid_fs_mutations
+):
+    path = _plant_guard_config(synthetic_account_home, "")
+    if kind == "directory":
+        path.unlink()
+        path.mkdir()
+    elif kind == "oversize":
+        path.write_bytes(b" " * (fsutil._PYTEST_CONFIG_MAX_BYTES + 1))
+    else:
+        original = Path.open
+
+        def denied(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("synthetic read denial")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", denied)
+    calls = forbid_fs_mutations()
+    target = tmp_path / "safe"
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.atomic_write_bytes(target, b"never")
+    _assert_guard_diagnostic(caught.value, target, "configured-root lookup failed")
+    assert repr(str(path)) in str(caught.value) and calls == []
+    assert {"unreadable": "permissions", "directory": "regular", "oversize": "cap"}[kind] in str(
+        caught.value
+    )
+
+
+@pytest.mark.parametrize(
+    "spelling", ["absolute", "tilde", "named-user", "relative", "legacy", "disabled"]
+)
+def test_configured_root_refuses_expanded_destination(
+    spelling, synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    home = synthetic_account_home
+    monkeypatch.chdir(home)
+    custom = home / "custom"
+    raw = {
+        "absolute": str(custom),
+        "tilde": "~/custom",
+        "named-user": "~guard-user/custom",
+        "relative": "custom",
+        "legacy": str(custom),
+        "disabled": str(custom),
+    }[spelling]
+    if spelling == "legacy":
+        text = f"[sync]\nclaude_dir={json.dumps(raw)}"
+        key = "sync.claude_dir"
+    elif spelling == "disabled":
+        text = (
+            '[sync]\ndisabled_sources=["custom"]\n[[sync.sources]]\n'
+            f'name="custom"\npath={json.dumps(raw)}'
+        )
+        key = "sync.sources[0].path"
+    else:
+        text = f"[storage]\npath={json.dumps(raw)}"
+        key = "storage.path"
+    config_path = _plant_guard_config(home, text)
+    path = custom / "missing/file"
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.atomic_write_bytes(path, b"never")
+    _assert_guard_diagnostic(caught.value, path, "protected account-state path")
+    message = str(caught.value)
+    for value in (str(custom), key, str(config_path), str(home)):
+        assert repr(value) in message
+    assert "$HOME is ignored" in message and calls == []
+
+
+@pytest.mark.parametrize("spelling", ["/", "home", "ancestor", "~", "~missing-user/store"])
+def test_configured_root_unsafe_or_unknown_refuses_lookup(
+    spelling, synthetic_account_home, tmp_path, forbid_fs_mutations
+):
+    home = synthetic_account_home
+    raw = {"home": str(home), "ancestor": str(home.parent)}.get(spelling, spelling)
+    config_path = _plant_guard_config(home, f"[storage]\npath={json.dumps(raw)}")
+    calls = forbid_fs_mutations()
+    target = tmp_path / "otherwise-safe"
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.atomic_write_bytes(target, b"never")
+    _assert_guard_diagnostic(caught.value, target, "configured-root lookup failed")
+    assert repr(raw) in str(caught.value) and repr(str(config_path)) in str(caught.value)
+    assert "edit that path" in str(caught.value) and caught.value.__cause__.__cause__ is not None
+    assert calls == []
+
+
+def test_configured_root_cache_same_size_rewrite_and_chdir(synthetic_account_home, monkeypatch):
+    home = synthetic_account_home
+    path = _plant_guard_config(home, '[storage]\npath="alpha"')
+    first = home / "cwd-one"
+    second = home / "cwd-two"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.chdir(first)
+    roots, stamp = fsutil._pytest_refused_roots(home)
+    assert dict((key, root) for root, key in roots)["storage.path"] == first / "alpha"
+    before = fsutil._pytest_config_strings.cache_info()
+    fsutil.refuse_real_state_write_under_pytest(home / "safe")
+    fsutil.refuse_real_state_write_under_pytest(home / "safe")
+    assert fsutil._pytest_config_strings.cache_info().hits >= before.hits + 2
+    monkeypatch.chdir(second)
+    fsutil.refuse_real_state_write_under_pytest(first / "alpha/file")
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(second / "alpha/file")
+    path.write_text('[storage]\npath="bravo"')
+    os.utime(path, ns=(stamp[1] + 1_000_000, stamp[1] + 1_000_000))
+    assert path.stat().st_size == stamp[2]
+    fsutil.refuse_real_state_write_under_pytest(second / "alpha/file")
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(second / "bravo/file")
+
+
+@pytest.mark.parametrize("raw", ["absolute", "~guard-user/store", "~/store"])
+def test_configured_root_production_parity(raw, synthetic_account_home, monkeypatch):
+    from mind_meld import config
+
+    home = synthetic_account_home
+    monkeypatch.setenv("HOME", str(home))
+    (home / "store").mkdir()
+    path_value = str(home / "store") if raw == "absolute" else raw
+    text = '[device]\nid="dev"\nname="Mac"\n[storage]\npath=' + json.dumps(path_value)
+    text += "\n[sync]\nclaude_dir=" + json.dumps(path_value)
+    text += '\n[[sync.sources]]\nname="custom"\ntype="generic"\npath=' + json.dumps(path_value)
+    path = _plant_guard_config(home, text)
+    loaded = config.load_config(path)
+    roots, _ = fsutil._pytest_refused_roots(home)
+    extracted = {key: root.resolve() for root, key in roots}
+    assert extracted["storage.path"] == Path(loaded["storage"]["path"])
+    assert extracted["sync.claude_dir"] == Path(loaded["sync"]["claude_dir"])
+    assert (
+        extracted["sync.sources[0].path"] == Path(config.get_sources(loaded)[0]["path"]).resolve()
+    )
+
+
+@pytest.mark.no_mm_events_isolation
+@pytest.mark.no_source_enabled_isolation
+@pytest.mark.owns_skill_paths
+def test_default_source_and_agent_roots_pin(synthetic_account_home):
+    from mind_meld import config, skill_link
+
+    values = [source["path"] for source in config.DEFAULT_SOURCES]
+    values += [row.skills_root for row in skill_link.AGENT_ROWS]
+    _assert_root_coverage(values, synthetic_account_home)
+    with pytest.raises(AssertionError, match="uncovered.*fsutil.*#test-write-guard"):
+        _assert_root_coverage(["~/.new-agent/skills"], synthetic_account_home)
+
+
+def _assert_root_coverage(values, home):
+    roots, _ = fsutil._pytest_refused_roots(home)
+    for value in values:
+        if value == "~" or value.startswith("~/"):
+            path = fsutil._expand_pytest_root(value, home)
+            assert any(path.is_relative_to(root) for root, _ in roots), (
+                f"uncovered path {str(path)!r}: edit fsutil._pytest_refused_roots; "
+                "see docs/invariants/README.md#test-write-guard"
+            )
+            _assert_synthetic_destination(path, home)
+
+
+def test_guard_config_diagnostic_escapes_paths_only(synthetic_account_home):
+    path = synthetic_account_home / "custom\n\x1b[2J"
+    config_path = _plant_guard_config(
+        synthetic_account_home,
+        f'[storage]\npath={json.dumps(str(path))}\n[credentials]\ntoken="never-display-this"',
+    )
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.refuse_real_state_write_under_pytest(path / "file")
+    message = str(caught.value)
+    assert "\x1b" not in message and "\n" not in message
+    assert repr(str(path)) in message and repr(str(config_path)) in message
+    assert "never-display-this" not in message
+
+
+@pytest.mark.parametrize("failure", ["invalid", "unreadable"])
+def test_session_config_preflight_names_file_once(
+    failure, synthetic_account_home, capsys, monkeypatch
+):
+    from tests.conftest import pytest_sessionstart
+
+    path = _plant_guard_config(synthetic_account_home, "[broken")
+    if failure == "unreadable":
+        original = Path.open
+
+        def denied(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("synthetic unreadable config")
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", denied)
+    with pytest.raises(pytest.UsageError) as caught:
+        pytest_sessionstart(SimpleNamespace(config=SimpleNamespace()))
+    assert str(caught.value).count(str(path)) == 1
+    assert "real account config preflight" in str(caught.value)
+    assert capsys.readouterr().out == ""
+    # Workers rely on the controller's single preflight, never duplicate errors.
+    pytest_sessionstart(SimpleNamespace(config=SimpleNamespace(workerinput={})))
+
+
+def test_configured_root_resolution_failure_has_chained_remedy(
+    synthetic_account_home, tmp_path, forbid_fs_mutations
+):
+    home = synthetic_account_home
+    loop = home / "loop"
+    loop.symlink_to(loop)
+    config_path = _plant_guard_config(home, f"[storage]\npath={json.dumps(str(loop))}")
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.atomic_write_bytes(tmp_path / "safe", b"never")
+    _assert_guard_diagnostic(caught.value, tmp_path / "safe", "configured-root lookup failed")
+    assert "resolution failed" in str(caught.value) and "symlink chain" in str(caught.value)
+    assert repr(str(config_path)) in str(caught.value)
+    assert isinstance(caught.value.__cause__.__cause__, (OSError, RuntimeError)) and calls == []
+
+
+def test_configured_root_reexpands_named_user_and_root_alias(
+    synthetic_account_home, tmp_path, monkeypatch
+):
+    home = synthetic_account_home
+    first, second = home / "first", home / "second"
+    first.mkdir()
+    second.mkdir()
+    _plant_guard_config(home, '[storage]\npath="~guard-user/store"')
+    monkeypatch.setattr(fsutil.pwd, "getpwnam", lambda user: SimpleNamespace(pw_dir=str(first)))
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(first / "store/file")
+    monkeypatch.setattr(fsutil.pwd, "getpwnam", lambda user: SimpleNamespace(pw_dir=str(second)))
+    fsutil.refuse_real_state_write_under_pytest(first / "store/file")
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(second / "store/file")
+    external = tmp_path / "external"
+    external.mkdir()
+    (second / "store").symlink_to(external)
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        fsutil.refuse_real_state_write_under_pytest(external / "missing/file")
+    _assert_guard_diagnostic(
+        caught.value, external / "missing/file", "protected account-state path or alias"
+    )
+
+
+def test_marker_inheriting_child_refuses_configured_writer(synthetic_account_home, tmp_path):
+    home = synthetic_account_home
+    protected = home / "custom-store/autopull.log"
+    config_path = _plant_guard_config(home, f"[storage]\npath={json.dumps(str(protected.parent))}")
+    protected.parent.mkdir()
+    protected.write_bytes(b"keep")
+    before = protected.stat()
+    code = textwrap.dedent("""
+        import pwd, sys
+        from pathlib import Path
+        from types import SimpleNamespace
+        pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir=sys.argv[1])
+        from mind_meld import cli, sidecar
+        sidecar.SIDECAR_DIR = Path(sys.argv[2])
+        cli._log_unexpected('pull', RuntimeError('child incident'))
+    """)
+    env = dict(
+        os.environ, PYTHONPATH=str(Path(__file__).parents[1] / "src"), PYTHONDONTWRITEBYTECODE="1"
+    )
+    # No marker is assigned here: the child inherits pytest's active marker.
+    refused = subprocess.run(
+        [sys.executable, "-c", code, str(home), str(protected.parent)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert refused.returncode != 0 and "PytestRealStateWriteError" in refused.stderr
+    assert "protected account-state path" in refused.stderr
+    assert os.environ["PYTEST_CURRENT_TEST"] in refused.stderr
+    assert repr(str(config_path)) in refused.stderr
+    assert protected.stat() == before and protected.read_bytes() == b"keep"
+    safe = tmp_path / "child-safe"
+    allowed = subprocess.run(
+        [sys.executable, "-c", code, str(home), str(safe)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+    assert "RuntimeError: child incident" in (safe / "autopull.log").read_text()
+
+
+def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
+    """Retarget after autouse; return the *actual* destination and native call."""
+    from typer.testing import CliRunner
+
+    from mind_meld import (
+        attemptlog,
+        cli,
+        config,
+        devices,
+        lockfile,
+        resolveflow,
+        seen_sources,
+        sidecar,
+        upgrade,
+    )
+    from mind_meld.storage.local import LocalBackend
+
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", base)
+    monkeypatch.setattr(seen_sources, "SEEN_DIR", base)
+    monkeypatch.setattr(upgrade, "CACHE_DIR", base)
+    monkeypatch.setattr(lockfile, "LOCK_PATH", base / "mm.lock")
+    monkeypatch.setattr(devices, "DEVICES_WRITE_LOCK", base / "devices.lock")
+    monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "init-config.toml")
+    monkeypatch.setattr(config, "_is_default_mm_events_path", lambda path: True)
+    monkeypatch.setattr(cli, "DEFAULT_ARGON2_MEMORY_KB", 1024)
+    monkeypatch.setattr(
+        cli,
+        "_prompt_sources",
+        lambda: [{"name": "custom", "path": str(tmp_path), "type": "generic", "include_dirs": []}],
+    )
+    monkeypatch.setattr(cli.events_tail, "_run_events_backfill", lambda *args: None)
+    monkeypatch.setattr(cli.skill_link, "_ensure_retro_skill_links", lambda **kw: None)
+    names = {
+        "log_unexpected": "autopull.log",
+        "migration_write": "migration-state.json",
+        "migration_unlink": "migration-state.json",
+        "pull_apply": "nested/note.md",
+        "init_storage": "storage",
+        "seen_read": "seen-sources.json",
+        "seen_acknowledge": "seen-sources.json",
+        "seen_write": "seen-sources.json",
+        "pipx_install_lock": upgrade.INSTALL_LOCK_NAME,
+        "update_log": upgrade.UPDATE_LOG_NAME,
+        "acquire_lock": "mm.lock",
+        "devices_write_lock": "devices.lock",
+        "save_config": "saved.toml",
+        "events_bootstrap": "events-root",
+        "sidecar_write": "last-push.json",
+        "attemptlog_write": "last-attended-capture.json",
+        "inversion_marker": "inversion-installed-at",
+    }
+    path = base / ("data/sentinel" if writer.startswith("local_") else names[writer])
+    if exists:
+        if writer in ("init_storage", "events_bootstrap"):
+            path.mkdir(parents=True, exist_ok=True, mode=0o755)
+            path.chmod(0o755)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+            path.write_bytes(b"keep")
+            path.chmod(0o640)
+        if writer == "local_delete_conflict_copies":
+            for name in ("sentinel 2", "sentinel 3"):
+                (path.parent / name).write_bytes(b"keep-copy")
+
+    def invoke():
+        if writer.startswith("local_"):
+            backend = LocalBackend(base)
+            method = getattr(backend, writer.removeprefix("local_"))
+            if writer in ("local_put", "local_put_exclusive"):
+                return method("data/sentinel", b"new")
+            return method("data/sentinel")
+        if writer == "log_unexpected":
+            return cli._log_unexpected("pull", RuntimeError("original incident"))
+        if writer.startswith("migration_"):
+            return cli._write_migration_breadcrumb(["custom"] if writer.endswith("write") else [])
+        if writer == "pull_apply":
+            return cli._apply_incoming_file(path, "note.md", b"new", {}, "peer")
+        if writer == "init_storage":
+            # CliRunner catches Exception only; the guard's BaseException escapes.
+            result = CliRunner().invoke(cli.app, ["init"], input=f"{path}\nTest Mac\npw\npw\n")
+            assert result.exit_code == 0, (result.output, result.exception)
+            return result
+        if writer == "seen_read":
+            return seen_sources.read(["new"])
+        if writer == "seen_acknowledge":
+            return seen_sources.acknowledge(["new"], initial=["old"])
+        if writer == "seen_write":
+            return seen_sources.write(["new"])
+        if writer == "pipx_install_lock":
+            with upgrade._pipx_install_lock():
+                return upgrade._install_is_running()
+        if writer == "update_log":
+            return upgrade._write_update_log(["pipx", "upgrade", "fixture"], "fixture output")
+        if writer == "acquire_lock":
+            lockfile.acquire_lock()
+            lockfile.release_lock()
+            return None
+        if writer == "devices_write_lock":
+            with devices._devices_write_lock():
+                return None
+        if writer == "save_config":
+            return config.save_config({"device": {"id": "fixture"}}, path)
+        if writer == "events_bootstrap":
+            return config._bootstrap_mm_events_path(str(path), strict=True)
+        if writer == "sidecar_write":
+            return sidecar.write({"device_id": "fixture", "sources": {}, "tombstones": {}})
+        if writer == "attemptlog_write":
+            return attemptlog.write(attemptlog.CaptureOutcome(kind="no-row"))
+        if writer == "inversion_marker":
+            return resolveflow._ensure_inversion_marker()
+        raise AssertionError(writer)
+
+    return path, invoke
+
+
+def _tree_bytes_modes(root):
+    if not root.exists():
+        return {}
+    return {
+        str(path.relative_to(root)): (
+            stat.S_IMODE(path.stat().st_mode),
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in (root, *root.rglob("*"))
+    }
+
+
+@pytest.fixture(params=(False, True), ids=("missing", "existing"))
+def raw_writer_exists(request):
+    return request.param
+
+
+@pytest.fixture
+def raw_writer_refusal(
+    synthetic_state_root, synthetic_account_home, monkeypatch, tmp_path, forbid_fs_mutations
+):
+    def check(writer, exists):
+        path, invoke = _raw_writer_case(writer, synthetic_state_root, monkeypatch, tmp_path, exists)
+        _assert_synthetic_destination(path, synthetic_account_home)
+        before = _tree_bytes_modes(synthetic_state_root)
+        calls = forbid_fs_mutations()
+        with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+            invoke()
+        _assert_guard_diagnostic(caught.value, path, "protected account-state path")
+        assert calls == [], f"denied mutation attempts: {calls!r}"
+        assert _tree_bytes_modes(synthetic_state_root) == before
+
+    return check
+
+
+@pytest.fixture
+def raw_writer_control(synthetic_account_home, tmp_path, monkeypatch):
+    def check(writer, exists):
+        path, invoke = _raw_writer_case(writer, tmp_path / "safe", monkeypatch, tmp_path, exists)
+        if writer == "local_put_exclusive" and exists:
+            with pytest.raises(StorageError, match="already exists"):
+                invoke()
+            assert path.read_bytes() == b"keep"
+        elif writer == "inversion_marker" and exists:
+            assert invoke() is None  # invalid existing marker: native read/parse no-op
+            assert path.read_bytes() == b"keep"
+        else:
+            result = invoke()
+            if writer in ("local_delete", "migration_unlink"):
+                assert not path.exists()
+            elif writer == "local_delete_conflict_copies":
+                assert result == (2 if exists else 0)
+                assert not list(path.parent.glob("sentinel *"))
+            elif writer in ("init_storage", "events_bootstrap"):
+                assert path.is_dir()
+                if writer == "init_storage":
+                    assert (path / "mm-crypto-init").is_file()
+                else:
+                    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+            else:
+                assert path.is_file()
+                if writer == "pull_apply" and exists:
+                    assert result == "conflicted" and path.read_bytes() == b"keep"
+                    copies = list(path.parent.glob("*.sync-conflict-*"))
+                    assert len(copies) == 1 and copies[0].read_bytes() == b"new"
+                elif writer in ("local_put", "local_put_exclusive", "pull_apply"):
+                    assert path.read_bytes() == b"new"
+                elif writer == "log_unexpected":
+                    assert b"RuntimeError: original incident" in path.read_bytes()
+                elif writer == "update_log":
+                    assert path.read_text().endswith("fixture output")
+                elif writer.startswith("seen_"):
+                    assert "new" in json.loads(path.read_bytes())
+                    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+                elif writer == "migration_write":
+                    assert json.loads(path.read_bytes())["missing_sources"] == ["custom"]
+                elif writer in ("sidecar_write", "attemptlog_write", "save_config"):
+                    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    return check
+
+
+def test_log_unexpected_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("log_unexpected", raw_writer_exists)
+
+
+def test_log_unexpected_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("log_unexpected", raw_writer_exists)
+
+
+def test_migration_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("migration_write", raw_writer_exists)
+
+
+def test_migration_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("migration_write", raw_writer_exists)
+
+
+def test_migration_unlink_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("migration_unlink", raw_writer_exists)
+
+
+def test_migration_unlink_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("migration_unlink", raw_writer_exists)
+
+
+def test_pull_apply_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("pull_apply", raw_writer_exists)
+
+
+def test_pull_apply_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("pull_apply", raw_writer_exists)
+
+
+def test_init_storage_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("init_storage", raw_writer_exists)
+
+
+def test_init_storage_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("init_storage", raw_writer_exists)
+
+
+def test_local_put_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("local_put", raw_writer_exists)
+
+
+def test_local_put_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("local_put", raw_writer_exists)
+
+
+def test_local_put_exclusive_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("local_put_exclusive", raw_writer_exists)
+
+
+def test_local_put_exclusive_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("local_put_exclusive", raw_writer_exists)
+
+
+def test_local_delete_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("local_delete", raw_writer_exists)
+
+
+def test_local_delete_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("local_delete", raw_writer_exists)
+
+
+def test_local_delete_conflict_copies_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("local_delete_conflict_copies", raw_writer_exists)
+
+
+def test_local_delete_conflict_copies_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("local_delete_conflict_copies", raw_writer_exists)
+
+
+def test_seen_read_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("seen_read", raw_writer_exists)
+
+
+def test_seen_read_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("seen_read", raw_writer_exists)
+
+
+def test_seen_acknowledge_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("seen_acknowledge", raw_writer_exists)
+
+
+def test_seen_acknowledge_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("seen_acknowledge", raw_writer_exists)
+
+
+def test_seen_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("seen_write", raw_writer_exists)
+
+
+def test_seen_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("seen_write", raw_writer_exists)
+
+
+def test_pipx_install_lock_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("pipx_install_lock", raw_writer_exists)
+
+
+def test_pipx_install_lock_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("pipx_install_lock", raw_writer_exists)
+
+
+def test_update_log_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("update_log", raw_writer_exists)
+
+
+def test_update_log_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("update_log", raw_writer_exists)
+
+
+def test_acquire_lock_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("acquire_lock", raw_writer_exists)
+
+
+def test_acquire_lock_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("acquire_lock", raw_writer_exists)
+
+
+def test_devices_write_lock_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("devices_write_lock", raw_writer_exists)
+
+
+def test_devices_write_lock_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("devices_write_lock", raw_writer_exists)
+
+
+def test_save_config_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("save_config", raw_writer_exists)
+
+
+def test_save_config_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("save_config", raw_writer_exists)
+
+
+def test_events_bootstrap_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("events_bootstrap", raw_writer_exists)
+
+
+def test_events_bootstrap_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("events_bootstrap", raw_writer_exists)
+
+
+def test_sidecar_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("sidecar_write", raw_writer_exists)
+
+
+def test_sidecar_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("sidecar_write", raw_writer_exists)
+
+
+def test_attemptlog_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("attemptlog_write", raw_writer_exists)
+
+
+def test_attemptlog_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("attemptlog_write", raw_writer_exists)
+
+
+def test_inversion_marker_refuses_protected_root(raw_writer_refusal):
+    raw_writer_refusal("inversion_marker", False)
+
+
+def test_inversion_marker_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("inversion_marker", raw_writer_exists)
+
+
+def test_seen_sources_read_hit_and_inversion_marker_are_unguarded(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    from mind_meld import resolveflow, seen_sources, sidecar
+
+    root = synthetic_account_home / ".config/mind-meld"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(seen_sources, "SEEN_DIR", root)
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root)
+    seen_sources.seen_path().write_text('["existing"]')
+    resolveflow._inversion_marker_path().write_text("123.0\n")
+    monkeypatch.setattr(
+        fsutil,
+        "refuse_real_state_write_under_pytest",
+        lambda path: pytest.fail("pure read called guard"),
+    )
+    calls = forbid_fs_mutations()
+    assert seen_sources.read(["new"]) == {"existing"}
+    assert resolveflow._ensure_inversion_marker() == 123.0
+    assert calls == []
+
+
+@pytest.mark.no_mm_events_isolation
+def test_events_bootstrap_0700_and_inspection_are_unguarded(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    from mind_meld import config, upgrade
+
+    root = synthetic_account_home / ".local/share/mind-meld"
+    root.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(Path, "home", lambda: synthetic_account_home)
+    monkeypatch.setattr(upgrade, "CACHE_DIR", synthetic_account_home / ".config/mind-meld")
+    monkeypatch.setattr(
+        fsutil,
+        "refuse_real_state_write_under_pytest",
+        lambda path: pytest.fail("pure read called guard"),
+    )
+    calls = forbid_fs_mutations()
+    assert config._bootstrap_mm_events_path(str(root)) == []
+    assert not upgrade._install_is_running()
+    assert calls == []
+
+
+def test_log_unexpected_refuses_incident_through_auto_command_setup(
+    synthetic_account_home, monkeypatch, tmp_path, capsys, forbid_fs_mutations
+):
+    from mind_meld import cli, config, lockfile, sidecar
+
+    root = synthetic_account_home / ".config/mind-meld"
+    target = root / "autopull.log"
+    root.mkdir(parents=True, mode=0o750)
+    target.write_bytes(b"original log\n")
+    target.chmod(0o640)
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root)
+    config_path = tmp_path / "local-config.toml"
+    config_path.write_text("")
+    monkeypatch.setattr(config, "CONFIG_PATH", config_path)
+    original = RuntimeError("2026-10-08 original crypto incident")
+
+    def crash():
+        raise original
+
+    monkeypatch.setattr(cli, "load_config", crash)
+    _assert_synthetic_destination(target, synthetic_account_home)
+    before = _tree_bytes_modes(root)
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        with cli._auto_command_scope("pull", typer_exit_outcome="fleet-refused"):
+            pytest.fail("setup should refuse before yielding")
+    _assert_guard_diagnostic(caught.value, target, "protected account-state path")
+    assert caught.value.__context__ is original
+    assert "unexpected config error" in capsys.readouterr().err
+    assert calls == [] and _tree_bytes_modes(root) == before
+    assert not cli._autorun_breadcrumb_path().exists()
+    assert not lockfile._LOCK_FDS
+
+
+def test_log_unexpected_refusal_releases_held_auto_command_lock(
+    synthetic_account_home, monkeypatch, tmp_path, forbid_fs_mutations
+):
+    from mind_meld import cli, lockfile, sidecar
+
+    root = synthetic_account_home / ".config/mind-meld"
+    monkeypatch.setattr(sidecar, "SIDECAR_DIR", root)
+    monkeypatch.setattr(cli, "_auto_command_setup", lambda verb: SimpleNamespace(config={}))
+    monkeypatch.setattr(cli, "_write_migration_breadcrumb", lambda missing: None)
+    monkeypatch.setattr(cli, "_config_missing_recommended_excludes", lambda config: [])
+    lock_path = tmp_path / "safe-lock"
+    monkeypatch.setattr(lockfile, "LOCK_PATH", lock_path)
+    original = RuntimeError("core failure")
+    with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
+        with cli._auto_command_scope("pull", typer_exit_outcome="fleet-refused"):
+            held_fd = lockfile._LOCK_FDS[lockfile._resolve_key(lock_path)]
+            calls = forbid_fs_mutations()
+            raise original
+    assert caught.value.__context__ is original
+    assert lockfile._resolve_key(lock_path) not in lockfile._LOCK_FDS and calls == []
+    with pytest.raises(OSError) as closed:
+        os.fstat(held_fd)
+    assert closed.value.errno == errno.EBADF
+    assert not (root / "last-autorun.json").exists()
+
+
+@pytest.mark.no_mm_events_isolation
+def test_events_bootstrap_inspection_missing_root_is_unguarded(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    from mind_meld import config
+
+    root = synthetic_account_home / ".local/share/mind-meld"
+    monkeypatch.setattr(Path, "home", lambda: synthetic_account_home)
+    monkeypatch.setattr(
+        fsutil,
+        "refuse_real_state_write_under_pytest",
+        lambda path: pytest.fail("inspection called guard"),
+    )
+    calls = forbid_fs_mutations()
+    source = {"name": "mm-events", "path": str(root), "type": "generic", "include_dirs": ["events"]}
+    resolution = config.resolve_sources({"sync": {"sources": [source]}}, bootstrap=False)
+    assert resolution.would_create == ("mm-events",)
+    assert calls == [] and not root.exists()

@@ -112,6 +112,16 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `errors.py:KeyringUnavailableError` / keyring path | `docs/invariants/init-devices.md` |
 | `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
+| `cli.py:_log_unexpected` / `_write_migration_breadcrumb` / `_apply_incoming_file` / `init` | [Test write guard](README.md#test-write-guard); `test_log_unexpected_refuses_protected_root`, `test_migration_write_refuses_protected_root`, `test_migration_unlink_refuses_protected_root`, `test_pull_apply_refuses_protected_root`, `test_init_storage_refuses_protected_root` |
+| `storage/local.py:LocalBackend.put` / `LocalBackend.put_exclusive` / `LocalBackend.delete` / `LocalBackend.delete_conflict_copies` | [Test write guard](README.md#test-write-guard); `test_local_put_refuses_protected_root`, `test_local_put_exclusive_refuses_protected_root`, `test_local_delete_refuses_protected_root`, `test_local_delete_conflict_copies_refuses_protected_root` |
+| `seen_sources.py:read` / `acknowledge` / `write` | [Test write guard](README.md#test-write-guard); `test_seen_read_refuses_protected_root`, `test_seen_acknowledge_refuses_protected_root`, `test_seen_write_refuses_protected_root` |
+| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | [Test write guard](README.md#test-write-guard); `test_pipx_install_lock_refuses_protected_root`, `test_update_log_refuses_protected_root`; `_spawn_pipx` already refused by its pipx guard |
+| `lockfile.py:acquire_lock` | [Test write guard](README.md#test-write-guard); `test_acquire_lock_refuses_protected_root` |
+| `devices.py:_devices_write_lock` | [Test write guard](README.md#test-write-guard); `test_devices_write_lock_refuses_protected_root` |
+| `config.py:save_config` / `_bootstrap_mm_events_path` | [Test write guard](README.md#test-write-guard); `test_save_config_refuses_protected_root`, `test_events_bootstrap_refuses_protected_root` |
+| `sidecar.py:write` | [Test write guard](README.md#test-write-guard); `test_sidecar_write_refuses_protected_root` |
+| `attemptlog.py:write` | [Test write guard](README.md#test-write-guard); `test_attemptlog_write_refuses_protected_root` |
+| `resolveflow.py:_ensure_inversion_marker` | [Test write guard](README.md#test-write-guard); `test_inversion_marker_refuses_protected_root` |
 | `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
 | `upgrade.py:cached_upgrade_view` / `cli.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |
 | `cli.py:_detect_case_insensitive_fs` / `_detect_pull_case_collisions` | `docs/invariants/sync.md` |
@@ -161,46 +171,135 @@ If you're touching multiple areas (e.g., adding a new field to mm-push event tha
 ## Test write guard
 
 `fsutil.py:refuse_real_state_write_under_pytest` checks the nonempty
-`PYTEST_CURRENT_TEST` marker at call time, including in child processes, without
-depending on conftest or its `_isolate_*` fixtures. Alongside the
-[keyring guard](init-devices.md#store_passphrase_in_keyring-pytest_current_test-guard-load-bearing-v01111),
-it protects shared-helper writes to these canonical account roots:
+`PYTEST_CURRENT_TEST` marker at call time, including in marker-inheriting child
+processes. It is independent of conftest and its `_isolate_*` fixtures.
+The single `_pytest_refused_roots` inventory protects:
 
-- `<account-home>/.config/mind-meld`
-- `<account-home>/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`
-- `<account-home>/Sync/mind-meld`
-- `<account-home>/.local/share/mind-meld` (mm-events, retros and agent skills)
+- Four account trees: `.config/mind-meld`, `.local/share/mind-meld`,
+  `Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, `Sync/mind-meld`.
+- Seven agent trees: `.claude`, `.codex`, `.grok`, `.gstack`, `.gstack-extend`,
+  `.cursor`, `.local/share/muse`.
+- `storage.path`, every explicit `sync.sources[i].path` (including disabled
+  sources), and legacy `sync.claude_dir` from the **real account config**
+  `<account-home>/.config/mind-meld/config.toml`.
 
-The home comes from `pwd.getpwuid(os.getuid()).pw_dir`, never `HOME`,
-`Path.home()` or patched config constants. A test that patches
-`pwd.getpwuid` itself retargets the guard for that test. Roots and descendants
-are protected by lexical containment, resolved containment and read-only
-existing-ancestor device/inode identity checks anchored on both the root and its
-resolved target. The destination entry is also
-classified inside its resolved parent, without following its final component,
-because helpers create temps, rename and lock there. Every prefix before a `..`
-is classified too, since `mkdir(parents=True)` creates it before normalization
-applies. Stable symlinks into and out of the roots are covered. Existing
-distinct case variants on a sensitive filesystem are allowed; missing case
-variants that cannot be distinguished are conservatively refused. Ordinary
-nonexistent suffixes, including paths beneath a regular file, remain valid
-write candidates, so helpers keep their native errors. Other lookup failures
-refuse instead of disabling protection and name the destination or protected
-root that failed. No case probes or home-tree scans run.
+All home-relative roots above use `pwd.getpwuid(os.getuid()).pw_dir`, never
+`$HOME`, `Path.home()` or patched config constants. A test that patches pwd
+retargets the guard. DEFAULT_SOURCES paths and AGENT_ROWS skills-root **values**
+are pinned against this helper by `test_default_source_and_agent_roots_pin`;
+its `no_mm_events_isolation`, `no_source_enabled_isolation`, and
+`owns_skill_paths` opt-outs preserve canonical inputs. Source-enabling fixtures
+must honor `no_source_enabled_isolation`. Adding a default destination requires updating the helper and its pin.
 
-`atomic_write_bytes`, nonempty `flock_append_jsonl`, `append_rotatable_jsonl`,
-both `rotate_jsonl` paths, `statedb.connect(read_only=False)`, `locked_json_rmw` and `locked_json_durable_rmw`
-(data **and** sibling `.lock`) check before their first mutation, including
-mkdir, writable open, mode changes, temp creation and rename. Empty appends
-remain no-ops; `locked_json_snapshot` and `fsync_dir` are unguarded. Allowed-path
-lock, permission, publication, retry and durability contracts are unchanged.
-Outside pytest the guard returns before any account or path lookup.
+Configured roots use stdlib `tomllib`, imported lazily only after the active
+marker branch. Missing/empty config adds no roots. A non-regular, unreadable,
+over-cap (`_PYTEST_CONFIG_MAX_BYTES`, 1 MiB), unparseable or malformed-shape
+config refuses every guarded write. `storage`/`sync` must be tables,
+`sync.sources` a list of tables with string paths; duplicate keys are invalid
+TOML. Missing/non-string/empty `storage.path` adds no storage root. Repairs
+name the real config file and the offending path key, never credential values.
+The session preflight fails once before workers start on an unreadable or
+unparseable real config; the writer guard itself remains conftest-free.
 
-`PytestRealStateWriteError` deliberately derives from `BaseException` so
-forensic `except Exception` callers cannot hide it. Its diagnostic names the
-attempted path and test, distinguishes protected paths from account-home and
-path-resolution failures, and points here. Repair failed lookups and isolate
-destinations under `tmp_path`; keep ordinary isolation fixtures enabled:
+| Config spelling | Guard expansion / production relationship |
+|---|---|
+| Absolute | Keep lexical and resolved spellings for classification. |
+| Bare `~`, `~/...` | Expand against pwd home. Deliberately differs from production `expanduser`, which honors a patched HOME. |
+| `~user/...` | `pwd.getpwnam`; lookup failure refuses with a chained cause. |
+| Still relative | Resolve against `Path.cwd()`, matching production. |
+| Symlinked | Classify lexical location, resolved target and ancestor identity. Production mm-internal source paths retain their absolute, unresolved spelling; the guard additionally classifies the target. |
+| Disabled explicit source / legacy claude_dir | Still protected real user data. |
+
+A configured root equal to `/`, the pwd home, or an ancestor of it refuses as
+a **configured-root lookup failure**, naming the root and the edit required.
+Raw strings cache by `(config path, st_mtime_ns, st_size, pwd home)` and
+re-expand per call. Resolved roots/anchors also key on cwd and live ancestor
+identities, invalidating stable link retargeting. Same-size rewrites with a
+changed mtime and chdir are tested. Config schema changes must update this
+extractor and the scoped production-parity test (absolute, `~user`, and
+HOME-equals-pwd-home examples).
+
+Roots and descendants use lexical containment, resolved containment and
+read-only existing-ancestor device/inode identity checks anchored on both the
+root and its resolved target. The destination entry is also classified inside
+its resolved parent without following its final component: helpers create
+temps, rename and lock there. Each prefix before `..` is classified because
+recursive mkdir can create it before normalization. Stable symlinks into and
+out of roots are covered. Existing distinct case variants on a sensitive
+filesystem are allowed; missing indistinguishable variants refuse
+conservatively. Ordinary nonexistent suffixes, including beneath a regular
+file, retain native writer errors. Other lookup failures refuse with chained
+causes. No case probes or home-tree scans run. Outside pytest the guard returns
+before any account, path or config lookup, or tomllib import.
+
+**C1 closed for the frozen inventory below under an active marker.** Each
+writer calls the raising fsutil guard on its destination **before its first
+mutation, mkdir included**, without rerouting its write protocol. This
+completes retained 71B acceptance only for these named writers under an active
+marker; it establishes neither suite-wide safety nor simulator safety.
+
+| Writer | Guard destination and placement | No-op / read edge |
+|---|---|---|
+| `cli.py:_log_unexpected` | log path before SIDECAR_DIR mkdir and `a+b` open | BaseException escapes its Exception handler; original error stays diagnosable |
+| `cli.py:_write_migration_breadcrumb` | breadcrumb path at entry, before unlink or mkdir | even missing-file deletion refuses; docstring has guard carve-out |
+| `cli.py:_apply_incoming_file` | local_path once before ancestor mkdir loop | leaf symlink skip remains read-only |
+| `cli.py:init` | full storage path before mkdir | CliRunner flow tested |
+| `storage/local.py:LocalBackend.put` / `put_exclusive` | key path before mkdir/temp/link | exclusive EEXIST path also refuses |
+| `storage/local.py:LocalBackend.delete` / `delete_conflict_copies` | key path at entry | missing key and zero copies still refuse |
+| `seen_sources.py:read` / `acknowledge` / `write` | SEEN file before recovery/write mkdir | successful O_RDONLY read never guards |
+| `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | lock/log path before mkdir/open | `_install_is_running` read-only; spawn already refuses earlier via its pipx guard |
+| `lockfile.py:acquire_lock` / `devices.py:_devices_write_lock` | lock path before mkdir/open | release preserves lock inode |
+| `config.py:save_config` | config path before parent mkdir | — |
+| `config.py:_bootstrap_mm_events_path` | p before creation loop and before mode-tightening branch | existing 0700 root and inspection never guard |
+| `sidecar.py:write` / `attemptlog.py:write` / `resolveflow.py:_ensure_inversion_marker` | written path before SIDECAR_DIR mkdir | existing inversion marker is a pure read |
+
+Already guarded: `atomic_write_bytes`, nonempty `flock_append_jsonl`,
+`append_rotatable_jsonl`, both `rotate_jsonl` paths,
+`statedb.connect(read_only=False)`, `locked_json_rmw` and
+`locked_json_durable_rmw` (data **and** sibling lock). Empty appends remain
+no-ops; snapshots and `fsync_dir` are read-only. Allowed-path lock, permission,
+publication, retry and durability contracts remain unchanged.
+`test_<writer>_refuses_protected_root` and `test_<writer>_tmp_control` give
+each writer its own discoverable refusal/control pair; the
+static `tests/test_write_guard_inventory.py` census detects unreviewed raw
+sites and checks same-function guard ordering, including a seeded violation.
+It recognizes stdlib import aliases and direct method aliases, and rejects
+writable os flags in reviewed read-only opens. It supplements behavioral
+tests; it is not control-flow or sandbox proof.
+
+Copy this pattern for a new writer. Guard the written file (logs/config/
+sidecars), lock file, backend key path, apply local_path, or init storage path;
+bootstrap guards the root p only on branches that create or tighten it:
+
+```python
+from mind_meld import fsutil
+
+
+def write_state(path, data):
+    fsutil.refuse_real_state_write_under_pytest(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fsutil.atomic_write_bytes(path, data)
+```
+
+Refusal-test skeleton (prepare synthetic sentinels before denying mutations;
+retarget destination constants **after** autouse patches):
+
+```python
+def test_writer_refuses_real_state(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    root = synthetic_account_home / ".config/mind-meld"
+    destination = root / "state.json"
+    # Patch this writer's destination here, then assert it classifies under root.
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        fsutil.refuse_real_state_write_under_pytest(destination)
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        write_state(destination, b"{}")
+    assert calls == [], f"denied mutation attempts: {calls!r}"
+```
+
+Ordinary isolated tests stay simple:
 
 ```python
 from mind_meld import fsutil
@@ -210,22 +309,41 @@ def test_state_write(tmp_path):
     fsutil.atomic_write_bytes(tmp_path / "state.json", b"{}")
 ```
 
-A real `mm` process that inherits the marker, such as a hook launched inside a
-test run, is treated as a test: a protected write raises, the command exits
-nonzero and no breadcrumb is written. This deliberately differs from the keyring
-and `skill_link.py:_refuse_real_home_under_pytest` guards, which return instead
-of raising. An `Exception` here would reach the auto commands' `_log_unexpected`
-fallback and its raw writer.
+`PytestRealStateWriteError` derives from `BaseException` so forensic
+`except Exception` handlers cannot hide it. Diagnostics quote paths and keys,
+name the test, matched root/source, real config and pwd home (`$HOME is ignored`),
+and distinguish protected hits from lookup failures. Example refusal (wrapped
+for readability):
 
-**C1 remains open: this helper boundary does not establish suite-wide safety
-or Track 71D simulator safety.** Direct `_log_unexpected` `a+b` writes,
-`LocalBackend.put_exclusive`/link and delete/unlink, caller-side mkdirs, direct
-lock creation and the raw `seen_sources` and `upgrade` state opens bypass it.
-Custom storage roots outside the four named roots are not protected, nor are
-agent destinations such as `~/.claude`, `~/.codex`, `~/.grok` and `~/.gstack`
-that pull writes through these helpers. Missing or empty pytest markers (including unmarked
-collection/import activity) leave the guard inactive. This is an accident
-tripwire, not a malicious-test sandbox or protection against concurrent
-same-user symlink replacement. The original Track 71B no-real-state-mutation
-outcome remains unaccepted until those required gaps are resolved; passing
-helper checks does not waive it.
+```text
+Test write guard refused '/account/.claude/state'; PYTEST_CURRENT_TEST='test_writer (call)':
+protected account-state path under '/account/.claude'; matched root='/account/.claude',
+source key='.claude', real config='/account/.config/mind-meld/config.toml',
+pwd account home='/account'; $HOME is ignored.
+Isolate write destinations under tmp_path and keep the isolation fixtures enabled.
+No write occurred. Fix the destination/config and rerun; nothing to clean up.
+See docs/invariants/README.md#test-write-guard
+```
+
+Five-idiom decision rule: use the **raising fsutil guard at write sites**;
+`skill_link` keeps its **skip-loudly boolean guard on the push path only**;
+keyring returns **False**; upgrade's pipx guard raises **OSError**;
+`host_usage` keeps its destination comparators (**PermissionError** for Cursor
+hook edits, **RuntimeError** for real Conductor SQLite opens). These contracts
+are not interchangeable. The skill_link direct symlink/unlink gap remains;
+fsutil does not wrap those raw operations. Host-usage comparators keep their
+existing narrow hook-edit/store-open scope, not an eviction guarantee.
+
+Surviving residuals: missing/empty marker incl. collection-time and
+env-scrubbed subprocesses; concurrent symlink swap; malicious tests;
+worker-thread-local refusals; raw unlinks outside the inventory; future
+writers that skip the call — backstop-covered. Module-level test code can run
+before a marker exists. A same-size, same-mtime config rewrite can retain the
+cached raw strings. A refusal in a worker thread need not fail its parent test.
+Raw retention, resolveflow promotion/migration/resolution, crypto conflict-copy,
+host_usage spool, and cli stale-copy/quarantine/migration-cleanup deletes stay
+outside this frozen inventory (P3 TODO, revisit on an observed deletion or
+near-miss). The os.devnull output open is a process sink, not account state.
+New implementation-time finds belong here and in the reviewed census, not in
+the writer scope. Track 75A and later writers must adopt the call convention;
+82A deletes the temporary LocalBackend rows when that backend retires.

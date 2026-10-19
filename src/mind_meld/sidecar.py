@@ -46,6 +46,7 @@ def write(manifest: dict[str, Any]) -> None:
     Raises StorageError on filesystem failures. Caller handles
     (push writes best-effort; a failure warns but does not abort push).
     """
+    fsutil.refuse_real_state_write_under_pytest(sidecar_path())
     SIDECAR_DIR.mkdir(parents=True, exist_ok=True)
     target = sidecar_path()
     data = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
