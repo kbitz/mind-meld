@@ -272,8 +272,8 @@ def _pytest_refused_roots(
         try:
             identity = _root_cache_identity(root)
             resolver = _pytest_resolved_roots
-            if identity is None:
-                resolver = _pytest_resolved_roots.__wrapped__  # dangling: never cache
+            if identity is None:  # uncacheable root; see _root_cache_identity
+                resolver = _pytest_resolved_roots.__wrapped__
             resolved = resolver(((root, key),), stamp, Path.cwd(), (identity,))[0][2]
             if account is None:
                 account = home.resolve()
@@ -304,7 +304,8 @@ def _pytest_resolved_roots(
     """Resolve roots; stamp, cwd and identities are cache keys only.
 
     Live identities invalidate creation, removal and retargeting of stable root
-    symlinks. Callers bypass this cache (via __wrapped__) for dangling roots.
+    symlinks. Callers bypass this cache (via __wrapped__) when _root_cache_identity
+    returns None (a dangling or ``..``-bearing missing suffix).
     """
     resolved = []
     for root, key in roots:

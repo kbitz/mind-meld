@@ -267,8 +267,8 @@ each writer its own discoverable refusal/control pair; the
 static `tests/test_write_guard_inventory.py` census detects unreviewed raw
 sites and checks same-function guard ordering, including seeded violations.
 Its primitives cover open/mkdir/makedirs, writes, unlink/rmdir/removedirs,
-link/symlink/rename/renames/replace, chmod/chown/utime/truncate, temp-file and
-temp-dir creation, `shutil` copy/move/rmtree/archive helpers and
+link/symlink/rename/renames/replace, chmod/chown/utime/truncate, tempfile
+file and directory creation (including TemporaryFile and mkstemp), `shutil` copy/move/rmtree/archive helpers and
 `sqlite3.connect`; fd-only operations ride on their tracked opens. It recognizes stdlib import aliases and
 direct method aliases, and rejects writable os flags in reviewed read-only opens. It supplements behavioral
 tests; it is not control-flow or sandbox proof.

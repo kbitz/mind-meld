@@ -40,7 +40,10 @@ PRIMITIVES = frozenset(
         "truncate",
         "mkdtemp",
         "NamedTemporaryFile",
+        "TemporaryFile",
+        "SpooledTemporaryFile",
         "TemporaryDirectory",
+        "renames",
         # Receiver-qualified: bare copy/move/connect names are too common to match.
         "shutil.rmtree",
         "shutil.copy",
@@ -53,7 +56,6 @@ PRIMITIVES = frozenset(
         "shutil.make_archive",
         "shutil.unpack_archive",
         "sqlite3.connect",
-        "renames",
     }
 )
 # fd-only operations (fchmod, ftruncate, write) act on descriptors from census-tracked opens.
@@ -907,6 +909,9 @@ def test_raw_mutation_sites_are_reviewed():
         "import shutil\ndef new_writer(path):\n    shutil.chown(path, 'nobody')\n",
         "from shutil import chown\ndef new_writer(path):\n    chown(path, 'nobody')\n",
         "import os\ndef new_writer(a, b):\n    os.renames(a, b)\n",
+        "import shutil\ndef new_writer(path):\n    shutil.make_archive(path, 'zip')\n",
+        "from shutil import unpack_archive\ndef new_writer(path):\n    unpack_archive(path)\n",
+        "import tempfile\ndef new_writer(path):\n    tempfile.TemporaryFile(dir=path)\n",
     ],
 )
 def test_raw_mutation_census_detects_seeded_violation(source):
