@@ -9,6 +9,12 @@ for qualification; the remaining work packages are preserved in
 The [2026-09-30 inbox drain](../TODOS.md#roadmap-drain--2026-09-30) records their
 routing. Later work packages receive implementation Tracks after qualification.
 
+> **Scope (2026-10-19):** [docs/SPEC.md](../SPEC.md) defers Codex and
+> cross-agent memory sync. The fleet-parity qualification was dropped that
+> day. The work-package row links to the
+> [drain](../TODOS.md#roadmap-drain--2026-10-19) that records the drop.
+> This file remains Track 68A evidence.
+
 ## Outcome and scope
 
 First make Claude and Codex comparable for memory capture, recall, and sync
@@ -174,8 +180,8 @@ walker; documentation alone does not prove fleet path portability. See
 
 Each row maps to a work package routed from the TODO inbox. The linked work
 package defines its tasks; this table defines the deliverable and the evidence
-needed to finish it. All
-packages are pending. The prototype is part of qualification and the bridge
+needed to finish it. The fleet-parity row records a dropped package, not an
+open one. The prototype is part of qualification and the bridge
 package, not permission to deploy an incomplete sync protocol.
 
 | Work package | Depends on | Deliverable | Exit gate |
