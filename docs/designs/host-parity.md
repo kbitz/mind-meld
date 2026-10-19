@@ -7,6 +7,11 @@
 > **Superseded in part (v1.1):** retro-fleet now renders one `## Agents` table,
 > not the MODELS card described below. See README and
 > `docs/invariants/events-retro.md`.
+>
+> **Host scope (2026-10-19):** [docs/SPEC.md](../SPEC.md) owns which hosts mm
+> supports. Standalone Grok Build support is being removed, Muse gets its own
+> `muse` family, and Grok models used through Cursor stay in the Grok row. The
+> matrix below is historical where it disagrees.
 
 ## Outcome
 

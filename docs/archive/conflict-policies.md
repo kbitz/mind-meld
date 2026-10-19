@@ -1,7 +1,10 @@
+> SUPERSEDED on 2026-10-19 by [current project spec](../SPEC.md). Historical
+> rationale only; not a source of current scope, scheduling or release policy.
+
 # Conflict policies, three-way merge and the resolver
 
 > Written 2026-10-09/10 against `98e9a69` (v1.6.0). Not yet admitted to the
-> roadmap. Builds on [the 2.0 store](store-v2.md), which owns the causal
+> roadmap. Builds on [the 2.0 store](../designs/store-v2.md), which owns the causal
 > model: version vectors, the ledger, fast-forwards, symmetric resolution and
 > `displaced`. Ships as 2.1 and 2.2.
 >
@@ -27,7 +30,7 @@ days.
   any peer edit to a file this machine never touched is classified as a
   conflict (`cli.py:2006-2021`). That is why picking the newer copy is
   almost always the right answer. The 2.0 store's fast-forward rule removes this whole
-  class; see [store-v2 §4](store-v2.md#4-causal-versions).
+  class; see [store-v2 §4](../designs/store-v2.md#4-causal-versions).
 - **Most of the rest are files no human wrote.** v0.12.51's forensic pass
   over 88 recorded conflicts found 53% were generator output, and 64%
   including machine-written session state. Exclusion converged every one

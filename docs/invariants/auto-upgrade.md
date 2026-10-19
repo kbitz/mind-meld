@@ -400,6 +400,12 @@ prevent publication.
 
 ## Compatibility (1.x)
 
+> **Retired on 2026-10-19 by [docs/SPEC.md](../SPEC.md) release policy, except
+> the storage-format gates:** an mm still refuses storage written in a format it
+> cannot read. Command, flag, config, output, token-field and host-family
+> stability is no longer promised. Track 79A removes the tripwire tests and
+> rewrites this section; until then it describes code, not policy.
+
 1.0 freezes the interoperable storage/wire formats, command and flag names,
 positional arguments, documented prompt keys, `config.toml` keys, exit-code
 meanings, and the machine-readable surfaces listed below. Mixed 0.14.x/1.0.0

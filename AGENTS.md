@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI for syncing AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. Supports Claude Code, Codex, Grok, Muse, and configurable sync sources, plus Cursor usage capture. 2.0 moves the store to a Syncthing folder on macOS and Arch-based Linux; [docs/SPEC.md](docs/SPEC.md) is the product authority.
+Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Cursor, Muse). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -62,7 +62,7 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 - Build storage keys only through validated helpers in `storage/keys.py`, never raw f-strings.
 - Use `lockedjson` for flock-guarded JSON caches; extend it instead of adding ad-hoc fcntl. The multi-file `devices-write.lock` is the exception.
 - Sanitize peer-controlled display strings through `safety`; use `safe_terminal_str` for single-line plain stderr. Display text is not a filesystem identity or shell argument.
-- Never quiet-gate data-at-risk warnings. Normalize config failures at `load_config`; record every events-tail degradation in `PushResult.events_degradations`, not just stderr.
+- Output follows docs/SPEC.md O8: one outcome line, or what broke plus the one fixing command as the last thing printed. Never quiet-gate data-at-risk warnings. Record other degradations (every events-tail degradation in `PushResult.events_degradations`) for `mm status` and `mm diag`, and print them only when the owner must act. Normalize config failures at `load_config`.
 - Do not reintroduce the conflict collector or its cancelled auto-resolver; see [conflict invariants](docs/invariants/conflicts.md#collector-removal-and-auto-resolver-cancellation).
 - Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml` and `CHANGELOG.md` bump. Never restore workflow pushes to protected main. Row format and release rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade).
 - Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`. Update integration tests' `COMMAND_INTENTS62` for every new command; previews and inspection must preserve their write boundaries.
@@ -101,6 +101,6 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 - [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
 - [README](README.md): commands, configuration, previews, integration, and development.
 - [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
-- [SPEC](SPEC.md): 1.x architecture and data model; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 store: [design](docs/designs/store-v2.md).
+- [SPEC](SPEC.md): architecture, data model and CLI reference; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 carries this store onto Syncthing ([docs/SPEC.md](docs/SPEC.md)).
 - Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
 - [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.

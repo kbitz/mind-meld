@@ -44,23 +44,35 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:track=74A] Guard raw unlinks outside the 74A inventory
-- **Description:** Track 74A (autoplan 2026-10-18) guards the C1-named writers; raw unlink sites in retention.py, resolveflow.py promotions, crypto.py conflict-copy deletion, host_usage.py spool handling and cli.py stale-copy/quarantine paths stay unguarded under pytest because their destinations are test-isolated today and their file creation goes through guarded helpers.
-- **Why:** A future test reaching one of these with a real destination could delete real files under pytest without tripping the guard.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Revisit trigger: an observed test-run deletion or a near-miss through one of these sites, or the 75A store writers adopting the same unlink patterns. Without that manifestation this stays deferred per the planning demand gate.
-
-
-### [roadmap:track=74A] Narrow the 74A and 71B safety claims and carry the guard obligation to 75A
-- **Description:** Run /roadmap to amend Track 74A's Outcome and _produces_ and the retained 71B acceptance wording to the named writers under an active pytest marker. Put the before-first-mutation fsutil guard call and static-inventory review obligation on Track 75A's new writers.
-- **Why:** A finite writer inventory plus a discovery backstop does not establish suite-wide or simulator safety; future store writers must adopt the convention explicitly.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** UC2 approved at the 2026-10-18 autoplan gate (owner: rec). Track 74A narrows the invariant README now; ROADMAP.md remains reserved to /roadmap. Revisit when /roadmap next regenerates the 74A/75A cards, before citing 74A as 75A acceptance evidence.
-
-
 ## Drain records
+
+### Roadmap drain — 2026-10-19
+
+Composed with the `/project-spec` rewrite of 2026-10-19. Owner decisions: 2.0 carries the 1.x store onto Syncthing instead of building store-v2; fleet usage reporting is a co-equal product ("keep and invest"); standalone Grok Build support is removed; Muse gets its own family; the 1.x compatibility contract is retired; command output follows SPEC O8; S13, Track 70A's item 14B and the O6 acceptance record are dropped.
+
+2 inbox items: **1 placed, 1 deferred, 0 killed, 0 discharged**. Authored-false rate: 0 / (1 + 0) = 0%. Verification baseline: `408766d` (v1.11.2). Track 74A (v1.11.2, PR #217) was recorded independently in shipped history and Group 74 is tombstoned. No active pins were declared.
+
+| Inbox item | Disposition |
+|---|---|
+| [plan-eng-review:track=74A] Guard raw unlinks outside the 74A inventory | defer → Future (its own trigger: an observed test-run deletion or near-miss, or a new storage writer adopting the pattern) |
+| [roadmap:track=74A] Narrow the 74A and 71B safety claims and carry the guard obligation to 75A | place → the 74A receipt records the narrowed claim; the guard obligation moves to the new writers in Tracks 85A (`.stignore`) and 87A (deletion recovery copies), since the store-v2 publish Track it named is killed |
+
+**Leftover plan** (the 2026-10-18 Tracks, all built on store-v2): 75A publish, 76A snapshots and restore safety, 77A apply cursors, 78A causal classification and 82A delete the 1.x store are killed by the spec rewrite. Their still-wanted outcomes are re-carded on the 1.x store: "waiting, not failed" in 84A, fast-forward from a last-synced base in 87A, iCloud removal in 85A. 79A's portable Claude paths become 86A (its store-v2 previews fall with the store). 80A's create and join becomes 85A on the 1.x key header. 81A's read-only Syncthing status becomes 88A; its `mm devices retire` is killed (the cutover runbook removes a dead machine by hand). 83A's documentation rewrite becomes 89A, with the store invariants in 76A and the compatibility section in 79A. Those IDs are recycled for the new plan: old and new 75A–83A are unrelated. Tracks with no prior card: 75A (manifested refused push), 77A and 78A (O8), 79A to 81A (owner decisions) and 82A and 83A (O7.2, manifested capture gaps).
+
+**Future:** 28 → 16. Killed 12:
+- Grok publishes its own billed cost: Grok Build reader removed.
+- Shared host-reader resume primitives: internal refactor with no outcome; Track 83A restructures the Codex reader.
+- Claude and Codex memory parity qualification, live memory qualification, memory onboarding clock: qualification chain dropped with the owner's obligations decision; Codex memory sync stays deferred and decides its own gates when promoted.
+- S13, Track 70A's 14B, O6 acceptance record: dropped by the owner.
+- 2.1 conflict policies and the 2.2 resolver: designed on store-v2's version vectors; replaced by one new bullet.
+- Fake Syncthing transport conformance: the simulator is deleted (Track 76A).
+- Active-membership coverage before retire: `mm devices retire` is no longer planned.
+
+Promoted 2: the interactive `mm pull` exit code → Track 78A (its exit-0 decision rested on the retired contract); the `muse` host family → Track 79A. Added 2: per-path conflict policies (replacing the 2.1/2.2 bullets) and the deferred inbox item. Two kept bullets were edited during reassessment: "mm-managed Syncthing" now points at Track 88A instead of the killed 81A, and "Share project memories between Claude and Codex" gained a trigger because the parity gate it named was killed. Every other bullet is byte-identical.
+
+**Documents:** docs/SPEC.md rewritten; store-v2.md superseded in place (tests/sim reads it until Track 76A archives it); conflict-policies.md and self-update-qualification.md moved to docs/archive/ (the latter with a redirect for frozen shipped history); notices in host-parity.md and the auto-upgrade "Compatibility (1.x)" section; README's versioning paragraph and AGENTS.md's project, output and detail-map lines updated.
+
+**Version:** documentation-only regeneration; no bump.
 
 ### Roadmap drain — 2026-10-18
 

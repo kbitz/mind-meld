@@ -171,7 +171,7 @@ automatic update downgrades an install for you.
 
 ## Versioning and compatibility
 
-The [Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x) defines stable formats, CLI and machine-readable surfaces, release classifications, and downgrade rules.
+Mind Meld has one user and makes no compatibility promise beyond its storage formats: an older mm refuses storage written in a format it cannot read and tells you to upgrade. Commands, flags, config keys and output can change in any release; the [Upgrading](#upgrading) notes say what to do. The release policy is in [docs/SPEC.md](docs/SPEC.md#release-policy).
 
 ## Exit codes
 
