@@ -44,6 +44,24 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=76A] Repair archived-design pointers at the next roadmap regeneration
+- **Why:** `docs/ROADMAP.md` (the Track 76A card itself and the _read-first_ or _Source_ lines of Tracks 84A to 89A) still cites the design's old path under `docs/designs/`, which now holds only a "# Moved" redirect to `docs/archive/store-v2.md`. Repair those pointers at the next `/roadmap` regeneration and reconcile `docs/roadmap-future.md`, whose link Track 76A already repointed. Track 89A also cites the design's §13 (cutover) as evidence, which the `docs/SPEC.md` evidence list and the archive header omit; reconcile all three. Regeneration must precede starting any Track whose `_read-first_` cites the old design path.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** The Track 76A plan kept generator-owned `docs/ROADMAP.md` untouched and left the redirect at the old path so its pointers still resolve. Revisit at the next `/roadmap` regeneration.
+
+### [plan-eng-review:track=76A] Mention the abandoned code removal in the next release
+- **Why:** Add a one-line CHANGELOG note that the abandoned store code and simulator were removed and mm sync behavior is unchanged.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** The Track 76A plan took no version bump, so the deletion rides the next release. Revisit when preparing that release's CHANGELOG.
+
+### [review:track=76A] Retire pre-2026-10-19 Track IDs from the state.db invariants and their siblings
+- **Why:** The "Pull/push history log (Track 73B)" section of `docs/invariants/sync.md` still assigns the four provisional tables, `incremental_vacuum`, ledger durability and the authoritative-recovery remedy to the Tracks 75A to 81A that the 2026-10-19 rewrite killed or re-carded. Track 76A removed only the deleted simulator's reader claims and added a note that these IDs are not the current roadmap's. A reader for every persisted field, or an explicit "no reader", is still owed. The same old IDs survive in `src/mind_meld/statedb.py` (the `expire_displaced` docstring's "76A"), `docs/invariants/README.md` ("Track 75A and later writers ... 82A deletes the temporary LocalBackend rows", although the 2026-10-19 drain moved that guard obligation to Tracks 85A and 87A and killed the old 82A that would have retired the backend), `docs/invariants/init-devices.md` ("Track 80A's Linux passphrase flow", now Track 85A) and a `tests/test_pullhistory.py` comment ("75A's committed row").
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Found by the Track 76A review; the owner chose the minimal fix there. No current Track card owns the provisional tables: 87A's last-synced base or 88A's peer status should decide reuse or drop. Revisit when Track 87A or 88A starts, or at the next `/roadmap` regeneration if it reaches these references first.
+
 ### [plan-eng-review:track=75A] Name held and refusing files in status and escalate a file held on every push
 - **Why:** Track 75A holds a still-changing file at its published version and names it only in that push's outcome and the autopush breadcrumb (count plus up to three paths). Nothing persists which path a snapshot refusal named, and a file held on every push never escalates, so a continuously written file can lag indefinitely with only a repeating count. 77A's run record is the reader that can carry both.
 - **Effort:** M

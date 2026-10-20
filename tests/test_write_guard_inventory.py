@@ -772,12 +772,6 @@ REVIEWED = {
             "c.unlink(missing_ok=True)",
         ],
     ),
-    "store/format.py:seal_record": (
-        *_READ_ONLY,
-        [
-            "replace(expected, part=part, nparts=nparts)",
-        ],
-    ),
     "token_usage.py:walk_jsonl_segment": (
         *_READ_ONLY,
         [

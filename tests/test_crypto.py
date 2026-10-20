@@ -180,7 +180,7 @@ class TestNewerFormats66A:
 
 class TestDeriveKey:
     def test_explicit_parameters_and_unchanged_defaults(self, monkeypatch):
-        """T03/T15: v3 kwargs participate; legacy defaults stay byte-identical."""
+        """Explicit KDF kwargs participate; the defaults stay byte-identical."""
         salt = bytes(range(16))
         default = derive_key(PASSPHRASE, salt, memory_kb=MEMORY_KB)
         assert default == derive_key(

@@ -613,6 +613,21 @@ class TestMergeLines:
         lines = result.decode().strip().splitlines()
         assert "Apple" in lines[0]
 
+    def test_union_idempotent_commutative_associative(self):
+        """Peers can merge MEMORY.md in any order and grouping."""
+        a = b"- [Zed](z.md)\n- [Alpha](a.md)\n- [Zed](z.md)\n"
+        b_data = b"- [Mid](m.md)\n\n- [Alpha](a.md)  \n"
+        c = b"- [Beta](b.md)\n- [Zed](z.md)\n"
+        expected_ab = b"- [Alpha](a.md)\n- [Mid](m.md)\n- [Zed](z.md)\n"
+        expected_abc = b"- [Alpha](a.md)\n- [Beta](b.md)\n- [Mid](m.md)\n- [Zed](z.md)\n"
+        merged_ab = merge_lines(a, b_data)
+        assert merged_ab == expected_ab
+        assert merge_lines(b_data, a) == expected_ab
+        assert merge_lines(merged_ab, b_data) == expected_ab
+        assert merge_lines(a, b"") == merge_lines(b"", a)
+        assert merge_lines(merge_lines(a, b_data), c) == expected_abc
+        assert merge_lines(a, merge_lines(b_data, c)) == expected_abc
+
 
 class TestLcsMerge:
     """LCS-as-synthetic-base 3-way merge for the (m)erge prompt option."""

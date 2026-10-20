@@ -17,6 +17,8 @@
     ],
     "tests/fixtures/host_sessions/muse/CONTRACT.md": [
       "tests/test_muse_usage.py"
-    ]
+    ],
+    "tests/sim/**": [],
+    "tests/test_store_format.py": []
   }
 }

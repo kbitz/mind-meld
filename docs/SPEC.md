@@ -252,10 +252,6 @@ manual step.
   - [Invariants](invariants/README.md): module map and mandatory per-topic
     rules. Their "Compatibility (1.x)" section is retired by this spec except
     its storage-format gates.
-  - [Store-v2 design](designs/store-v2.md): superseded as the 2.0 design on
-    2026-10-19. Current only as evidence: the "Why a new store" hazard table
-    (the Syncthing problems the 1.x store must handle), §7 portable paths,
-    §10 Syncthing folder options and §11 Linux.
   - [Host parity](designs/host-parity.md): usage-family rationale. This
     spec's table owns host scope.
   - [Grok usage reader](designs/grok-build-usage-reader.md): the Grok Build
@@ -266,6 +262,10 @@ manual step.
     [Codex memory contract](designs/codex-memory-contract.md): Track 68A
     evidence behind the deferred memory work.
 - Superseded history:
+  - [Store-v2 design](archive/store-v2.md): superseded as the 2.0 design on
+    2026-10-19. Evidence: the "Why a new store" hazard table (the Syncthing
+    problems the 1.x store must handle), §7 portable paths, §10 Syncthing
+    folder options and §11 Linux.
   - [Conflict policies](archive/conflict-policies.md): the 2.1 policies and
     2.2 resolver designed on store-v2's version vectors; superseded
     2026-10-19 with that design.

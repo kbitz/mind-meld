@@ -5014,8 +5014,7 @@ def _push_core(
         # Apply the upload's patches and holds to the manifest BEFORE it is
         # serialized: a settled re-read advertises its own revision, and a held
         # file goes back to its accepted prior entry (or out), so the manifest
-        # never names a blob that was not put. 73C's torn-publish recovery only
-        # ever sees these final entries.
+        # never names a blob that was not put.
         local_files = local_manifest["sources"][src_name]["files"]
         local_files.update(uploaded.patches)
         upload_held |= bool(uploaded.held)
