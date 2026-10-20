@@ -238,7 +238,7 @@ Each site re-reads **once**, counted exactly: scan read 1 in `_record_file`, imm
 
 Hold eligibility is exactly `not recovering_from_corrupt` (`fetch.status == "corrupt"` or `fetch.conflict_copies_only`). `ok` holds at the fetched entry; `missing` (first push, not recovery) holds by omission; a recovered prior (sidecar, peers or conflict copies) was never accepted as-is, so there the retry still runs and settles normally, but a still-changing file refuses, naming the file and the fix. `_push_core` passes no collector under recovery and `_upload_changed_blobs(allow_hold=False)` re-raises. Held-file injection (`_inject_held_entries`, one helper for the scan and the rescan) runs after the unselected/exclude filters, the symlink prior-drop and the nested-checkout freeze, and before the omission proof and tombstones: it skips frozen, excluded and tombstoned paths (pruned, never counted: excluded or deleted, not waiting), needs no blob-exists probe (parity with the accepted freeze path), and so needs no omission-proof exemption (the proof skips locally present paths). A hold candidate is a scandir entry that vanished between its listing and its stat; it is re-lstat'ed at injection: still missing and an exact prior file holds at the prior, still missing under a prior directory refuses (an unenumerated subtree cannot be proven tombstone-safe), still missing and neither is omitted, present again in any form refuses.
 
-The mm-events rescan replaces its sources, so it takes their holds from its own scan: a path it reads cleanly leaves the held set and uploads normally, a path it holds keeps its accepted prior entry (or is left out), and a held path under a checkout the rescan reports moves to frozen handling (held and frozen stay disjoint; upload skips both). An upload-time hold puts no blob and skips only that file: the loop continues and the manifest still publishes the rest. Its entry is patched back to the accepted prior entry (or removed) and read-2 patches are applied **before the manifest is serialized**, so the manifest never advertises a blob that was not put and 73C's torn-publish recovery never observes a held skip. After upload holds, tombstones are reconciled against those final entries: a recreated file that could not publish keeps its accepted deletion and is not counted as waiting. Counters describe published bytes: upload holds leave `total_new`/`total_modified` by fresh-diff membership, and `content_files` only for non-mm-internal sources; `content_changed` is the pre-upload gate fact and is not recomputed.
+The mm-events rescan replaces its sources, so it takes their holds from its own scan: a path it reads cleanly leaves the held set and uploads normally, a path it holds keeps its accepted prior entry (or is left out), and a held path under a checkout the rescan reports moves to frozen handling (held and frozen stay disjoint; upload skips both). An upload-time hold puts no blob and skips only that file: the loop continues and the manifest still publishes the rest. Its entry is patched back to the accepted prior entry (or removed) and read-2 patches are applied **before the manifest is serialized**, so the manifest never advertises a blob that was not put. After upload holds, tombstones are reconciled against those final entries: a recreated file that could not publish keeps its accepted deletion and is not counted as waiting. Counters describe published bytes: upload holds leave `total_new`/`total_modified` by fresh-diff membership, and `content_files` only for non-mm-internal sources; `content_changed` is the pre-upload gate fact and is not recomputed.
 
 | State | What you see | What to do |
 |---|---|---|
@@ -734,18 +734,19 @@ tests assert table_info and index_list independently.
 |---|---|
 | meta | key/value: compat_version gates every connection; history_imported selects history; history_import_pending reports deferred import; legacy_jsonl_stat feeds the two-file stale-binary notice (73B). No other keys yet. |
 | history | id orders insertions/prune/ties, ts renders and sorts, ts_us filters --since, verb/device/source/rel_path/action/local_sha/remote_sha/extra reconstruct mm log rows (73B); old_version/new_version live in extra. |
-| ledger | source/path key; sha/vv/mtime/deleted/pending: 75A Publish: ledger authoring, commits and presence, and 78A Causal classification, symmetric resolution and displaced; size: 75A simulator INV7. vv is sorted compact canonical JSON; no content bytes. |
+| ledger | source/path key; sha/vv/mtime/deleted/pending: 75A Publish: ledger authoring, commits and presence, and 78A Causal classification, symmetric resolution and displaced; size: no reader. vv is sorted compact canonical JSON; no content bytes. |
 | cursors | peer/applied_seq/hash/gap_seq/gap_since: 77A Apply cursors, gap rule and snapshot bootstrap; hash anchors chains, NULL after snapshot raise. 81A Delivery receipts, device projection and retirement reads status; 75A presence reads applied. |
 | own_log | seq/prev/hash/parts/bytes: 75A publish; hash chains prev. time: integer epoch seconds for 76A Snapshots, compaction and own-storage reconciliation (14-day compaction). No redundant created_at. |
-| displaced | id/source/path/sha/vv/size/mtime/deleted/content/reason/time/expired: 78A mm displaced and classification; 76A compaction expiry; simulator INV2 reads expired/sha/time. size remains visible after expiry. |
+| displaced | id/source/path/sha/vv/size/mtime/deleted/content/reason/time/expired: 78A mm displaced and classification; 76A compaction expiry. size remains visible after expiry. |
 
 ledger, cursors, own_log and displaced are **provisional and empty** until their
-Tracks. Their owner may DROP and re-CREATE its table in a migration following
-73C or its own review without raising compat_version: released binaries
-read history only. 75A's adapter/oracle must preserve INV7 byte-integrity and
-causal coverage for an unpublished edit, deletion and pending resolution with
-the metadata-only ledger; current source bytes cannot substitute for old ledger
-content. `expire_displaced` is unit-tested only until 76A calls it inside its
+Tracks. The Track IDs 75A to 81A in this section name the store-v2 Tracks the
+2026-10-19 spec rewrite killed, not the current roadmap's Tracks of the same
+number: these four tables have no current reader, and Track 87A's state.db
+migration decides whether to reuse or drop them. Their owner may DROP and
+re-CREATE its table in a migration following 73C or its own review without
+raising compat_version: released binaries read history only.
+`expire_displaced` is unit-tested only until 76A calls it inside its
 transaction: at 30 days it clears content and sets expired, never deletes rows
 or changes metadata.
 

@@ -6,11 +6,15 @@
 > policy.
 >
 > Track 76A removed the abandoned code and simulator; `MM_SIM_DEEP` was
-> removed with the simulator. The simulator modeled store-v2 rules, so it is
-> not a seed for a 1.x-store Syncthing rig.
+> removed with the simulator. Its model, invariants and scenarios encoded
+> store-v2 rules. Its fake transport and two-device harness
+> (`tests/sim/transport.py`, `disk.py`, `devices.py` and their tests) imported
+> no store code and drove the real 1.x CLI; they are retrievable below.
+> Fake-Syncthing conformance was killed on 2026-10-19, so they are reference,
+> not a planned rig.
 >
 > Retrieval: the deleted code and tests were present at
-> `e013df3e85c7b797fe0aeb351da0e5695e000c7a` (this PR's base on `origin/main`).
+> `e013df3e85c7b797fe0aeb351da0e5695e000c7a` (Track 76A's base on `main`).
 > List the paths, then inspect a file without creating a worktree:
 >
 > ```sh
