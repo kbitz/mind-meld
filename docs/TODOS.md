@@ -44,6 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=76A] Repair archived-design pointers at the next roadmap regeneration
+- **Why:** `docs/ROADMAP.md` still points at the moved design through its tombstone. Repair those stale pointers at the next `/roadmap` regeneration, including the associated `docs/roadmap-future.md` reference. Regeneration must precede starting any Track whose `_read-first_` cites the old design path.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 76A gate d1a ships the redirect; generated roadmap text stays untouched by this implementation. Revisit at the next `/roadmap` regeneration.
+
+### [plan-eng-review:track=76A] Mention the abandoned code removal in the next release
+- **Why:** Add a one-line CHANGELOG note that the abandoned store code and simulator were removed and mm sync behavior is unchanged.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 76A gate d3a: no version bump; deletion rides the next release. Revisit when preparing that release's CHANGELOG.
+
 ### [plan-eng-review:track=75A] Name held and refusing files in status and escalate a file held on every push
 - **Why:** Track 75A holds a still-changing file at its published version and names it only in that push's outcome and the autopush breadcrumb (count plus up to three paths). Nothing persists which path a snapshot refusal named, and a file held on every push never escalates, so a continuously written file can lag indefinitely with only a repeating count. 77A's run record is the reader that can carry both.
 - **Effort:** M

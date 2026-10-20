@@ -144,9 +144,9 @@ def derive_key(
 ) -> bytes:
     """Derive a 256-bit key from a passphrase using Argon2id.
 
-    Low-level primitive used by load_master_key() and the explicit v3 fleet
-    API. Legacy callers retain time=3, parallelism=1 and their original cache.
-    The store validates untrusted v3 parameters before calling this primitive.
+    Low-level primitive used by load_master_key(). Legacy callers retain
+    time=3, parallelism=1 and their original cache.
+    Callers must validate untrusted KDF parameters before calling.
     """
     if not passphrase:
         raise CryptoError("init: passphrase cannot be empty.")
