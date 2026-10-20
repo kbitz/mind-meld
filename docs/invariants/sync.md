@@ -610,6 +610,13 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 
 ## Pull/push history log (Track 73B)
 
+Track IDs 75A to 81A in this section and its subsections name the store-v2
+Tracks from before the 2026-10-19 spec rewrite, not the current roadmap's
+Tracks of the same number: 75A to 78A were killed and 81A's peer status became
+Track 88A. The four provisional tables below have no current reader; whichever
+current Track first needs per-peer state (87A's last-synced base or 88A's peer
+status) decides whether to reuse or drop them.
+
 `pullhistory` owns the forensic `history` table in the local, never-synced
 `~/.config/mind-meld/state.db` (0600; a directory statedb creates is 0700, an
 existing one keeps its mode). `statedb` is a leaf:
@@ -739,13 +746,10 @@ tests assert table_info and index_list independently.
 | own_log | seq/prev/hash/parts/bytes: 75A publish; hash chains prev. time: integer epoch seconds for 76A Snapshots, compaction and own-storage reconciliation (14-day compaction). No redundant created_at. |
 | displaced | id/source/path/sha/vv/size/mtime/deleted/content/reason/time/expired: 78A mm displaced and classification; 76A compaction expiry. size remains visible after expiry. |
 
-ledger, cursors, own_log and displaced are **provisional and empty** until their
-Tracks. The Track IDs 75A to 81A in this section name the store-v2 Tracks the
-2026-10-19 spec rewrite killed, not the current roadmap's Tracks of the same
-number: these four tables have no current reader, and Track 87A's state.db
-migration decides whether to reuse or drop them. Their owner may DROP and
-re-CREATE its table in a migration following 73C or its own review without
-raising compat_version: released binaries read history only.
+ledger, cursors, own_log and displaced are **provisional and empty**, with no
+current reader (see the note at the top of this section). A Track that adopts
+one may DROP and re-CREATE it in a migration without raising compat_version:
+released binaries read history only.
 `expire_displaced` is unit-tested only until 76A calls it inside its
 transaction: at 30 days it clears content and sets expired, never deletes rows
 or changes metadata.

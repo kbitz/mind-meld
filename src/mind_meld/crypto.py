@@ -144,9 +144,10 @@ def derive_key(
 ) -> bytes:
     """Derive a 256-bit key from a passphrase using Argon2id.
 
-    Low-level primitive used by load_master_key(). Callers that omit
-    time_cost and parallelism get time=3, parallelism=1.
-    Callers must validate untrusted KDF parameters before calling.
+    Low-level primitive used by load_master_key() and bootstrap_crypto_init().
+    Callers that omit time_cost and parallelism get ARGON2_TIME_COST and
+    ARGON2_PARALLELISM. Callers must validate untrusted KDF parameters before
+    calling.
     """
     if not passphrase:
         raise CryptoError("init: passphrase cannot be empty.")
