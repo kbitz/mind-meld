@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.3] - 2026-10-20
+
+**`mm push` keeps going when a file is still changing.** It re-reads that file once. If the file is still changing, the last published copy stays, a never-published file is left out, and the rest of the push goes out. An attended push names the files that are not yet synced. `mm autopush` records that lag for `mm status`, and `mm recapture` says when its event file stayed local. A source folder that disappears during the upload still stops the push.
+
+### Fixed
+
+- During `mm push`, a file that changes while it is read is re-read once. If it is still changing, gone, or larger, the push holds it: the previous version stays published, a never-published file is omitted, and nothing is deleted. The command exits 0 and names up to three paths (`mm push --verbose` lists them all). `mm push --dry-run` reports the same hold from the scan. `mm autopush` prints nothing and leaves a degraded line for `mm status`.
+- A file that never settles is held on every push. Exclude it if a writer keeps it open. A push that is rewriting a corrupt or conflict-copy manifest still stops, because there is no accepted version to keep.
+- When `mm recapture` holds its own event file, it exits 1 and says the recapture was written locally but not synced. Run `mm push` to publish it.
+- If a previously published source folder disappears while its files are uploading, the push stops and keeps the previous snapshot. Restore the folder, or run `mm disable-source` for that source.
+
+### Upgrade notes
+
+- Commands, flags, and synced storage are unchanged. An older mm keeps working beside this one. An older mm still stops the whole push when a file changes while it is being read.
+
 ## [1.11.2] - 2026-10-19
 
 **Pytest can no longer write this Mac's real Mind Meld account state, configured storage, or agent folders through the remaining raw writers.** A test that reaches those paths stops before the writer creates or changes anything. `mm` itself is unchanged: the check runs only while pytest is running.
