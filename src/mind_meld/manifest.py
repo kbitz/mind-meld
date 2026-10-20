@@ -37,7 +37,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 
-from mind_meld.errors import ManifestError, SnapshotError, os_error_cause, snapshot_refusal
+from mind_meld.errors import (
+    ManifestError,
+    SnapshotChanged,
+    SnapshotError,
+    os_error_cause,
+    snapshot_refusal,
+)
 
 # Syncthing-style local conflict copies: <stem>.sync-conflict-<YYYYmmdd-HHMMSS>-<device>[.<ext>]
 # Pattern pinned to the exact timestamp shape `conflict_filename()` emits
@@ -844,6 +850,24 @@ class _FileTooLarge(Exception):
         self.size = size
 
 
+@dataclass
+class SourceHolds:
+    """Per-source out-parameter for per-file transients a strict scan could not settle.
+
+    Track 75A. A strict walker given one records a file that is still changing
+    after its one re-read (``reasons``: rel -> ``changed`` | ``vanished`` |
+    ``grew``) instead of refusing the whole push. ``candidates`` collects
+    enumeration entries that vanished before their stat; the caller validates
+    them against the prior manifest, because a vanished entry may have been a
+    directory. ``candidates`` is None when the caller cannot validate them, so
+    such an entry still refuses. Without a SourceHolds a transient raises
+    ``SnapshotChanged`` (a ``SnapshotError``) after its retry.
+    """
+
+    reasons: dict[str, str] = field(default_factory=dict)
+    candidates: set[str] | None = None
+
+
 @dataclass(frozen=True)
 class FileRevision:
     """One accepted open-file revision: digest, size, and mtime agree."""
@@ -972,19 +996,31 @@ def read_file_revision(
     ctime_ns or the pathname identity change during the read. Bytes read
     are bounded by ``max_file_size``. An already-oversized file raises
     ``_FileTooLarge`` so callers can keep the established skip policy.
+
+    A file that changes, disappears or grows past the cap *during* the read
+    raises ``SnapshotChanged`` (the transient subclass, Track 75A); every
+    other refusal stays a plain ``SnapshotError``. Callers decide per raise
+    site by exception type, never by message text.
     """
     rel = _rel_or_name(path, base) if base is not None else path.name
 
-    def _refuse(problem: str, next_action: str, exc: BaseException | None = None) -> NoReturn:
+    def _refuse(
+        problem: str,
+        next_action: str,
+        exc: BaseException | None = None,
+        *,
+        transient: str | None = None,
+    ) -> NoReturn:
         cause = os_error_cause(exc) if exc is not None else None
-        err = SnapshotError(
-            snapshot_refusal(
-                source=source_name,
-                rel_path=rel,
-                problem=problem,
-                cause=cause,
-                next_action=next_action,
-            )
+        message = snapshot_refusal(
+            source=source_name,
+            rel_path=rel,
+            problem=problem,
+            cause=cause,
+            next_action=next_action,
+        )
+        err: SnapshotError = (
+            SnapshotChanged(message, transient) if transient else SnapshotError(message)
         )
         if exc is not None:
             raise err from exc
@@ -997,6 +1033,7 @@ def read_file_revision(
             "disappeared while being read",
             "Wait for the writer to finish, then run mm push.",
             e,
+            transient="vanished",
         )
     except OSError as e:
         _refuse("could not be read", "Restore read access, then run mm push.", e)
@@ -1019,6 +1056,7 @@ def read_file_revision(
             "disappeared while being read",
             "Wait for the writer to finish, then run mm push.",
             e,
+            transient="vanished",
         )
     except OSError as e:
         _refuse("could not be read", "Restore read access, then run mm push.", e)
@@ -1033,16 +1071,26 @@ def read_file_revision(
                 "is no longer a confined regular file",
                 "Restore the regular file, then run mm push.",
             )
+        _assert_revision_privacy(
+            path, base, pre_fd_st, source_name=source_name, source_type=source_type
+        )
         if (pre_fd_st.st_dev, pre_fd_st.st_ino) != (pre_path_st.st_dev, pre_path_st.st_ino):
             _refuse(
                 "changed while being read",
                 "Wait for the writer to finish, then run mm push.",
+                transient="changed",
             )
         if pre_fd_st.st_size > max_file_size:
+            if pre_path_st.st_size <= max_file_size:
+                # Under the cap at the pre-open lstat, over it at the descriptor:
+                # the file grew while being opened. Over the cap at both is a
+                # stable oversized file and keeps the skip policy.
+                _refuse(
+                    "grew beyond max_file_size while being read",
+                    "Wait for the writer to finish, or raise sync.max_file_size, then run mm push.",
+                    transient="grew",
+                )
             raise _FileTooLarge(pre_fd_st.st_size)
-        _assert_revision_privacy(
-            path, base, pre_fd_st, source_name=source_name, source_type=source_type
-        )
 
         hasher = hashlib.sha256()
         chunks: list[bytes] = []
@@ -1058,18 +1106,6 @@ def read_file_revision(
             if retain_bytes:
                 chunks.append(chunk)
             remaining -= len(chunk)
-        if remaining <= 0:
-            _refuse(
-                "grew beyond max_file_size while being read",
-                "Wait for the writer to finish, or raise sync.max_file_size, then run mm push.",
-            )
-        hashed = (max_file_size + 1) - remaining
-        if hashed != pre_fd_st.st_size:
-            _refuse(
-                "changed while being read",
-                "Wait for the writer to finish, then run mm push.",
-            )
-
         try:
             post_fd_st = os.fstat(fd)
             post_path_st = path.lstat()
@@ -1078,19 +1114,11 @@ def read_file_revision(
                 "disappeared while being read",
                 "Wait for the writer to finish, then run mm push.",
                 e,
+                transient="vanished",
             )
         except OSError as e:
             _refuse("could not be read", "Restore read access, then run mm push.", e)
-        if _revision_signature(pre_fd_st) != _revision_signature(post_fd_st):
-            _refuse(
-                "changed while being read",
-                "Wait for the writer to finish, then run mm push.",
-            )
-        if (post_path_st.st_dev, post_path_st.st_ino) != (pre_fd_st.st_dev, pre_fd_st.st_ino):
-            _refuse(
-                "changed while being read",
-                "Wait for the writer to finish, then run mm push.",
-            )
+        # Confinement takes precedence over retryable revision changes.
         if not stat.S_ISREG(post_path_st.st_mode):
             _refuse(
                 "is no longer a confined regular file",
@@ -1099,6 +1127,36 @@ def read_file_revision(
         _assert_revision_privacy(
             path, base, post_fd_st, source_name=source_name, source_type=source_type
         )
+        if (post_path_st.st_dev, post_path_st.st_ino) != (post_fd_st.st_dev, post_fd_st.st_ino):
+            _assert_revision_privacy(
+                path, base, post_path_st, source_name=source_name, source_type=source_type
+            )
+        if remaining <= 0:
+            _refuse(
+                "grew beyond max_file_size while being read",
+                "Wait for the writer to finish, or raise sync.max_file_size, then run mm push.",
+                transient="grew",
+            )
+        hashed = (max_file_size + 1) - remaining
+        if hashed != pre_fd_st.st_size:
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+                transient="changed",
+            )
+
+        if _revision_signature(pre_fd_st) != _revision_signature(post_fd_st):
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+                transient="changed",
+            )
+        if (post_path_st.st_dev, post_path_st.st_ino) != (pre_fd_st.st_dev, pre_fd_st.st_ino):
+            _refuse(
+                "changed while being read",
+                "Wait for the writer to finish, then run mm push.",
+                transient="changed",
+            )
         data = b"".join(chunks) if retain_bytes else None
         return FileRevision(
             digest=hasher.hexdigest(),
@@ -1163,6 +1221,7 @@ def _collect_regular_files_scandir(
     on_skip: Any = None,
     nested_repos: set[str] | None = None,
     collect_files: bool = True,
+    holds: SourceHolds | None = None,
 ) -> list[Path]:
     """Explicit ``os.scandir`` walk that never follows descendant symlinks.
 
@@ -1170,6 +1229,12 @@ def _collect_regular_files_scandir(
     it with ``.git``) before listing their contents, reporting each root to
     ``on_skip`` with NESTED_REPO_SKIP_REASON and to ``nested_repos``.
     ``collect_files=False`` runs that inventory without collecting files.
+
+    A strict walk given ``holds.candidates`` records an entry that vanished
+    between its listing and its stat (a temp file renamed away) as a hold
+    candidate instead of refusing; the caller validates it against the prior
+    manifest. A directory that vanishes before its own listing, and every
+    other enumeration failure, still refuses.
     """
     collected: list[Path] = []
 
@@ -1230,6 +1295,9 @@ def _collect_regular_files_scandir(
             try:
                 st = entry.stat(follow_symlinks=False)
             except FileNotFoundError as e:
+                if strict and holds is not None and holds.candidates is not None:
+                    holds.candidates.add(_rel_or_name(Path(entry.path), base))
+                    continue
                 if strict:
                     raise SnapshotError(
                         snapshot_refusal(
@@ -1290,6 +1358,51 @@ def _lstat_or_none(
         return None
 
 
+def _stat_collected_file(
+    path: Path,
+    base: Path,
+    *,
+    strict: bool,
+    source_name: str | None,
+    holds: SourceHolds | None,
+    exclude_patterns: list[str] | None,
+    skip_prefixes: list[str] | None = None,
+) -> os.stat_result | None:
+    """Stat one already-enumerated file before it is recorded (grok/muse/generic loops).
+
+    Returns None when the walker should skip it. A strict walk re-probes a
+    vanished file once, even during recovery. An unresolved vanish is held
+    only with ``holds`` (excluded paths are skipped silently: they never sync).
+    Any other ``OSError``, or a repeated vanish without ``holds``, refuses.
+    """
+    try:
+        return path.lstat() if strict else path.stat()
+    except OSError as e:
+        if not strict:
+            return None
+        if isinstance(e, FileNotFoundError):
+            try:
+                return path.lstat()
+            except FileNotFoundError as again:
+                if holds is not None:
+                    rel = _rel_or_name(path, base)
+                    if not _is_excluded(rel, exclude_patterns, skip_prefixes):
+                        holds.reasons[rel] = "vanished"
+                    return None
+                e = again
+            except OSError as again:
+                e = again
+        raise SnapshotError(
+            snapshot_refusal(
+                source=source_name,
+                rel_path=_rel_or_name(path, base),
+                problem="could not be read",
+                cause=os_error_cause(e),
+                next_action="Restore read access, then run mm push.",
+            )
+        ) from e
+
+
 # Per-file walker pipeline (single source of truth, called by
 # walk_claude_source, walk_generic_source, walk_grok_source, and
 # walk_muse_source):
@@ -1298,7 +1411,10 @@ def _lstat_or_none(
 #                                   │
 #                          _is_excluded(rel)? ──► None
 #                                   │
-#                 strict: one descriptor revision ─── OSError/change ──► SnapshotError
+#                 strict: one descriptor revision ─── OSError ──► SnapshotError
+#                                   └─ changed/vanished/grew ─► re-read once ─► still
+#                                      changing ─► SnapshotChanged (a hold when the
+#                                      caller passed SourceHolds, else a refusal)
 #                 diagnostic: stat()/hash_file() skip on permission/read/size
 #                                   │
 #                          (rel, {sha256, size, mtime})
@@ -1307,6 +1423,22 @@ def _lstat_or_none(
 # permissive walker is intentionally lossy. Publishing scans use strict
 # mode so an incomplete observation cannot become a tombstone. See SPEC.md
 # "Merge invariants."
+#
+# Transient census (Track 75A). Only these strict sites may hold a file
+# instead of refusing, and only when the caller passes SourceHolds:
+#   1. read_file_revision's changed/vanished/grew raises (SnapshotChanged),
+#      retried once in _record_file, which every walker reaches;
+#   2. the per-file lstat in the grok, muse and generic loops
+#      (_stat_collected_file): FileNotFoundError after one re-probe;
+#   3. _collect_regular_files_scandir's entry stat (all four walkers):
+#      FileNotFoundError becomes a hold *candidate* the caller validates.
+# The claude walker has no per-file probe before _record_file. Marker discovery
+# (_collect_marker_files) has its own entry stat and keeps refusing on a
+# vanished entry: it cannot carry a collector and is outside the approved
+# census (docs/TODOS.md). Directory and root probes (_lstat_or_none, project
+# entries, scandir of a directory, nested-checkout probes,
+# path_has_descendant_symlink) and every other OSError keep refusing: an
+# unenumerated subtree cannot be proven tombstone-safe.
 def _record_file(
     path: Path,
     base: Path,
@@ -1319,6 +1451,7 @@ def _record_file(
     source_name: str | None = None,
     source_type: str | None = None,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
+    holds: SourceHolds | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Apply the per-file walker pipeline to `path` under `base`.
 
@@ -1334,6 +1467,10 @@ def _record_file(
     return None silently (no on_skip) — exclusion is intentional, not
     a degradation signal. Strict mode raises SnapshotError on read,
     identity, and privacy failures; a newly oversized file still skips.
+
+    A file that changes, vanishes or grows during the read is re-read once.
+    If the second read is also transient, a caller-supplied ``holds`` records
+    the file and the scan goes on (returns None); without one it raises.
     """
     rel = str(path.relative_to(base))
 
@@ -1341,19 +1478,30 @@ def _record_file(
         return None
 
     if strict:
+        read_args: dict[str, Any] = {
+            "max_file_size": max_file_size,
+            "retain_bytes": False,
+            "source_name": source_name,
+            "source_type": source_type,
+            "base": base,
+        }
         try:
-            revision = read_file_revision(
-                path,
-                max_file_size=max_file_size,
-                retain_bytes=False,
-                source_name=source_name,
-                source_type=source_type,
-                base=base,
-            )
+            try:
+                revision = read_file_revision(path, **read_args)
+            except SnapshotChanged:
+                # Read 2: a verified revision of its own, not required to equal
+                # read 1. Non-transient failures and a stable oversize here take
+                # their ordinary paths; there is no third read.
+                revision = read_file_revision(path, **read_args)
         except _FileTooLarge as e:
             if on_skip:
                 size_mb = e.size / (1024 * 1024)
                 on_skip(rel, f"exceeds max_file_size ({size_mb:.1f}MB)")
+            return None
+        except SnapshotChanged as e:
+            if holds is None:
+                raise
+            holds.reasons[rel] = e.reason
             return None
         return rel, {
             "sha256": revision.digest,
@@ -1398,6 +1546,7 @@ def walk_claude_source(
     *,
     strict: bool = False,
     source_name: str | None = None,
+    holds: SourceHolds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Claude ~/.claude directory and build the files dict.
 
@@ -1414,6 +1563,8 @@ def walk_claude_source(
             hardcoded EXCLUDED list. Matched against the relative path.
         strict: Publishing scans refuse incomplete observations.
         source_name: Source name for strict SnapshotError location.
+        holds: Optional strict-scan out-parameter that collects files still
+            changing after their retry instead of refusing (Track 75A).
 
     Returns:
         Dict mapping relative paths to {sha256, size, mtime}.
@@ -1508,7 +1659,12 @@ def walk_claude_source(
                 scan_dirs.append(subdir)
         for scan_dir in scan_dirs:
             for path in _collect_regular_files_scandir(
-                scan_dir, base, strict=True, source_name=source_name, on_skip=on_skip
+                scan_dir,
+                base,
+                strict=True,
+                source_name=source_name,
+                on_skip=on_skip,
+                holds=holds,
             ):
                 if result := _record_file(
                     path,
@@ -1519,6 +1675,7 @@ def walk_claude_source(
                     strict=True,
                     source_name=source_name,
                     source_type="claude",
+                    holds=holds,
                 ):
                     rel, info = result
                     files[rel] = info
@@ -1553,6 +1710,7 @@ def walk_grok_source(
     on_skip: Any = None,
     *,
     strict: bool = False,
+    holds: SourceHolds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Grok home and build the files dict.
 
@@ -1597,7 +1755,12 @@ def walk_grok_source(
             continue
         collected_paths.extend(
             _collect_regular_files_scandir(
-                scan_dir, base, strict=strict, source_name=source_name, on_skip=on_skip
+                scan_dir,
+                base,
+                strict=strict,
+                source_name=source_name,
+                on_skip=on_skip,
+                holds=holds,
             )
         )
 
@@ -1610,19 +1773,15 @@ def walk_grok_source(
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
-        try:
-            st = path.lstat() if strict else path.stat()
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=_rel_or_name(path, base),
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
+        st = _stat_collected_file(
+            path,
+            base,
+            strict=strict,
+            source_name=source_name,
+            holds=holds,
+            exclude_patterns=exclude_patterns,
+        )
+        if st is None:
             continue
         if stat.S_ISLNK(st.st_mode):
             if on_skip:
@@ -1649,6 +1808,7 @@ def walk_grok_source(
             strict=strict,
             source_name=source_name,
             source_type="grok",
+            holds=holds,
         ):
             rel, info = result
             files[rel] = info
@@ -1662,6 +1822,7 @@ def walk_muse_source(
     on_skip: Any = None,
     *,
     strict: bool = False,
+    holds: SourceHolds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a Muse data root and build the files dict.
 
@@ -1709,7 +1870,12 @@ def walk_muse_source(
             continue
         collected_paths.extend(
             _collect_regular_files_scandir(
-                scan_dir, base, strict=strict, source_name=source_name, on_skip=on_skip
+                scan_dir,
+                base,
+                strict=strict,
+                source_name=source_name,
+                on_skip=on_skip,
+                holds=holds,
             )
         )
 
@@ -1722,19 +1888,15 @@ def walk_muse_source(
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
-        try:
-            st = path.lstat() if strict else path.stat()
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=_rel_or_name(path, base),
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
+        st = _stat_collected_file(
+            path,
+            base,
+            strict=strict,
+            source_name=source_name,
+            holds=holds,
+            exclude_patterns=exclude_patterns,
+        )
+        if st is None:
             continue
         if stat.S_ISLNK(st.st_mode):
             if on_skip:
@@ -1760,6 +1922,7 @@ def walk_muse_source(
             strict=strict,
             source_name=source_name,
             source_type="muse",
+            holds=holds,
         ):
             rel, info = result
             files[rel] = info
@@ -1774,6 +1937,7 @@ def walk_generic_source(
     *,
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
+    holds: SourceHolds | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk a generic source directory with configurable include_dirs/include_files.
 
@@ -1795,6 +1959,8 @@ def walk_generic_source(
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
+        holds: Optional strict-scan out-parameter that collects files still
+            changing after their retry instead of refusing (Track 75A).
 
     Returns:
         Dict mapping relative paths (from base) to {sha256, size, mtime}.
@@ -1855,6 +2021,7 @@ def walk_generic_source(
                 source_name=source_name,
                 skip_prefixes=skip_prefixes,
                 on_skip=on_skip,
+                holds=holds,
             )
         )
 
@@ -1906,19 +2073,16 @@ def walk_generic_source(
             if on_skip:
                 on_skip(str(path), "symlink")
             continue
-        try:
-            st = path.lstat() if strict else path.stat()
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=_rel_or_name(path, base),
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
+        st = _stat_collected_file(
+            path,
+            base,
+            strict=strict,
+            source_name=source_name,
+            holds=holds,
+            exclude_patterns=exclude_patterns,
+            skip_prefixes=skip_prefixes,
+        )
+        if st is None:
             continue  # consistent with _record_file's tolerance for races
         if stat.S_ISLNK(st.st_mode):
             if on_skip:
@@ -1939,6 +2103,7 @@ def walk_generic_source(
             source_name=source_name,
             source_type="generic",
             diagnostic_hash=diagnostic_hash,
+            holds=holds,
         ):
             rel, info = result
             files[rel] = info
@@ -1953,6 +2118,7 @@ def walk_source(
     *,
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
+    holds: SourceHolds | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Dispatch to the appropriate walker based on source type.
 
@@ -1970,6 +2136,7 @@ def walk_source(
         strict: Publishing scans refuse incomplete observations.
         diagnostic_hash: Inspection-only hash reuse. Ignored when
             strict=True; the publisher never consults it.
+        holds: Optional strict-scan out-parameter (see ``SourceHolds``).
 
     Returns:
         Tuple of (resolved_base_path_str, files_dict).
@@ -1985,11 +2152,12 @@ def walk_source(
             exclude_patterns=source_config.get("exclude_patterns"),
             strict=strict,
             source_name=source_config.get("name"),
+            holds=holds,
         )
     elif source_type == "grok":
-        files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict)
+        files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "muse":
-        files = walk_muse_source(source_config, max_file_size, on_skip, strict=strict)
+        files = walk_muse_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "generic":
         files = walk_generic_source(
             source_config,
@@ -1997,6 +2165,7 @@ def walk_source(
             on_skip,
             strict=strict,
             diagnostic_hash=diagnostic_hash,
+            holds=holds,
         )
     else:
         raise ManifestError(f"manifest: unknown source type '{source_type}'")
@@ -2014,6 +2183,8 @@ def build_manifest_v2(
     strict: bool = False,
     diagnostic_hash: Callable[[Path, os.stat_result], str] | None = None,
     nested_roots: dict[str, set[str]] | None = None,
+    held: dict[str, dict[str, str]] | None = None,
+    held_candidates: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """Build a v2 manifest with multiple sources.
 
@@ -2031,6 +2202,14 @@ def build_manifest_v2(
             strict=True; the publisher never consults it.
         nested_roots: Optional out-parameter receiving each source's
             skipped checkout roots (bare relative paths) from this same walk.
+        held: Optional strict-scan out-parameter (Track 75A) receiving, per
+            source, each file still changing after its one re-read as
+            ``rel -> changed | vanished | grew``. Such a file is absent from
+            the returned manifest. Without it a transient raises
+            ``SnapshotChanged``.
+        held_candidates: Optional companion receiving, per source, enumeration
+            entries that vanished before their stat. Only collected alongside
+            ``held``; the caller validates them against its prior manifest.
 
     Returns:
         v2 manifest dict with a "sources" dict keyed by source name.
@@ -2052,12 +2231,21 @@ def build_manifest_v2(
             if on_skip is not None:
                 on_skip(path, reason)
 
+        holds = None
+        if held is not None:
+            holds = SourceHolds(
+                reasons=held.setdefault(name, {}),
+                candidates=(
+                    held_candidates.setdefault(name, set()) if held_candidates is not None else None
+                ),
+            )
         base_path, files = walk_source(
             src_cfg,
             max_file_size,
             source_skip,
             strict=strict,
             diagnostic_hash=diagnostic_hash,
+            holds=holds,
         )
         sources[name] = {
             "base_path": base_path,

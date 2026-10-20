@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 
-from mind_meld.errors import ManifestError, SnapshotError
+from mind_meld.errors import ManifestError, SnapshotChanged, SnapshotError
 from mind_meld.manifest import (
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
     TOMBSTONE_TTL_DAYS,
+    SourceHolds,
     _canonical_for_conflict,
+    _FileTooLarge,
     _is_active_tombstone,
     _is_excluded,
     _record_file,
@@ -39,6 +41,7 @@ from mind_meld.manifest import (
     walk_claude_source,
     walk_generic_source,
     walk_grok_source,
+    walk_muse_source,
     walk_source,
 )
 
@@ -2695,6 +2698,577 @@ class TestStrictWalkers:
             walk_generic_source(cfg, strict=True)
 
 
+def _tweak_stat(st, *, size=0, mtime_ns=0, ino=0):
+    return os.stat_result(
+        (
+            st.st_mode,
+            st.st_ino + ino,
+            st.st_dev,
+            st.st_nlink,
+            st.st_uid,
+            st.st_gid,
+            st.st_size + size,
+            st.st_atime,
+            st.st_mtime,
+            st.st_ctime,
+            st.st_atime_ns,
+            st.st_mtime_ns + mtime_ns,
+            st.st_ctime_ns,
+        )
+    )
+
+
+class TestSnapshotChangedClassification:
+    """Track 75A: only per-file changed/vanished/grew is transient, per raise site."""
+
+    def test_subclass_keeps_snapshot_error_handlers(self):
+        assert issubclass(SnapshotChanged, SnapshotError)
+        with pytest.raises(SnapshotError):
+            raise SnapshotChanged("x", "changed")
+        assert SnapshotChanged("x").reason == "changed"
+
+    def test_missing_file_is_vanished(self, tmp_path):
+        with pytest.raises(SnapshotChanged, match="disappeared while being read") as exc:
+            read_file_revision(
+                tmp_path / "gone.md", max_file_size=1000, retain_bytes=False, base=tmp_path
+            )
+        assert exc.value.reason == "vanished"
+
+    def test_vanish_after_read_is_vanished(self, tmp_path, monkeypatch):
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        real_lstat = Path.lstat
+        calls = {"n": 0}
+
+        def vanish_late(self):
+            if self == path:
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise FileNotFoundError("gone")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", vanish_late)
+        with pytest.raises(SnapshotChanged) as exc:
+            read_file_revision(path, max_file_size=1000, retain_bytes=False, base=tmp_path)
+        assert exc.value.reason == "vanished"
+
+    def test_descriptor_change_is_changed(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        real_fstat = os.fstat
+        calls = {"n": 0}
+
+        def mutating_fstat(fd):
+            st = real_fstat(fd)
+            calls["n"] += 1
+            return _tweak_stat(st, mtime_ns=1) if calls["n"] >= 2 else st
+
+        monkeypatch.setattr(m.os, "fstat", mutating_fstat)
+        with pytest.raises(SnapshotChanged) as exc:
+            read_file_revision(path, max_file_size=1000, retain_bytes=False, base=tmp_path)
+        assert exc.value.reason == "changed"
+
+    def test_growth_during_read_is_grew(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "grow.bin"
+        path.write_bytes(b"ab")
+        real_read = os.read
+        chunks = iter([b"a", b"b", b"c"])
+
+        def growing(fd, n):
+            return next(chunks, None) or real_read(fd, n)
+
+        monkeypatch.setattr(m.os, "read", growing)
+        with pytest.raises(SnapshotChanged) as exc:
+            read_file_revision(path, max_file_size=2, retain_bytes=True, base=tmp_path)
+        assert exc.value.reason == "grew"
+
+    def test_under_cap_at_lstat_over_cap_at_descriptor_is_grew(self, tmp_path, monkeypatch):
+        path = tmp_path / "grow.bin"
+        path.write_bytes(b"0123456789")
+        real_lstat = Path.lstat
+        calls = {"n": 0}
+
+        def small_first(self):
+            st = real_lstat(self)
+            if self == path:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return _tweak_stat(st, size=-7)
+            return st
+
+        monkeypatch.setattr(Path, "lstat", small_first)
+        with pytest.raises(SnapshotChanged, match="grew beyond max_file_size") as exc:
+            read_file_revision(path, max_file_size=5, retain_bytes=False, base=tmp_path)
+        assert exc.value.reason == "grew"
+
+    def test_stable_oversize_is_not_transient(self, tmp_path):
+        path = tmp_path / "big.bin"
+        path.write_bytes(b"0123456789")
+        with pytest.raises(_FileTooLarge):
+            read_file_revision(path, max_file_size=5, retain_bytes=False, base=tmp_path)
+
+    @pytest.mark.parametrize("kind", ["symlink", "fifo", "directory", "unreadable"])
+    def test_confinement_and_read_failures_are_not_transient(self, tmp_path, monkeypatch, kind):
+        import mind_meld.manifest as m
+
+        path = tmp_path / "x"
+        if kind == "symlink":
+            (tmp_path / "t").write_text("t")
+            path.symlink_to(tmp_path / "t")
+        elif kind == "fifo":
+            os.mkfifo(path)
+        elif kind == "directory":
+            path.mkdir()
+        else:
+            path.write_text("x")
+
+            def deny(_path):
+                raise PermissionError("denied")
+
+            monkeypatch.setattr(m, "_open_nofollow_nonblock", deny)
+        with pytest.raises(SnapshotError) as exc:
+            read_file_revision(path, max_file_size=1000, retain_bytes=False, base=tmp_path)
+        assert not isinstance(exc.value, SnapshotChanged)
+
+    def test_hardlink_replacement_is_not_transient(self, tmp_path):
+        base = tmp_path / "grok"
+        tree = base / "skills"
+        tree.mkdir(parents=True)
+        path = tree / "SKILL.md"
+        path.write_text("ok")
+        os.link(path, tree / "alias.md")
+        with pytest.raises(SnapshotError) as exc:
+            read_file_revision(
+                path, max_file_size=1000, retain_bytes=False, source_type="grok", base=base
+            )
+        assert not isinstance(exc.value, SnapshotChanged)
+
+
+class TestRecordFileRetryAndHold:
+    """Track 75A: one re-read per scanned file, then hold (opt-in) or refuse."""
+
+    def _patch_reads(self, monkeypatch, outcomes):
+        import mind_meld.manifest as m
+
+        real = m.read_file_revision
+        calls = []
+
+        def fake(path, **kw):
+            calls.append(path)
+            outcome = outcomes[min(len(calls), len(outcomes)) - 1]
+            if outcome == "real":
+                return real(path, **kw)
+            raise outcome
+
+        monkeypatch.setattr(m, "read_file_revision", fake)
+        return calls
+
+    def _file(self, tmp_path):
+        path = tmp_path / "a.md"
+        path.write_text("hello")
+        return path
+
+    def test_settles_on_retry(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        calls = self._patch_reads(monkeypatch, [SnapshotChanged("x", "changed"), "real"])
+        holds = SourceHolds()
+        rel, info = _record_file(
+            path, tmp_path, 1000, strict=True, source_name="claude", holds=holds
+        )
+        assert rel == "a.md"
+        assert info["sha256"] == hashlib.sha256(b"hello").hexdigest()
+        assert len(calls) == 2
+        assert holds.reasons == {}
+
+    def test_still_changing_is_held_after_exactly_two_reads(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        calls = self._patch_reads(monkeypatch, [SnapshotChanged("x", "changed")])
+        holds = SourceHolds()
+        assert _record_file(path, tmp_path, 1000, strict=True, holds=holds) is None
+        assert holds.reasons == {"a.md": "changed"}
+        assert len(calls) == 2
+
+    def test_second_read_reason_wins(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        self._patch_reads(
+            monkeypatch, [SnapshotChanged("x", "changed"), SnapshotChanged("y", "vanished")]
+        )
+        holds = SourceHolds()
+        assert _record_file(path, tmp_path, 1000, strict=True, holds=holds) is None
+        assert holds.reasons == {"a.md": "vanished"}
+
+    def test_without_collector_still_changing_raises_after_retry(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        calls = self._patch_reads(monkeypatch, [SnapshotChanged("x", "changed")])
+        with pytest.raises(SnapshotChanged):
+            _record_file(path, tmp_path, 1000, strict=True)
+        assert len(calls) == 2
+
+    def test_retry_landing_in_non_transient_class_refuses(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        self._patch_reads(
+            monkeypatch, [SnapshotChanged("x", "changed"), SnapshotError("confinement lost")]
+        )
+        holds = SourceHolds()
+        with pytest.raises(SnapshotError, match="confinement lost") as exc:
+            _record_file(path, tmp_path, 1000, strict=True, holds=holds)
+        assert not isinstance(exc.value, SnapshotChanged)
+        assert holds.reasons == {}
+
+    def test_retry_landing_on_stable_oversize_takes_skip_path(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        self._patch_reads(monkeypatch, [SnapshotChanged("x", "grew"), _FileTooLarge(99)])
+        skipped = []
+        holds = SourceHolds()
+        result = _record_file(
+            path,
+            tmp_path,
+            10,
+            on_skip=lambda p, r: skipped.append((p, r)),
+            strict=True,
+            holds=holds,
+        )
+        assert result is None
+        assert holds.reasons == {}
+        assert skipped and "exceeds max_file_size" in skipped[0][1]
+
+    def test_non_transient_first_read_is_not_retried(self, tmp_path, monkeypatch):
+        path = self._file(tmp_path)
+        calls = self._patch_reads(monkeypatch, [SnapshotError("denied")])
+        with pytest.raises(SnapshotError, match="denied"):
+            _record_file(path, tmp_path, 1000, strict=True, holds=SourceHolds())
+        assert len(calls) == 1
+
+    def test_excluded_path_is_never_read_or_held(self, tmp_path, monkeypatch):
+        path = tmp_path / "x.tmp"
+        path.write_text("x")
+        calls = self._patch_reads(monkeypatch, [SnapshotChanged("x", "changed")])
+        holds = SourceHolds()
+        assert _record_file(path, tmp_path, 1000, strict=True, holds=holds) is None
+        assert calls == [] and holds.reasons == {}
+
+
+def _walker_cfg(kind, root):
+    if kind == "generic":
+        return {"name": "gstack", "path": str(root), "type": "generic", "include_dirs": ["docs"]}
+    return {"name": kind, "path": str(root), "type": kind}
+
+
+def _walker_tree(kind, tmp_path):
+    """Two regular files under the synced subdir of each walker kind."""
+    root = tmp_path / kind
+    sub = {
+        "generic": "docs",
+        "grok": "skills",
+        "muse": "memory",
+        "claude": "projects/p/memory",
+    }[kind]
+    tree = root / sub
+    tree.mkdir(parents=True)
+    (tree / "keep.md").write_text("keep")
+    (tree / "flaky.md").write_text("flaky")
+    return root, tree
+
+
+def _run_walker(kind, root, **kw):
+    if kind == "claude":
+        return walk_claude_source(root, strict=True, source_name="claude", **kw)
+    walker = {"generic": walk_generic_source, "grok": walk_grok_source, "muse": walk_muse_source}
+    return walker[kind](_walker_cfg(kind, root), strict=True, **kw)
+
+
+class TestWalkerHolds:
+    """Track 75A: each walker holds a per-file vanish only when handed a collector."""
+
+    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    def test_probe_vanish_is_a_hold_with_collector(self, tmp_path, monkeypatch, kind):
+        root, tree = _walker_tree(kind, tmp_path)
+        target = tree / "flaky.md"
+        real_lstat = Path.lstat
+
+        def vanish(self):
+            if self == target:
+                raise FileNotFoundError("gone")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", vanish)
+        holds = SourceHolds()
+        files = _run_walker(kind, root, holds=holds)
+        assert [Path(rel).name for rel in files] == ["keep.md"]
+        assert {Path(rel).name: reason for rel, reason in holds.reasons.items()} == {
+            "flaky.md": "vanished"
+        }
+
+    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    def test_probe_vanish_without_collector_still_refuses(self, tmp_path, monkeypatch, kind):
+        root, tree = _walker_tree(kind, tmp_path)
+        target = tree / "flaky.md"
+        real_lstat = Path.lstat
+
+        def vanish(self):
+            if self == target:
+                raise FileNotFoundError("gone")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", vanish)
+        with pytest.raises(SnapshotError, match="could not be read"):
+            _run_walker(kind, root)
+
+    @pytest.mark.parametrize("collector", [False, True])
+    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    def test_probe_reprobe_that_succeeds_records_the_file(
+        self, tmp_path, monkeypatch, kind, collector
+    ):
+        # Value: protects=settling per-file disappearance retries during recovery;
+        # fails_when=retry depends on a hold collector;
+        # why_new=existing cases always supplied a collector; seam=none;
+        # no_claim=real writer timing (injected first lstat failure).
+        from mind_meld import manifest as manifest_module
+
+        root, tree = _walker_tree(kind, tmp_path)
+        target = tree / "flaky.md"
+        real_lstat = Path.lstat
+        real_probe = manifest_module._stat_collected_file
+        state = {"n": 0, "probing": False}
+
+        def probe(*args, **kwargs):
+            state["probing"] = True
+            try:
+                return real_probe(*args, **kwargs)
+            finally:
+                state["probing"] = False
+
+        def flicker(self):
+            if self == target and state["probing"]:
+                state["n"] += 1
+                if state["n"] == 1:
+                    raise FileNotFoundError("gone")
+            return real_lstat(self)
+
+        monkeypatch.setattr(manifest_module, "_stat_collected_file", probe)
+        monkeypatch.setattr(Path, "lstat", flicker)
+        holds = SourceHolds() if collector else None
+        files = _run_walker(kind, root, holds=holds)
+        assert sorted(Path(rel).name for rel in files) == ["flaky.md", "keep.md"]
+        assert state["n"] == 2
+        if holds is not None:
+            assert holds.reasons == {}
+
+    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    def test_probe_other_oserror_refuses_even_with_collector(self, tmp_path, monkeypatch, kind):
+        root, tree = _walker_tree(kind, tmp_path)
+        target = tree / "flaky.md"
+        real_lstat = Path.lstat
+
+        def deny(self):
+            if self == target:
+                raise PermissionError("denied")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", deny)
+        with pytest.raises(SnapshotError, match="could not be read") as exc:
+            _run_walker(kind, root, holds=SourceHolds())
+        assert not isinstance(exc.value, SnapshotChanged)
+
+    def test_excluded_vanished_probe_is_skipped_silently(self, tmp_path, monkeypatch):
+        root, tree = _walker_tree("generic", tmp_path)
+        cfg = {**_walker_cfg("generic", root), "exclude_patterns": ["docs/flaky.md"]}
+        target = tree / "flaky.md"
+        real_lstat = Path.lstat
+
+        def vanish(self):
+            if self == target:
+                raise FileNotFoundError("gone")
+            return real_lstat(self)
+
+        monkeypatch.setattr(Path, "lstat", vanish)
+        holds = SourceHolds()
+        files = walk_generic_source(cfg, strict=True, holds=holds)
+        assert list(files) == ["docs/keep.md"]
+        assert holds.reasons == {}
+
+    @pytest.mark.parametrize("kind", ["claude", "generic", "grok", "muse"])
+    def test_still_changing_read_is_held_per_walker(self, tmp_path, monkeypatch, kind):
+        import mind_meld.manifest as m
+
+        root, tree = _walker_tree(kind, tmp_path)
+        real = m.read_file_revision
+
+        def flaky(path, **kw):
+            if Path(path).name == "flaky.md":
+                raise SnapshotChanged("changed", "changed")
+            return real(path, **kw)
+
+        monkeypatch.setattr(m, "read_file_revision", flaky)
+        holds = SourceHolds()
+        files = _run_walker(kind, root, holds=holds)
+        assert [Path(rel).name for rel in files] == ["keep.md"]
+        assert {Path(rel).name: reason for rel, reason in holds.reasons.items()} == {
+            "flaky.md": "changed"
+        }
+        with pytest.raises(SnapshotChanged):
+            _run_walker(kind, root)
+
+
+class _VanishingScandir:
+    """os.scandir stand-in whose entry for ``vanish`` fails its stat (renamed away).
+
+    The first stat of that entry succeeds: marker discovery lists the tree before
+    the file walk does, and this exercises the file walk's own entry stat.
+    """
+
+    def __init__(self, monkeypatch, module, vanish):
+        real = os.scandir
+        stats = {"n": 0}
+        self.stats = stats
+
+        class Entry:
+            def __init__(self, entry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def stat(self, follow_symlinks=True):
+                if self.name == vanish:
+                    stats["n"] += 1
+                    if stats["n"] >= 2:
+                        raise FileNotFoundError("gone")
+                return self._entry.stat(follow_symlinks=follow_symlinks)
+
+        def fake(path):
+            real_cm = real(path)
+
+            class CM:
+                def __enter__(self):
+                    return [Entry(e) for e in real_cm.__enter__()]
+
+                def __exit__(self, *exc):
+                    return real_cm.__exit__(*exc)
+
+            return CM()
+
+        monkeypatch.setattr(module.os, "scandir", fake)
+
+
+class TestScandirHoldCandidates:
+    def _tree(self, tmp_path):
+        root = tmp_path / "src"
+        docs = root / "docs"
+        docs.mkdir(parents=True)
+        (docs / "keep.md").write_text("keep")
+        (docs / "tmpfile").write_text("x")
+        return {"name": "gstack", "path": str(root), "type": "generic", "include_dirs": ["docs"]}
+
+    def test_entry_vanish_becomes_candidate_with_collector(self, tmp_path, monkeypatch):
+        import mind_meld.manifest as m
+
+        cfg = self._tree(tmp_path)
+        _VanishingScandir(monkeypatch, m, "tmpfile")
+        holds = SourceHolds(candidates=set())
+        files = walk_generic_source(cfg, strict=True, holds=holds)
+        assert list(files) == ["docs/keep.md"]
+        assert holds.candidates == {"docs/tmpfile"}
+        assert holds.reasons == {}
+
+    @pytest.mark.parametrize("collector", [False, True])
+    def test_entry_vanish_refuses_without_candidate_collection(
+        self, tmp_path, monkeypatch, collector
+    ):
+        # Value: protects=entry loss refuses unless candidate validation is enabled;
+        # fails_when=holds without candidates silently omit an unclassified entry;
+        # why_new=the second old call reused counters and failed in marker discovery;
+        # seam=none; no_claim=real concurrent rename timing.
+        import mind_meld.manifest as m
+
+        cfg = self._tree(tmp_path)
+        scan = _VanishingScandir(monkeypatch, m, "tmpfile")
+        holds = SourceHolds() if collector else None
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            walk_generic_source(cfg, strict=True, holds=holds)
+        assert scan.stats["n"] == 2
+
+    def test_directory_vanishing_before_its_listing_still_refuses(self, tmp_path, monkeypatch):
+        # Value: protects=vanished directories never become file-hold candidates;
+        # fails_when=collector-enabled file walks silently skip an unlisted subtree;
+        # why_new=the old injection stopped in marker discovery before the file walk;
+        # seam=none; no_claim=real concurrent rename timing.
+        import mind_meld.manifest as m
+
+        root = tmp_path / "src"
+        nested = root / "docs" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "b.md").write_text("x")
+        real_scandir = os.scandir
+        real_collect = m._collect_regular_files_scandir
+        state = {"file_walk": False, "injected": False}
+
+        def collect(*args, **kwargs):
+            state["file_walk"] = True
+            try:
+                return real_collect(*args, **kwargs)
+            finally:
+                state["file_walk"] = False
+
+        def vanish(path):
+            if Path(path) == nested and state["file_walk"]:
+                state["injected"] = True
+                raise FileNotFoundError("gone")
+            return real_scandir(path)
+
+        monkeypatch.setattr(m, "_collect_regular_files_scandir", collect)
+        monkeypatch.setattr(m.os, "scandir", vanish)
+        cfg = {"name": "gstack", "path": str(root), "type": "generic", "include_dirs": ["docs"]}
+        holds = SourceHolds(candidates=set())
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            walk_generic_source(cfg, strict=True, holds=holds)
+        assert state["injected"] is True
+        assert holds.candidates == set()
+
+
+class TestBuildManifestHolds:
+    @pytest.mark.parametrize("kind", ["claude", "generic", "grok", "muse"])
+    def test_collector_receives_holds_per_source_and_manifest_omits_them(
+        self, tmp_path, monkeypatch, kind
+    ):
+        # Value: protects=all host dispatch routes preserve per-file holds;
+        # fails_when=walk_source drops the collector for a host;
+        # why_new=Grok and Muse hold tests called walkers directly; seam=none;
+        # no_claim=real concurrent writer timing (injected transient).
+        import mind_meld.manifest as m
+
+        root, tree = _walker_tree(kind, tmp_path)
+        cfg = _walker_cfg(kind, root)
+        keep = (tree / "keep.md").relative_to(root).as_posix()
+        flaky_rel = (tree / "flaky.md").relative_to(root).as_posix()
+        real = m.read_file_revision
+
+        def flaky(path, **kw):
+            if Path(path).name == "flaky.md":
+                raise SnapshotChanged("changed", "grew")
+            return real(path, **kw)
+
+        monkeypatch.setattr(m, "read_file_revision", flaky)
+        held: dict = {}
+        candidates: dict = {}
+        manifest = build_manifest_v2(
+            "dev",
+            "A",
+            [cfg],
+            strict=True,
+            held=held,
+            held_candidates=candidates,
+        )
+        assert list(manifest["sources"][cfg["name"]]["files"]) == [keep]
+        assert held == {cfg["name"]: {flaky_rel: "grew"}}
+        assert candidates == {cfg["name"]: set()}
+        with pytest.raises(SnapshotChanged):
+            build_manifest_v2("dev", "A", [cfg], strict=True)
+
+
 class TestLoadManifestApplyMetadata53A:
     @pytest.mark.parametrize(
         "entry",
@@ -2730,3 +3304,90 @@ class TestLoadManifestApplyMetadata53A:
         info = load_manifest(serialize_manifest(data))["sources"]["claude"]["files"]["notes.md"]
         assert info["mtime"] is None
         assert info["sha256"] == "a" * 64
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "hardlink", "hardlink-replacement"])
+def test_retry_confinement_loss_still_refuses(tmp_path, monkeypatch, replacement):
+    import mind_meld.manifest as m
+
+    # Value: protects=fatal privacy classification on the final scan read;
+    # fails_when=identity change masks symlink or hardlink loss as a hold;
+    # why_new=existing cases inject the exception, not the actual filesystem race;
+    # seam=none; no_claim=real concurrent writer timing.
+    path = tmp_path / "memory.md"
+    path.write_text("benign local content")
+    target = tmp_path / "target.md"
+    target.write_text("other benign local content")
+    inode = path.stat().st_ino
+    original_reader = m.read_file_revision
+    original_read = os.read
+    attempts = 0
+    swapped = False
+
+    def first_changes_then_real_read(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise SnapshotChanged("synthetic first-attempt change", "changed")
+        return original_reader(*args, **kwargs)
+
+    def replace_after_read(fd, size):
+        nonlocal swapped
+        data = original_read(fd, size)
+        if data and not swapped and os.fstat(fd).st_ino == inode:
+            swapped = True
+            if replacement == "symlink":
+                path.unlink()
+                path.symlink_to(target)
+            elif replacement == "hardlink-replacement":
+                path.unlink()
+                os.link(target, path)
+            else:
+                os.link(path, tmp_path / "alias.md")
+        return data
+
+    monkeypatch.setattr(m, "read_file_revision", first_changes_then_real_read)
+    monkeypatch.setattr(m.os, "read", replace_after_read)
+    holds = m.SourceHolds()
+    with pytest.raises(SnapshotError) as exc:
+        m._record_file(
+            path, tmp_path, 1024, strict=True, source_name="muse", source_type="muse", holds=holds
+        )
+    assert attempts == 2 and swapped
+    assert type(exc.value) is SnapshotError
+    assert not holds.reasons
+
+
+@pytest.mark.parametrize("source_type", ["grok", "muse"])
+def test_preopen_hardlink_replacement_refuses_before_identity_change(
+    tmp_path, monkeypatch, source_type
+):
+    import mind_meld.manifest as m
+
+    # Value: protects=pre-open replacement cannot mask hardlink privacy;
+    # fails_when=identity mismatch raises SnapshotChanged before privacy;
+    # why_new=existing hardlink tests begin with an already linked file;
+    # seam=none; no_claim=real concurrent timing.
+    path = tmp_path / "memory.md"
+    path.write_text("old")
+    replacement = tmp_path / "replacement.md"
+    replacement.write_text("new")
+    real_open = m._open_nofollow_nonblock
+
+    def replace_then_open(candidate):
+        path.unlink()
+        os.link(replacement, path)
+        return real_open(candidate)
+
+    monkeypatch.setattr(m, "_open_nofollow_nonblock", replace_then_open)
+    with pytest.raises(SnapshotError) as caught:
+        read_file_revision(
+            path,
+            max_file_size=1024,
+            retain_bytes=False,
+            base=tmp_path,
+            source_name=source_type,
+            source_type=source_type,
+        )
+    assert type(caught.value) is SnapshotError
+    assert "extra hard link" in str(caught.value)

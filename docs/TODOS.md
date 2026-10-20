@@ -44,6 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=75A] Name held and refusing files in status and escalate a file held on every push
+- **Why:** Track 75A holds a still-changing file at its published version and names it only in that push's outcome and the autopush breadcrumb (count plus up to three paths). Nothing persists which path a snapshot refusal named, and a file held on every push never escalates, so a continuously written file can lag indefinitely with only a repeating count. 77A's run record is the reader that can carry both.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** Deferred from the 2026-10-19 /autoplan of 75A (CEO and DX outside voices). Revisit in 77A, or sooner if the same held count repeats across pushes with no way to name the file outside a verbose push. Scope: persist the refusing path and class for snapshot refusals, and a consecutive-hold counter that `mm status` escalates. Not built in 75A.
+
+### [discovered:track=75A] Marker discovery still refuses when a listed entry vanishes before its stat
+- **Why:** `_collect_marker_files` (`.extend-root` discovery for generic sources, run before the file walk and by `_build_exclude_map`) has its own entry stat that refuses with "disappeared while being read". It is the same rename-away race the 75A hold candidates cover in `_collect_regular_files_scandir`, but it cannot carry a collector and was outside the approved census, so a temp file renamed away at that instant still refuses a whole push.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Found while implementing 75A. A vanished entry whose name is not `.extend-root` cannot be a marker, so ignoring it is provably safe unless it was a directory that held markers; decide that shape rule before changing it. Revisit if a push refuses with `disappeared while being read` and the path is not a source file.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-19

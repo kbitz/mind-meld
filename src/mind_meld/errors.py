@@ -111,6 +111,22 @@ class SnapshotError(MindMeldError):
     """
 
 
+class SnapshotChanged(SnapshotError):
+    """One file changed, disappeared or grew while mm read it (Track 75A).
+
+    The only transient snapshot failure. Publishing scans and uploads re-read
+    such a file once; a push that may hold it (``reason`` is one of
+    ``changed``, ``vanished``, ``grew``) keeps its previously published entry
+    and goes on. Every other ``SnapshotError`` (could not be read, enumeration,
+    confinement, missing roots) is not transient and still refuses the whole
+    push. Subclassing keeps ``except SnapshotError`` handlers unchanged.
+    """
+
+    def __init__(self, message: str, reason: str = "changed") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def os_error_cause(exc: BaseException) -> str:
     """Bounded OS cause/errno for snapshot messages and hook logs."""
     if isinstance(exc, OSError):

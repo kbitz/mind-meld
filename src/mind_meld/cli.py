@@ -137,6 +137,7 @@ from mind_meld.errors import (
     ManifestError,
     MindMeldError,
     NewerFormatError,
+    SnapshotChanged,
     SnapshotError,
     StorageError,
     os_error_cause,
@@ -332,6 +333,12 @@ class PushResult:
     # Claude Code hook, i.e. nobody's terminal. Mirrors the `degradations`
     # list `autopull` has carried since v0.8.1.
     events_degradations: list[str] = field(default_factory=list)
+    # Files this push left at their previously published version because they
+    # were still changing after one re-read (Track 75A): (source, rel_path,
+    # reason) sorted by source then path, reason one of changed / vanished /
+    # grew. A never-published file is left out. Every displayed count is
+    # `len(held)`; autopush records it in its `degraded` breadcrumb.
+    held: list[tuple[str, str, str]] = field(default_factory=list)
 
 
 app = typer.Typer(
@@ -1134,6 +1141,36 @@ def _drop_unfrozen_checkout_files(
     return {**prior_manifest, "sources": sources} if changed else prior_manifest
 
 
+def _require_published_source_root(src_name: str, base: Path) -> None:
+    """Refuse a missing or inaccessible previously published source root."""
+    try:
+        base.stat()
+    except FileNotFoundError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=src_name,
+                problem="is missing after it was previously published",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore the source folder, or run "
+                    f"'mm disable-source {src_name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+    except OSError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=src_name,
+                problem="could not be read",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore read access, or run "
+                    f"'mm disable-source {src_name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+
+
 def _prove_omitted_paths_absent(
     local_manifest: dict,
     prior_manifest: dict | None,
@@ -1157,32 +1194,7 @@ def _prove_omitted_paths_absent(
         if src_cfg is None or not src_cfg.get("path"):
             continue
         base = Path(src_cfg["path"]).expanduser()
-        try:
-            base.stat()
-        except FileNotFoundError as e:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=src_name,
-                    problem="is missing after it was previously published",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore the source folder, or run "
-                        f"'mm disable-source {src_name}' if it should stop syncing."
-                    ),
-                )
-            ) from e
-        except OSError as e:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=src_name,
-                    problem="could not be read",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore read access, or run "
-                        f"'mm disable-source {src_name}' if it should stop syncing."
-                    ),
-                )
-            ) from e
+        _require_published_source_root(src_name, base)
         local_files = local_sources.get(src_name, {}).get("files", {})
         for rel_path in remote_src.get("files", {}):
             if rel_path in local_files:
@@ -1756,6 +1768,22 @@ def _print_pull_prediction(
 # ── shared helpers ────────────────────────────────────────────────────
 
 
+@dataclass
+class UploadOutcome:
+    """What one source's upload loop did (Track 75A).
+
+    ``patches`` holds the replacement manifest entry (sha256, size, mtime) for
+    each file whose deferred re-read settled on a revision other than the one
+    scanned; ``held`` maps each file still changing after that re-read to its
+    reason. The caller applies both to its manifest before serializing; the
+    loop never mutates the caller's manifest dicts.
+    """
+
+    bytes_transferred: int = 0
+    patches: dict[str, dict[str, Any]] = field(default_factory=dict)
+    held: dict[str, str] = field(default_factory=dict)
+
+
 def _upload_changed_blobs(
     backend: LocalBackend,
     base_path: Path,
@@ -1768,13 +1796,20 @@ def _upload_changed_blobs(
     *,
     source_type: str = "claude",
     max_file_size: int = DEFAULT_MAX_FILE_SIZE,
-) -> int:
+    allow_hold: bool = False,
+) -> UploadOutcome:
     """Upload changed blobs to storage.
 
     Verifies the upload revision against the scanned digest, size, and
-    mtime before any encryption or ``backend.put``. Missing or changed
-    input aborts the whole publication. Returns total encrypted bytes
-    transferred.
+    mtime before any encryption or ``backend.put``. A file that no longer
+    matches, vanished, or grew past the cap is queued and re-read exactly once
+    after the rest of this source has uploaded (the other uploads are the
+    settle delay; no sleep). A settled re-read is a verified revision of its
+    own: its blob is keyed by its own digest and the returned ``patches`` entry
+    replaces the scanned one. A file still changing after that re-read is
+    ``held`` when ``allow_hold`` (no blob is put for it), else the transient
+    ``SnapshotChanged`` aborts the push. Non-transient failures (could not be
+    read, confinement) abort at once.
 
     `src_name` (when provided) drives `pullhistory.append` so the history
     log records one "uploaded" entry per file. Optional so legacy/test
@@ -1782,58 +1817,59 @@ def _upload_changed_blobs(
     always pass it. Source type and cap come from trusted local config,
     never from a source name string.
     """
-    with pullhistory.batch():
-        bytes_transferred = 0
-        for rel_path, info in to_upload.items():
-            file_path = base_path / rel_path
-            try:
-                revision = read_file_revision(
-                    file_path,
-                    max_file_size=max_file_size,
-                    retain_bytes=True,
-                    source_name=src_name,
-                    source_type=source_type,
-                    base=base_path,
-                )
-            except _ManifestFileTooLarge as e:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=src_name,
-                        rel_path=rel_path,
-                        problem="changed while being read",
-                        next_action="Wait for the writer to finish, then run mm push.",
-                    )
-                ) from e
-            assert revision.data is not None
-            # Only freshly scanned local revisions enter this upload path;
-            # loaded manifests (whose mtime may normalize to None) must never.
-            advertised_sha = info.get("sha256")
-            advertised_size = info.get("size")
-            advertised_mtime = info.get("mtime")
-            mtime_ok = isinstance(advertised_mtime, str) and (
-                revision.mtime_iso == advertised_mtime
-                or _upload_mtime_matches(revision.mtime_iso, advertised_mtime)
-            )
-            if (
-                revision.digest != advertised_sha
-                or revision.size != advertised_size
-                or len(revision.data) != advertised_size
-                or hashlib.sha256(revision.data).hexdigest() != advertised_sha
-                or not mtime_ok
-            ):
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=src_name,
-                        rel_path=rel_path,
-                        problem="changed while being read",
-                        next_action="Wait for the writer to finish, then run mm push.",
-                    )
-                )
 
+    def read_once(rel_path: str) -> Any:
+        # Every transient is a SnapshotChanged here; at upload an oversized
+        # file is one that grew after the scan accepted it at or under the cap.
+        try:
+            return read_file_revision(
+                base_path / rel_path,
+                max_file_size=max_file_size,
+                retain_bytes=True,
+                source_name=src_name,
+                source_type=source_type,
+                base=base_path,
+            )
+        except _ManifestFileTooLarge as e:
+            raise SnapshotChanged(
+                snapshot_refusal(
+                    source=src_name,
+                    rel_path=rel_path,
+                    problem="grew beyond max_file_size while being read",
+                    next_action=(
+                        "Wait for the writer to finish, or raise sync.max_file_size, "
+                        "then run mm push."
+                    ),
+                ),
+                "grew",
+            ) from e
+
+    def matches_scan(revision: Any, info: dict) -> bool:
+        # Only freshly scanned local revisions enter this upload path;
+        # loaded manifests (whose mtime may normalize to None) must never.
+        advertised_sha = info.get("sha256")
+        advertised_size = info.get("size")
+        advertised_mtime = info.get("mtime")
+        mtime_ok = isinstance(advertised_mtime, str) and (
+            revision.mtime_iso == advertised_mtime
+            or _upload_mtime_matches(revision.mtime_iso, advertised_mtime)
+        )
+        return not (
+            revision.digest != advertised_sha
+            or revision.size != advertised_size
+            or len(revision.data) != advertised_size
+            or hashlib.sha256(revision.data).hexdigest() != advertised_sha
+            or not mtime_ok
+        )
+
+    with pullhistory.batch():
+        outcome = UploadOutcome()
+
+        def put_blob(rel_path: str, revision: Any) -> None:
+            assert revision.data is not None
             enc_data = encrypt(revision.data, passphrase, memory_kb)
-            bkey = blob_key(device_id, info["sha256"])
-            backend.put(bkey, enc_data)
-            bytes_transferred += len(enc_data)
+            backend.put(blob_key(device_id, revision.digest), enc_data)
+            outcome.bytes_transferred += len(enc_data)
 
             if src_name is not None:
                 pullhistory.append(
@@ -1842,13 +1878,46 @@ def _upload_changed_blobs(
                     source=src_name,
                     rel_path=rel_path,
                     action="uploaded",
-                    local_sha=info.get("sha256"),
+                    local_sha=revision.digest,
                 )
 
             if verbose:
                 console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
 
-        return bytes_transferred
+        deferred: list[tuple[str, dict]] = []
+        for rel_path, info in to_upload.items():
+            try:
+                revision = read_once(rel_path)
+            except SnapshotChanged:
+                deferred.append((rel_path, info))
+                continue
+            assert revision.data is not None
+            if not matches_scan(revision, info):
+                deferred.append((rel_path, info))
+                continue
+            put_blob(rel_path, revision)
+
+        for rel_path, info in deferred:
+            try:
+                revision = read_once(rel_path)
+            except SnapshotChanged as e:
+                if not allow_hold:
+                    raise
+                outcome.held[rel_path] = e.reason
+                continue
+            assert revision.data is not None
+            # Read 2 publishes its own verified revision. Record the entry
+            # before the blob put; a digest equal to the scanned one is an
+            # idempotent put plus an mtime-only republish, no special case.
+            outcome.patches[rel_path] = {
+                **info,
+                "sha256": revision.digest,
+                "size": revision.size,
+                "mtime": revision.mtime_iso,
+            }
+            put_blob(rel_path, revision)
+
+        return outcome
 
 
 def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
@@ -4219,11 +4288,213 @@ def _print_usage_push_mode(result: PushResult) -> None:
         )
 
 
-def _push_result_or_none(events_degradations: list[str], dry_run: bool) -> PushResult | None:
-    """Preserve forensic degradations on no-op exits without inventing a capture."""
-    if events_degradations and not dry_run:
-        return PushResult(events_degradations=events_degradations)
+def _push_result_or_none(
+    events_degradations: list[str],
+    dry_run: bool,
+    held: list[tuple[str, str, str]] | None = None,
+) -> PushResult | None:
+    """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
+    if (events_degradations or held) and not dry_run:
+        return PushResult(events_degradations=events_degradations, held=list(held or []))
     return None
+
+
+# ── held files (Track 75A) ────────────────────────────────────────────
+
+_HELD_REASON_WORDS = {
+    "changed": "still changing",
+    "grew": "still growing",
+    "vanished": "gone while being read",
+}
+_HELD_PATHS_SHOWN = 3
+_HELD_BREADCRUMB_BUDGET = 300
+
+
+def _held_list(held_files: Mapping[str, Mapping[str, str]]) -> list[tuple[str, str, str]]:
+    """Flatten source -> rel -> reason into the sorted ``PushResult.held`` form."""
+    return sorted(
+        (name, rel, reason) for name, rels in held_files.items() for rel, reason in rels.items()
+    )
+
+
+def _held_count_phrase(held: list[tuple[str, str, str]], state: str = "not yet synced") -> str:
+    """Count phrase: ``2 files not yet synced (still changing)``, reasons split when mixed."""
+    noun = "file" if len(held) == 1 else "files"
+    counts = Counter(reason for _name, _rel, reason in held)
+    if len(counts) == 1:
+        detail = _HELD_REASON_WORDS.get(next(iter(counts)), "still changing")
+    else:
+        detail = ", ".join(
+            f"{count} {_HELD_REASON_WORDS.get(reason, reason)}"
+            for reason, count in sorted(counts.items())
+        )
+    return f"{len(held)} {noun} {state} ({detail})"
+
+
+def _print_held_outcome(
+    held: list[tuple[str, str, str]], *, verbose: bool, preview: bool = False
+) -> None:
+    """Attended outcome for held files: count, paths, and what happens next.
+
+    Lists up to three paths with ``+N more``; ``--verbose`` lists all. Rich
+    output, so every path goes through ``safe_str``.
+    """
+    if not held:
+        return
+    phrase = _held_count_phrase(
+        held, "would be held, not yet synced" if preview else "not yet synced"
+    )
+    shown = held if verbose else held[:_HELD_PATHS_SHOWN]
+    paths = [f"{safe_str(name)}:{safe_str(rel)}" for name, rel, _reason in shown]
+    more = len(held) - len(shown)
+    if verbose:
+        console.print(f"  [yellow]{phrase}:[/yellow]")
+        for path in paths:
+            console.print(f"    {path}")
+    else:
+        tail = f" (+{more} more)" if more else ""
+        console.print(f"  [yellow]{phrase}:[/yellow] {', '.join(paths)}{tail}")
+    console.print(
+        "  Their previous versions (if any) stay published; they go with a later push."
+        if not preview
+        else "  A real push would leave their previous versions (if any) published."
+    )
+    if any(reason == "vanished" for _name, _rel, reason in held):
+        console.print(
+            "  A file that vanished is recorded as deleted on a later push if it is still gone."
+        )
+
+
+def _held_breadcrumb_detail(held: list[tuple[str, str, str]], budget: int) -> str:
+    """One-line autopush breadcrumb fragment: count, up to 3 paths, ``+N more``.
+
+    Prefer complete paths; truncate the first if none fits. The count survives
+    even when existing degradations exhaust the budget. Sanitized for plain
+    stderr/status rendering (single line).
+    """
+    lead = _held_count_phrase(held, "held, not yet synced")
+    for keep in range(min(_HELD_PATHS_SHOWN, len(held)), 0, -1):
+        paths = ", ".join(
+            safety.safe_terminal_str(f"{name}:{rel}") for name, rel, _reason in held[:keep]
+        )
+        more = len(held) - keep
+        text = f"{lead}: {paths}" + (f", +{more} more" if more else "")
+        if len(text) <= budget:
+            return text
+    more = len(held) - 1
+    tail = f", +{more} more" if more else ""
+    path_budget = budget - len(lead) - len(": ") - len(tail)
+    if held and path_budget > 1:
+        name, rel, _reason = held[0]
+        path = safety.safe_terminal_str(f"{name}:{rel}")
+        return f"{lead}: {path[: path_budget - 1]}…{tail}"
+    return lead
+
+
+def _held_blocks_recapture(held: list[tuple[str, str, str]]) -> bool:
+    """True when a recapture's own mm-events day file did not go out this push."""
+    return any(name in MM_INTERNAL_SOURCE_NAMES for name, _rel, _reason in held)
+
+
+def _inject_held_entries(
+    local_manifest: dict,
+    prior_manifest: dict | None,
+    held: Mapping[str, Mapping[str, str]],
+    candidates: Mapping[str, Iterable[str]],
+    *,
+    exclude_map: Mapping[str, list[str]],
+    skip_prefixes: Mapping[str, list[str]],
+    frozen: Mapping[str, set[str]],
+) -> dict[str, dict[str, str]]:
+    """Resolve a strict scan's held files into the manifest about to be published.
+
+    Each held path keeps its accepted prior entry in ``local_manifest`` (parity
+    with the frozen-entry path: no blob-existence probe, the entry was accepted
+    as-is), so it reads as unchanged, uploads nothing and mints no tombstone. A
+    never-published path is simply left out. A path that is excluded, frozen or
+    tombstoned is not waiting and is pruned. ``candidates`` are enumeration
+    entries that vanished before their stat: re-lstat each, and refuse unless it
+    is still gone and was not a published directory. Returns the surviving holds.
+
+    Run after the unselected/exclude filters, symlink prior-drop and freeze, and
+    before the omission proof and tombstones. The carried entry is the *accepted
+    prior* only: a first-scan revision's blob is not in storage until the upload
+    loop, so carrying it would publish a dangling entry.
+    """
+    prior_sources = (prior_manifest or {}).get("sources", {})
+    tombstones = (prior_manifest or {}).get("tombstones", {})
+    local_sources = local_manifest.get("sources", {})
+    surviving: dict[str, dict[str, str]] = {}
+    for name in sorted(set(held) | set(candidates)):
+        local_src = local_sources.get(name)
+        if local_src is None:
+            continue
+        files = local_src["files"]
+        prior_files = prior_sources.get(name, {}).get("files", {})
+        patterns = exclude_map.get(name)
+        prefixes = skip_prefixes.get(name)
+        reasons = dict(held.get(name, {}))
+        directories: set[str] | None = None
+        for rel in sorted(candidates.get(name, ())):
+            if rel in reasons or _manifest_is_excluded(rel, patterns, prefixes):
+                continue
+            if directories is None:
+                directories = {
+                    "/".join(parts[:i])
+                    for path in prior_files
+                    for parts in (path.split("/"),)
+                    for i in range(1, len(parts))
+                }
+            _validate_vanished_candidate(name, rel, Path(local_src["base_path"]), directories)
+            reasons[rel] = "vanished"
+        for rel, reason in sorted(reasons.items()):
+            if (
+                rel in files
+                or rel in frozen.get(name, ())
+                or _manifest_is_excluded(rel, patterns, prefixes)
+                or is_tombstoned(name, rel, tombstones)
+            ):
+                continue
+            if (prior := prior_files.get(rel)) is not None:
+                files[rel] = dict(prior)
+            surviving.setdefault(name, {})[rel] = reason
+    return surviving
+
+
+def _validate_vanished_candidate(
+    source: str, rel: str, base_path: Path, directories: set[str]
+) -> None:
+    """Keep a vanished enumeration entry a hold only when its shape is provable.
+
+    The entry's type is unknown (its stat failed). Published descendants prove
+    a prior directory, even if a merged conflict copy also has an exact file
+    entry: a vanished subtree must refuse. Otherwise, a still-missing exact
+    prior file can hold at the prior; a never-published file is omitted.
+    Present again in any form, or unreadable: refuse.
+    """
+    try:
+        os.lstat(base_path / rel)
+    except (FileNotFoundError, NotADirectoryError):
+        if rel not in directories:
+            return
+        problem, cause = "disappeared while being read", None
+    except OSError as e:
+        problem, cause = "could not be read", os_error_cause(e)
+    else:
+        problem, cause = "disappeared while being read", None
+    raise SnapshotError(
+        snapshot_refusal(
+            source=source,
+            rel_path=rel,
+            problem=problem,
+            cause=cause,
+            next_action=(
+                "Wait for the writer to finish, then run mm push."
+                if cause is None
+                else "Restore read access, then run mm push."
+            ),
+        )
+    )
 
 
 _PUSH_GROWTH_WARNING_FILES = 1000
@@ -4271,7 +4542,11 @@ def _push_core(
     Only the attended push command captures before the manifest build.
     Incomplete scans raise ``SnapshotError``; callers must catch it
     (interactive push and recapture via ``_error``, autopush via
-    ``_auto_command_scope``).
+    ``_auto_command_scope``). A single file that changes, vanishes or grows while
+    mm reads it is re-read once and, if still changing, held at its previously
+    published version (``PushResult.held``) instead of refusing the push; a push
+    recovering a corrupt or conflict-copy manifest has no accepted prior to hold
+    at and still refuses.
     """
     start = time.time()
     device_id = config["device"]["id"]
@@ -4354,6 +4629,9 @@ def _push_core(
         fetch, backend, device_id, passphrase, memory_kb, quiet=quiet, dry_run=dry_run
     )
     advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
+    # A manifest held only by conflict copies is rewritten like a corrupt one,
+    # so GC's "run mm push" remedy works without a content change.
+    recovering_from_corrupt = fetch.status == "corrupt" or fetch.conflict_copies_only
     resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
     sources = _include_prior_grok_if_needed(
         config,
@@ -4398,6 +4676,14 @@ def _push_core(
     skipped: list[tuple[str, str]] = []
     skipped_repos: set[str] = set()
     nested_roots: dict[str, set[str]] = {}
+    # Track 75A: a file still changing after its one re-read is held at its
+    # accepted prior entry (or left out if never published) instead of refusing
+    # the push. Holding needs an accepted prior, so a push recovering a corrupt
+    # or conflict-copy manifest passes no collector and a transient refuses.
+    hold_eligible = not recovering_from_corrupt
+    held: dict[str, dict[str, str]] | None = {} if hold_eligible else None
+    held_candidates: dict[str, set[str]] | None = {} if hold_eligible else None
+    held_files: dict[str, dict[str, str]] = {}
 
     def on_skip(path: str, reason: str) -> None:
         if reason == manifest.NESTED_REPO_SKIP_REASON:
@@ -4426,6 +4712,8 @@ def _push_core(
         on_skip,
         strict=True,
         nested_roots=nested_roots,
+        held=held,
+        held_candidates=held_candidates,
     )
 
     total_file_count = sum(
@@ -4479,12 +4767,35 @@ def _push_core(
         remote_manifest = _filter_symlinked_paths(
             remote_manifest, sources, strict=True, exempt_roots=nested_roots
         )
+        # Held files keep their accepted prior entry before the omission proof
+        # sees them as omitted and before tombstones are generated.
+        if held is not None and held_candidates is not None:
+            held_files = _inject_held_entries(
+                local_manifest,
+                remote_manifest,
+                held,
+                held_candidates,
+                exclude_map=exclude_map,
+                skip_prefixes=skip_prefixes,
+                frozen=frozen,
+            )
         proof_sources = sources
         if dry_run and resolution.would_create:
             # Missing default roots truthfully preview deletions.
             proof_sources = [s for s in sources if s["name"] not in resolution.would_create]
         _prove_omitted_paths_absent(
             local_manifest, remote_manifest, proof_sources, max_file_size=max_file_size
+        )
+    elif held is not None and held_candidates is not None:
+        # First push: no prior entry to keep, so a held file is simply left out.
+        held_files = _inject_held_entries(
+            local_manifest,
+            None,
+            held,
+            held_candidates,
+            exclude_map=exclude_map,
+            skip_prefixes=skip_prefixes,
+            frozen=frozen,
         )
 
     # Generate tombstones for files that disappeared since last push
@@ -4503,9 +4814,6 @@ def _push_core(
     # but failed mid-upload). Pre-v0.12.2: events tail fired at HEAD of
     # _push_core unconditionally, so every `mm push` reported at least
     # the events-file modification.
-    # A manifest held only by conflict copies is rewritten like a corrupt one,
-    # so GC's "run mm push" remedy works without a content change.
-    recovering_from_corrupt = fetch.status == "corrupt" or fetch.conflict_copies_only
     source_diffs = list(iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
     if fetch.is_ok:
         # Without an accepted manifest of our own, everything (including
@@ -4539,10 +4847,19 @@ def _push_core(
         and not recovering_from_corrupt
         and not has_selection_change
     ):
+        scan_held = _held_list(held_files)
         if not quiet:
-            console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+            if scan_held:
+                lead = "Nothing would be pushed" if dry_run else "Nothing pushed"
+                console.print(
+                    f"[yellow]{lead}; {len(scan_held)} "
+                    f"{'file' if len(scan_held) == 1 else 'files'} not yet synced.[/yellow]"
+                )
+                _print_held_outcome(scan_held, verbose=verbose, preview=dry_run)
+            else:
+                console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
         if captured is not None and captured.appended is not None:
-            result = PushResult(events_degradations=events_degradations)
+            result = PushResult(events_degradations=events_degradations, held=scan_held)
             try:
                 result.host_usage_published = _report_usage_publication(
                     sources,
@@ -4565,7 +4882,7 @@ def _push_core(
                     file=sys.stderr,
                 )
             return result
-        return _push_result_or_none(events_degradations, dry_run)
+        return _push_result_or_none(events_degradations, dry_run, scan_held)
 
     # OK, this push will upload bytes. Run the events tail now to capture
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold
@@ -4587,6 +4904,8 @@ def _push_core(
     if not dry_run:
         mm_internal_cfgs = [s for s in sources if s["name"] in MM_INTERNAL_SOURCE_NAMES]
         if mm_internal_cfgs:
+            rescan_held: dict[str, dict[str, str]] | None = {} if hold_eligible else None
+            rescan_candidates: dict[str, set[str]] | None = {} if hold_eligible else None
             events_manifest = build_manifest_v2(
                 device_id,
                 device_name,
@@ -4595,6 +4914,8 @@ def _push_core(
                 on_skip,
                 strict=True,
                 nested_roots=nested_roots,
+                held=rescan_held,
+                held_candidates=rescan_candidates,
             )
             # The rescan replaces these sources' files; carry their frozen entries.
             # A path the rescan sees again (its .git vanished) uploads normally.
@@ -4605,6 +4926,33 @@ def _push_core(
                         frozen[name].discard(rel)
                     elif rel in previous:
                         data["files"][rel] = previous[rel]
+                # A file the scan held that now sits under a checkout the rescan
+                # reported is frozen instead: its carried entry is the accepted
+                # prior the first scan injected, never a first-scan revision.
+                roots = sorted(nested_roots.get(name, ()))
+                for rel in held_files.get(name, ()):
+                    if roots and rel not in data["files"] and _under_skip_prefix(rel, roots):
+                        if rel in previous:
+                            data["files"][rel] = previous[rel]
+                            frozen.setdefault(name, set()).add(rel)
+            if held is not None and rescan_held is not None and rescan_candidates is not None:
+                # The rescan is the new truth for these sources: a path it reads
+                # cleanly leaves the held set, and one it holds keeps the
+                # accepted prior entry (or is left out), never its first-scan
+                # revision, whose blob is not stored until the upload loop below.
+                for name in events_manifest["sources"]:
+                    held_files.pop(name, None)
+                held_files.update(
+                    _inject_held_entries(
+                        events_manifest,
+                        remote_manifest,
+                        rescan_held,
+                        rescan_candidates,
+                        exclude_map=exclude_map,
+                        skip_prefixes=skip_prefixes,
+                        frozen=frozen,
+                    )
+                )
             local_manifest["sources"].update(events_manifest["sources"])
             if remote_manifest is not None:
                 _prove_omitted_paths_absent(
@@ -4622,6 +4970,7 @@ def _push_core(
     total_new = 0
     total_modified = 0
     total_deleted = 0
+    upload_held = False
 
     for src_name, src_data, _remote_src, diff in iter_source_diffs(
         local_manifest, remote_sources, skip_unchanged=True
@@ -4633,10 +4982,11 @@ def _push_core(
             continue
 
         # Frozen checkout entries are already stored; their local bytes may differ.
+        # Held files keep their prior entry and are never read again here.
         to_upload = {
             rel: info
             for rel, info in {**diff.new, **diff.modified}.items()
-            if rel not in frozen.get(src_name, ())
+            if rel not in frozen.get(src_name, ()) and rel not in held_files.get(src_name, ())
         }
         base_path = Path(src_data["base_path"])
         src_cfg = source_by_name.get(src_name, {})
@@ -4644,7 +4994,7 @@ def _push_core(
         if verbose and not quiet:
             console.print(f"\n[bold]Uploading {len(to_upload)} files from '{src_name}'...[/bold]")
 
-        total_bytes += _upload_changed_blobs(
+        uploaded = _upload_changed_blobs(
             backend,
             base_path,
             to_upload,
@@ -4655,10 +5005,36 @@ def _push_core(
             src_name=src_name,
             source_type=src_cfg.get("type", "claude"),
             max_file_size=max_file_size,
+            allow_hold=hold_eligible,
         )
-        total_new += len(diff.new)
-        total_modified += len(diff.modified)
+        total_bytes += uploaded.bytes_transferred
+        if src_name in remote_sources and "vanished" in uploaded.held.values():
+            # A vanished file may mean its entire published root disappeared.
+            _require_published_source_root(src_name, Path(src_cfg["path"]).expanduser())
+        # Apply the upload's patches and holds to the manifest BEFORE it is
+        # serialized: a settled re-read advertises its own revision, and a held
+        # file goes back to its accepted prior entry (or out), so the manifest
+        # never names a blob that was not put. 73C's torn-publish recovery only
+        # ever sees these final entries.
+        local_files = local_manifest["sources"][src_name]["files"]
+        local_files.update(uploaded.patches)
+        upload_held |= bool(uploaded.held)
+        for rel, reason in uploaded.held.items():
+            prior = remote_sources.get(src_name, {}).get("files", {}).get(rel)
+            tombstoned = is_tombstoned(src_name, rel, (real_remote or {}).get("tombstones", {}))
+            if prior is not None and not tombstoned:
+                local_files[rel] = dict(prior)
+            else:
+                local_files.pop(rel, None)
+            if not tombstoned:
+                held_files.setdefault(src_name, {})[rel] = reason
+        held_new = sum(1 for rel in uploaded.held if rel in diff.new)
+        held_modified = sum(1 for rel in uploaded.held if rel in diff.modified)
+        total_new += len(diff.new) - held_new
+        total_modified += len(diff.modified) - held_modified
         total_deleted += len(diff.deleted)
+        if src_name not in MM_INTERNAL_SOURCE_NAMES:
+            content_files -= len(uploaded.held)
 
     if dry_run:
         if not quiet:
@@ -4676,8 +5052,17 @@ def _push_core(
                 console.print(
                     "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
                 )
+            _print_held_outcome(_held_list(held_files), verbose=verbose, preview=True)
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
+
+    if upload_held:
+        # The scan may have cleared a tombstone for a recreated file that the
+        # upload then held and removed. Reconcile against the final entries so
+        # that accepted deletion survives until replacement bytes are published.
+        local_manifest["tombstones"] = generate_tombstones(
+            local_manifest, remote_manifest, device_id
+        )
 
     # Upload manifest (includes tombstones)
     if not quiet:
@@ -4716,6 +5101,7 @@ def _push_core(
         content_changed=content_changed,
         content_files=content_files,
         content_accepted=True,
+        held=_held_list(held_files),
     )
     if captured is not None and captured.appended is not None:
         try:
@@ -4769,7 +5155,13 @@ def _push_core(
     result.elapsed = elapsed
 
     if not quiet:
-        console.print("\n[bold green]Push complete.[/bold green]")
+        if result.held:
+            console.print(
+                f"\n[bold green]Push complete;[/bold green] [yellow]{len(result.held)} "
+                f"{'file' if len(result.held) == 1 else 'files'} not yet synced.[/yellow]"
+            )
+        else:
+            console.print("\n[bold green]Push complete.[/bold green]")
         if total_new:
             console.print(f"  [green]+ {total_new} new[/green]")
         if total_modified:
@@ -4780,6 +5172,7 @@ def _push_core(
         if total_bytes:
             mb = total_bytes / (1024 * 1024)
             console.print(f"  {mb:.1f}MB transferred")
+        _print_held_outcome(result.held, verbose=verbose)
 
     return result
 
@@ -9592,6 +9985,14 @@ def recapture(
                     "Fix the storage error above, then run 'mm push'."
                 )
                 raise typer.Exit(1)
+            if result is not None and _held_blocks_recapture(result.held):
+                # The push held an mm-events file (a recapture day file was still
+                # changing): the rows exist locally but have not gone out.
+                console.print(
+                    "Recapture was written locally but not synced. "
+                    "A recapture file was still changing; run 'mm push' to publish it."
+                )
+                raise typer.Exit(1)
 
             _notice_recapture_host_usage(config, sources)
             partial = (
@@ -11077,8 +11478,18 @@ def autopush() -> None:
             # without this, `mm status` only ever sees `success` and monitoring
             # built on top of it never catches the wedge.
             events_degradations = result.events_degradations if result else []
-            if events_degradations:
-                _write_autorun_breadcrumb("push", "degraded", "; ".join(events_degradations))
+            # Files held because they were still changing (Track 75A) are not a
+            # failure but a push that is not yet complete: record the count and a
+            # few paths so `mm status` can name what lags. Degradations are never
+            # dropped when both exist; the push still exits 0 and prints nothing.
+            held = result.held if result else []
+            details = list(events_degradations)
+            if held:
+                used = len("; ".join(details)) + (2 if details else 0)
+                budget = max(_HELD_BREADCRUMB_BUDGET - used, 0)
+                details.append(_held_breadcrumb_detail(held, budget))
+            if details:
+                _write_autorun_breadcrumb("push", "degraded", "; ".join(details))
             else:
                 _write_autorun_breadcrumb("push", "success")
 
