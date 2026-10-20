@@ -1016,9 +1016,11 @@ def test_status_hint_for_every_keyring_outcome(tmp_path, monkeypatch, outcome, d
     """Spec 3.4: both outcomes hint, with or without a (known) detail."""
     _setup_real_config(tmp_path, monkeypatch)
     _redirect_sidecar(monkeypatch, tmp_path)
-    # _width, not width: the property setter makes undo pin the computed
-    # width for the rest of the worker.
+    # Private size fields, not the width property: the setter's undo pins
+    # the computed size for the rest of the worker. Rich ignores a
+    # width-only pin when TERM=dumb and wraps at 80 columns.
     monkeypatch.setattr(cli_module.console, "_width", 240)
+    monkeypatch.setattr(cli_module.console, "_height", 50)
     cli_module._write_autorun_breadcrumb("pull", outcome, detail)
 
     r = runner.invoke(app, ["status"])
@@ -1034,9 +1036,11 @@ def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):
 
     _setup_real_config(tmp_path, monkeypatch)
     _redirect_sidecar(monkeypatch, tmp_path)
-    # _width, not width: the property setter makes undo pin the computed
-    # width for the rest of the worker.
+    # Private size fields, not the width property: the setter's undo pins
+    # the computed size for the rest of the worker. Rich ignores a
+    # width-only pin when TERM=dumb and wraps at 80 columns.
     monkeypatch.setattr(cli_module.console, "_width", 240)
+    monkeypatch.setattr(cli_module.console, "_height", 50)
 
     control = runner.invoke(app, ["status"])
     assert control.exit_code == 0, control.output
