@@ -45,7 +45,7 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 ### [plan-eng-review:track=76A] Repair archived-design pointers at the next roadmap regeneration
-- **Why:** `docs/ROADMAP.md` (the Track 76A card itself and the _read-first_ or _Source_ lines of Tracks 84A to 89A) still cites the design's old path under `docs/designs/`, which now holds only a "# Moved" redirect to `docs/archive/store-v2.md`. Repair those pointers at the next `/roadmap` regeneration and reconcile `docs/roadmap-future.md`, whose link Track 76A already repointed. Track 89A also cites the design's §13 (cutover) as evidence, which the `docs/SPEC.md` evidence list omits; reconcile the two. Regeneration must precede starting any Track whose `_read-first_` cites the old design path.
+- **Why:** `docs/ROADMAP.md` (the Track 76A card itself and the _read-first_ or _Source_ lines of Tracks 84A to 89A) still cites the design's old path under `docs/designs/`, which now holds only a "# Moved" redirect to `docs/archive/store-v2.md`. Repair those pointers at the next `/roadmap` regeneration and reconcile `docs/roadmap-future.md`, whose link Track 76A already repointed. Track 89A also cites the design's §13 (cutover) as evidence, which the `docs/SPEC.md` evidence list and the archive header omit; reconcile all three. Regeneration must precede starting any Track whose `_read-first_` cites the old design path.
 - **Effort:** S
 - **Priority:** P2
 - **Context:** The Track 76A plan kept generator-owned `docs/ROADMAP.md` untouched and left the redirect at the old path so its pointers still resolve. Revisit at the next `/roadmap` regeneration.

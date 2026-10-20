@@ -612,10 +612,13 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 
 Track IDs 75A to 81A in this section and its subsections name the store-v2
 Tracks from before the 2026-10-19 spec rewrite, not the current roadmap's
-Tracks of the same number: 75A to 78A were killed and 81A's peer status became
-Track 88A. The four provisional tables below have no current reader; whichever
-current Track first needs per-peer state (87A's last-synced base or 88A's peer
-status) decides whether to reuse or drop them.
+Tracks of the same number: 75A to 78A were killed, and 81A's read-only peer
+status became Track 88A while its retirement was killed. The four provisional
+tables below have no current reader; whichever current Track first needs
+per-peer state (87A's last-synced base or 88A's peer status) decides whether to
+reuse or drop them. Obligations this section gives those old Tracks bind
+whichever current Track first writes non-history `state.db` data; README's
+History database section already names Track 87A for the move-aside remedy.
 
 `pullhistory` owns the forensic `history` table in the local, never-synced
 `~/.config/mind-meld/state.db` (0600; a directory statedb creates is 0700, an
@@ -749,7 +752,7 @@ tests assert table_info and index_list independently.
 ledger, cursors, own_log and displaced are **provisional and empty**, with no
 current reader (see the note at the top of this section). A Track that adopts
 one may DROP and re-CREATE it in a migration without raising compat_version:
-released binaries read history only.
+released binaries read only meta and history.
 `expire_displaced` is unit-tested only until 76A calls it inside its
 transaction: at 30 days it clears content and sets expired, never deletes rows
 or changes metadata.
