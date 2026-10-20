@@ -488,7 +488,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         cli,
         "_push_core",
-        lambda *_args, **_kwargs: calls.append(("push", None)) or object(),
+        lambda *_args, **_kwargs: calls.append(("push", None)) or cli.PushResult(),
     )
 
     r = runner.invoke(app, ["recapture", "1d"])
@@ -725,7 +725,7 @@ def _stub_recapture_result(tmp_path, monkeypatch, reasons=(), *, discovery="comp
     )
     monkeypatch.setattr(events_tail, "_prepare_recapture", lambda *a, **kw: prepared)
     monkeypatch.setattr(events, "write_push_event", lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_push_core", lambda *a, **kw: object())
+    monkeypatch.setattr(cli, "_push_core", lambda *a, **kw: cli.PushResult())
     return prepared
 
 

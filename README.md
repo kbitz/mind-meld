@@ -1534,7 +1534,33 @@ can record it again; this notice does not itself become a stored blocker.
 
 ### Snapshot failures
 
-A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file, a file that changes while it is being read, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot. There is no hidden retry; run `mm push` again after the cause is fixed. `mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
+A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
+
+**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and says which files are *not yet synced*; they go with a later push. Held files appear in the attended outcome (three paths, `--verbose` lists all), in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is rewriting a corrupt or conflict-copy manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
+
+```text
+$ mm push
+...
+Push complete; 2 files not yet synced.
+  2 files not yet synced (still changing): gstack:projects/x/log.jsonl, claude:projects/y/memory/MEMORY.md
+  Their previous versions (if any) stay published; they go with a later push.
+
+$ mm status          # after an autopush that held a file
+  Last auto-push: 2026-10-19T15:03:32+00:00 (degraded: 1 file held, not yet synced (still changing): claude:projects/y/memory/MEMORY.md)
+
+$ mm push            # a recovered manifest and a file that will not settle
+Error: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish, then run mm push. See .../#snapshot-failures.
+```
+
+| State | You see | Do |
+|---|---|---|
+| Held (still changing, vanished or grew) | *not yet synced*, count and paths | Nothing; the prior version stays published. Exclude it if it is always being written. |
+| Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
+| Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
+| Tombstoned | the deletion is published | Nothing |
+| Refused | one `Cannot publish:` error, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
+
+`mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
 
 Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
 
@@ -1545,7 +1571,8 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 | What happened | What to do |
 |---|---|
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
-| File changed while being read | Wait for the editor/writer to finish, then `mm push`. |
+| File changed, vanished or grew while being read, and a hold is not possible (the push is rewriting a corrupt or conflict-copy manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
+| Directory vanished while being listed, or `.extend-root` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
 | Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |
@@ -1570,7 +1597,7 @@ The lock allowance includes creating its parent if absent.
 
 | Command | May touch | Not previewed | Exit codes |
 |---|---|---|---|
-| `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads | 0 completed; 1 stopped |
+| `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (a scan-time hold is applied and its count shown) | 0 completed, including held files; 1 stopped |
 | `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
 | `mm gc --dry-run` | Local lock only | No cleanup is applied; conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
 | `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |

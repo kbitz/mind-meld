@@ -5459,6 +5459,78 @@ def test_all_emitters_obey_git_batch_origin_contract(capture61, monkeypatch, emi
         assert git_rows and all("origin" not in row for row in git_rows)
 
 
+def _recapture_with_unstable(capture61, monkeypatch, *, held_name):
+    """Run ``mm recapture 1d`` while scan reads of ``held_name`` never settle."""
+    env = capture61
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **kw: _mm_events.GitRootDiscovery([env["claude"]], [], False),
+    )
+    real = cli_module.manifest.read_file_revision
+
+    def flaky(path, **kw):
+        if Path(path).name == held_name or (held_name == "*.jsonl" and path.suffix == ".jsonl"):
+            raise cli_module.SnapshotChanged("changed while being read", "changed")
+        return real(path, **kw)
+
+    monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
+    return runner.invoke(app, ["recapture", "1d"])
+
+
+def test_recapture_with_a_held_day_file_takes_the_not_synced_exit_75a(capture61, monkeypatch):
+    result = _recapture_with_unstable(capture61, monkeypatch, held_name="*.jsonl")
+    flat = " ".join((result.output + (result.stderr or "")).split())
+    assert result.exit_code == 1, result.output
+    assert "Recapture was written locally but not synced." in flat
+    assert "still changing; run 'mm push' to publish it." in flat
+    assert "Recapture complete" not in flat and "Recapture found no commits" not in flat
+
+
+def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_published_75a(
+    capture61, monkeypatch
+):
+    """The captured-host-row no-op exit returns a PushResult carrying `held`, and the host
+    row that sits in the held day file is not reported as published."""
+    real = cli_module.manifest.read_file_revision
+
+    def flaky(path, **kw):
+        if path.suffix == ".jsonl" and path.parent.name == "events":
+            raise cli_module.SnapshotChanged("changed while being read", "changed")
+        return real(path, **kw)
+
+    monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
+    seen = []
+    real_core = cli_module._push_core
+
+    def spy(*args, **kwargs):
+        result = real_core(*args, **kwargs)
+        seen.append(result)
+        return result
+
+    monkeypatch.setattr(cli_module, "_push_core", spy)
+    result = runner.invoke(app, ["push"])
+    flat = " ".join((result.output + (result.stderr or "")).split())
+    assert result.exit_code == 0, result.output
+    assert "Nothing pushed; 1 file not yet synced." in flat
+    assert "Nothing to push" not in flat  # the held outcome replaces the up-to-date line
+    assert "Host usage published" not in flat
+    (core,) = seen
+    assert core is not None and len(core.held) == 1
+    assert core.held[0][0] == "mm-events" and core.held[0][2] == "changed"
+    assert core.host_usage_published is False
+    assert core.content_accepted is False
+
+
+def test_recapture_is_unaffected_by_a_held_user_file_75a(capture61, monkeypatch):
+    env = capture61
+    (env["claude"] / "projects/-Users-kb-myapp/memory/hot.md").write_text("still being written")
+    result = _recapture_with_unstable(capture61, monkeypatch, held_name="hot.md")
+    flat = " ".join((result.output + (result.stderr or "")).split())
+    assert result.exit_code in (0, 4), result.output
+    assert "written locally but not synced" not in flat
+
+
 @pytest.mark.parametrize("recovery", ["push", "autopush"])
 def test_failed_usage_publication_recovery_respects_activity_gate(capture61, monkeypatch, recovery):
     from mind_meld.skills.retro_fleet import aggregator
@@ -6999,14 +7071,15 @@ class TestCompleteSnapshots:
         assert env["backend"].get(env["device_key"]) == prior[2]
         assert "Push complete" not in result.output
 
-    def test_shared_hash_poison_is_refused_and_old_blob_kept(self, tmp_path, monkeypatch):
+    def test_upload_change_never_poisons_a_shared_hash_blob(self, tmp_path, monkeypatch):
+        """Track 75A flips the 49A refusal: the changed file's deferred re-read settles on
+        its own revision, so each blob holds exactly the bytes its digest names."""
         from mind_meld.crypto import decrypt
         from mind_meld.storage.keys import blob_key
 
         env = self._prepare(tmp_path, monkeypatch)
         first = self._push()
         assert first.exit_code == 0, first.output
-        prior = self._prior(env)
         old_digest = hashlib.sha256(b"old bytes").hexdigest()
         old_blob = env["backend"].get(blob_key("dev-a", old_digest))
         real_upload = cli_module._upload_changed_blobs
@@ -7019,15 +7092,37 @@ class TestCompleteSnapshots:
         (env["memory"] / "a.md").write_text("shared v2")
         (env["memory"] / "b.md").write_text("shared v2")
         result = self._push()
-        self._assert_prior_kept(env, prior, result)
-        plain = decrypt(old_blob, "shared-cli-test-passphrase", 1024)
-        assert plain == b"old bytes"
+        assert result.exit_code == 0, result.output
+        passphrase = "shared-cli-test-passphrase"
+        assert decrypt(old_blob, passphrase, 1024) == b"old bytes"
+        for text in ("changed bytes", "shared v2"):
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            assert decrypt(env["backend"].get(blob_key("dev-a", digest)), passphrase, 1024) == (
+                text.encode()
+            )
+        from mind_meld.manifest import load_manifest
 
-    def test_missing_upload_input_refuses(self, tmp_path, monkeypatch):
+        files = load_manifest(decrypt(env["backend"].get(env["manifest_key"]), passphrase, 1024))[
+            "sources"
+        ]["claude"]["files"]
+        assert (
+            files["projects/-app/memory/a.md"]["sha256"]
+            == hashlib.sha256(b"changed bytes").hexdigest()
+        )
+        assert (
+            files["projects/-app/memory/b.md"]["sha256"] == hashlib.sha256(b"shared v2").hexdigest()
+        )
+
+    def test_missing_upload_input_is_held_not_refused(self, tmp_path, monkeypatch):
+        """Track 75A flips the 49A refusal: a new file that vanishes before upload is
+        held (left out, no tombstone) and the rest of the push publishes."""
+        from mind_meld.crypto import decrypt
+        from mind_meld.manifest import load_manifest
+
         env = self._prepare(tmp_path, monkeypatch)
         assert self._push().exit_code == 0
-        prior = self._prior(env)
         (env["memory"] / "c.md").write_text("new")
+        (env["memory"] / "b.md").write_text("b changed")
 
         real_upload = cli_module._upload_changed_blobs
 
@@ -7037,7 +7132,17 @@ class TestCompleteSnapshots:
 
         monkeypatch.setattr(cli_module, "_upload_changed_blobs", drop_then_upload)
         result = self._push()
-        self._assert_prior_kept(env, prior, result)
+        assert result.exit_code == 0, result.output
+        assert "not yet synced" in " ".join(result.output.split())
+        remote = load_manifest(
+            decrypt(env["backend"].get(env["manifest_key"]), "shared-cli-test-passphrase", 1024)
+        )
+        files = remote["sources"]["claude"]["files"]
+        assert "projects/-app/memory/c.md" not in files
+        assert (
+            files["projects/-app/memory/b.md"]["sha256"] == hashlib.sha256(b"b changed").hexdigest()
+        )
+        assert not any(k.endswith("c.md") for k in remote.get("tombstones", {}))
 
     def test_unreadable_existing_file_does_not_tombstone(self, tmp_path, monkeypatch):
         env = self._prepare(tmp_path, monkeypatch)
@@ -7233,6 +7338,769 @@ class TestCompleteSnapshots:
         combined = (result.output + (result.stderr or "")).replace("\n", " ")
         assert "missing after" in combined
         assert "no sync sources found" not in combined
+
+
+class TestHeldFiles75A:
+    """Track 75A: a file that changes while mm reads it is re-read once, then held.
+
+    Scan-time changes ride ``manifest.read_file_revision`` and upload-time changes
+    ``cli.read_file_revision`` (separate bindings), so each seam is independent.
+    Holds keep the accepted prior entry; the rest of the push publishes.
+    """
+
+    REL = "projects/-app/memory/a.md"
+
+    def _prepare(self, tmp_path, monkeypatch, *, extra_sources=None):
+        return TestCompleteSnapshots()._prepare(tmp_path, monkeypatch, extra_sources=extra_sources)
+
+    def _events_source(self, tmp_path):
+        root = tmp_path / "mm-events"
+        root.mkdir(exist_ok=True)
+        return {
+            "name": "mm-events",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["events"],
+        }
+
+    def _push(self, *args):
+        return runner.invoke(app, ["push", *args])
+
+    def _spy_core(self, monkeypatch):
+        """Record every ``_push_core`` result (the PushResult the commands consume)."""
+        seen = []
+        real_core = cli_module._push_core
+
+        def spy(*args, **kwargs):
+            result = real_core(*args, **kwargs)
+            seen.append(result)
+            return result
+
+        monkeypatch.setattr(cli_module, "_push_core", spy)
+        return seen
+
+    @staticmethod
+    def _text(result):
+        return " ".join((result.output + (result.stderr or "")).split())
+
+    @staticmethod
+    def _published(env):
+        from mind_meld.manifest import load_manifest
+        from tests.conftest import PASSPHRASE as SHARED_PASSPHRASE  # what _prepare uses
+
+        return load_manifest(
+            crypto_module.decrypt(
+                env["backend"].get(env["manifest_key"]), SHARED_PASSPHRASE, memory_kb=1024
+            )
+        )
+
+    @staticmethod
+    def _entry(env, rel, source="claude"):
+        return TestHeldFiles75A._published(env)["sources"][source]["files"].get(rel)
+
+    @staticmethod
+    def _digest(text):
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    @staticmethod
+    def _blob_exists(env, digest):
+        return env["backend"].exists(storage_keys.blob_key("dev-a", digest))
+
+    def _flaky_reader(self, monkeypatch, owner, real, names, *, times, reason, when, before_first):
+        """Wrap a ``read_file_revision`` binding so reads of ``names`` are unstable.
+
+        ``changed`` is genuine: the descriptor signature differs between the two
+        stats inside the real function, so the real refusal text (location, fix)
+        is raised. ``vanished`` and ``grew`` raise a transient directly. Returns
+        the per-name read counts (every read counts, settled or not).
+        """
+        from mind_meld import manifest as manifest_module
+
+        calls: dict[str, int] = {}
+        real_signature = manifest_module._revision_signature
+
+        def fake(path, **kw):
+            name = Path(path).name
+            if name not in names or (when is not None and not when()):
+                return real(path, **kw)
+            calls[name] = calls.get(name, 0) + 1
+            if before_first is not None:
+                if calls[name] == 1:
+                    before_first(Path(path))
+                return real(path, **kw)
+            if times is not None and calls[name] > times:
+                return real(path, **kw)
+            if reason != "changed":
+                raise cli_module.SnapshotChanged(f"{reason} while being read", reason)
+            seen = {"n": 0}
+
+            def flipping(st):
+                seen["n"] += 1
+                return (*real_signature(st), seen["n"])
+
+            monkeypatch.setattr(manifest_module, "_revision_signature", flipping)
+            try:
+                return real(path, **kw)
+            finally:
+                monkeypatch.setattr(manifest_module, "_revision_signature", real_signature)
+
+        monkeypatch.setattr(owner, "read_file_revision", fake)
+        return calls
+
+    def _scan_flaky(self, monkeypatch, names, *, times=None, reason="changed", when=None):
+        """Scan reads of files named in ``names`` are unstable (``times`` reads, else always)."""
+        calls = self._flaky_reader(
+            monkeypatch,
+            cli_module.manifest,
+            cli_module.manifest.read_file_revision,
+            names,
+            times=times,
+            reason=reason,
+            when=when,
+            before_first=None,
+        )
+        return calls
+
+    def _upload_flaky(self, monkeypatch, names, *, before_first=None):
+        """Upload reads of files named in ``names`` are unstable (or mutate the file first)."""
+        return self._flaky_reader(
+            monkeypatch,
+            cli_module,
+            cli_module.read_file_revision,
+            names,
+            times=None,
+            reason="changed",
+            when=None,
+            before_first=before_first,
+        )
+
+    def _peer_pull(self, env, tmp_path, monkeypatch, *, extra_sources=()):
+        claude_b = tmp_path / "machine_b" / ".claude"
+        claude_b.mkdir(parents=True)
+        register_device(env["backend"], "dev-b", "B")
+        path_b = tmp_path / "config_b.toml"
+        save_config(
+            {
+                "device": {"id": "dev-b", "name": "B"},
+                "storage": {"path": str(env["storage_dir"])},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {"name": "claude", "path": str(claude_b), "type": "claude"},
+                        *extra_sources,
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            path_b,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", path_b)
+        try:
+            result = runner.invoke(app, ["pull"])
+        finally:
+            monkeypatch.setattr("mind_meld.config.CONFIG_PATH", env["config_path"])
+        assert result.exit_code == 0, result.output
+        return claude_b
+
+    # ── scan-time ────────────────────────────────────────────────────
+
+    def test_scan_change_settling_on_retry_publishes_read_two(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("new bytes")
+        calls = self._scan_flaky(monkeypatch, {"a.md"}, times=1)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert calls["a.md"] == 2  # the unstable read plus exactly one retry, no third read
+        assert "not yet synced" not in self._text(result)
+        assert self._entry(env, self.REL)["sha256"] == self._digest("new bytes")
+
+    def test_scan_still_changing_is_held_at_prior_and_peer_pulls_prior_bytes(
+        self, tmp_path, monkeypatch
+    ):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        old = self._digest("old bytes")
+        (env["memory"] / "a.md").write_text("new bytes")
+        (env["memory"] / "b.md").write_text("b changed")
+        calls = self._scan_flaky(monkeypatch, {"a.md"})
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert calls["a.md"] == 2  # scan read plus exactly one retry
+        text = self._text(result)
+        assert "Push complete; 1 file not yet synced." in text
+        assert f"claude:{self.REL}" in text
+        assert "Their previous versions (if any) stay published" in text
+        published = self._published(env)
+        assert self._entry(env, self.REL)["sha256"] == old
+        assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b changed")
+        assert not any(k.endswith("a.md") for k in published["tombstones"])
+        assert self._blob_exists(env, old)
+        assert not self._blob_exists(env, self._digest("new bytes"))
+        claude_b = self._peer_pull(env, tmp_path, monkeypatch)
+        assert (claude_b / self.REL).read_bytes() == b"old bytes"
+        assert (claude_b / "projects/-app/memory/b.md").read_bytes() == b"b changed"
+
+    def test_held_file_goes_out_with_a_later_push(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("new bytes")
+        with monkeypatch.context() as m:
+            self._scan_flaky(m, {"a.md"})
+            assert self._push().exit_code == 0
+        assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
+        later = self._push()
+        assert later.exit_code == 0, later.output
+        assert "not yet synced" not in self._text(later)
+        assert self._entry(env, self.REL)["sha256"] == self._digest("new bytes")
+
+    @pytest.mark.parametrize("has_prior", [False, True])
+    @pytest.mark.parametrize("phase", ["scan", "upload"])
+    def test_never_published_held_file_is_left_out_with_no_tombstone(
+        self, tmp_path, monkeypatch, has_prior, phase
+    ):
+        # Value: protects=first and later pushes hold while publishing stable files;
+        # fails_when=hold eligibility incorrectly requires an accepted manifest;
+        # why_new=the old case always published a baseline and only held during scan;
+        # seam=none; no_claim=real timing or provider delivery.
+        env = self._prepare(tmp_path, monkeypatch)
+        if has_prior:
+            assert self._push().exit_code == 0
+        else:
+            assert not env["backend"].exists(env["manifest_key"])
+        rel = "projects/-app/memory/c.md"
+        (env["memory"] / "c.md").write_text("brand new")
+        (env["memory"] / "b.md").write_text("b changed")
+        with monkeypatch.context() as m:
+            if phase == "scan":
+                self._scan_flaky(m, {"c.md"})
+            else:
+                self._upload_flaky(m, {"c.md"})
+            seen = self._spy_core(m)
+            result = self._push()
+        assert result.exit_code == 0, result.output
+        assert "1 file not yet synced" in self._text(result)
+        published = self._published(env)
+        files = published["sources"]["claude"]["files"]
+        assert rel not in files
+        assert files["projects/-app/memory/b.md"]["sha256"] == self._digest("b changed")
+        assert not any(k.endswith("c.md") for k in published["tombstones"])
+        assert seen[0].held == [("claude", rel, "changed")]
+        later = self._push()
+        assert later.exit_code == 0, later.output
+        assert self._entry(env, rel)["sha256"] == self._digest("brand new")
+
+    @pytest.mark.parametrize("phase", ["scan", "upload"])
+    def test_tombstoned_path_stays_deleted_when_the_recreated_file_is_held(
+        self, tmp_path, monkeypatch, phase
+    ):
+        # Value: protects=accepted deletions survive a held recreation;
+        # fails_when=upload holding removes the file without restoring its tombstone;
+        # why_new=the scan-only case never reaches post-diff holding; seam=none;
+        # no_claim=real writer timing (deterministic read mutation).
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").unlink()
+        assert self._push().exit_code == 0
+        prior_tombstones = self._published(env)["tombstones"]
+        assert any(k.endswith("a.md") for k in prior_tombstones)
+        (env["memory"] / "a.md").write_text("recreated")
+        (env["memory"] / "b.md").write_text("b changed")
+        if phase == "scan":
+            self._scan_flaky(monkeypatch, {"a.md"})
+        else:
+            self._upload_flaky(monkeypatch, {"a.md"})
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        published = self._published(env)
+        assert self.REL not in published["sources"]["claude"]["files"]
+        assert published["tombstones"] == prior_tombstones
+        assert "not yet synced" not in self._text(result)  # deleted, not waiting
+
+    def test_held_only_scan_exit_makes_no_put_and_never_claims_up_to_date(
+        self, tmp_path, monkeypatch
+    ):
+        # Value: protects=held-only pushes preserve event and publication side effects;
+        # fails_when=the no-op runs the events tail or writes storage or the sidecar;
+        # why_new=the original test checked only manifest bytes without mm-events;
+        # seam=none; no_claim=live host capture or provider delivery.
+        env = self._events_env(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        before = env["backend"].get(env["manifest_key"])
+        device_before = env["backend"].get(env["device_key"])
+        sidecar_path = cli_module.sidecar.sidecar_path()
+        tracked_paths = [sidecar_path, *env["events_dir"].glob("*.jsonl")]
+        local_before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tracked_paths
+        }
+        effects = []
+
+        def track(name, real):
+            def tracked(*args, **kwargs):
+                effects.append(name)
+                return real(*args, **kwargs)
+
+            return tracked
+
+        monkeypatch.setattr(
+            events_tail, "_run_events_tail", track("events-tail", events_tail._run_events_tail)
+        )
+        monkeypatch.setattr(cli_module.sidecar, "write", track("sidecar", cli_module.sidecar.write))
+        monkeypatch.setattr(
+            cli_module, "update_last_seen", track("last-seen", cli_module.update_last_seen)
+        )
+        monkeypatch.setattr(LocalBackend, "put", track("storage-put", LocalBackend.put))
+        (env["memory"] / "a.md").write_text("new bytes")
+        self._scan_flaky(monkeypatch, {"a.md"})
+        seen = self._spy_core(monkeypatch)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        text = self._text(result)
+        assert "Nothing pushed; 1 file not yet synced." in text
+        assert "up to date" not in text
+        assert env["backend"].get(env["manifest_key"]) == before
+        assert env["backend"].get(env["device_key"]) == device_before
+        assert {
+            path: (path.read_bytes(), path.stat().st_mtime_ns) for path in tracked_paths
+        } == local_before
+        assert sorted(env["events_dir"].glob("*.jsonl")) == sorted(tracked_paths[1:])
+        assert effects == []
+        (core,) = seen
+        assert core.held == [("claude", self.REL, "changed")]
+        assert core.content_changed is False and core.content_accepted is False
+
+    def test_scan_hold_does_not_suppress_an_unrelated_mtime_only_publication(
+        self, tmp_path, monkeypatch
+    ):
+        # Value: protects=held files do not suppress unrelated mtime-only publication;
+        # fails_when=held-only handling returns before the metadata-change gate;
+        # why_new=mtime tests had no holds and held tests changed neighbor bytes;
+        # seam=none; no_claim=real transport or physical two-Mac qualification.
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = self._published(env)
+        prior_files = prior["sources"]["claude"]["files"]
+        neighbor_rel = "projects/-app/memory/b.md"
+        neighbor = env["memory"] / "b.md"
+        bumped = neighbor.stat().st_mtime + 120
+        os.utime(neighbor, (bumped, bumped))
+        (env["memory"] / "a.md").write_text("held new bytes")
+        self._scan_flaky(monkeypatch, {"a.md"})
+        seen = self._spy_core(monkeypatch)
+
+        result = self._push()
+
+        assert result.exit_code == 0, result.output
+        assert "Push complete; 1 file not yet synced." in self._text(result)
+        published = self._published(env)
+        files = published["sources"]["claude"]["files"]
+        assert files[self.REL] == prior_files[self.REL]
+        assert files[neighbor_rel]["sha256"] == prior_files[neighbor_rel]["sha256"]
+        assert (
+            files[neighbor_rel]["mtime"]
+            == datetime.fromtimestamp(neighbor.stat().st_mtime, tz=timezone.utc).isoformat()
+        )
+        assert files[neighbor_rel]["mtime"] != prior_files[neighbor_rel]["mtime"]
+        assert published["tombstones"] == prior["tombstones"]
+        assert not self._blob_exists(env, self._digest("held new bytes"))
+        (core,) = seen
+        assert core.held == [("claude", self.REL, "changed")]
+        assert core.content_changed is True and core.content_accepted is True
+        assert (core.total_new, core.total_modified, core.content_files) == (0, 0, 0)
+
+    def test_vanished_scan_file_is_held_and_worded_as_vanished(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("new bytes")
+        (env["memory"] / "b.md").write_text("b changed")
+        self._scan_flaky(monkeypatch, {"a.md"}, reason="vanished")
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        text = self._text(result)
+        assert "gone while being read" in text
+        assert "recorded as deleted on a later push" in text
+        assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
+
+    def test_default_output_lists_three_paths_and_verbose_lists_all(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        names = {f"n{i}.md" for i in range(5)}
+        for name in names:
+            (env["memory"] / name).write_text(name)
+        (env["memory"] / "b.md").write_text("b changed")
+        with monkeypatch.context() as m:
+            self._scan_flaky(m, names)
+            default = self._push()
+        assert default.exit_code == 0, default.output
+        text = self._text(default)
+        assert "5 files not yet synced" in text
+        assert "(+2 more)" in text
+        assert sum(f"memory/n{i}.md" in text for i in range(5)) == 3
+        (env["memory"] / "b.md").write_text("b changed again")
+        with monkeypatch.context() as m:
+            self._scan_flaky(m, names)
+            verbose = self._push("--verbose")
+        text = self._text(verbose)
+        assert "+2 more" not in text
+        assert all(f"memory/n{i}.md" in text for i in range(5))
+
+    def test_dry_run_applies_the_scan_hold_and_shows_the_count(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        before = env["backend"].get(env["manifest_key"])
+        (env["memory"] / "a.md").write_text("new bytes")
+        (env["memory"] / "b.md").write_text("b changed")
+        self._scan_flaky(monkeypatch, {"a.md"})
+        result = self._push("--dry-run")
+        assert result.exit_code == 0, result.output
+        text = self._text(result)
+        assert "1 file would be held, not yet synced (still changing)" in text
+        assert f"claude:{self.REL}" in text
+        assert text.index("would be held") < text.rindex("Completed in")
+        assert text.index("Source 'claude'") < text.index("would be held")
+        assert env["backend"].get(env["manifest_key"]) == before
+
+    def test_dry_run_held_only_says_nothing_would_be_pushed(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("new bytes")
+        self._scan_flaky(monkeypatch, {"a.md"})
+        result = self._push("--dry-run")
+        assert result.exit_code == 0, result.output
+        text = self._text(result)
+        assert "Nothing would be pushed; 1 file not yet synced." in text
+        assert "up to date" not in text
+
+    # ── upload-time ──────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("settled_text", ["v3 written", "old bytes"])
+    def test_upload_change_settles_and_patches_the_entry_to_read_two(
+        self, tmp_path, monkeypatch, settled_text
+    ):
+        from tests.conftest import PASSPHRASE as SHARED_PASSPHRASE
+
+        # Value: protects=upload retry may return to prior bytes without losing counters;
+        # fails_when=prior-digest equality suppresses the patch or fresh-diff counts;
+        # why_new=existing equality case uses scanned bytes and no accepted prior;
+        # seam=none; no_claim=real concurrent writer timing or two-Mac transport.
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        prior = dict(self._entry(env, self.REL))
+        path = env["memory"] / "a.md"
+        prior_mtime_ns = path.stat().st_mtime_ns
+        path.write_text("v2")
+        expected = {}
+
+        def settle(path):
+            path.write_text(settled_text)
+            stamp = prior_mtime_ns + 2_000_000_000
+            os.utime(path, ns=(stamp, stamp))
+            expected["mtime"] = datetime.fromtimestamp(
+                path.stat().st_mtime, tz=timezone.utc
+            ).isoformat()
+
+        calls = self._upload_flaky(monkeypatch, {"a.md"}, before_first=settle)
+        seen = self._spy_core(monkeypatch)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert calls["a.md"] == 2
+        assert "not yet synced" not in self._text(result)
+        entry = self._entry(env, self.REL)
+        assert entry["sha256"] == self._digest(settled_text)
+        assert entry["mtime"] == expected["mtime"]
+        assert entry["mtime"] != prior["mtime"]
+        (core,) = seen
+        assert core.held == []
+        assert (core.total_new, core.total_modified, core.content_files) == (0, 1, 1)
+        if settled_text == "old bytes":
+            assert entry["sha256"] == prior["sha256"]
+        blob = env["backend"].get(storage_keys.blob_key("dev-a", entry["sha256"]))
+        assert (
+            crypto_module.decrypt(blob, SHARED_PASSPHRASE, memory_kb=1024) == settled_text.encode()
+        )
+        assert not self._blob_exists(env, self._digest("v2"))
+
+    def test_upload_still_changing_holds_one_file_and_publishes_the_rest(
+        self, tmp_path, monkeypatch
+    ):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        (env["memory"] / "a.md").write_text("a2")
+        (env["memory"] / "b.md").write_text("b2")
+        (env["memory"] / "c.md").write_text("c2 never published")
+        calls = self._upload_flaky(monkeypatch, {"a.md", "c.md"})
+        seen = self._spy_core(monkeypatch)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert calls == {"a.md": 2, "c.md": 2}
+        (core,) = seen
+        assert [(src, rel) for src, rel, _reason in core.held] == [
+            ("claude", "projects/-app/memory/a.md"),
+            ("claude", "projects/-app/memory/c.md"),
+        ]
+        # a.md (modified) and c.md (new) left the counters; b.md alone remains.
+        assert (core.total_new, core.total_modified, core.content_files) == (0, 1, 1)
+        assert core.content_changed is True  # the pre-upload gate fact is not recomputed
+        assert core.content_accepted is True
+        text = self._text(result)
+        assert "Push complete; 2 files not yet synced." in text
+        assert "~ 1 modified" in text  # b only: held a.md left the counts
+        assert "new" not in text.split("Push complete")[1].split("not yet synced")[0]
+        assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
+        assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b2")
+        assert self._entry(env, "projects/-app/memory/c.md") is None
+        assert not any(k.endswith("c.md") for k in self._published(env)["tombstones"])
+        for entry in self._published(env)["sources"]["claude"]["files"].values():
+            assert self._blob_exists(env, entry["sha256"])  # no dangling entry
+        assert not self._blob_exists(env, self._digest("a2"))
+
+    def test_incident_replay_upload_change_completes_and_next_push_publishes(
+        self, tmp_path, monkeypatch
+    ):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        for name in ("a.md", "b.md", "c.md"):
+            (env["memory"] / name).write_text(f"{name} v2")
+        with monkeypatch.context() as m:
+            self._upload_flaky(m, {"b.md"})
+            first = self._push()
+        assert first.exit_code == 0, first.output
+        assert "1 file not yet synced" in self._text(first)
+        assert self._entry(env, "projects/-app/memory/c.md")["sha256"] == self._digest("c.md v2")
+        second = self._push()
+        assert second.exit_code == 0, second.output
+        assert "not yet synced" not in self._text(second)
+        assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b.md v2")
+
+    def test_upload_held_only_push_still_puts_the_manifest(self, tmp_path, monkeypatch):
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        before = env["backend"].get(env["manifest_key"])
+        (env["memory"] / "a.md").write_text("a2")
+        self._upload_flaky(monkeypatch, {"a.md"})
+        seen = self._spy_core(monkeypatch)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert "Push complete; 1 file not yet synced." in self._text(result)
+        assert env["backend"].get(env["manifest_key"]) != before  # the manifest was put
+        assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
+        (core,) = seen
+        assert core.content_accepted is True and len(core.held) == 1
+        assert (core.total_new, core.total_modified) == (0, 0)
+
+    def test_held_mm_internal_upload_leaves_content_files_alone(self, tmp_path, monkeypatch):
+        env = self._events_env(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        day = self._day_file(env)
+        (env["memory"] / "a.md").write_text("content push")
+        self._upload_flaky(monkeypatch, {day.name})
+        seen = self._spy_core(monkeypatch)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        (core,) = seen
+        assert [(src, reason) for src, _rel, reason in core.held] == [("mm-events", "changed")]
+        # content_files counted only the user file; the held internal file never was.
+        assert core.content_files == 1
+        assert (core.total_new, core.total_modified) == (0, 1)
+        rel = f"events/{day.name}"
+        assert self._blob_exists(env, self._entry(env, rel, "mm-events")["sha256"])
+
+    # ── recovered prior ──────────────────────────────────────────────
+
+    def _damage_prior(self, env, recovery):
+        from tests.conftest import PASSPHRASE as SHARED_PASSPHRASE
+
+        if recovery == "conflict-copies-only":
+            conflict = env["backend"].root / Path(env["manifest_key"]).with_name(
+                "manifest.json 2.enc"
+            )
+            conflict.write_bytes(env["backend"].get(env["manifest_key"]))
+        env["backend"].put(env["manifest_key"], b"not a manifest")
+        fetch = cli_module._fetch_remote_manifest(
+            env["backend"], "dev-a", SHARED_PASSPHRASE, MEMORY_KB
+        )
+        assert fetch.status == ("ok" if recovery == "conflict-copies-only" else "corrupt")
+        assert fetch.conflict_copies_only == (recovery == "conflict-copies-only")
+
+    @pytest.mark.parametrize("recovery", ["corrupt", "conflict-copies-only"])
+    def test_recovered_prior_refuses_a_still_changing_file_naming_it_and_the_fix(
+        self, tmp_path, monkeypatch, recovery
+    ):
+        # Value: protects=recovered priors never hold an unstable scan;
+        # fails_when=conflict-copy recovery is treated as accepted canonical state;
+        # why_new=only corrupt-canonical recovery was exercised; seam=none;
+        # no_claim=provider conflict-copy arrival timing (local backend).
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        self._damage_prior(env, recovery)
+        (env["memory"] / "a.md").write_text("new bytes")
+        self._scan_flaky(monkeypatch, {"a.md"})
+        result = self._push()
+        assert result.exit_code != 0
+        text = self._text(result)
+        assert self.REL in text
+        assert "changed while being read" in text
+        assert "Wait for the writer to finish, then run mm push." in text
+        assert env["backend"].get(env["manifest_key"]) == b"not a manifest"
+
+    @pytest.mark.parametrize("recovery", ["corrupt", "conflict-copies-only"])
+    def test_recovered_prior_still_publishes_when_the_retry_settles(
+        self, tmp_path, monkeypatch, recovery
+    ):
+        # Value: protects=recovery can publish a settled retry;
+        # fails_when=hold ineligibility disables the successful retry;
+        # why_new=the conflict-copy recovery branch lacked coverage; seam=none;
+        # no_claim=real concurrent writer timing (deterministic read mutation).
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        self._damage_prior(env, recovery)
+        (env["memory"] / "a.md").write_text("new bytes")
+        calls = self._scan_flaky(monkeypatch, {"a.md"}, times=1)
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert calls["a.md"] == 2  # the retry ran even though a hold is unavailable
+        assert self._entry(env, self.REL)["sha256"] == self._digest("new bytes")
+
+    @pytest.mark.parametrize("recovery", ["corrupt", "conflict-copies-only"])
+    def test_recovered_prior_refuses_an_upload_that_keeps_changing(
+        self, tmp_path, monkeypatch, recovery
+    ):
+        # Value: protects=conflict-copy recovery refuses an unstable upload;
+        # fails_when=upload holding is enabled for an unaccepted recovery prior;
+        # why_new=the upload test covered corrupt canonical state only; seam=none;
+        # no_claim=real concurrent writer timing (deterministic read mutation).
+        env = self._prepare(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        self._damage_prior(env, recovery)
+        (env["memory"] / "a.md").write_text("new bytes")
+        self._upload_flaky(monkeypatch, {"a.md"})
+        result = self._push()
+        assert result.exit_code != 0
+        assert env["backend"].get(env["manifest_key"]) == b"not a manifest"
+
+    # ── mm-events rescan ─────────────────────────────────────────────
+
+    def _events_env(self, tmp_path, monkeypatch, *, subtree=False):
+        events_src = self._events_source(tmp_path)
+        if subtree:
+            sub = Path(events_src["path"]) / "events" / "sub"
+            sub.mkdir(parents=True)
+            (sub / "x.jsonl").write_text('{"type":"note","n":1}\n')
+        monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
+        monkeypatch.setattr(
+            _mm_events,
+            "discover_git_roots",
+            lambda *a, **kw: _mm_events.GitRootDiscovery([], [], False),
+        )
+        env = self._prepare(tmp_path, monkeypatch, extra_sources=[events_src])
+        env["events_dir"] = Path(events_src["path"]) / "events"
+        return env
+
+    def _phase_spy(self, monkeypatch, after_scan=None):
+        """Track which build_manifest_v2 call is the first scan versus the mm-events rescan."""
+        real_build = cli_module.build_manifest_v2
+        state = {"phase": "idle"}
+
+        def spy(*a, **kw):
+            cfgs = a[2] if len(a) > 2 else kw.get("sources_configs")
+            names = [c.get("name") for c in cfgs]
+            rescan = names == ["mm-events"]
+            state["phase"] = "rescan" if rescan else "scan"
+            try:
+                manifest = real_build(*a, **kw)
+            finally:
+                state["phase"] = "idle"
+            if not rescan and after_scan is not None:
+                after_scan()
+            return manifest
+
+        monkeypatch.setattr(cli_module, "build_manifest_v2", spy)
+        return state
+
+    def _day_file(self, env):
+        (day,) = sorted(env["events_dir"].glob("*.jsonl"))
+        return day
+
+    def test_rescan_hold_carries_the_accepted_prior_never_a_first_scan_revision(
+        self, tmp_path, monkeypatch
+    ):
+        # Value: protects=a peer can pull the accepted bytes of a rescan-held event file;
+        # fails_when=the manifest references the unuploaded first-scan revision;
+        # why_new=the prior peer assertion selected only Claude content; seam=none;
+        # no_claim=physical two-Mac transport (two configs, one local backend).
+        env = self._events_env(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        day = self._day_file(env)
+        rel = f"events/{day.name}"
+        prior = self._entry(env, rel, "mm-events")["sha256"]
+        prior_bytes = day.read_bytes()
+        lines = day.read_text().splitlines()
+        day.write_text("\n".join([*lines, lines[-1]]) + "\n")  # the first scan will see this
+        first_scan_digest = hashlib.sha256(day.read_bytes()).hexdigest()
+        assert first_scan_digest != prior
+        (env["memory"] / "a.md").write_text("content push")
+        state = self._phase_spy(monkeypatch)
+        self._scan_flaky(monkeypatch, {day.name}, when=lambda: state["phase"] == "rescan")
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert "not yet synced" in self._text(result)
+        assert self._entry(env, rel, "mm-events")["sha256"] == prior
+        assert not self._blob_exists(env, first_scan_digest)
+        for source in self._published(env)["sources"].values():
+            for entry in source["files"].values():
+                assert self._blob_exists(env, entry["sha256"])  # nothing dangles
+        events_b = tmp_path / "machine_b" / "mm-events"
+        events_b.mkdir(parents=True)
+        claude_b = self._peer_pull(
+            env,
+            tmp_path,
+            monkeypatch,
+            extra_sources=[
+                {
+                    "name": "mm-events",
+                    "path": str(events_b),
+                    "type": "generic",
+                    "include_dirs": ["events"],
+                }
+            ],
+        )
+        assert (claude_b / "projects/-app/memory/a.md").read_bytes() == b"content push"
+        assert (events_b / rel).read_bytes() == prior_bytes
+
+    def test_rescan_reading_a_scan_held_path_cleanly_unholds_it(self, tmp_path, monkeypatch):
+        env = self._events_env(tmp_path, monkeypatch)
+        assert self._push().exit_code == 0
+        day = self._day_file(env)
+        rel = f"events/{day.name}"
+        (env["memory"] / "a.md").write_text("content push")
+        state = self._phase_spy(monkeypatch)
+        self._scan_flaky(monkeypatch, {day.name}, when=lambda: state["phase"] == "scan")
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        assert "not yet synced" not in self._text(result)
+        published = self._entry(env, rel, "mm-events")["sha256"]
+        assert published == hashlib.sha256(day.read_bytes()).hexdigest()
+        assert self._blob_exists(env, published)
+
+    def test_scan_held_path_under_a_checkout_the_rescan_reports_moves_to_frozen(
+        self, tmp_path, monkeypatch
+    ):
+        env = self._events_env(tmp_path, monkeypatch, subtree=True)
+        assert self._push().exit_code == 0
+        sub = env["events_dir"] / "sub"
+        rel = "events/sub/x.jsonl"
+        prior = self._entry(env, rel, "mm-events")["sha256"]
+        (sub / "x.jsonl").write_text('{"type":"note","n":2}\n')
+        (env["memory"] / "a.md").write_text("content push")
+        state = self._phase_spy(monkeypatch, after_scan=lambda: (sub / ".git").mkdir())
+        self._scan_flaky(monkeypatch, {"x.jsonl"}, when=lambda: state["phase"] == "scan")
+        result = self._push()
+        assert result.exit_code == 0, result.output
+        text = self._text(result)
+        assert "not yet synced" not in text  # frozen, out of the held count
+        assert self._entry(env, rel, "mm-events")["sha256"] == prior
+        assert self._blob_exists(env, prior)
+        assert not any(k.endswith("x.jsonl") for k in self._published(env)["tombstones"])
 
 
 @pytest.fixture

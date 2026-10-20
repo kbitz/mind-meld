@@ -2112,6 +2112,92 @@ def test_autopush_breadcrumb_joins_multiple_degradations(tmp_path, monkeypatch):
     assert detail.count("; ") == 1, f"expected exactly one separator, got {detail!r}"
 
 
+class TestAutopushHeldBreadcrumb75A:
+    """Track 75A: files held because they are still changing reach the breadcrumb.
+
+    Holds are not a failure: autopush exits 0 and prints nothing, but `mm status`
+    must be able to name what lags, so the outcome is `degraded` with the count
+    and a few paths. Degradations are never dropped when both exist.
+    """
+
+    ROLE = "projects/-Users-kb-myapp/memory/role.md"
+
+    def _unstable(self, monkeypatch, *names):
+        real = cli_module.manifest.read_file_revision
+
+        def flaky(path, **kw):
+            if Path(path).name in names:
+                raise cli_module.SnapshotChanged("changed while being read", "changed")
+            return real(path, **kw)
+
+        monkeypatch.setattr(cli_module.manifest, "read_file_revision", flaky)
+
+    def _crumb(self, iso):
+        return _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+
+    def test_held_file_degrades_the_breadcrumb_with_count_and_path_and_stays_silent(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import token_usage
+
+        iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+        token_usage.warm_token_cache_inline([claude_root])
+        first = runner.invoke(app, ["autopush"])
+        assert first.exit_code == 0, (first.stdout, first.stderr)
+        assert self._crumb(iso)["outcome"] == "success"  # control: held is what changes it
+        (claude_root / self.ROLE).write_text("still being written")
+        self._unstable(monkeypatch, "role.md")
+        r = runner.invoke(app, ["autopush"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert "role.md" not in r.stdout + r.stderr
+        assert "not yet synced" not in r.stdout + r.stderr
+        payload = self._crumb(iso)
+        assert payload["outcome"] == "degraded", payload
+        assert payload["detail"] == (
+            f"1 file held, not yet synced (still changing): claude:{self.ROLE}"
+        )
+        status = runner.invoke(app, ["status"])
+        assert "1 file held, not yet synced" in " ".join(status.output.split())
+
+    def test_held_count_joins_events_degradations_without_dropping_either(
+        self, tmp_path, monkeypatch
+    ):
+        iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+        assert runner.invoke(app, ["autopush"]).exit_code == 0
+        memory = claude_root / "projects/-Users-kb-myapp/memory"
+        (memory / "role.md").write_text("still being written")
+        (memory / "fresh.md").write_text("a real change so the events tail runs")
+        monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_AUTOPUSH_MS", 0)
+        self._unstable(monkeypatch, "role.md")
+        r = runner.invoke(app, ["autopush"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        payload = self._crumb(iso)
+        assert payload["outcome"] == "degraded", payload
+        detail = payload["detail"]
+        assert "budget" in detail
+        # Degradations are never dropped; the held fragment sheds its paths first
+        # when they leave no room, but always keeps its count.
+        assert "1 file held, not yet synced (still changing)" in detail
+        assert detail.index("budget") < detail.index("held")
+
+    def test_many_held_files_cap_paths_and_keep_the_detail_bounded(self, tmp_path, monkeypatch):
+        iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+        assert runner.invoke(app, ["autopush"]).exit_code == 0
+        memory = claude_root / "projects/-Users-kb-myapp/memory"
+        names = {f"hot{i}.md" for i in range(6)}
+        for name in names:
+            (memory / name).write_text(name)
+        self._unstable(monkeypatch, *names)
+        r = runner.invoke(app, ["autopush"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        detail = self._crumb(iso)["detail"]
+        assert "6 files held, not yet synced" in detail
+        assert detail.count("claude:projects/") == 3
+        assert detail.endswith("+3 more")
+        assert len(detail) <= 300
+        assert "\n" not in detail
+
+
 def test_status_sanitizes_breadcrumb_detail(tmp_path, monkeypatch, capsys):
     """`mm status` renders the breadcrumb `detail` into a Rich console.
 

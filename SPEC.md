@@ -158,7 +158,7 @@ argon2_memory_kb = 65536   # Argon2id memory parameter in KB (default: 64MB). Lo
 
 ### Manifest Schema
 
-The manifest is a **truth-based snapshot** of the local filesystem state. It always reflects the complete current state — files present locally are listed, files not present locally are omitted. Deletions propagate naturally: when a file is deleted locally, the next push produces a manifest without it.
+The manifest is a **truth-based snapshot** of the selected local filesystem state, with explicit preservation exceptions: frozen nested git checkouts and Track 75A held files retain their accepted prior entries. A held path with no accepted prior entry is omitted without a tombstone. Otherwise, a proven local deletion produces a manifest without that file and with its deletion record.
 
 **v2 manifests** carry a `sources` dict keyed by source name:
 
@@ -517,7 +517,7 @@ When `_merge_manifests` combines multiple conflict copies of the same device's m
 - **Files: UNION across all copies** (older entries survive when absent from newer copies).
 - **Tombstones: newest-timestamp-wins** on `deleted_at`.
 
-The asymmetry is correct because **diagnostic** walkers are **lossy** — they drop files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source` with the default permissive mode). Publishing scans (`_push_core`) use strict mode and refuse instead of omitting those paths, so an incomplete observation cannot become a tombstone. Conflict-copy union still cannot treat a missing entry as deletion: a file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one **permissive** scan but not another.
+The asymmetry is correct because **diagnostic** walkers are **lossy** — they drop files on permission errors, read failures, and `max_file_size` overruns (see `manifest.walk_claude_source` / `walk_generic_source` with the default permissive mode). Publishing scans (`_push_core`) use strict mode: eligible transient file changes are retried and held under Track 75A; other snapshot failures refuse. Neither path turns an incomplete observation into a tombstone. Conflict-copy union still cannot treat a missing entry as deletion: a file missing from the newer conflict copy is **not causal evidence** of deletion; only an explicit tombstone is. Swapping files to newest-wins would silently drop any file that happened to be transiently locked/unreadable during one **permissive** scan but not another.
 
 **Correctness invariant:** union-for-files + newest-wins-for-tombstones + `is_tombstoned()` gate at every downstream consumer. The tombstone gate is load-bearing. **Every new consumer of a merged manifest MUST check `is_tombstoned(source, rel_path, aggregated_tombstones)` before acting on a file entry.** Adding a consumer that reads `manifest["sources"][x]["files"]` without the gate will silently resurrect deletions.
 
@@ -835,7 +835,10 @@ class ConfigError(MindMeldError): ...         # config parsing/validation
 class ManifestError(MindMeldError): ...       # manifest corruption/incompatibility
 class LockError(MindMeldError): ...           # concurrent operation conflict
 class SnapshotError(MindMeldError): ...       # incomplete selected scan or unverified upload revision
+class SnapshotChanged(SnapshotError): ...     # one file changed/vanished/grew while read: re-read once, then held
 ```
+
+A single file that changes, vanishes or grows while it is read (`SnapshotChanged`) is re-read once and, if it is still changing, **held**: its previously published version stays in the manifest (a never-published file is left out, with no tombstone), the rest of the push publishes, and the outcome names the held count (`PushResult.held`; autopush records a `degraded` breadcrumb). Only a push that has no accepted prior manifest to hold at (recovery from a corrupt or conflict-copy manifest) still refuses on it. Every other snapshot failure refuses the whole push.
 
 Snapshot refusals use a four-part message: location (source/path), problem, preservation (`Previous snapshot kept`), and the next action, plus a README `#snapshot-failures` link. Interactive `mm push` exits 1 with no traceback. `mm autopush` keeps exit 0, typed stderr, and a failed breadcrumb.
 

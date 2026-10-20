@@ -26,8 +26,11 @@ from mind_meld.cli import (
     _CorruptPeer,
     _fsync_touched_parents,
     _FsyncWarning,
+    _held_breadcrumb_detail,
+    _held_count_phrase,
     _include_prior_grok_if_needed,
     _include_prior_host_if_needed,
+    _inject_held_entries,
     _load_prior_device_metadata,
     _PerSourceResult,
     _prefetch_manifests,
@@ -45,8 +48,8 @@ from mind_meld.cli import (
     _upload_changed_blobs,
 )
 from mind_meld.config import DEFAULT_SOURCES, SourceResolution
-from mind_meld.errors import SnapshotError, StorageError
-from mind_meld.manifest import read_file_revision
+from mind_meld.errors import SnapshotChanged, SnapshotError, StorageError
+from mind_meld.manifest import _FileTooLarge, read_file_revision
 
 # ── fixtures ─────────────────────────────────────────────────────────
 
@@ -802,6 +805,35 @@ class TestPullOneSource:
         assert result.src_name == "claude"
         assert result.device_id == "peerA"
         assert not result.had_changes
+
+    @pytest.mark.parametrize("error_class", [SnapshotError, SnapshotChanged])
+    def test_mm_events_bootstrap_refusal_handler_catches_the_transient_subclass(
+        self, tmp_path: Path, monkeypatch, capsys, error_class
+    ) -> None:
+        """Track 75A: pull's ``except SnapshotError`` is unchanged for ``SnapshotChanged``."""
+        from mind_meld import cli as cli_module
+
+        def refuse(*args, **kwargs):
+            raise error_class("Cannot publish: mm-events folder is not ready.")
+
+        monkeypatch.setattr(cli_module._config_module, "_bootstrap_mm_events_path", refuse)
+        result = _pull_one_source(
+            backend=None,
+            src_name="mm-events",
+            src_type="generic",
+            src_data={"files": {"events/a.jsonl": _info("abc")}},
+            did="peerA",
+            dname="A",
+            base_path=tmp_path / "events-root",
+            all_tombstones={},
+            passphrase="pp",
+            memory_kb=1024,
+            interactive_resolve=False,
+            dry_run=False,
+            verbose_console=False,
+        )
+        assert result.src_name == "mm-events"
+        assert "mm-events folder is not ready" in capsys.readouterr().err
 
     def test_dry_run_returns_diff(self, tmp_path: Path) -> None:
         result = _pull_one_source(
@@ -2994,16 +3026,150 @@ class TestSnapshotPublicationHelpers:
                 max_file_size=1024,
             )
 
-    def test_upload_rejects_matching_digest_wrong_size(self, tmp_path):
+    def test_upload_mismatch_is_deferred_and_settles_on_its_own_revision(
+        self, tmp_path, monkeypatch
+    ):
+        """A scan/upload mismatch is re-read once; read 2 publishes its own revision."""
+        from mind_meld.storage.keys import blob_key
+
         base = tmp_path / "src"
         base.mkdir()
-        (base / "a.md").write_text("ok")
-        digest = hashlib.sha256(b"ok").hexdigest()
-        info = {"sha256": digest, "size": 99, "mtime": "2026-01-01T00:00:00+00:00"}
+        (base / "a.md").write_text("new bytes")
+        stale = {
+            "sha256": hashlib.sha256(b"old bytes").hexdigest(),
+            "size": 9,
+            "mtime": "2026-01-01T00:00:00+00:00",
+        }
         backend = MagicMock()
-        with pytest.raises(SnapshotError, match="changed while being read"):
+        monkeypatch.setattr("mind_meld.cli.encrypt", lambda *a, **kw: b"enc")
+        outcome = _upload_changed_blobs(backend, base, {"a.md": stale}, "dev", "pw", 1024)
+        new_digest = hashlib.sha256(b"new bytes").hexdigest()
+        backend.put.assert_called_once_with(blob_key("dev", new_digest), b"enc")
+        assert outcome.held == {}
+        assert outcome.patches["a.md"]["sha256"] == new_digest
+        assert outcome.patches["a.md"]["size"] == 9
+        assert outcome.patches["a.md"]["mtime"] != stale["mtime"]
+        assert stale["sha256"] == hashlib.sha256(b"old bytes").hexdigest()  # caller's dict intact
+
+    def test_upload_read_two_with_digest_equal_to_scan_is_an_mtime_only_republish(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld.storage.keys import blob_key
+
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "a.md").write_text("same")
+        digest = hashlib.sha256(b"same").hexdigest()
+        info = {"sha256": digest, "size": 4, "mtime": "2026-01-01T00:00:00+00:00"}
+        backend = MagicMock()
+        monkeypatch.setattr("mind_meld.cli.encrypt", lambda *a, **kw: b"enc")
+        outcome = _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
+        backend.put.assert_called_once_with(blob_key("dev", digest), b"enc")
+        assert outcome.patches["a.md"]["sha256"] == digest
+        assert outcome.patches["a.md"]["mtime"] != info["mtime"]
+
+    def test_upload_retry_runs_after_the_rest_of_the_source_and_reads_exactly_twice(
+        self, tmp_path, monkeypatch
+    ):
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "a.md").write_text("a")
+        (base / "b.md").write_text("b")
+        infos = {
+            name: {
+                "sha256": hashlib.sha256(name[0].encode()).hexdigest(),
+                "size": 1,
+                "mtime": read_file_revision(
+                    base / name, max_file_size=1024, retain_bytes=False, base=base
+                ).mtime_iso,
+            }
+            for name in ("a.md", "b.md")
+        }
+        reads: list[str] = []
+        real = read_file_revision
+
+        def flaky_a(path, **kw):
+            reads.append(Path(path).name)
+            if Path(path).name == "a.md":
+                raise SnapshotChanged("changed", "changed")
+            return real(path, **kw)
+
+        monkeypatch.setattr("mind_meld.cli.read_file_revision", flaky_a)
+        monkeypatch.setattr("mind_meld.cli.encrypt", lambda *a, **kw: b"enc")
+        backend = MagicMock()
+        outcome = _upload_changed_blobs(backend, base, infos, "dev", "pw", 1024, allow_hold=True)
+        assert reads == ["a.md", "b.md", "a.md"]
+        assert outcome.held == {"a.md": "changed"}
+        assert outcome.patches == {}
+        assert outcome.bytes_transferred == len(b"enc")
+        assert backend.put.call_count == 1  # only b.md: no blob is put for the held file
+
+    def test_upload_still_changing_without_hold_permission_refuses(self, tmp_path, monkeypatch):
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "a.md").write_text("a")
+        info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-01-01T00:00:00+00:00"}
+
+        def always(path, **kw):
+            raise SnapshotChanged("changed", "changed")
+
+        monkeypatch.setattr("mind_meld.cli.read_file_revision", always)
+        backend = MagicMock()
+        with pytest.raises(SnapshotChanged):
             _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
         backend.put.assert_not_called()
+
+    def test_upload_vanished_file_is_held_with_reason(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-01-01T00:00:00+00:00"}
+        backend = MagicMock()
+        outcome = _upload_changed_blobs(
+            backend, base, {"gone.md": info}, "dev", "pw", 1024, allow_hold=True
+        )
+        assert outcome.held == {"gone.md": "vanished"}
+        backend.put.assert_not_called()
+
+    def test_upload_growth_past_cap_is_transient_grew(self, tmp_path):
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "big.md").write_bytes(b"x" * 50)
+        info = {"sha256": "0" * 64, "size": 3, "mtime": "2026-01-01T00:00:00+00:00"}
+        backend = MagicMock()
+        outcome = _upload_changed_blobs(
+            backend, base, {"big.md": info}, "dev", "pw", 1024, max_file_size=10, allow_hold=True
+        )
+        assert outcome.held == {"big.md": "grew"}
+        backend.put.assert_not_called()
+        with pytest.raises(SnapshotChanged, match="grew beyond max_file_size"):
+            _upload_changed_blobs(
+                backend, base, {"big.md": info}, "dev", "pw", 1024, max_file_size=10
+            )
+
+    def test_upload_retry_landing_in_confinement_refuses_instead_of_holding(
+        self, tmp_path, monkeypatch
+    ):
+        base = tmp_path / "src"
+        base.mkdir()
+        (base / "a.md").write_text("a")
+        info = {"sha256": "0" * 64, "size": 1, "mtime": "2026-01-01T00:00:00+00:00"}
+        calls = {"n": 0}
+
+        def second_is_confinement(path, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise SnapshotChanged("changed", "changed")
+            raise SnapshotError("no longer a confined regular file")
+
+        monkeypatch.setattr("mind_meld.cli.read_file_revision", second_is_confinement)
+        with pytest.raises(SnapshotError, match="confined regular file") as exc:
+            _upload_changed_blobs(
+                MagicMock(), base, {"a.md": info}, "dev", "pw", 1024, allow_hold=True
+            )
+        assert not isinstance(exc.value, SnapshotChanged)
+
+    def test_upload_stable_oversize_error_class_is_not_leaked(self, tmp_path):
+        assert not issubclass(_FileTooLarge, SnapshotError)
 
     def test_upload_accepts_z_mtime_alias(self, tmp_path, monkeypatch):
         base = tmp_path / "src"
@@ -3015,9 +3181,10 @@ class TestSnapshotPublicationHelpers:
         info = {"sha256": rev.digest, "size": rev.size, "mtime": advertised}
         backend = MagicMock()
         monkeypatch.setattr("mind_meld.cli.encrypt", lambda *a, **kw: b"enc")
-        transferred = _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
+        outcome = _upload_changed_blobs(backend, base, {"a.md": info}, "dev", "pw", 1024)
         backend.put.assert_called_once()
-        assert transferred == len(b"enc")
+        assert outcome.bytes_transferred == len(b"enc")
+        assert outcome.patches == {} and outcome.held == {}
 
     @pytest.mark.parametrize(("source_type", "subdir"), [("grok", "skills"), ("muse", "memory")])
     def test_upload_refuses_hardlink_replacement(self, tmp_path, source_type, subdir):
@@ -3825,3 +3992,261 @@ def test_pull_missing_custom_mm_events_root_is_skipped(tmp_path, capsys):
     assert result.outcomes["failed"] == ["events/a.jsonl"]
     assert not (tmp_path / "unplugged").exists()
     assert capsys.readouterr().err.count("mm: warning:") == 1
+
+
+def _held_manifests(tmp_path, *, prior_files=None, tombstones=None, local_files=None):
+    root = tmp_path / "src"
+    root.mkdir(exist_ok=True)
+    local = {
+        "sources": {"gstack": {"base_path": str(root), "files": dict(local_files or {})}},
+    }
+    prior = {
+        "sources": {"gstack": {"base_path": str(root), "files": dict(prior_files or {})}},
+        "tombstones": dict(tombstones or {}),
+    }
+    return root, local, prior
+
+
+def _entry(char="a"):
+    return {"sha256": char * 64, "size": 1, "mtime": "2026-01-01T00:00:00+00:00"}
+
+
+class TestInjectHeldEntries:
+    """Track 75A: a held path keeps its accepted prior entry; never a first-scan revision."""
+
+    def _inject(self, local, prior, held, candidates=None, **kw):
+        return _inject_held_entries(
+            local,
+            prior,
+            held,
+            candidates or {},
+            exclude_map=kw.get("exclude_map", {}),
+            skip_prefixes=kw.get("skip_prefixes", {}),
+            frozen=kw.get("frozen", {}),
+        )
+
+    def test_held_path_keeps_accepted_prior_entry(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path, prior_files={"a.md": _entry("a")})
+        surviving = self._inject(local, prior, {"gstack": {"a.md": "changed"}})
+        assert surviving == {"gstack": {"a.md": "changed"}}
+        assert local["sources"]["gstack"]["files"]["a.md"] == _entry("a")
+        assert (
+            local["sources"]["gstack"]["files"]["a.md"]
+            is not prior["sources"]["gstack"]["files"]["a.md"]
+        )
+
+    def test_never_published_path_is_left_out_but_counted(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path)
+        surviving = self._inject(local, prior, {"gstack": {"new.md": "changed"}})
+        assert surviving == {"gstack": {"new.md": "changed"}}
+        assert local["sources"]["gstack"]["files"] == {}
+
+    def test_first_push_without_a_prior_omits(self, tmp_path):
+        _root, local, _prior = _held_manifests(tmp_path)
+        assert self._inject(local, None, {"gstack": {"new.md": "grew"}}) == {
+            "gstack": {"new.md": "grew"}
+        }
+        assert local["sources"]["gstack"]["files"] == {}
+
+    def test_tombstoned_path_is_never_injected_or_counted(self, tmp_path):
+        _root, local, prior = _held_manifests(
+            tmp_path,
+            prior_files={"a.md": _entry("a")},
+            tombstones={"gstack:a.md": {"deleted_at": "2026-10-01T00:00:00+00:00"}},
+        )
+        assert self._inject(local, prior, {"gstack": {"a.md": "changed"}}) == {}
+        assert local["sources"]["gstack"]["files"] == {}
+
+    def test_excluded_path_is_pruned_from_the_count(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path, prior_files={"a.md": _entry("a")})
+        surviving = self._inject(
+            local, prior, {"gstack": {"a.md": "changed"}}, exclude_map={"gstack": ["a.md"]}
+        )
+        assert surviving == {}
+        assert local["sources"]["gstack"]["files"] == {}
+
+    def test_frozen_path_is_not_also_held(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path, prior_files={"a.md": _entry("a")})
+        assert (
+            self._inject(local, prior, {"gstack": {"a.md": "changed"}}, frozen={"gstack": {"a.md"}})
+            == {}
+        )
+
+    def test_path_read_cleanly_in_the_same_manifest_is_not_held(self, tmp_path):
+        _root, local, prior = _held_manifests(
+            tmp_path, prior_files={"a.md": _entry("a")}, local_files={"a.md": _entry("b")}
+        )
+        assert self._inject(local, prior, {"gstack": {"a.md": "changed"}}) == {}
+        assert local["sources"]["gstack"]["files"]["a.md"] == _entry("b")
+
+    def test_candidate_gone_with_exact_prior_file_holds_at_prior(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path, prior_files={"a.md": _entry("a")})
+        surviving = self._inject(local, prior, {}, {"gstack": {"a.md"}})
+        assert surviving == {"gstack": {"a.md": "vanished"}}
+        assert local["sources"]["gstack"]["files"]["a.md"] == _entry("a")
+
+    def test_candidate_gone_with_no_prior_omits(self, tmp_path):
+        _root, local, prior = _held_manifests(tmp_path, prior_files={"other.md": _entry("a")})
+        assert self._inject(local, prior, {}, {"gstack": {"tmp.1234"}}) == {
+            "gstack": {"tmp.1234": "vanished"}
+        }
+        assert "tmp.1234" not in local["sources"]["gstack"]["files"]
+
+    @pytest.mark.parametrize("parent_tombstoned", [False, True])
+    def test_conflict_union_directory_candidate_refuses(self, tmp_path, parent_tombstoned):
+        from mind_meld import cli
+
+        # Value: protects=known prior descendants force vanished-directory refusal;
+        # fails_when=an exact old file from conflict union overrides directory evidence;
+        # why_new=existing candidate tests have no file/directory prefix overlap;
+        # seam=none; no_claim=real provider conflict delivery or concurrent rename timing.
+        root, local, canonical = _held_manifests(
+            tmp_path, prior_files={"docs/sub/a.md": _entry("a")}
+        )
+        stamp = datetime.now(timezone.utc).isoformat()
+        canonical["timestamp"] = stamp
+        if parent_tombstoned:
+            canonical["tombstones"] = {
+                "gstack:docs/sub": {"deleted_at": stamp, "device_id": "dev-a"}
+            }
+        old = {
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "sources": {"gstack": {"base_path": str(root), "files": {"docs/sub": _entry("b")}}},
+            "tombstones": {},
+        }
+        prior = cli._merge_manifests([old, canonical])
+        assert set(prior["sources"]["gstack"]["files"]) == {"docs/sub", "docs/sub/a.md"}
+        assert not (root / "docs/sub").exists()
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            cli._inject_held_entries(
+                local,
+                prior,
+                {},
+                {"gstack": {"docs/sub"}},
+                exclude_map={},
+                skip_prefixes={},
+                frozen={},
+            )
+
+    def test_candidate_that_was_a_published_directory_refuses(self, tmp_path):
+        _root, local, prior = _held_manifests(
+            tmp_path, prior_files={"docs/sub/a.md": _entry("a"), "docs/b.md": _entry("b")}
+        )
+        with pytest.raises(SnapshotError, match="disappeared while being read") as exc:
+            self._inject(local, prior, {}, {"gstack": {"docs/sub"}})
+        assert not isinstance(exc.value, SnapshotChanged)
+
+    def test_candidate_present_again_refuses(self, tmp_path):
+        root, local, prior = _held_manifests(tmp_path)
+        (root / "back.md").write_text("here again")
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            self._inject(local, prior, {}, {"gstack": {"back.md"}})
+
+    def test_candidate_replaced_by_a_directory_refuses(self, tmp_path):
+        root, local, prior = _held_manifests(tmp_path, prior_files={"a.md": _entry("a")})
+        (root / "a.md").mkdir()
+        with pytest.raises(SnapshotError, match="disappeared while being read"):
+            self._inject(local, prior, {}, {"gstack": {"a.md"}})
+
+    def test_unreadable_candidate_refuses_with_restore_access(self, tmp_path, monkeypatch):
+        _root, local, prior = _held_manifests(tmp_path)
+
+        def deny(path):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr("mind_meld.cli.os.lstat", deny)
+        with pytest.raises(SnapshotError, match="could not be read"):
+            self._inject(local, prior, {}, {"gstack": {"a.md"}})
+
+    def test_excluded_candidate_is_skipped_without_probing(self, tmp_path, monkeypatch):
+        root, local, prior = _held_manifests(tmp_path)
+        (root / "present.log").write_text("x")  # would refuse if probed
+        surviving = self._inject(
+            local, prior, {}, {"gstack": {"present.log"}}, exclude_map={"gstack": ["*.log"]}
+        )
+        assert surviving == {}
+
+
+class TestHeldWording:
+    def test_count_phrase_names_reason_and_splits_when_mixed(self):
+        one = [("gstack", "a.md", "changed")]
+        assert _held_count_phrase(one) == "1 file not yet synced (still changing)"
+        mixed = [("gstack", "a.md", "changed"), ("claude", "b.md", "vanished")]
+        assert _held_count_phrase(mixed) == (
+            "2 files not yet synced (1 still changing, 1 gone while being read)"
+        )
+
+    def test_breadcrumb_detail_caps_paths_and_counts_the_rest(self):
+        held = [("gstack", f"p/{i}.md", "changed") for i in range(5)]
+        detail = _held_breadcrumb_detail(held, 300)
+        assert detail.startswith("5 files held, not yet synced (still changing): ")
+        assert detail.count("gstack:p/") == 3
+        assert detail.endswith("+2 more")
+
+    def test_breadcrumb_detail_is_single_line_and_sanitized(self):
+        held = [("gstack", "bad\nname\x1b[31m.md", "changed")]
+        detail = _held_breadcrumb_detail(held, 300)
+        assert "\n" not in detail and "\x1b" not in detail
+
+    def test_breadcrumb_detail_truncates_paths_before_the_count_when_over_budget(self):
+        # Value: protects=long held paths remain identifiable within the breadcrumb budget;
+        # fails_when=all paths disappear instead of being truncated;
+        # why_new=previous assertion covered only count and length; seam=none;
+        # no_claim=terminal appearance beyond sanitized one-line text.
+        held = [("gstack", "p/" + "x" * 80 + f"{i}.md", "changed") for i in range(3)]
+        detail = _held_breadcrumb_detail(held, 120)
+        assert len(detail) <= 120
+        assert detail.startswith("3 files held, not yet synced")
+        assert "gstack:p/" in detail
+        assert "…" in detail
+        assert detail.endswith("+2 more")
+        assert _held_breadcrumb_detail(held, 0) == ("3 files held, not yet synced (still changing)")
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_deferred_upload_privacy_loss_refuses(tmp_path, monkeypatch, kind):
+    from mind_meld import cli, manifest
+
+    # Value: protects=fatal privacy on the actual deferred upload read;
+    # fails_when=symlink or hardlink replacement is consumed as a hold;
+    # why_new=previous upload test directly raised SnapshotError;
+    # seam=none; no_claim=real concurrent timing.
+    base = tmp_path / "source"
+    base.mkdir()
+    path = base / "a.md"
+    path.write_bytes(b"new")
+    other = tmp_path / "other.md"
+    other.write_bytes(b"other")
+    actual_read = manifest.os.read
+    calls = {"reads": 0}
+
+    def change_at_second_read(fd, count):
+        data = actual_read(fd, count)
+        if data:
+            calls["reads"] += 1
+            if calls["reads"] == 2:
+                if kind == "symlink":
+                    path.unlink()
+                    path.symlink_to(other)
+                else:
+                    os.link(path, tmp_path / "alias.md")
+        return data
+
+    monkeypatch.setattr(manifest.os, "read", change_at_second_read)
+    backend = MagicMock()
+    scanned = {"a.md": {"sha256": "0" * 64, "size": 3, "mtime": "2026-01-01T00:00:00+00:00"}}
+    with pytest.raises(SnapshotError) as caught:
+        cli._upload_changed_blobs(
+            backend,
+            base,
+            scanned,
+            "dev-a",
+            "pw",
+            1024,
+            src_name="grok",
+            source_type="grok",
+            allow_hold=True,
+        )
+    assert calls["reads"] == 2
+    assert not isinstance(caught.value, SnapshotChanged)
+    backend.put.assert_not_called()
