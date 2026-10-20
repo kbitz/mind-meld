@@ -264,6 +264,12 @@ performs its own descriptor-bound scan and upload verification.
 
 `generate_tombstones` stays a pure comparison. Before the scan and rescan calls, `_prove_omitted_paths_absent` checks omitted prior paths against the trusted local source map. The final reconciliation after upload holds uses the accepted entries and tombstones described above. ENOENT/ENOTDIR below an accessible root is genuine absence. A still-present regular file omitted by size cap or inode dedup refuses. A missing previously populated selected user-source root refuses the whole push; removing a source from selection drops its file entries, preserves existing tombstones, and is itself a manifest change.
 
+Before applying vanished upload holds for a previously published source, `_push_core`
+rechecks its trusted configured root through `_require_published_source_root`, the
+same check used by the omission proof. A root that disappears after that earlier
+proof still refuses publication; individual missing files under an available root
+can be held.
+
 **mm-events ownership (Tracks 59A/60A).** The default `~/.local/share/mind-meld` root is mm-owned: a missing root, a present root with `events/` gone, or individual missing event files represent deletions. A real push creates the default root at 0700 and publishes that snapshot, including its usual new activity row. A missing **custom** mm-events root is never created: push warns with the folder and remedies, drops that source's prior entries without new tombstones, preserves existing tombstones, skips the events tail, and publishes the other sources. Autopush records the same warning as a degraded breadcrumb. When the custom folder returns, the next push publishes it again. User-source missing-root refusal is unchanged.
 
 `_upload_changed_blobs` verifies the upload revision against the scanned digest, size, and mtime **before** `backend.put`. A mismatch, a vanished file or growth past the cap is queued, re-read once after the rest of that source has uploaded, and then either published as its own revision (patched entry) or held (no blob put); it never uploads bytes under a digest they do not match, and a non-transient failure aborts at once. Earlier correctly keyed encrypted blobs may remain as orphans. The encrypted manifest is the commit boundary; last_seen, sidecar, and conflict cleanup run only after that put.

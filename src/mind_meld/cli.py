@@ -1141,6 +1141,36 @@ def _drop_unfrozen_checkout_files(
     return {**prior_manifest, "sources": sources} if changed else prior_manifest
 
 
+def _require_published_source_root(src_name: str, base: Path) -> None:
+    """Refuse a missing or inaccessible previously published source root."""
+    try:
+        base.stat()
+    except FileNotFoundError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=src_name,
+                problem="is missing after it was previously published",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore the source folder, or run "
+                    f"'mm disable-source {src_name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+    except OSError as e:
+        raise SnapshotError(
+            snapshot_refusal(
+                source=src_name,
+                problem="could not be read",
+                cause=os_error_cause(e),
+                next_action=(
+                    "Restore read access, or run "
+                    f"'mm disable-source {src_name}' if it should stop syncing."
+                ),
+            )
+        ) from e
+
+
 def _prove_omitted_paths_absent(
     local_manifest: dict,
     prior_manifest: dict | None,
@@ -1164,32 +1194,7 @@ def _prove_omitted_paths_absent(
         if src_cfg is None or not src_cfg.get("path"):
             continue
         base = Path(src_cfg["path"]).expanduser()
-        try:
-            base.stat()
-        except FileNotFoundError as e:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=src_name,
-                    problem="is missing after it was previously published",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore the source folder, or run "
-                        f"'mm disable-source {src_name}' if it should stop syncing."
-                    ),
-                )
-            ) from e
-        except OSError as e:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=src_name,
-                    problem="could not be read",
-                    cause=os_error_cause(e),
-                    next_action=(
-                        "Restore read access, or run "
-                        f"'mm disable-source {src_name}' if it should stop syncing."
-                    ),
-                )
-            ) from e
+        _require_published_source_root(src_name, base)
         local_files = local_sources.get(src_name, {}).get("files", {})
         for rel_path in remote_src.get("files", {}):
             if rel_path in local_files:
@@ -5003,6 +5008,9 @@ def _push_core(
             allow_hold=hold_eligible,
         )
         total_bytes += uploaded.bytes_transferred
+        if src_name in remote_sources and "vanished" in uploaded.held.values():
+            # A vanished file may mean its entire published root disappeared.
+            _require_published_source_root(src_name, Path(src_cfg["path"]).expanduser())
         # Apply the upload's patches and holds to the manifest BEFORE it is
         # serialized: a settled re-read advertises its own revision, and a held
         # file goes back to its accepted prior entry (or out), so the manifest

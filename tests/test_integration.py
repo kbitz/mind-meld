@@ -13035,3 +13035,50 @@ def test_hot_history_recovery_per_command73(push_preview56, tmp_path, argv, repa
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, (result.output, result.exception)
     assert (not journal.exists()) if repaired else journal.read_bytes() == before
+
+
+def test_upload_missing_published_root_refuses_sibling(tmp_path, monkeypatch):
+    """A root lost after omission proof must not become per-file holds."""
+    # Value: protects=missing published roots still refuse publication;
+    # fails_when=upload holds mask a whole missing root;
+    # why_new=existing missing-root coverage removes it before scanning;
+    # seam=none; the test renames an isolated source at the existing upload boundary;
+    # no_claim=real unmount timing or native fleet delivery.
+    harness = TestCompleteSnapshots()
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "keep.md").write_text("notes")
+    env = harness._prepare(
+        tmp_path,
+        monkeypatch,
+        extra_sources=[
+            {
+                "name": "notes",
+                "path": str(root),
+                "type": "generic",
+                "include_files": ["keep.md"],
+            }
+        ],
+    )
+    first = harness._push()
+    assert first.exit_code == 0, first.output
+    prior = harness._prior(env)
+    (root / "keep.md").write_text("notes changed")
+    (env["memory"] / "a.md").write_text("sibling changed")
+    real_upload = cli_module._upload_changed_blobs
+    renamed = []
+
+    def rename_then_upload(*args, **kwargs):
+        if kwargs.get("src_name") == "notes":
+            root.rename(tmp_path / "notes-away")
+            renamed.append(True)
+        return real_upload(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "_upload_changed_blobs", rename_then_upload)
+    result = harness._push()
+    assert renamed == [True]
+    assert result.exit_code == 1, result.output
+    harness._assert_prior_kept(env, prior, result)
+    output = " ".join((result.output + (result.stderr or "")).split())
+    assert "missing after it was previously published" in output
+    assert "Restore the source folder" in output
