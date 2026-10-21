@@ -90,6 +90,7 @@ _PER_REPO_BUDGET_S = 5.0
 def gather_local_identities(
     *,
     allow_refresh: bool = True,
+    diagnostic=None,
     root_discovery: GitRootDiscovery | None = None,
 ) -> list[str]:
     """Return the locally-known author emails as a sorted, lowercased list.
@@ -125,7 +126,14 @@ def gather_local_identities(
             stale = _is_cache_stale(cache)
             if not stale or not allow_refresh:
                 return list(cache.get("emails") or [])
-            sys.stderr.write("mm: notice: refreshing identity cache (one-off)\n")
+            try:
+                message = "mm: notice: refreshing identity cache (one-off)\n"
+                if diagnostic is None:
+                    sys.stderr.write(message)
+                else:
+                    diagnostic(message, False)
+            except (Exception, SystemExit):
+                pass
     except Exception:
         return []
 

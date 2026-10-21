@@ -524,3 +524,83 @@ def test_host_read_age_boundaries(delta, expected):
     86400/3600/60-second boundaries had none."""
     when = datetime.now(timezone.utc) - delta
     assert events_tail.host_read_age(when.isoformat(timespec="seconds")) == expected
+
+
+def test_whole_walk_failure_preserves_collected_and_marks_outstanding(monkeypatch, tmp_path):
+    from concurrent.futures import Future
+    from datetime import datetime, timezone
+
+    from mind_meld import events
+
+    roots = [tmp_path / "one", tmp_path / "two"]
+    futures = []
+
+    class Executor:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, fn, root, *args):
+            future = Future()
+            future.set_result(({"path": str(root)}, None))
+            futures.append(future)
+            return future
+
+        def shutdown(self, **kwargs):
+            pass
+
+    def pump(*args, **kwargs):
+        yield futures[0]
+        raise RuntimeError("private sentinel")
+
+    monkeypatch.setattr(events, "ThreadPoolExecutor", Executor)
+    monkeypatch.setattr(events, "as_completed", pump)
+    notices = []
+
+    def broken_notice(message, degraded):
+        notices.append((message, degraded))
+        raise OSError("closed pipe")
+
+    row = events.walk_git_projects(
+        roots, datetime.now(timezone.utc), 500, diagnostic=broken_notice
+    )[0]
+    assert row["projects"] == [{"path": str(roots[0])}]
+    assert row["skipped"] == [{"path": str(roots[1]), "reason": events.WALK_SKIP_RAISED}]
+    assert events.walk_skip_counts(row["skipped"]) == (0, 1)
+    assert notices[0][1] is False  # walk_errors (WALK_SKIP_RAISED) carries the loss
+    assert "private sentinel" not in notices[0][0]
+
+
+def test_diagnostic_retention_is_bounded_and_counts_repetitions():
+    from mind_meld import events_tail
+
+    details = events_tail.Degradations()
+    for _ in range(10000):
+        details.append("token walk skipped, so tokens and skills are missing")
+    for n in range(100):
+        details.append(f"unknown {n}")
+    assert len(details) == 8
+    assert details.total == 10100
+    assert details.omitted == 10092
+
+
+def test_diagnostic_candidates_drop_escapes_and_overlong_text():
+    # Value: protects=candidates stay sanitized, at most 384 characters, with honest extend counts;
+    # fails_when=an escape or a 385-character string is stored, or extend counts an omission twice;
+    # why_new=the retention test uses only short plain duplicates;
+    # seam=none; no_claim=which status line shows a candidate
+    details = events_tail.Degradations()
+    details.append("kept\x1b[2J")
+    details.append("y" * 385)
+    assert details == ["kept"]
+    assert "\x1b" not in details[0]
+    assert details.total == 2
+    assert details.omitted == 1
+    source = events_tail.Degradations()
+    source.append("alpha")
+    source.append("alpha")
+    source.append("beta")
+    merged = events_tail.Degradations()
+    merged.extend(source)
+    assert list(merged) == ["alpha", "beta"]
+    assert merged.total == source.total == 3
+    assert merged.omitted == source.omitted == 1

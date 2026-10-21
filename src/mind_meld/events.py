@@ -64,7 +64,7 @@ from urllib.parse import urlsplit
 
 from mind_meld import fsutil, gitenv, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
-from mind_meld.safety import safe_terminal_str, strip_terminal_escapes
+from mind_meld.safety import safe_terminal_str
 
 # ---------------------------------------------------------------------------
 # Module-level named constants (C3). Track 7B imports the budget pair to
@@ -894,6 +894,8 @@ def walk_git_projects(
     roots: list[Path],
     since: datetime,
     total_budget_ms: int,
+    *,
+    diagnostic=None,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -940,12 +942,14 @@ def walk_git_projects(
     deadline = time.monotonic() + (total_budget_ms / 1000.0)
     since_iso = since.isoformat()
 
-    executor = ThreadPoolExecutor(max_workers=MAX_GIT_WORKERS)
+    executor = None
+    futures: dict[Future, Path] = {}
+    collected: set[Future] = set()
+    finished_roots: set[Path] = set()
     try:
-        futures: dict[Future, Path] = {
-            executor.submit(_walk_one_repo, root, since_iso, per_repo_timeout_ms): root
-            for root in roots
-        }
+        executor = ThreadPoolExecutor(max_workers=MAX_GIT_WORKERS)
+        for root in roots:
+            futures[executor.submit(_walk_one_repo, root, since_iso, per_repo_timeout_ms)] = root
         # Futures already drained by the pump below. The budget-abort handler
         # MUST skip these (v0.12.16): it iterates all of `futures.items()`,
         # so without this set every repo that finished before the timeout was
@@ -959,6 +963,7 @@ def walk_git_projects(
             for fut in as_completed(futures, timeout=max(0.0, deadline - time.monotonic())):
                 root = futures[fut]
                 collected.add(fut)
+                finished_roots.add(root)
                 # `except Exception` alone: CancelledError and
                 # FuturesTimeoutError are both Exception subclasses, so naming
                 # them added nothing. NOTE two near-misses worth keeping in
@@ -985,6 +990,7 @@ def walk_git_projects(
             for fut, root in futures.items():
                 if fut in collected:
                     continue
+                finished_roots.add(root)
                 if fut.done():
                     try:
                         proj, err = fut.result(timeout=0)
@@ -999,15 +1005,25 @@ def walk_git_projects(
                     fut.cancel()
                     skipped.append({"path": str(root), "reason": WALK_SKIP_BUDGET_ABORT})
     except Exception as e:
-        sys.stderr.write(
-            "mm: notice: walk_git_projects whole-walk failure "
-            f"({type(e).__name__}: {strip_terminal_escapes(str(e))})\n"
+        for root in dict.fromkeys(roots):
+            if root not in finished_roots:
+                skipped.append({"path": str(root), "reason": WALK_SKIP_RAISED})
+        detail = (
+            f"{type(e).__name__}: {safe_terminal_str(e)}"
+            if diagnostic is None
+            else type(e).__name__
         )
+        message = f"mm: notice: walk_git_projects whole-walk failure ({detail})\n"
+        try:
+            if diagnostic is None:
+                sys.stderr.write(message)
+            else:
+                diagnostic(message, False)  # walk_errors records the loss
+        except (Exception, SystemExit):
+            pass
     finally:
-        # Don't wait for orphaned subprocesses: they'll be killed on process
-        # exit. shutdown(wait=False) lets us return promptly even if a
-        # future is still running.
-        executor.shutdown(wait=False, cancel_futures=True)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     snapshot["projects"] = projects
     snapshot["skipped"] = skipped

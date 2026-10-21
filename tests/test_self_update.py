@@ -3035,7 +3035,9 @@ def seam(tmp_path, monkeypatch):
     _setup_real_config(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
-        upgrade, "update_or_nudge", lambda config, *, attended: calls.append(attended)
+        upgrade,
+        "update_or_nudge",
+        lambda config, *, attended, diagnostics=True: calls.append(attended),
     )
     return calls
 
@@ -3115,3 +3117,37 @@ class TestSeams:
         upgrade.CACHE_PATH.write_text(json.dumps(cache))
         text = _flat(runner.invoke(app, ["status"]).stdout)
         assert "Automatic update did not complete: run mm update to see why." in text
+
+
+@pytest.mark.parametrize("diagnostics", [False, True])
+def test_sync78_update_progress_policy_preserves_attempt_and_lock(
+    pipx_install, monkeypatch, capsys, diagnostics
+):
+    venv = pipx_install()
+    calls = _fake_run(monkeypatch, venv, lands="1.3.0")
+    upgrade.update_or_nudge({}, attended=True, diagnostics=diagnostics)
+    output = capsys.readouterr()
+    assert len(calls) == 1
+    assert output.out == ""
+    assert ("updated mm" in output.err) is diagnostics
+    assert ("updating mm" in output.err) is diagnostics
+    assert _cache()["install_attempt_version"] == "1.3.0"
+    lockfile.acquire_lock()
+    lockfile.release_lock()
+
+
+def test_sync78_cancelled_optional_update_never_asserts_sync_success(
+    pipx_install, monkeypatch, capsys
+):
+    pipx_install()
+
+    def interrupt(argv):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(upgrade, "_run_pipx", interrupt)
+    upgrade.update_or_nudge({}, attended=True, diagnostics=False)
+    output = capsys.readouterr().err
+    assert "cancelled" in output
+    assert "sync is complete" not in output
+    assert "sync outcome is reported separately" in output
+    assert _cache()["install_attempt_outcome"] == "failed"

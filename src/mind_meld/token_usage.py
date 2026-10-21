@@ -77,17 +77,44 @@ import re
 import sys
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
 from mind_meld.lockedjson import (
+    LockContended,
     LockedJsonSnapshot,
     locked_json_rmw,
     locked_json_snapshot,
 )
 from mind_meld.safety import safe_terminal_str
+
+_DIAGNOSTIC = ContextVar("token_usage_diagnostic", default=None)
+
+
+@contextmanager
+def diagnostic_scope(sink):
+    """Invocation-local rendering only; direct callers retain stderr notices."""
+    token = _DIAGNOSTIC.set(sink)
+    try:
+        yield
+    finally:
+        _DIAGNOSTIC.reset(token)
+
+
+def _diagnostic(message: str, degraded: bool = True) -> None:
+    # degraded=False when the caller's returned result already records the loss.
+    sink = _DIAGNOSTIC.get()
+    try:
+        if sink is None:
+            sys.stderr.write(message)
+        else:
+            sink(message, degraded)
+    except (Exception, SystemExit):
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1187,7 +1214,7 @@ def iter_bounded_lines(
             # 19A's relaxed Codex refusal made this reachable on far more
             # files than before — the scan used to die on the first
             # ledger-less rollout. Dedup still keys on the raw path.
-            sys.stderr.write(
+            _diagnostic(
                 f"mm: notice: {label} skipping oversize line in {safe_terminal_str(path_str)}\n"
             )
             _WARNED_OVERSIZE_PATHS.add(path_str)
@@ -1605,9 +1632,7 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
                 # peer-controlled jsonls. A planted model like "x\x1b[2J" would
                 # otherwise clear the user's terminal on stderr emit. Dedup
                 # and resolve_prices still use the original model id.
-                sys.stderr.write(
-                    f"mm: notice: unknown model in pricing: {safe_terminal_str(model)}\n"
-                )
+                _diagnostic(f"mm: notice: unknown model in pricing: {safe_terminal_str(model)}\n")
                 _WARNED_UNKNOWN_MODELS.add(model)
             continue
         cost = _cost_under(prices, usage)
@@ -1622,6 +1647,25 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
 
 
 CacheMode = Literal["block", "warn"]
+
+
+@contextmanager
+def _cache_lock(*args, **kwargs):
+    manager = locked_json_rmw(*args, **kwargs)
+    try:
+        locked = manager.__enter__()
+    except LockContended:
+        _diagnostic("mm: notice: token cache contended; skipping token aggregation\n", False)
+        # The wrapper recognizes None as the same warn-mode skip.
+        yield None
+        return
+    try:
+        yield locked
+    except BaseException:
+        if not manager.__exit__(*sys.exc_info()):
+            raise
+    else:
+        manager.__exit__(None, None, None)
 
 
 @contextmanager
@@ -1648,13 +1692,15 @@ def lock_and_get_files(on_contention: CacheMode) -> Iterator[dict[str, Any] | No
 
     Inherits ``skip_unchanged_write=True`` from ``locked_json_rmw``'s
     default — no-op contexts skip the disk write."""
-    with locked_json_rmw(
+    with _cache_lock(
         CACHE_PATH,
         default_factory=_empty_cache,
-        on_contention=on_contention,
+        on_contention="raise"
+        if on_contention == "warn" and _DIAGNOSTIC.get() is not None
+        else on_contention,
         contention_warning="token cache contended; skipping token aggregation",
     ) as ljson:
-        if not ljson.is_locked:
+        if ljson is None or not ljson.is_locked:
             yield None
             return
         # Normalize cache shape under the lock. The version-check + files

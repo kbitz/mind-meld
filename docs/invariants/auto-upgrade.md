@@ -14,6 +14,29 @@ Read BEFORE editing any of these:
 
 Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class), `tests/test_lockfile.py`.
 
+
+## Sync tail output and eligibility (Track 78A)
+
+Attended non-preview push/pull defer their one terminal outcome until capture
+receipt, unlock, eligible update, history command_scope notice and attended run
+record/notice have finished. Successful `updating`/`updated` chatter is verbose-only
+for these callers (`diagnostics=` defaults preserve direct callers). Standalone
+`mm update` is unchanged. A foreground update can delay the final outcome; no
+latency improvement is claimed. Actionable failure/nudge/cancellation notices
+still precede the final line. Cancellation never asserts that sync succeeded:
+its outcome belongs to the outer sync command.
+
+Eligibility is independent of presentation: a failed attended push that acquired
+the sync lock still runs the tail, except interruptions; pull runs it only after
+a normal core return, including contained apply failures whose final attended
+exit is now 1. Setup/auth/lock failure, interrupted pull and previews do not start
+updates. All original mm-lock-before-cache-lock, install-lock and daily-attempt
+gates remain. Optional update faults cannot replace sync's original failure or
+revoke known accepted/applied effects. Autos preserve their detached policy and
+exit behavior; successful changes emit no sync summary. No release metadata or
+release-policy change is part of this output work.
+
+
 ## The mm lockfile
 
 `~/.config/mind-meld/mind-meld.lock` is the mm lockfile. It is distinct from the installer `install.lock`. Never unlink the mm lockfile: `release_lock` keeps the inode so two processes cannot flock different files at the same path. Contention text never advises deleting the lockfile or killing the holder. `tests/test_lockfile.py` pins that text.
@@ -218,8 +241,8 @@ version is still behind; a foreign or already-updated install never inherits
 another installation's failed-attempt message.
 
 **Attended vs unattended.** `push` / `pull` run pipx in the foreground after
-`release_lock()`, re-take the mm lock for the swap, and print
-`mm: notice: updating …` then `updated …`. `autopull` / `autopush` spawn pipx
+`release_lock()`, re-take the mm lock for the swap, and show
+`mm: notice: updating …` then `updated …` only with --verbose during sync. `autopull` / `autopush` spawn pipx
 in its own session with output to `~/.config/mind-meld/auto-update.log`, print
 nothing, and do not wait. The detached pipx cannot hold the mm lock (its
 parent exits), so an mm process starting during the few seconds pip swaps
@@ -237,7 +260,7 @@ Ctrl-C during process creation is deferred until the caller owns the process
 handle, then follows the same bounded cleanup before releasing the mm lock.
 Further Ctrl-C presses are ignored until cleanup finishes; the previous
 signal handler is then restored before propagating the original interruption.
-Cancelling an optional update preserves the completed sync and marks its
+Cancelling an optional update preserves the sync outcome and marks its
 claimed attempt failed without shortening the daily retry gate. Cancelling
 the push itself skips the update tail entirely.
 
@@ -492,8 +515,9 @@ evidence that other interpreters were tested.
 **Exit outcomes:** [one README table](../../README.md#exit-codes) is the
 operator reference, including post-parse value errors (1), usage errors (2),
 pull preflight (3), and partial recapture (4). Valid autopull/autopush
-invocations exit 0 even on refusal; per-file pull failures also retain exit 0.
-A stricter pull exit policy must be an opt-in flag in a MINOR.
+invocations exit 0 even on refusal or contained apply failures. Track 78A makes
+attended partial-pull failures exit 1 without an opt-in flag under the current
+SPEC policy; preflight remains 3. The retired 1.x policy does not govern this change.
 `tests/test_compat_contract.py:EXIT_EVIDENCE` maps every outcome to behavioral
 tests and checks those references exist. Its all-module exit AST scan is
 supplementary, not a substitute for those tests.

@@ -3286,9 +3286,9 @@ class TestGCSafety:
         # The remedy the refusal names must work without any content change.
         healed = runner.invoke(app, ["push"])
         assert healed.exit_code == 0, healed.output
-        assert "Nothing to push" not in healed.output
+        assert "Push: no content changes" not in healed.output
         healed_flat = " ".join(healed.output.split())
-        assert "Rewriting manifest held only by conflict copies" in healed_flat
+        assert "Push: manifest repaired." in healed_flat
         fetched = cli_module._fetch_remote_manifest(backend, "dev-a", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "ok" and not fetched.conflict_copies_only
         assert not conflict.exists()
@@ -3585,6 +3585,15 @@ class TestAutoCommands:
         # Error banner present, no raw traceback.
         assert "keyring backend failure" in result.output + (result.stderr or "")
         assert "Traceback" not in result.output + (result.stderr or "")
+        # Value: protects=attended sync names the keyring exception class, never its message;
+        # fails_when=the sync-scope branch echoes str(e) again; why_new=only presence was pinned;
+        # seam=none; no_claim=real keychain behavior (get_passphrase faked)
+        last = result.stderr.splitlines()[-1]
+        assert last.startswith(
+            "Push failed [authentication-error]: keyring backend failure: OSError"
+        )
+        assert last.endswith("Run: mm diag")
+        assert "keychain is locked" not in result.output
 
     def test_init_tolerates_keyring_write_exception(self, tmp_path, monkeypatch):
         """Regression: _register_and_save must not abort on a non-KeyringError
@@ -3709,7 +3718,7 @@ class TestAutoCommands:
             child.wait(timeout=5)
 
     def test_autopush_round_trip(self, tmp_path, monkeypatch):
-        """autopush should push changes and print a one-line summary."""
+        """autopush publishes changed bytes without a success announcement."""
         storage_dir = tmp_path / "storage"
         claude_dir_a = tmp_path / "machine_a" / ".claude"
 
@@ -3746,8 +3755,7 @@ class TestAutoCommands:
         # Run autopush
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
-        assert "mm: pushed" in result.output
-        assert "1 new" in result.output
+        assert result.stdout == result.stderr == ""
 
 
 class TestMultiSourceSync:
@@ -3835,7 +3843,7 @@ class TestMultiSourceSync:
 
         result = runner.invoke(app, ["autopush"])
         assert result.exit_code == 0
-        assert "mm: pushed" in result.output
+        assert result.stdout == ""
 
         # Phase 2: Clear local dirs (simulating Machine B that starts empty)
         shutil.rmtree(str(claude_dir))
@@ -5136,7 +5144,7 @@ def test_partial_and_absent_capture_reports_own_outcome(capture61, monkeypatch, 
         )
     )
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: result)
-    invocation = runner.invoke(app, ["push"])
+    invocation = runner.invoke(app, ["push", "--verbose"])
     assert invocation.exit_code == 0, invocation.output
     assert ("absent (no metadata ledger)" if absent else "partial") in invocation.output
     assert "completed, no usage" not in invocation.output
@@ -5221,7 +5229,7 @@ def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Usage capture:" not in result.stdout
     assert "Host usage published" not in result.stdout
-    assert "~ 1 modified" in result.stdout
+    assert "usage published" in result.stdout
     added = [json.loads(line) for line in env["dayfile"].read_text().splitlines()[len(before) :]]
     rows = [r for r in added if r["type"] == "host-usage-snapshot"]
     assert len(rows) == len(calls) == 1
@@ -5269,13 +5277,14 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
         return result
 
     monkeypatch.setattr(cli_module, "_push_core", core)
-    for _ in range(2):
-        result = runner.invoke(app, ["push"])
+    for verbose in (False, True):
+        result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
         assert result.exit_code == 0, result.output
         flat = " ".join(result.stdout.split())  # the mode line wraps at 80 columns
-        assert "usage-only" in flat
-        assert "Git cursor unchanged" in flat
-        assert "mm recapture 30d" in flat
+        assert flat.endswith("Push: no content changes; usage published.")
+        # The usage-only mode explanation moved to --verbose; it is not removed.
+        assert ("Git cursor unchanged" in flat) is verbose
+        assert ("mm recapture 30d" in flat) is verbose
         assert rendered_counts() == before
     added = [json.loads(line) for line in path.read_bytes()[len(original) :].splitlines()]
     assert [r["type"] for r in added] == ["host-usage-snapshot"] * 2
@@ -5337,7 +5346,7 @@ def test_content_refresh_counts_once_and_preserves_next_bare_push(
     assert counted.zero_repo_captures == {"dev-a": (1, 1)}
     committed = path.read_bytes()
     bare = runner.invoke(app, ["push"])
-    assert bare.exit_code == 0 and "usage-only" in bare.stdout, bare.output
+    assert bare.exit_code == 0 and "no content changes; usage published" in bare.stdout, bare.output
     more = [json.loads(line) for line in path.read_bytes()[len(committed) :].splitlines()]
     assert [row["type"] for row in more] == ["host-usage-snapshot"]
 
@@ -5509,11 +5518,12 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
         return result
 
     monkeypatch.setattr(cli_module, "_push_core", spy)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     flat = " ".join((result.output + (result.stderr or "")).split())
     assert result.exit_code == 0, result.output
-    assert "Nothing pushed; 1 file not yet synced." in flat
-    assert "Nothing to push" not in flat  # the held outcome replaces the up-to-date line
+    assert "no content changes; 1 held." in flat
+    assert "Push: no content changes." not in flat  # held count qualifies this invocation
+    assert "not yet synced" in flat  # --verbose names the held file even on a held-only push
     assert "Host usage published" not in flat
     (core,) = seen
     assert core is not None and len(core.held) == 1
@@ -5554,8 +5564,8 @@ def test_failed_usage_publication_recovery_respects_activity_gate(capture61, mon
     assert failed.exit_code == 1, failed.output
     assert "(push-failed)" in failed.stderr
     assert "(push-failed)" not in failed.stdout
-    assert "content was not pushed" in failed.stderr
-    assert "#host-usage-capture" in failed.stderr
+    assert "effects unconfirmed" in failed.stderr
+    assert failed.stderr.splitlines()[-1].endswith("Run: mm diag")
     monkeypatch.setattr(LocalBackend, "put", real_put)
     result = runner.invoke(app, [recovery])
     assert result.exit_code == 0, result.output
@@ -5589,7 +5599,7 @@ def test_torn_append_failed_rollback_continues_and_separates_next_append(
 
     monkeypatch.setattr(os, "write", torn)
     monkeypatch.setattr(os, "ftruncate", cannot_rollback)
-    failed = runner.invoke(app, ["push"])
+    failed = runner.invoke(app, ["push", "--verbose"])
     assert failed.exit_code == 0, failed.output
     assert "(append-failed)" in failed.stderr
     assert "(append-failed)" not in failed.stdout
@@ -5599,7 +5609,7 @@ def test_torn_append_failed_rollback_continues_and_separates_next_append(
     assert path.read_bytes().endswith(b"\n")
     monkeypatch.setattr(os, "write", real_write)
     monkeypatch.setattr(os, "ftruncate", real_truncate)
-    result = runner.invoke(app, ["autopush"] if recovery == "autopush" else ["push"])
+    result = runner.invoke(app, ["autopush"] if recovery == "autopush" else ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     added = path.read_bytes()[len(original) :].splitlines()
     with pytest.raises(ValueError):
@@ -5618,14 +5628,14 @@ def test_capture_failure_nudges_upgrade_after_unlock(capture61, monkeypatch):
     )
     calls = []
 
-    def nudge(config, *, attended):
+    def nudge(config, *, attended, diagnostics=True):
         cli_module.acquire_lock()
         cli_module.release_lock()
         assert attended
         calls.append("nudge")
 
     monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", nudge)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert calls == ["nudge"]
     assert "(no-row)" in result.stderr and "(no-row)" not in result.stdout
@@ -5653,7 +5663,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
         cli_module, "_get_passphrase_or_exit", lambda: keychain.append(True) or PASSPHRASE
     )
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: pytest.fail("reader"))
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert keychain == [True]
     assert result.stderr.count(f"(prerequisites: {state})") == 1
@@ -5687,11 +5697,11 @@ def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pendin
         return real_core(*a, **kw)
 
     monkeypatch.setattr(cli_module, "_push_core", core)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert reason in result.output
     assert calls == [True]
-    assert ("Nothing to push" in result.output) == (not pending)
+    assert ("Push: no content changes" in result.output) == (not pending)
     assert "(no-row)" in result.stderr and "(no-row)" not in result.stdout
     assert "Content sync continues" in " ".join(result.stderr.split())
     assert "#host-usage-capture" in result.stderr
@@ -5717,9 +5727,9 @@ def test_requested_capture_observes_append_failure(capture61, monkeypatch, short
         return real(fd, payload)
 
     monkeypatch.setattr(os, "write", write)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
-    assert ("short JSONL append" if short else "disk full") in result.output
+    assert "OSError" in result.output
     assert "Host usage published" not in result.output
     assert "(append-failed)" in result.stderr and "(append-failed)" not in result.stdout
     assert "Content sync continues" in " ".join(result.stderr.split())
@@ -5731,7 +5741,7 @@ def test_requested_capture_observes_append_failure(capture61, monkeypatch, short
         "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
     ) == pending
     if not short:
-        assert "[events/dev-a.jsonl]" in result.stderr
+        assert "[events/dev-a.jsonl]" not in result.stderr
         assert r"\[events" not in result.stderr
     if short:
         before = [
@@ -5741,7 +5751,7 @@ def test_requested_capture_observes_append_failure(capture61, monkeypatch, short
         ]
         host_before = sum(row["type"] == "host-usage-snapshot" for row in before)
         monkeypatch.setattr(os, "write", real)
-        retry = runner.invoke(app, ["push"])
+        retry = runner.invoke(app, ["push", "--verbose"])
         assert retry.exit_code == 0, retry.output
         parsed = [
             json.loads(line)
@@ -5780,7 +5790,7 @@ def test_capture_must_be_in_accepted_manifest(capture61, monkeypatch, mode, unre
         (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("unrelated")
     save_config(cfg, env["path"])
     saved = config_module.load_config(env["path"])["sync"]
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     if unrelated:
         remote = cli_module.sidecar.read("dev-a")
@@ -5819,19 +5829,19 @@ def test_converged_publication_evidence_failure_keeps_exit_zero(capture61, monke
     save_config(env["cfg"], env["path"])
     # The first push settles the exclusion into the advertised manifest, so the
     # next host row lands in a day file the manifest never carries.
-    settled = runner.invoke(app, ["push"])
+    settled = runner.invoke(app, ["push", "--verbose"])
     assert settled.exit_code == 0, settled.output
 
     def broken(*args, **kwargs):
         raise RecursionError("evidence broke")
 
     monkeypatch.setattr(cli_module, "_report_usage_publication", broken)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
-    assert "Nothing to push" in result.stdout
+    assert "Push: no content changes" in result.stdout
     flat = " ".join(result.stderr.split())
     assert "(unverified: evidence-error)" in flat
-    assert "evidence broke" in flat
+    assert "RecursionError" in flat and "evidence broke" not in flat
     assert "User content was already up to date" in flat
     assert "push-failed" not in result.output
 
@@ -5856,7 +5866,7 @@ def test_capture_publication_reports_local_revision_evidence_loss(capture61, mon
         return result
 
     monkeypatch.setattr(LocalBackend, "put", put)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     token = "missing" if damage == "missing" else "revision-mismatch"
     assert f"(unverified: {token})" in result.stderr
@@ -5873,7 +5883,7 @@ def test_mode_render_failure_cannot_undo_manifest_acceptance(capture61, monkeypa
 
     prior = cli_module.sidecar.read("dev-a")
     monkeypatch.setattr(cli_module, "_print_usage_push_mode", fail)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert "post-publication maintenance failed" in " ".join(result.stderr.split())
     # The usage-only push reached manifest acceptance: its new host row is in the sidecar.
@@ -5898,9 +5908,9 @@ def test_capture_exit_uses_acceptance_boundary(capture61, monkeypatch, after):
             return real(self, key, data)
 
         monkeypatch.setattr(LocalBackend, "put", fail_manifest)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == (0 if after else 1), result.output
-    assert ("Host usage was published" if after else "content was not pushed") in result.output
+    assert ("Host usage was published" if after else "effects unconfirmed") in result.output
     record, reason = cli_module.attemptlog.read()
     assert reason is None
     assert record["class"] == ("published" if after else "push-failed")
@@ -6235,7 +6245,7 @@ class TestTrack7BEventsTail:
         # Nothing changed since the first push → no-op.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0
-        assert ("Nothing to push" in result.output) == (not consented)
+        assert ("usage published" in result.output) is consented
         assert calls == (["codex"] if consented else [])
 
     def test_noop_across_utc_keeps_cursor_for_later_git_catchup(self, tmp_path, monkeypatch):
@@ -6612,7 +6622,7 @@ class TestPushMtimeOnlyPropagation:
         # Post-fix: manifest uploads with bumped mtime.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
-        assert "Nothing to push" not in result.output, (
+        assert "Push: no content changes" not in result.output, (
             f"push bailed on mtime-only change instead of refreshing the manifest:\n{result.output}"
         )
 
@@ -6662,7 +6672,7 @@ class TestPushMtimeOnlyPropagation:
         # Second push with truly nothing changed.
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
-        assert "Nothing to push" in result.output, (
+        assert "Push: no content changes" in result.output, (
             f"empty push must still bail at the substantive-change gate:\n{result.output}"
         )
 
@@ -7050,7 +7060,7 @@ class TestCompleteSnapshots:
         }
 
     def _push(self, extra_args=None):
-        result = runner.invoke(app, ["push", *(extra_args or [])])
+        result = runner.invoke(app, ["push", "--verbose", *(extra_args or [])])
         return result
 
     def _prior(self, env):
@@ -7069,7 +7079,7 @@ class TestCompleteSnapshots:
 
         assert sidecar_mod.sidecar_path().read_bytes() == prior[1]
         assert env["backend"].get(env["device_key"]) == prior[2]
-        assert "Push complete" not in result.output
+        assert "Push: " not in result.output
 
     def test_upload_change_never_poisons_a_shared_hash_blob(self, tmp_path, monkeypatch):
         """Track 75A flips the 49A refusal: the changed file's deferred re-read settles on
@@ -7133,7 +7143,7 @@ class TestCompleteSnapshots:
         monkeypatch.setattr(cli_module, "_upload_changed_blobs", drop_then_upload)
         result = self._push()
         assert result.exit_code == 0, result.output
-        assert "not yet synced" in " ".join(result.output.split())
+        assert "held" in " ".join(result.output.split())
         remote = load_manifest(
             decrypt(env["backend"].get(env["manifest_key"]), "shared-cli-test-passphrase", 1024)
         )
@@ -7205,7 +7215,7 @@ class TestCompleteSnapshots:
         assert not any(k.startswith("notes:") for k in published["tombstones"] if "keep.md" in k)
         second = self._push()
         assert second.exit_code == 0
-        assert "Nothing to push" in second.output or "up to date" in second.output
+        assert "Push: no content changes" in second.output or "up to date" in second.output
         _ = MEMORY_KB
 
     def test_dry_run_scan_failure_does_not_publish(self, tmp_path, monkeypatch):
@@ -7512,7 +7522,7 @@ class TestHeldFiles75A:
         result = self._push()
         assert result.exit_code == 0, result.output
         assert calls["a.md"] == 2  # the unstable read plus exactly one retry, no third read
-        assert "not yet synced" not in self._text(result)
+        assert " held." not in self._text(result)
         assert self._entry(env, self.REL)["sha256"] == self._digest("new bytes")
 
     def test_scan_still_changing_is_held_at_prior_and_peer_pulls_prior_bytes(
@@ -7528,9 +7538,9 @@ class TestHeldFiles75A:
         assert result.exit_code == 0, result.output
         assert calls["a.md"] == 2  # scan read plus exactly one retry
         text = self._text(result)
-        assert "Push complete; 1 file not yet synced." in text
-        assert f"claude:{self.REL}" in text
-        assert "Their previous versions (if any) stay published" in text
+        assert "1 held." in text
+        assert f"claude:{self.REL}" not in text
+        assert "Their previous versions (if any) stay published" not in text
         published = self._published(env)
         assert self._entry(env, self.REL)["sha256"] == old
         assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b changed")
@@ -7551,7 +7561,7 @@ class TestHeldFiles75A:
         assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
         later = self._push()
         assert later.exit_code == 0, later.output
-        assert "not yet synced" not in self._text(later)
+        assert " held." not in self._text(later)
         assert self._entry(env, self.REL)["sha256"] == self._digest("new bytes")
 
     @pytest.mark.parametrize("has_prior", [False, True])
@@ -7579,7 +7589,7 @@ class TestHeldFiles75A:
             seen = self._spy_core(m)
             result = self._push()
         assert result.exit_code == 0, result.output
-        assert "1 file not yet synced" in self._text(result)
+        assert "1 held" in self._text(result)
         published = self._published(env)
         files = published["sources"]["claude"]["files"]
         assert rel not in files
@@ -7615,7 +7625,7 @@ class TestHeldFiles75A:
         published = self._published(env)
         assert self.REL not in published["sources"]["claude"]["files"]
         assert published["tombstones"] == prior_tombstones
-        assert "not yet synced" not in self._text(result)  # deleted, not waiting
+        assert " held." not in self._text(result)  # deleted, not waiting
 
     def test_held_only_scan_exit_makes_no_put_and_never_claims_up_to_date(
         self, tmp_path, monkeypatch
@@ -7656,7 +7666,7 @@ class TestHeldFiles75A:
         result = self._push()
         assert result.exit_code == 0, result.output
         text = self._text(result)
-        assert "Nothing pushed; 1 file not yet synced." in text
+        assert "no content changes; 1 held." in text
         assert "up to date" not in text
         assert env["backend"].get(env["manifest_key"]) == before
         assert env["backend"].get(env["device_key"]) == device_before
@@ -7691,7 +7701,7 @@ class TestHeldFiles75A:
         result = self._push()
 
         assert result.exit_code == 0, result.output
-        assert "Push complete; 1 file not yet synced." in self._text(result)
+        assert "1 held." in self._text(result)
         published = self._published(env)
         files = published["sources"]["claude"]["files"]
         assert files[self.REL] == prior_files[self.REL]
@@ -7710,18 +7720,18 @@ class TestHeldFiles75A:
 
     def test_vanished_scan_file_is_held_and_worded_as_vanished(self, tmp_path, monkeypatch):
         env = self._prepare(tmp_path, monkeypatch)
-        assert self._push().exit_code == 0
+        assert self._push("--verbose").exit_code == 0
         (env["memory"] / "a.md").write_text("new bytes")
         (env["memory"] / "b.md").write_text("b changed")
         self._scan_flaky(monkeypatch, {"a.md"}, reason="vanished")
-        result = self._push()
+        result = self._push("--verbose")
         assert result.exit_code == 0, result.output
         text = self._text(result)
         assert "gone while being read" in text
         assert "recorded as deleted on a later push" in text
         assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
 
-    def test_default_output_lists_three_paths_and_verbose_lists_all(self, tmp_path, monkeypatch):
+    def test_default_output_counts_held_and_verbose_lists_all(self, tmp_path, monkeypatch):
         env = self._prepare(tmp_path, monkeypatch)
         assert self._push().exit_code == 0
         names = {f"n{i}.md" for i in range(5)}
@@ -7733,9 +7743,9 @@ class TestHeldFiles75A:
             default = self._push()
         assert default.exit_code == 0, default.output
         text = self._text(default)
-        assert "5 files not yet synced" in text
-        assert "(+2 more)" in text
-        assert sum(f"memory/n{i}.md" in text for i in range(5)) == 3
+        assert "5 held" in text
+        assert "(+2 more)" not in text
+        assert sum(f"memory/n{i}.md" in text for i in range(5)) == 0
         (env["memory"] / "b.md").write_text("b changed again")
         with monkeypatch.context() as m:
             self._scan_flaky(m, names)
@@ -7804,7 +7814,7 @@ class TestHeldFiles75A:
         result = self._push()
         assert result.exit_code == 0, result.output
         assert calls["a.md"] == 2
-        assert "not yet synced" not in self._text(result)
+        assert " held." not in self._text(result)
         entry = self._entry(env, self.REL)
         assert entry["sha256"] == self._digest(settled_text)
         assert entry["mtime"] == expected["mtime"]
@@ -7843,9 +7853,9 @@ class TestHeldFiles75A:
         assert core.content_changed is True  # the pre-upload gate fact is not recomputed
         assert core.content_accepted is True
         text = self._text(result)
-        assert "Push complete; 2 files not yet synced." in text
-        assert "~ 1 modified" in text  # b only: held a.md left the counts
-        assert "new" not in text.split("Push complete")[1].split("not yet synced")[0]
+        assert "2 held." in text
+        assert "1 content change published" in text  # b only: held a.md left the counts
+        assert text.splitlines()[-1] == "Push: 1 content change published; 2 held."
         assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
         assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b2")
         assert self._entry(env, "projects/-app/memory/c.md") is None
@@ -7865,11 +7875,11 @@ class TestHeldFiles75A:
             self._upload_flaky(m, {"b.md"})
             first = self._push()
         assert first.exit_code == 0, first.output
-        assert "1 file not yet synced" in self._text(first)
+        assert "1 held" in self._text(first)
         assert self._entry(env, "projects/-app/memory/c.md")["sha256"] == self._digest("c.md v2")
         second = self._push()
         assert second.exit_code == 0, second.output
-        assert "not yet synced" not in self._text(second)
+        assert " held." not in self._text(second)
         assert self._entry(env, "projects/-app/memory/b.md")["sha256"] == self._digest("b.md v2")
 
     def test_upload_held_only_push_still_puts_the_manifest(self, tmp_path, monkeypatch):
@@ -7881,7 +7891,7 @@ class TestHeldFiles75A:
         seen = self._spy_core(monkeypatch)
         result = self._push()
         assert result.exit_code == 0, result.output
-        assert "Push complete; 1 file not yet synced." in self._text(result)
+        assert "1 held." in self._text(result)
         assert env["backend"].get(env["manifest_key"]) != before  # the manifest was put
         assert self._entry(env, self.REL)["sha256"] == self._digest("old bytes")
         (core,) = seen
@@ -7940,7 +7950,8 @@ class TestHeldFiles75A:
         text = self._text(result)
         assert self.REL in text
         assert "changed while being read" in text
-        assert "Wait for the writer to finish, then run mm push." in text
+        assert "Wait for the writer to finish" in text
+        assert text.endswith("Run: mm push")
         assert env["backend"].get(env["manifest_key"]) == b"not a manifest"
 
     @pytest.mark.parametrize("recovery", ["corrupt", "conflict-copies-only"])
@@ -8043,7 +8054,7 @@ class TestHeldFiles75A:
         self._scan_flaky(monkeypatch, {day.name}, when=lambda: state["phase"] == "rescan")
         result = self._push()
         assert result.exit_code == 0, result.output
-        assert "not yet synced" in self._text(result)
+        assert "held" in self._text(result)
         assert self._entry(env, rel, "mm-events")["sha256"] == prior
         assert not self._blob_exists(env, first_scan_digest)
         for source in self._published(env)["sources"].values():
@@ -8077,7 +8088,7 @@ class TestHeldFiles75A:
         self._scan_flaky(monkeypatch, {day.name}, when=lambda: state["phase"] == "scan")
         result = self._push()
         assert result.exit_code == 0, result.output
-        assert "not yet synced" not in self._text(result)
+        assert " held." not in self._text(result)
         published = self._entry(env, rel, "mm-events")["sha256"]
         assert published == hashlib.sha256(day.read_bytes()).hexdigest()
         assert self._blob_exists(env, published)
@@ -8097,7 +8108,7 @@ class TestHeldFiles75A:
         result = self._push()
         assert result.exit_code == 0, result.output
         text = self._text(result)
-        assert "not yet synced" not in text  # frozen, out of the held count
+        assert " held." not in text  # frozen, out of the held count
         assert self._entry(env, rel, "mm-events")["sha256"] == prior
         assert self._blob_exists(env, prior)
         assert not any(k.endswith("x.jsonl") for k in self._published(env)["tombstones"])
@@ -8195,7 +8206,7 @@ class TestApplyRecovery53A:
         fleet.publish({"aaa.txt": b"a", blocked: b"b", "ccc.txt": b"c"})
         (fleet.memory / "bbb").write_bytes(b"mine")
         result = runner.invoke(app, [command])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == (1 if command == "pull" else 0), result.output
         assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
         assert (fleet.memory / "ccc.txt").read_bytes() == b"c"
         assert (fleet.memory / "bbb").read_bytes() == b"mine"
@@ -8211,7 +8222,7 @@ class TestApplyRecovery53A:
         assert "ccc.txt" in fleet.log.read_text()
         assert fleet.memory in fleet.fsync_calls
         if command == "autopull":
-            assert result.stdout == "mm: pulled 2 files from Mac A (2 written)\n"
+            assert result.stdout == ""
             crumb = cli_module._read_autorun_breadcrumbs()["pull"]
             assert (crumb["outcome"], crumb["detail"]) == ("degraded", "1 file(s) failed")
             assert (
@@ -8222,7 +8233,7 @@ class TestApplyRecovery53A:
             assert status_result.exit_code == 0, status_result.output
             assert "Files failed to apply on the last auto-pull" in status_result.stdout
         else:
-            assert "Pull incomplete: 2 written, 1 failed." in result.stdout
+            assert "Pull incomplete [result-degraded]: 2 files applied, 1 failed" in result.stderr
             assert "Pull complete." not in result.stdout
         (fleet.memory / "bbb").rename(fleet.memory / "bbb.local")
         retry = runner.invoke(app, ["autopull"])
@@ -8354,7 +8365,7 @@ class TestApplyRecovery53A:
             assert result.exit_code != 0
             # Click converts Ctrl-C to Abort at its outer CLI boundary.
             if failure != "keyboard":
-                assert result.exception is exc
+                assert result.exit_code == 1
         assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
         assert not (fleet.memory / "ccc.txt").exists()
         records = fleet.records()
@@ -8374,13 +8385,16 @@ class TestApplyRecovery53A:
             }
         assert "aaa.txt" in fleet.log.read_text()
         assert fleet.memory in fleet.fsync_calls
-        assert "Pull complete." not in result.stdout
+        assert "Pull: " not in result.stdout
         if command == "pull":
-            assert "Pull interrupted; completed changes were kept." in result.stdout
+            assert "completed changes remain" in result.stderr
             run = cli_module.attemptlog.read_runs()["runs"]["pull"]
             assert run["outcome"] == "failed"
             assert run["cause"] == ("interrupted" if failure == "keyboard" else "unexpected-error")
-            assert run["counts"] == {}  # No returned result: do not invent partial counts.
+            assert (
+                sum(run["counts"][k] for k in ("total_written", "total_merged", "total_conflicted"))
+                == expected
+            )
             assert run["content_accepted"] is None
 
     def test_abort_after_keep_local_records_without_draining(
@@ -8406,7 +8420,7 @@ class TestApplyRecovery53A:
         assert (fleet.memory / "aaa.txt").stat().st_mtime == 1
         assert fleet.memory in fleet.fsync_calls
         assert not drain
-        assert "Pull aborted; completed changes were kept." in result.stdout
+        assert "Pull interrupted [interrupted]" in result.stderr
 
     @pytest.mark.parametrize("command", ["pull", "autopull"])
     @pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
@@ -8469,7 +8483,7 @@ class TestApplyRecovery53A:
             assert (fleet.memory / name).read_bytes() == data
         assert summaries == [(3, "interrupted")]
         assert not drains
-        assert "Pull complete." not in result.stdout
+        assert "Pull: " not in result.stdout
 
     @pytest.mark.parametrize("command", ["pull", "autopull"])
     @pytest.mark.parametrize(
@@ -8575,9 +8589,21 @@ class TestApplyRecovery53A:
                 monkeypatch.setattr(cli_module, "_select_devices", select)
             else:
                 monkeypatch.setattr(cli_module.console, "print", output)
-        result = runner.invoke(app, [command])
+        original_core = cli_module._pull_core
+        propagated = []
+
+        def core(*args, **kwargs):
+            try:
+                return original_core(*args, **kwargs)
+            except BaseException as error:
+                propagated.append(error)
+                raise
+
+        monkeypatch.setattr(cli_module, "_pull_core", core)
+        result = runner.invoke(app, [command, *(["--verbose"] if command == "pull" else [])])
+        assert propagated == [exc]
         if command == "pull":
-            assert result.exception is exc, result.output
+            assert result.exit_code == 1, result.output
         else:
             assert result.exit_code == 0, result.output
             crumb = cli_module._read_autorun_breadcrumbs()["pull"]
@@ -8598,7 +8624,7 @@ class TestApplyRecovery53A:
             assert fleet.memory in fleet.fsync_calls
         if recovery_failure in ("fsync", "fsync-close"):
             assert "durability fsync failed" in result.output
-        assert "Pull complete." not in result.stdout
+        assert "Pull: " not in result.stdout
 
     @pytest.mark.parametrize("command", [["pull", "--dry-run"], ["diff"]])
     def test_preview_with_loaded_int_mtime_never_applies(
@@ -8631,7 +8657,7 @@ def test_53a_normal_summary_systemexit_propagates(apply_failure_fleet, monkeypat
 
     monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
     result = runner.invoke(app, [command])
-    assert result.exit_code == 45
+    assert result.exit_code == (1 if command == "pull" else 45)
     assert isinstance(result.exception, SystemExit)
     assert [r["action"] for r in fleet.records()] == ["written"]
     assert fleet.memory in fleet.fsync_calls
@@ -9552,7 +9578,7 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
         cfg["sync"]["sources"][0]["path"] = str(applied)
         save_config(cfg, env["config_path"])
         result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 0, (result.output, result.exception)
+        assert result.exit_code == 1, (result.output, result.exception)
         for predicted, real in (
             ("write", "written"),
             ("conflict", "conflicted"),
@@ -10414,7 +10440,7 @@ class TestMmEventsOwnership59A:
         )
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
-        assert result.stderr.count("mm: warning:") == (2 if command == "push" else 1)
+        assert result.stderr.count("mm: warning:") == 1
         assert str(custom) in result.stderr
         assert "plug it in, create it, or run mm disable-source mm-events" in result.stderr
         assert not custom.exists()
@@ -10893,7 +10919,7 @@ class TestNewerStorage66A:
         )
         before = _preview_tree(env["claude"])
         result = runner.invoke(app, ["pull"])
-        assert result.exit_code == 0, result.output
+        assert result.exit_code == 1, result.output
         assert upgrade.INSTALL_CMD in " ".join(result.stderr.split()), result.output
         assert "unsupported format version 0x03" in result.stderr
         assert _preview_tree(env["claude"]) == before
@@ -11150,7 +11176,7 @@ def test_attended_capture_exception_never_retries_or_blocks_content(capture61, m
             return real_write(path, device, rows, **kw)
 
         monkeypatch.setattr(_mm_events, "write_push_event", write)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert calls == [True]
     assert "mm: warning: Usage capture" in result.stderr
@@ -11228,7 +11254,7 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
         )
     elif capture_state == "no-reader":
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == (0 if capture_state == "published" else 1), result.output
     assert "corrupt" in result.stderr.lower()
     assert ("Host usage was published" in result.stderr) == (capture_state == "published")
@@ -11293,7 +11319,7 @@ def test_failed_refresh_records_attempt_without_replacing_capture(capture61, mon
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
     )
-    failed = runner.invoke(app, ["push"])
+    failed = runner.invoke(app, ["push", "--verbose"])
     assert failed.exit_code == 0 and "(no-row)" in failed.stderr
     after = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     assert after["ts"] == before["ts"] and after["age_days"] == 0
@@ -11464,7 +11490,7 @@ def test_push_stop_reports_failure_and_nudges_only_after_a_real_attempt(
 
     nudges = []
 
-    def nudge(config, *, attended):
+    def nudge(config, *, attended, diagnostics=True):
         cli_module.acquire_lock()  # proves the lock was released first
         cli_module.release_lock()
         assert attended
@@ -11481,8 +11507,9 @@ def test_push_stop_reports_failure_and_nudges_only_after_a_real_attempt(
         assert flat.endswith("Nothing was changed except the local lock file (dry run).")
         assert nudges == []
     else:
-        assert "Push (push-failed): content was not pushed" in flat
-        assert "#host-usage-capture" in flat
+        assert "Push failed [storage-error]" in flat
+        assert "effects unconfirmed" in flat
+        assert flat.endswith("Run: mm diag")
         assert nudges == ["dev-a"]
 
 
@@ -11500,7 +11527,7 @@ def test_post_push_gc_outcomes_never_undo_accepted_content(capture61, monkeypatc
         return 3
 
     monkeypatch.setattr(cli_module, "_do_gc", gc)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     if outcome == "deleted":
         assert "GC: deleted 3 orphaned blobs." in result.stdout
@@ -11525,12 +11552,12 @@ def test_publication_evidence_failure_cannot_undo_content_acceptance(capture61, 
         raise RecursionError("evidence broke")
 
     monkeypatch.setattr(_mm_events, "recorded_row_revision", broken)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     flat = " ".join(result.stderr.split())
     assert "(unverified: evidence-error)" in flat
     assert "publication evidence could not be read" in flat
-    assert "evidence broke" in flat
+    assert "RecursionError" in flat and "evidence broke" not in flat
     assert "Content sync succeeded" in flat
     assert "not-published:" not in result.stdout
     accepted = cli_module.sidecar.read("dev-a")
@@ -11794,7 +11821,7 @@ def test_attended_push_deadline_after_warm_gets_an_honest_diagnostic(capture61, 
     exhausted = _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: exhausted)
     monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     flat = " ".join(result.stderr.split())
     assert "(no-row)" in flat and "(codex deadline)" in flat
@@ -11863,7 +11890,7 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
         exhausted = _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
         monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **kw: exhausted)
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     sync = cli_module.attemptlog.read_runs()["runs"]["push"]
     assert (sync["outcome"], sync["cause"]) == ("degraded", "result-degraded")
@@ -11876,7 +11903,8 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
     added = [json.loads(line) for line in env["dayfile"].read_text().splitlines()[len(before) :]]
     hosts = [row for row in added if row["type"] == "host-usage-snapshot"]
     if case == "capture-failed":
-        assert "Usage capture (capture-failed): snapshot construction broke." in flat
+        assert "Usage capture (capture-failed): RuntimeError." in flat
+        assert "snapshot construction broke" not in flat
         assert "Repair the local events folder if needed and run mm diag" in flat
         assert "the next attended mm push retries automatically" in flat
         assert hosts == []
@@ -11899,9 +11927,13 @@ def test_capture_warning_names_the_exception_when_its_message_is_empty(capture61
         raise AssertionError()
 
     monkeypatch.setattr(events_tail, "_capture_host_snapshot", broken)
-    result = runner.invoke(app, ["push"])
+    result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert "Usage capture (capture-failed): AssertionError." in " ".join(result.stderr.split())
+    # The capture receipt owns this loss; it is not also an events-tail degradation.
+    run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run["counts"].get("events_degradations", 0) == 0
+    assert run["omitted_details"] == 0
 
 
 def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61, monkeypatch):
@@ -11975,7 +12007,7 @@ def test_upload_stop_cause_is_private_and_visible_in_status_diag(
 
     monkeypatch.setattr(LocalBackend, "put", stop)
     result = runner.invoke(app, ["push"])
-    assert result.exit_code == (130 if failure == "interrupt" else 1), result.output
+    assert result.exit_code == 1, result.output
     record, reason = cli_module.attemptlog.read()
     assert reason is None
     assert (record["class"], record["cause"], record["errno"]) == ("push-failed", cause, number)
@@ -13562,3 +13594,749 @@ def test_status77_omitted_file_comparison_is_truthful(status77, mode):
         assert "In sync with this device's last push." in headline
     else:
         assert "0 new, 0 modified and 1 deleted waiting to push" in headline
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+@pytest.mark.parametrize("width", [24, 80, 240])
+def test_sync78_default_and_verbose_share_one_logical_final_line(
+    status77, monkeypatch, verbose, width
+):
+    monkeypatch.setattr(cli_module.console, "_width", width)
+    monkeypatch.setattr(cli_module.stderr_console, "_width", width)
+    result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-1] == "Push: no content changes."
+    assert sum(line.startswith("Push:") for line in result.output.splitlines()) == 1
+    if not verbose:
+        assert result.stdout == "Push: no content changes.\n"
+        assert result.stderr == ""
+    assert ("Building manifest" in result.output) is verbose
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+@pytest.mark.parametrize("change", ["files", "metadata", "selection", "repair"])
+def test_sync78_real_push_accepted_grammar(status77, monkeypatch, verbose, change):
+    env = status77
+    memory = env["claude"] / "projects/-Users-kb-myapp/memory"
+    file = memory / "user_role.md"
+    if change == "files":
+        file.write_text("changed")
+        (memory / "new78.md").write_text("new")
+        expected = "Push: 2 content changes published."
+    elif change == "metadata":
+        stamp = file.stat().st_mtime + 2
+        os.utime(file, (stamp, stamp))
+        expected = "Push: metadata updated."
+    elif change == "selection":
+        cfg = env["cfg"]
+        extra = env["path"].parent / "empty78"
+        extra.mkdir()
+        cfg["sync"]["sources"].append({"name": "empty78", "type": "generic", "path": str(extra)})
+        save_config(cfg, env["path"])
+        expected = "Push: source selection updated."
+    else:
+        backend = env["backend"]
+        key = storage_keys.manifest_key("dev-a")
+        (backend.root / Path(key).with_name("manifest.json 2.enc")).write_bytes(backend.get(key))
+        backend.delete(key)
+        expected = "Push: manifest repaired."
+    result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[-1] == expected
+    record = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert record["content_accepted"] is True
+    assert "published_content_files" not in record["counts"]
+
+
+@pytest.mark.parametrize("verbose", [False, True])
+def test_sync78_degraded_capture_default_is_quiet_and_status_actionable(
+    capture61, monkeypatch, verbose
+):
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
+    )
+    result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-1] == "Push: no content changes."
+    assert ("Usage capture (no-row)" in result.stderr) is verbose
+    run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run["outcome"] == "degraded"
+    assert any("no-row" in detail for detail in run["degradations"])
+    status = runner.invoke(app, ["status"])
+    assert "In sync" not in status.output.splitlines()[0]
+    assert "mm update" in status.output or "mm diag" in status.output
+    diag = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert diag["last_attended_runs"]["runs"]["push"]["outcome"] == "degraded"
+
+
+@pytest.mark.parametrize("fault", ["update", "unlock", "history", "record", "capture-record"])
+def test_sync78_finalizer_notice_precedes_outcome_and_primary_wins(capture61, monkeypatch, fault):
+    from mind_meld import pullhistory, statedb
+
+    def stop(*args, **kwargs):
+        raise RuntimeError("PRIVATE78 exception")
+
+    monkeypatch.setattr(cli_module, "_push_core", stop)
+    if fault == "update":
+        monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", stop)
+    elif fault == "unlock":
+        original = cli_module.release_lock
+
+        def unlock():
+            original()
+            raise OSError("PRIVATE78 unlock")
+
+        monkeypatch.setattr(cli_module, "release_lock", unlock)
+    elif fault == "history":
+        original = cli_module._push_core
+
+        def history(*args, **kwargs):
+            pullhistory.record_failure(statedb.StateDBBusy("SQLITE_BUSY"))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "_push_core", history)
+    elif fault == "record":
+        monkeypatch.setattr(
+            cli_module.attemptlog,
+            "write_run",
+            lambda *a: (_ for _ in ()).throw(OSError(5, "PRIVATE78")),
+        )
+    else:
+
+        def capture_record(*args, **kwargs):
+            kwargs["attempt"].outcome = cli_module.attemptlog.CaptureOutcome().finish("no-row")
+            raise RuntimeError("PRIVATE78")
+
+        monkeypatch.setattr(cli_module, "_push_core", capture_record)
+        monkeypatch.setattr(cli_module.attemptlog, "write", stop)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1, result.output
+    assert result.output.splitlines()[-1].startswith(
+        "Push failed [unexpected-error]: RuntimeError;"
+    )
+    assert result.output.splitlines()[-1].endswith("Run: mm diag")
+    assert result.output.count("Push failed") == 1
+    assert "PRIVATE78" not in result.output
+    notice = {
+        "update": "automatic update did not complete",
+        "unlock": "lock release could not be confirmed",
+        "record": "run-evidence-write-unavailable",
+        "capture-record": "could not durably record",
+    }.get(fault)
+    if notice:
+        assert result.output.index(notice) < result.output.rindex("Push failed")
+    if fault != "record":
+        assert cli_module.attemptlog.read_runs()["runs"]["push"]["cause"] == "unexpected-error"
+
+
+@pytest.mark.parametrize("when", ["before", "accepted"])
+def test_sync78_push_unexpected_receipt_survives_cleanup(status77, monkeypatch, when):
+    file = status77["claude"] / "projects/-Users-kb-myapp/memory/user_role.md"
+    file.write_text("new78 bytes")
+    original = cli_module._push_core
+    propagated = []
+    exc = RuntimeError("PRIVATE78")
+    if when == "accepted":
+        monkeypatch.setattr(cli_module, "update_last_seen", lambda *a: (_ for _ in ()).throw(exc))
+    else:
+        monkeypatch.setattr(
+            cli_module, "_upload_changed_blobs", lambda *a, **k: (_ for _ in ()).throw(exc)
+        )
+
+    def core(*args, **kwargs):
+        try:
+            return original(*args, **kwargs)
+        except BaseException as error:
+            propagated.append(error)
+            raise
+
+    monkeypatch.setattr(cli_module, "_push_core", core)
+    result = runner.invoke(app, ["push", "--verbose"])
+    assert result.exit_code == 1
+    assert propagated == [exc]
+    assert "PRIVATE78" not in result.output
+    run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run["content_accepted"] is (when == "accepted")
+    if when == "accepted":
+        assert (
+            "1 content change published; accepted changes remain" in result.stderr.splitlines()[-1]
+        )
+        assert run["counts"]["content_files"] == 1
+    else:
+        assert "effects unconfirmed" in result.stderr.splitlines()[-1]
+    assert "cli.py:_push_core:" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["success", "warning", "failure", "auth", "degraded"])
+@pytest.mark.parametrize("verbose", [False, True])
+def test_sync78_real_entrypoint_merged_buffered_pipes(tmp_path, mode, verbose):
+    """Actual Typer entrypoint with isolated HOME/store and fake optional boundaries."""
+    script = r"""
+import os, sys
+from pathlib import Path
+import keyring
+keyring.get_password = lambda *a: None
+from mind_meld import config, crypto, events_tail, host_usage, upgrade
+mode = sys.argv[1]
+upgrade.run_transition_hook = lambda *a, **k: None
+upgrade.update_or_nudge = lambda *a, **k: None
+events_tail._default_host_readers = lambda *a, **k: ()
+root = Path.home()
+notes = root / "notes"
+notes.mkdir(parents=True)
+(notes / "note.md").write_text("synthetic content")
+from mind_meld.storage.local import LocalBackend
+backend = LocalBackend(str(root / "store"))
+crypto.bootstrap_crypto_init(backend, "synthetic78", 1024)
+sources = [{"name": "notes", "path": str(notes), "type": "generic", "include_files": ["note.md"]}]
+if mode == "degraded":
+    events_root = root / "events-root"
+    events_root.mkdir()
+    sources.append({"name": "mm-events", "path": str(events_root),
+                    "type": "generic", "include_dirs": ["events"]})
+    events_tail._default_host_readers = lambda *a, **k: ((
+        "codex", lambda **kw: host_usage.HostUsageResult({}, False, "unsupported")
+    ),)
+config.save_config({
+    "device": {"id": "dev78", "name": "fixture"},
+    "storage": {"path": str(root / "store")},
+    "sync": {"sources": sources},
+    "crypto": {"argon2_memory_kb": 1024},
+})
+from mind_meld import cli
+mode = sys.argv[1]
+if mode == "warning":
+    def warn(*a):
+        print("mm: warning: large sync growth: synthetic; inspect the source", file=sys.stderr)
+    cli._warn_push_growth = warn
+    # first-push growth normally needs an accepted baseline; inject a required
+    # warning through the real apply-independent scan boundary instead.
+    original_build = cli.build_manifest_v2
+    def build(*a, **k):
+        warn()
+        return original_build(*a, **k)
+    cli.build_manifest_v2 = build
+elif mode == "failure":
+    def fail(*a):
+        raise RuntimeError("PRIVATE78 /user/path secret") from ValueError("PRIVATE78 cause")
+    cli.update_last_seen = fail
+cli.app(args=["push", *(["--verbose"] if sys.argv[2] == "yes" else [])])
+"""
+    env = dict(
+        os.environ, HOME=str(tmp_path / "home"), XDG_CONFIG_HOME=str(tmp_path / "home/.config")
+    )
+    env.pop("MINDMELD_PASSPHRASE", None)
+    if mode != "auth":
+        env["MINDMELD_PASSPHRASE"] = "synthetic78"
+    child = subprocess.run(
+        [sys.executable, "-c", script, mode, "yes" if verbose else "no"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+    assert child.returncode == (1 if mode in ("failure", "auth") else 0), child.stdout
+    assert "PRIVATE78" not in child.stdout
+    assert "Traceback" not in child.stdout and "Aborted!" not in child.stdout
+    last = child.stdout.splitlines()[-1]
+    if mode == "failure":
+        assert last.startswith("Push failed [unexpected-error]: RuntimeError;")
+        assert "1 content change published" in last and last.endswith("Run: mm diag")
+        assert ("cli.py:_push_core:" in child.stdout) is verbose
+    elif mode == "auth":
+        assert last.startswith("Push failed [authentication-error]:")
+        assert "MINDMELD_PASSPHRASE" in last and "no content published" in last
+    else:
+        assert last == "Push: 1 content change published."
+        if mode == "success" and not verbose:
+            assert child.stdout == last + "\n"
+        if mode == "degraded":
+            assert ("Usage capture (no-row)" in child.stdout) is verbose
+        if mode == "warning":
+            assert child.stdout.index("mm: warning: large sync growth") < child.stdout.index(last)
+
+
+def test_sync78_diagnostics_survive_refusal_are_bounded_and_reset(status77, monkeypatch):
+    from mind_meld.errors import SnapshotError
+
+    original = cli_module._push_core
+
+    def core(*args, **kwargs):
+        for _ in range(10000):
+            cli_module._sync_diagnostic("unsafe /private/path\n", True)
+        raise SnapshotError("Cannot publish: unreadable source. Previous snapshot kept.")
+
+    monkeypatch.setattr(cli_module, "_push_core", core)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1
+    assert "unsafe" not in result.output
+    run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run["counts"]["events_degradations"] == 10000
+    assert run["degradations"] == []
+    assert run["omitted_details"] == 10000
+    monkeypatch.setattr(cli_module, "_push_core", original)
+    next_run = runner.invoke(app, ["push"])
+    assert next_run.exit_code == 0
+    assert (
+        cli_module.attemptlog.read_runs()["runs"]["push"]["counts"].get("events_degradations", 0)
+        == 0
+    )
+    assert cli_module._SYNC_OUTPUT.get() is None
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_sync78_broken_stream_preserves_effects_and_never_retries(status77, monkeypatch, stream):
+    calls = []
+    original = cli_module._push_core
+
+    class Broken:
+        def write(self, value):
+            raise OSError("PRIVATE78 pipe")
+
+        def flush(self):
+            raise OSError("PRIVATE78 pipe")
+
+    def emit(message, **kwargs):
+        # Break just the actual terminal emission, after all durable evidence.
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, stream, Broken())
+            cli_module._emit_sync_outcome_original78(message, **kwargs)
+
+    monkeypatch.setattr(
+        cli_module, "_emit_sync_outcome_original78", cli_module._emit_sync_outcome, raising=False
+    )
+    monkeypatch.setattr(cli_module, "_emit_sync_outcome", emit)
+
+    def core(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "_push_core", core)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0
+    assert calls == [True]
+    assert cli_module.attemptlog.read_runs()["runs"]["push"]["outcome"] == "success"
+
+
+def test_sync78_no_peers_and_no_sources_are_explicit(status77):
+    no_peers = runner.invoke(app, ["pull"])
+    assert no_peers.exit_code == 0, no_peers.output
+    assert no_peers.stdout == "Pull: no peer devices.\n"
+    cfg = status77["cfg"]
+    cfg["sync"]["sources"] = []
+    save_config(cfg, status77["path"])
+    no_sources = runner.invoke(app, ["push"])
+    assert no_sources.exit_code == 0, no_sources.output
+    assert no_sources.output.splitlines()[-1] == "Push: no enabled sources."
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_sync78_pull_update_eligibility_and_partial_exit(
+    apply_failure_fleet, monkeypatch, interrupt
+):
+    fleet = apply_failure_fleet
+    fleet.publish({"aaa.txt": b"a", "bbb/inside.txt": b"b"})
+    (fleet.memory / "bbb").write_bytes(b"mine")
+    updates = []
+
+    def update(*args, **kwargs):
+        cli_module.acquire_lock()
+        cli_module.release_lock()
+        print("actionable update tail", file=sys.stderr)
+        updates.append(True)
+
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", update)
+    if interrupt:
+        monkeypatch.setattr(
+            cli_module,
+            "_pull_one_source",
+            lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 1
+    assert updates == ([] if interrupt else [True])
+    assert result.output.splitlines()[-1].startswith(
+        "Pull interrupted" if interrupt else "Pull incomplete [result-degraded]"
+    )
+    run = cli_module.attemptlog.read_runs()["runs"]["pull"]
+    assert run["outcome"] == ("failed" if interrupt else "degraded")
+    if not interrupt:
+        assert run["counts"]["total_written"] == run["counts"]["total_failed"] == 1
+        assert (fleet.memory / "aaa.txt").read_bytes() == b"a"
+        assert "actionable update tail" in result.stderr
+
+
+def test_sync78_activity_degradation_survives_later_upload_refusal(capture61, monkeypatch):
+    from mind_meld.errors import SnapshotError
+
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/refused78.md").write_text("pending")
+    monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **k: ())
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ("budget exhausted",), True),
+    )
+    monkeypatch.setattr(cli_module.identity, "gather_local_identities", lambda **k: [])
+
+    def refuse(*args, **kwargs):
+        raise SnapshotError("Cannot publish: fixture upload refused. Previous snapshot kept.")
+
+    monkeypatch.setattr(cli_module, "_upload_changed_blobs", refuse)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1
+    assert "discovery hit its time budget" not in result.output
+    record = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert record["cause"] == "snapshot-refused"
+    assert record["counts"]["events_degradations"] > 0
+    assert events_tail._ROOT_DISCOVERY_DEGRADATION in record["degradations"]
+
+
+_NEWER78 = cli_module._newer_format_message(3, "manifest")
+_MISSING_ROOT78 = (
+    "Cannot publish: source notes is missing after it was previously published. "
+    "Previous snapshot kept. Restore the source folder, or run 'mm disable-source notes' "
+    "if it should stop syncing. See https://example.test/#snapshot."
+)
+
+
+@pytest.mark.parametrize(
+    ("state", "error", "expected"),
+    [
+        (
+            {"message": _MISSING_ROOT78, "run": {"cause": "snapshot-refused"}},
+            typer.Exit(1),
+            "Push refused [snapshot-refused]: Cannot publish: source notes is missing after it "
+            "was previously published. Previous snapshot kept. Restore the source folder, or run "
+            "'mm disable-source notes' if it should stop syncing; no content published. "
+            "Run: mm push",
+        ),
+        (
+            {
+                "message": "Cannot publish: a.md changed while being read. Previous snapshot "
+                "kept. Wait for the writer to finish, then run mm push. See https://x.test/.",
+                "run": {"cause": "snapshot-refused"},
+            },
+            typer.Exit(1),
+            "Push refused [snapshot-refused]: Cannot publish: a.md changed while being read. "
+            "Previous snapshot kept. Wait for the writer to finish; no content published. "
+            "Run: mm push",
+        ),
+        (
+            {"message": "wrong passphrase", "run": {"cause": "crypto-error"}},
+            typer.Exit(1),
+            "Push failed [crypto-error]: wrong passphrase; no content published. Run: mm diag",
+        ),
+        (
+            {"run": {"cause": "storage-error", "stage": "command-refused"}},
+            cli_module.StorageError("storage: failed to read devices.json"),
+            "Push failed [storage-error]: storage: failed to read devices.json; "
+            "effects unconfirmed; reconcile before retrying. Run: mm diag",
+        ),
+        (
+            {"run": {"cause": "lock-held"}},
+            typer.Exit(1),
+            "Push refused [lock-held]: another mm operation holds the lock; wait for it to "
+            "finish; no content published. Run: mm diag",
+        ),
+        # Value: protects=exit-3 and curated refusals end with their own remedy command;
+        # fails_when=preflight_failures selection inverts or a curated remedy maps to mm diag;
+        # why_new=exit-3 and mm update/mm init rows had prefix-only or no coverage;
+        # seam=none; no_claim=which producer emits each message (pure renderer)
+        (
+            {"preflight": "conflict; conflict", "run": {"cause": "command-refused"}},
+            typer.Exit(3),
+            "Pull refused [command-refused]: preflight predicted conflict; conflict; "
+            "no files applied. Run: mm pull --conflict-mode keep-both",
+        ),
+        (
+            {
+                "preflight": "may fail (local file unreadable)",
+                "preflight_failures": True,
+                "run": {"cause": "command-refused"},
+            },
+            typer.Exit(3),
+            "Pull refused [command-refused]: preflight predicted may fail (local file "
+            "unreadable); no files applied. Run: mm diag",
+        ),
+        (
+            {"message": _NEWER78, "run": {"cause": "crypto-error"}},
+            typer.Exit(1),
+            f"Pull failed [crypto-error]: {_NEWER78.rstrip('. ')}; "
+            "no files applied. Run: mm update",
+        ),
+        (
+            {"message": "Not initialized. Run mm init first.", "run": {"stage": "setup-error"}},
+            typer.Exit(1),
+            "Pull failed [setup-error]: Not initialized. Run mm init first; no files applied. "
+            "Run: mm init",
+        ),
+    ],
+)
+def test_sync78_failure_line_keeps_curated_remedy_and_known_effects(state, error, expected):
+    verb = expected.split()[0].lower()
+    assert cli_module._sync_failure(verb, state, error) == expected
+
+
+def test_sync78_outcome_counts_are_singular_at_one():
+    pull = cli_module.PullResult(total_written=1)
+    assert cli_module._sync_success("pull", pull) == "Pull: 1 file applied."
+    push = cli_module.PushResult(published_content_files=1)
+    assert cli_module._sync_success("push", push) == "Push: 1 content change published."
+    partial = cli_module.PullResult(total_written=1, total_failed=1)
+    line = cli_module._sync_failure("pull", {"run": {"result": partial}}, None)
+    assert line.startswith("Pull incomplete [result-degraded]: 1 file applied, 1 failed;")
+    # Value: protects=conflict copies, skips and no-source state stay on the one pull line;
+    # fails_when=the conflict/skip suffix or no_sources precedence is dropped;
+    # why_new=no test reached these _sync_success branches; seam=none;
+    # no_claim=which pull paths set these counts (pure renderer)
+    one = cli_module.PullResult(total_written=1, total_conflicted=1)
+    assert cli_module._sync_success("pull", one) == "Pull: 2 files applied (1 conflict copy)."
+    many = cli_module.PullResult(total_conflicted=2, total_skipped=1)
+    assert (
+        cli_module._sync_success("pull", many)
+        == "Pull: 2 files applied (2 conflict copies); 1 skipped."
+    )
+    empty = cli_module.PullResult(no_peers=True, no_sources=True)
+    assert cli_module._sync_success("pull", empty) == "Pull: no enabled sources."
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+def test_sync78_lock_held_is_one_refusal_without_update(status77, monkeypatch, verb):
+    def held():
+        raise cli_module.LockError("another mm process holds the lock")
+
+    updates = []
+    monkeypatch.setattr(cli_module, "acquire_lock", held)
+    monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **k: updates.append(1))
+    result = runner.invoke(app, [verb])
+    assert result.exit_code == 1
+    last = result.stderr.splitlines()[-1]
+    assert last.startswith(f"{verb.title()} refused [lock-held]:")
+    assert last.endswith("Run: mm diag")
+    assert result.output.count(f"{verb.title()} refused") == 1
+    assert updates == []
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_sync78_passphrase_env_guidance_only_without_terminal(status77, monkeypatch, terminal):
+    def cancelled(*args, **kwargs):
+        raise cli_module.CryptoError("init: passphrase input cancelled.")
+
+    monkeypatch.setattr(cli_module, "get_passphrase", cancelled)
+    monkeypatch.setattr(cli_module, "_stdin_is_terminal", lambda: terminal)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1
+    last = result.stderr.splitlines()[-1]
+    assert last.startswith("Push failed [authentication-error]:")
+    assert ("MINDMELD_PASSPHRASE" in last) is (not terminal)
+    assert ("input cancelled" in last) is terminal
+
+
+def test_sync78_no_source_push_records_no_changes(status77):
+    cfg = status77["cfg"]
+    cfg["sync"]["sources"] = []
+    save_config(cfg, status77["path"])
+    result = runner.invoke(app, ["push"])
+    assert result.output.splitlines()[-1] == "Push: no enabled sources."
+    assert cli_module.attemptlog.read_runs()["runs"]["push"]["cause"] == "no-changes"
+
+
+def test_sync78_pull_plain_warnings_strip_control_characters(capsys):
+    peer = cli_module._CorruptPeer(device_id="id\r\x1b[2Jx", device_name="Mac\rFAKE OK\n")
+    cli_module._print_pull_summary(
+        cli_module.PullResult(), [peer], [], [], [], quiet=True, verbose=False
+    )
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "\r" not in err and "\x1b" not in err
+    assert "is corrupt - skipping pull from this device." in err
+
+
+@pytest.mark.parametrize("command", ["push", "autopush"])
+@pytest.mark.parametrize("fault", ["whole-walk", "host-lock", "reader-raise", "leaf-notice"])
+def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, fault, command):
+    # Value: protects=one activity loss is counted and recorded once, with no notice text
+    # persisted; fails_when=a scoped notice whose result already records the loss is also
+    # counted (degraded=True), or an unknown leaf notice is dropped or persisted verbatim;
+    # why_new=leaf tests pin the degraded flag only, the bounded test injects the sink
+    # directly; seam=none; no_claim=real Git/host stores (pump, reader and lock faked
+    # in-process; discovery fixed to tmp roots)
+    from contextlib import nullcontext
+
+    from mind_meld import lockedjson
+
+    roots: list[Path] = []
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(tuple(roots), ()),
+    )
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    # Prime once with deterministic discovery so the fixture's machine-dependent
+    # first capture cannot leave a held cursor behind as unrelated noise.
+    (memory / "prime78.md").write_text("prime")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    if fault == "whole-walk":
+        roots.append(capture61["path"].parent / "repo78")
+        roots[0].mkdir()
+
+        def pump(*args, **kwargs):
+            raise RuntimeError("PRIVATE78 pump")
+            yield
+
+        monkeypatch.setattr(_mm_events, "as_completed", pump)
+    elif fault == "reader-raise":
+
+        def raising(**kwargs):
+            raise RuntimeError("PRIVATE78 reader")
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", raising)
+    elif fault == "leaf-notice":
+
+        def noisy(**kwargs):
+            _mm_host_usage._notice_cache_write_failure(OSError(errno.EIO, "PRIVATE78"))
+            return _mm_host_usage.HostUsageResult({}, complete=True)
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", noisy)
+    (memory / "loss78.md").write_text("changed")
+    held = (
+        lockedjson.locked_json_rmw(_mm_host_usage.CACHE_PATH)
+        if fault == "host-lock"
+        else nullcontext()
+    )
+    with held:
+        result = runner.invoke(app, [command])
+    assert result.exit_code == 0, result.output
+    assert "PRIVATE78" not in result.output
+    for notice in ("whole-walk failure", "was locked; skipping", "raised", "write failed"):
+        assert notice not in result.output
+    if command == "push":
+        (line,) = result.stdout.splitlines()
+        assert line.startswith("Push: 1 content change published")
+        run = cli_module.attemptlog.read_runs()["runs"]["push"]
+        assert run["outcome"] == "degraded"
+        details = run["degradations"]
+        count = run["counts"].get("events_degradations", 0)
+        if fault == "whole-walk":
+            assert count == 1
+            assert len(details) == 1 and details[0].startswith("git walk dropped 1 repositories")
+        elif fault == "leaf-notice":
+            assert count == 1 and details == [] and run["omitted_details"] == 1
+        else:
+            # The attended capture owns this loss; the tail does not read hosts again.
+            assert count == 0 and details == ["usage capture no-row (none)"]
+    else:
+        assert result.stdout == result.stderr == ""
+        crumb = cli_module._read_autorun_breadcrumbs()["push"]
+        assert crumb["outcome"] == "degraded"
+        detail = crumb["detail"]
+        assert "PRIVATE78" not in detail and "EIO" not in detail
+        expected = {
+            "whole-walk": "git walk dropped 1 repositories",
+            "host-lock": "host-usage snapshot skipped (codex locked)",
+            "reader-raise": "host-usage snapshot skipped (codex unavailable)",
+            "leaf-notice": "1 diagnostic details omitted (run mm diag)",
+        }[fault]
+        assert detail.startswith(expected) and detail.count(expected) == 1
+        assert detail.count("git walk dropped") + detail.count("snapshot skipped") <= 1
+        if fault != "leaf-notice":
+            assert "diagnostic details omitted" not in detail
+
+
+def test_sync78_remaining_remedy_commands_select_their_run_command():
+    # Value: protects=unsupported-format and migrate-config refusals end on their own command;
+    # fails_when=those substrings fall through to mm diag or repeat the command in the reason;
+    # why_new=the failure table covers newer-mm, init, and devices only;
+    # seam=none; no_claim=which producer raises each message
+    unsupported = cli_module._sync_failure(
+        "pull",
+        {
+            "message": ("decrypt: unsupported format version 0x03. Expected 0x02. Update mm?"),
+            "run": {"cause": "crypto-error"},
+        },
+        typer.Exit(1),
+    )
+    assert unsupported == (
+        "Pull failed [crypto-error]: decrypt: unsupported format version 0x03. "
+        "Expected 0x02. Update mm?; no files applied. Run: mm update"
+    )
+    assert "newer mm" not in unsupported
+    migrated = cli_module._sync_failure(
+        "push",
+        {
+            "message": "Recommended excludes are missing, then run mm migrate-config.",
+            "run": {"stage": "setup-error"},
+        },
+        typer.Exit(1),
+    )
+    assert migrated == (
+        "Push failed [setup-error]: Recommended excludes are missing; "
+        "no content published. Run: mm migrate-config"
+    )
+    assert migrated.count("mm migrate-config") == 1
+
+
+def test_sync78_pull_with_a_peer_and_no_sources_names_sources(status77):
+    # Value: protects=an attended pull with a peer and no enabled sources says so;
+    # fails_when=the peer-path result omits no_sources and reports no changes;
+    # why_new=the live no-peer pull and the renderer test never take this path;
+    # seam=none; no_claim=apply behavior when sources are enabled
+    register_device(status77["backend"], "dev-peer78", "Peer78")
+    cfg = status77["cfg"]
+    cfg["sync"]["sources"] = []
+    save_config(cfg, status77["path"])
+    result = runner.invoke(app, ["pull", "--verbose"])
+    assert result.exit_code == 0, result.output
+    assert "Pulling from Peer78" in result.output
+    assert result.stdout.splitlines()[-1] == "Pull: no enabled sources."
+
+
+def test_sync78_pre_write_refusals_and_verbose_trace_cause():
+    line = cli_module._sync_failure(
+        "pull",
+        {"message": "Device not found: Mac Z", "run": {"cause": "command-refused"}},
+        typer.Exit(1),
+    )
+    assert line == (
+        "Pull failed [command-refused]: Device not found: Mac Z; no files applied. Run: mm devices"
+    )
+    try:
+        try:
+            raise RuntimeError("PRIVATE78 keyring detail")
+        except RuntimeError:
+            raise typer.Exit(1)
+    except typer.Exit as exit_error:
+        trace = cli_module._compact_sync_trace(exit_error)
+    assert trace.startswith("RuntimeError (no errno):")
+    assert "PRIVATE78" not in trace
+
+
+def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys):
+    line = cli_module._sync_failure(
+        "push",
+        {"message": "Could not open lockfile L: permission denied", "run": {"cause": "lock-held"}},
+        typer.Exit(1),
+    )
+    assert line.startswith(
+        "Push refused [lock-held]: Could not open lockfile L: permission denied;"
+    )
+    token = cli_module._SYNC_OUTPUT.set(
+        {"verbose": False, "diagnostics": events_tail.Degradations()}
+    )
+    try:
+        cli_module._print_pull_summary(
+            cli_module.PullResult(total_written=1, total_conflicted=1),
+            [],
+            [],
+            [],
+            [],
+            quiet=True,
+            verbose=False,
+        )
+    finally:
+        cli_module._SYNC_OUTPUT.reset(token)
+    err = capsys.readouterr().err
+    assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err

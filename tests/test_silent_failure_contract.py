@@ -614,7 +614,7 @@ def test_pull_warns_on_unknown_source(tmp_path, monkeypatch):
     assert r.exit_code == 0, (r.stdout, r.stderr)
     # Warning prints regardless of --verbose (the whole point of the fix).
     assert "unknown source 'gstack'" in (r.stdout + (r.stderr or ""))
-    assert "unknown source(s) skipped" in r.stdout
+    assert r.stdout == "Pull: 1 file applied.\n"
 
 
 # ─── --conflict-mode fail preflight ──────────────────────────────────────
@@ -669,8 +669,9 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     assert role.read_text() == snapshot_before
     siblings = list(role.parent.iterdir())
     assert all(".sync-conflict-" not in p.name for p in siblings)
-    # Conflict is listed by name.
-    assert "role.md" in r.stdout
+    # The conflicting files are named, then the refusal is the final stderr line.
+    assert r.stderr.splitlines()[-1].startswith("Pull refused [command-refused]:")
+    assert "role.md" in r.stderr  # the conflicting file is named before the refusal
 
 
 # ─── Devices table header ────────────────────────────────────────────────
@@ -1510,7 +1511,7 @@ def test_error_writes_to_stderr_not_stdout(tmp_path, monkeypatch):
     # Exit code 1 from _error's typer.Exit(1).
     assert r.exit_code == 1
     # The error text must be on stderr.
-    assert "Error:" in (r.stderr or "")
+    assert "Push failed [setup-error]:" in (r.stderr or "")
     # And stdout must be clean — no rich error leakage. Before the fix,
     # stdout would carry a [red]Error:[/red]-expanded string.
     assert "Error:" not in (r.stdout or "")
@@ -2712,7 +2713,7 @@ def test_attended77_callback_failure_matrix(tmp_path, monkeypatch, verb, stage, 
 
     monkeypatch.setattr(cli_module, target, fail)
     result = runner.invoke(app, [verb])
-    assert result.exit_code == {"exit": 3, "interrupt": 130}.get(stage, 1)
+    assert result.exit_code == {"exit": 3}.get(stage, 1)
     recorded = attemptlog.read_runs()["runs"][verb]
     assert recorded["cause"] == cause
     assert recorded["outcome"] == ("skipped" if stage == "lock" else "failed")
@@ -2848,7 +2849,8 @@ def test_attended77_result_counts(tmp_path, monkeypatch, verb, result, counts, o
     _setup_events_tail_config(tmp_path, monkeypatch)
     monkeypatch.setattr(cli_module, f"_{verb}_core", lambda *a, **k: result)
     finished = runner.invoke(app, [verb])
-    assert finished.exit_code == 0, finished.output
+    expected_exit = 1 if isinstance(result, cli_module.PullResult) and result.total_failed else 0
+    assert finished.exit_code == expected_exit, finished.output
     record = attemptlog.read_runs()["runs"][verb]
     assert record["outcome"] == outcome
     for key, value in counts.items():

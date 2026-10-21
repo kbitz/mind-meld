@@ -25,9 +25,10 @@ import sys
 import threading
 import time
 import traceback
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, redirect_stderr, redirect_stdout, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -277,8 +278,8 @@ class PullResult:
       written    — local had no copy; remote written to canonical path
       merged     — .jsonl or MEMORY.md union-merged with local
       skipped    — local is newer than remote (no write)
-      conflicted — hashes differed and remote newer/equal: local renamed to
-                   .sync-conflict-*, remote written to canonical
+      conflicted — hashes differed and remote newer/equal: local canonical
+                   preserved, remote written to .sync-conflict-*
       unchanged  — apply-time re-read showed local already matches remote
       failed     — rename/write error; local preserved, no change applied
 
@@ -288,6 +289,8 @@ class PullResult:
     silently). One increment per (device, source) pair per pull, not per file.
     """
 
+    no_peers: bool = False
+    no_sources: bool = False
     total_written: int = 0
     total_merged: int = 0
     total_skipped: int = 0
@@ -315,6 +318,13 @@ class PullResult:
 class PushResult:
     """Result of a push operation."""
 
+    # Invocation-local display facts for the attended outcome line (Track 78A);
+    # never persisted.
+    no_sources: bool = False
+    published_content_files: int | None = None
+    metadata_updated: bool = False
+    selection_updated: bool = False
+    manifest_repaired: bool = False
     # User-source bytes, metadata or selection changed (mm-owned sources excluded).
     content_changed: bool = False
     content_files: int = 0
@@ -326,7 +336,7 @@ class PushResult:
     total_deleted: int = 0
     bytes_transferred: int = 0
     elapsed: float = 0.0
-    # Events-tail degradations for this push, one human-readable phrase each
+    # Bounded events-tail candidates; Degradations.total preserves occurrences
     # (v0.12.16). Empty on a healthy push. `autopush` turns a non-empty list
     # into a `degraded` autorun breadcrumb so `mm status` stops reporting
     # `success` while the retro pipeline is dead — the events tail is
@@ -334,7 +344,7 @@ class PushResult:
     # signal was a stderr notice from a command that runs unattended from a
     # Claude Code hook, i.e. nobody's terminal. Mirrors the `degradations`
     # list `autopull` has carried since v0.8.1.
-    events_degradations: list[str] = field(default_factory=list)
+    events_degradations: list[str] = field(default_factory=lambda: events_tail.Degradations())
     # Files this push left at their previously published version because they
     # were still changing after one re-read (Track 75A): (source, rel_path,
     # reason) sorted by source then path, reason one of changed / vanished /
@@ -395,11 +405,14 @@ def _main(
 
 def _error(msg: str) -> None:
     # Route to stderr so quiet-mode autopush/autopull don't leak error text
-    # to stdout (violating the one-line-stderr contract). Interactive users
-    # still see the [red]Error:[/red] formatting because terminals render
-    # stderr alongside stdout — the separation only matters when stdout is
-    # being consumed programmatically.
-    stderr_console.print(f"[red]Error:[/red] {safe_str(msg)}")
+    # to stdout (violating the one-line-stderr contract). Inside an attended
+    # push/pull outcome scope the message is stored instead, and
+    # _sync_failure renders it once as the final line.
+    state = _SYNC_OUTPUT.get()
+    if state is None:
+        stderr_console.print(f"[red]Error:[/red] {safe_str(msg)}")
+    else:
+        state["message"] = msg
     raise typer.Exit(1)
 
 
@@ -456,10 +469,26 @@ def _get_config(*, read_only: bool) -> dict:
     return config
 
 
+def _stdin_is_terminal() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (OSError, ValueError):
+        return False
+
+
 def _get_passphrase_or_exit() -> str:
     try:
         return get_passphrase()
     except CryptoError as e:
+        if (
+            _SYNC_OUTPUT.get() is not None
+            and "passphrase" in str(e).lower()
+            and not _stdin_is_terminal()
+        ):
+            if "input cancelled" in str(e):
+                with suppress(OSError, ValueError):
+                    sys.stderr.write("\n")
+            _error("Supply the passphrase securely using MINDMELD_PASSPHRASE, then retry once")
         _error(str(e))
         raise
     except Exception as e:
@@ -470,7 +499,11 @@ def _get_passphrase_or_exit() -> str:
         # print the one-line red banner instead of an uncaught traceback —
         # break-glass path (MINDMELD_PASSPHRASE env var) is already past,
         # so the user needs to see exactly why the keyring hiccuped.
-        _error(f"keyring backend failure: {type(e).__name__}: {e}")
+        _error(
+            f"keyring backend failure: {type(e).__name__}"
+            if _SYNC_OUTPUT.get() is not None
+            else f"keyring backend failure: {type(e).__name__}: {e}"
+        )
         raise
 
 
@@ -2929,7 +2962,11 @@ def _download_and_apply(
     outcomes = reporter.outcomes
 
     total = len(to_download)
-    show_progress = bool(to_download) and not quiet
+    show_progress = (
+        bool(to_download)
+        and not quiet
+        and (_SYNC_OUTPUT.get() is None or _SYNC_OUTPUT.get()["verbose"])
+    )
     use_widget = show_progress and console.is_terminal
 
     progress: Progress | None = None
@@ -3756,6 +3793,26 @@ def init() -> None:
 # ── push ──────────────────────────────────────────────────────────────
 
 
+_SYNC_OUTPUT = ContextVar("sync_output", default=None)
+
+
+def _sync_diagnostic(message: str, degraded: bool = False) -> None:
+    """Retain facts before best-effort rendering; never change execution policy."""
+    state = _SYNC_OUTPUT.get()
+    if state is not None and degraded:
+        state["diagnostics"].append(message.removeprefix("mm: notice: ").strip())
+    if state is None or state["verbose"]:
+        with suppress(Exception, SystemExit):
+            print(safety.safe_terminal_str(message.rstrip()), file=sys.stderr)
+
+
+def _capture_notice(message: str) -> None:
+    if _SYNC_OUTPUT.get() is None:
+        stderr_console.print(message)
+    else:
+        _sync_diagnostic(message)
+
+
 def _capture_attended_usage(
     config: dict,
     sources: list[dict],
@@ -3781,7 +3838,8 @@ def _capture_attended_usage(
             selected, sources, reader_consented=bool(readers)
         )
         if readiness != "ready":
-            stderr_console.print(
+            outcome.finish("prerequisites", readiness)
+            _capture_notice(
                 f"mm: warning: Usage capture (prerequisites: {readiness}): skipped — "
                 f"{safe_str(_config_module.usage_capture_remedy(readiness))} "
                 "Content sync continues."
@@ -3817,9 +3875,11 @@ def _capture_attended_usage(
                 console.print(f"Usage capture: {safe_str(name)} — {label}")
         if not rows:
             notices.append("No usage snapshot written; run mm diag to diagnose the reader.")
+        if not rows:
+            outcome.finish("no-row")
         if notices:
             token = "no-row" if not rows else "readers"
-            stderr_console.print(
+            _capture_notice(
                 f"mm: warning: Usage capture ({token}): {safe_str(' '.join(notices))} "
                 f"Content sync continues. See {HOST_USAGE_CAPTURE_URL}"
             )
@@ -3840,17 +3900,16 @@ def _capture_attended_usage(
         outcome.appended = (path, rows[0])
         return outcome
     except Exception as e:
-        stderr_console.print(
-            f"mm: warning: Usage capture ({phase}): {_exception_text(e)}. "
+        outcome.finish(phase)
+        _sync_diagnostic(f"usage capture failed ({type(e).__name__})")
+        if _SYNC_OUTPUT.get() is not None:
+            _sync_diagnostic(_compact_sync_trace(e))
+        _capture_notice(
+            f"mm: warning: Usage capture ({phase}): {type(e).__name__}. "
             "Content sync continues. Repair the local events folder if needed and run mm diag; "
             f"the next attended mm push retries automatically. See {HOST_USAGE_CAPTURE_URL}"
         )
         return outcome.finish(phase)
-
-
-def _exception_text(e: BaseException) -> str:
-    """Printable cause for a warning; ``AssertionError()`` and ``StopIteration()`` are empty."""
-    return safe_str(e) or type(e).__name__
 
 
 def _warn_publication_evidence_unavailable(
@@ -3859,9 +3918,9 @@ def _warn_publication_evidence_unavailable(
     """Publication evidence failing must never change what the push already did."""
     if attempt is not None and attempt.outcome is not None:
         attempt.outcome.finish("unverified", "evidence-error")
-    stderr_console.print(
+    _capture_notice(
         "mm: warning: Usage capture (unverified: evidence-error): "
-        f"publication evidence could not be read ({_exception_text(e)}); check mm status. "
+        f"publication evidence could not be read ({type(e).__name__}); check mm status. "
         f"{content_outcome} See {HOST_USAGE_CAPTURE_URL}"
     )
 
@@ -3993,25 +4052,260 @@ def _report_usage_publication(
                 if result.content_changed
                 else "User content was already up to date."
             )
-            stderr_console.print(
+            _capture_notice(
                 f"mm: warning: Usage capture ({outcome}: {cause}): "
                 f"{safe_str(remedy)}. {content_outcome} See {HOST_USAGE_CAPTURE_URL}"
             )
-    except Exception as e:
-        # The verdict is already on the attempt. A broken stream, including
-        # UnicodeEncodeError, must not relabel it as unverified evidence.
-        print(
-            "mm: notice: could not print publication evidence "
-            f"({_exception_text(e)}); check mm status",
-            file=sys.stderr,
-        )
+    except Exception:
+        _sync_diagnostic("mm: notice: could not print publication evidence; check mm status")
     return published
+
+
+def _sync_warning(message: str) -> None:
+    with suppress(Exception, SystemExit):
+        _print_apply_warning(message)
+
+
+def _release_sync_lock() -> None:
+    if _SYNC_OUTPUT.get() is None:
+        release_lock()
+        return
+    try:
+        release_lock()
+    except (Exception, SystemExit) as exc:
+        _sync_diagnostic("lock release could not be confirmed", True)
+        _sync_warning(
+            f"mm: warning: lock release could not be confirmed ({type(exc).__name__}); run mm diag"
+        )
+
+
+def _sync_update(config: dict, *, verbose: bool) -> None:
+    try:
+        upgrade.update_or_nudge(config, attended=True, diagnostics=verbose)
+    except (Exception, KeyboardInterrupt):
+        _sync_warning("mm: notice: automatic update did not complete; run mm update")
+
+
+def _count(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def _sync_success(verb: str, result: PushResult | PullResult | None) -> str:
+    if verb == "push":
+        result = result if isinstance(result, PushResult) else PushResult()
+        published_files = result.published_content_files
+        if published_files is None:
+            published_files = result.content_files
+        lead = (
+            "no enabled sources"
+            if result.no_sources
+            else f"{_count(published_files, 'content change', 'content changes')} published"
+            if published_files
+            else "metadata updated"
+            if result.metadata_updated
+            else "source selection updated"
+            if result.selection_updated
+            else "manifest repaired"
+            if result.manifest_repaired
+            else "no content changes"
+        )
+        parts = [lead]
+        if result.host_usage_published:
+            parts.append("usage published")
+        if result.held:
+            parts.append(f"{len(result.held)} held")
+        return "Push: " + "; ".join(parts) + "."
+    assert isinstance(result, PullResult)
+    lead = (
+        "no enabled sources"
+        if result.no_sources
+        else "no peer devices"
+        if result.no_peers
+        else f"{_count(result.total_applied, 'file', 'files')} applied"
+        if result.total_applied
+        else "no changes"
+    )
+    if result.total_conflicted:
+        word = "copy" if result.total_conflicted == 1 else "copies"
+        lead += f" ({result.total_conflicted} conflict {word})"
+    if result.total_skipped:
+        lead += f"; {result.total_skipped} skipped"
+    return "Pull: " + lead + "."
+
+
+def _compact_sync_trace(exc: BaseException) -> str:
+    """Trusted frame identifiers only: no messages, source text, locals or paths."""
+    seen: set[int] = set()
+    while (
+        isinstance(exc, (typer.Exit, typer.Abort))
+        and (exc.__cause__ or exc.__context__) is not None
+        and id(exc) not in seen
+    ):
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    frames = deque(maxlen=8)
+    tb = exc.__traceback__
+    package = Path(__file__).parent
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        path = Path(code.co_filename)
+        if path.parent == package and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", code.co_name):
+            frames.append(f"{path.name}:{code.co_name}:{tb.tb_lineno}")
+        tb = tb.tb_next
+    return f"{type(exc).__name__} ({attemptlog.storage_errno(exc) or 'no errno'}): " + " > ".join(
+        frames
+    )
+
+
+def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
+    run = state.get("run", {})
+    result = run.get("result")
+    record = state.get("record", {})
+    partial = isinstance(result, PullResult) and result.total_failed and error is None
+    cause = (
+        "result-degraded"
+        if partial
+        else record.get("cause", run.get("cause", run.get("stage", "unexpected-error")))
+    )
+    interrupted = cause == "interrupted" or isinstance(error, (KeyboardInterrupt, typer.Abort))
+    refused = (
+        cause in ("lock-held", "snapshot-refused")
+        or isinstance(error, typer.Exit)
+        and error.exit_code == 3
+    )
+    kind = (
+        "incomplete"
+        if partial
+        else "interrupted"
+        if interrupted
+        else "refused"
+        if refused
+        else "failed"
+    )
+    command = "mm diag"
+    message = state.get("message", "")
+    if partial:
+        reason = (
+            f"{_count(result.total_applied, 'file', 'files')} applied, {result.total_failed} failed"
+        )
+    elif isinstance(error, typer.Exit) and error.exit_code == 3:
+        reason = "preflight predicted " + state.get("preflight", "conflicts or failures")
+        command = (
+            "mm diag" if state.get("preflight_failures") else "mm pull --conflict-mode keep-both"
+        )
+    elif cause == "lock-held":
+        # LockError also covers permission/write failures: keep its own text.
+        reason = message or "another mm operation holds the lock; wait for it to finish"
+    elif cause == "authentication-error":
+        reason = message or "authentication could not complete"
+    elif message:
+        # Known CLI refusals already have curated location/problem text. Keep the
+        # problem, select its existing remedy, and avoid repeating command prose.
+        if "newer mm" in message or "unsupported format" in message:
+            command = "mm update"
+        elif "mm migrate-config" in message:
+            command = "mm migrate-config"
+        elif "mm init" in message:
+            command = "mm init"
+        elif message.startswith("Device not found"):
+            command = "mm devices"
+        elif cause == "snapshot-refused":
+            command = "mm push"
+        # Keep the curated text intact (it may name an alternative remedy such
+        # as mm disable-source); only drop a trailing step that repeats Run:.
+        reason = message.split(" See https:")[0].strip()
+        reason = re.sub(rf",? then (?:run |retry )?[`']?{re.escape(command)}[`']?\.?$", ".", reason)
+    elif isinstance(error, MindMeldError) and str(error):
+        # Curated library text; sanitized and bounded below.
+        reason = str(error).split(" See https:")[0]
+    else:
+        reason = (
+            "interrupted"
+            if interrupted
+            else type(error).__name__
+            if error is not None
+            else "command stopped"
+        )
+    if isinstance(result, PullResult):
+        effects = (
+            f"{_count(result.total_applied, 'file', 'files')} applied; completed changes remain"
+        )
+        if partial:
+            effects = "completed changes remain; repair the reported failures before one retry"
+    elif isinstance(result, PushResult) and result.content_accepted:
+        accepted = result.published_content_files
+        if accepted is None:
+            accepted = result.content_files
+        effects = (
+            f"{_count(accepted, 'content change', 'content changes')} published; "
+            "accepted changes remain"
+        )
+    elif (
+        run.get("stage") in ("setup-error", "authentication-error")
+        # Crypto-session setup fails before any upload or apply; a core error
+        # keeps its partial result above, so a bare cause here means no effect.
+        or (result is None and run.get("cause") in ("setup-error", "crypto-error"))
+        # Pre-write refusals: unknown device, newer storage format.
+        or (result is None and command in ("mm devices", "mm update"))
+        or cause == "lock-held"
+        or refused
+    ):
+        effects = "no content published" if verb == "push" else "no files applied"
+    else:
+        effects = "effects unconfirmed; reconcile before retrying"
+    # One logical line; bound peer/config text without treating display as identity.
+    reason = safety.safe_terminal_str(reason)[:384].rstrip(". ")
+    return f"{verb.title()} {kind} [{cause}]: {reason}; {effects}. Run: {command}"
+
+
+def _emit_sync_outcome(message: str, *, failed: bool) -> None:
+    # Rich wrapping is deliberately bypassed. Flush both pipes before the last
+    # write so stderr=STDOUT at process spawn preserves the observed order.
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception, SystemExit):
+            stream.flush()
+    stream = sys.stderr if failed else sys.stdout
+    with suppress(Exception, SystemExit):
+        stream.write(safety.safe_terminal_str(message) + "\n")
+        stream.flush()
+
+
+@contextmanager
+def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
+    if dry_run:
+        yield
+        return
+    state = {"verbose": verbose, "diagnostics": events_tail.Degradations()}
+    token = _SYNC_OUTPUT.set(state)
+    error = None
+    try:
+        with events_tail.diagnostic_scope(_sync_diagnostic):
+            yield
+    except (Exception, KeyboardInterrupt, SystemExit) as exc:
+        error = exc
+    finally:
+        _SYNC_OUTPUT.reset(token)
+    result = state.get("run", {}).get("result")
+    failed = error is not None or isinstance(result, PullResult) and result.total_failed > 0
+    if error is not None and verbose:
+        with suppress(Exception, SystemExit):
+            print(_compact_sync_trace(error), file=sys.stderr)
+    _emit_sync_outcome(
+        _sync_failure(verb, state, error) if failed else _sync_success(verb, result), failed=failed
+    )
+    if isinstance(error, typer.Exit) and error.exit_code == 3:
+        raise typer.Exit(3)
+    if failed:
+        raise typer.Exit(1)
 
 
 @contextmanager
 def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
     """Callback-local facts; finalization never changes the command's result."""
     run: dict = {"stage": "setup-error", "result": None, "attempt": None}
+    state = _SYNC_OUTPUT.get()
+    if state is not None:
+        state["run"] = run
     error: BaseException | None = None
     try:
         yield run
@@ -4028,7 +4322,12 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 else (bool(attempt.content_accepted) if attempt is not None else None)
             )
             counts = {}
-            details = []
+            details = events_tail.Degradations()
+            if result is None and state is not None:
+                pending = state.get("events_degradations", ())
+                if getattr(pending, "total", len(pending)):
+                    counts["events_degradations"] = getattr(pending, "total", len(pending))
+                    details.extend(pending)
             if result is not None:
                 counts = {
                     name: getattr(result, name)
@@ -4037,9 +4336,12 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 }
                 if isinstance(result, PushResult):
                     counts.update(
-                        held=len(result.held), events_degradations=len(result.events_degradations)
+                        held=len(result.held),
+                        events_degradations=getattr(
+                            result.events_degradations, "total", len(result.events_degradations)
+                        ),
                     )
-                    details = result.events_degradations
+                    details.extend(result.events_degradations)
             capture = attempt.outcome if attempt is not None else None
             capture_degraded = capture is not None and (
                 capture.kind not in ("published", "no-row")
@@ -4054,7 +4356,14 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                     if capture.kind == "published"
                     else f"usage capture {capture.kind} ({capture.cause or 'none'})"
                 )
-                details = [*details, capture_detail]
+                details.append(capture_detail)
+            if state is not None:
+                extra = state["diagnostics"]
+                details.extend(extra)
+                if extra.total:
+                    counts["events_degradations"] = min(
+                        2**53, counts.get("events_degradations", 0) + extra.total
+                    )
             degraded = capture_degraded or any(
                 counts.get(k, 0)
                 for k in (
@@ -4067,7 +4376,13 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                     "maintenance_failures",
                 )
             )
-            cause = "result-degraded" if degraded else "ok" if result is not None else "no-changes"
+            cause = (
+                "result-degraded"
+                if degraded
+                else "ok"
+                if result is not None and not getattr(result, "no_sources", False)
+                else "no-changes"
+            )
             outcome = "degraded" if degraded else "success"
             number = None
             if error is not None:
@@ -4105,8 +4420,11 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                     degradations=details,
                     errno_name=number,
                 )
+                record["omitted_details"] = min(2**53, record["omitted_details"] + details.omitted)
+                if state is not None:
+                    state["record"] = record
                 attemptlog.write_run(verb, record)
-            except (OSError, StorageError, ValueError, RecursionError, LockContended) as exc:
+            except (Exception, SystemExit, KeyboardInterrupt) as exc:
                 effect = (
                     "accepted"
                     if accepted
@@ -4121,7 +4439,7 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 code = attemptlog.storage_errno(exc) or (
                     "contended" if isinstance(exc, LockContended) else "unavailable"
                 )
-                with suppress(OSError):
+                with suppress(Exception, SystemExit):
                     print(
                         safety.safe_terminal_str(
                             "mm: notice [run-evidence-write-unavailable]: "
@@ -4164,141 +4482,148 @@ def push(
     mm status for recorded capture/publication evidence. Exit 1 means sync or
     required maintenance stopped; exit 2 means invalid arguments.
     """
-    with (
-        _attended_sync_run("push", dry_run=dry_run) as run,
-        pullhistory.command_scope(attended=True),
-    ):
-        config = _get_config(read_only=dry_run)
-        _maybe_prompt_migration(config, read_only=dry_run)
-        # Re-load in case the migration prompt mutated config on disk so the
-        # current command sees the new exclude_patterns.
-        if not dry_run:
-            config = _get_config(read_only=False)
-        run["stage"] = "authentication-error"
-        passphrase = _get_passphrase_or_exit()
-        run["stage"] = "command-refused"
-        pending: list[str] = []
-        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-        attempt = attemptlog.Attempt()
-        run["attempt"] = attempt
-        core_finished = False
-        stop_cause = "error"
-        stop_errno = None
+    with _sync_outcome("push", verbose=verbose, dry_run=dry_run):
+        with (
+            _attended_sync_run("push", dry_run=dry_run) as run,
+            pullhistory.command_scope(attended=True),
+        ):
+            config = _get_config(read_only=dry_run)
+            _maybe_prompt_migration(config, read_only=dry_run)
+            # Re-load in case the migration prompt mutated config on disk so the
+            # current command sees the new exclude_patterns.
+            if not dry_run:
+                config = _get_config(read_only=False)
+            run["stage"] = "authentication-error"
+            passphrase = _get_passphrase_or_exit()
+            run["stage"] = "command-refused"
+            pending: list[str] = []
+            refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+            attempt = attemptlog.Attempt()
+            run["attempt"] = attempt
+            core_finished = False
+            stop_cause = "error"
+            stop_errno = None
 
-        try:
-            acquire_lock()
-        except LockError as e:
-            run["cause"] = "lock-held"
-            _error(str(e))
-
-        try:
-            if not dry_run and not pullhistory.failed():
-                pullhistory.record_failure(statedb.recover_if_needed())
-            backend = get_backend(config)
             try:
-                memory_kb = _init_crypto_session(
-                    backend, passphrase, config, read_only=dry_run, pending=pending
-                )
-            except MindMeldError as e:
-                run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
-                _error(str(e) + refusal_suffix)
+                acquire_lock()
+            except LockError as e:
+                run["cause"] = "lock-held"
+                _error(str(e))
+
             try:
-                # One history transaction per push; per-source batches join it.
-                with pullhistory.batch():
-                    result = _push_core(
-                        config,
-                        passphrase,
-                        memory_kb,
-                        verbose,
-                        dry_run,
-                        preview_notes=pending,
-                        attended=True,
-                        attempt=attempt,
-                    )
-                run["result"] = result
-                core_finished = True
-            except SnapshotError as e:
-                stop_cause = "snapshot-refused"
-                run["cause"] = stop_cause
-                _error(str(e) + refusal_suffix)
-            except (OSError, MindMeldError) as e:
-                if isinstance(e, (OSError, StorageError)):
-                    stop_cause = "storage-error"
-                    stop_errno = attemptlog.storage_errno(e)
-                run["cause"] = (
-                    stop_cause
-                    if stop_cause != "error"
-                    else "crypto-error"
-                    if isinstance(e, CryptoError)
-                    else "command-refused"
-                )
-                run["errno"] = stop_errno
-                if dry_run:
-                    _error(str(e) + refusal_suffix)
-                _error(
-                    f"Push (push-failed): content was not pushed — {e}. "
-                    f"Repair the sync failure and retry mm push. See {HOST_USAGE_CAPTURE_URL}"
-                )
-
-            if dry_run:
-                for note in pending:
-                    console.print(safe_str(note))
-                console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
-                console.print(
-                    "Not previewed: host-usage capture, the mm-events activity row a real push "
-                    "appends, post-push GC of orphaned blobs, and upload re-reads."
-                )
-
-            # Usage-only publication leaves obsolete day-file blobs for the next
-            # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
-            if not dry_run and result and result.content_changed:
+                if not dry_run and not pullhistory.failed():
+                    pullhistory.record_failure(statedb.recover_if_needed())
+                backend = get_backend(config)
                 try:
-                    gc_count = _do_gc(
-                        config,
-                        passphrase,
-                        memory_kb,
-                        dry_run=False,
-                        verbose=False,
-                        emit_retention_summary=False,
+                    memory_kb = _init_crypto_session(
+                        backend, passphrase, config, read_only=dry_run, pending=pending
                     )
-                    if gc_count:
-                        console.print(f"  GC: deleted {gc_count} orphaned blobs.")
-                except typer.Exit:
-                    result.maintenance_failures += 1
-                    if not result.host_usage_published:
-                        raise
-                    stderr_console.print(
-                        "mm: warning: Host usage was published; post-publication GC stopped. "
-                        "Run mm gc for details."
-                    )
-                except (OSError, MindMeldError) as e:
-                    result.maintenance_failures += 1
-                    stderr_console.print(
-                        f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
-                    )
-        except (KeyboardInterrupt, typer.Abort):
-            # Only a storage-error record may carry errno.
-            stop_cause, stop_errno = "interrupted", None
-            raise
-        finally:
-            try:
-                if not dry_run and attempt.outcome is not None:
-                    if not core_finished:
-                        attempt.stopped(stop_cause, errno_name=stop_errno)
-                    try:
-                        attemptlog.write(attempt.outcome)
-                    except Exception as e:
-                        stderr_console.print(
-                            "mm: notice: could not durably record this attended capture attempt at "
-                            f"{safe_str(_home_relative_path(attemptlog.record_path()))} "
-                            f"({_exception_text(e)}); check mm status"
+                except MindMeldError as e:
+                    run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
+                    _error(str(e) + refusal_suffix)
+                try:
+                    # One history transaction per push; per-source batches join it.
+                    with pullhistory.batch():
+                        result = _push_core(
+                            config,
+                            passphrase,
+                            memory_kb,
+                            verbose,
+                            dry_run,
+                            preview_notes=pending,
+                            attended=True,
+                            attempt=attempt,
+                            diagnostics=verbose or dry_run,
+                            result_observer=lambda result: run.__setitem__("result", result),
                         )
+                    run["result"] = result
+                    core_finished = True
+                except SnapshotError as e:
+                    stop_cause = "snapshot-refused"
+                    run["cause"] = stop_cause
+                    _error(str(e) + refusal_suffix)
+                except (OSError, MindMeldError) as e:
+                    if isinstance(e, (OSError, StorageError)):
+                        stop_cause = "storage-error"
+                        stop_errno = attemptlog.storage_errno(e)
+                    run["cause"] = (
+                        stop_cause
+                        if stop_cause != "error"
+                        else "crypto-error"
+                        if isinstance(e, CryptoError)
+                        else "command-refused"
+                    )
+                    run["errno"] = stop_errno
+                    if dry_run:
+                        _error(str(e) + refusal_suffix)
+                    _error(
+                        f"Push (push-failed): {e}. "
+                        f"Repair the sync failure. See {HOST_USAGE_CAPTURE_URL}"
+                    )
+
+                if dry_run:
+                    for note in pending:
+                        console.print(safe_str(note))
+                    console.print(f"\n[bold]{DRY_RUN_COMPLETE}[/bold]")
+                    console.print(
+                        "Not previewed: host-usage capture, the mm-events activity row a real push "
+                        "appends, post-push GC of orphaned blobs, and upload re-reads."
+                    )
+
+                # Usage-only publication leaves obsolete day-file blobs for the next
+                # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
+                if not dry_run and result and result.content_changed:
+                    try:
+                        gc_count = _do_gc(
+                            config,
+                            passphrase,
+                            memory_kb,
+                            dry_run=False,
+                            verbose=False,
+                            emit_retention_summary=False,
+                        )
+                        if gc_count and verbose:
+                            console.print(f"  GC: deleted {gc_count} orphaned blobs.")
+                    except typer.Exit:
+                        result.maintenance_failures += 1
+                        if not result.host_usage_published:
+                            raise
+                        problem = (_SYNC_OUTPUT.get() or {}).get("message", "GC refused")
+                        stderr_console.print(
+                            "mm: warning: Host usage was published; post-publication GC stopped. "
+                            f"{safe_str(problem)} Run mm gc for details."
+                        )
+                    except (OSError, MindMeldError) as e:
+                        result.maintenance_failures += 1
+                        stderr_console.print(
+                            f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
+                        )
+            except (KeyboardInterrupt, typer.Abort):
+                # Only a storage-error record may carry errno.
+                stop_cause, stop_errno = "interrupted", None
+                raise
             finally:
-                release_lock()
-            # Failed attended attempts need the update or nudge too; previews never
-            # fetch, install or write it.
-            if not dry_run and not isinstance(sys.exception(), KeyboardInterrupt):
-                upgrade.update_or_nudge(config, attended=True)
+                try:
+                    if not dry_run and attempt.outcome is not None:
+                        if not core_finished:
+                            attempt.stopped(stop_cause, errno_name=stop_errno)
+                        try:
+                            attemptlog.write(attempt.outcome)
+                        except (Exception, SystemExit) as e:
+                            _sync_warning(
+                                "mm: notice: could not durably record this attended "
+                                "capture attempt at "
+                                f"{safe_str(_home_relative_path(attemptlog.record_path()))} "
+                                f"({type(e).__name__}); check mm status"
+                            )
+                finally:
+                    _release_sync_lock()
+                # Failed attended attempts need the update or nudge too; previews never
+                # fetch, install or write it.
+                if not dry_run and not isinstance(
+                    sys.exception(), (KeyboardInterrupt, typer.Abort)
+                ):
+                    _sync_update(config, verbose=verbose)
 
 
 def _ensure_device_registered(
@@ -4442,7 +4767,7 @@ def _push_result_or_none(
     held: list[tuple[str, str, str]] | None = None,
 ) -> PushResult | None:
     """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
-    if (events_degradations or held) and not dry_run:
+    if (getattr(events_degradations, "total", len(events_degradations)) or held) and not dry_run:
         return PushResult(events_degradations=events_degradations, held=list(held or []))
     return None
 
@@ -4680,10 +5005,16 @@ def _push_core(
     preview_notes: list[str] | None = None,
     attended: bool = False,
     attempt: attemptlog.Attempt | None = None,
+    diagnostics: bool | None = None,
+    result_observer: Callable[[PushResult], None] | None = None,
 ) -> PushResult | None:
     """Core push logic shared by push, autopush, and recapture.
 
     When quiet=True, suppresses all rich console output (for autopush).
+    ``diagnostics`` controls presentation only; ``result_observer`` marks the
+    attended outcome owner: it receives the result at manifest acceptance, a
+    no-source run returns PushResult(no_sources=True), and the legacy summary
+    lines are left to the caller's single outcome line.
     Returns PushResult on success, None if nothing to push or dry_run. A no-op
     push that captured a host row, or that carries events degradations, returns
     a PushResult with ``content_changed=False`` instead of None.
@@ -4696,6 +5027,7 @@ def _push_core(
     recovering a corrupt or conflict-copy manifest has no accepted prior to hold
     at and still refuses.
     """
+    show = not quiet and (diagnostics if diagnostics is not None else True)
     start = time.time()
     device_id = config["device"]["id"]
     device_name = config["device"]["name"]
@@ -4707,7 +5039,10 @@ def _push_core(
     # Resolve under the lock, then recover prior sources before capturing so
     # consent and readers are final. Only real push bootstraps mm-events here.
     resolution = resolve_sources(config, strict=True, bootstrap=not dry_run)
-    events_degradations: list[str] = []
+    events_degradations: list[str] = events_tail.Degradations()
+    state = _SYNC_OUTPUT.get()
+    if state is not None:
+        state["events_degradations"] = events_degradations
     available_names = {src["name"] for src in resolution.available}
     skipped_internal = [
         src
@@ -4764,7 +5099,11 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return _push_result_or_none(events_degradations, dry_run)
+        return (
+            PushResult(no_sources=True, events_degradations=events_degradations)
+            if result_observer is not None
+            else _push_result_or_none(events_degradations, dry_run)
+        )
 
     # Fetch remote manifest (tri-state: ok / missing / corrupt).
     # `fetch.manifest` (when ok) is pre-normalized via load_manifest;
@@ -4803,7 +5142,11 @@ def _push_core(
             print(f"mm: warning: {msg}", file=sys.stderr)
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return _push_result_or_none(events_degradations, dry_run)
+        return (
+            PushResult(no_sources=True, events_degradations=events_degradations)
+            if result_observer is not None
+            else _push_result_or_none(events_degradations, dry_run)
+        )
 
     # Evaluate prerequisites against the final set, including recovered Grok.
     # Keep skipped custom roots in this view so "unavailable" is not "disabled".
@@ -4836,7 +5179,7 @@ def _push_core(
     def on_skip(path: str, reason: str) -> None:
         if reason == manifest.NESTED_REPO_SKIP_REASON:
             # Autopush stays silent; attended push, preview, status and diag report it.
-            if not quiet and path not in skipped_repos:
+            if show and path not in skipped_repos:
                 skipped_repos.add(path)
                 print(
                     f"mm: notice: skipped: nested git repository {safety.safe_terminal_str(path)}",
@@ -4850,7 +5193,7 @@ def _push_core(
     # Scan before the activity tail. A captured host row can itself require
     # an upload, but only user-content changes then warrant activity capture.
     # With no host row, the existing substantive-change gate stays in force.
-    if not quiet:
+    if show:
         console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(
         device_id,
@@ -4867,7 +5210,7 @@ def _push_core(
     total_file_count = sum(
         len(src_data["files"]) for src_data in local_manifest["sources"].values()
     )
-    if not quiet:
+    if show:
         console.print(
             f"  {total_file_count} files scanned across {len(local_manifest['sources'])} source(s)"
         )
@@ -4996,7 +5339,7 @@ def _push_core(
         and not has_selection_change
     ):
         scan_held = _held_list(held_files)
-        if not quiet:
+        if show and (dry_run or result_observer is None):
             if scan_held:
                 lead = "Nothing would be pushed" if dry_run else "Nothing pushed"
                 console.print(
@@ -5006,8 +5349,13 @@ def _push_core(
                 _print_held_outcome(scan_held, verbose=verbose, preview=dry_run)
             else:
                 console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+        elif show and scan_held:
+            # Attended outcome owner: the final line carries the count; verbose names them.
+            _print_held_outcome(scan_held, verbose=verbose)
         if captured is not None and captured.appended is not None:
             result = PushResult(events_degradations=events_degradations, held=scan_held)
+            if result_observer is not None:
+                result_observer(result)
             try:
                 result.host_usage_published = _report_usage_publication(
                     sources,
@@ -5022,11 +5370,12 @@ def _push_core(
                     e, "User content was already up to date.", attempt=attempt
                 )
             try:
-                _print_usage_push_mode(result)
+                if show:
+                    _print_usage_push_mode(result)
             except Exception as e:
                 print(
                     "mm: notice: could not print usage refresh mode "
-                    f"({_exception_text(e)}); check mm status",
+                    f"({type(e).__name__}); check mm status",
                     file=sys.stderr,
                 )
             return result
@@ -5124,7 +5473,7 @@ def _push_core(
         local_manifest, remote_sources, skip_unchanged=True
     ):
         if dry_run:
-            if not quiet:
+            if show:
                 console.print(f"\n[bold]Source '{src_name}':[/bold]")
                 _print_diff_summary(diff, 0)
             continue
@@ -5184,7 +5533,7 @@ def _push_core(
             content_files -= len(uploaded.held)
 
     if dry_run:
-        if not quiet:
+        if show:
             elapsed = time.time() - start
             if has_selection_change and not (total_new or total_modified or total_deleted):
                 console.print("\n[bold]Would refresh manifest[/bold] (source selection changed).")
@@ -5212,7 +5561,7 @@ def _push_core(
         )
 
     # Upload manifest (includes tombstones)
-    if not quiet:
+    if show:
         if fetch.conflict_copies_only:
             # The mm-events activity row nearly always adds a modified file, so
             # name the rewrite even when files upload too.
@@ -5234,9 +5583,19 @@ def _push_core(
     fresh_manifest = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     if fresh_manifest.newer_version is not None:
         _error(_newer_format_message(fresh_manifest.newer_version, "manifest"))
-    backend.put(mkey, enc_manifest)
-    if attempt is not None:
-        attempt.content_accepted = True
+    # Display-only facts for the attended outcome line; autopush/recapture skip
+    # the extra manifest passes.
+    published_content_files = (
+        sum(
+            len(diff.new) + len(diff.modified) + len(diff.deleted)
+            for name, _local, _remote, diff in iter_source_diffs(
+                local_manifest, remote_sources, skip_unchanged=True
+            )
+            if name not in MM_INTERNAL_SOURCE_NAMES
+        )
+        if result_observer is not None
+        else None
+    )
     # Independent content receipt at the actual acceptance boundary, even when
     # capture was skipped or failed. Maintenance cannot revoke accepted content.
     result = PushResult(
@@ -5247,9 +5606,27 @@ def _push_core(
         events_degradations=events_degradations,
         content_changed=content_changed,
         content_files=content_files,
-        content_accepted=True,
+        content_accepted=False,
+        published_content_files=published_content_files,
+        metadata_updated=result_observer is not None
+        and not published_content_files
+        and any(
+            _has_mtime_only_changes_vs_remote(local_manifest, remote_sources, source_filter=name)
+            for name in local_manifest["sources"]
+            if name not in MM_INTERNAL_SOURCE_NAMES
+        ),
+        selection_updated=bool(
+            (set(local_manifest["sources"]) ^ advertised_prior_sources) - MM_INTERNAL_SOURCE_NAMES
+        ),
+        manifest_repaired=recovering_from_corrupt,
         held=_held_list(held_files),
     )
+    backend.put(mkey, enc_manifest)
+    result.content_accepted = True
+    if attempt is not None:
+        attempt.content_accepted = True
+    if result_observer is not None:
+        result_observer(result)
     if captured is not None and captured.appended is not None:
         try:
             result.host_usage_published = _report_usage_publication(
@@ -5259,7 +5636,8 @@ def _push_core(
             _warn_publication_evidence_unavailable(e, "Content sync succeeded.", attempt=attempt)
     if captured is not None and captured.appended is not None:
         try:
-            _print_usage_push_mode(result)
+            if show:
+                _print_usage_push_mode(result)
         except OSError as e:
             stderr_console.print(
                 f"mm: warning: Content sync reached manifest acceptance; "
@@ -5303,7 +5681,9 @@ def _push_core(
     elapsed = time.time() - start
     result.elapsed = elapsed
 
-    if not quiet:
+    if show and result_observer is not None:
+        _print_held_outcome(result.held, verbose=verbose)
+    if show and result_observer is None:
         if result.held:
             console.print(
                 f"\n[bold green]Push complete;[/bold green] [yellow]{len(result.held)} "
@@ -5371,76 +5751,80 @@ def pull(
     CI check. Files can change between preflight and apply.
 
     Exit codes: 0 completed (warnings may indicate an incomplete preview),
-    1 stopped, 2 usage error, 3 conflicts or failures predicted in fail mode.
+    1 stopped or any file failed to apply, 2 usage error,
+    3 conflicts or failures predicted in fail mode.
     """
-    with (
-        _attended_sync_run(
-            "pull",
-            dry_run=dry_run,
-            scope={
-                k: v
-                for k, v in {"source": source, "from_device": from_device}.items()
-                if v is not None
-            },
-        ) as run,
-        pullhistory.command_scope(attended=True),
-    ):
-        config = _get_config(read_only=dry_run)
-        _maybe_prompt_migration(config, read_only=dry_run)
-        # Re-load in case the migration prompt mutated config on disk so this
-        # pull sees the new exclude_patterns.
-        if not dry_run:
-            config = _get_config(read_only=False)
-        refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
-        run["stage"] = "authentication-error"
-        passphrase = _get_passphrase_or_exit()
-        run["stage"] = "command-refused"
+    with _sync_outcome("pull", verbose=verbose, dry_run=dry_run):
+        with (
+            _attended_sync_run(
+                "pull",
+                dry_run=dry_run,
+                scope={
+                    k: v
+                    for k, v in {"source": source, "from_device": from_device}.items()
+                    if v is not None
+                },
+            ) as run,
+            pullhistory.command_scope(attended=True),
+        ):
+            config = _get_config(read_only=dry_run)
+            _maybe_prompt_migration(config, read_only=dry_run)
+            # Re-load in case the migration prompt mutated config on disk so this
+            # pull sees the new exclude_patterns.
+            if not dry_run:
+                config = _get_config(read_only=False)
+            refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
+            run["stage"] = "authentication-error"
+            passphrase = _get_passphrase_or_exit()
+            run["stage"] = "command-refused"
 
-        try:
-            acquire_lock()
-        except LockError as e:
-            run["cause"] = "lock-held"
-            _error(str(e))
-
-        try:
-            if not dry_run and not pullhistory.failed():
-                pullhistory.record_failure(statedb.recover_if_needed())
-            backend = get_backend(config)
             try:
-                pending: list[str] = []
-                memory_kb = _init_crypto_session(
-                    backend, passphrase, config, read_only=dry_run, pending=pending
-                )
-                for note in pending:
-                    console.print(safe_str(note))
-            except MindMeldError as e:
-                run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
-                _error(str(e) + refusal_suffix)
-            run["result"] = _pull_core(
-                config,
-                passphrase,
-                memory_kb,
-                from_device,
-                source,
-                verbose,
-                dry_run,
-                conflict_mode=conflict_mode,
-            )
-            if dry_run:
-                console.print(DRY_RUN_COMPLETE)
-                console.print(PULL_NOT_PREVIEWED)
-        except MindMeldError as e:
-            if dry_run:
-                _error(str(e) + refusal_suffix)
-            raise
-        finally:
-            release_lock()
+                acquire_lock()
+            except LockError as e:
+                run["cause"] = "lock-held"
+                _error(str(e))
 
-        # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
-        # the lock is released so the cold-cache HTTP fetch never blocks pull
-        # progress and the update can take the lock for itself.
-        if not dry_run:
-            upgrade.update_or_nudge(config, attended=True)
+            try:
+                if not dry_run and not pullhistory.failed():
+                    pullhistory.record_failure(statedb.recover_if_needed())
+                backend = get_backend(config)
+                try:
+                    pending: list[str] = []
+                    memory_kb = _init_crypto_session(
+                        backend, passphrase, config, read_only=dry_run, pending=pending
+                    )
+                    for note in pending:
+                        console.print(safe_str(note))
+                except MindMeldError as e:
+                    run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
+                    _error(str(e) + refusal_suffix)
+                run["result"] = _pull_core(
+                    config,
+                    passphrase,
+                    memory_kb,
+                    from_device,
+                    source,
+                    verbose,
+                    dry_run,
+                    conflict_mode=conflict_mode,
+                    diagnostics=verbose or dry_run,
+                    result_observer=lambda result: run.__setitem__("result", result),
+                )
+                if dry_run:
+                    console.print(DRY_RUN_COMPLETE)
+                    console.print(PULL_NOT_PREVIEWED)
+            except MindMeldError as e:
+                if dry_run:
+                    _error(str(e) + refusal_suffix)
+                raise
+            finally:
+                _release_sync_lock()
+
+            # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
+            # the lock is released so the cold-cache HTTP fetch never blocks pull
+            # progress and the update can take the lock for itself.
+            if not dry_run:
+                _sync_update(config, verbose=verbose)
 
 
 @dataclass
@@ -5927,6 +6311,19 @@ def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: 
     Non-quiet: rich console with resolution hint.
     """
     # src_name, rel_path, device_name are all peer-controlled — sanitize.
+    state = _SYNC_OUTPUT.get()
+    if state is not None:
+        state["preflight"] = "; ".join(p.label for p in predicted[:3])
+        state["preflight_failures"] = any(p.outcome == "may fail" for p in predicted)
+        # Which files would conflict is the "what broke" part of the refusal.
+        for p in predicted:
+            _sync_warning(
+                f"mm: {safety.safe_terminal_str(p.label)} "
+                f"{safety.safe_terminal_str(p.src_name)}/"
+                f"{safety.safe_terminal_str(p.rel_path)} "
+                f"(from {safety.safe_terminal_str(p.device_name)})"
+            )
+        return
     if quiet:
         for p in predicted:
             print(
@@ -5982,6 +6379,15 @@ def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
         console.print(f"    [dim]... and {len(paths) - cap} more[/dim]")
 
 
+def _conflict_review_notice(result: PullResult) -> None:
+    """Attended pulls keep the review/resolve remedy before their one outcome line."""
+    if result.total_conflicted:
+        _sync_warning(
+            f"mm: {_count(result.total_conflicted, 'conflict copy', 'conflict copies')} kept; "
+            "run mm conflicts to review, mm resolve to pick a winner"
+        )
+
+
 def _print_pull_summary(
     result: PullResult,
     corrupt_peers: list[_CorruptPeer],
@@ -6014,7 +6420,13 @@ def _print_pull_summary(
             f"is corrupt - skipping pull from this device."
         )
         if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
+            print(
+                "mm: warning: manifest for device "
+                f"{safety.safe_terminal_str(peer.device_name)} "
+                f"({safety.safe_terminal_str(peer.device_id)}) "
+                "is corrupt - skipping pull from this device.",
+                file=sys.stderr,
+            )
         else:
             console.print(f"[yellow]Warning:[/yellow] {msg}")
 
@@ -6026,7 +6438,11 @@ def _print_pull_summary(
             f"{safe_str(unk.device_name)} - not configured locally"
         )
         if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
+            print(
+                f"mm: warning: skipping unknown source '{safety.safe_terminal_str(unk.src_name)}' "
+                f"from {safety.safe_terminal_str(unk.device_name)} - not configured locally",
+                file=sys.stderr,
+            )
         else:
             console.print(f"  [yellow]Warning:[/yellow] {msg}")
 
@@ -6034,7 +6450,11 @@ def _print_pull_summary(
     for w in fsync_warnings:
         msg = f"durability fsync failed on {safe_str(w.parent_dir)} — {safe_str(w.error)}"
         if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
+            print(
+                "mm: warning: durability fsync failed on "
+                f"{safety.safe_terminal_str(w.parent_dir)} — {safety.safe_terminal_str(w.error)}",
+                file=sys.stderr,
+            )
         else:
             console.print(f"  [yellow]warning:[/yellow] {msg}")
 
@@ -6066,6 +6486,8 @@ def _print_pull_summary(
                     f"{safety.safe_terminal_str(r.src_name)} — {src_failed} failed: {paths}",
                     file=sys.stderr,
                 )
+        if _SYNC_OUTPUT.get() is not None:
+            _conflict_review_notice(result)
         return
 
     # Per-source lines (conflicts/failures always; verbose otherwise).
@@ -6096,6 +6518,10 @@ def _print_pull_summary(
                 _print_inline_paths(r.outcomes["conflicted"], verbose=verbose, color="yellow")
             if src_failed:
                 _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
+
+    if _SYNC_OUTPUT.get() is not None:
+        _conflict_review_notice(result)
+        return
 
     # Totals.
     if interruption == "aborted":
@@ -6201,6 +6627,9 @@ def _pull_core(
     dry_run: bool = False,
     quiet: bool = False,
     conflict_mode: ConflictMode = "keep-both",
+    *,
+    diagnostics: bool | None = None,
+    result_observer: Callable[[PullResult], None] | None = None,
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
@@ -6218,6 +6647,7 @@ def _pull_core(
     When quiet=True, load-bearing warnings still reach stderr; cosmetic
     progress chatter is suppressed.
     """
+    show = not quiet and (diagnostics if diagnostics is not None else True)
     with pullhistory.batch():
         refusal_suffix = DRY_RUN_REFUSAL if dry_run else ""
         interactive_resolve_flag = conflict_mode == "prompt"
@@ -6271,11 +6701,13 @@ def _pull_core(
             if not quiet:
                 _error(f"Device not found: {from_device}" + refusal_suffix)
         if not pull_targets:
-            if not quiet:
+            if show:
                 console.print("[yellow]No other devices found to pull from.[/yellow]")
             if dry_run and not quiet:
                 console.print("No changes predicted.")
-            return PullResult(elapsed=time.time() - start)
+            return PullResult(
+                no_peers=True, no_sources=not pull_resolution.selected, elapsed=time.time() - start
+            )
 
         manifest_cache, corrupt_peers = _prefetch_manifests(
             backend, all_devices, passphrase, memory_kb
@@ -6486,14 +6918,14 @@ def _pull_core(
             for device in pull_targets:
                 did = device["device_id"]
                 dname = device["device_name"]
-                if not quiet and not dry_run:
+                if show and not dry_run:
                     console.print(
                         f"\n[bold]Pulling from {safe_str(dname)} ({safe_str(did)})...[/bold]"
                     )
 
                 remote_manifest = manifest_cache.get(did)
                 if remote_manifest is None:
-                    if not quiet:
+                    if show:
                         console.print(f"  [yellow]No manifest for {safe_str(dname)}[/yellow]")
                     continue
 
@@ -6644,6 +7076,7 @@ def _pull_core(
             # contract requires corrupt-peer / unknown-source / fsync-failure
             # warnings to survive quiet mode AND partial pulls.
             _partial_result = PullResult(
+                no_sources=not pull_resolution.selected,
                 total_written=total_written,
                 total_merged=total_merged,
                 total_skipped=total_skipped,
@@ -6656,6 +7089,9 @@ def _pull_core(
                 durability_fsync_failures=len(fsync_warnings),
                 corrupt_peer_count=len(corrupt_peers),
             )
+            if result_observer is not None:
+                with suppress(Exception, SystemExit):
+                    result_observer(_partial_result)
             exception_in_flight = sys.exc_info()[0] is not None
             try:
                 _print_pull_summary(
@@ -6664,7 +7100,7 @@ def _pull_core(
                     unknown_sources=unknown_sources,
                     fsync_warnings=fsync_warnings,
                     per_source_results=per_source_results,
-                    quiet=quiet,
+                    quiet=quiet or not show,
                     verbose=verbose,
                     interruption=interruption,
                     dry_run=dry_run,
@@ -8964,9 +9400,10 @@ def _do_gc(
     if dry_run:
         console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")
     else:
-        console.print(
-            f"\n[bold green]GC complete.[/bold green] Deleted {orphan_count} orphaned blobs."
-        )
+        if _SYNC_OUTPUT.get() is None or _SYNC_OUTPUT.get()["verbose"]:
+            console.print(
+                f"\n[bold green]GC complete.[/bold green] Deleted {orphan_count} orphaned blobs."
+            )
 
     return orphan_count
 
@@ -11737,7 +12174,10 @@ def autopull() -> None:
     stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
     config, crypto init failure, unexpected bug inside `_pull_core`.
     """
-    with pullhistory.command_scope(attended=False):
+    with (
+        events_tail.diagnostic_scope(lambda message, degraded=False: None),
+        pullhistory.command_scope(attended=False),
+    ):
         with _auto_command_scope("pull", typer_exit_outcome="fleet-refused") as setup:
             if setup is None:
                 return
@@ -11753,22 +12193,11 @@ def autopull() -> None:
                 conflict_mode="keep-both",
             )
 
-            if result.total_applied:
-                parts = []
-                if result.total_written:
-                    parts.append(f"{result.total_written} written")
-                if result.total_merged:
-                    parts.append(f"{result.total_merged} merged")
-                if result.total_conflicted:
-                    parts.append(f"{result.total_conflicted} conflicts")
-                src_display = ", ".join(result.device_names)
-                total = result.total_applied
-                print(f"mm: pulled {total} files from {src_display} ({', '.join(parts)})")
-                if result.total_conflicted:
-                    print(
-                        f"mm: {result.total_conflicted} conflicts - run 'mm conflicts' to review",
-                        file=sys.stderr,
-                    )
+            if result.total_conflicted:
+                print(
+                    f"mm: {result.total_conflicted} conflicts - run 'mm conflicts' to review",
+                    file=sys.stderr,
+                )
             if result.total_skipped_unknown_source:
                 print(
                     f"mm: skipped {result.total_skipped_unknown_source} unknown "
@@ -11833,7 +12262,16 @@ def autopush() -> None:
     config, crypto init failure, unexpected bug inside `_push_core`. No
     auto-GC on autopush (prevents blob-deletion hole).
     """
-    with pullhistory.command_scope(attended=False):
+    diagnostics = events_tail.Degradations()
+
+    def notice(message: str, degraded: bool = False) -> None:
+        if degraded:
+            diagnostics.append(message.removeprefix("mm: notice: ").strip())
+
+    with (
+        events_tail.diagnostic_scope(notice),
+        pullhistory.command_scope(attended=False),
+    ):
         with _auto_command_scope("push", typer_exit_outcome="refused") as setup:
             if setup is None:
                 return
@@ -11849,6 +12287,16 @@ def autopush() -> None:
                     quiet=True,
                 )
 
+            if diagnostics.total:
+                result = result or PushResult()
+                safe_details, omitted = attemptlog.run_details(diagnostics)
+                bounded = result.events_degradations
+                bounded.extend(safe_details)
+                # One omission phrase is written below from the bounded total.
+                extra = omitted + diagnostics.omitted
+                bounded.total = min(2**53, getattr(bounded, "total", 0) + extra)
+                bounded.omitted = min(2**53, getattr(bounded, "omitted", 0) + extra)
+
             if result is None and not get_sources(setup.config):
                 # Distinguish "broken config no-op" from "nothing to push" no-op
                 # in the breadcrumb. _push_core already printed the stderr warning;
@@ -11856,18 +12304,6 @@ def autopush() -> None:
                 # catches the wedge.
                 _write_autorun_breadcrumb("push", "no-sources")
                 return
-
-            if result:
-                total = result.total_new + result.total_modified + result.total_deleted
-                if total:
-                    parts = []
-                    if result.total_new:
-                        parts.append(f"{result.total_new} new")
-                    if result.total_modified:
-                        parts.append(f"{result.total_modified} modified")
-                    if result.total_deleted:
-                        parts.append(f"{result.total_deleted} deleted")
-                    print(f"mm: pushed {total} files ({', '.join(parts)})")
 
             # Persist events-tail degradation the same way autopull persists its
             # own (see the `degradations` list in `autopull` below). The tail is
@@ -11885,6 +12321,10 @@ def autopush() -> None:
             # dropped when both exist; the push still exits 0 and prints nothing.
             held = result.held if result else []
             details = list(events_degradations)
+            if getattr(events_degradations, "omitted", 0):
+                details.append(
+                    f"{events_degradations.omitted} diagnostic details omitted (run mm diag)"
+                )
             if result and result.maintenance_failures:
                 details.append(
                     f"{result.maintenance_failures} post-publication maintenance failure(s)"
