@@ -138,7 +138,7 @@ upgrade nudge never downgrades.
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
 The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
 
-For `Pull incomplete:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
+For `Pull incomplete [result-degraded]:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
 
 ```bash
 mm update
@@ -439,6 +439,8 @@ Building manifest...
 ...scan, capture and upload details...
 Push: 3 content changes published; 1 held.
 $ mm pull
+mm: warning: ... — 1 conflicts: ...
+mm: 1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner
 Pull: 3 files applied (1 conflict copy); 2 skipped.
 ```
 
@@ -449,7 +451,8 @@ files. Metadata-only, source-selection-only and repair-only publications say
 published version, if any; its paths/reasons appear with `--verbose`.
 Verified usage publication appends `; usage published` even without a user
 content change. Other explicit outcomes include `Push: no content changes.`,
-`Push: no enabled sources.`, `Pull: no changes.` and `Pull: no peer devices.`
+`Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
+and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
 paths. Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
@@ -483,9 +486,9 @@ safe errno, with no exception messages, locals, source text or user paths.
 
 Capture receipt, lock release, eligible update, history notice and run-evidence
 notice finish before the final line. Data-at-risk and actionable warnings stay
-visible: apply/fsync failures, corrupt/unsafe peer skips, recovery issues, large
-sync growth, config migration, missing custom mm-events folders, unavailable
-history/run evidence, and update failure/nudges. Successful `autopush` and
+visible: apply/fsync failures, kept conflict copies, corrupt/unsafe peer skips,
+recovery issues, large sync growth, config migration, missing custom mm-events
+folders, unavailable history/run evidence, and update failure/nudges. Successful `autopush` and
 `autopull` emit nothing; failures/warnings and their existing status breadcrumbs
 remain available. Previews retain their read-only scope and completion trailer.
 
@@ -1147,7 +1150,7 @@ mm pull
 
 Use the real path from your filesystem: displayed nonprintable characters are visible notation, not a shell argument. `mm disable-source <name>` stops a whole source; a precise `exclude_patterns` glob under the existing source configuration can omit just the unwanted path. Neither option deletes your local file.
 
-A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` line (exit 1) means an interrupt or unexpected error stopped the batch; completed changes were kept. Check `mm diag`, then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
+A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` line (exit 1) means an interrupt or unexpected error stopped the batch; the line says completed changes remain. Its `Run:` command is `mm diag`. Then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
 
 **Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 

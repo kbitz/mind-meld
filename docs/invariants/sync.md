@@ -90,8 +90,8 @@ encryption or schemas. Progress/capture/cache/budget/nested notices are verbose;
 actual degradations reach existing status/diag evidence, including failures
 without a returned result. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
-unsafe/corrupt peer skips, apply/fsync/recovery failures, unavailable history/run
-evidence and actionable update faults. Automatic successful changes and no-ops
+unsafe/corrupt peer skips, kept conflict copies, apply/fsync/recovery failures,
+unavailable history/run evidence and actionable update faults. Automatic successful changes and no-ops
 are silent; existing automatic error/exit policies remain. The emitter census
 and isolated transcript are implementation artifacts, not live fleet acceptance.
 
@@ -888,7 +888,7 @@ Directory durability includes each published file's parent and the parent of eve
 
 **Residual windows.** An interrupt between `atomic_write_bytes` returning and `published()` loses that file's row and its parent fsync registration; its bytes are already on disk. Closing that window requires a callback inside the atomic-write primitive and is outside this contract. A second Ctrl-C during recovery can interrupt bookkeeping and replace the first traceback. No rollback is claimed.
 
-`Pull incomplete:` is reserved for a positive failed-file count; interrupted/aborted summaries say completed changes were kept. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Attended pull exits 1 for per-file failures after finalization (78A). `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
+Attended pull uses `Pull incomplete [result-degraded]:` for a positive failed-file count. Interrupt and unexpected-error lines say completed changes remain. The legacy `Pull incomplete:` summary, and interrupted/aborted lines that say completed changes were kept, remain only for a direct caller with no outcome owner. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Attended pull exits 1 for per-file failures after finalization (78A). `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
 
 Tests: `tests/test_pull_helpers.py::TestApplyExceptionBoundary53A`, publication/failure matrix tests in that module, `tests/test_integration.py::TestApplyRecovery53A`, and `tests/test_manifest.py::TestLoadManifestApplyMetadata53A`.
 
