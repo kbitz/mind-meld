@@ -2658,3 +2658,46 @@ def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
     assert "grok-4.7-fast" not in tu.PRICING_FAMILY_BY_MODEL
     assert tu.PRICING_CURSOR_LAST_UPDATED == "2026-09-23"
     assert tu.PRICING_XAI_LAST_UPDATED == "2026-09-10"
+
+
+def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch, capsys):
+    # Value: protects=scoped unknown-model and oversize notices count once and stay off stderr;
+    # fails_when=the scope is ignored, degraded is cleared, or an escape remains;
+    # why_new=existing notices are asserted only with no diagnostic scope;
+    # seam=none; no_claim=autopush breadcrumb wording
+    from mind_meld import events_tail
+
+    usage = {"input": 1, "cache_create": 0, "cache_read": 0, "output": 0}
+    model = "claude-sync78-unpriced\x1b[2J"
+    path = "sync78\x1b[2J.jsonl"
+    tu._WARNED_UNKNOWN_MODELS.discard(model)
+    tu._WARNED_OVERSIZE_PATHS.discard(path)
+    monkeypatch.setattr(tu, "MAX_JSONL_LINE_BYTES", 16)
+    notices = []
+
+    def sink(message, degraded):
+        notices.append((message, degraded))
+
+    with events_tail.diagnostic_scope(sink):
+        total, per_model = tu.estimate_cost({model: usage})
+        lines = list(tu.iter_bounded_lines(io.BytesIO(b"x" * 64 + b"\n"), path, 0))
+    assert total == 0 and per_model == {}
+    assert lines and lines[0][0] == b""
+    captured = capsys.readouterr()
+    assert captured.err == "" and captured.out == ""
+    assert [flag for _, flag in notices] == [True, True]
+    text = " ".join(message for message, _ in notices)
+    assert "unknown model in pricing" in text
+    assert "skipping oversize line" in text
+    assert "\x1b" not in text
+    assert "snapshot skipped" not in text
+
+    direct_model = "claude-sync78-direct"
+    direct_path = "sync78-direct.jsonl"
+    tu._WARNED_UNKNOWN_MODELS.discard(direct_model)
+    tu._WARNED_OVERSIZE_PATHS.discard(direct_path)
+    tu.estimate_cost({direct_model: usage})
+    list(tu.iter_bounded_lines(io.BytesIO(b"x" * 64 + b"\n"), direct_path, 0))
+    err = capsys.readouterr().err
+    assert "unknown model in pricing: claude-sync78-direct" in err
+    assert "skipping oversize line" in err

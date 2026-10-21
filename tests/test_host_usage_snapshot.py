@@ -2437,3 +2437,39 @@ def test_sync78_host_and_token_contention_keep_skip_and_default_policy(tmp_path,
         with token_usage.lock_and_get_files("warn") as files:
             assert files is None
         assert "contended" in capsys.readouterr().err
+
+
+def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path, capsys):
+    # Value: protects=grok and muse locked caches skip once and do not count again;
+    # fails_when=either reader leaks stderr, raises, or sets degraded;
+    # why_new=the contention test locks only the codex host cache;
+    # seam=none; no_claim=what a scan returns after the lock is free
+    from mind_meld import host_usage, lockedjson
+
+    notices = []
+
+    def sink(message, degraded):
+        notices.append((message, degraded))
+
+    readers = (
+        (
+            host_usage.GROK_CACHE_PATH,
+            lambda: host_usage.read_grok_usage(root=tmp_path / "no-grok", consented=True),
+        ),
+        (
+            host_usage.MUSE_CACHE_PATH,
+            lambda: host_usage.read_muse_usage(root=tmp_path / "no-muse", consented=True),
+        ),
+    )
+    for cache, read in readers:
+        notices.clear()
+        with lockedjson.locked_json_rmw(cache):
+            with events_tail.diagnostic_scope(sink):
+                scoped = read()
+            assert scoped.complete is False and scoped.reason == "locked"
+            assert capsys.readouterr().err == ""
+            direct = read()
+            assert direct.complete is False and direct.reason == "locked"
+            assert "locked" in capsys.readouterr().err
+        assert notices and not any(degraded for _, degraded in notices)
+        assert all("adapter cache was locked" in message for message, _ in notices)

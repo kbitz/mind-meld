@@ -581,3 +581,26 @@ def test_diagnostic_retention_is_bounded_and_counts_repetitions():
     assert len(details) == 8
     assert details.total == 10100
     assert details.omitted == 10092
+
+
+def test_diagnostic_candidates_drop_escapes_and_overlong_text():
+    # Value: protects=candidates stay sanitized, at most 384 characters, with honest extend counts;
+    # fails_when=an escape or a 385-character string is stored, or extend counts an omission twice;
+    # why_new=the retention test uses only short plain duplicates;
+    # seam=none; no_claim=which status line shows a candidate
+    details = events_tail.Degradations()
+    details.append("kept\x1b[2J")
+    details.append("y" * 385)
+    assert details == ["kept"]
+    assert "\x1b" not in details[0]
+    assert details.total == 2
+    assert details.omitted == 1
+    source = events_tail.Degradations()
+    source.append("alpha")
+    source.append("alpha")
+    source.append("beta")
+    merged = events_tail.Degradations()
+    merged.extend(source)
+    assert list(merged) == ["alpha", "beta"]
+    assert merged.total == source.total == 3
+    assert merged.omitted == source.omitted == 1

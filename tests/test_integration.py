@@ -14246,6 +14246,54 @@ def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, faul
             assert "diagnostic details omitted" not in detail
 
 
+def test_sync78_remaining_remedy_commands_select_their_run_command():
+    # Value: protects=unsupported-format and migrate-config refusals end on their own command;
+    # fails_when=those substrings fall through to mm diag or repeat the command in the reason;
+    # why_new=the failure table covers newer-mm, init, and devices only;
+    # seam=none; no_claim=which producer raises each message
+    unsupported = cli_module._sync_failure(
+        "pull",
+        {
+            "message": ("decrypt: unsupported format version 0x03. Expected 0x02. Update mm?"),
+            "run": {"cause": "crypto-error"},
+        },
+        typer.Exit(1),
+    )
+    assert unsupported == (
+        "Pull failed [crypto-error]: decrypt: unsupported format version 0x03. "
+        "Expected 0x02. Update mm?; no files applied. Run: mm update"
+    )
+    assert "newer mm" not in unsupported
+    migrated = cli_module._sync_failure(
+        "push",
+        {
+            "message": "Recommended excludes are missing, then run mm migrate-config.",
+            "run": {"stage": "setup-error"},
+        },
+        typer.Exit(1),
+    )
+    assert migrated == (
+        "Push failed [setup-error]: Recommended excludes are missing; "
+        "no content published. Run: mm migrate-config"
+    )
+    assert migrated.count("mm migrate-config") == 1
+
+
+def test_sync78_pull_with_a_peer_and_no_sources_names_sources(status77):
+    # Value: protects=an attended pull with a peer and no enabled sources says so;
+    # fails_when=the peer-path result omits no_sources and reports no changes;
+    # why_new=the live no-peer pull and the renderer test never take this path;
+    # seam=none; no_claim=apply behavior when sources are enabled
+    register_device(status77["backend"], "dev-peer78", "Peer78")
+    cfg = status77["cfg"]
+    cfg["sync"]["sources"] = []
+    save_config(cfg, status77["path"])
+    result = runner.invoke(app, ["pull", "--verbose"])
+    assert result.exit_code == 0, result.output
+    assert "Pulling from Peer78" in result.output
+    assert result.stdout.splitlines()[-1] == "Pull: no enabled sources."
+
+
 def test_sync78_pre_write_refusals_and_verbose_trace_cause():
     line = cli_module._sync_failure(
         "pull",
