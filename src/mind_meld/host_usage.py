@@ -88,6 +88,7 @@ import stat
 import sys
 import time
 from contextlib import closing, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -112,6 +113,31 @@ from mind_meld.token_usage import (
     zero_day_bucket,
     zero_model_bucket,
 )
+
+_DIAGNOSTIC = ContextVar("host_usage_diagnostic", default=None)
+
+
+@contextmanager
+def diagnostic_scope(sink):
+    """Invocation-local rendering only; direct callers retain stderr notices."""
+    token = _DIAGNOSTIC.set(sink)
+    try:
+        yield
+    finally:
+        _DIAGNOSTIC.reset(token)
+
+
+def _diagnostic(message: str, degraded: bool = True) -> None:
+    # degraded=False when the caller's returned result already records the loss.
+    sink = _DIAGNOSTIC.get()
+    try:
+        if sink is None:
+            sys.stderr.write(message)
+        else:
+            sink(message, degraded)
+    except (Exception, SystemExit):
+        pass
+
 
 CACHE_PATH = Path.home() / ".config" / "mind-meld" / "host-tokens.json"
 """Forensic host-reader cache. Deliberately separate from Claude's cache."""
@@ -599,7 +625,7 @@ def read_codex_usage(
             compact=True,
             default_factory=_empty_cache,
             retry_intervals=(),
-            on_contention="warn",
+            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -662,6 +688,9 @@ def read_codex_usage(
                 result = _incomplete("deadline")
         _notice_cache_write_failure(locked.write_error)
         return result
+    except LockContended:
+        _diagnostic("mm: notice: host token cache was locked; skipping host usage scan\n", False)
+        return _incomplete("locked")
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:
@@ -1738,7 +1767,7 @@ def _take_cursor_spool(deadline: float | None = None) -> tuple[list[dict[str, An
             continue
         records.append({"key": key, **record})
     if skipped:
-        sys.stderr.write(f"mm: notice: skipped {skipped} unreadable Cursor completion record(s)\n")
+        _diagnostic(f"mm: notice: skipped {skipped} unreadable Cursor completion record(s)\n")
     if not records:
         with suppress(OSError):
             merging.unlink()
@@ -2437,7 +2466,7 @@ def read_grok_usage(
             compact=True,
             default_factory=_empty_grok_cache,
             retry_intervals=(),
-            on_contention="warn",
+            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -2498,6 +2527,11 @@ def read_grok_usage(
                 result = _incomplete("deadline")
         _notice_cache_write_failure(locked.write_error)
         return result
+    except LockContended:
+        _diagnostic(
+            "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
+        )
+        return _incomplete("locked")
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:
@@ -2652,7 +2686,7 @@ def _carry_reason(
 def _notice_cache_write_failure(error: OSError | None) -> None:
     if error is not None:
         name = errno.errorcode.get(error.errno, "OSError")
-        sys.stderr.write(f"mm: notice: host token cache write failed: {name}\n")
+        _diagnostic(f"mm: notice: host token cache write failed: {name}\n")
 
 
 def _scan_grok_root(
@@ -3306,7 +3340,7 @@ def read_muse_usage(
             compact=True,
             default_factory=_empty_grok_cache,
             retry_intervals=(),
-            on_contention="warn",
+            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
         ) as locked:
             if not locked.is_locked:
@@ -3367,6 +3401,11 @@ def read_muse_usage(
                 result = _incomplete("deadline")
         _notice_cache_write_failure(locked.write_error)
         return result
+    except LockContended:
+        _diagnostic(
+            "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
+        )
+        return _incomplete("locked")
     except _NoCacheCommit as aborted:
         return aborted.result
     except OSError:

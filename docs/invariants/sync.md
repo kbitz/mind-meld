@@ -26,6 +26,62 @@ Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (o
 
 ---
 
+
+## Attended terminal outcome (Track 78A)
+
+For non-preview push/pull, the outer `_sync_outcome` owns one final plain line:
+success on stdout; failed/incomplete/interrupted/refused on stderr with one
+existing fixing/diagnostic command. Default and verbose share its grammar.
+Flush stdout and stderr before that write, then flush its stream. Delivery to
+a broken pipe is not guaranteed; reporting failure never retries sync or undoes
+known effects. Auth/migration/conflict prompts and read-only previews keep their
+existing behavior. No global stream interception is used.
+
+```text
+setup/auth -> mm lock -> unchanged core / publication ledger
+                        -> invocation-local accepted or recovered result
+           -> capture receipt -> unlock -> eligible update
+           -> history command_scope notice -> attended run record/notice
+           -> flush streams -> ONE outcome -> explicit exit
+```
+
+Push hands its result off immediately after manifest acceptance, before
+fallible reporting/maintenance. Pull hands off its recovered result after
+bookkeeping/fsync and before optional summary/rethrow. Observers only store
+facts; there is no rescan, replay or rollback. Core unexpected/interrupt objects
+still propagate unchanged. The outer attended boundary translates them to exit
+1 after cleanup; it emits no Click Abort/default traceback afterward. A compact
+trusted-frame trace is verbose-only (class, safe errno, basename/function/line;
+no messages, source lines, locals, paths or cause messages).
+
+Push display counts are recomputed from accepted user-file diffs after upload
+holds. Existing content_files/content_changed evidence and GC semantics stay
+unchanged; invocation-only published_content_files and metadata/selection/repair
+facts distinguish accepted bytes, metadata, selection and repair. Usage is
+reported only with publication proof, never counted as user files. Held counts
+stay separate; paths/reasons are verbose. Pull uses total_applied with conflict
+copies included and distinct skipped/failed counts, across the selected scope,
+not as unique paths. No peers/no sources are explicit branch facts.
+
+A positive failed-file count ends attended pull with
+`Pull incomplete [result-degraded]` and explicit exit 1 **after** writing its
+existing degraded run record. Autopull retains exit 0, per-file warnings and its
+`N file(s) failed` breadcrumb. Conflict-fail preflight keeps exit 3 before writes.
+Original command failure wins over optional finalizer/output failures; accepted
+or applied effects remain visible. Unknown effects direct read-only diagnosis
+before retry; no blind retry advice or repair guarantee is added.
+
+Presentation never changes quiet/attended execution, budgets, warming, locks,
+encryption or schemas. Progress/capture/cache/budget/nested notices are verbose;
+actual degradations reach existing status/diag evidence, including failures
+without a returned result. Actionable/data-at-risk warnings remain visible in
+all modes before the outcome: growth, migration, missing custom events root,
+unsafe/corrupt peer skips, apply/fsync/recovery failures, unavailable history/run
+evidence and actionable update faults. Automatic successful changes and no-ops
+are silent; existing automatic error/exit policies remain. The emitter census
+and isolated transcript are implementation artifacts, not live fleet acceptance.
+
+
 ## Shared JSON locking
 
 `lockedjson.py` (v0.11.14, extended v0.12.22) — extracted single-file flock R/M/W primitive shared by `upgrade.py`, `token_usage.py`, and `identity.py` (v0.11.17). Its read-only shared-lock snapshot serves dry-run planners without creating, rewriting, re-permissioning, or normalizing a cache; R/M/W remains the exclusive mutation path. `locked_json_snapshot` (v0.14.11) takes an optional `blocking=False` so a caller (Grok's diag read) can report contention as unknown immediately instead of waiting; existing planners keep the blocking default. Three contention modes: `block` / `raise` / `warn`. Do NOT route new flock-guarded JSON caches through ad-hoc fcntl calls; extend `lockedjson` if the contract needs to grow. `devices-write.lock` stays ad-hoc — its multi-file lock-on-sibling shape doesn't fit the single-file R/M/W contract.
@@ -242,7 +298,7 @@ The mm-events rescan replaces its sources, so it takes their holds from its own 
 
 | State | What you see | What to do |
 |---|---|---|
-| **Held** (still changing, vanished or grew) | `PushResult.held`; the attended outcome names the count and up to three paths (`--verbose` all) as *not yet synced*; autopush records them in a `degraded` breadcrumb and prints nothing | Nothing: the prior version stays published and the file goes with a later push. A file held on every push is one something keeps writing; `exclude_patterns` ends it. |
+| **Held** (still changing, vanished or grew) | `PushResult.held`; the attended outcome names the count; paths and reasons are verbose-only as *not yet synced*; autopush records them in a `degraded` breadcrumb and prints nothing | Nothing: the prior version stays published and the file goes with a later push. A file held on every push is one something keeps writing; `exclude_patterns` ends it. |
 | **Frozen** (under a nested git checkout) | `skipped: nested git repository`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
 | **Skipped / excluded** (oversized at the scan, glob, marker) | `skipped:` lines with `--verbose`; excluded paths silent | Raise `sync.max_file_size` or adjust the glob |
 | **Tombstoned** | The deletion record is published; a path with a tombstone is never frozen or held | Nothing: the tombstone suppresses restoration of a missing file; existing peer copies remain |
@@ -327,7 +383,7 @@ legacy backup copies stay readable with jq (not mm log).
 [Back up history and upgrade, migrate and push every active Mac before the next
 attended pull on any of them](../../README.md#v180-scope-trim).
 Auto-update installs per Mac. A default-config Mac publishes the trim on its
-next push or autopush; autopush can print `mm: pushed N files (N deleted)`.
+next push or autopush; autopush stays silent on success (including those deletions).
 Those deletions count manifest entries, remove no local files and write no
 tombstones. Autopush never runs GC. An explicit-config Mac waits for
 `mm migrate-config`; a direct successful migration tells the owner to run
@@ -400,7 +456,7 @@ no longer lists them: disable then enable of the source, `mm recover
 removing a glob. Those paths lose delete convergence like the exclusion they
 amount to.
 
-Attended push and preview print one `mm: notice: skipped: nested git repository
+Verbose attended push and previews print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
 is not a data-at-risk warning), and status summarizes the selected roots with an exact count and mm diag
 for path detail. Diag retains roots. Attended pull (not
@@ -818,7 +874,7 @@ Directory durability includes each published file's parent and the parent of eve
 
 **Residual windows.** An interrupt between `atomic_write_bytes` returning and `published()` loses that file's row and its parent fsync registration; its bytes are already on disk. Closing that window requires a callback inside the atomic-write primitive and is outside this contract. A second Ctrl-C during recovery can interrupt bookkeeping and replace the first traceback. No rollback is claimed.
 
-`Pull incomplete:` is reserved for a positive failed-file count; interrupted/aborted summaries say completed changes were kept. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Interactive pull also keeps exit 0 for per-file failures. `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
+`Pull incomplete:` is reserved for a positive failed-file count; interrupted/aborted summaries say completed changes were kept. Success output never includes "failed". Autopull retains the byte-identical breadcrumb detail `N file(s) failed` and exit 0; its count line explains retry on the next pull. Attended pull exits 1 for per-file failures after finalization (78A). `mm status` points a degraded failed-file breadcrumb back to `mm pull`.
 
 Tests: `tests/test_pull_helpers.py::TestApplyExceptionBoundary53A`, publication/failure matrix tests in that module, `tests/test_integration.py::TestApplyRecovery53A`, and `tests/test_manifest.py::TestLoadManifestApplyMetadata53A`.
 
@@ -946,10 +1002,10 @@ rewrite is added to inspection; seen-sources remains the sole status exemption.
 
 Attended callback finalization surrounds setup and core. Typed result/error and
 local stage facts classify every callback outcome, including no-op, scoped pull,
-lock skip and interruption. Only an acquired mm lock is released. The existing
-capture-finally and maintenance/update order and command exits are unchanged.
-Known accepted content cannot be revoked by later maintenance failure; absent
-returned pull counts remain unknown, including partial interruption. Previews
+lock skip and interruption. Only an acquired mm lock is released. Track 78A places the terminal outcome after
+capture-finally, maintenance/update, history and run-evidence finalization.
+Known accepted content cannot be revoked by later maintenance failure; recovered pull counts are handed off before rethrow; without that receipt,
+effects remain unknown. Previews
 bypass evidence, preserving their existing local mm-lock/parent exemption.
 Pre-callback parsing and SIGKILL are unrecordable.
 
@@ -997,5 +1053,6 @@ not lost work. Keep auto hook-age meaning in diag; attended age is not hook
 liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
 both diag formats. Status shows only selected summaries plus current capture
 facts; only existing latest_attempt_superseded proof hides a capture row.
-No history engine, hold escalation, future capture counters, Track 78A exits/
-tails, or Track 88A peer-state assessment is introduced.
+No history engine, hold escalation, future capture counters or Track 88A
+peer-state assessment is introduced. Track 78A changes exits/tails only as
+described above.

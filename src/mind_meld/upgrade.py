@@ -1369,7 +1369,9 @@ def _record_install_failed(latest: str) -> None:
         return
 
 
-def update_or_nudge(config: dict[str, Any] | None, *, attended: bool) -> None:
+def update_or_nudge(
+    config: dict[str, Any] | None, *, attended: bool, diagnostics: bool = True
+) -> None:
     """Tail seam for pull / push / autopull / autopush.
 
     Installs the newer release when `[upgrade] auto_install` is on and this
@@ -1385,7 +1387,9 @@ def update_or_nudge(config: dict[str, Any] | None, *, attended: bool) -> None:
         if result.state != "upgrade-available" or result.latest is None:
             return
         try:
-            handled, failed = _auto_install(config, result, attended=attended)
+            handled, failed = _auto_install(
+                config, result, attended=attended, diagnostics=diagnostics
+            )
         except Exception:
             handled, failed = False, False
         if not handled:
@@ -1397,7 +1401,11 @@ def update_or_nudge(config: dict[str, Any] | None, *, attended: bool) -> None:
 
 
 def _auto_install(
-    config: dict[str, Any] | None, result: UpgradeCheckResult, *, attended: bool
+    config: dict[str, Any] | None,
+    result: UpgradeCheckResult,
+    *,
+    attended: bool,
+    diagnostics: bool = True,
 ) -> tuple[bool, bool]:
     """Returns (handled, failed): handled suppresses the nudge for this run;
     failed makes the nudge say the automatic update did not complete."""
@@ -1447,17 +1455,18 @@ def _auto_install(
         if claim != "claimed":
             return claim == "in-flight", claim == "failed"
         shown = " ".join(["pipx", *argv[1:]])
-        print(
-            f"mm: notice: updating mm {result.local} → {result.latest} ({shown})…",
-            file=sys.stderr,
-        )
+        if diagnostics:
+            print(
+                f"mm: notice: updating mm {result.local} → {result.latest} ({shown})…",
+                file=sys.stderr,
+            )
         outcome = run_update(install, pipx, latest=result.latest)
     except KeyboardInterrupt:
         if claim == "claimed":
             _record_install_failed(result.latest)
         _write_update_log(argv, "Automatic update cancelled.\n")
         print(
-            "mm: notice: automatic update cancelled; sync is complete. "
+            "mm: notice: automatic update cancelled; sync outcome is reported separately. "
             f"If mm is now missing, reinstall with: {reinstall_cmd(install)}",
             file=sys.stderr,
         )
@@ -1472,10 +1481,12 @@ def _auto_install(
         return True, False
     _write_update_log(argv, outcome.output)
     if outcome.status == "updated":
-        print(
-            f"mm: notice: updated mm {outcome.old} → {outcome.new}; the next mm command runs it",
-            file=sys.stderr,
-        )
+        if diagnostics:
+            print(
+                f"mm: notice: updated mm {outcome.old} → {outcome.new}; "
+                "the next mm command runs it",
+                file=sys.stderr,
+            )
         return True, False
     _record_install_failed(result.latest)
     reason = outcome.detail if outcome.status == "failed" else "pipx found no newer build"

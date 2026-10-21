@@ -971,3 +971,19 @@ class TestLockDiscipline:
         emails = identity.refresh_identity_cache(force=True)
         # Force wins over the peer's fresh write.
         assert emails == ["force-overwrites@example.com"]
+
+
+def test_refresh_diagnostic_failure_does_not_cancel_gather(monkeypatch):
+    """Presentation cannot skip the cold-cache work or its durable result."""
+    from mind_meld import identity
+
+    monkeypatch.setattr(identity, "_do_full_gather", lambda: ["owner@example.test"])
+    calls = []
+
+    def broken(message, degraded):
+        calls.append((message, degraded))
+        raise OSError("closed pipe")
+
+    assert identity.gather_local_identities(diagnostic=broken) == ["owner@example.test"]
+    assert calls and calls[0][1] is False
+    assert identity.read_cached_identities() == ["owner@example.test"]

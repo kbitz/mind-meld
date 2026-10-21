@@ -2392,3 +2392,48 @@ def test_cursor_consent_reaches_every_capture_caller(tmp_path, monkeypatch, entr
     row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
     assert row["token_sources"] == ["cursor"]
     assert row["empty_sources"] == ["cursor"]
+
+
+def test_leaf_diagnostic_scopes_restore_default_after_failure(capsys):
+    from mind_meld import events_tail, host_usage, token_usage
+
+    notices = []
+    with (
+        pytest.raises(RuntimeError),
+        events_tail.diagnostic_scope(lambda message, degraded: notices.append((message, degraded))),
+    ):
+        host_usage._notice_cache_write_failure(OSError(5, "private"))
+        token_usage._diagnostic("mm: notice: synthetic cache detail\n")
+        raise RuntimeError("leave scope")
+    assert len(notices) == 2
+    assert capsys.readouterr().err == ""
+    host_usage._notice_cache_write_failure(OSError(5, "private"))
+    assert "host token cache write failed: EIO" in capsys.readouterr().err
+
+
+def test_sync78_host_and_token_contention_keep_skip_and_default_policy(tmp_path, capsys):
+    from mind_meld import host_usage, lockedjson, token_usage
+
+    notices = []
+    with lockedjson.locked_json_rmw(host_usage.CACHE_PATH):
+        with events_tail.diagnostic_scope(
+            lambda message, degraded: notices.append((message, degraded))
+        ):
+            result = host_usage.read_codex_usage(root=tmp_path / "no-sessions")
+        assert result.complete is False and result.reason == "locked"
+        assert capsys.readouterr().err == ""
+        direct = host_usage.read_codex_usage(root=tmp_path / "no-sessions")
+        assert direct.complete is False and direct.reason == "locked"
+        assert "locked" in capsys.readouterr().err
+    # The returned "locked" result already records the loss; the notice is not counted again.
+    assert notices and not any(degraded for _, degraded in notices)
+    with lockedjson.locked_json_rmw(token_usage.CACHE_PATH):
+        with events_tail.diagnostic_scope(
+            lambda message, degraded: notices.append((message, degraded))
+        ):
+            with token_usage.lock_and_get_files("warn") as files:
+                assert files is None
+        assert capsys.readouterr().err == ""
+        with token_usage.lock_and_get_files("warn") as files:
+            assert files is None
+        assert "contended" in capsys.readouterr().err

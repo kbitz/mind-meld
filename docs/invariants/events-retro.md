@@ -18,6 +18,51 @@ Read BEFORE editing any of these:
 
 Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_host_skill_discovery.py`, `tests/test_diag.py`.
 
+
+## Sync diagnostic presentation (Track 78A)
+
+During attended non-preview push/pull, capture/cache/reader/discovery/cursor/
+budget/nested-repository and healthy progress notices are verbose-only. The
+same diagnostics are suppressed on successful automatic commands. Descriptions
+of legacy stderr notices below retain their direct-library/init/recapture
+meaning; this sync-specific policy governs presentation. No execution policy,
+cache mode, TTL, time budget, deadline, warm eligibility or capture/publication
+schema changes. Direct callers and standalone update keep their defaults.
+
+Leaf owner modules scope token/host diagnostics with Python 3.11-compatible
+ContextVar set/reset in finally; explicit callbacks cross the Git worker/pump
+boundary. Identity refresh has a per-call callback. No leaf imports CLI and no
+console/stderr monkeypatch implements this policy. Cache contention uses the
+existing raising lockedjson mode with identical retries, then preserves the
+original unlocked/skip result. A failed diagnostic renderer cannot erase a fact
+or skip warming. Routine refresh/warm progress contributes no degradation.
+
+Actual degradations survive even if content later refuses: invocation candidates
+are bounded to 8 sanitized details of at most 384 characters, deduplicated, with
+scalar occurrence/omission counts capped at 2**53. Only bounded candidates pass
+through attemptlog.run_details/make_run; producer omissions merge into the
+existing omitted_details before write_run validation. Unknown cache-write or
+oversize details are honestly omitted, never encoded as a fabricated known
+reader cause. Existing events_degradations counts retain occurrences without
+one retained string per file. Readers remain mm status/mm diag; no new log or
+persisted field is added. Empty-repository discovery remains advisory.
+
+`walk_git_projects(diagnostic=...)` retains collected projects and marks each
+known uncollected root once with the existing raised skip reason after a
+whole-walk exception. Its callback runs after that evidence exists and before
+optional rendering. Existing walk_errors and git_capture therefore expose loss,
+not a complete empty walk. Discovery/cursor allowlists and walk-budget behavior
+remain unchanged: a walk error does not introduce a new cursor-HOLD rule.
+
+Capture prerequisites, reader loss, no-row, append failure and unverified
+publication remain in the existing capture receipt/status projection while
+content's exit stays independent. Default output shows content's outcome, and
+verbose shows the optional phase. Append-size warnings, missing custom folders
+and other actionable/data-at-risk warnings remain visible. No three-push
+escalation or total-budget redesign is delivered here. See sync.md for the
+terminal outcome and finalization order; auto-upgrade.md owns update eligibility.
+
+
 ## Contents
 
 - [`mm-events` default source](#mm-events-default-source--bootstrap-load-bearing-v0101)
@@ -1684,12 +1729,13 @@ quiet error/lock behavior; it is not an equivalent attended no-capture command.
 **Publication and content acceptance are independent.** `_capture_attended_usage`
 contains exceptions from the whole optional phase, including notices, warming,
 snapshot construction, serialization and strict append. A no-row, append failure
-or unexpected capture error warns on stderr and continues content sync. The
+or unexpected capture error is recorded, shown with --verbose and continues content sync. The
 activity tail cannot retry that failed reader. A successful append retains its
 exact day path and row. At `backend.put(manifest_key, ...)`, `PushResult.content_accepted`
 is recorded before any later observation/maintenance. `_report_usage_publication`
 sets `host_usage_published` only if that row belongs to the accepted file revision.
-The former `on_manifest_accepted` callback is gone.
+The capture-specific former `on_manifest_accepted` callback is gone; 78A
+uses a facts-only result observer at this boundary.
 
 Exit 0 means content sync succeeded regardless of capture outcome; exit 1 means
 sync or required maintenance stopped; exit 2 means invalid arguments. Push has
@@ -1697,7 +1743,8 @@ no exit 4. Recapture retains exit 4 for partial Git recovery. A captured row
 excluded from a no-op push is warned as unpublished, with content already up to
 date. Exclusions and include_dirs are never overridden. Successful reader output
 and publication receipts are verbose-only; non-contributing readers share one
-stderr summary using `_host_skip_phrase`, and non-publication is always stderr.
+verbose diagnostic using `_host_skip_phrase`; non-publication remains in the
+receipt/status/diag and is verbose during sync.
 
 **Content gate (64A amendment).** `host_row_appended` and `capture_activity` are
 separate facts. When no host row was appended, the existing activity tail stays
@@ -1746,7 +1793,8 @@ none can run); dry-run never does. Peer corruption/newer metadata cannot veto
 own-device collection. Missing own metadata visibly skips only blob collection;
 explicit GC still runs local retention. See sync.md's own-device collection rule.
 
-**Capture failures and remedies.** Always-stderr `mm: warning:` lines carry
+**Capture failures and remedies.** Verbose sync diagnostics (legacy stderr
+for other callers) carry
 `prerequisites`, `readers` (a row was still written), `no-row`, `capture-failed`,
 `append-failed`, `max-file-size`, `not-published: <cause>`, or
 `unverified: <reason>`; `push-failed` is
@@ -2620,8 +2668,8 @@ cross-fleet retro determinism.
 identities(allow_refresh=True)` and threads the result into
 `make_mm_push_event(local_emails=...)`. Every `mm-push` event row on
 synced storage carries the emitting machine's identity set. Cache hit
-is ~1ms; cold/stale cache emits a single `mm: notice: refreshing
-identity cache (one-off)` and runs a synchronous refresh inline.
+is ~1ms; cold/stale cache runs a synchronous refresh inline and emits
+`mm: notice: refreshing identity cache (one-off)` only with --verbose during sync.
 **No autopush-budget contortions** — D1 from /plan-eng-review locked
 "synchronous refresh on cold cache, tell the user, accept the one-off
 slow path." No background threads, no empty-emit-and-self-heal-later.
@@ -3362,4 +3410,5 @@ exit/exception, and finish with a fixing command. Inspection remains write-free
 apart from the existing seen-sources exemption, with one capture parsing pass.
 No live keyring, wheel, Linux Secret Service or fleet acceptance is inferred
 from portable tests. This track does not complete all quiet-output acceptance
-and retains Track 78A's existing partial-pull exit 0 and tail order.
+and does not claim owner/fleet quiet-output acceptance. Track 78A now owns
+the attended partial-pull exit 1 and outcome-last order described above.

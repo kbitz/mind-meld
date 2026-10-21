@@ -16,6 +16,24 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+
+**Push and pull output (Track 78A):** attended `mm push` and `mm pull` now end
+with one outcome line. Capture, cache, budget, nested-repository and scan
+notices move to `--verbose`; actual degradations remain in `mm status` and
+`mm diag`. Capture failure does not make content sync fail. Actionable and
+data-at-risk warnings still print before the outcome. Successful automatic
+commands stay silent, including when they move files.
+
+**Exit change:** an attended pull with any failed file now exits **1**, replacing
+its previous exit 0. Completed files remain applied. `mm autopull` keeps exit 0
+for contained failures and records the failed count; conflict-fail preflight
+keeps exit 3 before applying files. There is no data/config migration or new
+quiet flag. See [Sync outcomes](#sync-outcomes), [Exit codes](#exit-codes),
+[Status verdicts](#status-verdicts) and [pull remedies](#pull-incomplete--could-not-pull-a-file).
+A foreground automatic update can delay the final line; successful version
+details appear only with `--verbose`. Standalone `mm update` is unchanged.
+
+
 **Status verdict and local run evidence (Track 77A):** `mm status` now opens
 its report after authentication with a verdict about this device's last push.
 Nested checkout paths are summarized as a count; use `mm diag` for paths.
@@ -94,8 +112,8 @@ mm push
 mm status
 ```
 
-The first push after migrating shows a red deleted count for the excluded
-files. This counts entries removed from this Mac's manifest: expected, no
+The first push after migrating includes the removed entries in its content-change count;
+`--verbose` shows upload/scan detail. This counts entries removed from this Mac's manifest: expected, no
 tombstones, and every Mac keeps its copies. A default-config Mac's autopush
 may already have printed `mm: pushed N files (N deleted)` for that trim;
 autopush removes no local files and never runs GC. Own storage reclamation
@@ -118,7 +136,7 @@ an upgrade remedy. Once v1.0.0 is tagged, a regression ships as 1.0.1: the
 upgrade nudge never downgrades.
 
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
-The first push needing that refresh prints `mm: notice: refreshing identity cache (one-off)`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
+The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
 
 For `Pull incomplete:` or a per-file warning after upgrading, see [pull failures and remedies](#pull-incomplete--could-not-pull-a-file). No data migration is needed for apply exception containment.
 
@@ -189,8 +207,8 @@ Mind Meld has one user and makes no compatibility promise beyond its storage for
 
 | Code | Meaning |
 |---|---|
-| 0 | Completed successfully. Valid `autopull`/`autopush` invocations also exit 0 on refusal or degradation; inspect stderr and `mm status`. Interactive pull keeps exit 0 when individual files fail. |
-| 1 | Stopped or aborted, including EOF/Ctrl-C at a prompt, config/crypto/lock failures, required maintenance failure, and argument values rejected after parsing (`mm log --since bad`, `mm log --format xml`, `mm recapture 999d`). A push may already have published before required GC stops. |
+| 0 | Completed successfully. Valid `autopull`/`autopush` invocations also exit 0 on refusal or degradation; inspect stderr and `mm status`. Attended pull with failed files exits 1. |
+| 1 | Stopped, interrupted, or incomplete: includes attended pull with failed files, EOF/Ctrl-C at a prompt, config/crypto/lock failures, required maintenance failure, and argument values rejected after parsing (`mm log --since bad`, `mm log --format xml`, `mm recapture 999d`). A push may already have published before required GC stops. |
 | 2 | Usage error from Typer/Click or retro-fleet's argparse, including unknown options on autorun commands. |
 | 3 | `pull --conflict-mode fail` preflight predicts a conflict or local failure, including with `--dry-run`; no files applied. |
 | 4 | `recapture` completed only partially (`RECAPTURE_EXIT_PARTIAL`). |
@@ -254,7 +272,7 @@ If your storage path is **not** under iCloud Drive (e.g. a custom local folder o
 
 ## Claude Code Integration
 
-Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt for input and stay silent when already in sync. On Linux with the Secret Service keyring backend they also never open a desktop unlock prompt: a locked or missing collection skips the run with a `keyring-locked` / `keyring-no-collection` breadcrumb instead (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)). Other backends (KWallet, KeePassXC, keyring's libsecret backend), macOS Keychain access dialogs, and a stalled D-Bus session can still block. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
+Mind Meld includes `autopull` and `autopush` commands designed for Claude Code — they never prompt for input and stay silent on successful changes and no-ops. On Linux with the Secret Service keyring backend they also never open a desktop unlock prompt: a locked or missing collection skips the run with a `keyring-locked` / `keyring-no-collection` breadcrumb instead (see [Auto commands skip: keyring locked or unavailable](#auto-commands-skip-keyring-locked-or-unavailable)). Other backends (KWallet, KeePassXC, keyring's libsecret backend), macOS Keychain access dialogs, and a stalled D-Bus session can still block. A failed apply prints one `mm: warning:` line per failed file plus a per-source summary and a total count.
 
 Add the following to your **global** `~/.claude/CLAUDE.md` to have Claude automatically sync at the start and end of each conversation:
 
@@ -386,7 +404,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture-codex-and-grok) |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull with verbose output |
+| `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
@@ -405,6 +423,72 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. |
 | `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
+
+
+### Sync outcomes
+
+Default and verbose commands share the same final logical line; a narrow
+terminal may wrap it visually. Success is on stdout, failure on stderr.
+These examples describe possible results, not commands that guarantee them:
+
+```text
+$ mm push
+Push: 3 content changes published; 1 held.
+$ mm push --verbose
+Building manifest...
+...scan, capture and upload details...
+Push: 3 content changes published; 1 held.
+$ mm pull
+Pull: 3 files applied (1 conflict copy); 2 skipped.
+```
+
+Push counts accepted user-file changes, excluding captured usage rows and held
+files. Metadata-only, source-selection-only and repair-only publications say
+`Push: metadata updated.`, `Push: source selection updated.` and
+`Push: manifest repaired.` respectively. A held file keeps its previous
+published version, if any; its paths/reasons appear with `--verbose`.
+Verified usage publication appends `; usage published` even without a user
+content change. Other explicit outcomes include `Push: no content changes.`,
+`Push: no enabled sources.`, `Pull: no changes.` and `Pull: no peer devices.`
+Pull counts applications across selected peers/sources, not guaranteed unique
+paths. Conflict copies are already included in applied files; skipped and failed
+outcomes are separate. A scoped pull makes no claim about other sources or peers.
+
+```text
+$ mm pull
+mm: warning: ...named failed file and its remedy...
+Pull incomplete [result-degraded]: 12 files applied, 2 failed; completed changes remain; repair the reported failures before one retry. Run: mm diag
+$ mm push
+Push: no content changes.
+$ mm status
+...capture degradation and its action, when capture failed independently...
+$ mm push --verbose
+...Usage capture (no-row): ...
+Push: no content changes.
+```
+
+The partial pull exits 1. The degraded-capture push exits 0: consult
+[Status verdicts](#status-verdicts) or `mm diag` for the existing capture receipt
+and reader state. No repeated-push escalation counter is implied.
+
+Failures end with the verb, existing cause, safe reason, known effects and one
+`Run:` command. Those cause labels are explanatory, not a stable error-code API.
+Known completed changes remain; nothing rolls back. Correct the named problem
+before one retry; when effects are unconfirmed, reconcile with read-only
+`mm diag` first. Repeated or unresolved failures need the owner's judgment.
+No-terminal authentication failures name `MINDMELD_PASSPHRASE`: the owner must
+supply the passphrase securely before retrying, without exposing it in output.
+Unexpected traces are verbose-only and contain trusted frame identifiers and
+safe errno, with no exception messages, locals, source text or user paths.
+
+Capture receipt, lock release, eligible update, history notice and run-evidence
+notice finish before the final line. Data-at-risk and actionable warnings stay
+visible: apply/fsync failures, corrupt/unsafe peer skips, recovery issues, large
+sync growth, config migration, missing custom mm-events folders, unavailable
+history/run evidence, and update failure/nudges. Successful `autopush` and
+`autopull` emit nothing; failures/warnings and their existing status breadcrumbs
+remain available. Previews retain their read-only scope and completion trailer.
+
 
 ### Status verdicts
 
@@ -1040,7 +1124,7 @@ one before continuing.
 
 ### Pull incomplete / could not pull a file
 
-One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Interactive `mm pull` also exits 0 for per-file failures; this collision previously crashed with exit 1. Read the warnings and `Pull incomplete:` summary to tell whether everything arrived.
+One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `Pull incomplete [result-degraded]` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
 
 ```bash
 mm log --verb pull --action failed --limit 10
@@ -1392,18 +1476,20 @@ host usage, fetch upgrade information or write nudge state.
 | Usage-only refresh published | Already up to date | No activity capture; cursor unchanged | 0 |
 | Refresh carrying user-source changes published | Pushed (bytes, metadata or selection) | Ordinary activity tail; one push | 0 |
 | Prerequisites unavailable, capture fails, or append skipped | Ordinary content sync continues | Ordinary activity rules; capture is not retried in the tail | 0 if content sync succeeds |
-| Push fails before manifest acceptance | Not pushed | Locally recorded rows may remain | 1 |
-| Row excluded, file absent from accepted manifest, or row absent from accepted bytes (`not-published`) | Pushed or already up to date | Depends on user-content changes | 0, with a warning |
-| Publication evidence changed or cannot be read (`unverified`) | Pushed or already up to date | Depends on user-content changes | 0, with a warning; check `mm status` read-only |
+| Push stops without an acceptance receipt | Publication may be unconfirmed; diagnose before retry | Locally recorded rows may remain | 1 |
+| Row excluded, file absent from accepted manifest, or row absent from accepted bytes (`not-published`) | Pushed or already up to date | Depends on user-content changes | 0; verbose diagnostic and receipt |
+| Publication evidence changed or cannot be read (`unverified`) | Pushed or already up to date | Depends on user-content changes | 0; verbose diagnostic and receipt; check `mm status` read-only |
 | `mm push --dry-run` | Preview only | Nothing captured | 0 completed; 1 stopped |
 
-Capture problems are always stderr `mm: warning:` lines with stable tokens:
+Capture problems appear as verbose stderr diagnostics and in the existing
+status/diag evidence. Explanatory phase labels include:
 `(prerequisites: <state>)`, `(readers)` (a row was still written, but a consented
 reader was partial, dropped or absent), `(no-row)`, `(capture-failed)`,
 `(append-failed)`, `(max-file-size)`, `(not-published: <cause>)` or
 `(unverified: <reason>)`. Only
-`(push-failed)`, a stop before manifest acceptance, is an `Error:` line with
-exit 1. `not-published` requires proof: `exclude-patterns`, `include-dirs`,
+a content-sync failure changes the push exit to 1; its final line reports
+known accepted effects or explicitly unconfirmed publication. Optional capture
+failure alone does not change that exit. `not-published` requires proof: `exclude-patterns`, `include-dirs`,
 `file-absent` (no day file in the accepted manifest), or `row-missing` (the accepted
 bytes contain no matching row). Fix exclude/include settings before retrying;
 preserve a copy outside mm-events before repairing damaged JSONL for `row-missing`.

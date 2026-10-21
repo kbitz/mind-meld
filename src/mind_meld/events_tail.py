@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import sys
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -44,10 +46,69 @@ from mind_meld.config import (
     grok_host_usage_enabled,
 )
 from mind_meld.errors import HOST_USAGE_CAPTURE_URL
-from mind_meld.safety import safe_str
+from mind_meld.safety import safe_str, safe_terminal_str
 
 CacheLockMode = Literal["warn", "block"] | None
 HostReader = Callable[..., host_usage.HostUsageResult]
+
+
+_DIAGNOSTIC = ContextVar("events_diagnostic", default=None)
+
+
+@contextmanager
+def diagnostic_scope(sink):
+    token = _DIAGNOSTIC.set(sink)
+    try:
+        with token_usage.diagnostic_scope(sink), host_usage.diagnostic_scope(sink):
+            yield
+    finally:
+        _DIAGNOSTIC.reset(token)
+
+
+def _diagnostic(message: str, degraded: bool = False) -> None:
+    sink = _DIAGNOSTIC.get()
+    try:
+        if sink is None:
+            sys.stderr.write(message)
+        else:
+            sink(message, degraded)
+    except (Exception, SystemExit):
+        pass
+
+
+def _exception_detail(error: Exception) -> str:
+    # Preserve legacy direct/init diagnostics, but never copy exception messages
+    # into a sync invocation's newly scoped diagnostic surface.
+    return (
+        f"{type(error).__name__}: {safe_str(error)}"
+        if _DIAGNOSTIC.get() is None
+        else type(error).__name__
+    )
+
+
+class Degradations(list[str]):
+    """Bound candidate text while keeping full occurrence and omission counts."""
+
+    def __init__(self):
+        super().__init__()
+        self.total = 0
+        self.omitted = 0
+
+    def append(self, detail):
+        if isinstance(detail, str):
+            detail = safe_terminal_str(detail)
+        self.total = min(2**53, self.total + 1)
+        if len(self) < 8 and isinstance(detail, str) and len(detail) <= 384 and detail not in self:
+            super().append(detail)
+        else:
+            self.omitted = min(2**53, self.omitted + 1)
+
+    def extend(self, details):
+        for detail in details:
+            self.append(detail)
+        self.total = min(2**53, self.total + getattr(details, "omitted", 0))
+        self.omitted = min(2**53, self.omitted + getattr(details, "omitted", 0))
+
 
 HOST_USAGE_READ_BUDGET_INTERACTIVE_MS = DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
 HOST_USAGE_READ_BUDGET_AUTOPUSH_MS = DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS
@@ -303,16 +364,16 @@ def _decide_token_walk_policy(
         return True
     transition = upgrade.last_transition_seen()
     if quiet and transition is None:
-        sys.stderr.write("mm: notice: token cache not warm; run 'mm push' to populate\n")
+        # The tail records the corresponding token-walk omission below; this
+        # explanatory notice must not count the same skipped work a second time.
+        _diagnostic("mm: notice: token cache not warm; run 'mm push' to populate\n")
         return False
     if not quiet:
-        sys.stderr.write("mm: warming token cache (one-time, ~3s)...\n")
+        _diagnostic("mm: warming token cache (one-time, ~3s)...\n")
     try:
         token_usage.warm_token_cache_inline(claude_paths)
     except Exception as e:
-        sys.stderr.write(
-            f"mm: notice: token cache warm failed: {type(e).__name__}: {safe_str(e)}\n"
-        )
+        _diagnostic(f"mm: notice: token cache warm failed: {_exception_detail(e)}\n")
         return False
     return True
 
@@ -411,9 +472,7 @@ def _capture_host_usage(
             # it a `TypeError` regression inside a reader is indistinguishable
             # from a benign transient and can crash-loop on every push while
             # the breadcrumb calmly promises a retry.
-            sys.stderr.write(
-                f"mm: notice: host reader {name} raised: {type(e).__name__}: {safe_str(e)}\n"
-            )
+            _diagnostic(f"mm: notice: host reader {name} raised: {_exception_detail(e)}\n")
             dropped.append((name, _HOST_UNKNOWN_REASON))
             continue
         if not result.complete:
@@ -552,7 +611,7 @@ def _merge_warm_retry_capture(
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
     """Attended notice only; the capture core contains and publishes the read."""
-    sys.stderr.write(
+    _diagnostic(
         f"mm: reading {reader} usage beyond [retro] host_usage_interactive_budget_ms "
         f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
     )
@@ -877,7 +936,10 @@ def _capture_git_rows(
         deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
     )
     roots, _discovery_errors = root_discovery
-    git_rows = events.walk_git_projects(roots, since=since, total_budget_ms=walk_budget_ms)
+    walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
+    git_rows = events.walk_git_projects(
+        roots, since=since, total_budget_ms=walk_budget_ms, **walk_kwargs
+    )
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)
     capture = events.make_git_capture(
@@ -913,18 +975,10 @@ def _run_events_tail(
 ) -> list[str]:
     """Capture fleet-retro events after ``_push_core``'s substantive-change gate.
 
-    Returns a list of human-readable degradation phrases for this push
-    (empty when healthy). ``autopush`` turns a non-empty list into a
-    ``degraded`` autorun breadcrumb (v0.12.16). The stderr notices below
-    stay exactly as they are — they are the interactive signal — but they
-    are NOT the load-bearing one: this function runs from ``mm autopush``,
-    which fires unattended from a Claude Code hook, so its stderr reaches
-    nobody. Before the return value existed, ``mm status`` reported
-    ``success`` no matter how badly this degraded. CHANGELOG v0.12.13
-    records the same lesson from the unpriced-model breadcrumb, which
-    "fired for four unpriced models across the whole v0.12.x line and
-    nobody saw it." Any new degradation detected here MUST be appended to
-    the returned list as well as printed.
+    Returns bounded human-readable candidates with full occurrence/omission
+    counts on Degradations. Automatic callers retain the existing degraded
+    breadcrumb. A scoped diagnostic sink controls rendering only; init and
+    direct callers keep stderr defaults. Record facts before optional output.
 
     See docs/invariants/events-retro.md "Events tail in `_push_core`" for
     the load-bearing invariants: head-position single-call-site (Codex C4
@@ -946,7 +1000,7 @@ def _run_events_tail(
     content-carrying refresh records one push and can advance the Git cursor.
     Unattended no-op pushes still do zero host work.
     """
-    degradations: list[str] = []
+    degradations: list[str] = Degradations()
     if dry_run or not capture_activity:
         return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
@@ -1014,6 +1068,7 @@ def _run_events_tail(
         local_emails = identity.gather_local_identities(
             allow_refresh=True,
             root_discovery=capture.root_discovery,
+            **({"diagnostic": _DIAGNOSTIC.get()} if _DIAGNOSTIC.get() is not None else {}),
         )
         mm_event = events.make_mm_push_event(
             device=device_id,
@@ -1049,27 +1104,27 @@ def _run_events_tail(
             degradations.append("event append skipped (max-file-size)")
 
         if cursor.held:
-            sys.stderr.write(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
             degradations.append(_CURSOR_HOLD_DEGRADATION)
+            _diagnostic(f"mm: notice: {_CURSOR_HOLD_DEGRADATION}\n")
         elif cursor.floored_after_incomplete:
-            sys.stderr.write(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
             degradations.append(_CURSOR_COVERAGE_DEGRADATION)
+            _diagnostic(f"mm: notice: {_CURSOR_COVERAGE_DEGRADATION}\n")
         if capture.root_discovery.exceeded:
-            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_DEGRADATION)
+            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_DEGRADATION}\n")
         elif capture.root_discovery.errors:
-            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_ERROR_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_ERROR_DEGRADATION)
+            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_ERROR_DEGRADATION}\n")
         elif not capture.root_discovery.roots and capture.root_discovery.probers_ran:
-            sys.stderr.write(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
             degradations.append(_ROOT_DISCOVERY_EMPTY_DEGRADATION)
+            _diagnostic(f"mm: notice: {_ROOT_DISCOVERY_EMPTY_DEGRADATION}\n")
         walk_phrase = _git_walk_degradation(capture.walk_budget_aborts, capture.walk_errors)
         if walk_phrase is not None:
-            sys.stderr.write(f"mm: notice: {walk_phrase}\n")
             degradations.append(walk_phrase)
+            _diagnostic(f"mm: notice: {walk_phrase}\n")
         if capture.session_walk_exceeded_budget:
-            sys.stderr.write("mm: notice: events tail budget exceeded\n")
             degradations.append(f"events walk exceeded its {budget_ms}ms budget")
+            _diagnostic("mm: notice: events tail budget exceeded\n")
         if capture.warn_lock_unavailable:
             degradations.append("token cache was locked, so tokens and skills are missing")
         # `claude_paths` gate is load-bearing: `_decide_token_walk_policy`
@@ -1096,8 +1151,8 @@ def _run_events_tail(
                 phrase = _host_skip_phrase(
                     dropped_reader, dropped_reason, readiness="ready", attended=not quiet
                 )
-                sys.stderr.write(f"mm: notice: {phrase}\n")
                 degradations.append(phrase)
+                _diagnostic(f"mm: notice: {phrase}\n")
         elif not capture.host_capture.complete:
             phrase = _host_skip_phrase(
                 capture.host_capture.reader,
@@ -1105,11 +1160,11 @@ def _run_events_tail(
                 readiness="ready",
                 attended=not quiet,
             )
-            sys.stderr.write(f"mm: notice: {phrase}\n")
             degradations.append(phrase)
+            _diagnostic(f"mm: notice: {phrase}\n")
     except Exception as e:
-        sys.stderr.write(f"mm: notice: events tail failed: {type(e).__name__}: {safe_str(e)}\n")
         degradations.append(f"events tail failed ({type(e).__name__})")
+        _diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
     return degradations
 
 
@@ -1165,9 +1220,8 @@ def _run_events_backfill(
             try:
                 token_usage.warm_token_cache_inline(claude_paths)
             except Exception as e:
-                sys.stderr.write(
-                    f"mm: notice: token cache warm at init failed: "
-                    f"{type(e).__name__}: {safe_str(e)}\n"
+                _diagnostic(
+                    f"mm: notice: token cache warm at init failed: {_exception_detail(e)}\n"
                 )
             return "block"
 
@@ -1212,15 +1266,12 @@ def _run_events_backfill(
                 root_discovery=capture.root_discovery,
             )
         except Exception as e:
-            sys.stderr.write(
-                f"mm: notice: identity cache warm at init failed: "
-                f"{type(e).__name__}: {safe_str(e)}\n"
-            )
+            _diagnostic(f"mm: notice: identity cache warm at init failed: {_exception_detail(e)}\n")
 
         if capture.session_walk_exceeded_budget:
-            sys.stderr.write("mm: notice: events backfill budget exceeded\n")
+            _diagnostic("mm: notice: events backfill budget exceeded\n")
         if capture.root_discovery.exceeded:
-            sys.stderr.write(
+            _diagnostic(
                 "mm: notice: git repository discovery hit its time budget: "
                 "initial retro capture may omit repositories. Run mm diag\n"
             )
@@ -1228,7 +1279,7 @@ def _run_events_backfill(
         # the only surface available — and init IS attended, so it lands.
         if capture.host_capture.dropped:
             for dropped_reader, dropped_reason in capture.host_capture.dropped:
-                sys.stderr.write(
+                _diagnostic(
                     "mm: notice: "
                     + _host_skip_phrase(
                         dropped_reader,
@@ -1240,7 +1291,7 @@ def _run_events_backfill(
                     + "\n"
                 )
         elif not capture.host_capture.complete:
-            sys.stderr.write(
+            _diagnostic(
                 "mm: notice: "
                 + _host_skip_phrase(
                     capture.host_capture.reader,
@@ -1252,7 +1303,7 @@ def _run_events_backfill(
                 + "\n"
             )
     except Exception as e:
-        sys.stderr.write(f"mm: notice: events backfill failed: {type(e).__name__}: {safe_str(e)}\n")
+        _diagnostic(f"mm: notice: events backfill failed: {_exception_detail(e)}\n")
 
 
 @dataclass
