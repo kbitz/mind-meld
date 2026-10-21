@@ -5523,6 +5523,7 @@ def test_attended_capture_exit_with_a_held_day_file_carries_held_and_not_publish
     assert result.exit_code == 0, result.output
     assert "no content changes; 1 held." in flat
     assert "Push: no content changes." not in flat  # held count qualifies this invocation
+    assert "not yet synced" in flat  # --verbose names the held file even on a held-only push
     assert "Host usage published" not in flat
     (core,) = seen
     assert core is not None and len(core.held) == 1
@@ -11929,6 +11930,10 @@ def test_capture_warning_names_the_exception_when_its_message_is_empty(capture61
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert "Usage capture (capture-failed): AssertionError." in " ".join(result.stderr.split())
+    # The capture receipt owns this loss; it is not also an events-tail degradation.
+    run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert run["counts"].get("events_degradations", 0) == 0
+    assert run["omitted_details"] == 0
 
 
 def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61, monkeypatch):
@@ -14239,3 +14244,51 @@ def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, faul
         assert detail.count("git walk dropped") + detail.count("snapshot skipped") <= 1
         if fault != "leaf-notice":
             assert "diagnostic details omitted" not in detail
+
+
+def test_sync78_pre_write_refusals_and_verbose_trace_cause():
+    line = cli_module._sync_failure(
+        "pull",
+        {"message": "Device not found: Mac Z", "run": {"cause": "command-refused"}},
+        typer.Exit(1),
+    )
+    assert line == (
+        "Pull failed [command-refused]: Device not found: Mac Z; no files applied. Run: mm devices"
+    )
+    try:
+        try:
+            raise RuntimeError("PRIVATE78 keyring detail")
+        except RuntimeError:
+            raise typer.Exit(1)
+    except typer.Exit as exit_error:
+        trace = cli_module._compact_sync_trace(exit_error)
+    assert trace.startswith("RuntimeError (no errno):")
+    assert "PRIVATE78" not in trace
+
+
+def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys):
+    line = cli_module._sync_failure(
+        "push",
+        {"message": "Could not open lockfile L: permission denied", "run": {"cause": "lock-held"}},
+        typer.Exit(1),
+    )
+    assert line.startswith(
+        "Push refused [lock-held]: Could not open lockfile L: permission denied;"
+    )
+    token = cli_module._SYNC_OUTPUT.set(
+        {"verbose": False, "diagnostics": events_tail.Degradations()}
+    )
+    try:
+        cli_module._print_pull_summary(
+            cli_module.PullResult(total_written=1, total_conflicted=1),
+            [],
+            [],
+            [],
+            [],
+            quiet=True,
+            verbose=False,
+        )
+    finally:
+        cli_module._SYNC_OUTPUT.reset(token)
+    err = capsys.readouterr().err
+    assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err

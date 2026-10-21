@@ -3901,7 +3901,7 @@ def _capture_attended_usage(
         return outcome
     except Exception as e:
         outcome.finish(phase)
-        _sync_diagnostic(f"usage capture failed ({type(e).__name__})", True)
+        _sync_diagnostic(f"usage capture failed ({type(e).__name__})")
         if _SYNC_OUTPUT.get() is not None:
             _sync_diagnostic(_compact_sync_trace(e))
         _capture_notice(
@@ -4135,6 +4135,14 @@ def _sync_success(verb: str, result: PushResult | PullResult | None) -> str:
 
 def _compact_sync_trace(exc: BaseException) -> str:
     """Trusted frame identifiers only: no messages, source text, locals or paths."""
+    seen: set[int] = set()
+    while (
+        isinstance(exc, (typer.Exit, typer.Abort))
+        and (exc.__cause__ or exc.__context__) is not None
+        and id(exc) not in seen
+    ):
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
     frames = deque(maxlen=8)
     tb = exc.__traceback__
     package = Path(__file__).parent
@@ -4186,7 +4194,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
             "mm diag" if state.get("preflight_failures") else "mm pull --conflict-mode keep-both"
         )
     elif cause == "lock-held":
-        reason = "another mm operation holds the lock; wait for it to finish"
+        # LockError also covers permission/write failures: keep its own text.
+        reason = message or "another mm operation holds the lock; wait for it to finish"
     elif cause == "authentication-error":
         reason = message or "authentication could not complete"
     elif message:
@@ -4198,6 +4207,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
             command = "mm migrate-config"
         elif "mm init" in message:
             command = "mm init"
+        elif message.startswith("Device not found"):
+            command = "mm devices"
         elif cause == "snapshot-refused":
             command = "mm push"
         # Keep the curated text intact (it may name an alternative remedy such
@@ -4234,6 +4245,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
         # Crypto-session setup fails before any upload or apply; a core error
         # keeps its partial result above, so a bare cause here means no effect.
         or (result is None and run.get("cause") in ("setup-error", "crypto-error"))
+        # Pre-write refusals: unknown device, newer storage format.
+        or (result is None and command in ("mm devices", "mm update"))
         or cause == "lock-held"
         or refused
     ):
@@ -5336,6 +5349,9 @@ def _push_core(
                 _print_held_outcome(scan_held, verbose=verbose, preview=dry_run)
             else:
                 console.print("[green]Nothing to push \u2014 everything is up to date.[/green]")
+        elif show and scan_held:
+            # Attended outcome owner: the final line carries the count; verbose names them.
+            _print_held_outcome(scan_held, verbose=verbose)
         if captured is not None and captured.appended is not None:
             result = PushResult(events_degradations=events_degradations, held=scan_held)
             if result_observer is not None:
@@ -6299,14 +6315,14 @@ def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: 
     if state is not None:
         state["preflight"] = "; ".join(p.label for p in predicted[:3])
         state["preflight_failures"] = any(p.outcome == "may fail" for p in predicted)
-        if state["verbose"]:
-            for p in predicted:
-                _print_apply_warning(
-                    safety.safe_terminal_str(
-                        f"mm: notice: preflight {p.label}: {p.src_name}/{p.rel_path} "
-                        f"(from {p.device_name})"
-                    )
-                )
+        # Which files would conflict is the "what broke" part of the refusal.
+        for p in predicted:
+            _sync_warning(
+                f"mm: {safety.safe_terminal_str(p.label)} "
+                f"{safety.safe_terminal_str(p.src_name)}/"
+                f"{safety.safe_terminal_str(p.rel_path)} "
+                f"(from {safety.safe_terminal_str(p.device_name)})"
+            )
         return
     if quiet:
         for p in predicted:
@@ -6361,6 +6377,15 @@ def _print_inline_paths(paths: list[str], *, verbose: bool, color: str) -> None:
         console.print(f"    [{color}]- {safe_str(p)}[/{color}]")
     if not verbose and len(paths) > cap:
         console.print(f"    [dim]... and {len(paths) - cap} more[/dim]")
+
+
+def _conflict_review_notice(result: PullResult) -> None:
+    """Attended pulls keep the review/resolve remedy before their one outcome line."""
+    if result.total_conflicted:
+        _sync_warning(
+            f"mm: {_count(result.total_conflicted, 'conflict copy', 'conflict copies')} kept; "
+            "run mm conflicts to review, mm resolve to pick a winner"
+        )
 
 
 def _print_pull_summary(
@@ -6461,6 +6486,8 @@ def _print_pull_summary(
                     f"{safety.safe_terminal_str(r.src_name)} — {src_failed} failed: {paths}",
                     file=sys.stderr,
                 )
+        if _SYNC_OUTPUT.get() is not None:
+            _conflict_review_notice(result)
         return
 
     # Per-source lines (conflicts/failures always; verbose otherwise).
@@ -6493,6 +6520,7 @@ def _print_pull_summary(
                 _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
 
     if _SYNC_OUTPUT.get() is not None:
+        _conflict_review_notice(result)
         return
 
     # Totals.

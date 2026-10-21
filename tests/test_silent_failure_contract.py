@@ -669,8 +669,9 @@ def test_pull_conflict_mode_fail_exits_3_before_writes(tmp_path, monkeypatch):
     assert role.read_text() == snapshot_before
     siblings = list(role.parent.iterdir())
     assert all(".sync-conflict-" not in p.name for p in siblings)
-    # Path details are verbose-only; the default refusal is the final stderr line.
+    # The conflicting files are named, then the refusal is the final stderr line.
     assert r.stderr.splitlines()[-1].startswith("Pull refused [command-refused]:")
+    assert "role.md" in r.stderr  # the conflicting file is named before the refusal
 
 
 # ─── Devices table header ────────────────────────────────────────────────
