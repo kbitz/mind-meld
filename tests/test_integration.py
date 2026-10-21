@@ -5277,13 +5277,14 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
         return result
 
     monkeypatch.setattr(cli_module, "_push_core", core)
-    for _ in range(2):
-        result = runner.invoke(app, ["push"])
+    for verbose in (False, True):
+        result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
         assert result.exit_code == 0, result.output
         flat = " ".join(result.stdout.split())  # the mode line wraps at 80 columns
-        assert "no content changes; usage published" in flat
-        assert "Git cursor unchanged" not in flat
-        assert "mm recapture 30d" not in flat
+        assert flat.endswith("Push: no content changes; usage published.")
+        # The usage-only mode explanation moved to --verbose; it is not removed.
+        assert ("Git cursor unchanged" in flat) is verbose
+        assert ("mm recapture 30d" in flat) is verbose
         assert rendered_counts() == before
     added = [json.loads(line) for line in path.read_bytes()[len(original) :].splitlines()]
     assert [r["type"] for r in added] == ["host-usage-snapshot"] * 2
