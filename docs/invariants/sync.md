@@ -71,6 +71,20 @@ Original command failure wins over optional finalizer/output failures; accepted
 or applied effects remain visible. Unknown effects direct read-only diagnosis
 before retry; no blind retry advice or repair guarantee is added.
 
+`_sync_failure` keeps curated refusal text intact, including any alternative
+remedy it names (such as `mm disable-source <name>`), and drops only a trailing
+`then run <cmd>` step that repeats the selected `Run:` command: `mm update`
+(newer/unsupported format), `mm migrate-config`, `mm init`, `mm push` (snapshot
+refusal), else `mm diag`. Conflict-fail preflight selects
+`mm pull --conflict-mode keep-both`, or `mm diag` for predicted local failures. Uncaught `MindMeldError` text is kept; other
+unexpected errors show only their class name. Setup, authentication, lock-held
+and refused stops, and setup/crypto-session errors without a returned result,
+report no content published / no files applied. Counts are singular at 1
+(`1 file applied`, `1 content change published`). The `MINDMELD_PASSPHRASE`
+remedy replaces a passphrase error only when stdin is not a terminal. A
+no-source attended push ends `Push: no enabled sources.` and records run cause
+`no-changes`, not `ok`.
+
 Presentation never changes quiet/attended execution, budgets, warming, locks,
 encryption or schemas. Progress/capture/cache/budget/nested notices are verbose;
 actual degradations reach existing status/diag evidence, including failures
@@ -302,9 +316,9 @@ The mm-events rescan replaces its sources, so it takes their holds from its own 
 | **Frozen** (under a nested git checkout) | `skipped: nested git repository`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
 | **Skipped / excluded** (oversized at the scan, glob, marker) | `skipped:` lines with `--verbose`; excluded paths silent | Raise `sync.max_file_size` or adjust the glob |
 | **Tombstoned** | The deletion record is published; a path with a tombstone is never frozen or held | Nothing: the tombstone suppresses restoration of a missing file; existing peer copies remain |
-| **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` error, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
+| **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` reason in the final `Push refused [snapshot-refused]` line, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
 
-Frozen checkout entries and held files are the **only** sanctioned exceptions to a complete snapshot. A third exception requires revisiting the manifest model, not another special case. Held-only exits: a scan that holds everything takes the existing no-substantive-change exit (no manifest put, sidecar, last_seen or events tail) but returns a `PushResult` carrying `held` and never claims "up to date"; an upload that holds everything still puts the manifest. `mm push --dry-run` applies the scan hold, shows the held count after the per-source summaries, and exits 0; upload re-reads stay unpreviewed. `mm recapture` takes its written-locally-but-not-synced exit when any held path is mm-internal. A file that is written continuously can be held on every push; the held count and paths are visible each time, and escalation is deferred (docs/TODOS.md).
+Frozen checkout entries and held files are the **only** sanctioned exceptions to a complete snapshot. A third exception requires revisiting the manifest model, not another special case. Held-only exits: a scan that holds everything takes the existing no-substantive-change exit (no manifest put, sidecar, last_seen or events tail) but returns a `PushResult` carrying `held` and never claims "up to date"; an upload that holds everything still puts the manifest. `mm push --dry-run` applies the scan hold, shows the held count after the per-source summaries, and exits 0; upload re-reads stay unpreviewed. `mm recapture` takes its written-locally-but-not-synced exit when any held path is mm-internal. A file that is written continuously can be held on every push; the held count is visible each time (paths with `--verbose`), and escalation is deferred (docs/TODOS.md).
 
 The autopush breadcrumb budgets about 300 characters for its combined detail.
 It prefers whole held paths, truncates a long first path when needed, and counts

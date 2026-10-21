@@ -164,7 +164,7 @@ pipx install --force git+https://github.com/kbitz/mind-meld.git@latest
 
 Once per 24h, `mm pull`, `mm push`, `mm autopull` and `mm autopush` check GitHub for a newer release tag after the sync has finished. If there is one, mm updates itself:
 
-- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground and print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it`. Expect a short one-off wait per release while pipx clones and builds.
+- **`mm pull` / `mm push`** run `pipx upgrade mind-meld` in the foreground before their final outcome line. With `--verbose` they print `mm: notice: updating mm <old> → <new> (pipx upgrade mind-meld)…`, then `mm: notice: updated mm <old> → <new>; the next mm command runs it`; without it a successful update prints nothing. Expect a short one-off wait per release while pipx clones and builds.
 - **`mm autopull` / `mm autopush`** start the same command in the background and return immediately, printing nothing. The output goes to `~/.config/mind-meld/auto-update.log`.
 
 The new version takes effect on the next `mm` command. A failed update never fails the sync or changes its exit code: it prints a `mm: notice:`, `mm status` shows `Automatic update did not complete`, and mm retries once a day. Run `mm update` to see the error.
@@ -285,8 +285,8 @@ At the **start of each conversation**, run:
 mm autopull
 \`\`\`
 
-- **No output:** Already in sync. Continue silently.
-- **Any output:** Tell the user what was synced; surface warnings and their suggested fixes.
+- **No output:** Synced (or already in sync). Continue silently.
+- **Any output:** Surface conflicts, warnings and their suggested fixes.
 
 At the **end of each conversation** (when the user is wrapping up, says goodbye,
 or you've completed the requested task), run:
@@ -296,7 +296,7 @@ mm autopush
 \`\`\`
 
 - **No output:** Nothing was printed. Say goodbye normally. A held file stays quiet; `mm status` names it as not yet synced.
-- **Any output:** Tell the user what was pushed; surface skips, warnings and their suggested fixes.
+- **Any output:** Surface skips, warnings and their suggested fixes.
 
 If `mm` is not installed, both commands will fail silently — no action needed.
 ```
@@ -307,7 +307,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb and prints `mm: notice: git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, upgrade the producing Mac to v0.14.17+ and run mm push. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
+- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery gets a small independent time budget; if it expires, autopush records a `degraded` breadcrumb (it prints nothing) whose detail reads `git repository discovery hit its time budget: this push captured an incomplete repository set. Run mm diag, then mm recapture 30d to recover the omitted commits`; attended `mm push --verbose` prints the same text as a `mm: notice:`. The detail is deliberately generic: it never exposes local paths or probe errors. For Git recovery, do not retry a bare empty push—the events tail runs after a substantive sync change. For host usage, upgrade the producing Mac to v0.14.17+ and run mm push. A later ordinary push does **not** recapture the omitted interval; `mm recapture 30d` on the Mac that owns the repositories does. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does **not** mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
@@ -359,7 +359,7 @@ Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first upgrade
 to v0.14.17+ and verify with `mm --version`, then:
 
 1. `mm enable-source grok`
-2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. Each cold reader may print `mm: reading grok usage beyond [retro] host_usage_interactive_budget_ms (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms.
+2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print `mm: reading grok usage beyond [retro] host_usage_interactive_budget_ms (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms.
 3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Grok contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `grok usage read blocker: none` describes only the cache.
 4. Optionally verify end to end from a **second Mac** after iCloud delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
 
@@ -379,7 +379,7 @@ Expected: a new `as_of`, the enabled readers in `consulted`, and their actual wo
 
 The retro should name Grok's inherent pricing floor. After the next real capture, repeat the second-Mac check: `as_of` must advance with Grok still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
 
-If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / push stderr) and keeps publishing Codex. A newer mm may read it: run `mm update`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
+If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. A newer mm may read it: run `mm update`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
 
 Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
 
@@ -579,8 +579,8 @@ be recorded.
 | `setup-error`, `authentication-error`, `crypto-error`, `storage-error`, `snapshot-refused`, `command-refused`, `unexpected-error` | The callback stopped; use current diagnostics and the original fixing instruction. A bare command refusal has unknown side effects. |
 | `lock-held`, `interrupted`, `result-degraded` | No execution, interruption, or typed partial/degraded result. Inspect `mm diag` and its counts before choosing a sync retry. |
 
-This track leaves attended pull's inherited partial-file exit 0 and existing
-push/pull output/tail order unchanged. Track 78A owns those changes; this
+Track 78A since made attended partial pulls exit 1 and moved the push/pull
+outcome after these finalizers (see [Sync outcomes](#sync-outcomes)); this
 verdict alone does not complete O8's quiet-output checkpoint. Current capture
 budget remedies apply; future resumable catch-up counters are not implemented.
 
@@ -607,7 +607,7 @@ file by default. This applies to every source type, including explicit includes
 that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
 
-Attended `mm push` and its `--dry-run` preview report each skipped root once:
+Attended `mm push --verbose` and the `--dry-run` preview report each skipped root once:
 `skipped: nested git repository <source>:<relative-root>`. `mm status` shows
 the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` stays silent about them.
 `mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps
@@ -840,7 +840,7 @@ The card is generated via a two-pass flow: the first invocation emits an `MM_THE
 
 Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the same CLI surface is available directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`) or terminal use, just without the LLM judgment layer the skill adds (natural-language window parsing, error translation). The earlier `python -m mind_meld.skills.retro_fleet.aggregator` form is a development-checkout fallback only; pipx-installed mm lives in an isolated venv that bare `python` / `python3` can't import from, so the skill's documented invocation routes through the `mm` console-script (always on PATH wherever mm is installed).
 
-**Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
+**Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...` at init and with `mm push --verbose`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
 Cost is not subscription spend: historical tokens are repriced at the rates bundled with this mm release, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
@@ -1147,7 +1147,7 @@ mm pull
 
 Use the real path from your filesystem: displayed nonprintable characters are visible notation, not a shell argument. `mm disable-source <name>` stops a whole source; a precise `exclude_patterns` glob under the existing source configuration can omit just the unwanted path. Neither option deletes your local file.
 
-`Pull interrupted; completed changes were kept.` means an interrupt or unexpected error stopped the batch. Run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
+A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` line (exit 1) means an interrupt or unexpected error stopped the batch; completed changes were kept. Check `mm diag`, then run `mm pull` to continue. Choosing `(a)bort` also keeps and records completed changes; pending keep-local mtime decisions are not broadcast. A `mm: notice:` saying a file was written, merged, or a conflict copy saved means publication completed and the named follow-up step encountered an error.
 
 **Retro output is missing a block, unexpectedly empty, or older than expected.** Treat the missing data as unknown, not zero. Run `command -v mm` and `mm --version`; upgrade to v0.14.17+ before running `mm diag` and `mm push`. If `mm status` or `mm diag` shows an incomplete git capture, recover on that Mac with `mm recapture 30d`, then rerun the retro at a window that includes the recovered commit dates. If push prints an upgrade notice, run its command, then run `mm install-skills` (or `mm install-skills --agent KEY` if `mm diag` shows that agent as `maintain_links: disabled`), **restart the agent**, and rerun the retro. Bare `mm install-skills` skips agents not authorized by the current `[skills]` policy; by default that means sources you declined. If `mm push` fails, its error explains which local data was not refreshed. This cannot tell you whether the SKILL.md the agent loaded matches the store copy — only that the binary and the published store are what they are.
 
@@ -1185,7 +1185,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then `mm recapture 30d` (ordinary substantive pushes capture going forward; `mm push` refreshes host usage). Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
-**`mm push` prints `events tail budget exceeded`.** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
+**`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
 **A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it. A tombstone suppresses restoration from peers that still advertise the file; it does not actively delete a copy that is already present. Push on the deleting Mac, then pull elsewhere.
 
@@ -1452,16 +1452,18 @@ A successful append writes one host row. With no user-source byte, newer-mtime
 or selection change, the refresh skips Git/session capture, preserves the Git
 cursor and adds nothing to retro push counts. If that day file is held because
 it changed, vanished or grew while being read, the new row stays unpublished
-and the push names the file as not yet synced
-([Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
+and the push counts it as held (`--verbose` names it as not yet synced;
+[Snapshot failures](#snapshot-failures)). Otherwise it still re-encrypts and
 uploads the growing day file, updates last-seen and rewrites the recovery
-sidecar, so the command reports a file modification even on a converged Mac.
+sidecar, so `--verbose` shows an upload even on a converged Mac. The outcome
+line counts no user content change: `Push: no content changes; usage published.`
+when publication is verified.
 A content-changing push records activity once and runs auto-GC. Usage-only
 publication skips this device's blob GC; obsolete blobs wait for the next
 content-changing push or an explicit `mm gc`.
 
-Healthy capture adds no per-reader output unless `--verbose` is set. A usage-only
-refresh explains its work with:
+Healthy capture adds no per-reader output unless `--verbose` is set. With
+`--verbose`, a usage-only refresh also explains its work with:
 
 ```text
 Refresh mode: usage-only; user content already up to date, Git cursor unchanged. Run mm recapture 30d for Git history.
@@ -1680,7 +1682,7 @@ scanning, independent of these settings.
 An attended `mm push` re-reads usage even when nothing else needs uploading. A
 no-op `mm autopush` still does not: autopush stays change-gated and never warms,
 and previews never capture. Orchestration failures (`unavailable`, or expiry
-before a reader was invoked) stay on push stderr and the autorun breadcrumb;
+before a reader was invoked) stay on `mm push --verbose` stderr and the autorun breadcrumb;
 they cannot be recorded by a reader that never ran. A no-op autopush may
 replace that breadcrumb with `success` while the standing reader blocker
 remains. A completed read clears the blocker only if it finishes inside its
@@ -1731,29 +1733,34 @@ can record it again; this notice does not itself become a stored blocker.
 
 A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
 
-**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and says which files are *not yet synced*; they go with a later push. Held files appear in the attended outcome (three paths, `--verbose` lists all), in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is rewriting a corrupt or conflict-copy manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
+**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is rewriting a corrupt or conflict-copy manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
 
 ```text
 $ mm push
+Push: 1 content change published; 2 held.
+
+$ mm push --verbose
 ...
-Push complete; 2 files not yet synced.
-  2 files not yet synced (still changing): gstack:projects/x/log.jsonl, claude:projects/y/memory/MEMORY.md
+  2 files not yet synced (still changing):
+    gstack:projects/x/log.jsonl
+    claude:projects/y/memory/MEMORY.md
   Their previous versions (if any) stay published; they go with a later push.
+Push: 1 content change published; 2 held.
 
 $ mm status          # after an autopush that held a file
   Last auto-push: 2026-10-19T15:03:32+00:00 (degraded: 1 file held, not yet synced (still changing): claude:projects/y/memory/MEMORY.md)
 
 $ mm push            # a recovered manifest and a file that will not settle
-Error: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish, then run mm push. See .../#snapshot-failures.
+Push refused [snapshot-refused]: Cannot publish: source claude, projects/y/memory/MEMORY.md changed while being read. Previous snapshot kept. Wait for the writer to finish; no content published. Run: mm push
 ```
 
 | State | You see | Do |
 |---|---|---|
-| Held (still changing, vanished or grew) | *not yet synced*, count and paths | Nothing; the prior version stays published. Exclude it if it is always being written. |
+| Held (still changing, vanished or grew) | `N held` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
 | Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
 | Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
 | Tombstoned | the deletion is published | Nothing |
-| Refused | one `Cannot publish:` error, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
+| Refused | one final `Push refused [snapshot-refused]: Cannot publish: …` line, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
 
 `mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
 
