@@ -124,6 +124,10 @@ def _enable_capture_sources(tmp_path, *, readers):
 def test_capture_remedies_respect_readiness_without_bootstrapping(
     tmp_path, monkeypatch, state, inventory, reader
 ):
+    # Value: protects=actionable capture opens status with its fixing command;
+    # fails_when=capture action is lost behind a first-push or healthy verdict;
+    # why_new=detail-only checks cannot reject a false headline; seam=none;
+    # no_claim=real host reader or fleet acceptance.
     from mind_meld import config as config_module
 
     _setup(tmp_path, monkeypatch)
@@ -159,7 +163,25 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
     for command in commands:
         result = runner.invoke(app, [command])
         assert result.exit_code == 0, result.output
-        flat = " ".join(result.output.split())
+        if command == "status":
+            headline = result.output.splitlines()[0]
+            if expected == "disabled":
+                assert headline.startswith("Usage capture unavailable.")
+                assert "mm enable-source mm-events" in headline
+            elif expected == "unavailable":
+                assert headline.startswith("Usage capture unavailable.")
+                assert "Restore access to the configured mm-events folder" in headline
+                assert headline.endswith("Run: mm diag")
+            elif expected == "ready" and inventory == "unsupported":
+                assert headline == "Usage capture needs a newer mm. Run: mm update"
+            elif expected == "ready" and inventory == "deadline":
+                assert headline == "Usage capture needs attention. Run: mm diag"
+            else:
+                assert headline == "This device has not pushed yet. Run: mm push"
+        # The opening verdict has a separate content-sync remedy. This test
+        # pins capture readiness, including absence of an unsafe capture retry.
+        detail = result.output.partition("\n")[2] if command == "status" else result.output
+        flat = " ".join(detail.split())
         if expected == "ready":
             assert ("mm update" if inventory == "unsupported" else "mm push") in flat
             if inventory == "unsupported":
@@ -1836,3 +1858,77 @@ def test_diag_never_walks_an_unconsented_muse_tree(tmp_path, monkeypatch):
     assert state["consented"] is True
     assert state["files_on_disk"] == 1
     assert walked == [sessions]
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt", "oversized", "valid"])
+def test_diag77_raw_and_projected_evidence_both_formats(tmp_path, monkeypatch, state):
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import attemptlog, cli
+
+    _setup(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    path = attemptlog.runs_path()
+    if state != "missing":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if state == "valid":
+            attemptlog.write_run(
+                "pull",
+                attemptlog.make_run(
+                    outcome="success",
+                    cause="ok",
+                    scope={"source": "claude"},
+                    completed_at=(now - timedelta(seconds=1)).isoformat(),
+                ),
+            )
+        else:
+            path.write_bytes(b"{" if state == "corrupt" else b"x" * 16385)
+    cli._write_autorun_breadcrumb("pull", "crypto-error", "forensic-old-detail")
+    auto_path = cli._autorun_breadcrumb_path()
+    raw = json.loads(auto_path.read_text())
+    raw["pull"]["timestamp"] = (now - timedelta(days=1)).isoformat()
+    auto_path.write_text(json.dumps(raw))
+    before = path.read_bytes() if path.exists() else None
+    structured = runner.invoke(app, ["diag", "--json"])
+    assert structured.exit_code == 0, structured.output
+    payload = json.loads(structured.stdout)
+    assert payload["last_attended_runs"]["state"] == state
+    assert payload["last_autorun"]["pull"]["detail"] == "forensic-old-detail"
+    projected = payload["sync_run_projection"]["pull"]
+    if state == "valid":
+        assert projected["limited_coverage"]
+        assert projected["unknown_reason"] == "limited-coverage"
+    elif state != "missing":
+        assert projected["unknown_reason"] == state
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    flat = " ".join(plain.output.split())
+    assert "Last attended runs" in flat and "Sync run projection" in flat
+    assert "forensic-old-detail" in flat
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+def test_diag77_superseded_capture_stays_forensic(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import attemptlog
+
+    _setup(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    attemptlog.write(
+        attemptlog.CaptureOutcome(attempted_at=(now - timedelta(days=2)).isoformat()).finish(
+            "push-failed", "interrupted"
+        )
+    )
+    state = attemptlog.project([], now.isoformat())
+    assert state["latest_attempt_superseded"]
+    state.update(state="absent", publication="unknown", readers={}, readiness="no-reader")
+    # Same renderer: only status opts into hiding proven supersession.
+    from mind_meld import cli
+
+    with cli.console.capture() as status_capture:
+        cli._print_host_publication(state, reader_states={}, hide_superseded=True)
+    with cli.console.capture() as diag_capture:
+        cli._print_host_publication(state, reader_states={})
+    assert "push-failed" not in status_capture.get()
+    assert "push-failed" in diag_capture.get()

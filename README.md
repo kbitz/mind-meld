@@ -16,6 +16,16 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Status verdict and local run evidence (Track 77A):** `mm status` now opens
+its report after authentication with a verdict about this device's last push.
+Nested checkout paths are summarized as a count; use `mm diag` for paths.
+The optional, private `last-attended-runs.json` needs no migration. Missing
+history after upgrade is normal: a readable own manifest and complete local
+inspection can establish a healthy comparison without seeding both verbs.
+Older binaries ignore this sidecar. Existing auto-update and rollback rules
+below still apply; plaintext status is not a stable scripting interface.
+
+
 **Before the first attended `mm push` or `mm gc` on any Mac, including a dormant
 one, check every `mm` it can run.** Older releases' GC can delete other Macs'
 blobs during a push or `mm gc`. Run `which -a mm`, then `<path> gc --help` for
@@ -207,6 +217,8 @@ mm pull    # download from another device
 
 Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
 
+See [Status verdicts](#status-verdicts) to interpret `mm status` after your first push.
+
 ## Setting up a second (or third) Mac
 
 1. `pipx install git+https://github.com/kbitz/mind-meld.git@latest` on the new machine.
@@ -377,8 +389,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull` | Pull with verbose output |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
-| `mm status` | Show local vs remote state, plus the last `autopull` / `autopush` breadcrumb — flagged `stale` when nothing has auto-run in 48h, with a hint after a [keyring skip](#auto-commands-skip-keyring-locked-or-unavailable). Prints one extra line when a `retro-fleet` skill link is broken |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
+| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -393,6 +405,100 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. |
 | `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
+
+### Status verdicts
+
+Required passphrase prompts keep working. After authentication, the report's
+first line is one plain stdout line, including when redirected or on a narrow
+terminal (the terminal itself may soft-wrap). Preparatory notices follow it.
+Fatal inspection errors use stderr and preserve a nonzero exit and their
+notices. Exit 0 means inspection completed, **not** proof that everything synced.
+
+Representative first lines:
+
+```text
+In sync with this device's last push.
+2 new, 1 modified and 3 deleted waiting to push. Run: mm push
+Metadata-only changes waiting to push. Run: mm push
+This device has not pushed yet. Run: mm push
+Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm push
+Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
+```
+
+The comparison does not assess incoming peer changes, peer delivery or
+Syncthing health. Counts cover the selected `--source` set. Metadata means
+equal hashes with a strictly newer local mtime, using the same forward-only
+gate as push; a source selection change also needs publication. Holds and
+failed files stay pending or degraded; pushing does not force a green verdict.
+Missing published roots, unavailable requested sources, incomplete scans,
+conflicts and corrupt/newer own metadata cannot report healthy. Inspection
+uses a strict source scan; this disables cached diagnostic hashes and can
+reread event-file bytes, while retaining one event parsing pass. The I/O cost
+is unmeasured.
+
+Status selects one execution summary per verb from the latest available auto
+and attended records. Strictly later valid completed success can resolve an
+available earlier same-verb failure, in either auto/attended order. Push never clears pull. Equal, invalid, naive, future or otherwise
+ambiguous timestamps cannot establish recovery. A filtered pull carries its
+source/device scope and explicitly says limited coverage; it cannot clear an
+unscoped failure. Lock skips establish neither failure nor recovery: a routine
+skip alone need not displace a healthy current comparison, but a known
+unresolved failure in those records stays actionable. Later runs overwrite
+their own per-verb record; overwritten failures are not retained. Discovery
+finding no repositories is advisory detail, not lost work. No additional history or consecutive-hold
+escalation is inferred.
+
+`mm diag --json` retains raw `last_autorun`, distinct `last_attended_runs`
+(`state`, `runs`), and `sync_run_projection`. Each projected verb has `kind`,
+`selected`, `superseded`, `unknown_reason`, `unresolved`, and `limited_coverage`.
+Plain diag prints these too. Raw autorun age still describes when hooks ran;
+an attended run's age is not “no autorun.” Supersession hides obsolete status
+rows without deleting the underlying latest records. Capture/publication
+evidence stays separate; only its existing `latest_attempt_superseded` proof hides an obsolete capture
+attempt from status, and diag retains it.
+
+The local mode-0600 sync record has schema `version: 1` and at most one `push`
+and one `pull` entry. Entries contain UTC `completed_at`, `outcome`, `cause`,
+finite integer `counts`, `content_accepted` (true/false/unknown), optional
+`scope`, bounded safe `degradations`, `omitted_details`, `ordering_unknown`,
+and an errno name. Outcomes are success, degraded, failed and skipped;
+interruption is failed/interrupted. Counts retain named push new/modified/deleted,
+content-file/held/event-degradation/maintenance counts, and pull written,
+merged, skipped, conflicted, failed, unknown-source pair, corrupt-peer and
+parent-fsync counts; bytes transferred are separate from file counts. An
+unknown partial interruption invents no counts. Content acceptance survives
+later maintenance failure and says nothing about usage publication or delivery.
+
+Records are recoverable forensic evidence, capped at 16 KiB generated JSON;
+at most eight detail phrases are retained. Omitted detail is **not retained**,
+including unsafe unknown phrases, rather than promised in diag. Reads/writes
+never wait on a busy evidence lock. A delayed older completion cannot replace
+a newer one; conflicting writes with equal or older timestamps make ordering
+unknown, covering both delayed writers and clock rollback. The shared
+truncate/write primitive does not guarantee old bytes survive a write error,
+or certify power-loss durability. Ordinary oversized files are rejected before
+parsing; a size race retains the shared helper's 64 MiB ceiling. Status/diag
+never repair records; a later real attended invocation may repair recoverable
+history. Previews write no sync record or extra lock (the existing local mm
+lock/parent exemption remains). Parsing before a callback and SIGKILL cannot
+be recorded.
+
+#### Run evidence diagnostics
+
+| Code / cause | Meaning and safe next step |
+|---|---|
+| <a id="run-evidence-write-unavailable"></a>`run-evidence-write-unavailable` | Sync's primary result is unchanged. The stderr notice names push/pull, known content side effects and a bounded errno/code. Do not repeat sync solely to record history; restore local access/storage if needed, then run `mm diag`. |
+| <a id="run-evidence-contended"></a>`run-evidence-contended` | Read was busy and changed nothing. Retry read-only `mm status` once; if still busy, use `mm diag` and inspect local access. Never delete a live lock. |
+| <a id="run-evidence-corrupt"></a><a id="run-evidence-oversized"></a><a id="run-evidence-unreadable"></a>`run-evidence-corrupt`, `run-evidence-oversized`, `run-evidence-unreadable` | History is unknown. Use `mm diag`; no deletion or blind sync retry is prescribed. Missing history needs no repair. |
+| <a id="run-evidence-ambiguous"></a><a id="run-evidence-limited-coverage"></a>`run-evidence-ambiguous`, `run-evidence-limited-coverage` | Ordering or scope cannot prove recovery. Inspect raw evidence and the selected scope with `mm diag`. |
+| `ok`, `no-changes` | Completed content execution; capture and publication remain independent. |
+| `setup-error`, `authentication-error`, `crypto-error`, `storage-error`, `snapshot-refused`, `command-refused`, `unexpected-error` | The callback stopped; use current diagnostics and the original fixing instruction. A bare command refusal has unknown side effects. |
+| `lock-held`, `interrupted`, `result-degraded` | No execution, interruption, or typed partial/degraded result. Inspect `mm diag` and its counts before choosing a sync retry. |
+
+This track leaves attended pull's inherited partial-file exit 0 and existing
+push/pull output/tail order unchanged. Track 78A owns those changes; this
+verdict alone does not complete O8's quiet-output checkpoint. Current capture
+budget remedies apply; future resumable catch-up counters are not implemented.
 
 ### Garbage collection
 
@@ -418,8 +524,8 @@ that point inside a checkout. The source root's own `.git` keeps its existing
 behavior. Ordinary directories still sync; there is no opt-out setting.
 
 Attended `mm push` and its `--dry-run` preview report each skipped root once:
-`skipped: nested git repository <source>:<relative-root>`. `mm status` and
-`mm diag` list the current skips too. `mm autopush` stays silent about them.
+`skipped: nested git repository <source>:<relative-root>`. `mm status` shows
+the exact selected-source count plus `mm diag` for details; diag lists paths. `mm autopush` stays silent about them.
 `mm diag --json` adds `sync_scope`, whose `skipped_nested_repositories` maps
 source names to relative roots (empty lists mean none found; null means config
 unavailable). Inspection is best-effort and never reads checkout contents.
@@ -979,7 +1085,7 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.13.0); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 

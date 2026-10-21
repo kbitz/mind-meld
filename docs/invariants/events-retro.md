@@ -1779,9 +1779,11 @@ rows. These fixes close a class before it scales, not a claimed larger incident.
 **Readiness and coherent remedies (64A).** `config.usage_capture_readiness` is
 pure over already-resolved `selected`, `available`, and reader consent. Its five
 verdicts are ready, disabled/not configured, unavailable custom root, no-reader,
-and unknown (selection is `None` because config was unreadable). Inspection
-resolves once with `strict=False, bootstrap=False`; a missing bootstrapable
-default root is available, and neither status nor diag creates it. Push keeps its existing strict bootstrap policy under the mm lock. `usage_capture_remedy` supplies the
+and unknown (selection is `None` because config was unreadable). Status resolves
+once with `strict=True, bootstrap=False`; diag uses `strict=False,
+bootstrap=False`. A missing bootstrapable default root is available, and neither
+status nor diag creates it. Push keeps its existing strict bootstrap policy
+under the mm lock. `usage_capture_remedy` supplies the
 prerequisite action. `_host_skip_phrase` requires an explicit readiness keyword;
 tail/init pass ready because they resolved the writer and readers already.
 Status/diag combine that verdict with current reader consent and permanent
@@ -1853,9 +1855,9 @@ the separate claim. All displayed names intersect the live allowlist and consent
 and go through `safe_str`.
 
 **Local capture evidence (61A).** Status and diag share one filename-scoped,
-bounded binary day-file pass for mm-push and host rows. Status reuses its stable
-file hashes for the diagnostic manifest only (see sync.md), so it does not open
-the same day file again. The cache uses `(st_dev, st_ino)`, verified against
+bounded binary day-file pass for mm-push and host rows. Status uses strict manifest hashing (77A; see sync.md), so it may reread
+event bytes but never adds another EventScan parsing pass. Completeness takes
+precedence over diagnostic-hash reuse; the I/O cost is unmeasured. The cache uses `(st_dev, st_ino)`, verified against
 device/inode/size/mtime/ctime; it never resolves paths. The cursor keeps its digest.
 Names use
 `_safe_device_filename`; row `device` never selects a local file. Cursor
@@ -3291,3 +3293,73 @@ values; a token count outside this range is already garbage. Pinned by
 **Not fleet-skewed.** Pricing is applied locally at render time, from
 `tokens_by_model` carried over the wire. Fixing the local table fixes the
 card immediately, even with other machines on older mm. No peer migration.
+
+
+## Attended sync-run evidence and status projection (Track 77A)
+
+`last-attended-runs.json` is separate from `last-attended-capture.json`.
+`attemptlog.write_run` stores at most one execution per push/pull; status and
+diag read it. It says nothing about peer delivery or the completeness or
+publication of a host snapshot. Keep capture's schema, closed causes,
+readiness/remedy helpers and publication proof intact. No new catch-up,
+consecutive-push or hold-escalation counter exists. Budget notices alone never
+invent a future escalation policy. Source/format safety wins before conflicts,
+run failure/actionable degradation or uncertain history, current capture
+prerequisite/reader blockers, first push, pending content/metadata and qualified
+local healthy. Advisory discovery/updates/skill drift stay in detail.
+
+Run outcomes: success/degraded/failed/skipped. Causes: ok, no-changes,
+setup-error, authentication-error, lock-held, snapshot-refused, storage-error,
+crypto-error, command-refused, interrupted, unexpected-error, result-degraded.
+Interrupted is failed, not an extra outcome. Bare typer.Exit without a result
+is command-refused with unknown side effects; no fabricated partial counts.
+Known accepted push content survives a later maintenance error. Optional
+capture degradation cannot become content failure or change the primary exit.
+
+Counts preserve existing units: push total_new/modified/deleted are file-entry
+counts, content_files excludes mm-owned sources, held counts distinct held
+files, events_degradations counts producer phrases, maintenance_failures counts
+contained follow-up failures. Pull total_written/merged/skipped/conflicted/
+failed count file outcomes, total_skipped_unknown_source counts (peer, source)
+pairs, corrupt_peer_count counts peers, durability_fsync_failures counts parent
+flush failures. bytes_transferred counts bytes separately. These are not
+summable across categories as unique files. No paths or raw error messages are
+stored in counts. The bounded schema/locking/error protocol is specified in
+sync.md; completion timestamp is captured once before nonblocking RMW.
+
+Producer detail families are append-size skips, cursor hold/coverage,
+discovery budgets/errors/empty, git/session budgets and errors, locked/skipped
+token cache, closed host-reader skip phrases and tail exception class. Preserve
+safe reasons, count and remedy; normalize missing custom mm-events absolute
+paths to the source label. Unknown or unsafe phrases and excess/overlong detail
+are explicitly counted as not retained. Known host links can become the safe
+mm diag reference; no host logs or local paths are copied. A generic degraded
+classification remains when detail is omitted. Generated JSON <=16 KiB and
+mode 0600; status/diag do not write it or create an evidence lock. Normal
+missing upgrade history requires no seeding runs. Contention/damage is unknown,
+not success; recovery never recommends deleting a live lock or blind sync retry.
+
+Projection retains all available raw evidence in diag (last_autorun,
+last_attended_runs, sync_run_projection in JSON and text). Each auto/attended
+store retains only its latest record per verb; later writes overwrite it, so
+this projection cannot recover overwritten failures. Strict later completed
+success can resolve an available earlier same-verb failure in either direction;
+a skip cannot. Routine lock-skip alone need not block a healthy local
+comparison; finding zero repositories remains advisory. Equal, invalid,
+naive, future, contradictory writer/completion order or insufficient-scope
+evidence cannot prove recovery. Conflicting equal or older timestamp writes
+retain the newer facts with ordering uncertainty, including clock rollback.
+A limited source/from-device pull labels its coverage. Status displays only the
+selected execution summary per verb; independent current capture/publication
+facts remain. Hide a capture attempt only when latest_attempt_superseded already
+proves it, retaining the raw attempt in diag. Preserve autorun staleness meaning;
+never label attended age “no autorun.”
+
+Status verdict begins the report after required authentication; getpass remains
+outside deferred post-auth notices. Emit one safe plain stdout line, no Rich
+wrapping/truncation; fatal errors restore output, preserve notices and original
+exit/exception, and finish with a fixing command. Inspection remains write-free
+apart from the existing seen-sources exemption, with one capture parsing pass.
+No live keyring, wheel, Linux Secret Service or fleet acceptance is inferred
+from portable tests. This track does not complete all quiet-output acceptance
+and retains Track 78A's existing partial-pull exit 0 and tail order.

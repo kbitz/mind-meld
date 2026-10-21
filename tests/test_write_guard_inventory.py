@@ -183,6 +183,19 @@ REVIEWED = {
             "record_path().open('rb')",
         ],
     ),
+    "attemptlog.py:run_details": (
+        *_READ_ONLY,
+        [
+            "detail.replace(events_tail.HOST_USAGE_CAPTURE_URL, 'mm diag')",
+            "detail.replace('git/session', 'git and session')",
+        ],
+    ),
+    "attemptlog.py:project_runs": (
+        *_READ_ONLY,
+        [
+            "datetime.min.replace(tzinfo=timezone.utc)",
+        ],
+    ),
     "cli.py:_retain_prior_default_sources": (
         *_READ_ONLY,
         [

@@ -230,7 +230,7 @@ narrowing that tuple fails a test.
 
 ## Complete snapshots (load-bearing, v0.14.3)
 
-Publishing scans (`_push_core`, including the mm-events rescan) use strict mode: directory enumeration, classification, descriptor identity, and hash errors raise `SnapshotError` instead of omitting the path. Diagnostic walkers stay permissive. A published entry's digest and size describe the accepted file bytes and mtime describes that same observed revision. This is not a filesystem-wide atomic snapshot.
+Publishing scans (`_push_core`, including the mm-events rescan) use strict mode: directory enumeration, classification, descriptor identity, and hash errors raise `SnapshotError` instead of omitting the path. Status also uses strict mode to avoid a falsely healthy comparison; other diagnostic walkers stay permissive. A published entry's digest and size describe the accepted file bytes and mtime describes that same observed revision. This is not a filesystem-wide atomic snapshot.
 
 **One changing file is held, not a refusal (Track 75A).** `SnapshotChanged(SnapshotError)` (`errors.py`, with `reason` `changed`, `vanished` or `grew`) is the only transient snapshot exception. It comes from `read_file_revision` and `_upload_changed_blobs`, classified at the raise site and never by message text. The reader reports changed, vanished or grew past `max_file_size` *while being read*: a file under the cap at its pre-open lstat and over it at the descriptor is `grew`; over it at both is the unchanged `_FileTooLarge` skip. The per-file lstat in the grok, muse and generic loops separately re-probes `FileNotFoundError` once, then records `vanished` directly when a collector is present or raises plain `SnapshotError` without one. Everything else stays a plain `SnapshotError` and refuses the whole push, so a retry that lands in one of them refuses instead of holding: could not be read, directory enumeration (including a discovered directory that vanishes and `.extend-root` marker discovery), confinement (symlink, non-regular file, hardlink privacy), missing previously published roots, and still-present omissions. The subclass keeps every `except SnapshotError` handler, pull's included, unchanged.
 
@@ -256,10 +256,10 @@ omitted paths with `+N more`. Existing events degradations and the held count
 are never dropped; if those alone exhaust the budget, they take precedence
 over paths and the size target.
 
-Status can supply `diagnostic_hash` to reuse hashes from its single event-file
-scan, avoiding a second read just to build the inspection manifest. Reuse
-requires unchanged device/inode/size/mtime/ctime; changed files are rehashed.
-`_record_file`'s strict branch never consults this callback. Publication always
+Status now uses strict hashing for scan completeness (77A), so it does not
+reuse `diagnostic_hash` from the single event-file scan. This may reread event
+bytes, an explicit unmeasured I/O tradeoff; it adds no EventScan parsing pass.
+`_record_file`'s strict branch never consults the callback. Publication always
 performs its own descriptor-bound scan and upload verification.
 
 `generate_tombstones` stays a pure comparison. Before the scan and rescan calls, `_prove_omitted_paths_absent` checks omitted prior paths against the trusted local source map. The final reconciliation after upload holds uses the accepted entries and tombstones described above. ENOENT/ENOTDIR below an accessible root is genuine absence. A still-present regular file omitted by size cap or inode dedup refuses. A missing previously populated selected user-source root refuses the whole push; removing a source from selection drops its file entries, preserves existing tombstones, and is itself a manifest change.
@@ -312,7 +312,7 @@ The walker drops excluded paths from the local manifest at push time. The
 cache rationale and generator measurements live in
 [Generated files are not sync data](#generated-files-are-not-sync-data-load-bearing-v01251).
 
-`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior only to select frozen nested-checkout entries (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads this device's raw manifest via that path to compute referenced blobs, and a filtered manifest there would mark live own blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
+`_filter_excluded_paths(manifest, exclude_map)` applies at THREE consumer-boundary call sites — all AFTER `_fetch_remote_manifest` returns: (1) `_pull_core` filters peer manifests in `manifest_cache` BEFORE `collect_tombstones` and the per-source download loop; (2) `_push_core` filters the manifest returned by `_recover_prior_manifest` (covers ok / sidecar / peer-fallback uniformly) BEFORE `generate_tombstones`; (3) `diff_cmd` filters its default or `--from` comparison manifest with both exclude globs and marker skip prefixes. A fourth call in `status` filters a copy of the prior to select frozen nested-checkout entries and check omitted paths (see "Nested git checkouts are frozen, never published"); the diff's remote side stays unfiltered. The filter MUST NOT apply at `_fetch_remote_manifest` itself — `mm gc` reads this device's raw manifest via that path to compute referenced blobs, and a filtered manifest there would mark live own blobs as orphans (codex-2 #1, pinned by `test_mm_gc_does_not_orphan_excluded_path_blobs`).
 
 **Tombstone-suppression invariant.** Adding a path to `exclude_patterns` must NOT generate a deletion tombstone on the next push (2026-04-24 first-pull regression). Removing a glob brings the path back as new. Sidecar recovery is filtered too so a corrupt-manifest recovery on a freshly-migrated config doesn't re-introduce pre-exclude paths via the sidecar (codex-2 #2). All four scenarios (two-device first-pull, tombstone-on-exclude, tombstone-on-unexclude, sidecar-bypass-guard) are pinned in `tests/test_integration.py::TestExcludePatterns5C`.
 
@@ -349,8 +349,8 @@ includes so a direct include inside a checkout cannot bypass the rule.
 `nested_repo_root` probes components in order and stops at the first missing,
 non-directory or symlinked one, so a checkout above a descendant link is still
 found and nothing is probed through a link; callers check it before the
-descendant-symlink omission. Strict publishing refuses an unreadable component
-or checkout-marker probe; diagnostic scans remain permissive.
+descendant-symlink omission. Strict publishing and status refuse an unreadable component
+or checkout-marker probe; other diagnostic scans remain permissive.
 
 **One observation per command.** `build_manifest_v2(nested_roots=...)` returns the
 roots its own walk skipped. Push, status and diff never re-walk for them, and
@@ -402,7 +402,8 @@ amount to.
 
 Attended push and preview print one `mm: notice: skipped: nested git repository
 source:rel` line per root; autopush stays silent (a skip deletes nothing, so it
-is not a data-at-risk warning), and status/diag list roots. Attended pull (not
+is not a data-at-risk warning), and status summarizes the selected roots with an exact count and mm diag
+for path detail. Diag retains roots. Attended pull (not
 `--dry-run` or autopull, which write no `excluded` history) logs one `excluded`
 record per root and device manifest, not per file; a peer with only tombstones
 there is logged too (informational: pull is additive and never deletes local
@@ -919,3 +920,82 @@ incomplete-preview line only for corrupt manifests; unknown sources remain
 warnings. No output or exit-code change applies to autopull. Twin-tree parity
 tests cover encrypted two-peer input, exclusions/tombstones, symlinks,
 unreadability, file/directory collisions in both orders and conflict retries.
+
+
+## Status verdict and attended sync evidence (Track 77A)
+
+After existing authentication, status emits one sanitized, unwrapped stdout
+line before notices, title or detail. `_status_verdict` is pure over explicit
+observations: blocking setup/storage/format/incomplete scan, conflicts, unresolved
+same-verb failure/actionable degradation or uncertain history, current capture
+prerequisite/reader blockers, first push, pending content or forward-only metadata,
+then “In sync with this device's last push.” Missing own metadata selects the
+first-push verdict unless a higher-priority action applies. No incoming peer convergence
+is measured. Every --source verdict names its source, and all counts use one
+materialized diff list. Selection, availability and previous publication must
+agree: missing previously published enabled roots, unavailable requested roots,
+unknown/disabled filters, zero usable sources and failed conflict inspection
+never fall through to healthy. Absent never-used optional sources and deliberate
+disables remain normal. Strict source enumeration/hashing detects incomplete
+observations; no second host parsing or peer-health scan is added. Frozen
+nested entries retain the existing semantics. Scan failure remains visible and
+comparison unavailable, never fabricated deletions. Fatal collection restores
+streams, reports failure first, retains notices and ends with the fixing command;
+authentication stays outside capture. No update, capture, bootstrap or receipt
+rewrite is added to inspection; seen-sources remains the sole status exemption.
+
+Attended callback finalization surrounds setup and core. Typed result/error and
+local stage facts classify every callback outcome, including no-op, scoped pull,
+lock skip and interruption. Only an acquired mm lock is released. The existing
+capture-finally and maintenance/update order and command exits are unchanged.
+Known accepted content cannot be revoked by later maintenance failure; absent
+returned pull counts remain unknown, including partial interruption. Previews
+bypass evidence, preserving their existing local mm-lock/parent exemption.
+Pre-callback parsing and SIGKILL are unrecordable.
+
+`attemptlog` owns private local `last-attended-runs.json` beside the distinct
+capture receipt, resolved through SIDECAR_DIR at call time. Status and diag are
+its readers. Schema version 1 contains at most push and pull, each with aware
+UTC completion time, closed outcome/cause, finite nonboolean integer counts
+(0..2**53), known content acceptance or null, bounded source/from-device scope,
+safe bounded details, omissions, ordering uncertainty and errno name. Generated
+JSON <=16 KiB, <=8 details of <=384 chars. No raw exceptions, credentials,
+absolute user paths or host logs are retained. Missing custom mm-events paths
+normalize to their source label. Unknown/unsafe detail is omitted truthfully.
+See README's run-evidence table and events-retro.md for causes and counter units.
+
+Use `locked_json_rmw(retry_intervals=(), on_contention="raise", mode=0o600)`;
+check is_locked and write_error. Capture completion once before locking. A delayed
+older completion never replaces a newer same-verb completion; conflicting
+equal or older timestamp writes retain the newer facts and become ordering
+unknown. Delayed writes and clock rollback cannot be distinguished here. Successful independent verb updates preserve both.
+Write failure is best-effort, never sync failure; its bounded stderr notice
+names verb/known side effects/code, forbids repeating sync solely for history,
+and directs mm diag after local access/storage repair. Guard BaseException and
+interruptions propagate. No atomic durability/old-byte preservation is claimed
+for this truncate/write protocol.
+
+New evidence and autorun inspection use `locked_json_snapshot(blocking=False)`.
+Missing is normal absent history, not success; corrupt, empty, malformed,
+unreadable, oversized or contended is unknown, with no repair. Reject ordinary
+files >16 KiB before parsing; the stat race retains the shared 64 MiB ceiling.
+Deep JSON is unknown. Contention permits one read-only status retry then diag;
+other damage/ordering/scope uncertainty directs diag without deleting evidence,
+blind sync retries or live locks. A later real writer may repair recoverable
+records, not necessarily every damaged file.
+
+Project the newest available execution per verb without deleting the underlying
+latest auto or attended records. Each kind retains only its latest record per
+verb; later writes overwrite it, so overwritten failures are not retained.
+Strict valid timestamp ordering and sufficient scope let completed success of
+either kind resolve an available earlier same-verb failure. Ties, invalid/naive/future
+timestamps cannot clear it. A scoped pull explicitly limits coverage and cannot
+prove global recovery. A skip proves neither failure nor recovery; a routine
+lock skip may coexist with a healthy complete local comparison only without
+known unresolved same-verb failure. Finding zero repositories is advisory,
+not lost work. Keep auto hook-age meaning in diag; attended age is not hook
+liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
+both diag formats. Status shows only selected summaries plus current capture
+facts; only existing latest_attempt_superseded proof hides a capture row.
+No history engine, hold escalation, future capture counters, Track 78A exits/
+tails, or Track 88A peer-state assessment is introduced.

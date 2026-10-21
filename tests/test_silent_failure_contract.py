@@ -752,6 +752,9 @@ def test_autopush_surfaces_sidecar_write_failure_in_quiet_mode(tmp_path, monkeyp
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "sidecar" in (r.stderr or "")
     assert "simulated disk full" in (r.stderr or "")
+    crumb = cli_module._read_autorun_breadcrumbs()["push"]
+    assert crumb["outcome"] == "degraded"
+    assert "1 post-publication maintenance failure(s)" in crumb["detail"]
 
 
 # ─── Typed-error branches in autopull/autopush (contract tests) ──────────
@@ -2628,3 +2631,372 @@ def test_cursor_drift_survives_capture_and_attempt_outcomes(cursor_store, tmp_pa
     assert "disable-source cursor" in phrase
     degradations = events_tail._run_events_tail(cfg, sources, "dev-deg", dry_run=False, quiet=True)
     assert any("cursor unsupported" in reason for reason in degradations)
+
+
+def test_status77_stale_crypto_replaced_by_real_attended_push(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module.console, "_width", 240)
+    cli_module._write_autorun_breadcrumb("push", "crypto-error", "old-crypto-diagnostic")
+    path = cli_module._autorun_breadcrumb_path()
+    raw = json.loads(path.read_text())
+    raw["push"]["timestamp"] = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+    path.write_text(json.dumps(raw))
+    pushed = runner.invoke(app, ["push"])
+    assert pushed.exit_code == 0, pushed.output
+    assert attemptlog.read_runs()["runs"]["push"]["outcome"] in ("success", "degraded")
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    assert "old-crypto-diagnostic" not in shown.output
+    assert "Last auto-push:" not in shown.output
+    assert "Last attended-push:" in shown.output
+    diag = runner.invoke(app, ["diag", "--json"])
+    payload = json.loads(diag.stdout)
+    assert payload["last_autorun"]["push"]["detail"] == "old-crypto-diagnostic"
+    assert payload["sync_run_projection"]["push"]["superseded"] == ["auto"]
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+@pytest.mark.parametrize(
+    "stage,cause",
+    [
+        ("setup", "setup-error"),
+        ("authentication", "authentication-error"),
+        ("lock", "lock-held"),
+        ("snapshot", "snapshot-refused"),
+        ("storage", "storage-error"),
+        ("crypto", "crypto-error"),
+        ("exit", "command-refused"),
+        ("interrupt", "interrupted"),
+        ("abort", "interrupted"),
+        ("unexpected", "unexpected-error"),
+    ],
+)
+def test_attended77_callback_failure_matrix(tmp_path, monkeypatch, verb, stage, cause):
+    import errno
+
+    import typer
+
+    from mind_meld import attemptlog
+    from mind_meld.errors import CryptoError, LockError, SnapshotError
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    released = []
+    real_release = cli_module.release_lock
+    monkeypatch.setattr(
+        cli_module, "release_lock", lambda: (released.append(True), real_release())[1]
+    )
+    failures = {
+        "setup": typer.Exit(1),
+        "authentication": typer.Exit(1),
+        "lock": LockError("held"),
+        "snapshot": SnapshotError("refused"),
+        "storage": OSError(errno.ENOSPC, "/secret"),
+        "crypto": CryptoError("bad key"),
+        "exit": typer.Exit(3),
+        "interrupt": KeyboardInterrupt(),
+        "abort": typer.Abort(),
+        "unexpected": RuntimeError("unexpected"),
+    }
+    target = {
+        "setup": "_get_config",
+        "authentication": "_get_passphrase_or_exit",
+        "lock": "acquire_lock",
+    }.get(stage, f"_{verb}_core")
+
+    def fail(*args, **kwargs):
+        raise failures[stage]
+
+    monkeypatch.setattr(cli_module, target, fail)
+    result = runner.invoke(app, [verb])
+    assert result.exit_code == {"exit": 3, "interrupt": 130}.get(stage, 1)
+    recorded = attemptlog.read_runs()["runs"][verb]
+    assert recorded["cause"] == cause
+    assert recorded["outcome"] == ("skipped" if stage == "lock" else "failed")
+    assert recorded["counts"] == {}
+    assert recorded["content_accepted"] is not True
+    assert bool(released) == (stage not in ("setup", "authentication", "lock"))
+    if stage == "storage":
+        assert recorded["errno"] == "ENOSPC"
+    assert "/secret" not in json.dumps(recorded)
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+def test_attended77_lock_skip_preserves_real_holder(tmp_path, monkeypatch, verb):
+    from mind_meld import attemptlog, lockfile
+    from mind_meld.errors import LockError
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    lockfile.acquire_lock()
+    owned = dict(lockfile._LOCK_FDS)
+    try:
+        shown = runner.invoke(app, [verb])
+        assert shown.exit_code == 1, shown.output
+        assert lockfile._LOCK_FDS == owned
+        with pytest.raises(LockError):
+            lockfile.acquire_lock()
+        recorded = attemptlog.read_runs()["runs"][verb]
+        assert (recorded["outcome"], recorded["cause"]) == ("skipped", "lock-held")
+    finally:
+        lockfile.release_lock()
+    lockfile.acquire_lock()
+    lockfile.release_lock()
+
+
+def test_attended77_auto_maintenance_failure_cannot_prove_recovery(tmp_path, monkeypatch):
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        "_push_core",
+        lambda *a, **k: cli_module.PushResult(content_accepted=True, maintenance_failures=1),
+    )
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    attended = attemptlog.read_runs()
+    assert attended["runs"]["push"]["outcome"] == "degraded"
+    assert runner.invoke(app, ["autopush"]).exit_code == 0
+    auto = cli_module._read_autorun_evidence()
+    assert auto["runs"]["push"]["outcome"] == "degraded"
+    assert attemptlog.project_runs(auto, attended)["push"]["unresolved"] is True
+
+
+@pytest.mark.parametrize("verb", ["push", "pull"])
+@pytest.mark.parametrize("write_failure", ["disk", "contention", "torn"])
+def test_attended77_evidence_failure_preserves_result_and_unlocks(
+    tmp_path, monkeypatch, verb, write_failure
+):
+    import errno
+
+    from mind_meld import attemptlog, lockedjson
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cli_module,
+        f"_{verb}_core",
+        lambda *a, **k: (
+            cli_module.PushResult(content_accepted=True)
+            if verb == "push"
+            else cli_module.PullResult(total_written=2)
+        ),
+    )
+
+    def fail(*args, **kwargs):
+        if write_failure == "contention":
+            raise lockedjson.LockContended("private")
+        raise OSError(errno.ENOSPC, "secret")
+
+    if write_failure == "torn":
+        monkeypatch.setattr(
+            lockedjson, "_write_json", lambda *a, **k: OSError(errno.ENOSPC, "torn")
+        )
+    else:
+        monkeypatch.setattr(attemptlog, "write_run", fail)
+    result = runner.invoke(app, [verb])
+    assert result.exit_code == 0, result.output
+    assert "run-evidence-write-unavailable" in result.stderr
+    assert "Do not repeat sync solely to record it" in result.stderr
+    assert "secret" not in result.stderr
+    assert ("content accepted" if verb == "push" else "content partial") in result.stderr
+    cli_module.acquire_lock()
+    cli_module.release_lock()
+
+
+@pytest.mark.parametrize(
+    "verb,result,counts,outcome",
+    [
+        ("push", cli_module.PushResult(), {"held": 0}, "success"),
+        (
+            "push",
+            cli_module.PushResult(held=[("claude", "secret.md", "changed")]),
+            {"held": 1},
+            "degraded",
+        ),
+        (
+            "push",
+            cli_module.PushResult(events_degradations=["event append skipped (max-file-size)"]),
+            {"events_degradations": 1},
+            "degraded",
+        ),
+        (
+            "pull",
+            cli_module.PullResult(total_written=2, total_failed=1),
+            {"total_failed": 1, "total_written": 2},
+            "degraded",
+        ),
+        (
+            "pull",
+            cli_module.PullResult(
+                corrupt_peer_count=2, durability_fsync_failures=3, total_skipped_unknown_source=4
+            ),
+            {
+                "corrupt_peer_count": 2,
+                "durability_fsync_failures": 3,
+                "total_skipped_unknown_source": 4,
+            },
+            "degraded",
+        ),
+        ("pull", cli_module.PullResult(), {"total_written": 0}, "success"),
+    ],
+)
+def test_attended77_result_counts(tmp_path, monkeypatch, verb, result, counts, outcome):
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module, f"_{verb}_core", lambda *a, **k: result)
+    finished = runner.invoke(app, [verb])
+    assert finished.exit_code == 0, finished.output
+    record = attemptlog.read_runs()["runs"][verb]
+    assert record["outcome"] == outcome
+    for key, value in counts.items():
+        assert record["counts"][key] == value
+    assert "secret.md" not in json.dumps(record)
+
+
+def test_status77_pure_precedence_and_hostile_scope():
+    # Value: protects=capture action priority below blockers and above pending;
+    # fails_when=capture hides a blocker or pending hides actionable capture;
+    # why_new=existing precedence checks omit capture_action; seam=none;
+    # no_claim=real host reader or fleet acceptance.
+    from mind_meld import attemptlog
+
+    empty = attemptlog.project_runs(
+        {"state": "missing", "runs": {}}, {"state": "missing", "runs": {}}
+    )
+    base = dict(
+        source=None,
+        blocking=None,
+        conflicts=0,
+        projection=empty,
+        counts=(2, 3, 4),
+        metadata=True,
+        first_push=False,
+    )
+    assert (
+        cli_module._status_verdict(**base)
+        == "2 new, 3 modified and 4 deleted waiting to push. Run: mm push"
+    )
+    assert cli_module._status_verdict(**{**base, "conflicts": 2}).startswith(
+        "2 unresolved conflicts"
+    )
+    assert cli_module._status_verdict(
+        **{**base, "blocking": "storage failed. Run: mm diag", "conflicts": 2}
+    ).startswith("storage failed")
+    failure = attemptlog.make_run(outcome="failed", cause="storage-error")
+    state = attemptlog.project_runs(
+        {"state": "missing", "runs": {}}, {"state": "valid", "runs": {"pull": failure}}
+    )
+    assert "Latest pull needs attention" in cli_module._status_verdict(
+        **{**base, "projection": state}
+    )
+    capture = {**base, "capture_action": "Usage capture needs attention. Run: mm diag"}
+    assert cli_module._status_verdict(**capture) == capture["capture_action"]
+    assert (
+        cli_module._status_verdict(**{**capture, "first_push": True}) == capture["capture_action"]
+    )
+    assert cli_module._status_verdict(
+        **{**capture, "blocking": "storage failed. Run: mm diag"}
+    ).startswith("storage failed")
+    assert cli_module._status_verdict(**{**capture, "conflicts": 2}).startswith(
+        "2 unresolved conflicts"
+    )
+    assert "Latest pull needs attention" in cli_module._status_verdict(
+        **{**capture, "projection": state}
+    )
+    assert "Metadata-only" in cli_module._status_verdict(**{**base, "counts": (0, 0, 0)})
+    assert "has not pushed yet" in cli_module._status_verdict(**{**base, "first_push": True})
+    clean = {**base, "counts": (0, 0, 0), "metadata": False}
+    assert cli_module._status_verdict(**clean) == "In sync with this device's last push."
+    text = cli_module._status_verdict(**{**clean, "source": "[red]evil\n\x1b[2Jname"})
+    assert text.startswith("Source '[red]evil\\n") and "\n" not in text and "\x1b" not in text
+
+
+@pytest.mark.parametrize("latest,earlier", [("lock-held", "failed"), ("success", "lock-held")])
+def test_status77_skip_and_opposite_verb_regressions(tmp_path, monkeypatch, latest, earlier):
+    from datetime import timedelta
+
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module.console, "_width", 240)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    now = datetime.now(timezone.utc)
+    path = cli_module._autorun_breadcrumb_path()
+    path.write_text(
+        json.dumps(
+            {
+                "pull": {"timestamp": (now - timedelta(seconds=2)).isoformat(), "outcome": earlier},
+                "push": {
+                    "timestamp": (now - timedelta(seconds=3)).isoformat(),
+                    "outcome": "crypto-error",
+                    "detail": "push-older-forensic",
+                },
+            }
+        )
+    )
+    attemptlog.write_run(
+        "pull",
+        attemptlog.make_run(
+            outcome="skipped" if latest == "lock-held" else "success",
+            cause=latest if latest == "lock-held" else "ok",
+            completed_at=(now - timedelta(seconds=1)).isoformat(),
+        ),
+    )
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    assert "Last attended-pull:" in shown.output
+    assert "Last auto-pull:" not in shown.output
+    if latest == "lock-held":
+        assert "Latest pull needs attention" in shown.output.splitlines()[0]
+        assert "recovery is unproven" in shown.output.splitlines()[0]
+    assert "push-older-forensic" not in shown.output  # newer push is independent
+    diag = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert diag["last_autorun"]["push"]["detail"] == "push-older-forensic"
+
+
+def test_status77_clean_attended_then_routine_auto_skip_can_be_healthy(tmp_path, monkeypatch):
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        _mm_events, "discover_git_roots", lambda *a, **k: _mm_events.GitRootDiscovery((), ())
+    )
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    written = attemptlog.read_runs()["runs"]["push"]
+    assert written["outcome"] == "success"
+    cli_module._write_autorun_breadcrumb("push", "lock-held")
+    # Auto's later skip does no work and does not invent a prior failure.
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.splitlines()[0] == "In sync with this device's last push."
+    assert "Last auto-push:" in shown.output and "Last attended-push:" not in shown.output
+
+
+def test_attended77_accepted_content_survives_later_gc_failure(tmp_path, monkeypatch):
+    import typer
+
+    from mind_meld import attemptlog
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+
+    def published(*args, **kwargs):
+        kwargs["attempt"].content_accepted = True
+        return cli_module.PushResult(content_accepted=True, content_changed=True)
+
+    monkeypatch.setattr(cli_module, "_push_core", published)
+
+    def stopped(*a, **k):
+        raise typer.Exit(1)
+
+    monkeypatch.setattr(cli_module, "_do_gc", stopped)
+    shown = runner.invoke(app, ["push"])
+    assert shown.exit_code == 1
+    record = attemptlog.read_runs()["runs"]["push"]
+    assert record["content_accepted"] is True
+    assert record["outcome"] == "failed" and record["cause"] == "command-refused"
+    assert record["counts"]["maintenance_failures"] == 1
+    cli_module.acquire_lock()
+    cli_module.release_lock()
