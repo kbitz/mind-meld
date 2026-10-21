@@ -3585,6 +3585,15 @@ class TestAutoCommands:
         # Error banner present, no raw traceback.
         assert "keyring backend failure" in result.output + (result.stderr or "")
         assert "Traceback" not in result.output + (result.stderr or "")
+        # Value: protects=attended sync names the keyring exception class, never its message;
+        # fails_when=the sync-scope branch echoes str(e) again; why_new=only presence was pinned;
+        # seam=none; no_claim=real keychain behavior (get_passphrase faked)
+        last = result.stderr.splitlines()[-1]
+        assert last.startswith(
+            "Push failed [authentication-error]: keyring backend failure: OSError"
+        )
+        assert last.endswith("Run: mm diag")
+        assert "keychain is locked" not in result.output
 
     def test_init_tolerates_keyring_write_exception(self, tmp_path, monkeypatch):
         """Regression: _register_and_save must not abort on a non-KeyringError
@@ -13980,6 +13989,7 @@ def test_sync78_activity_degradation_survives_later_upload_refusal(capture61, mo
     assert events_tail._ROOT_DISCOVERY_DEGRADATION in record["degradations"]
 
 
+_NEWER78 = cli_module._newer_format_message(3, "manifest")
 _MISSING_ROOT78 = (
     "Cannot publish: source notes is missing after it was previously published. "
     "Previous snapshot kept. Restore the source folder, or run 'mm disable-source notes' "
@@ -14026,10 +14036,43 @@ _MISSING_ROOT78 = (
             "Push refused [lock-held]: another mm operation holds the lock; wait for it to "
             "finish; no content published. Run: mm diag",
         ),
+        # Value: protects=exit-3 and curated refusals end with their own remedy command;
+        # fails_when=preflight_failures selection inverts or a curated remedy maps to mm diag;
+        # why_new=exit-3 and mm update/mm init rows had prefix-only or no coverage;
+        # seam=none; no_claim=which producer emits each message (pure renderer)
+        (
+            {"preflight": "conflict; conflict", "run": {"cause": "command-refused"}},
+            typer.Exit(3),
+            "Pull refused [command-refused]: preflight predicted conflict; conflict; "
+            "no files applied. Run: mm pull --conflict-mode keep-both",
+        ),
+        (
+            {
+                "preflight": "may fail (local file unreadable)",
+                "preflight_failures": True,
+                "run": {"cause": "command-refused"},
+            },
+            typer.Exit(3),
+            "Pull refused [command-refused]: preflight predicted may fail (local file "
+            "unreadable); no files applied. Run: mm diag",
+        ),
+        (
+            {"message": _NEWER78, "run": {"cause": "crypto-error"}},
+            typer.Exit(1),
+            f"Pull failed [crypto-error]: {_NEWER78.rstrip('. ')}; "
+            "no files applied. Run: mm update",
+        ),
+        (
+            {"message": "Not initialized. Run mm init first.", "run": {"stage": "setup-error"}},
+            typer.Exit(1),
+            "Pull failed [setup-error]: Not initialized. Run mm init first; no files applied. "
+            "Run: mm init",
+        ),
     ],
 )
 def test_sync78_failure_line_keeps_curated_remedy_and_known_effects(state, error, expected):
-    assert cli_module._sync_failure("push", state, error) == expected
+    verb = expected.split()[0].lower()
+    assert cli_module._sync_failure(verb, state, error) == expected
 
 
 def test_sync78_outcome_counts_are_singular_at_one():
@@ -14040,6 +14083,19 @@ def test_sync78_outcome_counts_are_singular_at_one():
     partial = cli_module.PullResult(total_written=1, total_failed=1)
     line = cli_module._sync_failure("pull", {"run": {"result": partial}}, None)
     assert line.startswith("Pull incomplete [result-degraded]: 1 file applied, 1 failed;")
+    # Value: protects=conflict copies, skips and no-source state stay on the one pull line;
+    # fails_when=the conflict/skip suffix or no_sources precedence is dropped;
+    # why_new=no test reached these _sync_success branches; seam=none;
+    # no_claim=which pull paths set these counts (pure renderer)
+    one = cli_module.PullResult(total_written=1, total_conflicted=1)
+    assert cli_module._sync_success("pull", one) == "Pull: 2 files applied (1 conflict copy)."
+    many = cli_module.PullResult(total_conflicted=2, total_skipped=1)
+    assert (
+        cli_module._sync_success("pull", many)
+        == "Pull: 2 files applied (2 conflict copies); 1 skipped."
+    )
+    empty = cli_module.PullResult(no_peers=True, no_sources=True)
+    assert cli_module._sync_success("pull", empty) == "Pull: no enabled sources."
 
 
 @pytest.mark.parametrize("verb", ["push", "pull"])
@@ -14091,3 +14147,94 @@ def test_sync78_pull_plain_warnings_strip_control_characters(capsys):
     err = capsys.readouterr().err
     assert err.count("\n") == 1 and "\r" not in err and "\x1b" not in err
     assert "is corrupt - skipping pull from this device." in err
+
+
+@pytest.mark.parametrize("command", ["push", "autopush"])
+@pytest.mark.parametrize("fault", ["whole-walk", "host-lock", "reader-raise", "leaf-notice"])
+def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, fault, command):
+    # Value: protects=one activity loss is counted and recorded once, with no notice text
+    # persisted; fails_when=a scoped notice whose result already records the loss is also
+    # counted (degraded=True), or an unknown leaf notice is dropped or persisted verbatim;
+    # why_new=leaf tests pin the degraded flag only, the bounded test injects the sink
+    # directly; seam=none; no_claim=real Git/host stores (pump, reader and lock faked
+    # in-process; discovery fixed to tmp roots)
+    from contextlib import nullcontext
+
+    from mind_meld import lockedjson
+
+    roots: list[Path] = []
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery(tuple(roots), ()),
+    )
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    # Prime once with deterministic discovery so the fixture's machine-dependent
+    # first capture cannot leave a held cursor behind as unrelated noise.
+    (memory / "prime78.md").write_text("prime")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    if fault == "whole-walk":
+        roots.append(capture61["path"].parent / "repo78")
+        roots[0].mkdir()
+
+        def pump(*args, **kwargs):
+            raise RuntimeError("PRIVATE78 pump")
+            yield
+
+        monkeypatch.setattr(_mm_events, "as_completed", pump)
+    elif fault == "reader-raise":
+
+        def raising(**kwargs):
+            raise RuntimeError("PRIVATE78 reader")
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", raising)
+    elif fault == "leaf-notice":
+
+        def noisy(**kwargs):
+            _mm_host_usage._notice_cache_write_failure(OSError(errno.EIO, "PRIVATE78"))
+            return _mm_host_usage.HostUsageResult({}, complete=True)
+
+        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", noisy)
+    (memory / "loss78.md").write_text("changed")
+    held = (
+        lockedjson.locked_json_rmw(_mm_host_usage.CACHE_PATH)
+        if fault == "host-lock"
+        else nullcontext()
+    )
+    with held:
+        result = runner.invoke(app, [command])
+    assert result.exit_code == 0, result.output
+    assert "PRIVATE78" not in result.output
+    for notice in ("whole-walk failure", "was locked; skipping", "raised", "write failed"):
+        assert notice not in result.output
+    if command == "push":
+        (line,) = result.stdout.splitlines()
+        assert line.startswith("Push: 1 content change published")
+        run = cli_module.attemptlog.read_runs()["runs"]["push"]
+        assert run["outcome"] == "degraded"
+        details = run["degradations"]
+        count = run["counts"].get("events_degradations", 0)
+        if fault == "whole-walk":
+            assert count == 1
+            assert len(details) == 1 and details[0].startswith("git walk dropped 1 repositories")
+        elif fault == "leaf-notice":
+            assert count == 1 and details == [] and run["omitted_details"] == 1
+        else:
+            # The attended capture owns this loss; the tail does not read hosts again.
+            assert count == 0 and details == ["usage capture no-row (none)"]
+    else:
+        assert result.stdout == result.stderr == ""
+        crumb = cli_module._read_autorun_breadcrumbs()["push"]
+        assert crumb["outcome"] == "degraded"
+        detail = crumb["detail"]
+        assert "PRIVATE78" not in detail and "EIO" not in detail
+        expected = {
+            "whole-walk": "git walk dropped 1 repositories",
+            "host-lock": "host-usage snapshot skipped (codex locked)",
+            "reader-raise": "host-usage snapshot skipped (codex unavailable)",
+            "leaf-notice": "1 diagnostic details omitted (run mm diag)",
+        }[fault]
+        assert detail.startswith(expected) and detail.count(expected) == 1
+        assert detail.count("git walk dropped") + detail.count("snapshot skipped") <= 1
+        if fault != "leaf-notice":
+            assert "diagnostic details omitted" not in detail
