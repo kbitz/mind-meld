@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.5] - 2026-10-21
+
+**`mm push` and `mm pull` end on one outcome line.** When the command finishes, the last line says what happened. A push reports the content it published, metadata, source selection, a repaired manifest, held files, or no enabled sources. A pull reports files applied, conflicts, skips, no peers, or no enabled sources. When the command stops, that line names the cause, what already happened, and the one command to run next.
+
+### Changed
+
+- Attended `mm push` and `mm pull` print the success line on stdout and the stopped line on stderr. `mm push --verbose` and `mm pull --verbose` still print the trace on stderr before it.
+- A stopped push or pull names the cause and the next command, such as `mm update`, `mm migrate-config`, `mm init`, `mm devices`, `mm diag`, or `mm push`. A partial attended pull still exits 1.
+- `mm autopush` and `mm autopull` still print nothing when the run succeeds. Warnings that a file failed, a manifest is corrupt, or data was not retained still reach stderr.
+
+### Upgrade notes
+
+- Commands, flags, and synced storage are unchanged. An older mm keeps working beside this one. It does not print this outcome line.
+
 ## [1.11.4] - 2026-10-21
 
 **`mm status` opens with this Mac's sync outcome.** After you authenticate, the first line says whether local content matches this device's last push, gives the exact pending counts, or names the one command that fixes a blocker. An older automatic failure clears once a later attended sync of that same command succeeds.
