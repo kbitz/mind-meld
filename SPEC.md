@@ -319,7 +319,7 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -455,13 +455,13 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 
 ### `mm status [--source NAME]`
 
-1. Build local manifest (no upload).
-2. Fetch remote manifest for current device.
-3. Fetch device list.
-4. Print: local file count, remote file count per device, pending pushes, pending pulls.
-5. If `--source` is given, show changes for that source only. Otherwise group changes by source.
-6. Print the last `autopull` / `autopush` breadcrumb (timestamp + outcome + `detail`), surfacing the `no-sources` and `degraded` outcomes the auto commands write. After a `keyring-locked` or `keyring-no-collection` skip (Track 73A), add a one-line hint linking the README's keyring troubleshooting entry.
-7. **Staleness marker (v0.12.21).** A breadcrumb older than 48h renders as `stale — no autorun in Nh`. The breadcrumb is written from *inside* the command, so any failure before typer's runner — a module-scope `ImportError` being the obvious one — writes nothing at all and step 6 would otherwise report the last `success` forever. This is the one degradation neither the `no-sources` nor the `degraded` breadcrumb can cover, because both are written by code that never ran. Best-effort: a missing or unparseable timestamp yields no marker rather than an error.
+1. Authenticate using the existing passphrase flow, then inspect selected local sources and this device's own manifest without uploading. Incomplete source observations cannot establish a healthy comparison.
+2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
+3. If `--source` is given, name it in the verdict and limit content counts to that source. Keep current capture/publication diagnostics independent of this content filter.
+4. Show local/own-manifest file counts and pending pushes by source. Summarize skipped nested repositories as an exact selected-source count; `mm diag` retains their paths.
+5. Show the selected latest auto or attended execution per push/pull verb. Strictly later valid completed success can resolve an earlier same-verb failure only with sufficient scope; skips, uncertain ordering and limited scope cannot prove recovery. Keep raw autorun and attended evidence plus their projection in `mm diag` and `mm diag --json`. A displayed `keyring-locked` or `keyring-no-collection` auto skip retains the existing keyring troubleshooting hint.
+6. Preserve current capture/publication evidence separately. Hide a capture-attempt row only when its existing supersession proof establishes that it is obsolete; retain it in diag. Missing attended-run history after upgrade is normal, not a successful run.
+7. Preserve autorun staleness meaning: a displayed auto breadcrumb older than 48h says `stale — no autorun in Nh`; an attended run's age is not hook liveness. Missing or unparseable timestamps retain the existing no-age-marker behavior; run-evidence uncertainty is reported separately. See [Status verdicts](README.md#status-verdicts) for evidence states, exit meaning and remedies.
 
 ### `mm sources`
 

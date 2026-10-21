@@ -6711,7 +6711,7 @@ class TestPushMtimeOnlyPropagation:
 
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0, result.output
-        assert "All sources in sync" not in result.output, (
+        assert "In sync with this device's last push." not in result.output, (
             f"status reported 'in sync' on a mtime-only divergence:\n{result.output}"
         )
         assert "Metadata-only changes pending" in result.output, (
@@ -8377,6 +8377,11 @@ class TestApplyRecovery53A:
         assert "Pull complete." not in result.stdout
         if command == "pull":
             assert "Pull interrupted; completed changes were kept." in result.stdout
+            run = cli_module.attemptlog.read_runs()["runs"]["pull"]
+            assert run["outcome"] == "failed"
+            assert run["cause"] == ("interrupted" if failure == "keyboard" else "unexpected-error")
+            assert run["counts"] == {}  # No returned result: do not invent partial counts.
+            assert run["content_accepted"] is None
 
     def test_abort_after_keep_local_records_without_draining(
         self, apply_failure_fleet, monkeypatch
@@ -11506,6 +11511,9 @@ def test_post_push_gc_outcomes_never_undo_accepted_content(capture61, monkeypatc
         assert f"mm: warning: GC skipped ({cause}). Run mm gc for details." in flat
         assert "GC skipped" not in result.stdout
         assert "GC: deleted" not in result.output
+    sync = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert sync["counts"]["maintenance_failures"] == (0 if outcome == "deleted" else 1)
+    assert sync["content_accepted"] is True
     accepted = cli_module.sidecar.read("dev-a")
     assert "projects/-Users-kb-myapp/memory/new.md" in accepted["sources"]["claude"]["files"]
 
@@ -11536,7 +11544,23 @@ def test_publication_evidence_failure_cannot_undo_content_acceptance(capture61, 
     "mode",
     ["published", "capture-failed", "append-failed", "max-file-size", "prerequisites", "no-row"],
 )
-def test_attended_attempt_records_each_capture_outcome(capture61, monkeypatch, mode):
+@pytest.mark.parametrize("content_change", [False, True])
+def test_attended_attempt_records_each_capture_outcome(
+    capture61, monkeypatch, mode, content_change
+):
+    monkeypatch.setattr(
+        _mm_events, "discover_git_roots", lambda *a, **k: _mm_events.GitRootDiscovery((), ())
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "resolve_push_cursor",
+        lambda *a, **k: _mm_events.CursorResolution(
+            since=datetime(2026, 1, 1, tzinfo=timezone.utc), held=True
+        ),
+    )
+    if content_change:
+        (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+
     def fail(*a, **kw):
         raise OSError("capture test failure")
 
@@ -11567,6 +11591,21 @@ def test_attended_attempt_records_each_capture_outcome(capture61, monkeypatch, m
     assert reason is None and record["class"] == mode
     assert record["cause"] == ("no-reader" if mode == "prerequisites" else None)
     assert (record["row_ts"] is not None) == (mode == "published")
+    sync = cli_module.attemptlog.read_runs()["runs"]["push"]
+    capture_degraded = mode not in ("published", "prerequisites")
+    # Explicitly hold the content tail's retro cursor independently of capture.
+    # That degradation must survive successful host capture, without depending
+    # on discovery timing during this fixture's initial push.
+    degraded = capture_degraded or content_change
+    assert sync["outcome"] == ("degraded" if degraded else "success")
+    expected_cause = "no-changes" if mode == "prerequisites" and not content_change else "ok"
+    assert sync["cause"] == ("result-degraded" if degraded else expected_cause)
+    assert sync["content_accepted"] is (content_change or mode == "published")
+    if capture_degraded:
+        assert any("usage capture" in detail for detail in sync["degradations"])
+    elif content_change:
+        assert any(detail.startswith("retro cursor held") for detail in sync["degradations"])
+    assert str(capture61["path"].parent) not in json.dumps(sync)
 
 
 @pytest.mark.parametrize("stage", ["pre-rename", "post-rename", "mkdir"])
@@ -11826,6 +11865,11 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
+    sync = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert (sync["outcome"], sync["cause"]) == ("degraded", "result-degraded")
+    assert sync["content_accepted"] is (case == "readers")
+    if case == "readers":
+        assert "usage capture published (incomplete reader coverage)" in sync["degradations"]
     flat = " ".join(result.stderr.split())
     assert "Content sync continues" in flat and "#host-usage-capture" in flat
     assert "(no-row)" not in flat and "(append-failed)" not in flat
@@ -12010,9 +12054,12 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
     for command in (["status"], ["diag"]):
         shown = runner.invoke(app, command)
         assert shown.exit_code == 0, shown.output
-        assert " ".join(shown.stdout.split()).count(expected) == 1
         if command == ["status"]:
+            assert "Skipped nested repositories: 1. Details: mm diag" in shown.stdout
+            assert "projects/literal*/checkout" not in shown.stdout
             assert "deleted" not in shown.stdout
+        else:
+            assert " ".join(shown.stdout.split()).count(expected) == 1
     shown = runner.invoke(app, ["diag", "--json"])
     assert shown.exit_code == 0, shown.output
     assert json.loads(shown.stdout)["sync_scope"]["skipped_nested_repositories"]["gstack"] == [
@@ -12525,6 +12572,9 @@ def test_interrupt_after_acceptance_before_verdict_records_unverified(capture61,
     record, reason = cli_module.attemptlog.read()
     assert reason is None and record["row_ts"] is not None
     assert (record["class"], record["cause"]) == ("unverified", "evidence-error")
+    sync_run = cli_module.attemptlog.read_runs()["runs"]["push"]
+    assert sync_run["outcome"] == "failed" and sync_run["cause"] == "interrupted"
+    assert sync_run["content_accepted"] is True
     cli_module.acquire_lock()
     cli_module.release_lock()
 
@@ -13082,3 +13132,433 @@ def test_upload_missing_published_root_refuses_sibling(tmp_path, monkeypatch):
     output = " ".join((result.output + (result.stderr or "")).split())
     assert "missing after it was previously published" in output
     assert "Restore the source folder" in output
+
+
+@pytest.fixture
+def status77(tmp_path, monkeypatch):
+    """Real stable sync; isolate optional discovery from machine-dependent budgets."""
+    helpers = TestTrack7BEventsTail()
+    storage, claude = tmp_path / "storage", tmp_path / "claude"
+    helpers._seed_claude(claude)
+    backend = helpers._bootstrap(storage)
+    register_device(backend, "dev-a", "A")
+    path = helpers._make_config_with_events(tmp_path, storage, claude, "dev-a", "A")
+    helpers._activate(monkeypatch, path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    monkeypatch.setattr(
+        _mm_events, "discover_git_roots", lambda *a, **k: _mm_events.GitRootDiscovery((), ())
+    )
+    pushed = runner.invoke(app, ["push"])
+    assert pushed.exit_code == 0, pushed.output
+    return {
+        "cfg": config_module.load_config(path),
+        "path": path,
+        "claude": claude,
+        "backend": backend,
+    }
+
+
+def test_status77_content_and_metadata_round_trips(status77):
+    from mind_meld import attemptlog
+
+    root = status77["claude"] / "projects/-Users-kb-myapp/memory"
+    baseline = runner.invoke(app, ["status"])
+    assert baseline.exit_code == 0, baseline.output
+    # Missing new history on upgrade is normal, not a mandatory seeding run.
+    attemptlog.runs_path().unlink()
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "In sync with this device's last push."
+    )
+    old = root / "user_role.md"
+    (root / "delete77.md").write_text("will delete")
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    changed = old.read_bytes() + b"\nlocal delta\n"
+    old.write_bytes(changed)
+    (root / "new77.md").write_text("new")
+    deleted = root / "delete77.md"
+    deleted.unlink()
+    first = runner.invoke(app, ["status"])
+    assert first.exit_code == 0, first.output
+    assert (
+        first.output.splitlines()[0]
+        == "1 new, 1 modified and 1 deleted waiting to push. Run: mm push"
+    )
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "In sync with this device's last push."
+    )
+    previous = old.stat()
+    os.utime(old, ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000))
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "Metadata-only changes waiting to push. Run: mm push"
+    )
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "In sync with this device's last push."
+    )
+
+
+@pytest.mark.parametrize(
+    "mode", ["unknown", "disabled", "unavailable", "published-missing", "zero", "unreadable"]
+)
+def test_status77_source_completeness(status77, monkeypatch, mode):
+    cfg = status77["cfg"]
+    args = ["status"]
+    if mode == "unknown":
+        args += ["--source", "missing"]
+    elif mode == "disabled":
+        cfg["sync"]["disabled_sources"] = ["claude"]
+        args += ["--source", "claude"]
+    elif mode in ("unavailable", "published-missing"):
+        cfg["sync"]["sources"][0]["path"] = str(status77["path"].parent / "missing")
+        if mode == "unavailable":
+            args += ["--source", "claude"]
+    elif mode == "zero":
+        cfg["sync"]["sources"] = []
+    else:
+        original = cli_module.manifest.read_file_revision
+
+        def denied(path, *a, **k):
+            if path.name == "user_role.md":
+                from mind_meld.errors import SnapshotError
+
+                raise SnapshotError("could not be read")
+            return original(path, *a, **k)
+
+        monkeypatch.setattr(cli_module.manifest, "read_file_revision", denied)
+    save_config(cfg, status77["path"])
+    shown = runner.invoke(app, args)
+    assert "In sync with" not in shown.output.splitlines()[0]
+    assert "deleted waiting" not in shown.output.splitlines()[0]
+    assert "run:" in shown.output.splitlines()[0].lower()
+    if "--source" in args:
+        assert args[-1] in shown.output.splitlines()[0]
+    if mode == "unreadable":
+        assert "Metadata-only changes pending" not in shown.output
+        assert "Comparison incomplete" in shown.output
+
+
+@pytest.mark.parametrize("bad", [{}, [], None])
+def test_status77_malformed_autorun_sibling_stays_unknown(status77, bad):
+    from datetime import timedelta
+
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    cli_module._autorun_breadcrumb_path().write_text(
+        json.dumps({"push": {"timestamp": stamp, "outcome": "success"}, "pull": bad})
+    )
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "run-evidence-corrupt" in result.output.splitlines()[0]
+
+
+@pytest.mark.parametrize("conflict_source,count", [("other", 0), ("claude", 1)])
+def test_status77_conflict_count_respects_source(status77, monkeypatch, conflict_source, count):
+    monkeypatch.setattr(
+        cli_module.resolveflow,
+        "_find_conflict_files",
+        lambda cfg: [(conflict_source, status77["path"].parent / "conflict", None)],
+    )
+    shown = runner.invoke(app, ["status", "--source", "claude"])
+    assert shown.exit_code == 0, shown.output
+    headline = shown.output.splitlines()[0]
+    assert ("1 unresolved conflicts" in headline) is bool(count)
+    if not count:
+        assert "In sync with this device's last push." in headline
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0].startswith("1 unresolved conflicts")
+    )
+
+
+def test_status77_real_scoped_pull_records_selection(status77):
+    from mind_meld import attemptlog
+
+    register_device(status77["backend"], "dev-b", "B")
+    shown = runner.invoke(app, ["pull", "--source", "claude", "--from", "dev-b"])
+    assert shown.exit_code == 0, shown.output
+    attended = attemptlog.read_runs()
+    assert attended["runs"]["pull"]["scope"] == {"source": "claude", "from_device": "dev-b"}
+    projected = attemptlog.project_runs(cli_module._read_autorun_evidence(), attended)
+    assert projected["pull"]["limited_coverage"] is True
+
+
+def test_status77_unused_optional_and_disabled_sources_are_normal(status77):
+    cfg = status77["cfg"]
+    cfg["sync"]["sources"].append(
+        {"name": "optional", "type": "generic", "path": str(status77["path"].parent / "absent")}
+    )
+    save_config(cfg, status77["path"])
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "In sync with this device's last push."
+    )
+    cfg["sync"]["disabled_sources"] = ["optional"]
+    save_config(cfg, status77["path"])
+    assert (
+        runner.invoke(app, ["status"]).output.splitlines()[0]
+        == "In sync with this device's last push."
+    )
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt", "newer"])
+def test_status77_own_manifest_state_prevents_healthy(status77, state):
+    key = storage_keys.manifest_key("dev-a")
+    backend = status77["backend"]
+    if state == "missing":
+        backend.delete(key)
+    else:
+        backend.put(key, b"bad" if state == "corrupt" else b"\x03")
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    first = shown.output.splitlines()[0]
+    assert "In sync" not in first
+    assert (
+        "has not pushed yet" if state == "missing" else "corrupt" if state == "corrupt" else "newer"
+    ) in first
+
+
+@pytest.mark.parametrize("width", [24, 80, 240])
+def test_status77_verdict_first_both_streams_narrow_and_notty(status77, monkeypatch, width):
+    import sys
+
+    monkeypatch.setattr(cli_module.console, "_width", width)
+    monkeypatch.setattr(cli_module.stderr_console, "_width", width)
+    original = cli_module._read_capture_rows
+
+    def notices(*a, **k):
+        print("preparatory stdout notice")
+        print("preparatory stderr notice", file=sys.stderr)
+        return original(*a, **k)
+
+    monkeypatch.setattr(cli_module, "_read_capture_rows", notices)
+    shown = runner.invoke(app, ["status"])
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.splitlines()[0] == "In sync with this device's last push."
+    assert "preparatory stdout notice" in shown.stdout
+    assert "preparatory stderr notice" in shown.stderr
+    assert shown.stdout.startswith("In sync with this device's last push.\n")
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_status77_fatal_replays_notices_preserves_exception(status77, monkeypatch, late):
+    import sys
+
+    def fail(*a, **k):
+        print("ancillary stdout")
+        print("ancillary stderr", file=sys.stderr)
+        raise RuntimeError("original")
+
+    monkeypatch.setattr(cli_module, "_host_publication" if late else "get_backend", fail)
+    shown = runner.invoke(app, ["status"])
+    assert isinstance(shown.exception, RuntimeError)
+    assert str(shown.exception) == "original"
+    assert shown.output.splitlines()[0] == "Status inspection failed (RuntimeError)."
+    assert "ancillary stdout" in shown.stdout and "ancillary stderr" in shown.stderr
+    assert shown.output.splitlines()[-1] == "Inspection did not complete. Run: mm diag"
+
+
+@pytest.mark.parametrize("cancel", [False, True, "eof"])
+def test_status77_auth_boundary_preserves_prompts(status77, monkeypatch, cancel):
+    import getpass
+
+    monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
+    import keyring
+
+    monkeypatch.setattr(keyring, "get_password", lambda *a: None)
+
+    def prompt(*args, **kwargs):
+        print("Mind Meld passphrase: ", end="")
+        if cancel == "eof":
+            raise EOFError()
+        if cancel:
+            raise KeyboardInterrupt()
+        return PASSPHRASE
+
+    monkeypatch.setattr(getpass, "getpass", prompt)
+    shown = runner.invoke(app, ["status"])
+    if cancel:
+        assert shown.exit_code != 0
+        assert "In sync with" not in shown.output
+    else:
+        assert shown.exit_code == 0, shown.output
+        assert shown.output.startswith(
+            "Mind Meld passphrase: In sync with this device's last push.\n"
+        )
+
+
+def test_status77_preview_and_inspection_leave_run_bytes_unchanged(status77):
+    from mind_meld import attemptlog
+
+    path = attemptlog.runs_path()
+    initial = (path.read_bytes(), path.stat().st_mtime_ns)
+    for args in (["push", "--dry-run"], ["pull", "--dry-run"], ["status"], ["diag", "--json"]):
+        shown = runner.invoke(app, args)
+        assert shown.exit_code == 0, shown.output
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == initial
+    path.unlink()
+    for args in (["push", "--dry-run"], ["pull", "--dry-run"], ["status"], ["diag", "--json"]):
+        assert runner.invoke(app, args).exit_code == 0
+        assert not path.exists()
+        assert not path.with_suffix(".json.lock").exists()
+
+
+def test_status77_source_count_isolation_and_nested_diag_paths(status77):
+    cfg = status77["cfg"]
+    for name, count in (("alpha", 1), ("beta", 2)):
+        root = status77["path"].parent / name
+        (root / "items").mkdir(parents=True)
+        for i in range(count):
+            (root / "items" / f"new{i}.md").write_text("pending")
+            (root / "items" / f"checkout{i}" / ".git").mkdir(parents=True)
+        cfg["sync"]["sources"].append(
+            {"name": name, "type": "generic", "path": str(root), "include_dirs": ["items"]}
+        )
+    save_config(cfg, status77["path"])
+    for name, count in (("alpha", 1), ("beta", 2)):
+        shown = runner.invoke(app, ["status", "--source", name])
+        assert shown.exit_code == 0, shown.output
+        assert shown.output.splitlines()[0] == (
+            f"Source '{name}' — {count} new, 0 modified and 0 deleted waiting to push. Run: mm push"
+        )
+        assert f"Skipped nested repositories: {count}. Details: mm diag" in shown.output
+        assert "items/checkout" not in shown.output
+    diag = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert diag["sync_scope"]["skipped_nested_repositories"]["alpha"] == ["items/checkout0"]
+    assert diag["sync_scope"]["skipped_nested_repositories"]["beta"] == [
+        "items/checkout0",
+        "items/checkout1",
+    ]
+
+
+def test_status77_conflicts_and_failed_conflict_inspection(status77, monkeypatch):
+    monkeypatch.setattr(cli_module.resolveflow, "_find_conflict_files", lambda cfg: ["one", "two"])
+    shown = runner.invoke(app, ["status"])
+    assert shown.output.splitlines()[0] == "2 unresolved conflicts. Run: mm resolve"
+
+    def denied(cfg):
+        raise PermissionError("private")
+
+    monkeypatch.setattr(cli_module.resolveflow, "_find_conflict_files", denied)
+    shown = runner.invoke(app, ["status"])
+    assert "Conflict inspection incomplete" in shown.output.splitlines()[0]
+    assert "private" not in shown.output
+
+
+@pytest.mark.parametrize("mtime", [None, "bad", "2026-01-01", "2026-01-01T00:00:00+00:00"])
+def test_status77_mtime_helper_does_not_invent_forward_metadata(mtime):
+    local = {"sources": {"claude": {"files": {"a": {"sha256": "same", "mtime": mtime}}}}}
+    remote = {"claude": {"files": {"a": {"sha256": "same", "mtime": "2026-02-01T00:00:00+00:00"}}}}
+    assert not cli_module._has_mtime_only_changes_vs_remote(local, remote)
+
+
+@pytest.mark.parametrize("width", [24, 80])
+@pytest.mark.parametrize("color", [False, True])
+@pytest.mark.parametrize("ancillary", [False, True])
+def test_status77_typed_fatal_keeps_message_and_remedy(
+    status77, monkeypatch, width, color, ancillary
+):
+    import sys
+
+    from rich.console import Console
+
+    from mind_meld import attemptlog
+    from mind_meld.errors import CryptoError
+
+    message = "crypto: missing initialization. Run 'mm init' to initialize this storage."
+    monkeypatch.setattr(
+        cli_module,
+        "stderr_console",
+        Console(
+            stderr=True,
+            force_terminal=color,
+            color_system="standard" if color else None,
+            no_color=False,
+            width=width,
+        ),
+    )
+
+    def refuse(*args, **kwargs):
+        if ancillary:
+            print("ancillary stdout")
+            print("ancillary stderr", file=sys.stderr)
+        raise CryptoError(message)
+
+    monkeypatch.setattr(cli_module, "_init_crypto_session", refuse)
+    path = attemptlog.runs_path()
+    before = (path.read_bytes(), path.stat().st_mtime_ns)
+    shown = runner.invoke(app, ["status"], color=True)
+    assert shown.exit_code == 1, shown.output
+    lines = shown.output.splitlines()
+    expected = "Error: " + message
+    assert lines[0] == expected
+    assert lines[-1] == expected
+    assert lines.count(expected) == (2 if ancillary else 1)
+    assert "Inspection did not complete. Run: mm diag" not in shown.output
+    assert ("ancillary stdout" in shown.stdout) == ancillary
+    assert ("ancillary stderr" in shown.stderr) == ancillary
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_status77_unrelated_scan_failure_does_not_block_selected_source(status77, monkeypatch):
+    cfg = status77["cfg"]
+    other = status77["path"].parent / "other"
+    other.mkdir()
+    (other / "other.md").write_text("other context")
+    cfg["sync"]["sources"].append(
+        {
+            "name": "other",
+            "type": "generic",
+            "path": str(other),
+            "include_files": ["other.md"],
+        }
+    )
+    save_config(cfg, status77["path"])
+    original = cli_module.manifest.read_file_revision
+
+    def denied(path, *args, **kwargs):
+        if path == other / "other.md":
+            from mind_meld.errors import SnapshotError
+
+            raise SnapshotError("unrelated source could not be read")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(cli_module.manifest, "read_file_revision", denied)
+    shown = runner.invoke(app, ["status", "--source", "claude"])
+    assert shown.exit_code == 0, shown.output
+    assert shown.output.splitlines()[0] == (
+        "Source 'claude' — In sync with this device's last push."
+    )
+    whole = runner.invoke(app, ["status"])
+    assert whole.exit_code == 0, whole.output
+    assert "Source inspection incomplete" in whole.output.splitlines()[0]
+
+
+@pytest.mark.parametrize("mode", ["published-oversized", "new-oversized", "deleted", "excluded"])
+def test_status77_omitted_file_comparison_is_truthful(status77, mode):
+    cfg = status77["cfg"]
+    root = status77["claude"] / "projects/-Users-kb-myapp/memory"
+    path = root / "user_role.md"
+    if mode == "deleted":
+        path.unlink()
+    else:
+        if mode == "new-oversized":
+            path = root / "new-oversized.md"
+        path.write_text("x" * 4096)
+        cfg["sync"]["max_file_size"] = 2048
+        if mode == "excluded":
+            cfg["sync"]["sources"][0]["exclude_patterns"] = ["**/user_role.md"]
+        save_config(cfg, status77["path"])
+    shown = runner.invoke(app, ["status", "--source", "claude"])
+    assert shown.exit_code == 0, shown.output
+    headline = shown.output.splitlines()[0]
+    if mode == "published-oversized":
+        assert "Source inspection incomplete" in headline
+        assert "deleted waiting" not in headline
+        assert "Comparison incomplete" in shown.output
+    elif mode == "new-oversized":
+        assert "In sync with this device's last push." in headline
+    else:
+        assert "0 new, 0 modified and 1 deleted waiting to push" in headline

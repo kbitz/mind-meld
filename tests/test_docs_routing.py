@@ -988,6 +988,8 @@ _DIAG_JSON_TOP_LEVEL = (
     "storage_inventory",
     "sync_scope",
     "last_autorun",
+    "last_attended_runs",
+    "sync_run_projection",
     "skill_links",
     "host_skill_discovery",
     "host_usage",
