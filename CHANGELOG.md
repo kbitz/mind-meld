@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.4] - 2026-10-21
+
+**`mm status` opens with this Mac's sync outcome.** After you authenticate, the first line says whether local content matches this device's last push, gives the exact pending counts, or names the one command that fixes a blocker. An older automatic failure clears once a later attended sync of that same command succeeds.
+
+### Added
+
+- After the passphrase prompt, `mm status` prints one plain first line: in sync with this device's last push, exact new, modified, and deleted counts, metadata still waiting, a machine that has not pushed yet, conflicts, or a named blocker with its fixing command. `mm diag` keeps the raw run records and nested-checkout paths.
+- Attended `mm push` and `mm pull` keep a private on-this-Mac record of the latest run of each command. A later success of that same command replaces an older automatic failure in the status summary. A push does not clear a pull problem. The record is not synced.
+
+### Upgrade notes
+
+- Commands, flags, and synced storage are unchanged. An older mm keeps working beside this one. Its status report does not open with this verdict, and it does not read the new local run record.
+
 ## [1.11.3] - 2026-10-20
 
 **`mm push` keeps going when a file is still changing.** It re-reads that file once. If the file is still changing, the last published copy stays, a never-published file is left out, and the rest of the push goes out. An attended push names the files that are not yet synced. `mm autopush` records that lag for `mm status`, and `mm recapture` says when its event file stayed local. A source folder that disappears during the upload still stops the push.

@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.4 | 2026-10-21 | **`mm status` opens with this Mac's sync outcome.** After you authenticate, the first line says whether local content matches this device's last push, gives the exact pending counts, or names the one command that fixes a blocker. An older automatic failure clears once a later attended sync of that same command succeeds. |
 | 1.11.3 | 2026-10-20 | **`mm push` keeps going when a file is still changing.** It re-reads that file once. If the file is still changing, the last published copy stays, a never-published file is left out, and the rest of the push goes out. An attended push names the files that are not yet synced. `mm autopush` records that lag for `mm status`, and `mm recapture` says when its event file stayed local. A source folder that disappears during the upload still stops the push. |
 | 1.11.2 | 2026-10-19 | **Pytest can no longer write this Mac's real Mind Meld account state, configured storage, or agent folders through the remaining raw writers.** A test that reaches those paths stops before the writer creates or changes anything. `mm` itself is unchanged: the check runs only while pytest is running. |
 | 1.11.1 | 2026-10-17 | **Installing 1.11.1 does not change how `mm` syncs.** The store design and its test model now describe how a restored machine and a publish torn by a crash recover. Nothing in `mm` calls that code yet. |
