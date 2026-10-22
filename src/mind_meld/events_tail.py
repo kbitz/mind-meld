@@ -408,7 +408,7 @@ def _default_host_readers(
     if HOST_READER_SOURCE_GATE["agy"] in enabled:
 
         def _read_agy(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_agy_usage(deadline=deadline)
+            return host_usage.read_agy_usage(deadline=deadline, consented=True)
 
         chosen.append(("agy", _read_agy))
     return tuple(chosen)

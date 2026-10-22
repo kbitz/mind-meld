@@ -269,7 +269,7 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Grok / Cursor (Conductor + enrolled CLI) / Muse readers as one additive
+The tail publishes the local Codex / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
 `host-usage-snapshot` row. `host_usage` stays the sole reader and
 model-family authority; `events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
@@ -346,8 +346,9 @@ Any `step_type != 15` carrying nonzero tokens refuses as `"unsupported"`.
 Models are resolved from `gen_metadata.data` Tag 1.3 (`model_enum`) -> Tag 1.19 (`model_slug`).
 Turns are deduplicated across DBs by `sha256(f"agy\0{bot_id}")`.
 Cached in `~/.config/mind-meld/agy-host-tokens.json` using forensic replacement
-`files = staged_files if result.complete else {**cached_files, **staged_files}`, trimmed
-to `MAX_BY_DAY_DAYS`. Antigravity models (`gemini-*`) classify as `"agy"` (`host_family()`),
+`files = staged_files if result.complete else {**cached_files, **staged_files}`.
+Full per-DB turns remain in the cache; the wire snapshot is trimmed to
+`MAX_BY_DAY_DAYS`. Antigravity models (`gemini-*`) classify as `"agy"` (`host_family()`),
 rendered in the `Antigravity` agent row. Verified API pricing (`gemini-4-argon`, `gemini-3.8-flash`)
 is in `token_usage.py` (`PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"`).
 
@@ -2549,33 +2550,18 @@ healthy store does not fail the gate open.
 `get_sources` above the hook so consent is known; the hook itself does not
 move relative to device registration or the events tail. That hoist also
 explicitly creates the default mm-events root before the installer. `mm diag` is
-passphrase-free and prints the skill-links block plus `host_skill_discovery`
-(Grok inspect probe; sibling key, never a `skill_links` row). `mm status` prints one
+passphrase-free and prints the skill-links block. `mm status` prints one
 line only when a link is broken (the first broken row through
 `render_skill_status`, including the restart clause). It is silent for every
 working-as-intended state, including `removed-by-user` — a deliberate deletion
 is not a fault. The 0.12.42 policy-transition notice that used to ride along
 here was deleted in v0.12.44 (see above).
 
-**Host skill discovery (`mm diag` only).** `host_skill_discovery.py:probe_grok_skill_discovery`
-runs `grok inspect --json` (argv subprocess, no shell, stdin=DEVNULL, 2s timeout,
-capped stdout). It extracts four values — Claude/skills compat bool, whether
-`retro-fleet` resolved, the resolved path, and the observed Grok version —
-and discards everything else. Failure states are five distinct strings:
-`binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`,
-`unsupported-schema`. Presence is `shutil.which("grok")`, not
-`config.grok_customization_dirs_exist` (that predicate is False when
-`~/.grok` has no `skills/`/`commands/`/`rules/`, which is a working Grok
-install). `$GROK_HOME` is a `host_usage` sessions-only override and is not
-consulted. Never persist or sync the result. Never call this from status,
-push, or autopush. Do not append the result to `skill_links` —
-`BROKEN_SKILL_STATUSES` filtering and the README uninstall loop treat that
-list as link-bearing.
-
 **Registry exit criterion.** mm maintains a skill link only for hosts that
-do not discover `~/.claude/skills`. Verified 2026-08-24: Grok 1.0.5 does
-(`grok inspect --json`); Codex and OpenCode show no evidence of it. Re-check
-with that command, not with static inference.
+do not discover `~/.claude/skills`: Claude Code, Codex and Antigravity have
+registry rows. Muse discovers that directory and needs no link. The retired
+Grok Build discovery probe and OpenCode reaper are removed; `mm diag` no
+longer emits `host_skill_discovery`.
 
 **`mm install-skills`.** Force-runs the installer with `explicit=True`, ignoring
 the TTL gate. Renders `render_skill_status` for foreign/dangling outcomes. Exits

@@ -4034,3 +4034,33 @@ class TestCursorJsonlGolden70A:
         assert json.dumps(actual, sort_keys=True) == json.dumps(
             _CURSOR_JSONL_GOLDEN, sort_keys=True
         )
+
+
+def test_not_a_directory_on_speculative_probe_is_skipped(tmp_path: Path) -> None:
+    """T1-2: ENOTDIR on the speculative path is absence, not io_error."""
+    parent = tmp_path / "file-not-dir"
+    parent.write_text("x", encoding="utf-8")
+    assert hu._is_regular_non_symlink(parent / "updates.jsonl") is False
+
+
+def test_codex_rollout_vanishing_between_iterdir_and_lstat_is_skipped(
+    isolated_cache: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """T1-4: the Codex TOCTOU window. A rollout reaped after listing
+    used to fail the whole scan; absence is now a skip."""
+    root = tmp_path / "sessions"
+    _write_rollout(root, "rollout-keep.jsonl", [_context(), _token(10)])
+    _write_rollout(root, "rollout-gone.jsonl", [_context(), _token(99)])
+    real_lstat = Path.lstat
+
+    def maybe_gone(self: Path):
+        if self.name == "rollout-gone.jsonl":
+            raise FileNotFoundError("reaped")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", maybe_gone)
+
+    result = hu.read_codex_usage(root)
+
+    assert result.complete is True
+    assert result.hosts["codex"]["2026-08-15"]["input"] == 10

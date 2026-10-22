@@ -210,8 +210,8 @@ Mind Meld has one user and makes no compatibility promise beyond its storage for
 | 3 | `pull --conflict-mode fail` preflight predicts a conflict or local failure, including with `--dry-run`; no files applied. |
 | 4 | `recapture` completed only partially (`RECAPTURE_EXIT_PARTIAL`). |
 
-Each outcome maps to a behavioral test in
-[`EXIT_EVIDENCE`](tests/test_compat_contract.py); the [Previews](#previews)
+Behavioral exit tests live in
+[`tests/test_integration.py`](tests/test_integration.py); the [Previews](#previews)
 table lists the applicable codes per command. Exit 0 from content sync does
 not prove host usage was captured or published.
 
@@ -352,8 +352,9 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 `mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this Mac into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave the Mac. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
 
-Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first upgrade
-to v0.14.17+ and verify with `mm --version`, then:
+Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first run
+`mm update` to install the release with Antigravity support, verify with
+`mm --version`, then:
 
 1. `mm enable-source agy`
 2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
@@ -1164,7 +1165,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
-**`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55 (and Grok Build was retired on 2026-10-22). The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` retired block and records the name in `disabled_sources` so that push does not mint deletion tombstones.
+**`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
 **`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
@@ -1439,7 +1440,7 @@ double counting.
 Capture and source bootstrap run under the mm lock before the manifest scan.
 There is one bounded sweep and at most one warm read per cold reader; that warm
 read supplies the result. Allow **about five seconds of scanning per cold reader,
-and both readers can be cold**. Budgets are cooperative, not hard timeouts;
+and multiple readers can be cold**. Budgets are cooperative, not hard timeouts;
 content sync follows capture. A smaller interactive budget does not cap the
 separate warm allowance. Autopush stays gated on substantive changes and never
 warms; it is not an attended substitute with the same failure reporting.
@@ -1705,7 +1706,8 @@ updates. Older mm ignores the additive root keys.
 `model_count`, `models`, `last_reason`, and `last_reason_since`.
 `host_usage.agy` keys are `consented`, `complete_once`, `usage_less_skipped`,
 `cache_state`, `model_count`, `models`, `last_reason`, `last_reason_since`,
-`files_cached`, and `files_on_disk`. The text line is `agy DBs cached: N of M`;
+`last_error_detail`, `error_db_count`, `files_cached`, and `files_on_disk`.
+The text line is `agy conversation DBs cached: N of M`;
 missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
 Both reader dictionaries also expose `last_complete_ms`, `last_complete_at`,
 and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
@@ -1816,8 +1818,8 @@ prompt` only predicts; it never prompts.
 Inspection commands leave sync data alone. `status` may seed or recover only
 `~/.config/mind-meld/seen-sources.json`; steady-state reads write nothing.
 Author-filtered `retro-fleet` may write its identity cache on every run,
-including a warm hit; `--no-author-filter` avoids it. `diag`'s `grok inspect`
-and identity discovery's `gh`/`git` subprocesses may manage their own host
+including a warm hit; `--no-author-filter` avoids it. Identity discovery's
+`gh`/`git` subprocesses may manage their own host
 state. Status reads only the cached upgrade result, showing its age when stale.
 
 **Upgrading to v0.14.15:** preview exit codes are unchanged. Pull preview's
@@ -1862,13 +1864,11 @@ pipx uninstall mind-meld
 # at that path is left alone. Installation now also requires source consent
 # (or `mm install-skills --agent`); cleanup still matches on readlink.
 # Covers every agent mm has ever created a store-backed skill link for,
-# including the retired OpenCode path. mm removes its own OpenCode link on
-# upgrade (v0.13.0); this loop is belt-and-braces for a machine that
-# uninstalls without ever running the retirement release. Do not delete
-# the opencode path as a "prose sweep" — it is an explicit exception.
+# including Antigravity and the retired OpenCode path. Current mm no longer
+# removes old OpenCode links automatically; this loop handles leftovers too.
 # `mm diag` prints the authoritative live list if you still have `mm`; this
 # loop does not need it.
-for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do
+for l in ~/.claude/skills/retro-fleet ~/.codex/skills/retro-fleet ~/.gemini/config/skills/retro-fleet ~/.config/opencode/skills/retro-fleet; do
   [ "$(readlink "$l")" = "$HOME/.local/share/mind-meld/agent-skills/retro-fleet" ] && rm -f "$l"
 done
 

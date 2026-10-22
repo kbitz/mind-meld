@@ -847,6 +847,35 @@ class TestCursorUsageConsent:
 
 
 class TestRetiredSourceToggle:
+    @pytest.mark.parametrize("keep_claude", [False, True])
+    def test_reconfigure_records_retired_sources_without_inspecting_their_fields(
+        self, cfg, isolated_seen_sources, monkeypatch, keep_claude
+    ):
+        from mind_meld.config import load_config
+
+        config = load_config(cfg)
+        config["sync"]["sources"] = [
+            *([config["sync"]["sources"][0]] if keep_claude else []),
+            {"name": "grok", "path": 17, "exclude_patterns": False},
+            {"name": "opencode"},
+        ]
+        save_config(config, cfg)
+        prompts = []
+
+        def choose(prompt, default):
+            prompts.append(prompt)
+            return keep_claude and "'claude'" in prompt
+
+        monkeypatch.setattr(typer, "confirm", choose)
+        result = runner.invoke(app, ["reconfigure-sources"])
+        assert result.exit_code == 0, result.output
+        on_disk = load_config(cfg)
+        assert [s["name"] for s in on_disk["sync"]["sources"]] == (
+            ["claude"] if keep_claude else []
+        )
+        assert {"grok", "opencode"} <= set(on_disk["sync"]["disabled_sources"])
+        assert not any("grok" in p or "opencode" in p for p in prompts)
+
     @pytest.mark.parametrize("name", ["grok", "opencode"])
     @pytest.mark.parametrize("force", [False, True])
     def test_enable_source_retired_name_rejected_even_with_force(self, cfg, name, force):
@@ -895,31 +924,44 @@ class TestMuseSourceToggle:
             on_disk = tomllib.load(f)
         assert "muse" in (on_disk["sync"].get("disabled_sources") or [])
 
-    def test_enable_source_muse_materializes_legacy_sources_before_adding_row(
-        self, cfg, isolated_seen_sources, monkeypatch, tmp_path
+    @pytest.mark.parametrize("name", ["muse", "agy"])
+    def test_enable_source_materializes_legacy_sources_before_adding_row(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path, name
     ):
-        """Explicit Muse enable must not replace a legacy Claude source."""
+        """Explicit host enable must preserve legacy Claude and record consent."""
         import tomllib
 
         from mind_meld.config import get_sources, load_config, save_config
 
         home = tmp_path / "home"
         (home / ".local" / "share" / "muse").mkdir(parents=True)
+        (home / ".gemini" / "antigravity-cli" / "conversations").mkdir(parents=True)
+        monkeypatch.setattr(
+            "mind_meld.host_usage.AGY_CONVERSATIONS_PATH",
+            home / ".gemini/antigravity-cli/conversations",
+        )
         monkeypatch.setenv("HOME", str(home))
         config = load_config(cfg)
         config["sync"].pop("sources")
         config["sync"]["claude_dir"] = str(tmp_path / ".claude")
         save_config(config, cfg)
 
-        result = runner.invoke(app, ["enable-source", "muse"])
+        result = runner.invoke(app, ["enable-source", name])
         assert result.exit_code == 0, result.output
+        assert f"Enabled source '{name}'" in result.output
+        if name == "agy":
+            assert "skills/" in result.output
+            assert "rules/" in result.output
+            assert "local Antigravity" in result.output
+            assert "not synced" in result.output
+            assert "mm disable-source agy" in result.output
 
         with open(cfg, "rb") as f:
             on_disk = tomllib.load(f)
-        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "muse") == (
-            get_default_source("muse")
+        assert next(s for s in on_disk["sync"]["sources"] if s["name"] == name) == (
+            get_default_source(name)
         )
-        assert [source["name"] for source in get_sources(load_config(cfg))] == ["claude", "muse"]
+        assert [source["name"] for source in get_sources(load_config(cfg))] == ["claude", name]
         assert next(s for s in on_disk["sync"]["sources"] if s["name"] == "claude") == {
             "name": "claude",
             "path": str((tmp_path / ".claude").resolve()),
@@ -932,6 +974,44 @@ class TestMuseSourceToggle:
 
 
 class TestReconfigureSources:
+    @pytest.mark.parametrize(
+        "detected_tree", [None, ".gemini/config", ".gemini/antigravity-cli/conversations"]
+    )
+    def test_legacy_agy_prompt_defaults_to_detection(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path, detected_tree
+    ):
+        """Interactive enrollment offers the detected host, never an absent one."""
+        from mind_meld.config import load_config
+
+        home = tmp_path / "home"
+        home.mkdir()
+        if detected_tree:
+            (home / detected_tree).mkdir(parents=True)
+        monkeypatch.setattr(
+            "mind_meld.host_usage.AGY_CONVERSATIONS_PATH",
+            home / ".gemini/antigravity-cli/conversations",
+        )
+        monkeypatch.setenv("HOME", str(home))
+        config = load_config(cfg)
+        config["sync"].pop("sources")
+        config["sync"]["claude_dir"] = str(tmp_path / ".claude")
+        save_config(config, cfg)
+        defaults = []
+
+        def accept_default(prompt, default):
+            if "'agy'" in prompt:
+                defaults.append(default)
+            return default
+
+        monkeypatch.setattr(typer, "confirm", accept_default)
+        result = runner.invoke(app, ["reconfigure-sources"])
+        assert result.exit_code == 0, result.output
+        assert defaults == [detected_tree is not None]
+        on_disk = load_config(cfg)
+        assert ("agy" in [s["name"] for s in on_disk["sync"]["sources"]]) is (
+            detected_tree is not None
+        )
+
     def test_reconfigure_sources_skips_retired_sources(
         self, cfg, isolated_seen_sources, monkeypatch
     ):

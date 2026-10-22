@@ -329,6 +329,55 @@ class TestPushPullRoundTrip:
         )
         assert not [key for key in remote["tombstones"] if key.startswith("claude:")]
 
+    def test_usage_only_agy_push_repeats_but_missing_populated_root_refuses(
+        self, tmp_path, monkeypatch
+    ):
+        """An empty published source is not evidence that its root ever existed."""
+        storage_dir = tmp_path / "storage"
+        claude_dir = tmp_path / ".claude"
+        self._populate_claude(claude_dir)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        config_path = self._make_config(tmp_path, storage_dir, claude_dir, "dev-a", "A")
+        home = tmp_path / "home"
+        (home / ".gemini/antigravity-cli/conversations").mkdir(parents=True)
+        monkeypatch.setattr(
+            _mm_host_usage, "AGY_CONVERSATIONS_PATH", home / ".gemini/antigravity-cli/conversations"
+        )
+        monkeypatch.setenv("HOME", str(home))
+        config = config_module.load_config(config_path)
+        config["sync"]["sources"].append(config_module.get_default_source("agy"))
+        save_config(config, config_path)
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
+
+        for _ in range(2):
+            pushed = runner.invoke(app, ["push"])
+            assert pushed.exit_code == 0, pushed.output
+            remote = load_manifest(
+                decrypt(
+                    backend.get("manifests/dev-a/manifest.json.enc"),
+                    PASSPHRASE,
+                    memory_kb=MEMORY_KB,
+                )
+            )
+            assert remote["sources"]["agy"]["files"] == {}
+        status = runner.invoke(app, ["status"])
+        assert status.exit_code == 0, status.output
+        assert "Source inspection incomplete" not in status.output
+
+        root = home / ".gemini/config"
+        root.mkdir()
+        (root / "AGENTS.md").write_text("Antigravity context\n")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        published = backend.get("manifests/dev-a/manifest.json.enc")
+        shutil.rmtree(root)
+        refused = runner.invoke(app, ["push"])
+        assert refused.exit_code == 1, refused.output
+        assert "is missing after it was previously published" in refused.output
+        assert backend.get("manifests/dev-a/manifest.json.enc") == published
+
     def test_deletion_not_propagated_in_additive_model(self, tmp_path, monkeypatch):
         """Delete on A, push, pull to B — B preserves its local copy (additive model)."""
         storage_dir = tmp_path / "storage"
@@ -1839,9 +1888,9 @@ class TestDisabledSourcesTombstoneSuppression:
         )
         assert "opencode:skills/gone/SKILL.md" in remote.get("tombstones", {})
 
-    def test_legacy_peer_opencode_section_is_not_pulled(self, tmp_path, monkeypatch):
-        """Mixed fleet: a peer still publishing sources.opencode must not
-        land files under the local opencode path, and pull must not error."""
+    @pytest.mark.parametrize("retired_name", ["grok", "opencode"])
+    def test_legacy_peer_retired_section_is_ignored(self, tmp_path, monkeypatch, retired_name):
+        """Retired peer files stay out of pull, previews, diff and status."""
         storage_dir = tmp_path / "storage"
         claude_a = tmp_path / "a" / ".claude"
         opencode_a = tmp_path / "a" / "opencode-root"
@@ -1886,7 +1935,6 @@ class TestDisabledSourcesTombstoneSuppression:
                 "sources": [
                     {"name": "claude", "path": str(claude_b), "type": "claude"},
                 ],
-                "disabled_sources": ["opencode"],
             },
             "crypto": {"argon2_memory_kb": MEMORY_KB},
         }
@@ -1898,9 +1946,47 @@ class TestDisabledSourcesTombstoneSuppression:
         self._activate(monkeypatch, config_path_b)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
+        # Seed the encrypted legacy peer directly: this version's push would
+        # already remove retired entries and make the consumer check vacuous.
+        peer = load_manifest(
+            decrypt(
+                backend.get("manifests/dev-b/manifest.json.enc"), PASSPHRASE, memory_kb=MEMORY_KB
+            )
+        )
+        payload = b"retired peer content"
+        sha = hashlib.sha256(payload).hexdigest()
+        peer["sources"][retired_name] = {
+            "files": {
+                "skills/retired-sentinel/SKILL.md": {
+                    "sha256": sha,
+                    "mtime_ns": 1,
+                    "size": len(payload),
+                }
+            }
+        }
+        backend.put(
+            storage_keys.blob_key("dev-b", sha), encrypt(payload, PASSPHRASE, memory_kb=MEMORY_KB)
+        )
+        backend.put(
+            "manifests/dev-b/manifest.json.enc",
+            encrypt(serialize_manifest(peer), PASSPHRASE, memory_kb=MEMORY_KB),
+        )
+
+        # Status compares with this device's prior push, rather than a peer.
+        inspected = runner.invoke(app, ["status"])
+        assert inspected.exit_code == 0, inspected.output
+        assert "retired-sentinel" not in inspected.output
+        assert "Metadata-only changes pending" not in inspected.output
+
         self._activate(monkeypatch, config_path_a)
+        for args in (["diff", "--from", "dev-b"], ["pull", "--dry-run"]):
+            inspected = runner.invoke(app, args)
+            assert inspected.exit_code == 0, inspected.output
+            assert "retired-sentinel" not in inspected.output
+            assert f"unknown source '{retired_name}'" not in inspected.output
         result = runner.invoke(app, ["pull"])
         assert result.exit_code == 0, result.output
+        assert f"unknown source '{retired_name}'" not in result.output
         landed = list(opencode_a.rglob("SKILL.md")) if opencode_a.exists() else []
         assert landed == [], f"Retired source must not pull peer content; got {landed}"
         claude_landed = list(claude_b.rglob("user_role.md"))

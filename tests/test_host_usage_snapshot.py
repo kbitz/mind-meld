@@ -141,6 +141,19 @@ class TestReaderOrchestration:
         readers["muse"](deadline=1_000.0)
         assert seen == {"consented": True}
 
+    def test_source_authorized_agy_reader_contributes_to_sweep(self, monkeypatch):
+        seen = []
+
+        def read(*, deadline, consented=False):
+            seen.append(consented)
+            return _complete() if consented else _mm_host_usage._incomplete("no_metadata_ledger")
+
+        monkeypatch.setattr(_mm_host_usage, "read_agy_usage", read)
+        readers = events_tail._default_host_readers(self._enabled("agy"))
+        capture = events_tail._capture_host_usage(readers, deadline=1_000.0, now=lambda: 0.0)
+        assert seen == [True]
+        assert capture.token_sources == ("agy",)
+
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
         no consent check at all. Strict equality against the live reader set

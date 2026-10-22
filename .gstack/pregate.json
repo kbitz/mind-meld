@@ -6,6 +6,12 @@
     ],
     "docs/roadmap-future.md": [],
     "docs/SPEC.md": [],
+    "tests/fixtures/cli_surface_1_x.json": [],
+    "tests/fixtures/host_sessions/agy/CONTRACT.md": [
+      "tests/test_agy_usage.py"
+    ],
+    "tests/fixtures/host_sessions/grok/**": [],
+    "tests/test_host_skill_discovery.py": [],
     "tests/fixtures/host_sessions/muse/2026/10/13/session-a/session.jsonl": [
       "tests/test_muse_usage.py"
     ],

@@ -689,13 +689,14 @@ Both prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).
 
-`_filter_disabled_sources(manifest, disabled)` applies at TWO consumer-boundary
-call sites — same shape as `_filter_excluded_paths` (the kb-mbp 2026-04-24 fix
-template): (1) `_push_core` filters prior_manifest BEFORE `generate_tombstones`,
-covering ok-fetch / sidecar / peer-fallback uniformly; (2) `_pull_core` filters
-peer manifests in `manifest_cache` BEFORE `collect_tombstones`. Disable-then-
-exclude order in both sites: dropping the whole source first avoids walking
-soon-to-be-dropped exclude_patterns. The filter MUST NOT apply at
+`_push_core` uses `_filter_unselected_sources` on the prior manifest BEFORE
+`generate_tombstones`, covering ok-fetch / sidecar / peer-fallback uniformly.
+`_filter_disabled_sources(manifest, disabled)` filters pull's peer manifests
+BEFORE `collect_tombstones`; it always drops retired source names, including
+when the disabled list is empty. Status and diff use it with an empty disabled
+list to ignore retired sources while retaining ordinary disabled-source changes.
+Disable-then-exclude order drops whole sources before walking their patterns.
+The filter MUST NOT apply at
 `_fetch_remote_manifest` itself — `mm gc` reads its own raw manifest via that path
 and a filtered manifest there orphans live own blobs (codex-2 #1 hazard,
 mirrored from exclude_patterns).

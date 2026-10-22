@@ -3553,7 +3553,7 @@ def _is_real_agy_store(path: Path) -> bool:
     return candidate == root or candidate.startswith(root + os.sep)
 
 
-def _decode_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
+def _decode_protobuf_varint(data: bytes | memoryview, offset: int) -> tuple[int, int]:
     val = 0
     shift = 0
     length = len(data)
@@ -3569,7 +3569,9 @@ def _decode_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
     raise _ReadFailure("malformed", cause="corrupt_protobuf")
 
 
-def _iter_protobuf_fields(data: bytes) -> Iterator[tuple[int, int, Any]]:
+def _iter_protobuf_fields(data: bytes | memoryview) -> Iterator[tuple[int, int, Any]]:
+    # Unknown payload fields are skipped without copying conversation content.
+    data = memoryview(data)
     offset = 0
     length = len(data)
     while offset < length:
@@ -3819,6 +3821,8 @@ def _read_single_agy_db(
 
             models: dict[int, str] = {}
             for (data,) in conn.execute("SELECT data FROM gen_metadata ORDER BY rowid"):
+                if _expired(deadline):
+                    raise _ReadFailure("deadline")
                 if not data or not isinstance(data, (bytes, memoryview)):
                     continue
                 data_bytes = bytes(data)
@@ -3830,8 +3834,10 @@ def _read_single_agy_db(
                             if sf_num == 3 and sf_wtype == 0:
                                 enum_id = sf_val
                             elif sf_num == 19 and sf_wtype == 2:
+                                if len(sf_val) > _MAX_MODEL_ID_BYTES:
+                                    raise _ReadFailure("malformed", cause="oversize_or_type")
                                 try:
-                                    slug = sf_val.decode("utf-8")
+                                    slug = bytes(sf_val).decode("utf-8")
                                 except UnicodeDecodeError as exc:
                                     raise _ReadFailure(
                                         "malformed", cause="corrupt_protobuf"
@@ -3852,126 +3858,127 @@ def _read_single_agy_db(
             cursor = conn.execute(
                 f"SELECT {idx_col}, step_type, status, metadata FROM steps ORDER BY {idx_col}"
             )
-            while batch := cursor.fetchmany(256):
+            for _idx, step_type, status, meta in cursor:
                 if _expired(deadline):
                     raise _ReadFailure("deadline")
-                for _idx, step_type, status, meta in batch:
-                    if _expired(deadline):
-                        raise _ReadFailure("deadline")
-                    if not meta or not isinstance(meta, (bytes, memoryview)):
-                        if step_type == 15 and status == 3:
-                            usage_less_skipped += 1
-                        continue
-                    meta_bytes = bytes(meta)
-                    ts = None
-                    token_usage_bytes = None
-                    for fnum, wtype, fval in _iter_protobuf_fields(meta_bytes):
-                        if fnum == 1 and wtype == 2:
-                            for sf_num, sf_wtype, sf_val in _iter_protobuf_fields(fval):
-                                if sf_num == 1 and sf_wtype == 0:
-                                    ts = sf_val
-                                    break
-                        elif fnum == 9 and wtype == 2:
-                            token_usage_bytes = fval
+                if not meta or not isinstance(meta, (bytes, memoryview)):
+                    if step_type == 15 and status == 3:
+                        usage_less_skipped += 1
+                    continue
+                meta_bytes = bytes(meta)
+                ts = None
+                token_usage_bytes = None
+                for fnum, wtype, fval in _iter_protobuf_fields(meta_bytes):
+                    if fnum == 1 and wtype == 2:
+                        for sf_num, sf_wtype, sf_val in _iter_protobuf_fields(fval):
+                            if sf_num == 1 and sf_wtype == 0:
+                                ts = sf_val
+                                break
+                    elif fnum == 9 and wtype == 2:
+                        token_usage_bytes = fval
 
-                    if token_usage_bytes is None:
-                        if step_type == 15 and status == 3:
-                            usage_less_skipped += 1
-                        continue
+                if token_usage_bytes is None:
+                    if step_type == 15 and status == 3:
+                        usage_less_skipped += 1
+                    continue
 
-                    model_enum = None
-                    input_tokens = 0
-                    output_tokens = 0
-                    cache_create = 0
-                    cache_read = 0
-                    bot_id = None
-                    thinking = None
-                    response = None
-                    for uf_num, _uf_wtype, uf_val in _iter_protobuf_fields(token_usage_bytes):
-                        if uf_num == 1 and _uf_wtype == 0:
-                            model_enum = uf_val
-                        elif uf_num == 2 and _uf_wtype == 0:
-                            input_tokens = uf_val
-                        elif uf_num == 3 and _uf_wtype == 0:
-                            output_tokens = uf_val
-                        elif uf_num == 4 and _uf_wtype == 0:
-                            cache_create = uf_val
-                        elif uf_num == 5 and _uf_wtype == 0:
-                            cache_read = uf_val
-                        elif uf_num == 7 and _uf_wtype == 2:
-                            try:
-                                bot_id = uf_val.decode("utf-8")
-                            except UnicodeDecodeError as exc:
-                                raise _ReadFailure("malformed", cause="corrupt_protobuf") from exc
-                        elif uf_num == 9 and _uf_wtype == 0:
-                            thinking = uf_val
-                        elif uf_num == 10 and _uf_wtype == 0:
-                            response = uf_val
-
-                    for counter_val in (input_tokens, output_tokens, cache_create, cache_read):
-                        if not _is_valid_counter(counter_val):
-                            raise _ReadFailure("malformed", cause="bad_counters")
-                    if thinking is not None and not _is_valid_counter(thinking):
+                model_enum = None
+                input_tokens = 0
+                output_tokens = 0
+                cache_create = 0
+                cache_read = 0
+                bot_id = None
+                thinking = None
+                response = None
+                for uf_num, _uf_wtype, uf_val in _iter_protobuf_fields(token_usage_bytes):
+                    if uf_num in {2, 3, 4, 5, 9, 10} and _uf_wtype != 0:
                         raise _ReadFailure("malformed", cause="bad_counters")
-                    if response is not None and not _is_valid_counter(response):
+                    if uf_num == 1 and _uf_wtype == 0:
+                        model_enum = uf_val
+                    elif uf_num == 2 and _uf_wtype == 0:
+                        input_tokens = uf_val
+                    elif uf_num == 3 and _uf_wtype == 0:
+                        output_tokens = uf_val
+                    elif uf_num == 4 and _uf_wtype == 0:
+                        cache_create = uf_val
+                    elif uf_num == 5 and _uf_wtype == 0:
+                        cache_read = uf_val
+                    elif uf_num == 7 and _uf_wtype == 2:
+                        try:
+                            bot_id = bytes(uf_val).decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise _ReadFailure("malformed", cause="corrupt_protobuf") from exc
+                    elif uf_num == 9 and _uf_wtype == 0:
+                        thinking = uf_val
+                    elif uf_num == 10 and _uf_wtype == 0:
+                        response = uf_val
+
+                if bot_id is not None and bot_id.startswith("<synthetic>"):
+                    continue
+                for counter_val in (input_tokens, output_tokens, cache_create, cache_read):
+                    if not _is_valid_counter(counter_val):
                         raise _ReadFailure("malformed", cause="bad_counters")
-                    if thinking is not None and response is not None:
-                        if thinking + response != output_tokens:
-                            raise _ReadFailure("malformed", cause="counter_invariant_violation")
+                if thinking is not None and not _is_valid_counter(thinking):
+                    raise _ReadFailure("malformed", cause="bad_counters")
+                if response is not None and not _is_valid_counter(response):
+                    raise _ReadFailure("malformed", cause="bad_counters")
+                if thinking is not None and response is not None:
+                    if thinking + response != output_tokens:
+                        raise _ReadFailure("malformed", cause="counter_invariant_violation")
 
-                    has_tokens = (
-                        input_tokens > 0 or output_tokens > 0 or cache_read > 0 or cache_create > 0
-                    )
-                    if step_type != 15:
-                        if has_tokens:
-                            raise _ReadFailure(
-                                "unsupported", cause="token_usage_on_unexpected_step_type"
-                            )
-                        continue
+                has_tokens = (
+                    input_tokens > 0 or output_tokens > 0 or cache_read > 0 or cache_create > 0
+                )
+                if step_type != 15:
+                    if has_tokens:
+                        raise _ReadFailure(
+                            "unsupported", cause="token_usage_on_unexpected_step_type"
+                        )
+                    continue
 
-                    if not has_tokens:
-                        continue
-                    if bot_id is None:
-                        raise _ReadFailure("malformed", cause="missing_bot_id")
-                    if bot_id == "<synthetic>" or bot_id.startswith("<synthetic>"):
-                        continue
-                    if model_enum is None or model_enum not in models:
-                        raise _ReadFailure("unsupported", cause="unknown_model_enum")
+                if not has_tokens:
+                    continue
+                if bot_id is None:
+                    raise _ReadFailure("malformed", cause="missing_bot_id")
+                if model_enum is None or model_enum not in models:
+                    raise _ReadFailure("unsupported", cause="unknown_model_enum")
 
-                    model_slug = models[model_enum]
-                    if ts is None or not _is_nonnegative_int(ts):
-                        raise _ReadFailure("malformed", cause="missing_timestamp")
-                    try:
-                        day_str = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
-                    except (ValueError, OSError, OverflowError) as exc:
-                        raise _ReadFailure("malformed", cause="missing_timestamp") from exc
+                model_slug = models[model_enum]
+                if ts is None or not _is_nonnegative_int(ts):
+                    raise _ReadFailure("malformed", cause="missing_timestamp")
+                try:
+                    day_str = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                except (ValueError, OSError, OverflowError) as exc:
+                    raise _ReadFailure("malformed", cause="missing_timestamp") from exc
 
-                    if cache_create > 0:
-                        partial_days.add(day_str)
+                if cache_create > 0:
+                    partial_days.add(day_str)
 
-                    turn_key = hashlib.sha256(f"agy\0{bot_id}".encode("utf-8")).hexdigest()
-                    turn_data = {
-                        "key": turn_key,
-                        "day": day_str,
-                        "model": model_slug,
-                        "usage": {
-                            "input": input_tokens,
-                            "output": output_tokens,
-                            "cache_read": cache_read,
-                            "cache_create": cache_create,
-                        },
-                    }
-                    if turn_key in seen_turn_keys:
-                        existing = next(t for t in turns if t["key"] == turn_key)
-                        if existing != turn_data:
-                            raise _ReadFailure("malformed", cause="bot_id_conflict")
-                        continue
-                    seen_turn_keys.add(turn_key)
-                    turns.append(turn_data)
+                turn_key = hashlib.sha256(f"agy\0{bot_id}".encode("utf-8")).hexdigest()
+                turn_data = {
+                    "key": turn_key,
+                    "day": day_str,
+                    "model": model_slug,
+                    "usage": {
+                        "input": input_tokens,
+                        "output": output_tokens,
+                        "cache_read": cache_read,
+                        "cache_create": cache_create,
+                    },
+                }
+                if turn_key in seen_turn_keys:
+                    existing = next(t for t in turns if t["key"] == turn_key)
+                    if existing != turn_data:
+                        raise _ReadFailure("malformed", cause="bot_id_conflict")
+                    continue
+                seen_turn_keys.add(turn_key)
+                turns.append(turn_data)
     except (sqlite3.Error, _ReadFailure) as exc:
         failure = exc
 
     present_after = _lstat_agy_sqlite_files(db_path)
+    if db_path.name not in present_after:
+        raise _ReadFailure("stale", cause="identity_changed")
     after_fp = _agy_fingerprint(present_after, db_path.name)
     if before_fp != after_fp:
         raise _ReadFailure("stale", cause="identity_changed")
@@ -4024,10 +4031,12 @@ def _scan_agy_root(
     if _expired(deadline):
         return (_incomplete("deadline"), {}, None, 0)
     try:
+        if root.is_symlink():
+            return (_incomplete("io_error"), {}, {"cause": "non_regular_path"}, 1)
         if not root.exists():
             return (HostUsageResult({}, complete=True), {}, None, 0)
-        if root.is_symlink() or not root.is_dir():
-            return (_incomplete("unsupported"), {}, {"cause": "non_regular_path"}, 1)
+        if not root.is_dir():
+            return (_incomplete("io_error"), {}, {"cause": "non_regular_path"}, 1)
         db_paths = sorted(
             [p for p in root.iterdir() if p.name.endswith(".db")], key=lambda p: p.name
         )
@@ -4114,7 +4123,12 @@ def read_agy_usage(
                 locked.data.get("version") == CACHE_VERSION
                 and locked.data.get("agy_format") == _AGY_CACHE_FORMAT
             )
-            cached_files = locked.data.get("files", {}) if current_format else {}
+            raw_files = _cached_files(locked.data) if current_format else {}
+            cached_files = {
+                name: entry
+                for name, raw in raw_files.items()
+                if (entry := _validated_agy_entry(raw)) is not None
+            }
             if _expired(read_deadline):
                 result, staged_files, last_error_detail, error_db_count = (
                     _incomplete("deadline"),
@@ -4147,8 +4161,10 @@ def read_agy_usage(
             if result.complete:
                 final_detail = None
                 final_error_count = 0
-            elif last_error_detail is not None:
-                final_detail = last_error_detail
+            elif (
+                detail := _agy_reason_detail({"last_error_detail": last_error_detail})
+            ) is not None:
+                final_detail = detail
                 final_error_count = error_db_count
             else:
                 final_detail = prior_detail
@@ -4167,9 +4183,16 @@ def read_agy_usage(
                 "error_db_count": final_error_count,
                 "files": files,
             }
-            return result
-    except (OSError, StorageError, InvalidJsonCache) as exc:
-        _diagnostic(f"mm: notice: agy usage cache error: {exc}\n")
+            if over_budget:
+                result = _incomplete("deadline")
+        _notice_cache_write_failure(locked.write_error)
+        return result
+    except LockContended:
+        _diagnostic(
+            "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
+        )
+        return _incomplete("locked")
+    except (OSError, StorageError, InvalidJsonCache):
         return _incomplete("io_error")
 
 

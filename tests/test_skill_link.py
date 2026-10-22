@@ -2126,6 +2126,43 @@ class TestUserRemovedLink:
         assert "installation failed" not in result.output
 
 
+class TestUnsupportedSkillAgents:
+    def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent"])
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset()
+        skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        err = capsys.readouterr().err
+        assert err.startswith("mm: notice:")
+        assert err.count("lists no currently supported") == 1
+        assert "maintain_links" in err
+
+    def test_mixed_agents_list_does_not_emit_empty_intersection_notice(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent", "claude"])
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset({"claude"})
+        err = capsys.readouterr().err
+        assert "lists no currently supported" not in err
+        assert "mm: notice:" not in err
+
+    def test_maintain_links_false_stays_silent_even_with_retired_agents(
+        self, _isolate_paths, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent"], maintain_links=False)
+        granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
+        assert granted == frozenset()
+        err = capsys.readouterr().err
+        assert "lists no currently supported" not in err
+        assert "mm: notice:" not in err
+
+
 class TestShellCompletion:
     """`add_completion=True` (cli.py). Rides along with Track 28A but is
     unrelated to skill links -- filed here so whoever flips the flag back
@@ -2153,3 +2190,22 @@ class TestShellCompletion:
         opts = {name for param in typer.main.get_command(app).params for name in param.opts}
         assert "--install-completion" in opts
         assert "--show-completion" in opts
+
+
+@pytest.mark.parametrize("allow_mutate", [False, True])
+def test_agy_install_creates_nested_private_config_only_when_mutating(
+    _isolate_paths, skill_src, allow_mutate
+):
+    """The host root can exist before Antigravity creates its config tree."""
+    agent_root = _isolate_paths / ".gemini"
+    agent_root.mkdir()
+    config_root = agent_root / "config"
+    result = _install("agy", allow_mutate=allow_mutate)
+    if allow_mutate:
+        assert result.status == "installed"
+        assert config_root.stat().st_mode & 0o777 == 0o700
+        assert (config_root / "skills").stat().st_mode & 0o777 == 0o700
+        _assert_store_link(config_root / "skills" / "retro-fleet")
+    else:
+        assert not config_root.exists()
+        assert result.status != "installed"

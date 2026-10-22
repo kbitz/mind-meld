@@ -847,6 +847,14 @@ class TestGetSources:
             ]
         )
 
+    def test_custom_grok_type_fails_at_load_with_config_remedy(self, tmp_path):
+        config = self._base_config(tmp_path)
+        config["sync"] = {"sources": [{"name": "old-host", "path": str(tmp_path), "type": "grok"}]}
+        path = tmp_path / "config.toml"
+        save_config(config, path)
+        with pytest.raises(ConfigError, match="type 'grok'.*no longer supported.*config.toml"):
+            load_config(path)
+
     @pytest.mark.parametrize("name", ["grok", "opencode"])
     def test_configured_sources_drops_retired_sources(self, name):
         """_configured_sources silently drops retired sources."""

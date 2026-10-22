@@ -1245,6 +1245,10 @@ def _prove_omitted_paths_absent(
     source_map = {source["name"]: source for source in sources if source.get("name")}
     local_sources = local_manifest.get("sources", {})
     for src_name, remote_src in prior_manifest.get("sources", {}).items():
+        # Usage-only hosts can publish an empty source before a configuration
+        # root exists. Only prior files require an accessible root for proof.
+        if not remote_src.get("files"):
+            continue
         src_cfg = source_map.get(src_name)
         if src_cfg is None or not src_cfg.get("path"):
             continue
@@ -1357,9 +1361,8 @@ def _include_prior_host_if_needed(
 ) -> list[dict[str, Any]]:
     """Retain a published host source whose allowlisted tree is gone.
 
-    Grok's default source activates only while its customization trees
-    exist; Muse's activates only by explicit enable, and its ``memory/`` can
-    still be deleted later. Once such a source has been published, losing
+    Muse and Antigravity sources activate by explicit enrollment, and their
+    allowlisted trees can still be deleted later. Once a source has been published, losing
     the tree must not silently drop the source from the scan: retain it so
     the deletions truthfully propagate, and refuse loudly when the root
     itself is unreadable.
@@ -3272,7 +3275,7 @@ def _prompt_source_toggle(
     by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
     D5). `current_state` is the default answer:
       - init: whether the source has a qualifying on-disk tree
-      - reconfigure: whether the source is currently active in config
+      - reconfigure: existing consent, or detected Antigravity on legacy config
     """
     name = source["name"]
     path_str = str(source.get("path", ""))
@@ -3289,12 +3292,9 @@ def _prompt_source_toggle(
 def _source_path_is_detected(source: dict[str, Any]) -> bool:
     """Return whether a source has the on-disk state that warrants a Y default.
 
-    A Grok home exists even on an install with no user customizations, so its
-    root is not an activation or usage-consent signal. Its three hardcoded
-    customization trees are. Explicitly configured Grok sources remain valid
-    when those trees are absent; this helper controls only prompt defaults and
-    labels. Muse is the same shape: its data root always exists, so the
-    hardcoded ``memory/`` tree is the signal.
+    Muse detection requires its hardcoded ``memory/`` tree, though its prompt
+    still defaults off. Antigravity's default source is also detected by its
+    separate local conversations root. Custom paths use their own existence.
     """
     path_str = str(source.get("path", ""))
     if not path_str:
@@ -3314,8 +3314,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
 
     User-facing sources (claude, gstack) become a Y/n prompt via
     `_prompt_source_toggle`. Default is Y when the qualifying source tree
-    exists on disk, N otherwise — Grok requires one of its hardcoded
-    customization dirs because its root always contains local session state.
+    exists on disk, N otherwise; Muse always defaults to N.
     This nudges users toward only-enabling-what-they-have without making it
     impossible to enable a source whose directory doesn't exist yet (e.g. new
     machine, same project about to be cloned).
@@ -6739,11 +6738,10 @@ def _pull_core(
         # download loop never tries to land a disabled source's files locally.
         # P0 invariant — see _filter_disabled_sources docstring.
         disabled_sources = list(config.get("sync", {}).get("disabled_sources", []) or [])
-        if disabled_sources:
-            manifest_cache = {
-                did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
-                for did, m in manifest_cache.items()
-            }
+        manifest_cache = {
+            did: (None if m is None else _filter_disabled_sources(m, disabled_sources))
+            for did, m in manifest_cache.items()
+        }
         # Pull never walks local trees for nested checkouts: it probes only the
         # local ancestors of incoming peer paths, so it never writes into one.
         nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
@@ -7279,6 +7277,10 @@ def status(
             console.print(safe_str(note))
         fetch = _fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
         remote_manifest = fetch.manifest if fetch.is_ok else None
+        if remote_manifest is not None:
+            # Retired host entries must not manufacture a pending-selection
+            # verdict. Deliberately disabled active sources retain that signal.
+            remote_manifest = _filter_disabled_sources(remote_manifest, [])
         source_resolution = _retain_prior_default_sources(
             resolve_sources(config, strict=True, bootstrap=False), remote_manifest, config
         )
@@ -9134,6 +9136,7 @@ def diff_cmd(
     remote_manifest = diff_fetch.manifest if diff_fetch.is_ok else None
 
     if remote_manifest is not None:
+        remote_manifest = _filter_disabled_sources(remote_manifest, [])
         # Same checkout probe as pull, so the diff predicts what pull applies.
         exclude_map, skip_prefixes = _build_exclude_map(
             config,
@@ -9875,9 +9878,9 @@ def enable_source(
     a freshly-shipped codex source that didn't auto-enable), append the
     default config so the source actually starts syncing.
 
-    Enabling `codex` or `muse` ALSO authorizes that host's local
+    Enabling `codex`, `muse`, or `agy` ALSO authorizes that host's local
     usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
-    block, and (for `codex` / `claude`) authorizes mm to
+    block, and (for `codex` / `claude` / `agy`) authorizes mm to
     maintain a `retro-fleet` skill link in that agent's skills directory.
     That consent coupling is the feature's default switch, so it is stated
     here at the point of decision (see HOST_READER_SOURCE_GATE). To keep a
@@ -9911,14 +9914,14 @@ def enable_source(
         disabled.remove(name)
         updates["disabled_sources"] = sorted(disabled)
 
-    # Muse must be materialized even when its allowlisted
+    # Muse and Antigravity must be materialized even when their allowlisted
     # trees are not present yet: explicit enable is consent.  In a legacy
     # config, first preserve the resolved source set before writing
     # sync.sources.  An explicit list takes priority over legacy
-    # claude_dir/default fallback; writing only Muse here would make the
+    # claude_dir/default fallback; writing only the new host here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
-    if name == "muse" and not has_explicit_sources:
+    if name in {"muse", "agy"} and not has_explicit_sources:
         explicit_sources = get_sources(config)
         explicit_names = [s["name"] for s in explicit_sources]
         updates["sources"] = explicit_sources
@@ -9927,7 +9930,7 @@ def enable_source(
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name == "muse" or (has_explicit_sources and name in default_names)
+        name in {"muse", "agy"} or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -9957,6 +9960,16 @@ def enable_source(
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
         )
         console.print("[dim]Run 'mm disable-source muse' to turn this off.[/dim]")
+    elif name == "agy":
+        console.print(
+            "[dim]Syncs ~/.gemini/config skills/, rules/, AGENTS.md, and GEMINI.md. "
+            "Session databases and settings are not synced.[/dim]"
+        )
+        console.print(
+            "[dim]Reads completed model-step token totals from local Antigravity "
+            "session databases. Prompts never leave this device.[/dim]"
+        )
+        console.print("[dim]Run 'mm disable-source agy' to turn this off.[/dim]")
 
 
 @app.command(name="reconfigure-sources")
@@ -9965,8 +9978,9 @@ def reconfigure_sources() -> None:
 
     Use this after `mm` ships a new source (e.g. codex in v0.11+) to walk
     through enable/disable for every known source. Preserves user
-    customizations on existing [[sync.sources]] entries (include_dirs,
-    exclude_patterns).
+    customizations on active [[sync.sources]] entries (include_dirs,
+    exclude_patterns). Removes retired source blocks and records their names
+    in disabled_sources; retirement has already stopped their sync.
 
     Atomicity: Ctrl-C mid-prompt aborts without writing. The whole
     reconfigured state is committed in a single patch_config_on_disk call.
@@ -10004,11 +10018,14 @@ def reconfigure_sources() -> None:
     console.print(
         "[dim]Disabling marks the source in disabled_sources (per-machine, "
         "not synced). Disabling does NOT delete the [[sync.sources]] entry — "
-        "re-enabling preserves customizations.[/dim]\n"
+        "re-enabling preserves customizations. Retired source blocks are removed.[/dim]\n"
     )
 
     new_explicit_sources: list[dict[str, Any]] = []
-    new_disabled: list[str] = []
+    new_disabled = list(
+        set(_explicit_retired_sources(explicit_sources))
+        | (set(disabled) & _config_module.RETIRED_SOURCE_NAMES)
+    )
 
     try:
         for item in ordered:
@@ -10019,6 +10036,10 @@ def reconfigure_sources() -> None:
                 # Muse never defaults on: its memory/ tree is host-created, so
                 # even a detected root is not consent for sync or usage reads.
                 default_active = False
+            elif iname == "agy":
+                # Interactive enrollment follows init's detected-host default;
+                # background resolution still requires explicit consent.
+                default_active = detected
             currently_active = (
                 iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled
@@ -10045,9 +10066,10 @@ def reconfigure_sources() -> None:
         console.print("\n[yellow]Reconfigure aborted; no changes written.[/yellow]")
         raise typer.Exit(1) from None
 
-    updates: dict[str, Any] = {"disabled_sources": sorted(new_disabled)}
-    if new_explicit_sources:
-        updates["sources"] = new_explicit_sources
+    updates: dict[str, Any] = {
+        "disabled_sources": sorted(new_disabled),
+        "sources": new_explicit_sources,
+    }
 
     patch_config_on_disk({"sync": updates})
 
@@ -10136,10 +10158,9 @@ def _config_missing_recommended_excludes(config: dict) -> list[str]:
 def _explicit_retired_sources(sources: list[dict] | None) -> list[str]:
     """Return explicit [[sync.sources]] names that belong to RETIRED_SOURCE_NAMES.
 
-    A leftover block is a user-defined generic source until ``mm migrate-config``
-    removes it and records the name in ``disabled_sources`` (the consumer-boundary
-    filter that keeps ``generate_tombstones`` from minting a deletion
-    tombstone for every file the source ever pushed).
+    Retired names are already ignored during source resolution and at manifest
+    consumer boundaries, without deletion tombstones. ``mm migrate-config``
+    removes their inert blocks and records their names in ``disabled_sources``.
     """
     if not sources:
         return []
@@ -10211,9 +10232,9 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         console.print("\n[bold]Retired sources:[/bold]")
         for rname in retired:
             console.print(
-                f"  [bold]{rname}[/bold] — remove the leftover [[sync.sources]] "
-                "block and record the name in disabled_sources so the next "
-                "push does not mint deletion tombstones."
+                f"  [bold]{rname}[/bold] — already stopped syncing; remove the leftover "
+                "[[sync.sources]] block and record the name in disabled_sources. "
+                "Local files are preserved."
             )
 
     if dry_run:
@@ -10249,9 +10270,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
 
         # One patch for both halves. patch_config_on_disk is section-level
         # shallow and REPLACES sync.sources wholesale; disabled_sources is
-        # a sibling field in the same section. The disabled_sources write
-        # is what feeds _filter_disabled_sources so generate_tombstones
-        # sees an empty diff for the retired name.
+        # a sibling field in the same section. Record the retirement in config;
+        # consumer filters already suppress retired sources without tombstones.
         sync_updates: dict[str, Any] = {"sources": new_sources}
         if retired:
             disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
@@ -10296,8 +10316,9 @@ def migrate_config(
     Compares each user-configured source against the matching DEFAULT_SOURCES
     entry and proposes adding any missing recommended exclude globs, plus a
     recommended `include_patterns` allowlist when the key is absent. Also removes a
-    leftover ``opencode`` source block (retired in v0.12.55) and records the
-    name in ``disabled_sources``. Idempotent — re-running on a fully-migrated
+    leftover ``grok`` or ``opencode`` source blocks and records their
+    names in ``disabled_sources``. These sources have already stopped syncing.
+    Idempotent — re-running on a fully-migrated
     config exits with "already up to date".
 
     Acquires the mm lockfile so a concurrent push/pull can't read a half-
@@ -11816,8 +11837,9 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
             f"\n[yellow]Retired sync source(s) detected:[/yellow] {', '.join(retired_sources)}"
         )
         console.print(
-            "  mm migrate-config will remove them and record their names in "
-            "disabled_sources so the next push does not mint deletion tombstones."
+            "  These sources have already stopped syncing. mm migrate-config removes "
+            "their inert blocks and records their names in disabled_sources. "
+            "Local files are preserved."
         )
     if typer.confirm("Run 'mm migrate-config' now?", default=True):
         # Call the core directly so typer's option machinery isn't in the

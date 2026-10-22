@@ -527,6 +527,11 @@ def _validate_sources(sources: Any) -> None:
                     f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
+        if src["type"] == "grok":
+            raise ConfigError(
+                "config: type 'grok' is no longer supported; "
+                f"remove source '{name}' from config.toml. Local files are preserved."
+            )
         if src["type"] == "muse" and name != "muse":
             raise ConfigError(
                 "config: type 'muse' is reserved for source name 'muse' so only its "
