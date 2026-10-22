@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.7] - 2026-10-22
+
+**`mm push` and `mm pull` show what they are working on.** In an interactive terminal, a spinner shows the current phase and file or manifest counts, then clears before the final outcome line.
+
+### Added
+
+- Attended push and pull show progress through unlocking, scanning, uploading, reading manifests, and applying files. Push counts span sources; pull counts cover each source batch.
+- The spinner pauses for push/pull warnings and conflict prompts. Redraws are throttled, and terminal display failures do not change the sync result.
+
+### Upgrade notes
+
+- Redirected output, `--verbose`, `--dry-run`, `autopush`, and `autopull` keep their existing output. Storage and command flags are unchanged.
+
 ## [1.11.6] - 2026-10-22
 
 **gstack sync now keeps per-run output on the Mac that produced it.** Checkpoints, plans, learnings, decisions, timelines, and handoffs still sync. Review-prep trees, loop state, and gate diffs stay local. A new install gets this allowlist. An existing config opts in with `mm migrate-config`.
