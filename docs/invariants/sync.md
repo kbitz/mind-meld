@@ -410,6 +410,86 @@ run `mm log --action excluded --source gstack --limit 0 --format jsonl --since <
 and read `device` on rows under the new globs. This identifies peers still
 listing those files; it does not certify fleet completion.
 
+## `include_patterns` allowlist + inverse consumer filter
+
+Generic sources may declare `include_patterns: list[str]` (`_validate_sources`
+rejects the key on non-`generic` sources so producer and consumer filters cannot
+diverge): when non-empty, only relative paths matching at least one pattern are
+walked, published or applied. The dialect is segment-aware
+(`manifest.matches_include_patterns`): `*` and `?` never cross `/`, a whole `**`
+segment crosses (adjacent `**` segments collapse). This is deliberately unlike
+the legacy fnmatch exclude globs, whose `*` crosses `/` —
+`projects/*/pair-review/*` must mean top-level files only. Excludes win:
+global `EXCLUDED`, marker skip prefixes and `exclude_patterns` are evaluated
+first in `_is_excluded`, so `pair-review/session.yaml` stays out even though
+`projects/*/pair-review/*` matches it. In `walk_generic_source`, `_is_excluded`
+also runs before `(st_dev, st_ino)` deduplication so an earlier-sorting
+excluded hardlink sibling cannot claim the inode and drop a later-sorting
+allowlisted sibling.
+
+**Why.** Measured 2026-10-21 on device 889e42c0: `projects/` held 43,323
+synced files / 1.5 GB raw (0.40 GB sealed). Bucketed by first component under
+each slug, per-run artifact trees (`review-and-prep/`, `run-*/`,
+`*-worktree-tmp`, `gate-diff/`, `defect-candidates/`) were 79% of files and
+loose run files another 13%; durable cross-machine context was ~1.5%.
+The set grew from 35,689 files (2026-10-13, before Track 72B's generator
+globs) to 43,323 after them — blacklist batches cannot outrun producer
+vocabulary (1,044 distinct subdir names, 5,656 distinct loose filenames;
+names recurring in 3+ projects: 13 dirs, 12 files). The default list in
+`config._GSTACK_INCLUDE_PATTERNS` therefore names readers instead:
+`/context-restore` (checkpoints + checkpoint-pointers), plan/design resume
+(ceo-plans, plans, designs, specs), factory handoffs (briefs, cards,
+handoffs, `driver-handoff*.md`, `manager-*.json`), land-and-deploy
+(deploy-reports), pair-review top-level prose, and the loose ledgers
+(learnings/decisions search, timeline + context recovery, question
+log/preferences/events, taste profile, `*-reviews.jsonl` /
+`*-evidence.jsonl` reused cross-machine by wtree fingerprint, test plans
+`/ship` reads, autoplan plan/restore artifacts). `analytics/**`, `retros/**`
+and the `include_files` literals keep non-`projects/` content unchanged.
+Result on the measured Mac: 3,375 files / 40 MB inside `projects/`.
+New skill output stays local until an entry is added — fail-closed is the
+point; admission requires naming the cross-machine reader.
+
+Review resume survives de-scoping `review-and-prep/` and `ship-and-land/` by
+design: both skills keep their durable handoff in the PR receipt and state
+that a machine-local path is not portable evidence; the synced
+`*-evidence.jsonl` / `*-reviews.jsonl` ledgers carry completed-review reuse.
+This supersedes [Bulk generator output](#bulk-generator-output) Decision 6's
+retention of `compact-snapshots/` / `ranking-summaries/` receipts (owner
+decision 2026-10-22): those trees are out with the rest of review-prep.
+
+**Mechanics mirror exclude_patterns.** The walker threads the list through
+`_stat_collected_file` / `_record_file` into `_is_excluded`, so a de-scoped
+path is silent (no `on_skip`, no hold) exactly like an excluded one; the
+walker still scandirs the whole tree (hashing is skipped, traversal is not —
+pruning is future work). `_build_include_map` feeds the same
+`_filter_excluded_paths` at the same four consumer-boundary sites, stripping
+non-matching entries and tombstone keys from prior/peer manifests before
+`generate_tombstones` / `collect_tombstones` and the omission proof, so
+narrowing mints no tombstones and deletes nothing on any Mac; widening
+brings paths back as new. The filter still never runs inside
+`_fetch_remote_manifest` (gc-bypass hazard). `_inject_held_entries` and
+`_prove_omitted_paths_absent` take the include map for the same reason.
+Pinned by `tests/test_integration.py::TestIncludePatternsAllowlist` (narrow,
+fresh-pull-from-fat-peer, widen) plus matcher/walker tests in
+`tests/test_manifest.py`.
+
+**Migration UX mirrors recommended excludes.** `_compute_recommended_includes_diff`
+fires only when the key is absent (a present list, even empty, is the user's
+choice; deleting the key re-prompts) and proposes the default wholesale —
+unlike excludes there is no per-glob merge. The signal unions into
+`_config_missing_recommended_excludes`, so status breadcrumbs, auto-command
+breadcrumbs and the attended prompt all fire unchanged, and
+`_migrate_config_core` applies both halves in one config write. Own store
+space is reclaimed by an attended content-changing push's GC or `mm gc` once
+the slim manifest publishes. Until every active Mac migrates and pushes, an
+attended pull on a migrated Mac logs one `excluded` row per de-scoped file
+an unmigrated peer still lists — on the measured Mac that is ~40k rows
+against the 20,000-row excluded retention, so earlier excluded history
+rotates out first; conflict history is unaffected. Migrate and push every
+active Mac before the next attended pull on any of them (README "Syncing
+gstack").
+
 ## Nested git checkouts are frozen, never published
 
 Every source walker prunes a directory with a regular `.git` file or `.git`

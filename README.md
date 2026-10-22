@@ -647,12 +647,13 @@ not record it.
 
 ### Syncing gstack
 
-If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack uses a **whitelist walker** — unlike the Claude source (which has hardcoded subdirs), the gstack source only syncs the directories and files you explicitly list.
+If `~/.gstack` is detected during `mm init`, it is automatically added as a sync source. gstack uses a **whitelist walker** — unlike the Claude source (which has hardcoded subdirs), the gstack source only syncs the directories and files you explicitly list. Inside them, `include_patterns` is a second allowlist: only context with a cross-machine reader (context-save checkpoints, plans, learnings/decisions/timeline ledgers, handoffs) syncs, while per-run output (review-prep trees, loop state, gate diffs) stays on the Mac that produced it. New skill output stays local until it is added to the list.
 
 **Defaults out of the box:**
 
 - `include_dirs`: `projects/`, `analytics/`, `retros/`
 - `include_files`: `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
+- `include_patterns` (segment-aware: `*` stays within one directory segment, `**` crosses): everything under `analytics/` and `retros/`, the `include_files` above, and inside each `projects/<slug>/` the `checkpoints/`, `checkpoint-pointers/`, `ceo-plans/`, `plans/`, `designs/`, `specs/`, `briefs/`, `cards/`, `handoffs/` and `deploy-reports/` directories, top-level `pair-review/` prose, and the loose ledgers (`learnings.jsonl`, `decisions*.jsonl`, `timeline.jsonl`, `question-*.json*`, `*-reviews.jsonl`, `*-evidence.jsonl`, `*-autoplan-*.md`, `*-test-plan-*.md`, `*-card.md`, `driver-handoff*.md`, `manager-*.json`, plus a few history files). The full list with per-entry readers and the measurement behind it lives in [the sync invariants](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter). Excludes below still win over an allowlist match. Existing installs opt in with `mm migrate-config` (a present-but-edited list, even empty, is respected; deleting the key brings the prompt back). On the measured Mac this takes `projects/` from about 43,000 synced files / 1.5 GB to about 3,400 files / 40 MB; de-scoped files stay on every Mac's disk, no tombstones are written, and own store space is reclaimed by the next attended push's GC or `mm gc`. Until every active Mac has migrated and pushed, an attended pull on a migrated Mac logs one excluded row per de-scoped file an unmigrated peer still lists (same behavior as the v1.8.0 trim, larger counts) — migrate and push every active Mac before the next attended pull on any of them.
 - `exclude_patterns`, per-machine caches and state: `config.yaml`,
   `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`,
   `analytics/.last-sync-*`, `projects/*/decisions.active.json`,
@@ -703,7 +704,9 @@ exclude_patterns = [
 
 Supplying `sync.sources` replaces the defaults wholesale — copy the full list,
 don't just add your extras, then run `mm migrate-config` to append the
-recommended globs. Run `mm sources` to confirm the resolved source list.
+recommended globs. A custom file under `projects/<slug>/` also needs a
+matching `include_patterns` entry or the allowlist leaves it local; run
+`mm sources` to confirm the resolved source list and counts.
 
 **Useful flags:**
 

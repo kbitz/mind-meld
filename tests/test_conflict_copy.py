@@ -3259,6 +3259,50 @@ class TestResolvePromote:
         err = capsys.readouterr().err
         assert "will not sync" not in err
 
+    def test_promote_include_patterns_miss_warns_and_match_does_not(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Under a generic source with include_patterns (like gstack), promoting
+        learnings.jsonl -> learnings.from-<peer>-<ts>.jsonl misses exact-name
+        allowlist patterns and must warn; promoting a .md under checkpoints/**
+        matches and must not warn."""
+        src_root = tmp_path / "gstack"
+        slug = src_root / "projects" / "demo"
+        ckpt = slug / "checkpoints"
+        ckpt.mkdir(parents=True)
+        src_cfg = {
+            "name": "gstack",
+            "path": str(src_root),
+            "type": "generic",
+            "include_dirs": ["projects"],
+            "include_files": [],
+            "include_patterns": [
+                "projects/*/learnings.jsonl",
+                "projects/*/checkpoints/**",
+            ],
+        }
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "p")
+
+        canonical_jsonl = slug / "learnings.jsonl"
+        canonical_jsonl.write_bytes(b"{}\n")
+        conflict_jsonl = slug / "learnings.sync-conflict-20260421-143055-devA1234.jsonl"
+        conflict_jsonl.write_bytes(b'{"a":1}\n')
+        _resolve_interactive_loop(
+            [("gstack", conflict_jsonl, canonical_jsonl)], None, {"gstack": src_cfg}
+        )
+        err = capsys.readouterr().err
+        assert "will not sync" in err
+
+        canonical_md = ckpt / "note.md"
+        canonical_md.write_bytes(b"local\n")
+        conflict_md = ckpt / "note.sync-conflict-20260421-143055-devA1234.md"
+        conflict_md.write_bytes(b"remote\n")
+        _resolve_interactive_loop(
+            [("gstack", conflict_md, canonical_md)], None, {"gstack": src_cfg}
+        )
+        err2 = capsys.readouterr().err
+        assert "will not sync" not in err2
+
     def test_no_base_promote_still_renames_to_canonical(self, tmp_path: Path, monkeypatch) -> None:
         """The pre-existing no-base (p)romote path is unchanged: when canonical
         is gone, promote renames the sidecar to the canonical name."""

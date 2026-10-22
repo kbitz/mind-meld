@@ -575,6 +575,7 @@ class TestExcludePatterns5C:
         device_name,
         *,
         exclude_patterns=None,
+        include_patterns=None,
     ):
         config_path = tmp_path / f"config_{device_id}.toml"
         gstack_src: dict = {
@@ -585,6 +586,8 @@ class TestExcludePatterns5C:
         }
         if exclude_patterns is not None:
             gstack_src["exclude_patterns"] = exclude_patterns
+        if include_patterns is not None:
+            gstack_src["include_patterns"] = include_patterns
         config = {
             "device": {"id": device_id, "name": device_name},
             "storage": {"path": str(storage_dir)},
@@ -647,6 +650,8 @@ class TestExcludePatterns5C:
             "dev-a",
             "A",
             exclude_patterns=[*_PRE18_GSTACK_GLOBS72B, "projects/acme/private/*"],
+            # Pin to the generator-glob migration; allowlist has own coverage.
+            include_patterns=[],
         )
         config_b = self._make_gstack_config(
             tmp_path,
@@ -768,6 +773,9 @@ class TestExcludePatterns5C:
         )
         default = config_module.get_default_source("gstack")
         default["path"] = str(root_a)
+        # Simulate the v1.8.0 default exactly: no include_patterns key yet.
+        # The allowlist default has its own upgrade coverage.
+        default = {k: v for k, v in default.items() if k != "include_patterns"}
         previous = {**default, "exclude_patterns": list(_PRE18_GSTACK_GLOBS72B)}
         TestMigrateConfigCommand()._redirect_lock(monkeypatch, tmp_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
@@ -1104,6 +1112,173 @@ class TestExcludePatterns5C:
         result = runner.invoke(app, ["gc"])
         assert result.exit_code == 0, result.output
         assert blob_path.exists(), "GC filtered its own manifest and orphaned an excluded reference"
+
+
+class TestIncludePatternsAllowlist:
+    """Allowlist narrowing must behave like exclusion, never like deletion.
+
+    Reasoning mirrors TestExcludePatterns5C: the consumer-boundary inverse
+    filter (`_filter_excluded_paths` + `_build_include_map`) strips
+    de-scoped entries from prior/peer manifests before tombstone
+    generation, so adding `include_patterns` mints no tombstones and no
+    peer loses local files. A peer with no allowlist configured stands in
+    for a pre-allowlist build: its filter inputs are empty either way.
+    """
+
+    PATTERNS = [
+        "projects/*/checkpoints/**",
+        "projects/*/learnings.jsonl",
+        "projects/*/pair-review/*",
+    ]
+    KEPT = {
+        "projects/demo/checkpoints/20261022-save.md": "ctx",
+        "projects/demo/learnings.jsonl": "{}\n",
+        "projects/demo/pair-review/report.md": "report",
+    }
+    DROPPED = {
+        "projects/demo/review-and-prep/run-1/scratch.md": "junk",
+        "projects/demo/pair-review/branches/b/report.md": "nested",
+        "projects/demo/pair-review/session.yaml": "live",
+        "projects/demo/loop-1.json": "{}",
+    }
+
+    def _config(self, tmp_path, storage_dir, root, device_id, name, *, include=None):
+        src: dict = {
+            "name": "gstack",
+            "path": str(root),
+            "type": "generic",
+            "include_dirs": ["projects"],
+            "exclude_patterns": ["projects/*/pair-review/session.yaml"],
+        }
+        if include is not None:
+            src["include_patterns"] = include
+        config = {
+            "device": {"id": device_id, "name": name},
+            "storage": {"path": str(storage_dir)},
+            "sync": {"max_file_size": 52_428_800, "sources": [src]},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+        }
+        path = tmp_path / f"config_{device_id}.toml"
+        save_config(config, path)
+        return path
+
+    def _populate(self, root):
+        for rel, data in {**self.KEPT, **self.DROPPED}.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(data)
+
+    def _setup_fleet(self, tmp_path, monkeypatch):
+        storage = tmp_path / "storage"
+        root_a, root_b = tmp_path / "a" / ".gstack", tmp_path / "b" / ".gstack"
+        self._populate(root_a)
+        root_b.mkdir(parents=True)
+        backend = LocalBackend(storage)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        return backend, root_a, root_b
+
+    def _invoke(self, monkeypatch, config, args):
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config)
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        return result
+
+    def _remote(self, backend, device):
+        return load_manifest(
+            decrypt(backend.get(storage_keys.manifest_key(device)), PASSPHRASE, memory_kb=MEMORY_KB)
+        )
+
+    def test_narrowing_mints_no_tombstones_and_peer_keeps_files(self, tmp_path, monkeypatch):
+        backend, root_a, root_b = self._setup_fleet(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A")
+        config_b = self._config(tmp_path, storage, root_b, "dev-b", "B")
+
+        self._invoke(monkeypatch, config_a, ["push"])
+        fat = self._remote(backend, "dev-a")["sources"]["gstack"]["files"]
+        assert set(self.KEPT) | set(self.DROPPED) - {
+            "projects/demo/pair-review/session.yaml"
+        } <= set(fat)
+        self._invoke(monkeypatch, config_b, ["pull"])
+        for rel in set(self.KEPT) | set(self.DROPPED):
+            if rel.endswith("session.yaml"):
+                continue
+            assert (root_b / rel).exists(), rel
+
+        # A adopts the allowlist and pushes: slim manifest, no tombstones
+        # for de-scoped paths, and B (no allowlist — the old-build stand-in)
+        # loses nothing on pull.
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A", include=self.PATTERNS)
+        self._invoke(monkeypatch, config_a, ["push"])
+        slim_manifest = self._remote(backend, "dev-a")
+        assert set(slim_manifest["sources"]["gstack"]["files"]) == set(self.KEPT)
+        tombstoned = {k.partition(":")[2] for k in slim_manifest.get("tombstones", {})}
+        assert not (tombstoned & set(self.DROPPED)), tombstoned
+
+        self._invoke(monkeypatch, config_b, ["pull"])
+        for rel in self.DROPPED:
+            if rel.endswith("session.yaml"):
+                continue
+            assert (root_b / rel).exists(), f"peer lost local file {rel}"
+
+        # A's local files are untouched too; de-scoped files stay on disk.
+        for rel in self.DROPPED:
+            assert (root_a / rel).exists(), rel
+
+    def test_fresh_allowlist_machine_pulls_only_kept_from_fat_peer(self, tmp_path, monkeypatch):
+        backend, root_a, root_b = self._setup_fleet(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A")
+        config_b = self._config(tmp_path, storage, root_b, "dev-b", "B", include=self.PATTERNS)
+
+        self._invoke(monkeypatch, config_a, ["push"])
+        self._invoke(monkeypatch, config_b, ["pull"])
+        for rel in self.KEPT:
+            assert (root_b / rel).exists(), rel
+        for rel in self.DROPPED:
+            assert not (root_b / rel).exists(), rel
+
+        # B pushes slim, then deletes a kept file's de-scoped sibling locally
+        # and pulls again: the fat peer manifest must not re-apply it.
+        self._invoke(monkeypatch, config_b, ["push"])
+        self._invoke(monkeypatch, config_b, ["pull"])
+        assert not (root_b / "projects/demo/review-and-prep/run-1/scratch.md").exists()
+
+    def test_widening_allowlist_brings_files_back_as_new(self, tmp_path, monkeypatch):
+        backend, root_a, _root_b = self._setup_fleet(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A", include=self.PATTERNS)
+        self._invoke(monkeypatch, config_a, ["push"])
+        slim = self._remote(backend, "dev-a")
+        assert "projects/demo/loop-1.json" not in slim["sources"]["gstack"]["files"]
+
+        widened = [*self.PATTERNS, "projects/*/loop-*.json"]
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A", include=widened)
+        self._invoke(monkeypatch, config_a, ["push"])
+        wide = self._remote(backend, "dev-a")
+        assert "projects/demo/loop-1.json" in wide["sources"]["gstack"]["files"]
+
+    def test_mm_gc_does_not_orphan_narrowed_blobs_before_push(self, tmp_path, monkeypatch):
+        """mm gc must read the raw published manifest, not _filter_excluded_paths,
+        so narrowing include_patterns in config.toml before pushing never deletes
+        blobs still referenced by the stored manifest."""
+        backend, root_a, _root_b = self._setup_fleet(tmp_path, monkeypatch)
+        storage = tmp_path / "storage"
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A")
+        self._invoke(monkeypatch, config_a, ["push"])
+
+        fat = self._remote(backend, "dev-a")
+        dropped_rel = "projects/demo/review-and-prep/run-1/scratch.md"
+        dropped_sha = fat["sources"]["gstack"]["files"][dropped_rel]["sha256"]
+        blob_path = storage / "data" / "dev-a" / f"{dropped_sha}.enc"
+        assert blob_path.exists()
+
+        config_a = self._config(tmp_path, storage, root_a, "dev-a", "A", include=self.PATTERNS)
+        self._invoke(monkeypatch, config_a, ["gc"])
+        assert blob_path.exists(), "mm gc filtered own manifest through include_patterns"
 
 
 class TestFilterExcludedPathsHelper:
@@ -1732,7 +1907,7 @@ class TestMigrateConfigCommand:
     """Track 5C: mm migrate-config adds missing recommended excludes,
     is idempotent, and preserves user-customized fields."""
 
-    def _write_explicit_config(self, tmp_path, *, exclude_patterns=None):
+    def _write_explicit_config(self, tmp_path, *, exclude_patterns=None, include_patterns=None):
         config_path = tmp_path / "config.toml"
         gstack_src: dict = {
             "name": "gstack",
@@ -1742,6 +1917,8 @@ class TestMigrateConfigCommand:
         }
         if exclude_patterns is not None:
             gstack_src["exclude_patterns"] = exclude_patterns
+        if include_patterns is not None:
+            gstack_src["include_patterns"] = include_patterns
         config = {
             "device": {"id": "dev-a", "name": "A"},
             "storage": {"path": str(tmp_path / "storage")},
@@ -1762,7 +1939,9 @@ class TestMigrateConfigCommand:
 
         gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         config_path = self._write_explicit_config(
-            tmp_path, exclude_patterns=list(gstack_default["exclude_patterns"])
+            tmp_path,
+            exclude_patterns=list(gstack_default["exclude_patterns"]),
+            include_patterns=list(gstack_default["include_patterns"]),
         )
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         self._redirect_lock(monkeypatch, tmp_path)
@@ -1770,6 +1949,56 @@ class TestMigrateConfigCommand:
         result = runner.invoke(app, ["migrate-config", "--yes"])
         assert result.exit_code == 0, result.output
         assert "already up to date" in result.output
+
+    def test_adds_recommended_include_patterns_when_key_absent(self, tmp_path, monkeypatch):
+        """A gstack source with excludes but no include_patterns gains the default."""
+        from mind_meld.config import DEFAULT_SOURCES
+
+        gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        config_path = self._write_explicit_config(
+            tmp_path, exclude_patterns=list(gstack_default["exclude_patterns"])
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        before = config_path.read_bytes()
+        dry = runner.invoke(app, ["migrate-config", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "Recommended include_patterns updates" in dry.output
+        assert config_path.read_bytes() == before
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+        output = " ".join(result.output.split())
+        assert (
+            "per-run output (review-prep trees, loop state, gate diffs) stays on this Mac" in output
+        )
+        assert "Run mm push to publish the exclusions" in output
+
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        assert gstack["include_patterns"] == list(gstack_default["include_patterns"])
+        assert "projects/*/checkpoints/**" in gstack["include_patterns"]
+
+    def test_user_edited_include_patterns_left_alone(self, tmp_path, monkeypatch):
+        """A present (even empty) include_patterns is the user's choice."""
+        from mind_meld.config import DEFAULT_SOURCES
+
+        gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        config_path = self._write_explicit_config(
+            tmp_path,
+            exclude_patterns=list(gstack_default["exclude_patterns"]),
+            include_patterns=[],
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "already up to date" in result.output
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        assert gstack["include_patterns"] == []
 
     def test_adds_missing_recommended_excludes(self, tmp_path, monkeypatch):
         """A source without exclude_patterns gets the recommended set."""
@@ -1859,8 +2088,10 @@ class TestMigrateConfigCommand:
                 cli_module.release_lock()
 
     def test_attended_push_migration_explains_and_publishes72b(self, tmp_path, monkeypatch):
+        # include_patterns=[] pins this test to the generator-glob migration;
+        # the allowlist migration has its own coverage.
         config_path = self._write_explicit_config(
-            tmp_path, exclude_patterns=list(_PRE18_GSTACK_GLOBS72B)
+            tmp_path, exclude_patterns=list(_PRE18_GSTACK_GLOBS72B), include_patterns=[]
         )
         root = tmp_path / ".gstack"
         fixture = TestExcludePatterns5C()
@@ -1956,6 +2187,7 @@ class TestMigrateConfigCommand:
                         "type": "generic",
                         "include_dirs": ["projects"],
                         "exclude_patterns": list(gstack_default["exclude_patterns"]),
+                        "include_patterns": list(gstack_default["include_patterns"]),
                     },
                     {
                         "name": "opencode",
@@ -1977,7 +2209,7 @@ class TestMigrateConfigCommand:
 
         result = runner.invoke(app, ["migrate-config", "--yes"])
         assert result.exit_code == 0, result.output
-        assert "Config written to" in result.output
+        assert "Config written to" in " ".join(result.output.split())
         assert "Run mm push to publish the exclusions" not in " ".join(result.output.split())
 
         import tomllib

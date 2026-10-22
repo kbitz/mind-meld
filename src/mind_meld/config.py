@@ -159,6 +159,70 @@ _GSTACK_GENERATOR_GLOBS: list[str] = [
     "*.dmg",
 ]
 
+# Allowlist for the gstack source (segment-aware dialect: manifest.
+# matches_include_patterns; * never crosses /, ** does). Measured
+# 2026-10-21/22 on device 889e42c0: projects/ held 43,323 files / 1.5 GB,
+# of which durable cross-machine context was ~1.5%; the rest was per-run
+# output (review-prep trees, gate-diff, loop state) whose producers'
+# vocabulary is unbounded while the cross-machine readers are a short,
+# stable list. Each entry names a reader: checkpoints + checkpoint-
+# pointers (/context-restore), ceo-plans/plans/designs/specs (plan and
+# design resume), briefs/cards/handoffs/driver-handoff*/manager-*.json
+# (factory handoffs), deploy-reports (land-and-deploy), pair-review
+# top-level prose (cross-machine resume), and the loose ledgers
+# (learnings/decisions search, timeline + context recovery, question
+# log/preferences, taste profile, review/evidence ledgers that make
+# completed reviews reusable by wtree fingerprint, test plans /ship
+# reads, autoplan plan/restore artifacts). analytics/**, retros/** and
+# the include_files literals keep non-projects content as before.
+# New skill output stays local until an entry is added here.
+_GSTACK_INCLUDE_PATTERNS: list[str] = [
+    "analytics/**",
+    "retros/**",
+    "retro-context.md",
+    "greptile-history.md",
+    ".completeness-intro-seen",
+    ".telemetry-prompted",
+    ".proactive-prompted",
+    ".welcome-seen",
+    ".codex-desc-healed",
+    "projects/*/checkpoints/**",
+    "projects/*/checkpoint-pointers/**",
+    "projects/*/ceo-plans/**",
+    "projects/*/plans/**",
+    "projects/*/designs/**",
+    "projects/*/specs/**",
+    "projects/*/briefs/**",
+    "projects/*/cards/**",
+    "projects/*/handoffs/**",
+    "projects/*/deploy-reports/**",
+    "projects/*/pair-review/*",
+    "projects/*/learnings.jsonl",
+    "projects/*/decisions.jsonl",
+    "projects/*/decisions.archive.jsonl",
+    "projects/*/timeline.jsonl",
+    "projects/*/question-log.jsonl",
+    "projects/*/question-events.jsonl",
+    "projects/*/question-preferences.json",
+    "projects/*/taste-profile.json",
+    "projects/*/greptile-history.md",
+    "projects/*/land-and-deploy.jsonl",
+    "projects/*/land-deploy.jsonl",
+    "projects/*/health-history.jsonl",
+    "projects/*/canary-history.jsonl",
+    "projects/*/distillation-proposals.json",
+    "projects/*/.former-slugs",
+    "projects/*/reviews.jsonl",
+    "projects/*/resources-shown.jsonl",
+    "projects/*/*-reviews.jsonl",
+    "projects/*/*-evidence.jsonl",
+    "projects/*/*-autoplan-*.md",
+    "projects/*/*-test-plan-*.md",
+    "projects/*/*-card.md",
+    "projects/*/driver-handoff*.md",
+    "projects/*/manager-*.json",
+]
+
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},
     {
@@ -179,6 +243,11 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "path": "~/.gstack",
         "type": "generic",
         "include_dirs": ["projects", "analytics", "retros"],
+        # Allowlist inside those dirs: only context with a named
+        # cross-machine reader syncs. See _GSTACK_INCLUDE_PATTERNS above
+        # for the measurement and per-entry readers. Existing explicit
+        # configs opt in via mm migrate-config.
+        "include_patterns": [*_GSTACK_INCLUDE_PATTERNS],
         # Curated to two categories: cross-machine memory content
         # (retro-context.md, greptile-history.md) and onboarding markers
         # (the dotfiles). Bare top-level files only — directories go in
@@ -488,6 +557,13 @@ def _validate_sources(sources: Any) -> None:
         seen_names.add(name)
         if "exclude_patterns" in src:
             _validate_exclude_patterns(src["exclude_patterns"], name)
+        if "include_patterns" in src:
+            if src["type"] != "generic":
+                raise ConfigError(
+                    f"config: source '{name}' (type '{src['type']}') does not support "
+                    "include_patterns; only type 'generic' sources use an allowlist."
+                )
+            _validate_pattern_list(src["include_patterns"], name, "include_patterns")
 
 
 def _validate_str_list(value: Any, label: str) -> None:
@@ -560,25 +636,29 @@ def _validate_skills(skills: Any) -> None:
             )
 
 
-def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
-    """Check exclude_patterns is a list[str] of compilable fnmatch globs.
+def _validate_pattern_list(patterns: Any, source_name: str, field: str) -> None:
+    """Check a per-source pattern field is a list[str].
 
-    fnmatch accepts any string as a pattern (no syntax errors), so we only
-    enforce the structural shape (list of strings). This guards the malformed-
-    schema branch (e.g. user wrote a single string instead of a list) at load
-    time so push/pull don't crash mid-walk with a TypeError on iteration.
+    Both pattern dialects accept any string (no syntax errors), so we only
+    enforce the structural shape. This guards the malformed-schema branch
+    (e.g. user wrote a single string instead of a list) at load time so
+    push/pull don't crash mid-walk with a TypeError on iteration.
     """
     if not isinstance(patterns, list):
         raise ConfigError(
-            f"config: source '{source_name}' exclude_patterns must be a list, "
-            f"got {type(patterns).__name__}."
+            f"config: source '{source_name}' {field} must be a list, got {type(patterns).__name__}."
         )
     for j, pat in enumerate(patterns):
         if not isinstance(pat, str):
             raise ConfigError(
-                f"config: source '{source_name}' exclude_patterns[{j}] must be "
+                f"config: source '{source_name}' {field}[{j}] must be "
                 f"a string, got {type(pat).__name__}."
             )
+
+
+def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
+    """Check exclude_patterns is a list[str] of compilable fnmatch globs."""
+    _validate_pattern_list(patterns, source_name, "exclude_patterns")
 
 
 def grok_customization_dirs_exist(
