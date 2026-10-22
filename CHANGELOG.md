@@ -2,6 +2,25 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.6] - 2026-10-22
+
+**gstack sync now keeps per-run output on the Mac that produced it.** Checkpoints, plans, learnings, decisions, timelines, and handoffs still sync. Review-prep trees, loop state, and gate diffs stay local. A new install gets this allowlist. An existing config opts in with `mm migrate-config`.
+
+### Added
+
+- The gstack source has `include_patterns`, a second allowlist inside the directories it already syncs. `*` stays in one directory and `**` crosses directories. Excludes still win. `mm migrate-config` adds the recommended list only when the key is absent. A list you already wrote, including an empty one, stays as it is.
+- `mm resolve --promote` warns when the name it would create falls outside that source's allowlist, so a promoted conflict copy is not silently left unsynced.
+
+### Changed
+
+- Narrowing the allowlist publishes a smaller manifest and writes no tombstones. Files that drop out of sync stay on every Mac's disk. After every active Mac has narrowed and pushed, the next attended content-changing `mm push`, or `mm gc`, reclaims this Mac's own copies of those blobs.
+- An older mm that has not migrated still publishes the wider set. A migrated Mac keeps the de-scoped files. Until every active Mac has migrated and pushed, an attended pull on a migrated Mac logs one excluded row for each de-scoped file that peer still lists.
+
+### Upgrade notes
+
+- The storage format is unchanged. An older mm keeps working beside this one.
+- On every active Mac, before the next attended `mm pull` on any of them: `mm update`, `mm migrate-config`, then `mm push`.
+
 ## [1.11.5] - 2026-10-21
 
 **`mm push` and `mm pull` end on one outcome line.** When the command finishes, the last line says what happened. A push reports the content it published, metadata, source selection, a repaired manifest, held files, or no enabled sources. A pull reports files applied, conflicts, skips, no peers, or no enabled sources. When the command stops, that line names the cause, what already happened, and the one command to run next.
