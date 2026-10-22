@@ -2,7 +2,7 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
+- `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_SyncProgress` / `_start_sync_progress` / `_pause_sync_progress` / `_fetch_remote_manifest` / `_recover_prior_manifest` / `_filter_excluded_paths` / `_filter_disabled_sources` / `_drop_case_collisions_from_manifests`
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
@@ -86,7 +86,7 @@ no-source attended push ends `Push: no enabled sources.` and records run cause
 `no-changes`, not `ok`.
 
 Presentation never changes quiet/attended execution, budgets, warming, locks,
-encryption or schemas. Progress/capture/cache/budget/nested notices are verbose;
+encryption or schemas. In a real terminal (`not verbose and not dry_run and console.is_terminal and console.file.isatty()`), attended `mm push` and `mm pull` render a transient Rich spinner (`_SyncProgress`) with phase labels and measured batch counters (`updateprogress.UpdateProgress`; pull counts per source batch), animated by a 100 ms daemon ticker thread that joins with a bounded timeout on shutdown (`_stop_sync_progress`), repainting per-file advances at ticker rate (phase changes and first/final files paint at once; synchronous refreshes can still wait on terminal output), pauses around mid-run warnings or interactive conflict prompts on the push/pull paths (`_pause_sync_progress`; leaf-module warnings cannot pause it), and clears before the final outcome line. Progress/capture/cache/budget/nested notices are verbose;
 actual degradations reach existing status/diag evidence, including failures
 without a returned result. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,

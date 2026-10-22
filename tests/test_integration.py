@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import inspect
+import io
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
@@ -14581,3 +14583,446 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         cli_module._SYNC_OUTPUT.reset(token)
     err = capsys.readouterr().err
     assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err
+
+
+class _SyncTerminalBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capture61, monkeypatch):
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    (memory / "user_role.md").write_text("updated content")
+    (memory / "second.md").write_text("second file")
+    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: 2 content changes published; usage published.\n"
+    assert result.stderr == ""
+    output = terminal.getvalue()
+    assert "⠋ Unlocking storage" in output
+    assert "━" not in output
+    assert "\x1b[?25h" in output
+    # First and final files paint immediately; intermediate advances are
+    # throttled to the ticker interval, so 2/3 is not a guaranteed frame.
+    positions = [
+        output.index("Unlocking storage"),
+        output.index("Checking remote manifest"),
+        output.index("Capturing host usage"),
+        output.index("Scanning sources"),
+        output.index("Recording activity"),
+        output.index("Uploading files"),
+        output.index("33.3% 1/3 files"),
+        output.index("100.0% 3/3 files"),
+        output.index("Saving manifest"),
+        output.index("Cleaning up orphaned blobs"),
+    ]
+    assert positions == sorted(positions)
+
+
+def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
+    apply_failure_fleet, monkeypatch
+):
+    fleet = apply_failure_fleet
+    fleet.publish({"alpha.md": b"alpha", "beta.md": b"beta"})
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Pull: 2 files applied.\n"
+    assert result.stderr == ""
+    output = terminal.getvalue()
+    assert "⠋ Unlocking storage" in output
+    assert "━" not in output
+    assert "\x1b[?25h" in output
+    positions = [
+        output.index("Unlocking storage"),
+        output.index("Reading peer manifests"),
+        output.index("50.0% 1/2 manifests"),
+        output.index("100.0% 2/2 manifests"),
+        output.index("Checking local files"),
+        output.index("Applying files"),
+        output.index("50.0% 1/2 files"),
+        output.index("100.0% 2/2 files"),
+    ]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["push", "--verbose"],
+        ["push", "--dry-run"],
+        ["pull", "--verbose"],
+        ["pull", "--dry-run"],
+        ["autopush"],
+        ["autopull"],
+    ],
+)
+def test_sync_progress_disabled_for_non_tty_verbose_dry_run_and_auto_commands(
+    status77, monkeypatch, args
+):
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert "Unlocking storage" not in terminal.getvalue()
+    assert "\x1b[?25l" not in terminal.getvalue()
+
+
+def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monkeypatch):
+    piped = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=piped, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: no content changes.\n"
+    assert piped.getvalue() == ""
+
+
+def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status77, monkeypatch):
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    failed = threading.Event()
+
+    class DyingTerminal(_SyncTerminalBuffer):
+        dead = False
+        failed_writes = 0
+        failing_thread = None
+
+        def write(self, text):
+            if self.dead:
+                self.failed_writes += 1
+                self.failing_thread = threading.current_thread()
+                failed.set()
+                raise OSError("terminal gone")
+            return super().write(text)
+
+    terminal = DyingTerminal()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def scanning_frames() -> set[str]:
+        output = terminal.getvalue()
+        return {frame for frame in frames if f"{frame} Scanning sources" in output}
+
+    original_build = cli_module.build_manifest_v2
+
+    def slow_build(*args, **kwargs):
+        deadline = time.monotonic() + 5
+        while len(scanning_frames()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        terminal.dead = True
+        try:
+            assert failed.wait(5), "timer never attempted a redraw"
+            assert terminal.failing_thread is not threading.current_thread()
+            terminal.failing_thread.join(timeout=5)
+            assert not terminal.failing_thread.is_alive()
+            assert terminal.failed_writes == 1
+        finally:
+            terminal.dead = False
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", slow_build)
+    thread_errors: list = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert len(scanning_frames()) >= 2
+    assert thread_errors == []
+    assert result.stdout == "Push: no content changes.\n"
+
+
+def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
+    status77, monkeypatch
+):
+    class FlakyTerminal(_SyncTerminalBuffer):
+        failed = False
+
+        def write(self, text):
+            if "\x1b[?25l" in text and not self.failed:
+                self.failed = True
+                raise BlockingIOError(35, "Resource temporarily unavailable")
+            return super().write(text)
+
+    flaky = FlakyTerminal()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=flaky, force_terminal=True, color_system=None, width=80),
+    )
+    res = runner.invoke(app, ["push"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout == "Push: no content changes.\n"
+
+    # Blocked ticker does not hang stop()
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=_SyncTerminalBuffer(), force_terminal=True, color_system=None, width=80),
+    )
+    drawing = threading.Event()
+    release_draw = threading.Event()
+    tickers, displays, stopped = [], [], []
+    original_refresh = cli_module.Progress.refresh
+    original_stop = cli_module.Progress.stop
+
+    def refresh(progress):
+        if not displays:
+            displays.append(progress)
+        if threading.current_thread().name == "mm-sync-spinner":
+            tickers.append(threading.current_thread())
+            drawing.set()
+            release_draw.wait()
+        return original_refresh(progress)
+
+    def stop(progress):
+        stopped.append(progress)
+        return original_stop(progress)
+
+    monkeypatch.setattr(cli_module.Progress, "refresh", refresh)
+    monkeypatch.setattr(cli_module.Progress, "stop", stop)
+    sp = cli_module._SyncProgress(enabled=True)
+    sp.start("Unlocking storage")
+    try:
+        assert drawing.wait(5), "ticker never entered blocked draw"
+        sp.stop()
+        assert len(tickers) == 1 and tickers[0].is_alive() and tickers[0].daemon
+        assert stopped == []
+    finally:
+        release_draw.set()
+        for ticker in tickers:
+            ticker.join(timeout=5)
+        for progress in displays:
+            original_stop(progress)
+
+
+def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_fleet, monkeypatch):
+    fleet = apply_failure_fleet
+    local_file = fleet.memory / "note.md"
+    local_file.write_text("local version\n")
+    os.utime(local_file, (1, 1))
+    fleet.publish({"note.md": b"remote version\n", "bad.md": b"bad blob", "other.md": b"other\n"})
+    fleet.ordered(["note.md", "bad.md", "other.md"])
+    # Corrupt bad.md's blob so its apply fails with a pause-wrapped warning
+    # between the conflict prompt and the final counter render.
+    fleet.backend.put(
+        storage_keys.blob_key("dev-a", hashlib.sha256(b"bad blob").hexdigest()),
+        b"not-encrypted",
+    )
+
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\n")
+    assert result.exit_code == 1, result.output
+    assert (fleet.memory / "other.md").read_bytes() == b"other\n"
+    output = terminal.getvalue()
+    # Observable resume: after the prompt and the mid-run warning, the
+    # spinner must render again and the counter must reach its final file.
+    positions = [
+        output.index("Applying files"),
+        output.index(f"Conflict: {fleet.prefix}note.md"),
+        output.index("decrypt failed"),
+        output.index("100.0% 3/3 files", output.index("decrypt failed")),
+    ]
+    assert positions == sorted(positions)
+    assert "\x1b[?25h" in output
+
+
+def test_sync_progress_clears_on_interrupt_and_error(status77, monkeypatch):
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+
+    def interrupted_scan(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", interrupted_scan)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 1, result.output
+    assert result.stderr.startswith("Push ")
+    output = terminal.getvalue()
+    assert "Unlocking storage" in output
+    assert "Scanning sources" in output
+    # The transient display is torn down: cursor restored, ticker gone.
+    assert "\x1b[?25h" in output
+    assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
+
+
+def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    (memory / "user_role.md").write_text("updated content")
+    codex_source = next(s for s in capture61["cfg"]["sync"]["sources"] if s["name"] == "codex")
+    codex_source["include_dirs"] = ["skills"]
+    save_config(capture61["cfg"], capture61["path"])
+    codex_path = codex_source["path"]
+    codex_skill = Path(codex_path) / "skills" / "skill.md"
+    codex_skill.parent.mkdir(parents=True, exist_ok=True)
+    codex_skill.write_text("codex skill")
+    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    output = terminal.getvalue()
+    # One run-wide denominator (claude + codex + mm-events row): a per-source
+    # reset would render 1/1 batches and never a single 3/3 sequence.
+    assert "33.3% 1/3 files" in output
+    assert "100.0% 3/3 files" in output
+    assert "1/1 files" not in output
+    assert output.index("33.3% 1/3 files") < output.index("100.0% 3/3 files")
+
+
+@pytest.mark.parametrize("fault", ["isatty", "update", "resume", "thread-start"])
+def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fault):
+    # Value: protects=display failures preserve successful sync and its final outcome;
+    # fails_when=TTY probing, redraw, resume, or thread-start errors escape;
+    # why_new=existing terminal tests cover only initial start and timer refresh failures;
+    # seam=none; no_claim=real terminal drivers (Rich is real, failures are injected)
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    triggered = []
+
+    def fail(*args, **kwargs):
+        triggered.append(fault)
+        raise OSError("synthetic display failure")
+
+    if fault == "isatty":
+        monkeypatch.setattr(terminal, "isatty", fail)
+    elif fault == "update":
+        monkeypatch.setattr(cli_module.Progress, "update", fail)
+    elif fault == "resume":
+        original_start = cli_module.Progress.start
+        starts = []
+
+        def start(progress):
+            starts.append(True)
+            if len(starts) > 1:
+                fail()
+            return original_start(progress)
+
+        monkeypatch.setattr(cli_module.Progress, "start", start)
+        original_build = cli_module.build_manifest_v2
+
+        def build(*args, **kwargs):
+            cli_module._print_apply_warning("synthetic apply warning")
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "build_manifest_v2", build)
+    else:
+        original_thread_start = threading.Thread.start
+
+        def thread_start(thread):
+            if thread.name == "mm-sync-spinner":
+                fail()
+            return original_thread_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", thread_start)
+
+    result = runner.invoke(app, ["push"])
+    assert triggered, "the injected display failure was not reached"
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: no content changes.\n"
+    assert result.stderr == ("synthetic apply warning\n" if fault == "resume" else "")
+    if fault != "isatty":
+        assert "\x1b[?25h" in terminal.getvalue()
+    assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
+
+
+def test_sync_progress_nested_pause_and_interrupt_do_not_restart_display(monkeypatch):
+    # Value: protects=nested warning pauses resume once and interrupted pauses stay cleared;
+    # fails_when=an inner pause or exception exit restarts the transient display;
+    # why_new=existing warning test resumes normally and interrupt test stops during scan;
+    # seam=none; no_claim=full CLI conflict routing (real Rich lifecycle at its owner)
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    progress = cli_module._SyncProgress(enabled=True)
+    progress.start("Working")
+    try:
+        with progress.paused():
+            clears = terminal.getvalue().count("\x1b[?25h")
+            starts = terminal.getvalue().count("\x1b[?25l")
+            with progress.paused():
+                progress.set_phase("Next phase")
+            assert terminal.getvalue().count("\x1b[?25l") == starts
+            assert terminal.getvalue().count("\x1b[?25h") == clears
+        assert terminal.getvalue().count("\x1b[?25l") == starts + 1
+        with pytest.raises(KeyboardInterrupt), progress.paused():
+            starts = terminal.getvalue().count("\x1b[?25l")
+            raise KeyboardInterrupt
+        assert terminal.getvalue().count("\x1b[?25l") == starts
+    finally:
+        progress.stop()
+    assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
