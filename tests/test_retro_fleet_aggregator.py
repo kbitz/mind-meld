@@ -6802,6 +6802,81 @@ class TestUnifiedAgents:
         usage = self._usage_for(self._data([snap], known_ids=("dev-a",)))
         assert all(not row.by_model for row in usage.rows)
 
+    @pytest.mark.parametrize(
+        "promoted_family, promoted_model",
+        [
+            ("muse", "muse-wonder-full-1.0"),
+            ("agy", "gemini-3.8-flash"),
+        ],
+    )
+    @pytest.mark.parametrize("historical", [True, False])
+    def test_promoted_classification_keeps_sibling_model_pricing(
+        self, promoted_family, promoted_model, historical
+    ):
+        day = "2026-04-22"
+        reported_family = "other" if historical else promoted_family
+        models = {
+            "gpt-6-astra": _usage(1_000_000),
+            "grok-4.7": _usage(2_000_000),
+            promoted_model: _usage(3_000_000),
+        }
+        hosts = {
+            "codex": {day: models["gpt-6-astra"]},
+            "grok": {day: models["grok-4.7"]},
+            reported_family: {day: models[promoted_model]},
+        }
+        ev = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts=hosts,
+            token_sources=("codex", "cursor", "muse"),
+            extra={"tokens_by_day": {day: {**_usage(6_000_000), "by_model": models}}},
+        )
+        data = self._data([], known_ids=("dev-a",))
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a"}
+        )
+        usage = self._usage_for(data)
+        for family, model in (
+            ("codex", "gpt-6-astra"),
+            ("grok", "grok-4.7"),
+            (reported_family, promoted_model),
+        ):
+            row = self._row(usage, family)
+            assert row.tokens == models[model]["input"]
+            assert row.by_model == {model: models[model]}
+            assert aggregator._agent_top_model(row) != "—"
+            assert not any("different family classification" in c for c in row.floor_causes)
+        assert aggregator._agent_row_cost(self._row(usage, "codex"))[0] == 10.0
+        assert aggregator._agent_row_cost(self._row(usage, "grok"))[0] is not None
+        assert data.host_inventory.by_device["dev-a"].lifetime_by_family == hosts
+
+    @pytest.mark.parametrize("promoted_model", ["muse-wonder-full-1.0", "gemini-3.8-flash"])
+    @pytest.mark.parametrize("field", ["input", "output", "cache_read", "cache_create"])
+    def test_legacy_promoted_mapping_still_checks_combined_other_counters(
+        self, field, promoted_model
+    ):
+        day = "2026-04-22"
+        other = {**_usage(0), field: 10}
+        codex = {**_usage(0), field: 5}
+        hosts = {"other": {day: other}, "codex": {day: codex}}
+        # Flat totals match, but the promoted and a genuine unclassified model
+        # over-attribute the old `other` family by one token.
+        models = {
+            promoted_model: {**_usage(0), field: 6},
+            "unknown-model": {**_usage(0), field: 5},
+            "gpt-6-astra": {**_usage(0), field: 4},
+        }
+        snap = _snap(
+            "dev-a",
+            self.UNTIL,
+            families=hosts,
+            tokens_by_day={day: {**_usage(0), field: 15, "by_model": models}},
+        )
+        usage = self._usage_for(self._data([snap]))
+        assert all(not row.by_model for row in usage.rows)
+        assert {row.key: row.tokens for row in usage.rows} == {"codex": 5, "other": 10}
+
     def test_capped_model_detail_still_prices_a_floor(self):
         hosts = {"codex": {"2026-04-22": _usage(1_000_000)}}
         snap = _snap("dev-a", self.UNTIL, families=hosts, counter_semantics="disjoint-v1")

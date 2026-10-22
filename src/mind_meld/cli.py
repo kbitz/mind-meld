@@ -1370,7 +1370,10 @@ def _include_prior_host_if_needed(
     the deletions truthfully propagate, and refuse loudly when the root
     itself is unreadable.
     """
-    if remote_manifest is None or name not in remote_manifest.get("sources", {}):
+    if remote_manifest is None or not (
+        remote_manifest.get("sources", {}).get(name, {}).get("files")
+    ):
+        # An empty usage-only source does not establish a populated sync root.
         return sources
     disabled = set(config.get("sync", {}).get("disabled_sources") or [])
     if name in disabled or any(src["name"] == name for src in sources):
@@ -7747,9 +7750,13 @@ def status(
             config, sources_configs, capture_rows, selected=source_resolution.selected
         )
         reader_states = {
-            name: _host_usage.reader_usage_diag(name, count_logs=True)
-            for name in publication["readers"]
+            name: _host_usage.reader_usage_diag(name) for name in publication["readers"]
         }
+        for name, state in reader_states.items():
+            if name in {"muse", "agy"} and state.get("last_reason") == "deadline":
+                # Only deadline progress uses on-disk counts. Healthy status
+                # stays cache-only instead of walking the host's full history.
+                reader_states[name] = _host_usage.reader_usage_diag(name, count_logs=True)
         capture_action = None
         if publication["readers"] and publication["readiness"] in ("disabled", "unavailable"):
             capture_action = "Usage capture unavailable. " + _usage_capture_remedy(

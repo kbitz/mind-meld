@@ -795,7 +795,7 @@ def aggregate_agent_usage(
             # versions. Never price one family's volume under another label.
             by_model = {}
         for model, usage in by_model.items():
-            family = host_usage.host_family(model)
+            family = _host_model_family(snap, model)
             if family not in _HOST_FAMILIES:
                 continue
             dest = fam_by_model.setdefault(family, {}).setdefault(
@@ -866,7 +866,7 @@ def aggregate_agent_usage(
                 per_family.setdefault(family, set()).add(cause)
         for family in touched:
             family_slice = {
-                m: u for m, u in by_model.items() if host_usage.host_family(m) == family
+                m: u for m, u in by_model.items() if _host_model_family(snap, m) == family
             }
             long_context = _long_context_cause(family_slice, incomplete=coverage_unknown)
             if long_context:
@@ -3657,6 +3657,19 @@ def _windowed_host_by_model(
     return merged, residual
 
 
+def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
+    """Preserve the recorded family for models promoted out of ``other``.
+
+    Older writers classified Muse and Gemini as ``other``. Keep their pricing
+    beside that accepted volume until the writer publishes the new family;
+    the ordinary day/counter reconciliation still bounds their combined sum.
+    """
+    family = host_usage.host_family(model)
+    if family in {"muse", "agy"} and family not in snap.lifetime_by_family:
+        return "other"
+    return family
+
+
 def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bool:
     """Check pricing attribution without rejecting a cross-version snapshot.
 
@@ -3676,7 +3689,7 @@ def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bo
         for model, usage in by_model.items():
             if not isinstance(model, str) or not isinstance(usage, dict):
                 continue
-            family = host_usage.host_family(model)
+            family = _host_model_family(snap, model)
             dest = classified.setdefault(family, token_usage.zero_model_bucket())
             token_usage.merge_usage_bucket(dest, usage)
         for family, usage in classified.items():

@@ -419,12 +419,12 @@ pin it.
 
 *Unconsented Muse is not walked.* `mm diag` counts session logs
 (`muse_usage_diag(count_logs=True)`) only for an enabled `muse` source;
-otherwise `files_on_disk` is null. `mm status` and recapture use the
+otherwise `files_on_disk` is null. Healthy `mm status` and recapture use the
 cache-only view (`reader_usage_diag`), since the count walks every day
-directory. `mm status` stats `sessions/` only for
+directory. Status counts an enabled Muse or Antigravity reader only when
+its cached reason is `deadline`, to report scan progress. `mm status` stats `sessions/` only for
 the opt-in nudge, and not at all when `muse` is in `disabled_sources` or
-already enabled. No path opens a session log without consent. (Grok's diag
-count and status probe predate this rule.)
+already enabled. No path opens a session log without consent.
 
 The census and fatal-check list are
 `tests/fixtures/host_sessions/muse/CONTRACT.md`, bound to
@@ -1102,14 +1102,17 @@ do not automatically discard a device or ledger based on equal totals.
   an older peer without detail from malformed detail that was dropped.
 - **Classifier disagreement preserves accepted wire totals.** Before pricing
   a host snapshot, compare locally classified per-model sums with its wire
-  family totals for each day and counter. If a local model sum exceeds the
+  family totals for each day and counter. Older snapshots without a `muse`
+  or `agy` family retain that family's models under their historical `other`
+  bucket for both validation and pricing; accepted wire totals stay unchanged.
+  If a local model sum exceeds the
   corresponding wire total, suppress that snapshot's pricing detail rather
   than moving accepted tokens between families or pricing an inconsistent
   basis. Other snapshots can still supply a priced subtotal for the row.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex, Grok Build and Muse ledgers and Cursor
+  overlap: `host_usage` reads Codex and Muse ledgers, Antigravity databases and Cursor
   (Conductor runs plus enrolled standalone completions), never Claude Code's
   own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.

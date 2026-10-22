@@ -369,6 +369,28 @@ class TestPushPullRoundTrip:
         assert status.exit_code == 0, status.output
         assert "Source inspection incomplete" not in status.output
 
+        # Losing usage-only data must not wedge unrelated context publishing:
+        # no configuration files have ever been advertised for this source.
+        shutil.rmtree(home / ".gemini/antigravity-cli/conversations")
+        role = claude_dir / "projects/-Users-kb-myapp/memory/user_role.md"
+        role.write_text("Context changed after Antigravity conversations disappeared\n")
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        remote = load_manifest(
+            decrypt(
+                backend.get("manifests/dev-a/manifest.json.enc"),
+                PASSPHRASE,
+                memory_kb=MEMORY_KB,
+            )
+        )
+        assert (
+            remote["sources"]["claude"]["files"]["projects/-Users-kb-myapp/memory/user_role.md"][
+                "sha256"
+            ]
+            == hashlib.sha256(role.read_bytes()).hexdigest()
+        )
+        assert not [key for key in remote["tombstones"] if key.startswith("agy:")]
+
         root = home / ".gemini/config"
         root.mkdir()
         (root / "AGENTS.md").write_text("Antigravity context\n")
@@ -13484,6 +13506,38 @@ def test_status77_content_and_metadata_round_trips(status77):
         runner.invoke(app, ["status"]).output.splitlines()[0]
         == "In sync with this device's last push."
     )
+
+
+@pytest.mark.parametrize("reason", [None, "deadline"])
+def test_status_counts_muse_history_only_for_deadline_progress(status77, monkeypatch, reason):
+    root = status77["path"].parent / "muse"
+    (root / "memory").mkdir(parents=True)
+    status77["cfg"]["sync"]["sources"].append({"name": "muse", "path": str(root), "type": "muse"})
+    save_config(status77["cfg"], status77["path"])
+    cache = {
+        "version": _mm_host_usage.CACHE_VERSION,
+        "muse_format": _mm_host_usage._MUSE_CACHE_FORMAT,
+        "files": {},
+        "complete_once": True,
+        "last_reason": reason,
+    }
+    _mm_host_usage.MUSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _mm_host_usage.MUSE_CACHE_PATH.write_text(json.dumps(cache))
+    counts = []
+
+    def count(root):
+        counts.append(root)
+        return 7
+
+    monkeypatch.setattr(_mm_host_usage, "_count_muse_ledgers", count)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    assert len(counts) == (1 if reason == "deadline" else 0)
+    output = " ".join(result.output.split())
+    if reason == "deadline":
+        assert "0 of 7 session logs cached" in output
+    else:
+        assert "Muse usage capture: enabled; a prior scan completed successfully" in output
 
 
 @pytest.mark.parametrize(
