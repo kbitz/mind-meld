@@ -167,6 +167,7 @@ from mind_meld.manifest import (
     is_tombstoned,
     load_manifest,
     marker_skip_globs,
+    matches_include_patterns,
     mtime_from_manifest,
     mtime_from_path,
     parse_conflict_created_at,
@@ -853,15 +854,39 @@ def _build_exclude_map(
     return out, prefixes
 
 
+def _build_include_map(
+    config: dict,
+    sources: list[dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Map source name -> include_patterns allowlist (generic sources).
+
+    Fed to ``_filter_excluded_paths`` alongside the exclude map so narrowing
+    a source's allowlist strips de-scoped entries from prior/peer manifests
+    at the consumer boundary instead of minting deletion tombstones for
+    every file the narrower walk no longer publishes.
+    """
+    resolved = sources if sources is not None else get_sources(config)
+    out: dict[str, list[str]] = {}
+    for src in resolved:
+        if src.get("type") != "generic":
+            continue
+        patterns = list(src.get("include_patterns") or [])
+        if patterns:
+            out[src["name"]] = patterns
+    return out
+
+
 def _filter_excluded_paths(
     manifest: dict,
     exclude_map: dict[str, list[str]],
     skip_prefixes: dict[str, list[str]] | None = None,
+    include_map: dict[str, list[str]] | None = None,
 ) -> dict:
     """Return a shallow copy of `manifest` with excluded source-paths stripped.
 
     Drops entries from `sources.<name>.files` and `tombstones` whose relative
-    path matches any glob in `exclude_map[name]`, AND any conflict-shaped
+    path matches any glob in `exclude_map[name]` or — when `include_map[name]`
+    is non-empty — matches no allowlist pattern in it, AND any conflict-shaped
     basename, `.extend-root` marker, `.git` segment in any letter case, or `.`
     or empty segment. That is intentionally stricter than the push-side
     ``manifest._is_excluded`` gate, whose `.git/` check is case-sensitive. A
@@ -904,11 +929,12 @@ def _filter_excluded_paths(
         if _under_skip_prefix(rel_path, (skip_prefixes or {}).get(src_name)):
             return True
         patterns = exclude_map.get(src_name)
-        if not patterns:
-            return False
-        return any(fnmatch.fnmatch(rel_path, p) for p in patterns)
+        if patterns and any(fnmatch.fnmatch(rel_path, p) for p in patterns):
+            return True
+        includes = (include_map or {}).get(src_name)
+        return bool(includes) and not matches_include_patterns(rel_path, includes)
 
-    if not exclude_map and not skip_prefixes:
+    if not exclude_map and not skip_prefixes and not include_map:
         has_conflict = False
         for src_data in manifest.get("sources", {}).values():
             for rel in src_data.get("files", {}):
@@ -1243,7 +1269,9 @@ def _prove_omitted_paths_absent(
                 extra = [*GROK_EXCLUDE_PATTERNS, *extra]
             elif src_cfg.get("type") == "muse":
                 extra = [*MUSE_EXCLUDE_PATTERNS, *extra]
-            if _manifest_is_excluded(rel_path, extra):
+            if _manifest_is_excluded(
+                rel_path, extra, None, list(src_cfg.get("include_patterns") or []) or None
+            ):
                 continue
             path = base / rel_path
             try:
@@ -4878,6 +4906,7 @@ def _inject_held_entries(
     exclude_map: Mapping[str, list[str]],
     skip_prefixes: Mapping[str, list[str]],
     frozen: Mapping[str, set[str]],
+    include_map: Mapping[str, list[str]] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Resolve a strict scan's held files into the manifest about to be published.
 
@@ -4906,10 +4935,11 @@ def _inject_held_entries(
         prior_files = prior_sources.get(name, {}).get("files", {})
         patterns = exclude_map.get(name)
         prefixes = skip_prefixes.get(name)
+        includes = (include_map or {}).get(name)
         reasons = dict(held.get(name, {}))
         directories: set[str] | None = None
         for rel in sorted(candidates.get(name, ())):
-            if rel in reasons or _manifest_is_excluded(rel, patterns, prefixes):
+            if rel in reasons or _manifest_is_excluded(rel, patterns, prefixes, includes):
                 continue
             if directories is None:
                 directories = {
@@ -4924,7 +4954,7 @@ def _inject_held_entries(
             if (
                 rel in files
                 or rel in frozen.get(name, ())
-                or _manifest_is_excluded(rel, patterns, prefixes)
+                or _manifest_is_excluded(rel, patterns, prefixes, includes)
                 or is_tombstoned(name, rel, tombstones)
             ):
                 continue
@@ -5236,10 +5266,13 @@ def _push_core(
     # whole source first avoids walking a soon-to-be-dropped source's
     # exclude_patterns for nothing. Tombstones stay (asymmetric filter).
     exclude_map, skip_prefixes = _build_exclude_map(config, sources, strict=True)
+    include_map = _build_include_map(config, sources)
     frozen: dict[str, set[str]] = {}
     if remote_manifest is not None:
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
-        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
+        remote_manifest = _filter_excluded_paths(
+            remote_manifest, exclude_map, skip_prefixes, include_map
+        )
         # Freeze before the symlink filter: entries below a checkout root are
         # kept as published without inspecting what replaced them on disk.
         frozen = _freeze_nested_checkout_entries(
@@ -5269,6 +5302,7 @@ def _push_core(
                 exclude_map=exclude_map,
                 skip_prefixes=skip_prefixes,
                 frozen=frozen,
+                include_map=include_map,
             )
         proof_sources = sources
         if dry_run and resolution.would_create:
@@ -5287,6 +5321,7 @@ def _push_core(
             exclude_map=exclude_map,
             skip_prefixes=skip_prefixes,
             frozen=frozen,
+            include_map=include_map,
         )
 
     # Generate tombstones for files that disappeared since last push
@@ -5448,6 +5483,7 @@ def _push_core(
                         exclude_map=exclude_map,
                         skip_prefixes=skip_prefixes,
                         frozen=frozen,
+                        include_map=include_map,
                     )
                 )
             local_manifest["sources"].update(events_manifest["sources"])
@@ -6736,6 +6772,7 @@ def _pull_core(
         # local ancestors of incoming peer paths, so it never writes into one.
         nested_roots = _incoming_nested_roots(pull_sources, manifest_cache.values())
         exclude_map, skip_prefixes = _build_exclude_map(config, nested_roots=nested_roots)
+        include_map = _build_include_map(config)
         # Always run: conflict-shaped names and `.extend-root` are stripped even
         # when no source declares exclude_patterns (claude-only installs).
         filtered_cache: dict[str, dict | None] = {}
@@ -6743,7 +6780,7 @@ def _pull_core(
             if m is None:
                 filtered_cache[did] = None
                 continue
-            filtered = _filter_excluded_paths(m, exclude_map, skip_prefixes)
+            filtered = _filter_excluded_paths(m, exclude_map, skip_prefixes, include_map)
             # Log "excluded" per peer-path so `mm log --action excluded`
             # shows what the user is NOT pulling because of their config.
             #
@@ -7310,7 +7347,10 @@ def status(
             if remote_manifest is not None:
                 exclude_map, skip_prefixes = _build_exclude_map(config, comparison_sources)
                 comparison_prior = _filter_excluded_paths(
-                    remote_manifest, exclude_map, skip_prefixes
+                    remote_manifest,
+                    exclude_map,
+                    skip_prefixes,
+                    _build_include_map(config, comparison_sources),
                 )
                 _freeze_nested_checkout_entries(local_manifest, comparison_prior, nested_roots)
                 comparison_prior = _filter_symlinked_paths(
@@ -9147,7 +9187,12 @@ def diff_cmd(
             sources_configs,
             nested_roots=_incoming_nested_roots(sources_configs, [remote_manifest]),
         )
-        remote_manifest = _filter_excluded_paths(remote_manifest, exclude_map, skip_prefixes)
+        remote_manifest = _filter_excluded_paths(
+            remote_manifest,
+            exclude_map,
+            skip_prefixes,
+            _build_include_map(config, sources_configs),
+        )
 
     remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
 
@@ -9432,8 +9477,9 @@ def sources() -> None:
     Shows ALL configured sources (active + disabled). The "Enabled" column
     reflects [sync].disabled_sources — disable a source on this device with
     `mm disable-source <name>`. The "Excluded" column reports how many files
-    the source's `exclude_patterns` actually matched on this scan; diagnostic
-    only, used to sanity-check an over-broad glob.
+    the source's `exclude_patterns` matched or its `include_patterns`
+    allowlist left out on this scan; diagnostic only, used to sanity-check
+    an over-broad glob or an under-broad allowlist.
     """
     config = _get_config(read_only=True)
 
@@ -9457,11 +9503,18 @@ def sources() -> None:
         # Two passes is the cheapest accurate diagnostic — instrumenting
         # the walker with a counter would leak diagnostic state into the
         # hot path.
-        src_no_excludes = {k: v for k, v in src.items() if k != "exclude_patterns"}
+        src_no_excludes = {
+            k: v for k, v in src.items() if k not in ("exclude_patterns", "include_patterns")
+        }
         _, all_files = walk_source(src_no_excludes, max_file_size)
         patterns = src.get("exclude_patterns") or []
-        if patterns:
-            excluded_count = sum(1 for rel in all_files if _manifest_is_excluded(rel, patterns))
+        includes = src.get("include_patterns") or []
+        if patterns or includes:
+            excluded_count = sum(
+                1
+                for rel in all_files
+                if _manifest_is_excluded(rel, patterns, None, includes or None)
+            )
             kept = len(all_files) - excluded_count
             excluded_display = str(excluded_count)
         else:
@@ -10134,17 +10187,49 @@ def _compute_recommended_excludes_diff(
     return diffs
 
 
+def _compute_recommended_includes_diff(
+    sources: list[dict],
+) -> list[tuple[str, list[str]]]:
+    """Sources whose default declares `include_patterns` but config lacks the key.
+
+    Unlike exclude globs, a partial allowlist is a different allowlist, so
+    migration only fires when the key is absent entirely and proposes the
+    default list wholesale. A user-edited (even empty) list is left alone;
+    deleting the key brings the prompt back, mirroring recommended excludes.
+    Returns [(source_name, default_patterns)].
+    """
+    diffs: list[tuple[str, list[str]]] = []
+    for src in sources:
+        if src.get("type") != "generic" or "include_patterns" in src:
+            continue
+        default = get_default_source(src.get("name", ""))
+        if default is None:
+            continue
+        recommended = default.get("include_patterns") or []
+        if recommended:
+            diffs.append((src["name"], list(recommended)))
+    return diffs
+
+
 def _config_missing_recommended_excludes(config: dict) -> list[str]:
     """Names of explicit `[[sync.sources]]` entries missing recommended excludes.
 
-    Returns [] when there's no explicit `sync.sources` array (legacy
-    claude_dir-only configs and bare configs use DEFAULT_SOURCES verbatim,
-    which already includes the recommended excludes — nothing to migrate).
+    Also covers sources missing a recommended `include_patterns` allowlist:
+    one migration signal drives the status breadcrumb, the auto-command
+    breadcrumb and the interactive prompt, and `mm migrate-config` applies
+    both halves. Returns [] when there's no explicit `sync.sources` array
+    (legacy claude_dir-only configs and bare configs use DEFAULT_SOURCES
+    verbatim, which already includes the recommended patterns — nothing to
+    migrate).
     """
     sources = config.get("sync", {}).get("sources")
     if not sources:
         return []
-    return [name for name, _missing, _current in _compute_recommended_excludes_diff(sources)]
+    names = [name for name, _missing, _current in _compute_recommended_excludes_diff(sources)]
+    for name, _patterns in _compute_recommended_includes_diff(sources):
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def _explicit_opencode_source_present(sources: list[dict] | None) -> bool:
@@ -10180,8 +10265,9 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         return False
 
     diffs = _compute_recommended_excludes_diff(sources)
+    include_diffs = _compute_recommended_includes_diff(sources)
     retire_opencode = _explicit_opencode_source_present(sources)
-    if not diffs and not retire_opencode:
+    if not diffs and not include_diffs and not retire_opencode:
         console.print("[green]Config is already up to date.[/green]")
         if dry_run:
             console.print(DRY_RUN_COMPLETE_LOCK_FREE)
@@ -10202,6 +10288,20 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         for name, missing, current in diffs:
             console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
             for p in missing:
+                console.print(f"    [green]+ {p}[/green]")
+    if include_diffs:
+        console.print(
+            "\nThe include_patterns allowlist syncs only context with a cross-machine "
+            "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
+            "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
+            "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
+            "its local files. Deleting the key later brings this prompt back; editing "
+            "the list (even to empty) is respected as your choice."
+        )
+        console.print("\n[bold]Recommended include_patterns updates:[/bold]")
+        for name, patterns in include_diffs:
+            console.print(f"\n  [bold]{name}[/bold]  (no include_patterns today)")
+            for p in patterns:
                 console.print(f"    [green]+ {p}[/green]")
     if retire_opencode:
         console.print("\n[bold]Retired source:[/bold]")
@@ -10226,14 +10326,18 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
 
     try:
         diff_map = {name: missing for name, missing, _current in diffs}
+        include_map_new = {name: patterns for name, patterns in include_diffs}
         new_sources: list[dict] = []
         for src in sources:
             if src.get("name") == "opencode":
                 continue
-            if src.get("name") in diff_map:
+            if src.get("name") in diff_map or src.get("name") in include_map_new:
                 merged = dict(src)
-                current = list(src.get("exclude_patterns") or [])
-                merged["exclude_patterns"] = current + diff_map[src["name"]]
+                if src.get("name") in diff_map:
+                    current = list(src.get("exclude_patterns") or [])
+                    merged["exclude_patterns"] = current + diff_map[src["name"]]
+                if src.get("name") in include_map_new:
+                    merged["include_patterns"] = include_map_new[src["name"]]
                 new_sources.append(merged)
             else:
                 new_sources.append(src)
@@ -10259,8 +10363,9 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         except OSError:
             pass
         parts: list[str] = []
-        if diffs:
-            parts.append(f"Updated {len(diffs)} source(s)")
+        if diffs or include_diffs:
+            updated = {name for name, _m, _c in diffs} | {name for name, _p in include_diffs}
+            parts.append(f"Updated {len(updated)} source(s)")
         if retire_opencode:
             parts.append("removed the retired opencode source block")
         console.print(
@@ -10268,7 +10373,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         )
     finally:
         release_lock()
-    return bool(diffs)
+    return bool(diffs or include_diffs)
 
 
 @app.command(name="migrate-config")
@@ -10280,10 +10385,11 @@ def migrate_config(
         help="Show the diff. Changes nothing: no config, lock or history writes. Exits 0.",
     ),
 ) -> None:
-    """Add recommended `exclude_patterns` to existing `[[sync.sources]]`.
+    """Add recommended sync patterns to existing `[[sync.sources]]`.
 
     Compares each user-configured source against the matching DEFAULT_SOURCES
-    entry and proposes adding any missing recommended globs. Also removes a
+    entry and proposes adding any missing recommended exclude globs, plus a
+    recommended `include_patterns` allowlist when the key is absent. Also removes a
     leftover ``opencode`` source block (retired in v0.12.55) and records the
     name in ``disabled_sources``. Idempotent — re-running on a fully-migrated
     config exits with "already up to date".

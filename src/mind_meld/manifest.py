@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import errno
 import fnmatch
+import functools
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -797,10 +799,54 @@ def mtime_from_path(path: Path) -> datetime:
     return datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
 
+@functools.lru_cache(maxsize=512)
+def _compile_include_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile one segment-aware include pattern to a regex.
+
+    Dialect (deliberately unlike the legacy fnmatch exclude globs, whose
+    ``*`` crosses ``/``): a pattern is ``/``-separated segments; ``*`` and
+    ``?`` match within one segment only; a whole ``**`` segment matches
+    zero or more segments. Everything else is literal. So
+    ``projects/*/pair-review/*`` means top-level files only, and
+    ``projects/*/checkpoints/**`` means any depth below checkpoints.
+    """
+    raw_segments = pattern.split("/")
+    segments = [
+        seg
+        for i, seg in enumerate(raw_segments)
+        if not (seg == "**" and i > 0 and raw_segments[i - 1] == "**")
+    ]
+    out: list[str] = []
+    for i, seg in enumerate(segments):
+        if seg == "**":
+            if i == len(segments) - 1:
+                out.append(r"(?:/.*)?" if out else r".*")
+            else:
+                out.append(r"(?:[^/]+/)*" if not out else r"/(?:[^/]+/)*")
+                # The join slash before the next segment is part of this
+                # token; mark it so the joiner below does not add another.
+                out.append("")
+            continue
+        if out and out[-1] != "":
+            out.append("/")
+        elif out:
+            out.pop()
+        out.append(
+            "".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in seg)
+        )
+    return re.compile("^" + "".join(out) + r"\Z", re.DOTALL)
+
+
+def matches_include_patterns(rel_path: str, include_patterns: list[str] | tuple[str, ...]) -> bool:
+    """True when ``rel_path`` matches any segment-aware include pattern."""
+    return any(_compile_include_pattern(pattern).match(rel_path) for pattern in include_patterns)
+
+
 def _is_excluded(
     rel_path: str,
     exclude_patterns: list[str] | None = None,
     skip_prefixes: list[str] | None = None,
+    include_patterns: list[str] | None = None,
 ) -> bool:
     """Check if a relative path matches any exclude pattern.
 
@@ -812,6 +858,8 @@ def _is_excluded(
     EXCLUDED list which mixes basename (`*.pyc`) and dir-segment (`.git/`)
     semantics for backward compatibility.
     ``skip_prefixes`` are path prefixes (not globs) for marker-skip dirs.
+    When ``include_patterns`` is non-empty, a path matching none of them is
+    excluded too (allowlist); excludes above still win over an include match.
     """
     parts = rel_path.split("/")
     filename = parts[-1]
@@ -836,6 +884,8 @@ def _is_excluded(
         for pattern in exclude_patterns:
             if fnmatch.fnmatch(rel_path, pattern):
                 return True
+    if include_patterns and not matches_include_patterns(rel_path, include_patterns):
+        return True
     return False
 
 
@@ -1367,6 +1417,7 @@ def _stat_collected_file(
     holds: SourceHolds | None,
     exclude_patterns: list[str] | None,
     skip_prefixes: list[str] | None = None,
+    include_patterns: list[str] | None = None,
 ) -> os.stat_result | None:
     """Stat one already-enumerated file before it is recorded (grok/muse/generic loops).
 
@@ -1384,10 +1435,11 @@ def _stat_collected_file(
             try:
                 return path.lstat()
             except FileNotFoundError as again:
+                rel = _rel_or_name(path, base)
+                if _is_excluded(rel, exclude_patterns, skip_prefixes, include_patterns):
+                    return None
                 if holds is not None:
-                    rel = _rel_or_name(path, base)
-                    if not _is_excluded(rel, exclude_patterns, skip_prefixes):
-                        holds.reasons[rel] = "vanished"
+                    holds.reasons[rel] = "vanished"
                     return None
                 e = again
             except OSError as again:
@@ -1446,6 +1498,7 @@ def _record_file(
     on_skip: Any = None,
     exclude_patterns: list[str] | None = None,
     skip_prefixes: list[str] | None = None,
+    include_patterns: list[str] | None = None,
     *,
     strict: bool = False,
     source_name: str | None = None,
@@ -1474,7 +1527,7 @@ def _record_file(
     """
     rel = str(path.relative_to(base))
 
-    if _is_excluded(rel, exclude_patterns, skip_prefixes):
+    if _is_excluded(rel, exclude_patterns, skip_prefixes, include_patterns):
         return None
 
     if strict:
@@ -1951,6 +2004,9 @@ def walk_generic_source(
                 containing `.extend-root` are also skipped (see
                 `marker_skip_globs`); that skip is a path-prefix match so
                 it does not generate deletion tombstones.
+            include_patterns: Optional segment-aware allowlist (see
+                `matches_include_patterns`); when non-empty, only matching
+                relative paths are walked. Excludes above win over a match.
         max_file_size: Skip files larger than this (bytes). Default 50MB.
         on_skip: Optional callback(path, reason) for skipped files. Nested
             checkouts report their bare relative directory root with
@@ -1985,6 +2041,7 @@ def walk_generic_source(
 
     include_dirs: list[str] = source_config.get("include_dirs", [])
     include_files: list[str] = source_config.get("include_files", [])
+    include_patterns: list[str] = list(source_config.get("include_patterns") or [])
     exclude_patterns: list[str] = list(source_config.get("exclude_patterns") or [])
     # Marker-aware skip: directories containing `.extend-root` drop out of
     # the local manifest the same way a glob would, but as PATH PREFIXES
@@ -2081,12 +2138,17 @@ def walk_generic_source(
             holds=holds,
             exclude_patterns=exclude_patterns,
             skip_prefixes=skip_prefixes,
+            include_patterns=include_patterns,
         )
         if st is None:
             continue  # consistent with _record_file's tolerance for races
         if stat.S_ISLNK(st.st_mode):
             if on_skip:
                 on_skip(str(path), "symlink")
+            continue
+        if _is_excluded(
+            _rel_or_name(path, base), exclude_patterns, skip_prefixes, include_patterns
+        ):
             continue
         identity = (st.st_dev, st.st_ino)
         if identity in seen:
@@ -2099,6 +2161,7 @@ def walk_generic_source(
             on_skip,
             exclude_patterns,
             skip_prefixes,
+            include_patterns,
             strict=strict,
             source_name=source_name,
             source_type="generic",

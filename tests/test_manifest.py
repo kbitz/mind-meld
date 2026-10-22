@@ -30,6 +30,7 @@ from mind_meld.manifest import (
     is_v1_conflict_filename,
     load_manifest,
     marker_skip_globs,
+    matches_include_patterns,
     nested_repo_roots_for_paths,
     nested_repo_skip_prefixes,
     normalize_manifest,
@@ -3391,3 +3392,161 @@ def test_preopen_hardlink_replacement_refuses_before_identity_change(
         )
     assert type(caught.value) is SnapshotError
     assert "extra hard link" in str(caught.value)
+
+
+class TestMatchesIncludePatterns:
+    """Segment-aware allowlist used by generic-source include_patterns.
+
+    ``*`` and ``?`` never cross ``/``; ``**`` as a whole segment crosses.
+    Deliberately unlike the legacy fnmatch exclude globs.
+    """
+
+    def test_empty_list_matches_nothing(self):
+        assert not matches_include_patterns("projects/x/checkpoints/a.md", [])
+
+    def test_dir_pattern_matches_any_depth_below(self):
+        pats = ["projects/*/checkpoints/**"]
+        assert matches_include_patterns("projects/slug/checkpoints/a.md", pats)
+        assert matches_include_patterns("projects/slug/checkpoints/sub/b.md", pats)
+
+    def test_star_does_not_cross_slash(self):
+        pats = ["projects/*/pair-review/*"]
+        assert matches_include_patterns("projects/slug/pair-review/report.md", pats)
+        assert not matches_include_patterns("projects/slug/pair-review/branches/b/report.md", pats)
+
+    def test_loose_file_pattern_is_exact_depth(self):
+        pats = ["projects/*/*-reviews.jsonl"]
+        assert matches_include_patterns("projects/slug/main-reviews.jsonl", pats)
+        assert not matches_include_patterns("projects/slug/kbitz/main-reviews.jsonl", pats)
+
+    def test_slug_star_does_not_swallow_extra_segments(self):
+        pats = ["projects/*/checkpoints/**"]
+        assert not matches_include_patterns("projects/a/b/checkpoints/a.md", pats)
+
+    def test_literal_dots_are_not_regex(self):
+        pats = ["projects/*/timeline.jsonl"]
+        assert matches_include_patterns("projects/slug/timeline.jsonl", pats)
+        assert not matches_include_patterns("projects/slug/timelineXjsonl", pats)
+
+    def test_bare_filename_matches_root_only(self):
+        pats = ["retro-context.md"]
+        assert matches_include_patterns("retro-context.md", pats)
+        assert not matches_include_patterns("projects/slug/retro-context.md", pats)
+
+    def test_double_star_mid_pattern(self):
+        pats = ["analytics/**"]
+        assert matches_include_patterns("analytics/skill-usage.jsonl", pats)
+        assert not matches_include_patterns("projects/slug/analytics/x.jsonl", pats)
+
+    def test_consecutive_double_stars_and_newline_segments(self):
+        assert matches_include_patterns("a/b", ["a/**/**/b"])
+        assert matches_include_patterns("a/x/y/b", ["a/**/**/b"])
+        assert matches_include_patterns("a/b", ["a/**/**"])
+        assert matches_include_patterns(
+            "projects/slug/checkpoints/line1\nline2.md",
+            ["projects/*/checkpoints/**"],
+        )
+        assert not matches_include_patterns(
+            "projects/slug/learnings.jsonl\n",
+            ["projects/*/learnings.jsonl"],
+        )
+
+    def test_is_excluded_applies_allowlist_after_excludes(self):
+        pats = ["projects/*/checkpoints/**", "projects/*/pair-review/*"]
+        # Not on the allowlist -> excluded.
+        assert _is_excluded("projects/s/review-and-prep/r/x.md", None, None, pats)
+        # On the allowlist -> kept.
+        assert not _is_excluded("projects/s/checkpoints/a.md", None, None, pats)
+        # Exclude glob still wins over an allowlist match.
+        assert _is_excluded(
+            "projects/s/pair-review/session.yaml",
+            ["projects/*/pair-review/session.yaml"],
+            None,
+            pats,
+        )
+        # No allowlist configured -> unchanged behavior.
+        assert not _is_excluded("projects/s/review-and-prep/r/x.md", None, None, None)
+        assert not _is_excluded("projects/s/review-and-prep/r/x.md", None, None, [])
+
+
+class TestWalkGenericIncludePatterns:
+    def _source(self, tmp_path: Path) -> dict[str, Any]:
+        base = tmp_path / "gstack"
+        slug = base / "projects" / "demo"
+        (slug / "checkpoints").mkdir(parents=True)
+        (slug / "checkpoints" / "20261022-save.md").write_text("ctx")
+        (slug / "review-and-prep" / "run-1").mkdir(parents=True)
+        (slug / "review-and-prep" / "run-1" / "scratch.md").write_text("junk")
+        (slug / "learnings.jsonl").write_text("{}\n")
+        (slug / "manager-asks.json").write_text("{}")
+        (slug / "manager-asks.lock").write_text("")
+        analytics = base / "analytics"
+        analytics.mkdir()
+        (analytics / "skill-usage.jsonl").write_text("{}\n")
+        (base / "retro-context.md").write_text("notes")
+        return {
+            "name": "gstack",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["projects", "analytics"],
+            "include_files": ["retro-context.md"],
+            "include_patterns": [
+                "analytics/**",
+                "retro-context.md",
+                "projects/*/checkpoints/**",
+                "projects/*/learnings.jsonl",
+                "projects/*/manager-*.json",
+            ],
+        }
+
+    def test_walk_keeps_only_allowlisted(self, tmp_path):
+        files = walk_generic_source(self._source(tmp_path))
+        assert set(files) == {
+            "projects/demo/checkpoints/20261022-save.md",
+            "projects/demo/learnings.jsonl",
+            "projects/demo/manager-asks.json",
+            "analytics/skill-usage.jsonl",
+            "retro-context.md",
+        }
+
+    def test_walk_without_allowlist_unchanged(self, tmp_path):
+        cfg = self._source(tmp_path)
+        del cfg["include_patterns"]
+        files = walk_generic_source(cfg)
+        assert "projects/demo/review-and-prep/run-1/scratch.md" in files
+        assert "projects/demo/manager-asks.lock" in files
+
+    def test_hardlink_between_excluded_and_allowlisted_keeps_allowlisted(self, tmp_path):
+        """An earlier-sorting excluded hardlink sibling must not claim the inode
+        in `seen` and cause the later-sorting allowlisted sibling to be dropped."""
+        cfg = self._source(tmp_path)
+        base = Path(cfg["path"])
+        excluded_earlier = base / "projects" / "demo" / "archive" / "note.md"
+        excluded_earlier.parent.mkdir(parents=True)
+        excluded_earlier.write_text("shared inode content")
+        allowlisted_later = base / "projects" / "demo" / "checkpoints" / "note.md"
+        os.link(excluded_earlier, allowlisted_later)
+
+        files = walk_generic_source(cfg, strict=True)
+        assert "projects/demo/checkpoints/note.md" in files
+        assert "projects/demo/archive/note.md" not in files
+
+    def test_vanished_excluded_file_with_holds_none_does_not_refuse(self, tmp_path, monkeypatch):
+        """Strict walk with holds=None (mm status / recovery mm push) must ignore
+        a vanished un-allowlisted file at _stat_collected_file instead of raising
+        SnapshotError."""
+        cfg = self._source(tmp_path)
+        scratch = (
+            Path(cfg["path"]) / "projects" / "demo" / "review-and-prep" / "run-1" / "scratch.md"
+        )
+        real_lstat = Path.lstat
+
+        def _vanish_scratch(self_path: Path, *args, **kwargs):
+            if self_path == scratch:
+                raise FileNotFoundError(2, "No such file or directory", str(self_path))
+            return real_lstat(self_path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", _vanish_scratch)
+        files = walk_generic_source(cfg, strict=True, holds=None)
+        assert "projects/demo/checkpoints/20261022-save.md" in files
+        assert "projects/demo/review-and-prep/run-1/scratch.md" not in files

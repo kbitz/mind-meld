@@ -465,24 +465,43 @@ def _promote_target_will_sync(src_cfg: dict, target: Path) -> bool:
     """True if ``target`` falls within the source's recursively-synced surface.
 
     A promoted file is a NEW filename, so it can only sync if it lives inside
-    one of the source's scanned directories (``_synced_scan_dirs``). An
+    one of the source's scanned directories (``_synced_scan_dirs``) and is not
+    filtered out by ``exclude_patterns`` or ``include_patterns``. An
     ``include_files`` source matches only exact configured filenames -- a
     promoted ``<stem>.from-...`` / ``<stem>.local-...`` name will never match
-    one, so promote under an ``include_files``-only source produces a file
-    that will not sync until the user adds it to config.
+    one, and a narrower ``include_patterns`` allowlist (such as
+    ``projects/*/learnings.jsonl``) will not match ``learnings.from-...jsonl``
+    either, so promote produces a file that will not sync until the user adds
+    it to config.
     """
     base_path = Path(src_cfg["path"]).expanduser().resolve()
     try:
         resolved_target = target.resolve()
-    except OSError:
+        rel = resolved_target.relative_to(base_path).as_posix()
+    except (ValueError, OSError):
         return False
+    in_scan_dir = False
     for scan_dir in _synced_scan_dirs(src_cfg, base_path):
         try:
             resolved_target.relative_to(scan_dir.resolve())
-            return True
+            in_scan_dir = True
+            break
         except (ValueError, OSError):
             continue
-    return False
+    if not in_scan_dir:
+        return False
+    exclude_patterns = list(src_cfg.get("exclude_patterns") or [])
+    include_patterns = (
+        list(src_cfg.get("include_patterns") or [])
+        if src_cfg.get("type", "claude") == "generic"
+        else []
+    )
+    return not manifest._is_excluded(
+        rel,
+        exclude_patterns or None,
+        None,
+        include_patterns or None,
+    )
 
 
 def _resolve_interactive_loop(

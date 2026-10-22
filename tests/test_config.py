@@ -253,6 +253,28 @@ class TestDefaultSources:
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         assert gstack["include_dirs"] == ["projects", "analytics", "retros"]
 
+    def test_gstack_include_patterns_allowlist(self):
+        """The default gstack allowlist covers the context-save/restore
+        contract and keeps non-projects content in scope, while leaving
+        per-run output (review-prep trees) local."""
+        from mind_meld.config import _GSTACK_INCLUDE_PATTERNS
+
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        assert gstack["include_patterns"] == list(_GSTACK_INCLUDE_PATTERNS)
+        assert "projects/*/checkpoints/**" in gstack["include_patterns"]
+        assert "projects/*/checkpoint-pointers/**" in gstack["include_patterns"]
+        assert "analytics/**" in gstack["include_patterns"]
+        assert "retros/**" in gstack["include_patterns"]
+        for f in gstack["include_files"]:
+            assert f in gstack["include_patterns"], f
+        assert not any("review-and-prep" in p for p in gstack["include_patterns"])
+
+    def test_include_patterns_lists_are_not_aliased(self):
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        from mind_meld.config import _GSTACK_INCLUDE_PATTERNS
+
+        assert gstack["include_patterns"] is not _GSTACK_INCLUDE_PATTERNS
+
     def test_gstack_include_files_contains_memory_content(self):
         """Memory content (retro-context.md, greptile-history.md) must be in the
         default include_files. Added 2026-04-24 for cross-machine memory continuity."""
@@ -502,6 +524,58 @@ class TestExcludePatternsValidation:
         )
         with pytest.raises(ConfigError, match="exclude_patterns must be a list"):
             load_config(config_path)
+
+    def test_include_patterns_validation(self):
+        ok = [
+            {
+                "name": "gstack",
+                "path": "~/.gstack",
+                "type": "generic",
+                "include_patterns": ["projects/*/checkpoints/**"],
+            }
+        ]
+        _validate_sources(ok)
+        with pytest.raises(ConfigError, match="include_patterns must be a list"):
+            _validate_sources([{**ok[0], "include_patterns": "nope"}])
+        with pytest.raises(ConfigError, match=r"include_patterns\[0\] must be a string"):
+            _validate_sources([{**ok[0], "include_patterns": [42]}])
+        for non_generic in ("claude", "grok", "muse"):
+            pat = (
+                rf"source {non_generic!r} \(type {non_generic!r}\) does not support "
+                r"include_patterns; only type 'generic' sources use an allowlist"
+            )
+            with pytest.raises(ConfigError, match=pat):
+                _validate_sources(
+                    [
+                        {
+                            "name": non_generic,
+                            "path": f"~/.{non_generic}",
+                            "type": non_generic,
+                            "include_patterns": ["memory/**"],
+                        }
+                    ]
+                )
+
+    def test_round_trip_preserves_include_patterns(self, tmp_path):
+        config = {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+            "sync": {
+                "sources": [
+                    {
+                        "name": "gstack",
+                        "path": "~/.gstack",
+                        "type": "generic",
+                        "include_dirs": ["projects"],
+                        "include_patterns": ["projects/*/checkpoints/**"],
+                    }
+                ]
+            },
+        }
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+        assert loaded["sync"]["sources"][0]["include_patterns"] == ["projects/*/checkpoints/**"]
 
 
 class TestTomlValueEscaping:
