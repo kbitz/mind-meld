@@ -635,7 +635,8 @@ def _init_crypto_session(
             # load_config and this call (concurrent editor crash, disk issue).
             # Per the v0.8.1 visible-failure contract (docs/invariants/sync.md): data-at-risk
             # signals reach stderr even in quiet mode.
-            print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
+            with _pause_sync_progress():
+                print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
 
     return fetch.argon2_memory_kb
 
@@ -2840,10 +2841,11 @@ def _apply_incoming_file(
         )
     except (TypeError, ValueError, OverflowError, OSError) as e:
         # Malformed mtime or filesystem error: fall through to conflict path.
-        console.print(
-            f"  [yellow]timestamp could not be interpreted; treating as a conflict:[/yellow] "
-            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
-        )
+        with _pause_sync_progress():
+            console.print(
+                "  [yellow]timestamp could not be interpreted; treating as a "
+                f"conflict:[/yellow] {safe_str(rel_path)} \u2014 {safe_str(e)}"
+            )
         local_mtime = None
         remote_mtime = None
     if local_newer:
@@ -2980,9 +2982,13 @@ def _download_and_apply(
     keep-canonical branch. Both halves no-op when ``pending_inline_bumps``
     is None (non-interactive pulls).
 
-    Progress display (Track 5B Task 4):
+    Progress display (Track 5B Task 4, plus the sync spinner):
       - quiet=True: no progress output; apply failures still warn on stderr.
-      - TTY + not quiet: Rich Progress widget renders bar + count + elapsed.
+      - Non-verbose attended pull inside `_sync_outcome`: `_SyncProgress`
+        renders the transient spinner and Applying-files counter; the widget
+        below stays off (`show_progress` requires verbose or no sync scope).
+      - TTY + not quiet (verbose/direct callers): Rich Progress widget
+        renders bar + count + elapsed.
         First-pull-on-new-Mac case (the 2026-04-24 first-pull session): per-file
         backend.get(bkey) blocks on iCloud placeholder materialization;
         before this, the entire 286-file / 263s pull was indistinguishable
@@ -3870,31 +3876,59 @@ class _SyncProgress:
         self._batch_total = 0
         self._pause_depth = 0
         self._stopped = False
+        self._last_render_at = 0.0
 
     def _can_draw(self) -> bool:
-        return self._enabled and not self._stopped and console.is_terminal and console.file.isatty()
+        # A closed/replaced stdout makes isatty() raise; that is a display
+        # failure, never a sync failure.
+        try:
+            return (
+                self._enabled
+                and not self._stopped
+                and console.is_terminal
+                and console.file.isatty()
+            )
+        except (Exception, SystemExit):
+            return False
 
-    def _render_locked(self, state: updateprogress.UpdateProgress) -> None:
+    def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
         self._state = state
-        if self._progress is None or self._task is None or self._pause_depth > 0:
+        if (
+            not self._enabled
+            or self._progress is None
+            or self._task is None
+            or self._pause_depth > 0
+        ):
             return
         measured = state.total is not None and state.completed is not None
         detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
-        with suppress(Exception, SystemExit):
+        # Per-file advances only update the task fields; the ticker paints
+        # them at 10 Hz. A synchronous redraw per file would let a stalled
+        # terminal block the sync mid-run, lock held. Forced renders (phase
+        # changes, first/final file) paint immediately.
+        now = time.monotonic()
+        do_refresh = force or now - self._last_render_at >= _UPDATE_SPINNER_TICK_SECONDS
+        try:
             self._progress.update(
                 self._task,
                 completed=0,
                 description=state.phase,
                 detail=detail.rstrip(),
-                refresh=True,
+                refresh=do_refresh,
             )
+        except (Exception, SystemExit):
+            # Dead terminal: stop retrying the draw on every remaining file.
+            self._enabled = False
+            return
+        if do_refresh:
+            self._last_render_at = now
 
     def start(self, phase: str) -> None:
         with self._lock:
             self._state = updateprogress.UpdateProgress(phase)
             self._batch_total = 0
             if self._progress is not None:
-                self._render_locked(self._state)
+                self._render_locked(self._state, force=True)
                 return
             if not self._can_draw():
                 return
@@ -3931,6 +3965,7 @@ class _SyncProgress:
                 self._enabled = False
                 return
             self._progress = progress
+            self._last_render_at = time.monotonic()
             self._task = task
             self._stop_ticking = stop_ticking
             self._ticker = ticker
@@ -3944,7 +3979,7 @@ class _SyncProgress:
     def set_phase(self, phase: str) -> None:
         with self._lock:
             self._batch_total = 0
-            self._render_locked(updateprogress.UpdateProgress(phase))
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
 
     def start_batch(self, phase: str, total: int, unit: str) -> None:
         with self._lock:
@@ -3952,11 +3987,15 @@ class _SyncProgress:
             self._batch_unit = unit
             self._batch_completed = 0
             self._batch_total = max(total, 0)
-            self._render_locked(updateprogress.UpdateProgress(phase))
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
 
     def ensure_batch(self, phase: str, total: int, unit: str) -> None:
         with self._lock:
-            if self._batch_total > 0 and self._batch_phase == phase:
+            if (
+                self._batch_total > 0
+                and self._batch_completed < self._batch_total
+                and self._batch_phase == phase
+            ):
                 return
             self.start_batch(phase, total, unit)
 
@@ -3972,7 +4011,8 @@ class _SyncProgress:
                     completed=self._batch_completed,
                     total=self._batch_total,
                     detail=detail,
-                )
+                ),
+                force=self._batch_completed in (1, self._batch_total),
             )
 
     @contextmanager
@@ -3983,8 +4023,15 @@ class _SyncProgress:
         if progress is not None:
             with suppress(Exception, SystemExit):
                 progress.stop()
+        propagating = False
         try:
             yield
+        except BaseException:
+            # Unwinding (e.g. Ctrl-C at a prompt): do not resurrect the
+            # spinner on the way out. A pause inside a handled `except:`
+            # block is not propagation and still resumes.
+            propagating = True
+            raise
         finally:
             with self._lock:
                 self._pause_depth = max(0, self._pause_depth - 1)
@@ -3992,16 +4039,21 @@ class _SyncProgress:
                     self._pause_depth == 0
                     and self._progress is not None
                     and not self._stopped
+                    and not propagating
                     and self._can_draw()
                 ):
                     try:
                         self._progress.start()
-                        self._render_locked(self._state)
+                        self._render_locked(self._state, force=True)
                     except (Exception, SystemExit):
                         with suppress(Exception, SystemExit):
                             self._progress.stop()
                         with suppress(Exception, SystemExit):
                             console.show_cursor(True)
+                        # Match start() failure: drop the dead display so no
+                        # later render targets it. Ticker refs stay for stop().
+                        self._progress = None
+                        self._task = None
                         self._enabled = False
 
     def stop(self) -> None:
@@ -4960,9 +5012,10 @@ def _ensure_device_registered(
     try:
         register_device(backend, device_id, device_name)
     except Exception as e:
-        stderr_console.print(
-            f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
-        )
+        with _pause_sync_progress():
+            stderr_console.print(
+                f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
+            )
         raise
 
 
@@ -5781,10 +5834,12 @@ def _push_core(
         iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
     )
     if not dry_run:
+        # diff.new and diff.modified are disjoint; count both without merging.
         total_to_upload = sum(
             1
             for src_name, _src_data, _remote_src, diff in source_diffs_to_upload
-            for rel in {**diff.new, **diff.modified}
+            for changes in (diff.new, diff.modified)
+            for rel in changes
             if rel not in frozen.get(src_name, ()) and rel not in held_files.get(src_name, ())
         )
         if total_to_upload > 0:
@@ -6604,10 +6659,11 @@ def _record_source_bookkeeping(
             )
         except (OSError, StorageError) as e:
             msg = f"sync log write failed: {e}"
-            if quiet:
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"  [yellow]warning:[/yellow] {msg}")
+            with _pause_sync_progress():
+                if quiet:
+                    print(f"mm: warning: {msg}", file=sys.stderr)
+                else:
+                    console.print(f"  [yellow]warning:[/yellow] {msg}")
         else:
             if verbose and not quiet and logs:
                 for log in logs:
@@ -7005,7 +7061,10 @@ def _pull_core(
         # inversion files indistinguishable except by mtime — and resolve's
         # dual-mode dispatch needs the prefix, not the timestamp.
         if not dry_run:
-            resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
+            # resolveflow is a leaf and cannot pause the cli-layer spinner;
+            # pause around the sweep so its migration warnings print clean.
+            with _pause_sync_progress():
+                resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
         # Widened to carry path + type per source. Type is load-bearing for
         # the sync-log gate in _pull_one_source — keying on type (not name)
