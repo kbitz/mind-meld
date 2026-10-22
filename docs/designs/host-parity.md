@@ -1,7 +1,7 @@
 # Host interchangeability (Claude / Codex / Grok)
 
 > Written 2026-08-17 after Track 21A review feedback. Supplements
-> `SPEC.md` and `docs/designs/grok-build-usage-reader.md`. Does not
+> `SPEC.md` and `docs/archive/grok-build-usage-reader.md`. Does not
 > reopen Tracks 18D or 21A.
 >
 > **Superseded in part (v1.1):** retro-fleet now renders one `## Agents` table,
@@ -238,7 +238,7 @@ Plan C is independent of the usage-card work. It is not a prerequisite for
 
 ## Pointers
 
-- Usage reader + consent: `docs/designs/grok-build-usage-reader.md`
+- Usage reader + consent: `docs/archive/grok-build-usage-reader.md`
 - Writer / consumer contract: `docs/invariants/events-retro.md`
   (host-usage snapshot + sessions-snapshot sections)
 - Default allowlists that B must resemble: `config.py:DEFAULT_SOURCES`

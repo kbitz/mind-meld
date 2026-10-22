@@ -44,7 +44,6 @@ LEAVES = [
     "safety",
     "conflictdiff",
     "fsutil",
-    "host_skill_discovery",
     "gitenv",
     "updateprogress",
 ]
@@ -383,7 +382,6 @@ def test_real_home_guard_fires(tmp_path: Path) -> None:
     for real in (
         Path("~/.claude/skills/retro-fleet").expanduser(),
         Path("~/.codex/skills/retro-fleet").expanduser(),
-        Path("~/.config/opencode/skills/retro-fleet").expanduser(),
         Path("~/.config/mind-meld").expanduser(),
         Path("~/.local/share/mind-meld/agent-skills").expanduser(),
     ):

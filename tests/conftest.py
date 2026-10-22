@@ -82,11 +82,12 @@ def synthetic_account_home(monkeypatch, tmp_path):
         ".local/share/mind-meld",
         ".claude",
         ".codex",
-        ".grok",
         ".gstack",
         ".gstack-extend",
         ".cursor",
         ".local/share/muse",
+        ".gemini/config",
+        ".gemini/antigravity-cli",
         "configured-storage",
         "configured-source",
     ),
@@ -97,11 +98,12 @@ def synthetic_account_home(monkeypatch, tmp_path):
         "events",
         "claude",
         "codex",
-        "grok",
         "gstack",
         "gstack-extend",
         "cursor",
         "muse",
+        "agy-config",
+        "agy-cli",
         "configured-storage",
         "configured-source",
     ),
@@ -445,14 +447,11 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     from mind_meld import host_usage as _host_usage
 
     root = tmp_path / "_isolated_hosts"
-    monkeypatch.delenv("GROK_HOME", raising=False)
     monkeypatch.setattr(_host_usage, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
     monkeypatch.setattr(
         _host_usage, "CODEX_ARCHIVED_SESSIONS_PATH", root / "codex" / "archived_sessions"
     )
-    monkeypatch.setattr(_host_usage, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
     monkeypatch.setattr(_host_usage, "CACHE_PATH", root / "host-tokens.json")
-    monkeypatch.setattr(_host_usage, "GROK_CACHE_PATH", root / "grok-host-tokens.json")
     monkeypatch.setattr(_host_usage, "CURSOR_STORE_PATH", root / "cursor-sdk-store")
     monkeypatch.setattr(_host_usage, "CURSOR_CACHE_PATH", root / "cursor-host-tokens.json")
     monkeypatch.setattr(_host_usage, "CURSOR_SPOOL_PATH", root / "cursor-standalone-spool.jsonl")
@@ -460,6 +459,10 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_host_usage, "CURSOR_CLI_CONFIG_PATH", root / "cursor-cli-config.json")
     monkeypatch.setattr(_host_usage, "MUSE_SESSIONS_PATH", root / "muse" / "sessions")
     monkeypatch.setattr(_host_usage, "MUSE_CACHE_PATH", root / "muse-host-tokens.json")
+    monkeypatch.setattr(
+        _host_usage, "AGY_CONVERSATIONS_PATH", root / "gemini" / "antigravity-cli" / "conversations"
+    )
+    monkeypatch.setattr(_host_usage, "AGY_CACHE_PATH", root / "agy-host-tokens.json")
 
 
 @pytest.fixture(autouse=True)

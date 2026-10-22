@@ -90,7 +90,7 @@ _MAX_COUNTER = 2**53
 _CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-HostFamily = Literal["claude", "codex", "grok", "other"]
+HostFamily = Literal["claude", "codex", "grok", "muse", "agy", "other"]
 
 
 Reason = Literal[
@@ -253,6 +253,10 @@ def host_family(model: str) -> HostFamily:
         return "codex"
     if normalized.startswith("grok-"):
         return "grok"
+    if normalized.startswith("muse-"):
+        return "muse"
+    if normalized.startswith("gemini-"):
+        return "agy"
     return "other"
 
 

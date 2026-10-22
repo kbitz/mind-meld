@@ -568,6 +568,8 @@ AGENT_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("claude", "Claude"),
     ("codex", "Codex"),
     ("grok", "Grok"),
+    ("muse", "Muse"),
+    ("agy", "Antigravity"),
     ("other", "Unclassified"),
 )
 """Display order for the unified Agents table and card block.
@@ -3780,7 +3782,7 @@ def _agent_coverage_notes(
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok` / `muse`), then "
+                "enable with `mm enable-source codex` (or `cursor`, `muse`, or `agy`), then "
                 f"{_attended_usage_remedy()}; readers with no attributable local ledger "
                 "are also omitted."
             )
@@ -4362,6 +4364,8 @@ def _render_health_block(health: list[dict]) -> list[str]:
             "cursor_url": "https://cursor.com/docs/models/grok-4-7",
             "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
             "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
+            "google_verified": token_usage.PRICING_GOOGLE_LAST_UPDATED,
+            "google_url": "https://ai.google.dev/gemini-api/docs/pricing",
             "basis": (
                 "Historical usage is repriced at the rates bundled with this mm release. "
                 "Not subscription spend. `~` is an estimate, `≥` a floor, `—` unavailable "

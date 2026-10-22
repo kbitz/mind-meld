@@ -54,7 +54,6 @@ from mind_meld import (
     events,
     events_tail,
     fsutil,
-    host_skill_discovery,
     identity,
     manifest,
     pullhistory,
@@ -79,7 +78,6 @@ from mind_meld.config import (
     SourceResolution,
     get_default_source,
     get_sources,
-    grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
     resolve_sources,
@@ -150,7 +148,6 @@ from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     CONFLICT_V1_MARKER,
-    GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
     MUSE_EXCLUDE_PATTERNS,
     DiffResult,
@@ -841,9 +838,7 @@ def _build_exclude_map(
     resolved = sources if sources is not None else get_sources(config)
     for src in resolved:
         patterns = list(src.get("exclude_patterns") or [])
-        if src.get("type") == "grok":
-            patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
-        elif src.get("type") == "muse":
+        if src.get("type") == "muse":
             patterns = [*MUSE_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
         prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
@@ -1049,7 +1044,7 @@ def _filter_unselected_sources(manifest: dict, selected: set[str] | list[str]) -
     source files must not generate deletion tombstones, and established
     unexpired tombstones stay.
     """
-    selected_set = set(selected)
+    selected_set = set(selected) - _config_module.RETIRED_SOURCE_NAMES
     current = manifest.get("sources", {})
     if not current or all(name in selected_set for name in current):
         return manifest
@@ -1061,8 +1056,9 @@ def _filter_unselected_sources(manifest: dict, selected: set[str] | list[str]) -
 def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     """Return a shallow copy of `manifest` with disabled-source entries stripped.
 
-    Drops `sources.<name>` entries whose source name is in `disabled`.
-    Empty `disabled` returns `manifest` unchanged (load-bearing for hot paths).
+    Drops `sources.<name>` entries whose source name is in `disabled` or
+    `RETIRED_SOURCE_NAMES`.
+    Empty `disabled` returns `manifest` unchanged when no retired source is present.
 
     Apply at the CONSUMER boundary (`_pull_core`). Push uses
     `_filter_unselected_sources` for the same asymmetric contract (drop
@@ -1096,15 +1092,13 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     section — empty diff = no new tombstones. Existing
     `tombstones[<disabled>:*]` keys flow through unchanged.
     """
-    if not disabled:
+    disabled_set = set(disabled) | _config_module.RETIRED_SOURCE_NAMES
+    current = manifest.get("sources", {})
+    if not current or not any(name in disabled_set for name in current):
         return manifest
 
-    disabled_set = set(disabled)
     out = dict(manifest)
-
-    out["sources"] = {
-        name: data for name, data in manifest.get("sources", {}).items() if name not in disabled_set
-    }
+    out["sources"] = {name: data for name, data in current.items() if name not in disabled_set}
     # Tombstones intentionally preserved across the disable filter — see
     # the asymmetric-filter rationale in the docstring above.
 
@@ -1265,9 +1259,7 @@ def _prove_omitted_paths_absent(
             except ManifestError:
                 continue
             extra = list(src_cfg.get("exclude_patterns") or [])
-            if src_cfg.get("type") == "grok":
-                extra = [*GROK_EXCLUDE_PATTERNS, *extra]
-            elif src_cfg.get("type") == "muse":
+            if src_cfg.get("type") == "muse":
                 extra = [*MUSE_EXCLUDE_PATTERNS, *extra]
             if _manifest_is_excluded(
                 rel_path, extra, None, list(src_cfg.get("include_patterns") or []) or None
@@ -1413,16 +1405,6 @@ def _include_prior_host_if_needed(
             )
         ) from e
     return [*sources, host_cfg]
-
-
-def _include_prior_grok_if_needed(
-    config: dict,
-    resolution: SourceResolution,
-    remote_manifest: dict | None,
-    sources: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Retain Grok before capture/scanning when its customization dirs are gone."""
-    return _include_prior_host_if_needed(config, resolution, remote_manifest, sources, "grok")
 
 
 def _refuse_unavailable_selected_sources(
@@ -3289,8 +3271,7 @@ def _prompt_source_toggle(
     Single source of truth for the prompt copy + default-Y/N rule. Used
     by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
     D5). `current_state` is the default answer:
-      - init: whether the source has a qualifying on-disk tree (Grok requires
-        one of its hardcoded customization dirs, not merely ~/.grok)
+      - init: whether the source has a qualifying on-disk tree
       - reconfigure: whether the source is currently active in config
     """
     name = source["name"]
@@ -3319,10 +3300,12 @@ def _source_path_is_detected(source: dict[str, Any]) -> bool:
     if not path_str:
         return False
     root = Path(path_str).expanduser()
-    if source.get("type") == "grok" or source.get("name") == "grok":
-        return _config_module.grok_customization_dirs_exist(root)
     if source.get("type") == "muse" or source.get("name") == "muse":
         return _config_module.muse_memory_dir_exists(root)
+    if source.get("name") == "agy" and path_str == _config_module.DEFAULT_AGY_DIR:
+        from mind_meld import host_usage as _host_usage
+
+        return root.exists() or _host_usage.agy_sessions_root().exists()
     return root.exists()
 
 
@@ -3859,7 +3842,6 @@ def _capture_attended_usage(
     try:
         readers = events_tail._default_host_readers(
             sources,
-            grok_consented=grok_host_usage_enabled(config),
             cursor_consented=_config_module.cursor_host_usage_enabled(config),
         )
         readiness = _config_module.usage_capture_readiness(
@@ -5105,13 +5087,6 @@ def _push_core(
     # gate stays open and runs the full installer prologue on every push.
     if not dry_run:
         try:
-            if not quiet:
-                # OpenCode retirement is independent of the 24h drift gate.
-                # Interactive push is the advertised trigger; a fresh
-                # Claude/Codex marker must not skip the reaper. Autopush
-                # still does not mutate. Init / install-skills reach the
-                # same function via _ensure_retro_skill_links.
-                skill_link._reap_retired_opencode_skill_link()
             if skill_link._skill_links_check_due(may_create=may_create):
                 skill_link._ensure_retro_skill_links(
                     dry_run=False,
@@ -5150,18 +5125,19 @@ def _push_core(
     # so GC's "run mm push" remedy works without a content change.
     recovering_from_corrupt = fetch.status == "corrupt" or fetch.conflict_copies_only
     resolution = _retain_prior_default_sources(resolution, remote_manifest, config)
-    sources = _include_prior_grok_if_needed(
-        config,
-        resolution,
-        remote_manifest,
-        sources,
-    )
     sources = _include_prior_host_if_needed(
         config,
         resolution,
         remote_manifest,
         sources,
         "muse",
+    )
+    sources = _include_prior_host_if_needed(
+        config,
+        resolution,
+        remote_manifest,
+        sources,
+        "agy",
     )
     intended_names = {src["name"] for src in resolution.selected}
     intended_names.update(src["name"] for src in sources)
@@ -7412,7 +7388,8 @@ def status(
             config, sources_configs, capture_rows, selected=source_resolution.selected
         )
         reader_states = {
-            name: _host_usage.reader_usage_diag(name) for name in publication["readers"]
+            name: _host_usage.reader_usage_diag(name, count_logs=True)
+            for name in publication["readers"]
         }
         capture_action = None
         if publication["readers"] and publication["readiness"] in ("disabled", "unavailable"):
@@ -7690,43 +7667,6 @@ def status(
                     f"not yet scanned; {safe_str(capture_remedy)}"
                 )
 
-        grok_source_on = any(s.get("name") == "grok" for s in sources_configs)
-        grok_on = grok_source_on or grok_host_usage_enabled(config)
-        grok_present = False
-        try:
-            grok_present = _host_usage.grok_sessions_root().exists()
-        except OSError:
-            grok_present = False
-        if grok_on or grok_present:
-            if grok_on:
-                grok_diag = reader_states["grok"]
-                last_reason = grok_diag.get("last_reason")
-                if last_reason:
-                    console.print(
-                        "  Grok usage capture: enabled — "
-                        + _host_usage_blocker(
-                            "grok",
-                            grok_diag,
-                            readiness=_reader_capture_readiness(publication, "grok"),
-                            upgrade_required=upgrade_required,
-                        )
-                    )
-                elif grok_diag.get("complete_once") is True:
-                    console.print(
-                        "  Grok usage capture: enabled; a prior scan completed successfully"
-                    )
-                else:
-                    console.print(
-                        "  Grok usage capture: enabled, but no successful scan yet — "
-                        + safe_str(capture_remedy)
-                    )
-            else:
-                console.print(
-                    "  Grok usage capture: disabled — "
-                    "run [bold]mm enable-source grok[/bold] to sync Grok customizations "
-                    "and publish token totals (session files stay local)."
-                )
-
         muse_on = any(s.get("name") == "muse" for s in sources_configs)
         # The presence probe only feeds the opt-in nudge: skip it once Muse is
         # enabled (its reader state answers) or explicitly disabled (no nudge).
@@ -7764,6 +7704,43 @@ def status(
                     "  Muse usage capture: disabled — "
                     "run [bold]mm enable-source muse[/bold] to sync Muse memory "
                     "and publish token totals (session files stay local)."
+                )
+
+        agy_on = "agy" in reader_states
+        agy_disabled = "agy" in (config.get("sync", {}).get("disabled_sources") or [])
+        agy_present = False
+        if not agy_on and not agy_disabled:
+            try:
+                agy_present = _host_usage.agy_sessions_root().exists()
+            except OSError:
+                agy_present = False
+        if agy_on or agy_present:
+            if agy_on:
+                agy_diag = reader_states["agy"]
+                if agy_diag.get("last_reason"):
+                    console.print(
+                        "  Antigravity usage capture: enabled — "
+                        + _host_usage_blocker(
+                            "agy",
+                            agy_diag,
+                            readiness=_reader_capture_readiness(publication, "agy"),
+                            upgrade_required=upgrade_required,
+                        )
+                    )
+                elif agy_diag.get("complete_once") is True:
+                    console.print(
+                        "  Antigravity usage capture: enabled; a prior scan completed successfully"
+                    )
+                else:
+                    console.print(
+                        "  Antigravity usage capture: enabled, but no successful scan yet — "
+                        + safe_str(capture_remedy)
+                    )
+            else:
+                console.print(
+                    "  Antigravity usage capture: disabled — "
+                    "run [bold]mm enable-source agy[/bold] to sync Antigravity configuration "
+                    "and publish token totals (conversation DBs stay local)."
                 )
 
         if "cursor" in reader_states:
@@ -8169,7 +8146,6 @@ def _host_publication(
         name
         for name, _ in events_tail._default_host_readers(
             sources,
-            grok_consented=grok_host_usage_enabled(config),
             cursor_consented=_config_module.cursor_host_usage_enabled(config),
         )
     ]
@@ -8260,7 +8236,6 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
 
     for name, _ in events_tail._default_host_readers(
         sources,
-        grok_consented=grok_host_usage_enabled(config),
         cursor_consented=_config_module.cursor_host_usage_enabled(config),
     ):
         state = host_usage.reader_usage_diag(name)
@@ -8442,14 +8417,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
       * keycheck_blob contents
       * passphrase
       * peer device_ids (only counts)
-      * grok inspect stdout / stderr / unknown fields / parse exceptions
-      * host_skill_discovery values other than the four extracted fields
-        (claude_skills_compat, retro_fleet_resolved, retro_fleet_path,
-        grok_version) plus host/status
-      * host_usage values other than the cache and path-count diag keys: grok's
-        consented / complete_once / usage_less_skipped / last_reason /
-        last_reason_since / cache_state / model_count / models / files_cached /
-        files_on_disk, Codex's cache_state / state /
+      * host_usage values other than the cache and path-count diag keys: Codex's
+        cache_state / state /
         files_cached / files_migrated / files_pre_track / files_on_disk /
         pending / model_count / models / last_reason / last_reason_since, and
         Cursor's consented / complete_once / cache_state / runs_cached /
@@ -8588,30 +8557,28 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     discovery = _collect_discovery_diag(cfg)
     from mind_meld import host_usage as _host_usage
 
-    grok_consented: bool | None = None
-    if config_state == "ok":
-        # Source-enabled is consent (Track 22B), using the exact resolved
-        # source set already needed for skill policy above. The 21A bit remains
-        # an OR. This is cache-only with respect to host usage: get_sources()
-        # resolves configuration but never opens the Grok host store.
-        grok_consented = grok_host_usage_enabled(cfg) or any(
-            source.get("name") == "grok" for source in resolved_sources
-        )
     muse_consented = (
         any(source.get("name") == "muse" for source in resolved_sources)
         if config_state == "ok"
         else None
     )
+    agy_consented = (
+        any(source.get("name") == "agy" for source in resolved_sources)
+        if config_state == "ok"
+        else None
+    )
     host_usage_state = {
-        # Muse's session-log count walks the sessions tree; only a consented
-        # source may pay for it (Grok's count predates that rule).
-        name: _host_usage.muse_usage_diag(count_logs=muse_consented is True)
-        if name == "muse"
-        else _host_usage.reader_usage_diag(name)
+        name: (
+            _host_usage.muse_usage_diag(count_logs=muse_consented is True)
+            if name == "muse"
+            else _host_usage.agy_usage_diag(count_logs=agy_consented is True)
+            if name == "agy"
+            else _host_usage.reader_usage_diag(name)
+        )
         for name in _host_usage.HOST_READER_DIAGS
     }
-    host_usage_state["grok"]["consented"] = grok_consented
     host_usage_state["muse"]["consented"] = muse_consented
+    host_usage_state["agy"]["consented"] = agy_consented
     host_usage_state["cursor"]["consented"] = (
         _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
     )
@@ -8651,7 +8618,6 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         "skill_links": skill_link.diagnose_skill_links(
             may_create=skill_may_create, config_error=skill_config_error
         ),
-        "host_skill_discovery": host_skill_discovery.probe_grok_skill_discovery(),
         "host_usage": host_usage_state,
         "host_read_budgets": _host_read_budgets(cfg if config_state == "ok" else None),
         "host_publication": _host_publication(
@@ -8805,20 +8771,6 @@ def diag(
         if status not in ("ok", "absent") and target:
             console.print(f"    {target}")
 
-    hsd = state.get("host_skill_discovery") or {}
-    console.print("\n[bold]Host skill discovery[/bold]")
-    console.print(f"  host:                  {safe_str(str(hsd.get('host', '')))[:200]}")
-    console.print(f"  status:                {safe_str(str(hsd.get('status', '')))[:200]}")
-    if hsd.get("status") == host_skill_discovery.STATUS_OK:
-        console.print(f"  claude_skills_compat:  {hsd.get('claude_skills_compat')}")
-        console.print(f"  retro_fleet_resolved:  {hsd.get('retro_fleet_resolved')}")
-        path = hsd.get("retro_fleet_path")
-        console.print(f"  retro_fleet_path:      {safe_str(str(path))[:200] if path else '(none)'}")
-        console.print(
-            f"  grok_version:          {safe_str(str(hsd.get('grok_version') or ''))[:200]}"
-        )
-
-    hu_state = (state.get("host_usage") or {}).get("grok") or {}
     console.print("\n[bold]Host usage[/bold]")
     publication = state["host_publication"]
     upgrade_required = _usage_capture_needs_upgrade(publication, state["host_usage"])
@@ -8833,40 +8785,6 @@ def diag(
         )
     console.print("  host read budgets: " + safe_str(budget_line))
     console.print("  host read sweep estimate: " + safe_str(_host_read_sweep_line(state)))
-    consented = hu_state.get("consented")
-    if consented is None:
-        consented_shown = "(config unreadable)"
-    else:
-        consented_shown = "yes" if consented else "no"
-    if hu_state.get("complete_once"):
-        scan_shown = "yes"
-    elif hu_state.get("cache_state") == "unreadable":
-        scan_shown = "unreadable"
-    else:
-        scan_shown = "no"
-    console.print(f"  grok consented:          {consented_shown}")
-    console.print(f"  grok prior successful scan: {scan_shown}")
-    console.print(f"  grok cache inventory:    {safe_str(str(hu_state.get('cache_state', '')))}")
-    if hu_state.get("cache_state") == "ok":
-        console.print(
-            "  grok usage read blocker: "
-            + _host_usage_blocker(
-                "grok",
-                hu_state,
-                in_diag=True,
-                readiness=_reader_capture_readiness(publication, "grok"),
-                upgrade_required=upgrade_required,
-            )
-        )
-    console.print(f"  grok usage-less skipped: {hu_state.get('usage_less_skipped', 0)}")
-    grok_cached = hu_state.get("files_cached")
-    grok_disk = hu_state.get("files_on_disk")
-    console.print(
-        f"  grok ledgers cached:     {'unknown' if grok_cached is None else grok_cached}"
-        f" of {'unknown' if grok_disk is None else grok_disk}"
-    )
-    console.print(f"  grok models cached:      {_diag_models_line(hu_state)}")
-    console.print("  grok last complete read: " + safe_str(_host_complete_read_line(hu_state)))
 
     mu_state = (state.get("host_usage") or {}).get("muse") or {}
     mu_consented = mu_state.get("consented")
@@ -8902,6 +8820,41 @@ def diag(
     )
     console.print(f"  muse models cached:      {_diag_models_line(mu_state)}")
     console.print("  muse last complete read: " + safe_str(_host_complete_read_line(mu_state)))
+
+    agy_state = (state.get("host_usage") or {}).get("agy") or {}
+    agy_consented = agy_state.get("consented")
+    if agy_consented is None:
+        agy_consented_shown = "(config unreadable)"
+    else:
+        agy_consented_shown = "yes" if agy_consented else "no"
+    if agy_state.get("complete_once"):
+        agy_scan_shown = "yes"
+    elif agy_state.get("cache_state") == "unreadable":
+        agy_scan_shown = "unreadable"
+    else:
+        agy_scan_shown = "no"
+    console.print(f"  agy consented:           {agy_consented_shown}")
+    console.print(f"  agy prior successful scan: {agy_scan_shown}")
+    console.print(f"  agy cache inventory:     {safe_str(str(agy_state.get('cache_state', '')))}")
+    if agy_state.get("cache_state") == "ok":
+        console.print(
+            "  agy usage read blocker:  "
+            + _host_usage_blocker(
+                "agy",
+                agy_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "agy"),
+                upgrade_required=upgrade_required,
+            )
+        )
+    agy_cached = agy_state.get("files_cached")
+    agy_disk = agy_state.get("files_on_disk")
+    console.print(
+        f"  agy conversation DBs cached: {'unknown' if agy_cached is None else agy_cached}"
+        f" of {'unknown' if agy_disk is None else agy_disk}"
+    )
+    console.print(f"  agy models cached:       {_diag_models_line(agy_state)}")
+    console.print("  agy last complete read:  " + safe_str(_host_complete_read_line(agy_state)))
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")
@@ -9547,7 +9500,11 @@ def _known_source_names(config: dict) -> list[str]:
     A name is "known" if the user configures its file source, mm ships a default
     for it, or it has a usage-only consent alias. --force accepts unknown names.
     """
-    explicit = [s["name"] for s in config.get("sync", {}).get("sources", []) or []]
+    explicit = [
+        s["name"]
+        for s in config.get("sync", {}).get("sources", []) or []
+        if s.get("name") not in _config_module.RETIRED_SOURCE_NAMES
+    ]
     defaults = [s["name"] for s in DEFAULT_SOURCES]
     return sorted(set(explicit) | set(defaults) | set(_config_module.HOST_USAGE_ONLY_CONSENT))
 
@@ -9559,6 +9516,11 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
     --force surfaces a stderr breadcrumb but accepts (forward-compat:
     pre-disabling a not-yet-shipped source like codex).
     """
+    if name in _config_module.RETIRED_SOURCE_NAMES:
+        raise ConfigError(
+            f"source '{name}' was retired; "
+            "run mm migrate-config to remove it from your configuration."
+        )
     valid = _known_source_names(config)
     if name in valid:
         return
@@ -9571,40 +9533,11 @@ def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
         return
     matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
     suggestion = f" Did you mean '{matches[0]}'?" if matches else ""
-    if name == "opencode":
-        raise ConfigError(
-            f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
-            "The opencode sync source was retired in v0.12.55; see the README "
-            "troubleshooting entry."
-        )
     raise ConfigError(
         f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
         "Use --force to accept a name not yet known to mm "
         "(forward-compat for not-yet-shipped sources)."
     )
-
-
-def _set_grok_host_usage(config: dict, *, enabled: bool, quiet: bool = False) -> None:
-    """Persist Grok usage consent. Does not touch sync.sources."""
-    current = grok_host_usage_enabled(config)
-    if current is enabled:
-        if not quiet:
-            state = "enabled" if enabled else "disabled"
-            console.print(f"[dim]Grok usage capture is already {state}.[/dim]")
-        return
-    patch_config_on_disk({"retro": {"grok_host_usage": enabled}})
-    if quiet:
-        return
-    if enabled:
-        console.print("[green]Enabled Grok usage capture on this device.[/green]")
-        console.print(
-            "[dim]Reads terminal token totals from local Grok session updates. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
-        )
-        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
-    else:
-        console.print("[green]Disabled Grok usage capture on this device.[/green]")
-        console.print("[dim]Run 'mm enable-source grok' to turn this back on.[/dim]")
 
 
 def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
@@ -9914,15 +9847,11 @@ def disable_source(
     sync = dict(config.get("sync", {}) or {})
     disabled = list(sync.get("disabled_sources", []) or [])
     if name in disabled:
-        if name == "grok":
-            _set_grok_host_usage(config, enabled=False, quiet=True)
         console.print(f"[dim]Source '{name}' is already disabled.[/dim]")
         return
 
     disabled.append(name)
     updates: dict[str, dict[str, Any]] = {"sync": {"disabled_sources": sorted(disabled)}}
-    if name == "grok":
-        updates["retro"] = {"grok_host_usage": False}
     patch_config_on_disk(updates)
     _record_seen([name])
 
@@ -9946,7 +9875,7 @@ def enable_source(
     a freshly-shipped codex source that didn't auto-enable), append the
     default config so the source actually starts syncing.
 
-    Enabling `codex`, `grok` or `muse` ALSO authorizes that host's local
+    Enabling `codex` or `muse` ALSO authorizes that host's local
     usage reader, whose activity shows up in the `retro-fleet` AGENT LOGS
     block, and (for `codex` / `claude`) authorizes mm to
     maintain a `retro-fleet` skill link in that agent's skills directory.
@@ -9982,14 +9911,14 @@ def enable_source(
         disabled.remove(name)
         updates["disabled_sources"] = sorted(disabled)
 
-    # Grok and Muse must be materialized even when their allowlisted
+    # Muse must be materialized even when its allowlisted
     # trees are not present yet: explicit enable is consent.  In a legacy
     # config, first preserve the resolved source set before writing
     # sync.sources.  An explicit list takes priority over legacy
-    # claude_dir/default fallback; writing only Grok here would make the
+    # claude_dir/default fallback; writing only Muse here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
-    if name in ("grok", "muse") and not has_explicit_sources:
+    if name == "muse" and not has_explicit_sources:
         explicit_sources = get_sources(config)
         explicit_names = [s["name"] for s in explicit_sources]
         updates["sources"] = explicit_sources
@@ -9998,7 +9927,7 @@ def enable_source(
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name in ("grok", "muse") or (has_explicit_sources and name in default_names)
+        name == "muse" or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -10009,32 +9938,15 @@ def enable_source(
     if not updates:
         # Already enabled and configured — no-op message.
         if name in explicit_names or (not has_explicit_sources and name in default_names):
-            if name == "grok":
-                _set_grok_host_usage(config, enabled=True, quiet=True)
             console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
             return
 
     if updates:
         config_updates: dict[str, dict[str, Any]] = {"sync": updates}
-        if name == "grok":
-            config_updates["retro"] = {"grok_host_usage": True}
         patch_config_on_disk(config_updates)
-
-    if name == "grok" and not updates:
-        _set_grok_host_usage(config, enabled=True, quiet=True)
 
     _record_seen([name])
     console.print(f"[green]Enabled source '{name}' on this device.[/green]")
-    if name == "grok":
-        console.print(
-            "[dim]Syncs ~/.grok skills/, commands/, and rules/ only. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
-        )
-        console.print(
-            "[dim]Reads terminal token totals from local Grok session updates. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
-        )
-        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
     if name == "muse":
         console.print(
             "[dim]Syncs ~/.local/share/muse memory/ only. "
@@ -10078,6 +9990,8 @@ def reconfigure_sources() -> None:
         existing = next((s for s in explicit_sources if s["name"] == d["name"]), None)
         ordered.append(existing if existing is not None else d)
     for s in explicit_sources:
+        if s["name"] in _config_module.RETIRED_SOURCE_NAMES:
+            continue
         if s["name"] not in seen_names:
             seen_names.add(s["name"])
             ordered.append(s)
@@ -10101,23 +10015,13 @@ def reconfigure_sources() -> None:
             iname = item["name"]
             detected = _source_path_is_detected(item)
             default_active = iname in default_names
-            if iname == "grok":
-                # A bare ~/.grok contains session state and credentials on
-                # every Grok install. It must not become a default-Y source
-                # or authorize the separate usage reader.
-                default_active = detected
-            elif iname == "muse":
+            if iname == "muse":
                 # Muse never defaults on: its memory/ tree is host-created, so
                 # even a detected root is not consent for sync or usage reads.
                 default_active = False
             currently_active = (
                 iname in explicit_names or (not has_explicit_sources and default_active)
             ) and iname not in disabled
-            if iname == "grok":
-                # A pre-22B usage-only opt-in is durable consent.  Keep it
-                # default-on in this explicit reconfigure flow even when the
-                # Grok customization dirs are absent, unless the user says N.
-                currently_active = currently_active or grok_host_usage_enabled(config)
             answered = _prompt_source_toggle(
                 item, current_state=currently_active, detected=detected
             )
@@ -10145,10 +10049,7 @@ def reconfigure_sources() -> None:
     if new_explicit_sources:
         updates["sources"] = new_explicit_sources
 
-    grok_on = (
-        any(s.get("name") == "grok" for s in new_explicit_sources) and "grok" not in new_disabled
-    )
-    patch_config_on_disk({"sync": updates, "retro": {"grok_host_usage": grok_on}})
+    patch_config_on_disk({"sync": updates})
 
     # Mark every name as seen — reconfigure is the explicit acknowledgment
     # surface, so even sources the user re-confirmed should not surface as
@@ -10232,18 +10133,21 @@ def _config_missing_recommended_excludes(config: dict) -> list[str]:
     return names
 
 
-def _explicit_opencode_source_present(sources: list[dict] | None) -> bool:
-    """True when an explicit ``[[sync.sources]]`` entry is named ``opencode``.
+def _explicit_retired_sources(sources: list[dict] | None) -> list[str]:
+    """Return explicit [[sync.sources]] names that belong to RETIRED_SOURCE_NAMES.
 
-    Track 37B dropped that name from ``DEFAULT_SOURCES``. A leftover block
-    is a user-defined generic source until ``mm migrate-config`` removes it
-    and records the name in ``disabled_sources`` (the consumer-boundary
+    A leftover block is a user-defined generic source until ``mm migrate-config``
+    removes it and records the name in ``disabled_sources`` (the consumer-boundary
     filter that keeps ``generate_tombstones`` from minting a deletion
     tombstone for every file the source ever pushed).
     """
     if not sources:
-        return False
-    return any(s.get("name") == "opencode" for s in sources)
+        return []
+    return [
+        s["name"]
+        for s in sources
+        if isinstance(s.get("name"), str) and s["name"] in _config_module.RETIRED_SOURCE_NAMES
+    ]
 
 
 def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
@@ -10266,8 +10170,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
 
     diffs = _compute_recommended_excludes_diff(sources)
     include_diffs = _compute_recommended_includes_diff(sources)
-    retire_opencode = _explicit_opencode_source_present(sources)
-    if not diffs and not include_diffs and not retire_opencode:
+    retired = _explicit_retired_sources(sources)
+    if not diffs and not include_diffs and not retired:
         console.print("[green]Config is already up to date.[/green]")
         if dry_run:
             console.print(DRY_RUN_COMPLETE_LOCK_FREE)
@@ -10303,13 +10207,14 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             console.print(f"\n  [bold]{name}[/bold]  (no include_patterns today)")
             for p in patterns:
                 console.print(f"    [green]+ {p}[/green]")
-    if retire_opencode:
-        console.print("\n[bold]Retired source:[/bold]")
-        console.print(
-            "  [bold]opencode[/bold] — remove the leftover [[sync.sources]] "
-            "block and record the name in disabled_sources so the next "
-            "push does not mint deletion tombstones."
-        )
+    if retired:
+        console.print("\n[bold]Retired sources:[/bold]")
+        for rname in retired:
+            console.print(
+                f"  [bold]{rname}[/bold] — remove the leftover [[sync.sources]] "
+                "block and record the name in disabled_sources so the next "
+                "push does not mint deletion tombstones."
+            )
 
     if dry_run:
         console.print(DRY_RUN_COMPLETE_LOCK_FREE)
@@ -10329,7 +10234,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         include_map_new = {name: patterns for name, patterns in include_diffs}
         new_sources: list[dict] = []
         for src in sources:
-            if src.get("name") == "opencode":
+            if src.get("name") in _config_module.RETIRED_SOURCE_NAMES:
                 continue
             if src.get("name") in diff_map or src.get("name") in include_map_new:
                 merged = dict(src)
@@ -10348,10 +10253,11 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         # is what feeds _filter_disabled_sources so generate_tombstones
         # sees an empty diff for the retired name.
         sync_updates: dict[str, Any] = {"sources": new_sources}
-        if retire_opencode:
+        if retired:
             disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
-            if "opencode" not in disabled:
-                disabled.append("opencode")
+            for rname in retired:
+                if rname not in disabled:
+                    disabled.append(rname)
             sync_updates["disabled_sources"] = sorted(disabled)
         patch_config_on_disk({"sync": sync_updates})
         # Clear any prior migration breadcrumb — config now matches.
@@ -10366,8 +10272,8 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         if diffs or include_diffs:
             updated = {name for name, _m, _c in diffs} | {name for name, _p in include_diffs}
             parts.append(f"Updated {len(updated)} source(s)")
-        if retire_opencode:
-            parts.append("removed the retired opencode source block")
+        if retired:
+            parts.append(f"removed retired source block(s): {', '.join(retired)}")
         console.print(
             f"[green]{'; '.join(parts)}.[/green] Config written to {_config_module.CONFIG_PATH}."
         )
@@ -11877,8 +11783,8 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
     of "wedged sync I never noticed" failure the contract exists to prevent.
     """
     missing = _config_missing_recommended_excludes(config)
-    retire_opencode = _explicit_opencode_source_present(config.get("sync", {}).get("sources"))
-    if not missing and not retire_opencode:
+    retired_sources = _explicit_retired_sources(config.get("sync", {}).get("sources"))
+    if not missing and not retired_sources:
         return
     is_tty = sys.stdin.isatty() and sys.stdout.isatty()
     if read_only or not is_tty:
@@ -11887,8 +11793,9 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
         bits: list[str] = []
         if missing:
             bits.append(f"config missing recommended excludes for source(s) {', '.join(missing)}")
-        if retire_opencode:
-            bits.append("config still has a retired [[sync.sources]] opencode block")
+        if retired_sources:
+            joined_retired = ", ".join(retired_sources)
+            bits.append(f"config still has retired [[sync.sources]] block(s): {joined_retired}")
         stderr_console.print(
             f"[yellow]warning:[/yellow] {'; '.join(bits)}. Run "
             f"[bold]mm migrate-config[/bold] to update."
@@ -11904,13 +11811,12 @@ def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
             f"\n[yellow]Config is missing recommended exclude_patterns for "
             f"source(s):[/yellow] {', '.join(missing)}"
         )
-    if retire_opencode:
+    if retired_sources:
         console.print(
-            "\n[yellow]The opencode sync source was retired in v0.12.55.[/yellow] "
-            "This config still has a leftover [[sync.sources]] opencode block."
+            f"\n[yellow]Retired sync source(s) detected:[/yellow] {', '.join(retired_sources)}"
         )
         console.print(
-            "  mm migrate-config will remove it and record the name in "
+            "  mm migrate-config will remove them and record their names in "
             "disabled_sources so the next push does not mint deletion tombstones."
         )
     if typer.confirm("Run 'mm migrate-config' now?", default=True):

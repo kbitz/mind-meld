@@ -226,7 +226,7 @@ One inbox item: **1 placed, 0 deferred, 0 killed, 0 discharged**. Authored-false
 
 **Future membership:** 91 existing bullets retained verbatim, 2 discharged, 6 appended: **93 → 97**. “Stable note codes for all 19 `## Notes` strings” and “Retro-card machine/cause diagnostics” are `discharged@c76f41d`: `aggregator._render_health_block` emits coded `MM_HEALTH` issues with machine/cause details and remedies, `retro_fleet/SKILL.md` consumes them, and `tests/test_docs_routing.py` checks the interface. The latter had no more specific residual requirement to carry forward. All other deferred entries retain their existing text and triggers; none is promoted on an unmeasured premise.
 
-**Advisory override:** keep `docs/designs/grok-build-usage-reader.md`, `host-parity.md`, `memory-continuity.md` and `sync-gstack-context.md` in place. The archive heuristic mistakes external host versions or historical baseline references for completed mm plans; these remain active source documents. PROGRESS covers every tagged/changelog version. Documentation only; no version bump.
+**Advisory override:** keep `host-parity.md`, `memory-continuity.md` and `sync-gstack-context.md` in place. The archive heuristic mistakes external host versions or historical baseline references for completed mm plans; these remain active source documents. PROGRESS covers every tagged/changelog version. Documentation only; no version bump.
 
 ### Roadmap drain — 2026-09-21
 

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, Grok, and Muse. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code and Codex; verified 2026-08-24). Grok 1.0.5 already loads that directory via its default-on Claude compatibility layer, so `mm diag` reports Grok under `host_skill_discovery`, not as a third `skill_links` row. Muse discovers that directory too, so it needs no link either.
+Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, Muse, and Antigravity. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Muse discovers that directory, so it needs no link.
 
 ## Install
 
@@ -16,6 +16,7 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
 **Push and pull output (Track 78A):** attended `mm push` and `mm pull` now end
 with one outcome line. Capture, cache, budget, nested-repository and scan
@@ -126,14 +127,10 @@ A migrated explicit config keeps these globs until removed by hand, which
 brings back the migration warning and attended prompt.
 
 **v1.0.0:** no action needed beyond upgrading. Mixed 0.14.x/1.0.0 fleets
-interoperate with no wire or storage migration. That release defined stable
-surfaces in the
-[Compatibility (1.x) contract](docs/invariants/auto-upgrade.md#compatibility-1x).
-[docs/SPEC.md](docs/SPEC.md#release-policy) retired that contract on 2026-10-19
-except the storage-format refusal. `b` / `both` still leave both conflict files
-on disk, without the retired alias notice. Newer-format storage refuses with
-an upgrade remedy. Once v1.0.0 is tagged, a regression ships as 1.0.1: the
-upgrade nudge never downgrades.
+interoperate with no wire or storage migration. Newer-format storage refuses with
+an upgrade remedy ([Storage-format gates](docs/invariants/auto-upgrade.md#storage-format-gates)).
+`b` / `both` still leave both conflict files on disk. Once v1.0.0 is tagged, a regression
+ships as 1.0.1: the upgrade nudge never downgrades.
 
 **v0.14.9:** the old identity cache becomes stale and refreshes on the next identity read that completes repository discovery; incomplete attempts retry.
 The first push needing that refresh shows `mm: notice: refreshing identity cache (one-off)` with `--verbose`. [Future capture is corrected; previously published rows stay unchanged.](#dropped-repositories-and-ignored-git-environment-variables)
@@ -312,11 +309,11 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 ## Codex Integration
 
-Mind Meld treats Codex as a first-class peer of Claude Code. Grok and Muse are the other usage-reader hosts (see [Grok usage in fleet retro](#grok-usage-in-fleet-retro) and [Muse](#muse)).
+Mind Meld treats Codex as a first-class peer of Claude Code. Muse and Antigravity are the other usage-reader hosts (see [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
-- Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source grok` is the same verb: it adds a scoped Grok source (`skills/`, `commands/`, and `rules/` only — same idea as Claude's `memory/` + `todos/`) and opts this Mac into reading terminal token totals from local `updates.jsonl` records. Session files, prompts, and chat history stay on the Mac.
+- Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
 
 Symlinks inside any sync source are local routing, not portable content: Mind Meld does not upload them and leaves existing local links untouched on pull, including dangling links and linked directories. A source root itself may be a symlink.
@@ -325,7 +322,7 @@ Fresh installs are asked about the `codex` source during `mm init`. That choice 
 
 ```bash
 mm enable-source codex
-mm enable-source grok
+mm enable-source agy
 mm enable-source muse
 ```
 
@@ -345,22 +342,22 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
 `ready` describes cached rollout inventory; `none` means no known standing
 read blocker. Neither proves a snapshot was published. The device-wide capture
 and publication lines in `mm status` provide that evidence. For a blocker, see
-[Host usage capture](#host-usage-capture-codex-and-grok).
+[Host usage capture](#host-usage-capture).
 
 ### Muse
 
-`mm enable-source muse` does the same two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models currently appear under the `Unclassified` row with their model names. This release has no separate Muse row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
+`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
-### Grok usage in fleet retro
+### Antigravity (agy)
 
-`mm enable-source grok` does two things: it syncs `~/.grok` `skills/`, `commands/`, and `rules/` (session files stay local), and it opts this Mac into reading terminal token totals from local `updates.jsonl`. Prompts never leave the Mac. The fleet retro's `AGENTS` block then gains a `Grok` row alongside Claude and Codex, on the same footing.
+`mm enable-source agy` does three things: it syncs `~/.gemini/config` (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`; session DBs, settings, hooks, and `agents/` stay local), maintains a `retro-fleet` skill link under `~/.gemini/config/skills/`, and opts this Mac into reading completed step token totals from `~/.gemini/antigravity-cli/conversations/<cid>.db`. Prompts never leave the Mac. The fleet retro gains an `Antigravity` row alongside Claude, Codex, and Muse.
 
 Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first upgrade
 to v0.14.17+ and verify with `mm --version`, then:
 
-1. `mm enable-source grok`
-2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print `mm: reading grok usage beyond [retro] host_usage_interactive_budget_ms (about 5 s of scanning)...`; scanning is cooperative, not a hard ceiling. Autopush never warms.
-3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Grok contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `grok usage read blocker: none` describes only the cache.
+1. `mm enable-source agy`
+2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
+3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
 4. Optionally verify end to end from a **second Mac** after iCloud delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
 
 ```sh
@@ -374,12 +371,12 @@ mm retro-fleet 7d
 Expected: a new `as_of`, the enabled readers in `consulted`, and their actual workload's models in the model list when usage exists. A completed empty scan is valid; no fixed model id or nonzero counter is required. Readers in `partial` contributed usable but incomplete totals; readers in `degraded` contributed nothing. For example:
 
 ```json
-{"as_of": "2026-09-15T12:00:00+00:00", "consulted": ["codex", "grok"], "partial": [], "degraded": []}
+{"as_of": "2026-10-22T12:00:00+00:00", "consulted": ["codex", "agy"], "partial": [], "degraded": []}
 ```
 
-The retro should name Grok's inherent pricing floor. After the next real capture, repeat the second-Mac check: `as_of` must advance with Grok still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
+After the next real capture, repeat the second-Mac check: `as_of` must advance with Antigravity still consulted. Upgrade the **producing Mac** for delivery and the **rendering Mac** for tables and wording. Run `mm install-skills` and restart the **agent** so it loads the updated decoder.
 
-If Grok writes a record this version cannot read, that Mac drops Grok (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. A newer mm may read it: run `mm update`, or `mm disable-source grok` to stop retrying. See [Host usage capture](#host-usage-capture-codex-and-grok) for all blockers.
+If Antigravity writes a record this version cannot read, that Mac drops Antigravity (declared on `mm status` / `mm diag` / `mm push --verbose` stderr) and keeps publishing Codex. A newer mm may read it: run `mm update`, or `mm disable-source agy` to stop retrying. See [Host usage capture](#host-usage-capture) for all blockers.
 
 Then give each agent the same lifecycle contract. For Codex, add this to `~/.codex/AGENTS.md` (or merge it into your existing global guidance):
 
@@ -401,14 +398,14 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm --version` | Print the installed version and exit |
 | `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
 | `mm init` | Configure device, storage path, passphrase |
-| `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture-codex-and-grok) |
+| `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
 | `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, Grok `host_skill_discovery`, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). `host_skill_discovery` is not a skill-link row. |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -762,13 +759,7 @@ maintain_links = true          # false disables every row
 
 `mm diag` is the authoritative resolved view. `mm sources` structurally cannot show a `[skills] agents` override.
 
-Grok is not a skill-link row. Verified 2026-08-24: Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (`grok inspect --json`, then `name == "retro-fleet"`). Codex shows no evidence of that discovery (`~/.codex/AGENTS.md` mentions are the user's own instruction prose — and gstack's `setup --host auto` plus `machine-setup` *copy into* that dir, which you would not do for a dir the host already reads). Exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`.** Re-check with `grok inspect --json`.
-
-Two Grok levers, and they are not interchangeable:
-
-- `[skills] ignore` (Grok README, skills config) is the documented lever that *breaks* discovery of `~/.claude/skills`.
-- `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` is the remedy that *adds* the mm-owned store as an extra search path.
-- The Claude-compat-off toggle itself is **undocumented** in Grok 1.0.5 — a live `~/.grok/config.toml` can carry `[compat.claude] hooks = false`, and that key appears nowhere in Grok's 109KB README — so `grok inspect --json` → `externalCompat` is the only reliable read. `mm diag --json` reports that under `host_skill_discovery`, never under `skill_links`. `skill_links` is links mm owns and maintains; `host_skill_discovery` is compatibility behaviour owned by a host.
+Muse is not a skill-link row because Muse discovers `~/.claude/skills` directly. Codex and Antigravity do not discover that directory, so Mind Meld maintains a `retro-fleet` skill link for both hosts when enabled. Exit criterion: **mm maintains a skill link only for hosts that do not discover `~/.claude/skills`.**
 
 ### Removing a skill link
 
@@ -838,7 +829,7 @@ publish a usable capture.
 | Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
 ```
 
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `cursor` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `agy` / `cursor` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
 
 Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
@@ -1159,11 +1150,11 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 
 **Why is my host cost missing (`—` on the economics table)?** That Mac reported token counters in an older format (mm < v0.12.52), has not pushed per-model `tokens_by_day` yet (mm < v0.12.49), or its latest snapshot predates the requested window. On **that** Mac: `pipx upgrade mind-meld`, then `mm push`. Confirm capture and publication with `mm status`. Then re-run `mm retro-fleet 30d` here. An upgraded peer's retained 90 days generally **do** become priceable on repush. `—` is unavailable, not zero; do not add the other machines' figures to fill it in.
 
-**I enabled Grok, but no Grok activity appears.** Check the standing blocker
-and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture-codex-and-grok).
-Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache success alone does not prove that Grok reached the wire.
+**I enabled an agent (e.g. Antigravity), but no activity appears.** Check the standing blocker
+and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
+Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost.
+**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build is retired, but Grok models used through Cursor remain supported and priceable.
 
 **Why grok-4.6 rates, not grok-build-0.1?** xAI's Build overview identifies grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 
@@ -1173,9 +1164,9 @@ Use the [second-Mac publication check](#grok-usage-in-fleet-retro); cache succes
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
-**`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` opencode block and records the name in `disabled_sources` so that push does not mint deletion tombstones. mm also removes the `~/.config/opencode/skills/retro-fleet` link it created (v0.13.0); a link you made yourself is left alone. To keep syncing that directory, give the source a name mm does not own — `[[sync.sources]]` accepts any name, so `name = "opencode-local"` with the same `path` and `include_dirs` syncs it as an ordinary generic source today, unchanged.
+**`mm enable-source opencode` says the source is unknown.** The OpenCode sync source was retired in v0.12.55 (and Grok Build was retired on 2026-10-22). The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes the leftover `[[sync.sources]]` retired block and records the name in `disabled_sources` so that push does not mint deletion tombstones.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_skill_discovery`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. `host_skill_discovery` (Grok only) carries `host`, `status`, `claude_skills_compat`, `retro_fleet_resolved`, `retro_fleet_path`, and `grok_version`. It is not a fourth `skill_links` row: a probe result is not a link mm owns. `status` there is one of `ok`, `binary-absent`, `timeout`, `nonzero-exit`, `malformed-json`, `unsupported-schema`. It does not carry the SKILL.md the agent loaded, the resolved `mm` path, or whether an upgrade is available. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's. For Grok, read `host_skill_discovery`, not `skill_links`. If `claude_skills_compat` is false, `[skills] ignore` is the documented lever that breaks discovery; `[skills] paths = ["~/.local/share/mind-meld/agent-skills"]` adds the store. The compat-off toggle itself is undocumented in Grok 1.0.5 — trust `grok inspect --json` → `externalCompat`.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -1262,9 +1253,9 @@ after 90 days by their filename date; GC also runs after an interactive
 `mm push` that published user-content changes, never from autopush. Upgrading does not
 claim to repair historical attribution.
 
-<a id="host-usage-capture-codex-and-grok"></a>
+<a id="host-usage-capture"></a>
 
-### Host usage capture (Codex, Grok, Cursor and Muse)
+### Host usage capture (Codex, Cursor, Muse and Antigravity)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -1290,8 +1281,7 @@ magnitudes or payloads. Local publication evidence proves acceptance by this Mac
 storage backend; it does not prove delivery to another Mac.
 
 Capture requires enabled, available `mm-events` and consented readers. Enable
-with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse`;
-Grok also accepts the existing `[retro] grok_host_usage = true` usage-only consent.
+with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source muse` / `mm enable-source agy`.
 
 Cursor uses local usage consent. Enable capture with:
 
@@ -1582,7 +1572,7 @@ values are `contributed`, `empty`, `partial`, `dropped:<reason>`, or `absent`.
 #### Host usage looks wrong
 
 Run `mm status` on the producing Mac, then `mm diag` for reader blockers.
-These example excerpts use both Codex and Grok, at a fixed UTC time.
+These example excerpts use both Codex and Antigravity, at a fixed UTC time.
 
 Healthy: the recorded capture and attended attempt both have publication evidence.
 
@@ -1591,11 +1581,11 @@ Healthy: the recorded capture and attended attempt both have publication evidenc
 Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
   Publication: published (accepted manifest evidence)
   codex: contributed
-  grok: contributed
+  Antigravity: contributed
   Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
 ```
 
-Mixed with an empty reader: Grok completed successfully and found no usage in
+Mixed with an empty reader: Antigravity completed successfully and found no usage in
 the retained snapshot. It does not need repair.
 
 <!-- usage-example:mixed-empty -->
@@ -1603,9 +1593,9 @@ the retained snapshot. It does not need repair.
 Host usage last recorded capture: 2026-09-21T12:00:00+00:00 (0d ago)
   Publication: published (accepted manifest evidence)
   codex: contributed
-  grok: completed, no usage in snapshot
+  Antigravity: completed, no usage in snapshot
   Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — published
-    codex contributed; grok completed, no usage in snapshot
+    codex contributed; agy completed, no usage in snapshot
 ```
 
 Failed refresh: the earlier published capture remains visible. The newer attempt
@@ -1617,9 +1607,9 @@ the blocker remedies below before refreshing.
 Host usage last recorded capture: 2026-09-21T11:00:00+00:00 (0d ago)
   Publication: published (accepted manifest evidence)
   codex: contributed
-  grok: contributed
+  Antigravity: contributed
   Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — no-row
-    codex dropped (unsupported); grok dropped (deadline)
+    codex dropped (unsupported); agy dropped (deadline)
 ```
 
 Unverified: a line larger than 16 MiB prevents proof from this file, including
@@ -1631,7 +1621,7 @@ check evidence read-only with `mm status`. An attended push creates a new attemp
 Host usage last recorded capture: unknown (~/.local/share/mind-meld/events/local-2026-09-21.jsonl)
   Publication: unverified (oversized-line) (accepted manifest evidence)
   codex: contributed
-  grok: contributed
+  Antigravity: contributed
   Last recorded attended attempt: 2026-09-21T12:00:00+00:00 (0 s ago) — unverified (oversized-line)
   Usage refresh: Attended mm push refreshes and publishes host usage automatically.
 ```
@@ -1650,7 +1640,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
@@ -1697,9 +1687,7 @@ read budget; a complete-but-late read records `deadline` and its timing. Invento
 `mm disable-source codex` also stops syncing Codex customizations and skill-link
 maintenance under the default source-derived policy; an explicit `[skills]
 agents` grant is the exception for maintenance. There is no independent Codex
-usage opt-out yet. Grok's existing `[retro] grok_host_usage = true` remains a
-separate opt-in: turn that off too if you want to stop usage after disabling
-the source. Content sync and other readers' captures survive one reader's
+usage opt-out yet. Content sync and other readers' captures survive one reader's
 failure.
 
 If `mm --version` does not change after `pipx upgrade`, see [Upgrading](#upgrading).
@@ -1715,9 +1703,9 @@ updates. Older mm ignores the additive root keys.
 `mm diag --json` exposes `host_usage.codex` keys `cache_state`, `state`,
 `files_cached`, `files_migrated`, `files_pre_track`, `files_on_disk`, `pending`,
 `model_count`, `models`, `last_reason`, and `last_reason_since`.
-`host_usage.grok` keys are `consented`, `complete_once`, `usage_less_skipped`,
+`host_usage.agy` keys are `consented`, `complete_once`, `usage_less_skipped`,
 `cache_state`, `model_count`, `models`, `last_reason`, `last_reason_since`,
-`files_cached`, and `files_on_disk`. The text line is `grok ledgers cached: N of M`;
+`files_cached`, and `files_on_disk`. The text line is `agy DBs cached: N of M`;
 missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
 Both reader dictionaries also expose `last_complete_ms`, `last_complete_at`,
 and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
@@ -1726,8 +1714,8 @@ and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
 opening host logs or needing a passphrase; Codex counts rollout paths under both
-its live and archived roots and Grok
-counts two-level `*/*/updates.jsonl` paths under its resolved sessions root.
+its live and archived roots and Antigravity
+counts conversation `.db` paths under its conversations root.
 `cache_state: missing` or `unreadable` leaves the blocker unknown.
 
 A `mm: notice: host token cache write failed: <ErrnoName>` means the read's

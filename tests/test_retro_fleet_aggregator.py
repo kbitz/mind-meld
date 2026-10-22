@@ -4570,7 +4570,7 @@ class TestHostSnapshotAcceptance:
         assert result.reason == "naive_timestamp"
 
     def test_token_sources_out_of_order_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4803,16 +4803,16 @@ class TestHostSnapshotWireCompat:
         assert "mm diag" in rendered
 
     def test_known_name_out_of_order_still_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
 
     def test_unknown_name_does_not_mask_known_name_out_of_order(self):
-        """A naive continue-on-unknown would accept this by dropping grok's
+        """A naive continue-on-unknown would accept this by dropping cursor's
         successor check. Membership is tested before the positional scan,
         and an unknown name must not advance the known-name cursor."""
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "opencode", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "opencode", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4984,11 +4984,11 @@ class TestCoverageAcceptor:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
-            degraded_sources=("grok",),
+            degraded_sources=("cursor",),
             partial_days={"codex": ["2026-04-20"]},
         )
         accepted = _accepted(json.loads(json.dumps(row)))
-        assert accepted.degraded == ("grok",)
+        assert accepted.degraded == ("cursor",)
         assert accepted.degraded_reason is None
         assert accepted.partial == ("codex",)
         assert accepted.partial_reason is None
@@ -5212,14 +5212,14 @@ class TestHostSnapshotNoWindowSpend:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=ts,
-            degraded_sources=("grok",),
+            degraded_sources=("cursor",),
         )
         accepted_plain = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(plain)))
         accepted_degraded = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(degraded)))
         assert isinstance(accepted_plain, aggregator._AcceptedHostRow)
         assert isinstance(accepted_degraded, aggregator._AcceptedHostRow)
         assert accepted_plain.tie_key == accepted_degraded.tie_key
-        assert accepted_degraded.degraded == ("grok",)
+        assert accepted_degraded.degraded == ("cursor",)
         assert aggregator._sibling_tie_key(accepted_plain) != aggregator._sibling_tie_key(
             accepted_degraded
         )
@@ -6470,7 +6470,7 @@ class TestAgentCoverageNotes:
                         self.UNTIL,
                         families={"codex": {"2026-04-22": _usage(1)}},
                         consulted=("codex",),
-                        degraded=("grok",),
+                        degraded=("agy",),
                     )
                 ]
             )
@@ -6478,9 +6478,9 @@ class TestAgentCoverageNotes:
         hit = [n for n in notes if "failed on the latest push" in n]
         assert len(hit) == 1
         assert "laptop" in hit[0]
-        assert "grok" in hit[0]
+        assert "Antigravity" in hit[0]
         assert "mm diag" in hit[0]
-        assert "host_usage.grok" in hit[0]
+        assert "host_usage.agy" in hit[0]
         assert "mm push" not in hit[0]
 
     def test_f1b_one_partial_machine_names_machine_reader_and_diag(self):
@@ -6490,9 +6490,9 @@ class TestAgentCoverageNotes:
                     _snap(
                         "laptop",
                         self.UNTIL,
-                        families={"grok": {"2026-04-22": _usage(1)}},
-                        consulted=("grok",),
-                        partial=("grok",),
+                        families={"agy": {"2026-04-22": _usage(1)}},
+                        consulted=("agy",),
+                        partial=("agy",),
                     )
                 ]
             )
@@ -6500,17 +6500,17 @@ class TestAgentCoverageNotes:
         hit = [n for n in notes if "are incomplete" in n]
         assert len(hit) == 1
         assert "laptop" in hit[0]
-        assert "grok" in hit[0]
+        assert "Antigravity" in hit[0]
         assert "mm diag" in hit[0]
-        assert "host_usage.grok" in hit[0]
+        assert "host_usage.agy" in hit[0]
         assert "mm push" not in hit[0]
 
     def test_f2_n_degraded_machines_is_one_aggregated_note(self):
         notes = aggregator._agent_coverage_notes(
             self._data(
                 [
-                    _snap("laptop", self.UNTIL, degraded=("grok",)),
-                    _snap("desktop", self.UNTIL, degraded=("grok",)),
+                    _snap("laptop", self.UNTIL, degraded=("agy",)),
+                    _snap("desktop", self.UNTIL, degraded=("agy",)),
                 ]
             )
         )
@@ -6518,6 +6518,7 @@ class TestAgentCoverageNotes:
         assert len(hits) == 1
         assert "laptop" in hits[0]
         assert "desktop" in hits[0]
+        assert "Antigravity" in hits[0]
 
     def test_f3_zero_degraded_emits_no_coverage_note(self):
         notes = aggregator._agent_coverage_notes(
@@ -7009,8 +7010,12 @@ class TestUnifiedAgents:
         usage = self._usage_for(data)
         codex_causes = self._row(usage, "codex").floor_causes
         grok_causes = self._row(usage, "grok").floor_causes
-        assert any("grok" in c and "incomplete" in c for c in codex_causes), codex_causes
-        assert any("grok" in c and "incomplete" in c for c in grok_causes), grok_causes
+        assert any("unknown/retired reader" in c and "incomplete" in c for c in codex_causes), (
+            codex_causes
+        )
+        assert any("unknown/retired reader" in c and "incomplete" in c for c in grok_causes), (
+            grok_causes
+        )
 
     def test_partial_codex_serving_claude_floors_claude_cost(self):
         counters = {**_usage(1_000_000), "cache_create": 1_000_000}

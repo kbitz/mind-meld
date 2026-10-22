@@ -572,6 +572,7 @@ class TestPipxSeams:
         )
         runner_code = (
             "import signal, sys\n"
+            "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
             "from pathlib import Path\n"
             "from mind_meld import upgrade\n"
             "upgrade._refuse_under_pytest = lambda: None\n"
@@ -1247,6 +1248,7 @@ class TestPipxSeams:
         )
         runner_code = (
             "import signal, sys\n"
+            "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
             "from pathlib import Path\n"
             "from mind_meld import upgrade\n"
             "upgrade._refuse_under_pytest = lambda: None\n"

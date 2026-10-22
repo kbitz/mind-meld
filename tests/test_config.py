@@ -12,12 +12,13 @@ from mind_meld.config import (
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
     HOST_USAGE_BUDGET_MAX_MS,
     HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS,
+    RETIRED_SOURCE_NAMES,
     _apply_defaults,
+    _configured_sources,
     _validate,
     _validate_exclude_patterns,
     _validate_sources,
     get_sources,
-    grok_host_usage_enabled,
     load_config,
     patch_config_on_disk,
     resolve_sources,
@@ -444,12 +445,6 @@ class TestDefaultSources:
             *_GENERATED_HOST_SKILL_GLOBS,
         ]
 
-    def test_grok_source_is_claude_shaped(self):
-        grok = next(s for s in DEFAULT_SOURCES if s["name"] == "grok")
-        assert grok == {"name": "grok", "path": "~/.grok", "type": "grok"}
-        assert "include_dirs" not in grok
-        assert "include_files" not in grok
-
     def test_generated_skill_excludes_preserve_hand_authored_skills(self):
         import fnmatch
 
@@ -539,7 +534,7 @@ class TestExcludePatternsValidation:
             _validate_sources([{**ok[0], "include_patterns": "nope"}])
         with pytest.raises(ConfigError, match=r"include_patterns\[0\] must be a string"):
             _validate_sources([{**ok[0], "include_patterns": [42]}])
-        for non_generic in ("claude", "grok", "muse"):
+        for non_generic in ("claude", "muse"):
             pat = (
                 rf"source {non_generic!r} \(type {non_generic!r}\) does not support "
                 r"include_patterns; only type 'generic' sources use an allowlist"
@@ -838,95 +833,40 @@ class TestGetSources:
         assert "codex" in names
         assert "opencode" not in names
 
-    def test_does_not_auto_detect_grok_when_only_home_exists(self, tmp_path, monkeypatch):
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (tmp_path / ".grok").mkdir()
+    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    def test_retired_sources_bypass_type_and_field_validation(self, name):
+        """Retired source blocks from un-migrated configs validate cleanly."""
+        _validate_sources(
+            [
+                {
+                    "name": name,
+                    "path": f"~/.{name}",
+                    "type": "some-retired-type",
+                    "include_dirs": ["sessions"],
+                }
+            ]
+        )
 
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        config = self._base_config(tmp_path)
-        config["sync"] = {
-            "claude_dir": str(claude_dir),
-            "max_file_size": 52_428_800,
+    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    def test_configured_sources_drops_retired_sources(self, name):
+        """_configured_sources silently drops retired sources."""
+        config = {
+            "sync": {
+                "sources": [
+                    {"name": "codex", "path": "~/.codex", "type": "generic"},
+                    {"name": name, "path": f"~/.{name}", "type": name},
+                ]
+            }
         }
-        names = [source["name"] for source in get_sources(config)]
-        assert "grok" not in names
-
-    def test_auto_detects_grok_when_a_customization_dir_exists(self, tmp_path, monkeypatch):
-        claude_dir = tmp_path / ".claude"
-        claude_dir.mkdir()
-        (tmp_path / ".grok" / "skills").mkdir(parents=True)
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        config = self._base_config(tmp_path)
-        config["sync"] = {
-            "claude_dir": str(claude_dir),
-            "max_file_size": 52_428_800,
-        }
-        names = [source["name"] for source in get_sources(config)]
-        assert "grok" in names
-
-    def test_default_sources_fallback_skips_grok_without_customization_dirs(
-        self, tmp_path, monkeypatch
-    ):
-        (tmp_path / ".claude").mkdir()
-        (tmp_path / ".grok").mkdir()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path))
-
-        config = self._base_config(tmp_path)
-        config["sync"] = {"max_file_size": 52_428_800}
-        names = [source["name"] for source in get_sources(config)]
-        assert "grok" not in names
+        sources, explicit = _configured_sources(config, strict=False)
+        assert explicit is True
+        assert [s["name"] for s in sources] == ["codex"]
 
     def test_validates_source_configs(self):
         """Missing required fields in a source should raise ConfigError."""
         bad_sources = [{"name": "oops"}]  # missing path and type
         with pytest.raises(ConfigError, match="missing required field"):
             _validate_sources(bad_sources)
-
-    def test_rejects_grok_generic_widening(self):
-        with pytest.raises(ConfigError, match="must use type 'grok'"):
-            _validate_sources(
-                [
-                    {
-                        "name": "grok",
-                        "path": "~/.grok",
-                        "type": "generic",
-                        "include_dirs": ["sessions"],
-                    }
-                ]
-            )
-
-    def test_rejects_grok_include_dirs(self):
-        with pytest.raises(ConfigError, match="does not support include_dirs"):
-            _validate_sources(
-                [
-                    {
-                        "name": "grok",
-                        "path": "~/.grok",
-                        "type": "grok",
-                        "include_dirs": ["sessions"],
-                    }
-                ]
-            )
-
-    @pytest.mark.parametrize("name", ["grok-custom", "alternate-grok"])
-    def test_rejects_grok_type_aliases(self, name):
-        with pytest.raises(ConfigError, match="reserved for source name 'grok'"):
-            _validate_sources(
-                [
-                    {
-                        "name": name,
-                        "path": "~/.grok",
-                        "type": "grok",
-                    }
-                ]
-            )
 
     def test_filters_out_nonexistent_paths(self, tmp_path):
         config = {
@@ -1835,36 +1775,9 @@ class TestMmEventsSource:
             share.chmod(0o755)
 
 
-class TestGrokHostUsageConfig:
-    def test_absent_and_false_are_disabled(self):
-        assert grok_host_usage_enabled({}) is False
-        assert grok_host_usage_enabled({"retro": {}}) is False
-        assert grok_host_usage_enabled({"retro": {"grok_host_usage": False}}) is False
-        assert grok_host_usage_enabled({"retro": {"grok_host_usage": True}}) is True
-
-    def test_non_bool_is_config_error(self):
-        with pytest.raises(ConfigError, match="grok_host_usage must be a boolean"):
-            _validate(
-                {
-                    "device": {"id": "abc123", "name": "Mac"},
-                    "storage": {"path": "/tmp"},
-                    "retro": {"grok_host_usage": "yes"},
-                }
-            )
-
-    def test_unknown_retro_keys_are_not_rejected(self):
-        _validate(
-            {
-                "device": {"id": "abc123", "name": "Mac"},
-                "storage": {"path": "/tmp"},
-                "retro": {"author_emails": ["a@example.com"], "grok_host_usage": True},
-            }
-        )
-
-    def test_grok_is_a_default_sync_source(self):
-        assert any(s["name"] == "grok" and s["type"] == "grok" for s in DEFAULT_SOURCES)
-
-    def test_grok_sync_source_row_is_allowed(self):
+class TestRetiredSourcesConfig:
+    @pytest.mark.parametrize("name", sorted(RETIRED_SOURCE_NAMES))
+    def test_retired_sources_allowed_in_validate_sources(self, name):
         _validate(
             {
                 "device": {"id": "abc123", "name": "Mac"},
@@ -1872,12 +1785,21 @@ class TestGrokHostUsageConfig:
                 "sync": {
                     "sources": [
                         {
-                            "name": "grok",
-                            "path": "~/.grok",
-                            "type": "grok",
+                            "name": name,
+                            "path": f"~/.{name}",
+                            "type": name,
                         }
                     ]
                 },
+            }
+        )
+
+    def test_unknown_retro_keys_are_not_rejected(self):
+        _validate(
+            {
+                "device": {"id": "abc123", "name": "Mac"},
+                "storage": {"path": "/tmp"},
+                "retro": {"author_emails": ["a@example.com"], "grok_host_usage": True},
             }
         )
 
@@ -2259,7 +2181,6 @@ class TestSourceBootstrapPreview56A:
             ],
         )
         monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
-        monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
         monkeypatch.setattr(Path, "stat", stat)
         # Python 3.14's Path.lstat calls os.lstat directly instead of
         # self.stat(follow_symlinks=False); inject the fault on both seams.
@@ -2284,7 +2205,6 @@ class TestSourceBootstrapPreview56A:
         claude.mkdir()
         cfg = {"sync": {"claude_dir": str(claude)}}
         monkeypatch.setattr(config_module, "_optional_host_present", lambda *a: False)
-        monkeypatch.setattr(config_module, "grok_customization_dirs_exist", lambda *a, **kw: False)
         monkeypatch.setattr(config_module, "muse_memory_dir_exists", lambda *a, **kw: False)
         resolution = resolve_sources(cfg, strict=True, bootstrap=False)
         # claude_dir legacy resolution itself never adds mm-events; supply the

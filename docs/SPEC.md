@@ -19,11 +19,11 @@ several machines:
 
 1. **Sync.** It keeps the agents' context identical on every machine, with no
    server and nobody else able to read it: Claude Code memory, Codex skills,
-   Muse memory and gstack project state. Finish on one machine and `mm push`;
+   Muse memory, Antigravity skills and rules, and gstack project state. Finish on one machine and `mm push`;
    start on another and `mm pull`, and it is all there.
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
-   Code, Codex, Cursor and Muse.
+   Code, Codex, Cursor, Muse and Antigravity.
 
 A command either succeeds, in one line, or says what broke and how to fix it.
 
@@ -40,6 +40,7 @@ Syncthing.
 | Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
 | Cursor | Nothing: no user-authored tree exists, and Cursor reads `~/.claude/skills` | Runs from Conductor and the enrolled `cursor-agent` CLI, counted under each model's family (Grok, Claude, GPT) |
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
+| Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
 | gstack, gstack-extend | Project state, analytics and retros; generator output excluded | — |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
@@ -133,8 +134,8 @@ manual step.
 
 ### O7: Fleet usage reporting is complete and accurate
 1. `retro-fleet` reports tokens, cost, active days, machines and top model
-   for each agent family (Claude, Codex, Grok and Muse), summed across the
-   fleet from Claude Code, Codex, Cursor and Muse. Cursor's runs count under
+   for each agent family (Claude, Codex, Grok, Muse and Antigravity), summed across the
+   fleet from Claude Code, Codex, Cursor, Muse and Antigravity. Cursor's runs count under
    their model's family.
 2. Every attended push captures this machine's usage and git activity within
    one total time budget. Work left unfinished resumes on later pushes, so
@@ -254,8 +255,8 @@ manual step.
     its storage-format gates.
   - [Host parity](designs/host-parity.md): usage-family rationale. This
     spec's table owns host scope.
-  - [Grok usage reader](designs/grok-build-usage-reader.md): the Grok Build
-    reader until it is removed.
+  - [Grok usage reader](archive/grok-build-usage-reader.md): historical
+    design for the Grok Build reader, retired on 2026-10-22.
   - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
     cited by invariants.
   - [Memory continuity](designs/memory-continuity.md) and the

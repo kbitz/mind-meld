@@ -146,8 +146,6 @@ CODEX_SESSIONS_PATH = Path.home() / ".codex" / "sessions"
 CODEX_ARCHIVED_SESSIONS_PATH = Path.home() / ".codex" / "archived_sessions"
 """Flat archive (Codex 0.160.0). ``thread/archive`` moves a rollout here from the
 date tree; Paseo archives on merge, and the Codex app and VS Code can too."""
-GROK_SESSIONS_PATH = Path.home() / ".grok" / "sessions"
-GROK_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "grok-host-tokens.json"
 MUSE_SESSIONS_PATH = Path.home() / ".local" / "share" / "muse" / "sessions"
 MUSE_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "muse-host-tokens.json"
 CURSOR_STORE_PATH = (
@@ -286,16 +284,6 @@ _MAX_MODEL_ID_BYTES = 256
 _MAX_PROMPT_ID_BYTES = 256
 _MAX_REASON_SINCE_CHARS = 40
 _MAX_COUNTER = 2**53
-_GROK_STOPS = frozenset({"end_turn", "cancelled"})
-_GROK_CONTENT_FIELDS = frozenset({"content", "rawInput", "rawOutput"})
-_GROK_REQUIRED_KEYS = frozenset({"prompt_id", "sessionUpdate", "stop_reason", "usage"})
-_GROK_IGNORABLE_KEYS = frozenset({"elapsed_ms"})
-GROK_USAGE_CENSUS_HOST_VERSION = "1.0.30"
-"""Host version of the last Grok usage-reader wire census.
-
-Bound to ``tests/fixtures/host_sessions/grok/CONTRACT.md`` by
-``test_contract_census_pin_matches_src_constant``. Not the skill-discovery
-pin in README.md (that is a different census, ``grok inspect --json``)."""
 _MUSE_USAGE_KEYS = frozenset(
     {
         "input_tokens",
@@ -314,13 +302,12 @@ MUSE_USAGE_CENSUS_HOST_VERSION = "1.4.7"
 
 Bound to ``tests/fixtures/host_sessions/muse/CONTRACT.md`` by
 ``test_muse_contract_census_pin_matches_src_constant``."""
-GrokUpdateClass = Literal["terminal", "usage_less", "ignore", "drift"]
 _CANONICAL_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _YEAR_PART = re.compile(r"^\d{4}$")
 _MONTH_OR_DAY_PART = re.compile(r"^\d{2}$")
 _ROLLOUT_NAME = re.compile(r"^rollout-.*\.jsonl$")
 
-HostFamily = Literal["claude", "codex", "grok", "other"]
+HostFamily = Literal["claude", "codex", "grok", "muse", "agy", "other"]
 Reason = Literal[
     "deadline",
     "io_error",
@@ -573,12 +560,10 @@ def host_family(model: str) -> HostFamily:
         return "codex"
     if normalized.startswith("grok-"):
         return "grok"
-    # Muse models (``muse-*``) deliberately fall through to ``other``:
-    # a new host family is a MAJOR exception in the 1.x compatibility
-    # contract (an un-upgraded peer rejects the whole snapshot over an
-    # unknown nested family), while the muse *reader* name is a MINOR.
-    # Add the ``muse`` family when 2.0 rewrites the contract; see
-    # docs/invariants/auto-upgrade.md "Compatibility (1.x)".
+    if normalized.startswith("muse-"):
+        return "muse"
+    if normalized.startswith("gemini-"):
+        return "agy"
     return "other"
 
 
@@ -718,12 +703,12 @@ def warm_host_cache_inline(
     ceiling. Full interpreter and phase measurements: events-retro.md.
     """
     deadline = time.monotonic() + budget_s
-    if reader == "grok":
-        return read_grok_usage(root, deadline=deadline, consented=True)
     if reader == "cursor":
         return read_cursor_usage(root, deadline=deadline, consented=True)
     if reader == "muse":
         return read_muse_usage(root, deadline=deadline, consented=True)
+    if reader == "agy":
+        return read_agy_usage(root, deadline=deadline, consented=True)
     return read_codex_usage(root, deadline=deadline)
 
 
@@ -2109,36 +2094,27 @@ class HostReaderDiag:
 
 HOST_READER_DIAGS = {
     "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex"),
-    "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "grok"),
     "cursor": HostReaderDiag(
         "cursor_usage_diag", "complete_once", True, "Cursor (Conductor + enrolled CLI)"
     ),
     "muse": HostReaderDiag("muse_usage_diag", "complete_once", True, "muse"),
+    "agy": HostReaderDiag("agy_usage_diag", "complete_once", True, "Antigravity"),
 }
 
 
-def reader_usage_diag(reader: str) -> dict[str, Any]:
+def reader_usage_diag(reader: str, *, count_logs: bool = False) -> dict[str, Any]:
     # Resolve at call time so patching the owner still reaches every consumer.
-    # Muse's on-disk count walks every day directory (no calendar floor), so
-    # status and recapture use its cache-only view; ``mm diag`` calls
-    # ``muse_usage_diag(count_logs=...)`` directly with its own consent bit.
-    return globals()[HOST_READER_DIAGS[reader].function]()
+    # Muse and Antigravity on-disk counts walk trees, so callers pass count_logs=True
+    # when holding consent; status and recapture use their cache-only view.
+    fn = globals()[HOST_READER_DIAGS[reader].function]
+    if reader in {"muse", "agy"}:
+        return fn(count_logs=count_logs)
+    return fn()
 
 
 def reader_cache_cold(reader: str, state: dict[str, Any]) -> bool:
     descriptor = HOST_READER_DIAGS[reader]
     return state.get(descriptor.ready_key) != descriptor.ready_value
-
-
-def grok_completed_once() -> bool:
-    """True after a consented scan finished and saw at least one ledger file.
-
-    Missing, corrupt, or lock-contended cache is pre-success (fail safe).
-    Diagnostic only: the host-sweep no longer keys publication policy on this
-    latch (Track 31A). ``mm status`` / ``mm diag`` prefer ``last_reason``
-    whenever a standing blocker exists, then this latch.
-    """
-    return grok_usage_diag()["complete_once"] is True
 
 
 def codex_usage_diag() -> dict[str, Any]:
@@ -2238,62 +2214,11 @@ def codex_usage_diag() -> dict[str, Any]:
     }
 
 
-def grok_usage_diag() -> dict[str, Any]:
-    """Grok cache inventory and ledger path count. Never opens host logs.
-
-    ``mm diag`` must run without a passphrase and without a valid config, so
-    this reads the private cache and counts only two-level ledger paths.
-    Unknown cache states keep the count unknown, never a fabricated zero.
-    """
-    on_disk = _count_two_level_ledgers(grok_sessions_root())
-    blank = {
-        **_cached_read_timing({}),
-        "complete_once": False,
-        "usage_less_skipped": 0,
-        "last_reason": None,
-        "last_reason_since": None,
-        "cache_state": "unreadable",
-        "model_count": 0,
-        "models": [],
-        "files_cached": None,
-        "files_on_disk": on_disk,
-    }
-    try:
-        with locked_json_snapshot(GROK_CACHE_PATH, blocking=False) as snap:
-            data = snap.data
-            state = snap.state
-    except OSError:
-        return blank
-    if state != "valid" or not isinstance(data, dict):
-        return {
-            **blank,
-            "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
-        }
-    files = data.get("files")
-    if data.get("version") != CACHE_VERSION or not isinstance(files, dict):
-        return blank
-    raw_skip = data.get("usage_less_skipped", 0)
-    skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
-    models = _diag_grok_model_ids(files)
-    return {
-        "complete_once": data.get("complete_once") is True,
-        "usage_less_skipped": skipped,
-        **_cached_read_timing(data),
-        "last_reason": _cached_last_reason(data),
-        "last_reason_since": _cached_reason_since(data),
-        "cache_state": "ok",
-        "model_count": models["model_count"],
-        "models": models["models"],
-        "files_cached": len(files),
-        "files_on_disk": on_disk,
-    }
-
-
 def muse_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
     """Muse cache inventory and session-log path count. Never opens host logs.
 
-    Same contract as ``grok_usage_diag``: cache-only reads plus a path
-    count, so ``mm diag`` runs without a passphrase or a valid config.
+    Cache-only reads plus a path count, so ``mm diag`` runs without a
+    passphrase or a valid config.
     The path count walks the sessions tree, so it is off unless the caller
     holds consent (``count_logs=True``); otherwise ``files_on_disk`` is None
     and an unconsented Muse tree is never walked.
@@ -2337,7 +2262,7 @@ def muse_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
         }
         for rel, record in frozen.items()
     }
-    models = _diag_grok_model_ids({**files, **frozen_models})
+    models = _diag_turn_model_ids({**files, **frozen_models})
     return {
         "complete_once": data.get("complete_once") is True,
         "usage_less_skipped": skipped,
@@ -2378,8 +2303,8 @@ def _diag_model_ids(entries: Any) -> dict[str, Any]:
     return {"model_count": len(cleaned), "models": cleaned[:_DIAG_MODEL_CAP]}
 
 
-def _diag_grok_model_ids(files: dict[str, Any]) -> dict[str, Any]:
-    """Distinct model ids on Grok cache turns. Cache-only."""
+def _diag_turn_model_ids(files: dict[str, Any]) -> dict[str, Any]:
+    """Distinct model ids on cache turns. Cache-only."""
     found: set[str] = set()
     for value in files.values():
         if not isinstance(value, dict):
@@ -2397,148 +2322,7 @@ def _diag_grok_model_ids(files: dict[str, Any]) -> dict[str, Any]:
     return {"model_count": len(cleaned), "models": cleaned[:_DIAG_MODEL_CAP]}
 
 
-def grok_sessions_root() -> Path:
-    """Resolve the Grok sessions directory at call time."""
-    env = os.environ.get("GROK_HOME")
-    if env:
-        return Path(env).expanduser() / "sessions"
-    return GROK_SESSIONS_PATH
-
-
-def _count_two_level_ledgers(root: Path) -> int | None:
-    """Count reader-visible ``*/*/updates.jsonl`` without swallowing scan errors.
-
-    ``Path.glob`` on Python 3.13 suppresses directory-scan ``OSError``, so an
-    unreadable Grok store would render as empty. A missing root is 0. A
-    symlink or non-directory root is unknown (the reader refuses those as
-    unsupported). Directory and file predicates match ``_iter_grok_ledgers``.
-    """
-    try:
-        if not root.exists():
-            return 0
-        if root.is_symlink() or not root.is_dir():
-            return None
-    except OSError:
-        return None
-    try:
-        count = 0
-        with os.scandir(root) as workspaces:
-            for workspace in workspaces:
-                workspace_path = Path(workspace.path)
-                if not _is_directory(workspace_path):
-                    continue
-                with os.scandir(workspace.path) as sessions:
-                    for session in sessions:
-                        session_path = Path(session.path)
-                        if not _is_directory(session_path):
-                            continue
-                        if _is_regular_non_symlink(session_path / "updates.jsonl"):
-                            count += 1
-        return count
-    except (_ReadFailure, OSError):
-        return None
-
-
-@_pause_gc()
-def read_grok_usage(
-    root: Path | None = None,
-    *,
-    deadline: float | None = None,
-    consented: bool = False,
-) -> HostUsageResult:
-    """Read completed Grok turn totals from ``updates.jsonl`` terminal records.
-
-    Closed by default: ``consented=False`` does not stat or open the store.
-    A caller that has the local opt-in must pass ``consented=True``.
-    """
-    started = time.monotonic()
-    if not consented:
-        return _incomplete("no_metadata_ledger")
-    source_root = root if root is not None else grok_sessions_root()
-    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
-    if _expired(read_deadline):
-        return _incomplete("deadline")
-
-    try:
-        with locked_json_rmw(
-            GROK_CACHE_PATH,
-            mode=0o600,
-            compact=True,
-            default_factory=_empty_grok_cache,
-            retry_intervals=(),
-            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
-            contention_warning="host token adapter cache was locked; skipping host usage scan",
-        ) as locked:
-            if not locked.is_locked:
-                return _incomplete("locked")
-            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
-            cached_files = _cached_files(locked.data)
-            prior_complete = (
-                locked.data.get("version") == CACHE_VERSION
-                and locked.data.get("complete_once") is True
-            )
-            if _expired(read_deadline):
-                result, staged_files, learned, saw_files = _incomplete("deadline"), {}, False, False
-            else:
-                result, staged_files, learned, saw_files = _scan_grok_root(
-                    source_root, cached_files, read_deadline
-                )
-            ready = time.monotonic()
-            over_budget = result.complete and _expired(read_deadline)
-            now = datetime.now(timezone.utc)
-            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
-            timing = _carry_read_timing(
-                locked.data,
-                result,
-                carried[0],
-                started,
-                ready,
-                read_deadline,
-                now,
-                over_budget=over_budget,
-            )
-            # Failed passes write only newly learned files, a changed pair,
-            # or changed timing evidence, including the first observation of
-            # a migrated, undated blocker.
-            if _skip_failed_cache_write(learned, result, prior, carried, locked.data, timing):
-                raise _NoCacheCommit(result)
-            complete_once = prior_complete or (result.complete and saw_files)
-            files = staged_files if result.complete else {**cached_files, **staged_files}
-            # A partial scan merges durable per-file entries with the existing
-            # cache. Derive the diagnostic tally from that merged view too;
-            # retaining the old root total would make ``mm diag`` hide a
-            # usage-less turn learned before the deadline.
-            skip_total = sum(
-                entry.get("usage_less_skipped", 0)
-                for entry in files.values()
-                if isinstance(entry, dict)
-                and _is_nonnegative_int(entry.get("usage_less_skipped", 0))
-            )
-            locked.data = {
-                **timing,
-                "version": CACHE_VERSION,
-                "complete_once": complete_once,
-                "usage_less_skipped": skip_total,
-                "last_reason": carried[0],
-                "last_reason_since": carried[1],
-                "files": files,
-            }
-            if over_budget:
-                result = _incomplete("deadline")
-        _notice_cache_write_failure(locked.write_error)
-        return result
-    except LockContended:
-        _diagnostic(
-            "mm: notice: host token adapter cache was locked; skipping host usage scan\n", False
-        )
-        return _incomplete("locked")
-    except _NoCacheCommit as aborted:
-        return aborted.result
-    except OSError:
-        return _incomplete("io_error")
-
-
-def _empty_grok_cache() -> dict[str, Any]:
+def _empty_turn_cache() -> dict[str, Any]:
     return {
         "version": CACHE_VERSION,
         "complete_once": False,
@@ -2689,92 +2473,7 @@ def _notice_cache_write_failure(error: OSError | None) -> None:
         _diagnostic(f"mm: notice: host token cache write failed: {name}\n")
 
 
-def _scan_grok_root(
-    root: Path,
-    cached_files: dict[str, Any],
-    deadline: float,
-) -> tuple[HostUsageResult, dict[str, Any], bool, bool]:
-    """Returns ``(result, staged, learned, saw_files)``."""
-    try:
-        ledgers = list(_iter_grok_ledgers(root, deadline))
-    except _ReadFailure as failure:
-        return _incomplete(failure.reason), {}, False, False
-
-    canonical_root = root.resolve()
-    staged: dict[str, Any] = {}
-    learned = False
-    for workspace, session_id, path in ledgers:
-        if _expired(deadline):
-            return _incomplete("deadline"), staged, learned, True
-        key = _cache_key(path, root=root, canonical_root=canonical_root)
-        try:
-            before = _regular_stat(path)
-            existing = _validated_grok_entry(cached_files.get(key))
-            entry = _grok_cache_hit(path, before, existing, deadline)
-            if entry is None:
-                resume = _grok_resumable_entry(path, before, existing, deadline)
-                entry = (
-                    _resume_grok_file(path, workspace, session_id, before, resume, deadline)
-                    if resume is not None
-                    else _read_full_grok_file(path, workspace, session_id, before, deadline)
-                )
-                learned = True
-            staged[key] = entry
-        except _ReadFailure as failure:
-            return _incomplete(failure.reason), staged, learned, True
-
-    return (
-        _result_from_buckets(
-            _aggregate_grok(staged.values()),
-            partial_days=_grok_partial_days(staged.values()),
-        ),
-        staged,
-        learned,
-        bool(ledgers),
-    )
-
-
-def _iter_grok_ledgers(root: Path, deadline: float):
-    """Yield ``(workspace, session_id, updates.jsonl)`` under ``root``."""
-    if _expired(deadline):
-        raise _ReadFailure("deadline")
-    try:
-        if not root.exists():
-            return
-        if root.is_symlink() or not root.is_dir():
-            raise _ReadFailure("unsupported")
-        for workspace in _sorted_children(root, deadline):
-            if not _is_directory(workspace):
-                continue
-            for session in _sorted_children(workspace, deadline):
-                if not _is_directory(session):
-                    continue
-                candidate = session / "updates.jsonl"
-                if _is_regular_non_symlink(candidate):
-                    yield workspace.name, session.name, candidate
-    except OSError as exc:
-        raise _ReadFailure("io_error") from exc
-
-
-def _grok_cache_hit(
-    path: Path,
-    before: os.stat_result,
-    entry: dict[str, Any] | None,
-    deadline: float,
-) -> dict[str, Any] | None:
-    if entry is None:
-        return None
-    if not _same_cache_metadata(entry, before):  # type: ignore[arg-type]
-        return None
-    fingerprint = _fingerprint(path, before, deadline)
-    if not _same_fingerprint(entry, fingerprint):  # type: ignore[arg-type]
-        return None
-    if not _same_source(before, _regular_stat(path)):
-        raise _ReadFailure("stale")
-    return entry
-
-
-def _grok_resumable_entry(
+def _turn_resumable_entry(
     path: Path,
     source: os.stat_result,
     entry: dict[str, Any] | None,
@@ -2800,47 +2499,7 @@ def _grok_resumable_entry(
     return entry
 
 
-def _read_full_grok_file(
-    path: Path,
-    workspace: str,
-    session_id: str,
-    before: os.stat_result,
-    deadline: float,
-) -> dict[str, Any]:
-    turns, skipped, new_partial = _read_grok_file(
-        path, workspace, session_id, 0, {}, before, deadline
-    )
-    return _grok_file_entry(path, before, deadline, turns, skipped, new_partial=new_partial)
-
-
-def _resume_grok_file(
-    path: Path,
-    workspace: str,
-    session_id: str,
-    before: os.stat_result,
-    entry: dict[str, Any],
-    deadline: float,
-) -> dict[str, Any]:
-    prior = {turn["key"]: turn for turn in entry["turns"]}
-    turns, skipped, new_partial = _read_grok_file(
-        path, workspace, session_id, entry["offset"], prior, before, deadline
-    )
-    prior_skip = entry.get("usage_less_skipped", 0)
-    if not _is_nonnegative_int(prior_skip):
-        prior_skip = 0
-    prior_partial = entry.get("partial_days") or ()
-    return _grok_file_entry(
-        path,
-        before,
-        deadline,
-        turns,
-        prior_skip + skipped,
-        prior_partial=prior_partial,
-        new_partial=new_partial,
-    )
-
-
-def _grok_file_entry(
+def _turn_file_entry(
     path: Path,
     before: os.stat_result,
     deadline: float,
@@ -2890,157 +2549,6 @@ def _grok_file_entry(
     }
 
 
-def _read_grok_file(
-    path: Path,
-    workspace: str,
-    session_id: str,
-    start_offset: int,
-    prior: dict[str, dict[str, Any]],
-    before: os.stat_result,
-    deadline: float,
-) -> tuple[dict[str, dict[str, Any]], int, frozenset[str]]:
-    turns = dict(prior)
-    last_offset = start_offset
-    usage_less_skipped = 0
-    incomplete_days: set[str] = set()
-    try:
-        with path.open("rb") as fp:
-            fp.seek(start_offset)
-            for raw, end_offset in iter_bounded_lines(
-                fp,
-                _cache_key(path),
-                start_offset,
-                label="grok usage walker",
-            ):
-                if _expired(deadline):
-                    raise _ReadFailure("deadline")
-                last_offset = end_offset
-                if raw == b"":
-                    raise _ReadFailure("malformed")
-                if not raw.strip():
-                    continue
-                try:
-                    record = json.loads(raw)
-                except (TypeError, ValueError, UnicodeDecodeError) as exc:
-                    raise _ReadFailure("malformed") from exc
-                parsed = _grok_turns_from_record(record, workspace, session_id)
-                if parsed is None:
-                    continue
-                accepted, record_days = parsed
-                if accepted == []:
-                    usage_less_skipped += 1
-                    continue
-                incomplete_days.update(record_days)
-                for key, turn in accepted:
-                    existing = turns.get(key)
-                    if existing is None:
-                        turns[key] = turn
-                        continue
-                    if existing == turn:
-                        continue
-                    raise _ReadFailure("unsupported")
-            if fp.tell() != last_offset:
-                raise _ReadFailure("partial")
-    except OSError as exc:
-        raise _ReadFailure("io_error") from exc
-    if not _same_source(before, _regular_stat(path)):
-        raise _ReadFailure("stale")
-    return turns, usage_less_skipped, frozenset(incomplete_days)
-
-
-def _grok_turns_from_record(
-    record: Any, workspace: str, session_id: str
-) -> tuple[list[tuple[str, dict[str, Any]]], frozenset[str]] | None:
-    if not isinstance(record, dict):
-        raise _ReadFailure("malformed")
-    params = record.get("params")
-    if not isinstance(params, dict):
-        return None
-    update = params.get("update")
-    if not isinstance(update, dict):
-        return None
-    if update.get("sessionUpdate") != "turn_completed":
-        return None
-    kind = _classify_grok_update(update)
-    if kind == "ignore":
-        return None
-    if kind == "usage_less":
-        return [], frozenset()
-    if kind == "drift":
-        raise _ReadFailure("unsupported")
-    if kind != "terminal":
-        raise _ReadFailure("unsupported")
-    day = _grok_outer_day(record.get("timestamp"))
-    prompt_id = update.get("prompt_id")
-    if not isinstance(prompt_id, str) or not prompt_id:
-        raise _ReadFailure("unsupported")
-    if len(prompt_id.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
-        raise _ReadFailure("unsupported")
-    stop = update.get("stop_reason")
-    if not isinstance(stop, str) or stop not in _GROK_STOPS:
-        raise _ReadFailure("unsupported")
-    usage = update.get("usage")
-    if not isinstance(usage, dict):
-        raise _ReadFailure("unsupported")
-    models = usage.get("modelUsage")
-    if not isinstance(models, dict) or not models:
-        raise _ReadFailure("unsupported")
-    _validate_grok_counters(usage)
-    # Identity check, never truthiness: usageIsIncomplete is peer-controlled.
-    # ``"yes"`` / ``1`` / ``null`` / ``"false"`` must not become a claim.
-    # Do NOT stamp the flag onto the turn dict: stored turns are
-    # {key, day, model, usage}, and resume compares live==cached.
-    incomplete = usage.get("usageIsIncomplete") is True
-    accepted: list[tuple[str, dict[str, Any]]] = []
-    cache_create_nonzero = False
-    for model, entry in models.items():
-        if not isinstance(model, str) or not model:
-            raise _ReadFailure("unsupported")
-        if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
-            raise _ReadFailure("unsupported")
-        if not isinstance(entry, dict):
-            raise _ReadFailure("unsupported")
-        counters = _validate_grok_counters(entry)
-        if counters["cache_create"] > 0:
-            cache_create_nonzero = True
-        model_key = _grok_terminal_key(workspace, session_id, prompt_id, model)
-        accepted.append(
-            (
-                model_key,
-                {
-                    "key": model_key,
-                    "day": day,
-                    "model": model,
-                    "usage": counters,
-                },
-            )
-        )
-    days = frozenset({day} if (incomplete or cache_create_nonzero) and accepted else ())
-    return accepted, days
-
-
-def _classify_grok_update(update: dict[str, Any]) -> GrokUpdateClass:
-    """Classify a ``turn_completed`` update object's key set.
-
-    Three tiers, matching ``_GROK_CONTENT_FIELDS`` / ``_GROK_IGNORABLE_KEYS``
-    / ``_GROK_REQUIRED_KEYS``. An ignorable key is dropped before the
-    required-set comparison so a usage-less terminal that also carries
-    ``elapsed_ms`` stays a skip, not a drift. Unknown extra keys are
-    ``drift`` and refuse this reader. See "Reader-agnostic quarantine and
-    drift classification" in ``docs/roadmap-future.md``. Sharing filesystem
-    resume primitives is separately deferred there pending measured need.
-    """
-    keys = set(update)
-    if _GROK_CONTENT_FIELDS & keys:
-        return "ignore"
-    projected = keys - _GROK_IGNORABLE_KEYS
-    if projected == _GROK_REQUIRED_KEYS:
-        return "terminal"
-    if projected == _GROK_REQUIRED_KEYS - {"usage"}:
-        return "usage_less"
-    return "drift"
-
-
 def _normalize_inclusive_usage(usage: Usage) -> Usage:
     """Convert inclusive host counters into mutually exclusive billable buckets.
 
@@ -3071,40 +2579,7 @@ def _normalize_inclusive_counters(counters: tuple[int, ...]) -> tuple[int, ...]:
     return input_tokens - cache_read - cache_create, cache_create, cache_read, output
 
 
-def _validate_grok_counters(usage: dict[str, Any]) -> Usage:
-    output = _grok_counter(usage, "outputTokens")
-    reasoning = _grok_counter(usage, "reasoningTokens")
-    if reasoning > output:
-        raise _ReadFailure("unsupported")
-    _grok_counter(usage, "totalTokens")
-    return _normalize_inclusive_usage(
-        {
-            "input": _grok_counter(usage, "inputTokens"),
-            "cache_create": _grok_counter(usage, "cacheCreationTokens"),
-            "cache_read": _grok_counter(usage, "cachedReadTokens"),
-            "output": output,
-        }
-    )
-
-
-def _grok_counter(usage: dict[str, Any], key: str) -> int:
-    if key not in usage:
-        raise _ReadFailure("unsupported")
-    value = usage[key]
-    if not _is_valid_counter(value):
-        raise _ReadFailure("unsupported")
-    return value
-
-
-def _grok_outer_day(value: Any) -> str:
-    return _utc_day(value)
-
-
-def _grok_terminal_key(workspace: str, session_id: str, prompt_id: str, model: str) -> str:
-    return hashlib.sha256(f"{workspace}\0{session_id}\0{prompt_id}\0{model}".encode()).hexdigest()
-
-
-def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
+def _validated_turn_entry(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     integer_keys = ("dev", "ino", "size", "mtime_ns", "head_len", "tail_len", "offset")
@@ -3156,7 +2631,7 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     # re-walk of this file, then persist the marker (possibly empty).
     if "partial_days" not in value:
         return None
-    partial_days = _validated_grok_partial_days(value.get("partial_days"))
+    partial_days = _validated_turn_partial_days(value.get("partial_days"))
     if partial_days is None:
         return None
     # Pre-35A entries stored inclusive counters. Re-walk once.
@@ -3171,7 +2646,7 @@ def _validated_grok_entry(value: Any) -> dict[str, Any] | None:
     }
 
 
-def _validated_grok_partial_days(value: Any) -> list[str] | None:
+def _validated_turn_partial_days(value: Any) -> list[str] | None:
     """Normalize a cached ``partial_days`` list, or reject the entry.
 
     Malformed is a re-walk, never a silent empty. Duplicates and
@@ -3191,7 +2666,7 @@ def _validated_grok_partial_days(value: Any) -> list[str] | None:
     return sorted(out)
 
 
-def _grok_partial_days(entries: Any) -> frozenset[str]:
+def _turn_partial_days(entries: Any) -> frozenset[str]:
     days: set[str] = set()
     for entry in entries:
         if not isinstance(entry, dict):
@@ -3202,11 +2677,8 @@ def _grok_partial_days(entries: Any) -> frozenset[str]:
     return frozenset(days)
 
 
-def _aggregate_grok(entries: Any) -> HostUsageBuckets:
-    """Grok's reduction is `_aggregate`'s ``turns`` branch. Kept as a named
-    alias because the Grok scan reads better with it, not because the reduction
-    differs — it deliberately does not, and a second implementation here is how
-    the two readers drifted apart in the first place."""
+def _aggregate_turns(entries: Any) -> HostUsageBuckets:
+    """Turns reduction using `_aggregate`'s ``turns`` branch."""
     return _aggregate(entry for entry in entries if isinstance(entry, dict))
 
 
@@ -3219,9 +2691,9 @@ def _aggregate_grok(entries: Any) -> HostUsageBuckets:
 # records restate the same steps split by purpose and are never read —
 # counting both would double every total (measured: per-file sums of the
 # two carriers are equal whenever attribution has caught up). The cache
-# entry shape is Grok's turns shape, so the entry validation, fingerprint,
+# entry shape is the shared turns shape, so the entry validation, fingerprint,
 # resume and aggregate helpers above are shared; the lock/commit
-# orchestration in ``read_muse_usage`` mirrors ``read_grok_usage``. The walk,
+# orchestration in ``read_muse_usage`` mirrors the standard turn pattern. The walk,
 # the record projection, cross-log dedup and counter validation are Muse's
 # own. The fixture contract is ``tests/fixtures/host_sessions/muse/CONTRACT.md``.
 
@@ -3338,7 +2810,7 @@ def read_muse_usage(
             MUSE_CACHE_PATH,
             mode=0o600,
             compact=True,
-            default_factory=_empty_grok_cache,
+            default_factory=_empty_turn_cache,
             retry_intervals=(),
             on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
             contention_warning="host token adapter cache was locked; skipping host usage scan",
@@ -3458,11 +2930,11 @@ def _scan_muse_root(
             path = day_dirs[rel] / log_rel
             key = _cache_key(path, root=root, canonical_root=canonical_root)
             before = _regular_stat(path)
-            existing = _validated_grok_entry(cached_files.get(key))
+            existing = _validated_turn_entry(cached_files.get(key))
             if existing is not None and _muse_identity(existing) == _muse_identity(before):
                 entry = existing
             else:
-                resume = _grok_resumable_entry(path, before, existing, deadline)
+                resume = _turn_resumable_entry(path, before, existing, deadline)
                 entry = (
                     _resume_muse_file(path, before, resume, deadline, when)
                     if resume is not None
@@ -3572,11 +3044,11 @@ def _scan_muse_root(
         for day, models in record["days"].items()
         for model, usage in models.items()
     ]
-    partial = set(_grok_partial_days(staged.values()))
+    partial = set(_turn_partial_days(staged.values()))
     for record in kept.values():
         partial.update(record["partial_days"])
     result = _result_from_buckets(
-        _aggregate_grok([{"turns": [*unique.values(), *frozen_turns]}]),
+        _aggregate_turns([{"turns": [*unique.values(), *frozen_turns]}]),
         partial_days=frozenset(partial),
     )
 
@@ -3676,7 +3148,7 @@ def _validated_muse_frozen(value: Any) -> dict[str, dict[str, Any]]:
         if not _is_nonnegative_int(record.get("check_seq")):
             continue
         days = _validated_muse_frozen_days(record.get("days"))
-        partial = _validated_grok_partial_days(record.get("partial_days"))
+        partial = _validated_turn_partial_days(record.get("partial_days"))
         keys = record.get("keys")
         if days is None or partial is None or not _valid_muse_key_prefixes(keys):
             continue
@@ -3808,7 +3280,7 @@ def _read_full_muse_file(
     dir_date: date,
 ) -> dict[str, Any]:
     turns, new_partial = _read_muse_file(path, 0, {}, before, deadline, dir_date)
-    return _grok_file_entry(path, before, deadline, turns, 0, new_partial=new_partial)
+    return _turn_file_entry(path, before, deadline, turns, 0, new_partial=new_partial)
 
 
 def _resume_muse_file(
@@ -3820,7 +3292,7 @@ def _resume_muse_file(
 ) -> dict[str, Any]:
     prior = {turn["key"]: turn for turn in entry["turns"]}
     turns, new_partial = _read_muse_file(path, entry["offset"], prior, before, deadline, dir_date)
-    return _grok_file_entry(
+    return _turn_file_entry(
         path,
         before,
         deadline,
@@ -4014,6 +3486,743 @@ def _utc_day(value: Any) -> str:
         return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()
     except (OverflowError, OSError, ValueError) as exc:
         raise _ReadFailure("unsupported") from exc
+
+
+# --- Antigravity reader -----------------------------------------------------
+# Google Antigravity (agy) session logs are SQLite databases stored under
+# ``~/.gemini/antigravity-cli/conversations/<cid>.db``. Model metadata is
+# stored in protobuf format in ``gen_metadata``; per-step metadata, timestamps,
+# and token ledgers are stored in protobuf format in ``steps``.
+# The only step type carrying billable token usage is step_type 15. Any completed
+# step_type 15 row (status 3) lacking token usage increments usage_less_skipped.
+# Any step_type != 15 row carrying nonzero token usage refuses the reader as
+# unsupported.
+# The cache entry shape is the shared turns shape keyed by <cid>.db, tracking
+# both main-DB and WAL fingerprints. Pre-open and post-close fingerprints must
+# match, and any hot journal refuses as stale. Deduplication across DBs is keyed
+# on sha256("agy\0" + bot_id).
+
+AGY_CONVERSATIONS_PATH = Path.home() / ".gemini" / "antigravity-cli" / "conversations"
+AGY_CACHE_PATH = Path.home() / ".config" / "mind-meld" / "agy-host-tokens.json"
+AGY_USAGE_CENSUS_HOST_VERSION = "1.4.5"
+_AGY_CACHE_FORMAT = 1
+_AGY_SQLITE_LENGTH_LIMIT = 16 * 1024 * 1024  # 16 MiB
+_AGY_SQLITE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+
+AGY_READER_CAUSES: dict[str, Reason] = {
+    "sqlite_unavailable": "io_error",
+    "cannot_open": "io_error",
+    "sqlite_auth": "io_error",
+    "sqlite_ioerr": "io_error",
+    "sqlite_pragma": "io_error",
+    "non_regular_path": "io_error",
+    "hot_journal": "stale",
+    "identity_changed": "stale",
+    "corrupt_database": "malformed",
+    "oversize_or_type": "malformed",
+    "corrupt_protobuf": "malformed",
+    "bad_counters": "malformed",
+    "counter_invariant_violation": "malformed",
+    "missing_timestamp": "malformed",
+    "missing_bot_id": "malformed",
+    "bot_id_conflict": "malformed",
+    "missing_steps_table": "unsupported",
+    "missing_steps_columns": "unsupported",
+    "missing_gen_metadata_table": "unsupported",
+    "unknown_model_enum": "unsupported",
+    "token_usage_on_unexpected_step_type": "unsupported",
+}
+
+
+def agy_sessions_root(home: Path | None = None) -> Path:
+    """Resolve the Antigravity conversations directory."""
+    if home is not None:
+        return home / ".gemini" / "antigravity-cli" / "conversations"
+    return AGY_CONVERSATIONS_PATH
+
+
+def _is_real_agy_store(path: Path) -> bool:
+    """Compare against real home to prevent tests touching real Antigravity DBs."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        home = Path.home()
+    real = home / ".gemini" / "antigravity-cli" / "conversations"
+    candidate = str(path.expanduser().resolve()).casefold()
+    root = str(real.resolve()).casefold()
+    return candidate == root or candidate.startswith(root + os.sep)
+
+
+def _decode_protobuf_varint(data: bytes, offset: int) -> tuple[int, int]:
+    val = 0
+    shift = 0
+    length = len(data)
+    while offset < length:
+        b = data[offset]
+        offset += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val, offset
+        shift += 7
+        if shift > 64:
+            raise _ReadFailure("malformed", cause="corrupt_protobuf")
+    raise _ReadFailure("malformed", cause="corrupt_protobuf")
+
+
+def _iter_protobuf_fields(data: bytes) -> Iterator[tuple[int, int, Any]]:
+    offset = 0
+    length = len(data)
+    while offset < length:
+        tag, offset = _decode_protobuf_varint(data, offset)
+        fnum = tag >> 3
+        wtype = tag & 0x7
+        if fnum == 0:
+            raise _ReadFailure("malformed", cause="corrupt_protobuf")
+        if wtype == 0:  # varint
+            val, offset = _decode_protobuf_varint(data, offset)
+            yield (fnum, wtype, val)
+        elif wtype == 1:  # 64-bit
+            if offset + 8 > length:
+                raise _ReadFailure("malformed", cause="corrupt_protobuf")
+            val = data[offset : offset + 8]
+            offset += 8
+            yield (fnum, wtype, val)
+        elif wtype == 2:  # length-delimited
+            flen, offset = _decode_protobuf_varint(data, offset)
+            if flen < 0 or offset + flen > length:
+                raise _ReadFailure("malformed", cause="corrupt_protobuf")
+            val = data[offset : offset + flen]
+            offset += flen
+            yield (fnum, wtype, val)
+        elif wtype == 5:  # 32-bit
+            if offset + 4 > length:
+                raise _ReadFailure("malformed", cause="corrupt_protobuf")
+            val = data[offset : offset + 4]
+            offset += 4
+            yield (fnum, wtype, val)
+        else:
+            raise _ReadFailure("malformed", cause="corrupt_protobuf")
+
+
+def _lstat_agy_sqlite_files(db_path: Path) -> dict[str, os.stat_result]:
+    present: dict[str, os.stat_result] = {}
+    base_name = db_path.name
+    parent = db_path.parent
+    for suffix in _AGY_SQLITE_SUFFIXES:
+        name = base_name + suffix
+        path = parent / name
+        try:
+            info = path.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            code = errno.errorcode.get(exc.errno or 0)
+            raise _ReadFailure("io_error", cause="cannot_open", code=code) from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise _ReadFailure("io_error", cause="non_regular_path")
+        present[name] = info
+    return present
+
+
+def _agy_fingerprint(
+    present: dict[str, os.stat_result], db_name: str
+) -> tuple[tuple[int, int, int, int], tuple[bool, int, int, int]]:
+    db_stat = present.get(db_name)
+    if db_stat is None:
+        raise FileNotFoundError(f"{db_name} disappeared")
+    main_fp = (db_stat.st_dev, db_stat.st_ino, db_stat.st_size, db_stat.st_mtime_ns)
+    wal_name = db_name + "-wal"
+    if wal_name in present:
+        wal_stat = present[wal_name]
+        wal_fp = (True, wal_stat.st_ino, wal_stat.st_size, wal_stat.st_mtime_ns)
+    else:
+        wal_fp = (False, 0, 0, 0)
+    return (main_fp, wal_fp)
+
+
+def _agy_entry_matches_stat(
+    entry: dict[str, Any],
+    fp: tuple[tuple[int, int, int, int], tuple[bool, int, int, int]],
+) -> bool:
+    main_fp, wal_fp = fp
+    return (
+        entry.get("dev") == main_fp[0]
+        and entry.get("ino") == main_fp[1]
+        and entry.get("size") == main_fp[2]
+        and entry.get("mtime_ns") == main_fp[3]
+        and entry.get("wal_present") == wal_fp[0]
+        and entry.get("wal_ino") == wal_fp[1]
+        and entry.get("wal_size") == wal_fp[2]
+        and entry.get("wal_mtime_ns") == wal_fp[3]
+    )
+
+
+def _validated_agy_entry(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    for k in ("dev", "ino", "size", "mtime_ns"):
+        if not _is_nonnegative_int(value.get(k)):
+            return None
+    wal_present = value.get("wal_present")
+    if not isinstance(wal_present, bool):
+        return None
+    for k in ("wal_ino", "wal_size", "wal_mtime_ns"):
+        if not _is_nonnegative_int(value.get(k)):
+            return None
+    turns = value.get("turns")
+    if not isinstance(turns, list):
+        return None
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for turn in turns:
+        if not isinstance(turn, dict):
+            return None
+        key = turn.get("key")
+        if not isinstance(key, str) or len(key) != 64 or key in seen:
+            return None
+        seen.add(key)
+        model = turn.get("model")
+        day = turn.get("day")
+        usage = turn.get("usage")
+        if not isinstance(model, str) or not model:
+            return None
+        if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
+            return None
+        if not isinstance(day, str) or not _CANONICAL_DAY.fullmatch(day):
+            return None
+        if not isinstance(usage, dict):
+            return None
+        if any(not _is_valid_counter(usage.get(field)) for field in TOKEN_FIELDS):
+            return None
+        normalized.append(
+            {
+                "key": key,
+                "day": day,
+                "model": model,
+                "usage": {field: usage[field] for field in TOKEN_FIELDS},
+            }
+        )
+    skip = value.get("usage_less_skipped", 0)
+    if not _is_nonnegative_int(skip):
+        return None
+    if "partial_days" not in value:
+        return None
+    partial_days = _validated_turn_partial_days(value.get("partial_days"))
+    if partial_days is None:
+        return None
+    if value.get("counter_semantics") != "disjoint-v1":
+        return None
+    return {
+        "dev": value["dev"],
+        "ino": value["ino"],
+        "size": value["size"],
+        "mtime_ns": value["mtime_ns"],
+        "wal_present": wal_present,
+        "wal_ino": value["wal_ino"],
+        "wal_size": value["wal_size"],
+        "wal_mtime_ns": value["wal_mtime_ns"],
+        "turns": normalized,
+        "usage_less_skipped": skip,
+        "partial_days": partial_days,
+        "counter_semantics": "disjoint-v1",
+    }
+
+
+def _count_agy_dbs(root: Path) -> int | None:
+    try:
+        if not root.exists():
+            return 0
+        if root.is_symlink() or not root.is_dir():
+            return None
+        count = 0
+        for entry in root.iterdir():
+            if entry.name.endswith(".db"):
+                try:
+                    info = entry.lstat()
+                    if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                        count += 1
+                except OSError:
+                    continue
+        return count
+    except OSError:
+        return None
+
+
+def _agy_reason_detail(data: dict[str, Any]) -> dict[str, str | None] | None:
+    raw = data.get("last_error_detail")
+    if not isinstance(raw, dict):
+        return None
+    cause = raw.get("cause")
+    if not isinstance(cause, str) or cause not in AGY_READER_CAUSES:
+        return None
+    code = raw.get("code")
+    detail: dict[str, str | None] = {"cause": cause}
+    if isinstance(code, str) and _CURSOR_SQLITE_DETAIL_CODE.fullmatch(code):
+        detail["code"] = code
+    return detail
+
+
+def _read_single_agy_db(
+    db_path: Path,
+    before_fp: tuple[tuple[int, int, int, int], tuple[bool, int, int, int]],
+    deadline: float,
+) -> dict[str, Any]:
+    if os.environ.get("PYTEST_CURRENT_TEST") and _is_real_agy_store(db_path):
+        raise RuntimeError(f"refusing to open the real Antigravity store {db_path} from a test")
+
+    immutable = not before_fp[1][0]  # not wal_present
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ReadFailure("deadline")
+    try:
+        import sqlite3
+    except ImportError as exc:
+        raise _ReadFailure("io_error", cause="sqlite_unavailable") from exc
+
+    uri = db_path.absolute().as_uri() + ("?mode=ro&immutable=1" if immutable else "?mode=ro")
+    failure: BaseException | None = None
+    turns: list[dict[str, Any]] = []
+    seen_turn_keys: set[str] = set()
+    usage_less_skipped = 0
+    partial_days: set[str] = set()
+
+    try:
+        with closing(
+            sqlite3.connect(uri, uri=True, isolation_level=None, timeout=min(remaining, 5.0))
+        ) as conn:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, _AGY_SQLITE_LENGTH_LIMIT)
+            for pragma in (
+                "trusted_schema=OFF",
+                "query_only=ON",
+                "cell_size_check=ON",
+                "mmap_size=0",
+            ):
+                conn.execute(f"PRAGMA {pragma}").fetchall()
+            if conn.execute("PRAGMA trusted_schema").fetchone() != (0,) or conn.execute(
+                "PRAGMA query_only"
+            ).fetchone() != (1,):
+                raise _ReadFailure("io_error", cause="sqlite_pragma")
+            conn.set_progress_handler(lambda: 1 if _expired(deadline) else 0, 1000)
+
+            tables = {
+                (
+                    row[0].decode("utf-8", "replace") if isinstance(row[0], bytes) else row[0]
+                ).casefold()
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "steps" not in tables:
+                raise _ReadFailure("unsupported", cause="missing_steps_table")
+            if "gen_metadata" not in tables:
+                raise _ReadFailure("unsupported", cause="missing_gen_metadata_table")
+
+            models: dict[int, str] = {}
+            for (data,) in conn.execute("SELECT data FROM gen_metadata ORDER BY rowid"):
+                if not data or not isinstance(data, (bytes, memoryview)):
+                    continue
+                data_bytes = bytes(data)
+                for fnum, wtype, fval in _iter_protobuf_fields(data_bytes):
+                    if fnum == 1 and wtype == 2:
+                        enum_id = None
+                        slug = None
+                        for sf_num, sf_wtype, sf_val in _iter_protobuf_fields(fval):
+                            if sf_num == 3 and sf_wtype == 0:
+                                enum_id = sf_val
+                            elif sf_num == 19 and sf_wtype == 2:
+                                try:
+                                    slug = sf_val.decode("utf-8")
+                                except UnicodeDecodeError as exc:
+                                    raise _ReadFailure(
+                                        "malformed", cause="corrupt_protobuf"
+                                    ) from exc
+                        if enum_id is not None and slug:
+                            models[enum_id] = slug
+
+            cols = {
+                (
+                    col[1].decode("utf-8", "replace") if isinstance(col[1], bytes) else col[1]
+                ).casefold()
+                for col in conn.execute("PRAGMA table_info(steps)").fetchall()
+            }
+            idx_col = "idx" if "idx" in cols else "step_index" if "step_index" in cols else None
+            if idx_col is None or not {"step_type", "status", "metadata"} <= cols:
+                raise _ReadFailure("unsupported", cause="missing_steps_columns")
+
+            cursor = conn.execute(
+                f"SELECT {idx_col}, step_type, status, metadata FROM steps ORDER BY {idx_col}"
+            )
+            while batch := cursor.fetchmany(256):
+                if _expired(deadline):
+                    raise _ReadFailure("deadline")
+                for _idx, step_type, status, meta in batch:
+                    if _expired(deadline):
+                        raise _ReadFailure("deadline")
+                    if not meta or not isinstance(meta, (bytes, memoryview)):
+                        if step_type == 15 and status == 3:
+                            usage_less_skipped += 1
+                        continue
+                    meta_bytes = bytes(meta)
+                    ts = None
+                    token_usage_bytes = None
+                    for fnum, wtype, fval in _iter_protobuf_fields(meta_bytes):
+                        if fnum == 1 and wtype == 2:
+                            for sf_num, sf_wtype, sf_val in _iter_protobuf_fields(fval):
+                                if sf_num == 1 and sf_wtype == 0:
+                                    ts = sf_val
+                                    break
+                        elif fnum == 9 and wtype == 2:
+                            token_usage_bytes = fval
+
+                    if token_usage_bytes is None:
+                        if step_type == 15 and status == 3:
+                            usage_less_skipped += 1
+                        continue
+
+                    model_enum = None
+                    input_tokens = 0
+                    output_tokens = 0
+                    cache_create = 0
+                    cache_read = 0
+                    bot_id = None
+                    thinking = None
+                    response = None
+                    for uf_num, _uf_wtype, uf_val in _iter_protobuf_fields(token_usage_bytes):
+                        if uf_num == 1 and _uf_wtype == 0:
+                            model_enum = uf_val
+                        elif uf_num == 2 and _uf_wtype == 0:
+                            input_tokens = uf_val
+                        elif uf_num == 3 and _uf_wtype == 0:
+                            output_tokens = uf_val
+                        elif uf_num == 4 and _uf_wtype == 0:
+                            cache_create = uf_val
+                        elif uf_num == 5 and _uf_wtype == 0:
+                            cache_read = uf_val
+                        elif uf_num == 7 and _uf_wtype == 2:
+                            try:
+                                bot_id = uf_val.decode("utf-8")
+                            except UnicodeDecodeError as exc:
+                                raise _ReadFailure("malformed", cause="corrupt_protobuf") from exc
+                        elif uf_num == 9 and _uf_wtype == 0:
+                            thinking = uf_val
+                        elif uf_num == 10 and _uf_wtype == 0:
+                            response = uf_val
+
+                    for counter_val in (input_tokens, output_tokens, cache_create, cache_read):
+                        if not _is_valid_counter(counter_val):
+                            raise _ReadFailure("malformed", cause="bad_counters")
+                    if thinking is not None and not _is_valid_counter(thinking):
+                        raise _ReadFailure("malformed", cause="bad_counters")
+                    if response is not None and not _is_valid_counter(response):
+                        raise _ReadFailure("malformed", cause="bad_counters")
+                    if thinking is not None and response is not None:
+                        if thinking + response != output_tokens:
+                            raise _ReadFailure("malformed", cause="counter_invariant_violation")
+
+                    has_tokens = (
+                        input_tokens > 0 or output_tokens > 0 or cache_read > 0 or cache_create > 0
+                    )
+                    if step_type != 15:
+                        if has_tokens:
+                            raise _ReadFailure(
+                                "unsupported", cause="token_usage_on_unexpected_step_type"
+                            )
+                        continue
+
+                    if not has_tokens:
+                        continue
+                    if bot_id is None:
+                        raise _ReadFailure("malformed", cause="missing_bot_id")
+                    if bot_id == "<synthetic>" or bot_id.startswith("<synthetic>"):
+                        continue
+                    if model_enum is None or model_enum not in models:
+                        raise _ReadFailure("unsupported", cause="unknown_model_enum")
+
+                    model_slug = models[model_enum]
+                    if ts is None or not _is_nonnegative_int(ts):
+                        raise _ReadFailure("malformed", cause="missing_timestamp")
+                    try:
+                        day_str = datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
+                    except (ValueError, OSError, OverflowError) as exc:
+                        raise _ReadFailure("malformed", cause="missing_timestamp") from exc
+
+                    if cache_create > 0:
+                        partial_days.add(day_str)
+
+                    turn_key = hashlib.sha256(f"agy\0{bot_id}".encode("utf-8")).hexdigest()
+                    turn_data = {
+                        "key": turn_key,
+                        "day": day_str,
+                        "model": model_slug,
+                        "usage": {
+                            "input": input_tokens,
+                            "output": output_tokens,
+                            "cache_read": cache_read,
+                            "cache_create": cache_create,
+                        },
+                    }
+                    if turn_key in seen_turn_keys:
+                        existing = next(t for t in turns if t["key"] == turn_key)
+                        if existing != turn_data:
+                            raise _ReadFailure("malformed", cause="bot_id_conflict")
+                        continue
+                    seen_turn_keys.add(turn_key)
+                    turns.append(turn_data)
+    except (sqlite3.Error, _ReadFailure) as exc:
+        failure = exc
+
+    present_after = _lstat_agy_sqlite_files(db_path)
+    after_fp = _agy_fingerprint(present_after, db_path.name)
+    if before_fp != after_fp:
+        raise _ReadFailure("stale", cause="identity_changed")
+
+    if isinstance(failure, _ReadFailure):
+        raise failure
+
+    if failure is not None:
+        code = getattr(failure, "sqlite_errorcode", None)
+        primary = code & 0xFF if isinstance(code, int) else None
+        error_name = _sqlite_error_name(failure)
+        if primary in {_SQLITE_BUSY, _SQLITE_LOCKED}:
+            raise _ReadFailure("locked") from failure
+        if primary == _SQLITE_INTERRUPT:
+            raise _ReadFailure("deadline") from failure
+        if primary == _SQLITE_TOOBIG:
+            raise _ReadFailure("malformed", cause="oversize_or_type") from failure
+        if primary in {_SQLITE_CORRUPT, _SQLITE_NOTADB}:
+            raise _ReadFailure("malformed", cause="corrupt_database") from failure
+        if primary == _SQLITE_AUTH:
+            raise _ReadFailure("io_error", cause="sqlite_auth", code=error_name) from failure
+        if primary == _SQLITE_CANTOPEN:
+            raise _ReadFailure("io_error", cause="cannot_open", code=error_name) from failure
+        if primary == 10:  # SQLITE_IOERR
+            raise _ReadFailure("io_error", cause="sqlite_ioerr", code=error_name) from failure
+        raise _ReadFailure("io_error", cause="cannot_open", code=error_name) from failure
+
+    main_fp, wal_fp = before_fp
+    return {
+        "dev": main_fp[0],
+        "ino": main_fp[1],
+        "size": main_fp[2],
+        "mtime_ns": main_fp[3],
+        "wal_present": wal_fp[0],
+        "wal_ino": wal_fp[1],
+        "wal_size": wal_fp[2],
+        "wal_mtime_ns": wal_fp[3],
+        "turns": turns,
+        "usage_less_skipped": usage_less_skipped,
+        "partial_days": sorted(partial_days),
+        "counter_semantics": "disjoint-v1",
+    }
+
+
+def _scan_agy_root(
+    root: Path,
+    cached_files: dict[str, Any],
+    deadline: float,
+) -> tuple[HostUsageResult, dict[str, Any], dict[str, str | None] | None, int]:
+    if _expired(deadline):
+        return (_incomplete("deadline"), {}, None, 0)
+    try:
+        if not root.exists():
+            return (HostUsageResult({}, complete=True), {}, None, 0)
+        if root.is_symlink() or not root.is_dir():
+            return (_incomplete("unsupported"), {}, {"cause": "non_regular_path"}, 1)
+        db_paths = sorted(
+            [p for p in root.iterdir() if p.name.endswith(".db")], key=lambda p: p.name
+        )
+    except OSError as exc:
+        code = errno.errorcode.get(exc.errno or 0)
+        return (_incomplete("io_error"), {}, {"cause": "cannot_open", "code": code}, 1)
+
+    staged_files: dict[str, Any] = {}
+    try:
+        for db_path in db_paths:
+            if _expired(deadline):
+                raise _ReadFailure("deadline")
+            present = _lstat_agy_sqlite_files(db_path)
+            if db_path.name not in present:
+                continue
+            journal_name = db_path.name + "-journal"
+            if journal_name in present and present[journal_name].st_size > 0:
+                raise _ReadFailure("stale", cause="hot_journal")
+            fp = _agy_fingerprint(present, db_path.name)
+            cached = _validated_agy_entry(cached_files.get(db_path.name))
+            if cached is not None and _agy_entry_matches_stat(cached, fp):
+                staged_files[db_path.name] = cached
+            else:
+                entry = _read_single_agy_db(db_path, fp, deadline)
+                staged_files[db_path.name] = entry
+
+        unique: dict[str, dict[str, Any]] = {}
+        for entry in staged_files.values():
+            for turn in entry.get("turns", ()):
+                tkey = turn["key"]
+                prior = unique.setdefault(tkey, turn)
+                if prior is not turn and prior != turn:
+                    raise _ReadFailure("malformed", cause="bot_id_conflict")
+
+        buckets = HostUsageBuckets()
+        for turn in unique.values():
+            _add_usage(buckets, turn["day"], turn["model"], turn["usage"])
+        all_partial: set[str] = set()
+        for entry in staged_files.values():
+            all_partial.update(entry.get("partial_days", ()))
+        result = _result_from_buckets(buckets, complete=True, partial_days=frozenset(all_partial))
+        return (result, staged_files, None, 0)
+    except _ReadFailure as failure:
+        detail: dict[str, str | None] = (
+            {"cause": failure.cause} if failure.cause else {"cause": failure.reason}
+        )
+        if failure.code:
+            detail["code"] = failure.code
+        return (_incomplete(failure.reason), staged_files, detail, 1)
+
+
+@_pause_gc()
+def read_agy_usage(
+    root: Path | None = None,
+    *,
+    deadline: float | None = None,
+    consented: bool = False,
+) -> HostUsageResult:
+    """Read completed Antigravity model-turn totals from conversation SQLite DBs."""
+    started = time.monotonic()
+    if not consented:
+        return _incomplete("no_metadata_ledger")
+    source_root = root if root is not None else agy_sessions_root()
+    read_deadline = deadline if deadline is not None else started + DEFAULT_READ_BUDGET_S
+    if _expired(read_deadline):
+        return _incomplete("deadline")
+
+    try:
+        with locked_json_rmw(
+            AGY_CACHE_PATH,
+            mode=0o600,
+            compact=True,
+            default_factory=_empty_turn_cache,
+            retry_intervals=(),
+            on_contention="raise" if _DIAGNOSTIC.get() is not None else "warn",
+            contention_warning="host token adapter cache was locked; skipping host usage scan",
+        ) as locked:
+            if not locked.is_locked:
+                return _incomplete("locked")
+            prior = (_cached_last_reason(locked.data), _cached_reason_since(locked.data))
+            prior_detail = _agy_reason_detail(locked.data)
+            prior_error_count = locked.data.get("error_db_count", 0)
+            current_format = (
+                locked.data.get("version") == CACHE_VERSION
+                and locked.data.get("agy_format") == _AGY_CACHE_FORMAT
+            )
+            cached_files = locked.data.get("files", {}) if current_format else {}
+            if _expired(read_deadline):
+                result, staged_files, last_error_detail, error_db_count = (
+                    _incomplete("deadline"),
+                    {},
+                    None,
+                    0,
+                )
+            else:
+                result, staged_files, last_error_detail, error_db_count = _scan_agy_root(
+                    source_root, cached_files, read_deadline
+                )
+            ready = time.monotonic()
+            over_budget = result.complete and _expired(read_deadline)
+            now = datetime.now(timezone.utc)
+            carried = _carry_reason(*prior, result, now, over_budget=over_budget)
+            timing = _carry_read_timing(
+                locked.data,
+                result,
+                carried[0],
+                started,
+                ready,
+                read_deadline,
+                now,
+                over_budget=over_budget,
+            )
+            files = staged_files if result.complete else {**cached_files, **staged_files}
+            complete_once = (locked.data.get("complete_once") is True) or result.complete
+            total_skipped = sum(entry.get("usage_less_skipped", 0) for entry in files.values())
+
+            if result.complete:
+                final_detail = None
+                final_error_count = 0
+            elif last_error_detail is not None:
+                final_detail = last_error_detail
+                final_error_count = error_db_count
+            else:
+                final_detail = prior_detail
+                final_error_count = prior_error_count
+
+            locked.data = {
+                "version": CACHE_VERSION,
+                "agy_format": _AGY_CACHE_FORMAT,
+                "census_host_version": AGY_USAGE_CENSUS_HOST_VERSION,
+                "complete_once": complete_once,
+                "usage_less_skipped": total_skipped,
+                **timing,
+                "last_reason": carried[0],
+                "last_reason_since": carried[1],
+                "last_error_detail": final_detail,
+                "error_db_count": final_error_count,
+                "files": files,
+            }
+            return result
+    except (OSError, StorageError, InvalidJsonCache) as exc:
+        _diagnostic(f"mm: notice: agy usage cache error: {exc}\n")
+        return _incomplete("io_error")
+
+
+def agy_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
+    """Antigravity cache inventory and DB path count. Never opens host logs."""
+    on_disk = _count_agy_dbs(agy_sessions_root()) if count_logs else None
+    blank = {
+        **_cached_read_timing({}),
+        "complete_once": False,
+        "usage_less_skipped": 0,
+        "last_reason": None,
+        "last_reason_since": None,
+        "last_error_detail": None,
+        "error_db_count": 0,
+        "cache_state": "unreadable",
+        "model_count": 0,
+        "models": [],
+        "files_cached": None,
+        "files_on_disk": on_disk,
+    }
+    try:
+        with locked_json_snapshot(AGY_CACHE_PATH, blocking=False) as snap:
+            data = snap.data
+            state = snap.state
+    except OSError:
+        return blank
+    if state != "valid" or not isinstance(data, dict):
+        return {
+            **blank,
+            "cache_state": "missing" if state in {"missing", "empty"} else "unreadable",
+        }
+    files = data.get("files")
+    if data.get("version") != CACHE_VERSION or not isinstance(files, dict):
+        return blank
+    if data.get("agy_format") != _AGY_CACHE_FORMAT:
+        files = {}
+    raw_skip = data.get("usage_less_skipped", 0)
+    skipped = raw_skip if _is_nonnegative_int(raw_skip) else 0
+    models = _diag_turn_model_ids(files)
+    return {
+        "complete_once": data.get("complete_once") is True,
+        "usage_less_skipped": skipped,
+        **_cached_read_timing(data),
+        "last_reason": _cached_last_reason(data),
+        "last_reason_since": _cached_reason_since(data),
+        "last_error_detail": _agy_reason_detail(data),
+        "error_db_count": data.get("error_db_count", 0),
+        "cache_state": "ok",
+        "model_count": models["model_count"],
+        "models": models["models"],
+        "files_cached": len(files),
+        "files_on_disk": on_disk,
+    }
 
 
 def _scan_codex_root(
@@ -5206,10 +5415,6 @@ __all__ = [
     "CODEX_ARCHIVED_SESSIONS_PATH",
     "CODEX_SESSIONS_PATH",
     "DEFAULT_READ_BUDGET_S",
-    "GROK_CACHE_PATH",
-    "GROK_SESSIONS_PATH",
-    "GROK_USAGE_CENSUS_HOST_VERSION",
-    "grok_sessions_root",
     "HostFamily",
     "HostTokens",
     "HostUsageResult",
@@ -5218,9 +5423,17 @@ __all__ = [
     "Reason",
     "host_family",
     "codex_usage_diag",
-    "grok_completed_once",
-    "grok_usage_diag",
     "read_codex_usage",
-    "read_grok_usage",
+    "MUSE_SESSIONS_PATH",
+    "MUSE_CACHE_PATH",
+    "muse_sessions_root",
+    "read_muse_usage",
+    "muse_usage_diag",
+    "AGY_CONVERSATIONS_PATH",
+    "AGY_CACHE_PATH",
+    "AGY_USAGE_CENSUS_HOST_VERSION",
+    "agy_sessions_root",
+    "read_agy_usage",
+    "agy_usage_diag",
     "warm_host_cache_inline",
 ]

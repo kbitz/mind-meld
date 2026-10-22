@@ -274,28 +274,6 @@ EXCLUDED = [
 # Everything else (sessions, settings, etc.) is either git-tracked or ephemeral.
 SYNCED_SUBDIRS = ["memory", "todos"]
 
-# Grok user-home customization trees. Hardcoded the same way Claude's
-# walker hardcodes memory/todos — not user-editable include_dirs, so a
-# config edit cannot widen the walk to sessions/ or auth.json.
-# Inspected 2026-08-17 against Grok 1.0.4 user-guide + live ~/.grok.
-GROK_SYNCED_SUBDIRS = ["skills", "commands", "rules"]
-# Generated host links are per-machine routing, matching Codex/OpenCode.
-#
-# Deliberately does NOT mirror v0.12.51's additions to the Codex/OpenCode
-# entries (`skills/.system/*` and `config._GENERATED_HOST_SKILL_GLOBS`).
-# Verified 2026-09-01 against the live `~/.grok`: no `skills/.system`, no
-# `.extend-root` marker anywhere in the tree, and none of the five
-# gstack-extend-rendered skill names present. gstack-extend's
-# `setup --host auto` renders into Claude, Codex and OpenCode only, and the
-# Codex system payload is Codex's own. The asymmetry is a measured absence,
-# not an oversight — if gstack-extend ever grows a Grok target, add the
-# globs here at the same time.
-GROK_EXCLUDE_PATTERNS = [
-    "skills/gstack-*",
-    "skills/log-work/*",
-    "skills/retro-fleet/*",
-]
-
 # Muse memory tree. Hardcoded the same way: the data root also holds
 # sessions/, the session index, bundled skills and plugin caches, and
 # ~/.config/muse holds auth.json — none of that is sync data. Only
@@ -442,9 +420,7 @@ def nested_repo_skip_prefixes(
                 ) from e
     else:
         dirs = (
-            GROK_SYNCED_SUBDIRS
-            if source_type == "grok"
-            else MUSE_SYNCED_SUBDIRS
+            MUSE_SYNCED_SUBDIRS
             if source_type == "muse"
             else source_config.get("include_dirs") or []
         )
@@ -1019,7 +995,7 @@ def _assert_revision_privacy(
                 next_action=("Remove the descendant symlink or hard link, then run mm push."),
             )
         )
-    if source_type in ("grok", "muse") and st.st_nlink > 1:
+    if source_type == "muse" and st.st_nlink > 1:
         raise SnapshotError(
             snapshot_refusal(
                 source=source_name,
@@ -1419,7 +1395,7 @@ def _stat_collected_file(
     skip_prefixes: list[str] | None = None,
     include_patterns: list[str] | None = None,
 ) -> os.stat_result | None:
-    """Stat one already-enumerated file before it is recorded (grok/muse/generic loops).
+    """Stat one already-enumerated file before it is recorded (muse/generic loops).
 
     Returns None when the walker should skip it. A strict walk re-probes a
     vanished file once, even during recovery. An unresolved vanish is held
@@ -1456,8 +1432,7 @@ def _stat_collected_file(
 
 
 # Per-file walker pipeline (single source of truth, called by
-# walk_claude_source, walk_generic_source, walk_grok_source, and
-# walk_muse_source):
+# walk_claude_source, walk_generic_source, and walk_muse_source):
 #
 #   path ──► relative_to(base) ──► rel
 #                                   │
@@ -1480,7 +1455,7 @@ def _stat_collected_file(
 # instead of refusing, and only when the caller passes SourceHolds:
 #   1. read_file_revision's changed/vanished/grew raises (SnapshotChanged),
 #      retried once in _record_file, which every walker reaches;
-#   2. the per-file lstat in the grok, muse and generic loops
+#   2. the per-file lstat in the muse and generic loops
 #      (_stat_collected_file): FileNotFoundError after one re-probe;
 #   3. _collect_regular_files_scandir's entry stat (all four walkers):
 #      FileNotFoundError becomes a hold *candidate* the caller validates.
@@ -1757,118 +1732,6 @@ def walk_claude_source(
     return files
 
 
-def walk_grok_source(
-    source_config: dict[str, Any],
-    max_file_size: int = 52_428_800,
-    on_skip: Any = None,
-    *,
-    strict: bool = False,
-    holds: SourceHolds | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Walk a Grok home and build the files dict.
-
-    Scans only the hardcoded customization dirs at the source root
-    (``GROK_SYNCED_SUBDIRS``). Sessions, credentials, vendor trees, and
-    ``config.toml`` are never entered. Missing dirs are a no-op.
-    """
-    source_name = source_config.get("name")
-    base = Path(source_config["path"]).expanduser().resolve()
-    try:
-        base.stat()
-    except FileNotFoundError:
-        return {}
-    except OSError as e:
-        if strict:
-            raise SnapshotError(
-                snapshot_refusal(
-                    source=source_name,
-                    problem="could not be read",
-                    cause=os_error_cause(e),
-                    next_action="Restore read access, then run mm push.",
-                )
-            ) from e
-        return {}
-
-    extra = source_config.get("exclude_patterns") or []
-    exclude_patterns = [*GROK_EXCLUDE_PATTERNS, *extra]
-
-    files: dict[str, dict[str, Any]] = {}
-    collected_paths: list[Path] = []
-
-    for dir_name in GROK_SYNCED_SUBDIRS:
-        scan_dir = base / dir_name
-        st = _lstat_or_none(scan_dir, strict=strict, source_name=source_name, rel_path=dir_name)
-        if st is None:
-            continue
-        if stat.S_ISLNK(st.st_mode):
-            if on_skip:
-                on_skip(str(scan_dir), "symlink")
-            continue
-        if not stat.S_ISDIR(st.st_mode):
-            continue
-        collected_paths.extend(
-            _collect_regular_files_scandir(
-                scan_dir,
-                base,
-                strict=strict,
-                source_name=source_name,
-                on_skip=on_skip,
-                holds=holds,
-            )
-        )
-
-    collected_paths.sort(
-        key=lambda p: str(p.relative_to(base)) if p.is_relative_to(base) else str(p)
-    )
-    seen: set[tuple[int, int]] = set()
-    for path in collected_paths:
-        if path_has_descendant_symlink(path, base, strict=strict, source_name=source_name):
-            if on_skip:
-                on_skip(str(path), "symlink")
-            continue
-        st = _stat_collected_file(
-            path,
-            base,
-            strict=strict,
-            source_name=source_name,
-            holds=holds,
-            exclude_patterns=exclude_patterns,
-        )
-        if st is None:
-            continue
-        if stat.S_ISLNK(st.st_mode):
-            if on_skip:
-                on_skip(str(path), "symlink")
-            continue
-        # A hard link can make a credential or session file reachable from an
-        # allowlisted directory without introducing a symlink component.  The
-        # Grok boundary is privacy-critical, so accept only singly-linked
-        # regular files rather than trying to infer every other inode path.
-        if st.st_nlink > 1:
-            if on_skip:
-                on_skip(str(path), "hardlink")
-            continue
-        identity = (st.st_dev, st.st_ino)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if result := _record_file(
-            path,
-            base,
-            max_file_size,
-            on_skip,
-            exclude_patterns,
-            strict=strict,
-            source_name=source_name,
-            source_type="grok",
-            holds=holds,
-        ):
-            rel, info = result
-            files[rel] = info
-
-    return files
-
-
 def walk_muse_source(
     source_config: dict[str, Any],
     max_file_size: int = 52_428_800,
@@ -1881,9 +1744,8 @@ def walk_muse_source(
 
     Scans only the hardcoded ``memory/`` tree (``MUSE_SYNCED_SUBDIRS``).
     Sessions, the session index, bundled skills, plugin caches and every
-    other root entry are never entered. Missing dirs are a no-op. The
-    body mirrors ``walk_grok_source`` because the boundary is the same
-    shape: a privacy-critical root where only singly-linked regular
+    other root entry are never entered. Missing dirs are a no-op.
+    This preserves a privacy-critical root where only singly-linked regular
     files under an allowlisted tree may roam.
     """
     source_name = source_config.get("name")
@@ -2188,7 +2050,6 @@ def walk_source(
     Args:
         source_config: Dict with at least "type" and "path" keys.
             type="claude" -> walk_claude_source
-            type="grok" -> walk_grok_source
             type="muse" -> walk_muse_source
             type="generic" -> walk_generic_source
         max_file_size: Skip files larger than this (bytes).
@@ -2217,8 +2078,6 @@ def walk_source(
             source_name=source_config.get("name"),
             holds=holds,
         )
-    elif source_type == "grok":
-        files = walk_grok_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "muse":
         files = walk_muse_source(source_config, max_file_size, on_skip, strict=strict, holds=holds)
     elif source_type == "generic":

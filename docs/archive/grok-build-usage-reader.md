@@ -1,5 +1,10 @@
 # Grok Build usage reader
 
+> [!NOTE] Historical design archive.
+> Superseded on 2026-10-22 by the Antigravity (`agy`) reader and Grok retirement.
+> Grok Build source and usage reader are retired; Grok token pricing and historical
+> row classification remain in `token_usage.py` and `retro-fleet`.
+
 ## Outcome
 
 `retro-fleet` must show Grok Build token usage from a Mac without a daemon,

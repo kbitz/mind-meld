@@ -266,6 +266,14 @@ $2/$0.50/$6 card; >256k input per REQUEST doubles it. Per-turn aggregates
 cannot select the tier. Cache-write price is unpublished, not proven free.
 Fast is deliberately unpriced (2x standard, 3x at long context)."""
 
+PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"
+"""Google Gemini API rates: https://ai.google.dev/gemini-api/docs/pricing, accessed
+on this date. Antigravity uses Google Gemini models. Censused models:
+gemini-4-argon: $2.00 input, $0.10 cache_read, $0.00 cache_create, $10.00 output
+(promotional rate through Nov 30, 2026).
+gemini-3.8-flash: $0.75 input, $0.075 cache_read, $0.00 cache_create, $3.75 output
+(promotional rate through Dec 31, 2026)."""
+
 PRICING_XAI_LAST_UPDATED = "2026-09-10"
 """xAI rates: https://docs.x.ai/developers/models/grok-4.6, accessed on
 this date. Requests whose prompt reaches 200k tokens pay the higher rate
@@ -396,6 +404,8 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # repaired the reader, but no Grok tokens had reached the wire. The base
 # card is always a floor: aggregate counters cannot recover request tiers.
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
+    "gemini-4-argon": "gemini-4-argon",
+    "gemini-3.8-flash": "gemini-3.8-flash",
     "grok-4.6-build": "grok-4.6",
     "grok-4.7": "grok-4.7",
     "gpt-6-astra": "gpt-6-astra",
@@ -409,6 +419,8 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
 # a new override cannot silently claim verification. Dates remain per vendor.
 VERIFIED_MODEL_IDS = frozenset(
     {
+        "gemini-4-argon",
+        "gemini-3.8-flash",
         "claude-opus-4",
         "claude-opus-4-0",
         "claude-opus-4-1",
@@ -444,6 +456,18 @@ VERIFIED_MODEL_IDS = frozenset(
 # xAI's source and alias evidence are documented at PRICING_XAI_LAST_UPDATED.
 # Do not derive these from ``_tier``.
 VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "gemini-4-argon": {
+        "input": 2.00,
+        "cache_read": 0.10,
+        "cache_create": 0.0,
+        "output": 10.00,
+    },
+    "gemini-3.8-flash": {
+        "input": 0.75,
+        "cache_read": 0.075,
+        "cache_create": 0.0,
+        "output": 3.75,
+    },
     "grok-4.7": {
         "input": 2.0,
         "cache_read": 0.5,
@@ -2072,6 +2096,7 @@ __all__ = [
     "PRICING_FAMILY_BY_MODEL",
     "PRICING_LAST_UPDATED",
     "PRICING_OPENAI_LAST_UPDATED",
+    "PRICING_GOOGLE_LAST_UPDATED",
     "PRICING_XAI_LAST_UPDATED",
     "PRICING_CURSOR_LAST_UPDATED",
     "VENDOR_FAMILY_TIERS",

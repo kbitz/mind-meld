@@ -291,8 +291,8 @@ class TestPushPullRoundTrip:
         )
         assert (personal_b / ".muse-memory.lock").read_text() == "pid=222\n"
 
-    def test_enable_grok_preserves_legacy_claude_manifest_on_next_push(self, tmp_path, monkeypatch):
-        """Materializing Grok must not turn legacy Claude content into tombstones."""
+    def test_enable_muse_preserves_legacy_claude_manifest_on_next_push(self, tmp_path, monkeypatch):
+        """Materializing Muse must not turn legacy Claude content into tombstones."""
         storage_dir = tmp_path / "storage"
         claude_dir = tmp_path / "machine_a" / ".claude"
         self._populate_claude(claude_dir)
@@ -313,11 +313,11 @@ class TestPushPullRoundTrip:
 
         assert runner.invoke(app, ["push"]).exit_code == 0
 
-        (home / ".grok").mkdir(parents=True)
-        enabled = runner.invoke(app, ["enable-source", "grok"])
+        (home / ".muse").mkdir(parents=True)
+        enabled = runner.invoke(app, ["enable-source", "muse"])
         assert enabled.exit_code == 0, enabled.output
         (claude_dir / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
-            "changed after enabling grok"
+            "changed after enabling muse"
         )
 
         pushed = runner.invoke(app, ["push"])
@@ -1779,12 +1779,6 @@ class TestDisabledSourcesTombstoneSuppression:
                 "max_file_size": 52_428_800,
                 "sources": [
                     {"name": "claude", "path": str(claude_dir), "type": "claude"},
-                    {
-                        "name": "opencode",
-                        "path": str(opencode_dir),
-                        "type": "generic",
-                        "include_dirs": ["skills"],
-                    },
                 ],
             },
             "crypto": {"argon2_memory_kb": MEMORY_KB},
@@ -1799,6 +1793,15 @@ class TestDisabledSourcesTombstoneSuppression:
 
         enc = backend.get("manifests/dev-a/manifest.json.enc")
         prior = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        prior["sources"]["opencode"] = {
+            "files": {
+                "skills/my-skill/SKILL.md": {
+                    "sha256": "fake-sha",
+                    "mtime_ns": 1_000_000,
+                    "size": 19,
+                }
+            }
+        }
         # Non-vacuity guard: the seeded prior must actually contain the file.
         assert "skills/my-skill/SKILL.md" in prior["sources"]["opencode"]["files"]
 
@@ -1810,6 +1813,7 @@ class TestDisabledSourcesTombstoneSuppression:
             "manifests/dev-a/manifest.json.enc",
             encrypt(serialize_manifest(prior), PASSPHRASE, memory_kb=MEMORY_KB),
         )
+        cli_module.sidecar.write(prior)
 
         config["sync"]["sources"] = [
             {"name": "claude", "path": str(claude_dir), "type": "claude"},
@@ -4606,47 +4610,6 @@ class TestInitFlow:
         assert "root_salt_fp" in cfg["crypto"]
         assert cfg["crypto"]["argon2_memory_kb"] == 65_536
 
-    @pytest.mark.parametrize(
-        ("customization_dir", "grok_enabled"),
-        [(None, False), ("skills", True), ("commands", True), ("rules", True)],
-    )
-    def test_init_grok_default_requires_customization_dir(
-        self, tmp_path, monkeypatch, customization_dir, grok_enabled
-    ):
-        """A stock Grok root is not consent; any allowlisted tree is default-Y."""
-        cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
-        home = tmp_path / "home"
-        (home / ".claude").mkdir(parents=True)
-        grok_root = home / ".grok"
-        grok_root.mkdir()
-        if customization_dir is not None:
-            (grok_root / customization_dir).mkdir()
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(
-            "mind_meld.skill_link._ensure_retro_skill_links",
-            lambda *, dry_run=False, allow_mutate=True, explicit=False, may_create: (),
-        )
-        monkeypatch.setattr("mind_meld.events_tail._run_events_backfill", lambda *_args: None)
-
-        grok_defaults: list[bool] = []
-
-        def confirm(prompt: str, *, default: bool) -> bool:
-            if "'grok'" in prompt:
-                grok_defaults.append(default)
-            return "'claude'" in prompt or default
-
-        monkeypatch.setattr("mind_meld.cli.typer.confirm", confirm)
-        storage = tmp_path / "icloud"
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw123\npw123\n")
-        assert result.exit_code == 0, result.output
-        assert grok_defaults == [grok_enabled]
-
-        with open(cfg_path, "rb") as f:
-            config = tomllib.load(f)
-        source_names = [source["name"] for source in config["sync"]["sources"]]
-        assert ("grok" in source_names) is grok_enabled
-        assert config.get("retro", {}).get("grok_host_usage") is not True
-
     def test_refuses_if_no_sources_enabled(self, tmp_path, monkeypatch):
         """User declines every source prompt → init refuses to finish.
 
@@ -5253,19 +5216,21 @@ def capture61(tmp_path, monkeypatch):
     return {"cfg": cfg, "path": path, "dayfile": dayfile, "backend": backend, "claude": claude}
 
 
-def test_later_autopush_supersedes_attended_reader_coverage(capture61, monkeypatch):
+def test_later_autopush_supersedes_attended_reader_coverage(capture61, tmp_path, monkeypatch):
     cfg = capture61["cfg"]
-    cfg["retro"] = {"grok_host_usage": True}
+    muse_dir = tmp_path / "muse"
+    (muse_dir / "memory").mkdir(parents=True, exist_ok=True)
+    cfg["sync"]["sources"].append({"name": "muse", "path": str(muse_dir), "type": "muse"})
     save_config(cfg, capture61["path"])
     monkeypatch.setattr(
         _mm_host_usage,
-        "read_grok_usage",
+        "read_muse_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
     )
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     first = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
-    assert first["readers"] == {"codex": "contributed", "grok": "contributed"}
+    assert first["readers"] == {"codex": "contributed", "muse": "contributed"}
     monkeypatch.setattr(
         _mm_host_usage,
         "read_codex_usage",
@@ -5279,7 +5244,7 @@ def test_later_autopush_supersedes_attended_reader_coverage(capture61, monkeypat
     assert result.exit_code == 0, result.output
     latest = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     assert latest["ts"] > first["ts"]
-    assert latest["readers"] == {"codex": "degraded", "grok": "contributed"}
+    assert latest["readers"] == {"codex": "degraded", "muse": "contributed"}
     assert "mm push" in " ".join(runner.invoke(app, ["status"]).output.split())
 
 
@@ -5394,14 +5359,16 @@ def test_partial_and_absent_capture_reports_own_outcome(capture61, monkeypatch, 
     assert not isinstance(aggregator._accept_host_usage_snapshot(row), aggregator.HostReject)
 
 
-def test_capture_outcome_labels_each_reader_independently(capture61, monkeypatch):
+def test_capture_outcome_labels_each_reader_independently(capture61, tmp_path, monkeypatch):
     """A reader that itself completes with zero usage must not inherit
     'contributed' just because a SIBLING reader in the same sweep had real
     data. The outcome computation used to check whole-capture
     `capture.hosts` truthiness instead of this reader's own membership,
     mislabeling the empty reader as 'contributed'."""
     cfg = capture61["cfg"]
-    cfg["retro"] = {"grok_host_usage": True}
+    muse_dir = tmp_path / "muse"
+    (muse_dir / "memory").mkdir(parents=True, exist_ok=True)
+    cfg["sync"]["sources"].append({"name": "muse", "path": str(muse_dir), "type": "muse"})
     save_config(cfg, capture61["path"])
     day = datetime.now(timezone.utc).date().isoformat()
     usage = {"input": 9, "output": 3, "cache_read": 0, "cache_create": 0}
@@ -5412,23 +5379,23 @@ def test_capture_outcome_labels_each_reader_independently(capture61, monkeypatch
     )
     monkeypatch.setattr(
         _mm_host_usage,
-        "read_grok_usage",
+        "read_muse_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
     )
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert "Usage capture: codex — contributed" in result.output
-    assert "Usage capture: grok — completed, no usage in snapshot" in result.output
+    assert "Usage capture: muse — completed, no usage in snapshot" in result.output
     rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
     row = [row for row in rows if row["type"] == "host-usage-snapshot"][-1]
-    assert row["empty_sources"] == ["grok"]
+    assert row["empty_sources"] == ["muse"]
     for command in (["status"], ["diag"]):
         inspected = runner.invoke(app, command)
         assert inspected.exit_code == 0, inspected.output
-        assert "grok: completed, no usage in snapshot" in inspected.stdout
+        assert "muse: completed, no usage in snapshot" in inspected.stdout
         assert "codex: contributed" in inspected.stdout
     publication = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
-    assert publication["empty_readers"] == ["grok"]
+    assert publication["empty_readers"] == ["muse"]
     assert publication["publication"] == "published"
 
 
@@ -6481,7 +6448,7 @@ class TestTrack7BEventsTail:
             return read
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", record("codex"))
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", record("grok"))
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", record("muse"))
 
         # Nothing changed since the first push → no-op.
         result = runner.invoke(app, ["push"])
@@ -9343,12 +9310,10 @@ def _publish_peer62(env, device, files, *, tombstones=None):
 
 @pytest.fixture
 def preview62(push_preview56, tmp_path, monkeypatch):
-    from types import SimpleNamespace
 
     from mind_meld import identity, pullhistory, seen_sources, token_usage
     from mind_meld.skills.retro_fleet import aggregator
     from mind_meld.storage.keys import blob_key
-    from tests.test_host_skill_discovery import _ok_payload
 
     env = push_preview56
     pullhistory.append(
@@ -9509,19 +9474,6 @@ def preview62(push_preview56, tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", run)
 
-    grok_output = tmp_path / "grok-inspect.json"
-    grok_output.write_text(json.dumps(_ok_payload()))
-    original_which = shutil.which
-    monkeypatch.setattr(
-        shutil, "which", lambda name: "grok" if name == "grok" else original_which(name)
-    )
-
-    def popen(argv, **kwargs):
-        assert argv[1:] == ["inspect", "--json"]
-        return SimpleNamespace(stdout=grok_output.open("rb"), returncode=0, wait=lambda **kw: 0)
-
-    monkeypatch.setattr(subprocess, "Popen", popen)
-
     def invoke(argv, *, exemptions=(), check=True):
         env["upgrade"]._reset_for_tests()
         lock = (
@@ -9664,8 +9616,6 @@ def test_retro_exemptions62(preview62, state):
 def test_inspection_variants62(preview62, argv):
     result = preview62["audit"](list(argv))
     assert result.exit_code == 0, result.output
-    if argv == ("diag", "--json"):
-        assert json.loads(result.stdout)["host_skill_discovery"]["status"] == "ok"
 
 
 def test_real_pull_keeps_migration_and_history62(preview62):
@@ -11681,41 +11631,6 @@ def test_event_size_limit_reaches_every_emitter(capture61, monkeypatch, emitter)
     assert env["dayfile"].read_bytes() == original
 
 
-def test_legacy_grok_recovery_finalizes_readers_before_capture(capture61, monkeypatch, tmp_path):
-    env = capture61
-    root = tmp_path / "legacy-grok"
-    root.mkdir()
-    grok = {"name": "grok", "path": str(root), "type": "grok"}
-    prior = cli_module.sidecar.read("dev-a")
-    prior["sources"]["grok"] = {"base_path": str(root), "files": {}}
-    env["backend"].put(
-        cli_module.manifest_key("dev-a"), encrypt(serialize_manifest(prior), PASSPHRASE, MEMORY_KB)
-    )
-    real_resolution = cli_module.resolve_sources(env["cfg"])
-    monkeypatch.setattr(
-        cli_module,
-        "resolve_sources",
-        lambda *a, **kw: cli_module.replace(real_resolution, explicit=False),
-    )
-    get_default = cli_module.get_default_source
-    monkeypatch.setattr(
-        cli_module, "get_default_source", lambda name: grok if name == "grok" else get_default(name)
-    )
-    readers = []
-
-    def read(**kw):
-        readers.append("grok")
-        return _mm_host_usage.HostUsageResult({}, complete=True)
-
-    monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
-    result = runner.invoke(app, ["push"])
-    assert result.exit_code == 0, result.output
-    assert readers == ["grok"]
-    rows = [json.loads(line) for line in env["dayfile"].read_text().splitlines()]
-    latest = [r for r in rows if r["type"] == "host-usage-snapshot"][-1]
-    assert latest["token_sources"] == ["codex", "grok"]
-
-
 @pytest.mark.parametrize("dry_run", [False, True])
 @pytest.mark.parametrize("failure", ["oserror", "mindmeld"])
 def test_push_stop_reports_failure_and_nudges_only_after_a_real_attempt(
@@ -11985,9 +11900,13 @@ def test_attempt_status_diag_read_states_are_write_free(capture61, monkeypatch, 
     assert identity() == before
 
 
-def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(capture61, monkeypatch):
+def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(
+    capture61, tmp_path, monkeypatch
+):
     cfg = capture61["cfg"]
-    cfg["retro"] = {"grok_host_usage": True}
+    muse_dir = tmp_path / "muse"
+    (muse_dir / "memory").mkdir(parents=True, exist_ok=True)
+    cfg["sync"]["sources"].append({"name": "muse", "path": str(muse_dir), "type": "muse"})
     save_config(cfg, capture61["path"])
     today = datetime.now(timezone.utc).date().isoformat()
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
@@ -12000,7 +11919,7 @@ def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(captu
     )
     monkeypatch.setattr(
         _mm_host_usage,
-        "read_grok_usage",
+        "read_muse_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({"other": {today: usage}}, True),
     )
     real = _mm_events.make_host_usage_snapshot
@@ -12008,10 +11927,10 @@ def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(captu
     result = runner.invoke(app, ["push", "-v"])
     assert result.exit_code == 0, result.output
     assert "Usage capture: codex — completed, no usage in snapshot" in result.stdout
-    assert "Usage capture: grok — contributed" in result.stdout
+    assert "Usage capture: muse — contributed" in result.stdout
     assert "partial" not in result.stderr
     record, reason = cli_module.attemptlog.read()
-    assert reason is None and record["readers"] == {"codex": "empty", "grok": "contributed"}
+    assert reason is None and record["readers"] == {"codex": "empty", "muse": "contributed"}
 
 
 @pytest.mark.parametrize("trigger", ["recovery", "selection"])
@@ -12126,10 +12045,14 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
 
         monkeypatch.setattr(events_tail, "_capture_host_snapshot", broken)
     else:
-        env["cfg"]["retro"] = {"grok_host_usage": True}
+        muse_dir = env["path"].parent / "muse"
+        (muse_dir / "memory").mkdir(parents=True, exist_ok=True)
+        env["cfg"]["sync"]["sources"].append(
+            {"name": "muse", "path": str(muse_dir), "type": "muse"}
+        )
         save_config(env["cfg"], env["path"])
         exhausted = _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **kw: exhausted)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **kw: exhausted)
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
@@ -12150,15 +12073,15 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
         assert "the next attended mm push retries automatically" in flat
         assert hosts == []
     else:
-        # Codex still contributes, so a row exists and is published; only grok is declared.
-        assert "Usage capture (readers): host-usage snapshot skipped (grok deadline)" in flat
+        # Codex still contributes, so a row exists and is published; only muse is declared.
+        assert "Usage capture (readers): host-usage snapshot skipped (muse deadline)" in flat
         assert "Attended warming also exhausted its allowance" in flat
         assert len(hosts) == 1
         assert hosts[0]["token_sources"] == ["codex"]
-        assert hosts[0]["degraded_sources"] == ["grok"]
+        assert hosts[0]["degraded_sources"] == ["muse"]
         published = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
         assert published["publication"] == "published"
-        assert published["readers"] == {"codex": "contributed", "grok": "degraded"}
+        assert published["readers"] == {"codex": "contributed", "muse": "degraded"}
 
 
 def test_capture_warning_names_the_exception_when_its_message_is_empty(capture61, monkeypatch):
@@ -14017,8 +13940,10 @@ def test_sync78_real_entrypoint_merged_buffered_pipes(tmp_path, mode, verbose):
     script = r"""
 import os, sys
 from pathlib import Path
+import getpass
 import keyring
 keyring.get_password = lambda *a: None
+getpass.getpass = lambda *a, **k: (_ for _ in ()).throw(EOFError())
 from mind_meld import config, crypto, events_tail, host_usage, upgrade
 mode = sys.argv[1]
 upgrade.run_transition_hook = lambda *a, **k: None
@@ -14581,3 +14506,44 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         cli_module._SYNC_OUTPUT.reset(token)
     err = capsys.readouterr().err
     assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err
+
+
+@pytest.mark.parametrize(
+    "argv", [["autopush", "--bogus"], ["retro-fleet", "--bogus"], ["retro-fleet", "bad"]]
+)
+def test_usage_exit(argv):
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 2, result.output
+
+
+@pytest.mark.parametrize(
+    "argv", [["log", "--since", "bad"], ["log", "--format", "xml"], ["recapture", "999d"]]
+)
+def test_rejected_value_exit(argv):
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 1, result.output
+    assert "Error:" in result.output
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_resolve_abort_exit(tmp_path, monkeypatch, interrupt):
+    local = tmp_path / "note.md"
+    local.write_bytes(b"local\n")
+    remote = tmp_path / "note.sync-conflict-20260922-120000-v1-peer1234.md"
+    remote.write_bytes(b"peer\n")
+    monkeypatch.setattr(cli_module, "_get_config", lambda **kw: {})
+    monkeypatch.setattr(cli_module, "get_backend", lambda cfg: LocalBackend(tmp_path / "storage"))
+    monkeypatch.setattr(cli_module, "get_sources", lambda cfg: [])
+    monkeypatch.setattr(
+        cli_module.resolveflow, "_find_conflict_files", lambda *a, **kw: [("notes", remote, local)]
+    )
+    if interrupt:
+
+        def ctrl_c(*a, **kw):
+            raise KeyboardInterrupt
+
+        monkeypatch.setitem(typer.prompt.__globals__, "visible_prompt_func", ctrl_c)
+    result = runner.invoke(app, ["resolve"], input="")
+    assert result.exit_code == 1, result.output
+    assert "Aborted" in result.output  # punctuation belongs to the framework
+    assert local.read_bytes() == b"local\n" and remote.read_bytes() == b"peer\n"

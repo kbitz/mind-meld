@@ -5,10 +5,9 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `install_skills_cmd` / `retro_fleet_cmd` / `refresh_identity_cmd` / `devices` (`--format json`) / `status` / `diag` / `_collect_diag_state` / `PushResult.events_degradations` / `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
-- `src/mind_meld/host_skill_discovery.py` — `probe_grok_skill_discovery`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `read_grok_usage` / `grok_completed_once` / `grok_usage_diag` / `warm_host_cache_inline` / `_scan_codex_root` / `_scan_grok_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_classify_grok_update` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS` / `_GROK_REQUIRED_KEYS` / `_GROK_IGNORABLE_KEYS` / `GROK_USAGE_CENSUS_HOST_VERSION`
+- `src/mind_meld/host_usage.py` — `read_codex_usage` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `warm_host_cache_inline` / `_scan_codex_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
@@ -16,7 +15,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_host_skill_discovery.py`, `tests/test_diag.py`.
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`.
 
 
 ## Sync diagnostic presentation (Track 78A)
@@ -316,45 +315,41 @@ Codex returns `unsupported` for a ledger it cannot attribute, which means
 that distinction backwards silently under-reports the fleet.
 
 **Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex,
-Grok and Muse to the source name whose being enabled authorizes them. The live set is
+Cursor, Muse and Antigravity to the source name whose being enabled authorizes them. The live set is
 `events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
 tuple (same names, same order). Unknown inbound names (retired `opencode`,
-or a future reader) are retained by the aggregator, not listed here.
-`_default_host_readers(sources, grok_consented=...)` returns only those.
+retired `grok`, or a future reader) are retained by the aggregator, not listed here.
+`_default_host_readers(sources)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
 (or the archive, `~/.codex/archived_sessions`) parsed — matching
-`_enabled_claude_paths`. Grok is a scoped sync source
-(`type: "grok"`, hardcoded `skills/` / `commands/` / `rules/`).
-`HOST_READER_SOURCE_GATE["grok"]` is `"grok"`. The 21A `[retro].grok_host_usage`
-bit remains an OR so a prior usage-only opt-in does not go dark.
-The callable bound into the sweep passes `read_grok_usage(..., consented=True)`.
+`_enabled_claude_paths`. Antigravity is a scoped sync source (`type: "generic"`,
+syncing `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`).
+`HOST_READER_SOURCE_GATE["agy"]` is `"agy"`.
+The callable bound into the sweep passes `read_agy_usage(..., consented=True)`.
 The function itself defaults to `consented=False` and does not stat or open
-`~/.grok`. Empty sources plus no opt-in and no bit must yield no Grok reader.
-The grok *file* walker never opens `sessions/`; the usage reader is a
-separate consented walk of `updates.jsonl` only. Host interchangeability vs
-Claude is `docs/designs/host-parity.md`: 22A/23A put totals on the MODELS
-card; Grok does not get an `AgentRow` (it discovers `~/.claude/skills`; `mm diag` measures that under `host_skill_discovery`); session-transcript sync and a
-Codex/Grok `sessions-snapshot` are not planned.
+`~/.gemini/antigravity-cli/conversations`. Empty sources must yield no Antigravity reader.
+Antigravity gets an `AgentRow` in `skill_link.py` (maintaining `retro-fleet` links under
+`~/.gemini/config/skills/`).
 
-**Grok v1 terminal ledger (Track 18D, ignorable keys Track 46A).** When consented, `read_grok_usage`
-walks `GROK_HOME/sessions` (else `~/.grok/sessions`) and reads only regular
-non-symlink `updates.jsonl` files directly under a session directory. It
-accepts a line when `params.update` is a `turn_completed` whose key set,
-minus `_GROK_IGNORABLE_KEYS` (`elapsed_ms`), equals `_GROK_REQUIRED_KEYS`
-(`prompt_id`, `sessionUpdate`, `stop_reason`, `usage`) with no
-content-bearing fields. Ignorable keys are dropped before the projection
-and are never stamped onto the stored turn dict (`{key, day, model, usage}`;
-resume compares live == cached). An unknown extra key is still `unsupported`
-and still refuses the whole reader (see "Reader-agnostic quarantine and drift
-classification" in `docs/roadmap-future.md`). Each accepted record is a per-prompt total attributed
-to the UTC day of the outer timestamp. `reasoningTokens` must be a bounded
-subset of `outputTokens` and is never added twice. The private
-`grok-host-tokens.json` cache stores opaque file keys, fingerprints, offsets,
-hashed terminal keys, model IDs, and aggregate counters — never paths,
-prompt IDs, or conversation bytes. Equal duplicate
-`(workspace, session, prompt_id, model)` records count once; conflicting
-duplicates refuse the store. The model is always part of the key so a
-later multi-model restatement of the same prompt cannot double-count.
+**Antigravity SQLite conversations reader (Track 82A).** When consented, `read_agy_usage`
+scans `~/.gemini/antigravity-cli/conversations/*.db` using read-only/immutable SQLite opens:
+`?mode=ro&immutable=1` when no `-wal` exists, and `?mode=ro` when `-wal` exists, setting
+`PRAGMA trusted_schema=OFF`, `query_only=ON`, `cell_size_check=ON`, `mmap_size=0`, and limiting
+SQL length to 16 MiB. A hot `-journal` file refuses as `"stale"`. SQLite interrupts via
+`conn.set_progress_handler` map to `"deadline"`. Pre-open and post-close fingerprints
+(`dev`, `ino`, `size`, `mtime_ns` for main DB and `-wal`) must match (`before_fp == after_fp`);
+any concurrent change raises `_ReadFailure("stale", cause="identity_changed")`.
+The reader scans `SELECT step_index, step_type, status, metadata FROM steps ORDER BY step_index`:
+only `step_type == 15` carries valid token usage (Tag 9 in `steps.metadata`).
+A completed `step_type == 15 AND status == 3` without Tag 9 increments `usage_less_skipped`.
+Any `step_type != 15` carrying nonzero tokens refuses as `"unsupported"`.
+Models are resolved from `gen_metadata.data` Tag 1.3 (`model_enum`) -> Tag 1.19 (`model_slug`).
+Turns are deduplicated across DBs by `sha256(f"agy\0{bot_id}")`.
+Cached in `~/.config/mind-meld/agy-host-tokens.json` using forensic replacement
+`files = staged_files if result.complete else {**cached_files, **staged_files}`, trimmed
+to `MAX_BY_DAY_DAYS`. Antigravity models (`gemini-*`) classify as `"agy"` (`host_family()`),
+rendered in the `Antigravity` agent row. Verified API pricing (`gemini-4-argon`, `gemini-3.8-flash`)
+is in `token_usage.py` (`PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"`).
 
 **Muse terminal ledger (1.x minor, 2026-10-14).** When the `muse` source
 is enabled, `read_muse_usage` walks
@@ -432,12 +427,10 @@ count and status probe predate this rule.)
 
 The census and fatal-check list are
 `tests/fixtures/host_sessions/muse/CONTRACT.md`, bound to
-`MUSE_USAGE_CENSUS_HOST_VERSION`. Muse models classify as `other` in
-1.x: a new host family is a MAJOR under the compatibility contract in
-`docs/invariants/auto-upgrade.md`, while the reader/token-source name is
-a MINOR. The `muse` *file* walker never opens `sessions/`; the usage
-reader is a separate consented walk of `session.jsonl` only. Muse gets
-no `AgentRow` (it discovers `~/.claude/skills`).
+`MUSE_USAGE_CENSUS_HOST_VERSION`. Muse models classify as `"muse"` in
+`host_usage.host_family()`, rendered in the `Muse` agent row. The `muse` *file*
+walker never opens `sessions/`; the usage reader is a separate consented walk
+of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
 **Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A).** Only
 `~/Library/Application Support/com.conductor.app/cursor-sdk-store/*/runs.ndjson`

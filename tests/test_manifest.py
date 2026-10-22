@@ -41,7 +41,6 @@ from mind_meld.manifest import (
     serialize_manifest,
     walk_claude_source,
     walk_generic_source,
-    walk_grok_source,
     walk_muse_source,
     walk_source,
 )
@@ -495,7 +494,7 @@ class TestNestedRepositories:
     # muse branch or the Muse walker enters a checkout; why_new=this table covered claude,
     # generic and grok only; seam=none; no_claim=none beyond protects
     @pytest.mark.parametrize("strict", [False, True])
-    @pytest.mark.parametrize("source_type", ["claude", "generic", "grok", "muse"])
+    @pytest.mark.parametrize("source_type", ["claude", "generic", "muse"])
     @pytest.mark.parametrize("gitlink", [False, True])
     def test_checkout_is_pruned_and_plain_content_and_source_root_repo_survive(
         self, tmp_path, monkeypatch, strict, source_type, gitlink
@@ -1032,108 +1031,6 @@ class TestWalkSource:
         config = {"name": "bad", "path": str(base), "type": "unknown_type"}
         with pytest.raises(ManifestError, match="unknown source type"):
             walk_source(config)
-
-    def test_grok_type_dispatches_to_walk_grok_source(self, tmp_path):
-        grok = tmp_path / ".grok"
-        skill = grok / "skills" / "my-review"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("review")
-        (grok / "auth.json").write_text("secret")
-
-        config = {"name": "grok", "path": str(grok), "type": "grok"}
-        base_path, files = walk_source(config)
-        assert "skills/my-review/SKILL.md" in files
-        assert "auth.json" not in files
-        assert base_path == str(grok.resolve())
-
-
-class TestWalkGrokSource:
-    def _mixed_home(self, tmp_path: Path) -> Path:
-        home = tmp_path / ".grok"
-        (home / "sessions" / "encoded").mkdir(parents=True)
-        (home / "sessions" / "encoded" / "updates.jsonl").write_text("{}\n")
-        (home / "sessions" / "encoded" / "chat_history.jsonl").write_text("prompt\n")
-        (home / "auth.json").write_text("secret")
-        (home / "config.toml").write_text("key = 1")
-        (home / "trusted_folders.toml").write_text("")
-        (home / "logs").mkdir()
-        (home / "logs" / "app.log").write_text("log")
-        (home / "worktrees").mkdir()
-        (home / "marketplace-cache").mkdir()
-        vendor = home / "bundled" / "skills" / "vendor"
-        vendor.mkdir(parents=True)
-        (vendor / "SKILL.md").write_text("shipped")
-        skill = home / "skills" / "my-review"
-        skill.mkdir(parents=True)
-        (skill / "SKILL.md").write_text("mine")
-        (home / "commands").mkdir()
-        (home / "commands" / "ship.md").write_text("ship")
-        (home / "rules").mkdir()
-        (home / "rules" / "house.md").write_text("rule")
-        generated = home / "skills" / "gstack-review"
-        generated.mkdir()
-        (generated / "SKILL.md").write_text("generated")
-        return home
-
-    def test_mixed_fixture_uploads_only_allowlisted_files(self, tmp_path):
-        from mind_meld.config import get_default_source
-
-        home = self._mixed_home(tmp_path)
-        src = get_default_source("grok")
-        assert src is not None
-        src["path"] = str(home)
-        files = walk_grok_source(src)
-        assert set(files) == {
-            "skills/my-review/SKILL.md",
-            "commands/ship.md",
-            "rules/house.md",
-        }
-
-    def test_nested_dir_symlink_into_sessions_is_not_walked(self, tmp_path):
-        home = tmp_path / ".grok"
-        sessions = home / "sessions" / "encoded"
-        sessions.mkdir(parents=True)
-        (sessions / "chat_history.jsonl").write_text("prompt\n")
-        skills = home / "skills"
-        skills.mkdir()
-        (skills / "evil").symlink_to(sessions, target_is_directory=True)
-        files = walk_grok_source({"path": str(home), "type": "grok"})
-        assert files == {}
-
-    def test_symlinked_include_dir_is_not_walked(self, tmp_path):
-        home = tmp_path / ".grok"
-        home.mkdir()
-        target = tmp_path / "sessions"
-        target.mkdir()
-        (target / "chat_history.jsonl").write_text("prompt\n")
-        (home / "skills").symlink_to(target, target_is_directory=True)
-        files = walk_grok_source({"path": str(home), "type": "grok"})
-        assert files == {}
-
-    @pytest.mark.parametrize("forbidden_rel", ["auth.json", "sessions/encoded/updates.jsonl"])
-    def test_hardlink_to_forbidden_file_is_not_walked(self, tmp_path, forbidden_rel):
-        home = tmp_path / ".grok"
-        target = home / forbidden_rel
-        target.parent.mkdir(parents=True)
-        target.write_text("secret")
-        skills = home / "skills"
-        skills.mkdir()
-        (skills / "copied-secret").hardlink_to(target)
-
-        skipped: list[tuple[str, str]] = []
-        files = walk_grok_source(
-            {"path": str(home), "type": "grok"},
-            on_skip=lambda path, reason: skipped.append((path, reason)),
-        )
-
-        assert files == {}
-        assert skipped == [(str(skills / "copied-secret"), "hardlink")]
-
-    def test_missing_dirs_are_a_noop(self, tmp_path):
-        home = tmp_path / ".grok"
-        home.mkdir()
-        files = walk_grok_source({"path": str(home), "type": "grok"})
-        assert files == {}
 
 
 class TestBuildManifestV2:
@@ -2176,13 +2073,13 @@ class TestGenerateTombstonesContract:
         result = generate_tombstones(local_manifest, None, "this-device")
         assert result == {}
 
-    def test_empty_first_grok_push_does_not_tombstone_unknown_files(self):
-        """This device never had grok files. Empty local grok must not mint
-        tombstones for a peer's skills — generate_tombstones only diffs
+    def test_empty_first_custom_source_push_does_not_tombstone_unknown_files(self):
+        """This device never had custom files. Empty local custom source must not mint
+        tombstones for a peer's files — generate_tombstones only diffs
         this device's prior manifest."""
         local_manifest = {
             "device_id": "this-device",
-            "sources": {"grok": {"base_path": "", "files": {}}},
+            "sources": {"custom": {"base_path": "", "files": {}}},
             "tombstones": {},
         }
         prior = {
@@ -2191,7 +2088,7 @@ class TestGenerateTombstonesContract:
             "tombstones": {},
         }
         result = generate_tombstones(local_manifest, prior, "this-device")
-        assert not any(key.startswith("grok:") for key in result)
+        assert not any(key.startswith("custom:") for key in result)
 
 
 class TestFileRevision:
@@ -2475,25 +2372,6 @@ class TestStrictWalkers:
         }
         with pytest.raises(SnapshotError, match="could not be enumerated"):
             walk_generic_source(cfg, strict=True)
-
-    def test_grok_selected_path_failure_refuses(self, tmp_path, monkeypatch):
-        import mind_meld.manifest as m
-
-        root = tmp_path / ".grok"
-        skills = root / "skills"
-        skills.mkdir(parents=True)
-        (skills / "a.md").write_text("ok")
-        real_scandir = os.scandir
-
-        def boom(path):
-            if Path(path) == skills:
-                raise PermissionError("denied")
-            return real_scandir(path)
-
-        monkeypatch.setattr(m.os, "scandir", boom)
-        cfg = {"name": "grok", "path": str(root), "type": "grok"}
-        with pytest.raises(SnapshotError, match="could not be enumerated"):
-            walk_grok_source(cfg, strict=True)
 
     def test_generic_dedup_stat_failure_refuses_before_record(self, tmp_path, monkeypatch):
         import mind_meld.manifest as m
@@ -2836,15 +2714,15 @@ class TestSnapshotChangedClassification:
         assert not isinstance(exc.value, SnapshotChanged)
 
     def test_hardlink_replacement_is_not_transient(self, tmp_path):
-        base = tmp_path / "grok"
-        tree = base / "skills"
+        base = tmp_path / "muse"
+        tree = base / "memory"
         tree.mkdir(parents=True)
-        path = tree / "SKILL.md"
+        path = tree / "memo.md"
         path.write_text("ok")
         os.link(path, tree / "alias.md")
         with pytest.raises(SnapshotError) as exc:
             read_file_revision(
-                path, max_file_size=1000, retain_bytes=False, source_type="grok", base=base
+                path, max_file_size=1000, retain_bytes=False, source_type="muse", base=base
             )
         assert not isinstance(exc.value, SnapshotChanged)
 
@@ -2964,7 +2842,6 @@ def _walker_tree(kind, tmp_path):
     root = tmp_path / kind
     sub = {
         "generic": "docs",
-        "grok": "skills",
         "muse": "memory",
         "claude": "projects/p/memory",
     }[kind]
@@ -2978,14 +2855,14 @@ def _walker_tree(kind, tmp_path):
 def _run_walker(kind, root, **kw):
     if kind == "claude":
         return walk_claude_source(root, strict=True, source_name="claude", **kw)
-    walker = {"generic": walk_generic_source, "grok": walk_grok_source, "muse": walk_muse_source}
+    walker = {"generic": walk_generic_source, "muse": walk_muse_source}
     return walker[kind](_walker_cfg(kind, root), strict=True, **kw)
 
 
 class TestWalkerHolds:
     """Track 75A: each walker holds a per-file vanish only when handed a collector."""
 
-    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["generic", "muse"])
     def test_probe_vanish_is_a_hold_with_collector(self, tmp_path, monkeypatch, kind):
         root, tree = _walker_tree(kind, tmp_path)
         target = tree / "flaky.md"
@@ -3004,7 +2881,7 @@ class TestWalkerHolds:
             "flaky.md": "vanished"
         }
 
-    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["generic", "muse"])
     def test_probe_vanish_without_collector_still_refuses(self, tmp_path, monkeypatch, kind):
         root, tree = _walker_tree(kind, tmp_path)
         target = tree / "flaky.md"
@@ -3020,7 +2897,7 @@ class TestWalkerHolds:
             _run_walker(kind, root)
 
     @pytest.mark.parametrize("collector", [False, True])
-    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["generic", "muse"])
     def test_probe_reprobe_that_succeeds_records_the_file(
         self, tmp_path, monkeypatch, kind, collector
     ):
@@ -3059,7 +2936,7 @@ class TestWalkerHolds:
         if holds is not None:
             assert holds.reasons == {}
 
-    @pytest.mark.parametrize("kind", ["generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["generic", "muse"])
     def test_probe_other_oserror_refuses_even_with_collector(self, tmp_path, monkeypatch, kind):
         root, tree = _walker_tree(kind, tmp_path)
         target = tree / "flaky.md"
@@ -3092,7 +2969,7 @@ class TestWalkerHolds:
         assert list(files) == ["docs/keep.md"]
         assert holds.reasons == {}
 
-    @pytest.mark.parametrize("kind", ["claude", "generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["claude", "generic", "muse"])
     def test_still_changing_read_is_held_per_walker(self, tmp_path, monkeypatch, kind):
         import mind_meld.manifest as m
 
@@ -3231,7 +3108,7 @@ class TestScandirHoldCandidates:
 
 
 class TestBuildManifestHolds:
-    @pytest.mark.parametrize("kind", ["claude", "generic", "grok", "muse"])
+    @pytest.mark.parametrize("kind", ["claude", "generic", "muse"])
     def test_collector_receives_holds_per_source_and_manifest_omits_them(
         self, tmp_path, monkeypatch, kind
     ):
@@ -3359,7 +3236,7 @@ def test_retry_confinement_loss_still_refuses(tmp_path, monkeypatch, replacement
     assert not holds.reasons
 
 
-@pytest.mark.parametrize("source_type", ["grok", "muse"])
+@pytest.mark.parametrize("source_type", ["muse"])
 def test_preopen_hardlink_replacement_refuses_before_identity_change(
     tmp_path, monkeypatch, source_type
 ):

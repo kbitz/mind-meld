@@ -113,7 +113,6 @@ class TestReaderOrchestration:
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                grok_consented=True,
                 cursor_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
@@ -128,38 +127,7 @@ class TestReaderOrchestration:
         ]
         # Enabling the leftover wire name does not invent a reader.
         assert [n for n, _ in events_tail._default_host_readers(self._enabled("opencode"))] == []
-        # If this is ever `["grok"]` again, an 18D reader opens ~/.grok with
-        # no opt-in.
         assert [n for n, _ in events_tail._default_host_readers([])] == []
-        grok_only = events_tail._default_host_readers([], grok_consented=True)
-        assert [n for n, _ in grok_only] == ["grok"]
-        grok_source = events_tail._default_host_readers(self._enabled("grok"))
-        assert [n for n, _ in grok_source] == ["grok"]
-        assert events_tail.HOST_READER_SOURCE_GATE["grok"] == "grok"
-
-    def test_consented_grok_reader_passes_consented_true(self, monkeypatch):
-        seen: dict[str, bool] = {}
-
-        def read(*, deadline, consented=False):
-            seen["consented"] = consented
-            return _complete()
-
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
-        readers = events_tail._default_host_readers([], grok_consented=True)
-        readers[0][1](deadline=1_000.0)
-        assert seen == {"consented": True}
-
-    def test_source_authorized_grok_reader_passes_consented_true(self, monkeypatch):
-        seen: dict[str, bool] = {}
-
-        def read(*, deadline, consented=False):
-            seen["consented"] = consented
-            return _complete()
-
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
-        readers = events_tail._default_host_readers(self._enabled("grok"))
-        readers[0][1](deadline=1_000.0)
-        assert seen == {"consented": True}
 
     def test_source_authorized_muse_reader_passes_consented_true(self, monkeypatch):
         seen: dict[str, bool] = {}
@@ -183,7 +151,6 @@ class TestReaderOrchestration:
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
-                grok_consented=True,
                 cursor_consented=True,
             )
         ]
@@ -194,12 +161,7 @@ class TestReaderOrchestration:
         can actually invoke. A key with no reader is a consent check of
         nothing."""
         enabled = self._enabled(*events_tail.HOST_READER_SOURCE_GATE)
-        names = [
-            n
-            for n, _ in events_tail._default_host_readers(
-                enabled, grok_consented=True, cursor_consented=True
-            )
-        ]
+        names = [n for n, _ in events_tail._default_host_readers(enabled, cursor_consented=True)]
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
@@ -210,6 +172,8 @@ class TestReaderOrchestration:
         assert set(_mm_events.ACTIVE_HOST_READERS) <= set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
         assert "opencode" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
         assert "opencode" not in _mm_events.ACTIVE_HOST_READERS
+        assert "grok" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
+        assert "grok" not in _mm_events.ACTIVE_HOST_READERS
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):
         """Module-qualified lookup, so patching ``host_usage.read_codex_usage``
@@ -217,12 +181,10 @@ class TestReaderOrchestration:
         global and the patch would be dead."""
         sentinel = _complete({"codex": {"2026-08-15": _usage(1)}})
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **_kw: sentinel)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **_kw: _complete())
 
         capture = events_tail._capture_host_usage(
             events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                grok_consented=True,
                 cursor_consented=True,
             ),
             deadline=1_000.0,
@@ -392,7 +354,6 @@ class TestReaderOrchestration:
             name
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
-                grok_consented=True,
                 cursor_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
@@ -704,7 +665,7 @@ class TestHostDeadline:
             return _complete()
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", read)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", read)
         _stub_fast_walks(monkeypatch)
 
         import time as _time
@@ -720,7 +681,6 @@ class TestHostDeadline:
             prepare_token_cache=lambda: None,
             host_readers=events_tail._default_host_readers(
                 [{"name": n, "type": "generic"} for n in _mm_events.ACTIVE_HOST_READERS],
-                grok_consented=True,
             ),
         )
         after = _time.monotonic()
@@ -784,14 +744,21 @@ def _sources(
     return sources
 
 
-def _tail_config(sources, *, grok: bool = False) -> dict:
-    config: dict = {"sync": {"sources": sources}}
-    if grok:
-        config["retro"] = {"grok_host_usage": True}
-    return config
+def _tail_config(sources, *, grok: bool = False, muse: bool = False) -> dict:
+    if (grok or muse) and not any(s.get("name") == "muse" for s in sources):
+        parent = Path(sources[0]["path"]).parent if sources else Path("/tmp")
+        sources.append({"name": "muse", "path": str(parent / "muse"), "type": "generic"})
+    return {"sync": {"sources": sources}}
 
 
-def _stub_hosts(monkeypatch, codex=None, grok=None, synth=None, calls: list | None = None):
+def _stub_hosts(
+    monkeypatch,
+    codex=None,
+    grok=None,
+    muse=None,
+    synth=None,
+    calls: list | None = None,
+):
     def make(name, result):
         def read(*, deadline, consented=False):
             if calls is not None:
@@ -803,15 +770,15 @@ def _stub_hosts(monkeypatch, codex=None, grok=None, synth=None, calls: list | No
         return read
 
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", make("codex", codex or _complete()))
-    monkeypatch.setattr(_mm_host_usage, "read_grok_usage", make("grok", grok or _complete()))
+    monkeypatch.setattr(
+        _mm_host_usage, "read_muse_usage", make("muse", muse or grok or _complete())
+    )
     if synth is not None:
         orig = events_tail._default_host_readers
         synth_fn = make(SYNTH, synth)
 
-        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
-            return orig(
-                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
-            ) + ((SYNTH, synth_fn),)
+        def with_synth(sources, *, cursor_consented=False):
+            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth_fn),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -933,20 +900,20 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(10, 1, 2, 3)}}),
-            grok=_complete({"grok": {"2026-08-15": _usage(1, 1, 1, 1)}}),
+            muse=_complete({"muse": {"2026-08-15": _usage(1, 1, 1, 1)}}),
         )
 
         events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {
             "codex": {"2026-08-15": _usage(10, 1, 2, 3)},
-            "grok": {"2026-08-15": _usage(1, 1, 1, 1)},
+            "muse": {"2026-08-15": _usage(1, 1, 1, 1)},
         }
         assert row["active_days"] == ["2026-08-15"]
-        assert row["token_sources"] == ["codex", "grok"]
+        assert row["token_sources"] == ["codex", "muse"]
 
     def test_tail_row_reconciles_at_the_acceptor(self, tmp_path, monkeypatch):
         """End-to-end: the shape the TAIL writes is the shape a peer accepts.
@@ -969,14 +936,14 @@ class TestTailWiring:
                 {"codex": {"2026-08-15": _usage(10, 1, 2, 3)}},
                 {"2026-08-15": {**_usage(10, 1, 2, 3), "by_model": {"gpt-5": _usage(10, 1, 2, 3)}}},
             ),
-            grok=_complete(
-                {"grok": {"2026-08-15": _usage(4, 0, 0, 1)}},
-                {"2026-08-15": {**_usage(4, 0, 0, 1), "by_model": {"grok-4": _usage(4, 0, 0, 1)}}},
+            muse=_complete(
+                {"muse": {"2026-08-15": _usage(4, 0, 0, 1)}},
+                {"2026-08-15": {**_usage(4, 0, 0, 1), "by_model": {"muse-1": _usage(4, 0, 0, 1)}}},
             ),
         )
 
         events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
@@ -985,7 +952,7 @@ class TestTailWiring:
         assert accepted.detail == "present", accepted.detail_reason
         models = accepted.tokens_by_day["2026-08-15"]["by_model"]
         assert models["gpt-5"] == _usage(10, 1, 2, 3)
-        assert models["grok-4"] == _usage(4, 0, 0, 1)
+        assert models["muse-1"] == _usage(4, 0, 0, 1)
 
     def test_incomplete_scan_omits_the_row_but_keeps_every_other_row(
         self, tmp_path, monkeypatch, capsys
@@ -1005,10 +972,10 @@ class TestTailWiring:
                 }
             ],
         )
-        _stub_hosts(monkeypatch, grok=_incomplete("unsupported"))
+        _stub_hosts(monkeypatch, muse=_incomplete("unsupported"))
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         types = [r["type"] for r in _rows(events_root)]
@@ -1016,13 +983,13 @@ class TestTailWiring:
             "content rows must survive a host reader drop; isolation publishes the others"
         )
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert "grok" not in row["token_sources"]
-        assert row["degraded_sources"] == ["grok"]
+        assert "muse" not in row["token_sources"]
+        assert row["degraded_sources"] == ["muse"]
         assert degradations == [
-            "host-usage snapshot skipped (grok unsupported) — "
+            "host-usage snapshot skipped (muse unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok wrote a record this version cannot read. A newer mm may read it: "
-            "run `mm update`, or run `mm disable-source grok` to stop retrying."
+            "muse wrote a record this version cannot read. A newer mm may read it: "
+            "run `mm update`, or run `mm disable-source muse` to stop retrying."
         ]
         assert f"mm: notice: {degradations[0]}" in capsys.readouterr().err
 
@@ -1063,23 +1030,23 @@ class TestTailWiring:
         )
 
         omitted_sources = _sources(events_root, hosts=())
-        _stub_hosts(monkeypatch, grok=_incomplete("unsupported"))
+        _stub_hosts(monkeypatch, muse=_incomplete("unsupported"))
         omitted_degradations = events_tail._run_events_tail(
-            _tail_config(omitted_sources, grok=True),
+            _tail_config(omitted_sources, muse=True),
             omitted_sources,
             "dev-a",
             dry_run=False,
             quiet=True,
         )
         assert omitted_degradations == [
-            "host-usage snapshot skipped (grok unsupported) — "
+            "host-usage snapshot skipped (muse unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok wrote a record this version cannot read. A newer mm may read it: "
-            "run `mm update`, or run `mm disable-source grok` to stop retrying."
+            "muse wrote a record this version cannot read. A newer mm may read it: "
+            "run `mm update`, or run `mm disable-source muse` to stop retrying."
         ]
 
         empty_sources = _sources(events_root, hosts=())
-        _stub_hosts(monkeypatch, grok=_incomplete("no_metadata_ledger"))
+        _stub_hosts(monkeypatch, muse=_incomplete("no_metadata_ledger"))
         assert (
             events_tail._run_events_tail(
                 {"sync": {"sources": empty_sources}},
@@ -1158,19 +1125,19 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(9)}}),
-            grok=_incomplete(reason),
+            muse=_incomplete(reason),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == ["codex"]
-        assert row["degraded_sources"] == ["grok"]
-        assert "grok" not in row["token_sources"]
+        assert row["degraded_sources"] == ["muse"]
+        assert "muse" not in row["token_sources"]
         assert len(degradations) == 1
-        assert degradations[0].startswith(f"host-usage snapshot skipped (grok {reason})")
+        assert degradations[0].startswith(f"host-usage snapshot skipped (muse {reason})")
         # Permanent vs transient: never promise a retry for a failure a later
         # push cannot fix, and never leave a transient one without a next step.
         promises_retry = "mm push" in degradations[0]
@@ -1186,7 +1153,7 @@ class TestTailWiring:
             )
 
     def test_an_absent_source_publishes_a_row_and_no_degradation(self, tmp_path, monkeypatch):
-        """The whole point of the revised premise: a machine whose Grok store
+        """The whole point of the revised premise: a machine whose Muse store
         holds no ledger still publishes its Codex totals, and `mm status` stays
         clean instead of reading `degraded` forever."""
         events_root = tmp_path / "events_root"
@@ -1195,11 +1162,11 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(42)}}),
-            grok=_incomplete("no_metadata_ledger"),
+            muse=_incomplete("no_metadata_ledger"),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
@@ -1207,7 +1174,7 @@ class TestTailWiring:
         assert row["token_sources"] == ["codex"]
         assert degradations == []
 
-    def test_consent_off_never_invokes_grok(self, tmp_path, monkeypatch):
+    def test_consent_off_never_invokes_muse(self, tmp_path, monkeypatch):
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
@@ -1218,90 +1185,68 @@ class TestTailWiring:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
         )
 
-        assert "grok" not in calls
+        assert "muse" not in calls
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert "grok" not in row["token_sources"]
+        assert "muse" not in row["token_sources"]
 
-    def test_pre_success_grok_deadline_drops_grok_and_publishes_others(self, tmp_path, monkeypatch):
+    def test_pre_success_muse_deadline_drops_muse_and_publishes_others(self, tmp_path, monkeypatch):
         """FLIP (Track 31A): degradations used to be empty (carve-out silence).
-        Isolation still publishes Codex, but now NAMES grok."""
+        Isolation still publishes Codex, but now NAMES muse."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(11)}}),
-            grok=_incomplete("deadline"),
+            muse=_incomplete("deadline"),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(11)}}
-        assert "grok" not in row["token_sources"]
-        assert row["degraded_sources"] == ["grok"]
-        assert any("grok deadline" in d for d in degradations)
+        assert "muse" not in row["token_sources"]
+        assert row["degraded_sources"] == ["muse"]
+        assert any("muse deadline" in d for d in degradations)
 
-    def test_post_success_grok_deadline_still_publishes_others(self, tmp_path, monkeypatch):
-        """FLIP: used to omit the row after complete_once latched. Isolation
-        makes the latch irrelevant — Codex publishes, grok is declared."""
-        events_root = tmp_path / "events_root"
-        sources = _sources(events_root)
-        _stub_fast_walks(monkeypatch)
-        _stub_hosts(
-            monkeypatch,
-            codex=_complete({"codex": {"2026-08-15": _usage(11)}}),
-            grok=_incomplete("deadline"),
-        )
-        monkeypatch.setattr(_mm_host_usage, "grok_completed_once", lambda: True)
-
-        degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
-        )
-
-        row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert row["token_sources"] == ["codex"]
-        assert row["degraded_sources"] == ["grok"]
-        assert any("grok deadline" in d for d in degradations)
-
-    def test_grok_only_failure_still_omits_the_row(self, tmp_path, monkeypatch):
-        """FLIP re-derived: grok is the only reader, so no sibling completed
+    def test_muse_only_failure_still_omits_the_row(self, tmp_path, monkeypatch):
+        """FLIP re-derived: muse is the only reader, so no sibling completed
         → still no row. Isolation does not invent a zero."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root, hosts=())
         _stub_fast_walks(monkeypatch)
-        _stub_hosts(monkeypatch, grok=_incomplete("deadline"))
+        _stub_hosts(monkeypatch, muse=_incomplete("deadline"))
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
-        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        assert degradations[0].startswith("host-usage snapshot skipped (muse deadline)")
 
     @pytest.mark.parametrize("reason", ["malformed", "unsupported", "stale"])
-    def test_grok_hard_fail_drops_grok_and_publishes_others(self, tmp_path, monkeypatch, reason):
+    def test_muse_hard_fail_drops_muse_and_publishes_others(self, tmp_path, monkeypatch, reason):
         """FLIP: used to omit the row for malformed/unsupported/stale even
-        pre-latch. Now Codex publishes and grok is declared."""
+        pre-latch. Now Codex publishes and muse is declared."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(11)}}),
-            grok=_incomplete(reason),
+            muse=_incomplete(reason),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(11)}}
-        assert row["degraded_sources"] == ["grok"]
-        assert any(f"grok {reason}" in d for d in degradations)
+        assert row["degraded_sources"] == ["muse"]
+        assert any(f"muse {reason}" in d for d in degradations)
 
     def test_all_readers_fail_omits_the_row(self, tmp_path, monkeypatch):
         """T3-5: isolation does not invent a row when nobody completed."""
@@ -1311,36 +1256,36 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_incomplete("malformed"),
-            grok=_incomplete("unsupported"),
+            muse=_incomplete("unsupported"),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         assert not [r for r in _rows(events_root) if r["type"] == "host-usage-snapshot"]
         assert any("codex malformed" in d for d in degradations)
-        assert any("grok unsupported" in d for d in degradations)
+        assert any("muse unsupported" in d for d in degradations)
 
-    def test_codex_fails_grok_completes_is_symmetric(self, tmp_path, monkeypatch):
-        """T3-8: isolation is per-reader, not Grok-special."""
+    def test_codex_fails_muse_completes_is_symmetric(self, tmp_path, monkeypatch):
+        """T3-8: isolation is per-reader, not Muse-special."""
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
         _stub_hosts(
             monkeypatch,
             codex=_incomplete("unsupported"),
-            grok=_complete({"grok": {"2026-08-15": _usage(3)}}),
+            muse=_complete({"muse": {"2026-08-15": _usage(3)}}),
         )
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert row["token_sources"] == ["grok"]
+        assert row["token_sources"] == ["muse"]
         assert row["degraded_sources"] == ["codex"]
-        assert "grok" not in row["degraded_sources"]
+        assert "muse" not in row["degraded_sources"]
         assert any("codex unsupported" in d for d in degradations)
 
     def test_degraded_sources_is_disjoint_subsequence(self, tmp_path, monkeypatch):
@@ -1351,10 +1296,10 @@ class TestTailWiring:
         _stub_hosts(
             monkeypatch,
             codex=_complete({"codex": {"2026-08-15": _usage(1)}}),
-            grok=_incomplete("unsupported"),
+            muse=_incomplete("unsupported"),
         )
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         universe = list(_mm_events.HOST_USAGE_TOKEN_SOURCES)
@@ -1368,10 +1313,10 @@ class TestTailWiring:
 
     def test_permanent_skip_phrase_carries_a_fix_clause(self):
         """T3-9: permanent branch used to append nothing."""
-        phrase = events_tail._host_skip_phrase("grok", "unsupported", readiness="ready")
+        phrase = events_tail._host_skip_phrase("muse", "unsupported", readiness="ready")
         assert "mm update" in phrase
         assert "Upgrade mm" not in phrase
-        assert "mm disable-source grok" in phrase
+        assert "mm disable-source muse" in phrase
         assert "The next push that uploads a change retries" not in phrase
         assert "; " not in phrase
 
@@ -1390,7 +1335,7 @@ class TestTailWiring:
         )
 
         assert "codex" not in calls, "an un-enabled host store must not be read"
-        assert "grok" not in calls, "Grok is not consulted without opt-in"
+        assert "muse" not in calls, "Muse is not consulted without opt-in"
         assert calls == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == []
@@ -1398,7 +1343,7 @@ class TestTailWiring:
 
     @pytest.mark.parametrize("reason", sorted(get_args(_mm_host_usage.Reason)))
     def test_degradation_phrase_is_safe(self, reason):
-        phrase = events_tail._host_skip_phrase("grok", reason, readiness="ready")
+        phrase = events_tail._host_skip_phrase("muse", reason, readiness="ready")
         assert "content sync and git/session capture unaffected" in phrase
         assert "\x1b" not in phrase
 
@@ -1458,7 +1403,7 @@ class TestColdCacheWarmAndRetry:
             return _complete({"codex": {"2026-08-15": _usage(7)}})
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **_kw: _complete())
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **_kw: _complete())
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
 
     @pytest.mark.parametrize("preinvoke", [False, True])
@@ -1502,7 +1447,7 @@ class TestColdCacheWarmAndRetry:
                 return _incomplete("deadline")
             warm.add(reader)
             clock[0] += 0.4
-            model = "gpt-6-astra" if reader == "codex" else "grok-4.6-build"
+            model = "gpt-6-astra" if reader == "codex" else "muse-1"
             return _complete(
                 {reader: {day: _usage(7)}},
                 {day: {**_usage(7), "by_model": {model: _usage(7)}}},
@@ -1512,25 +1457,25 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(events_tail, "_capture_host_usage", capture)
         monkeypatch.setattr(events_tail, "_merge_warm_retry_capture", merge)
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex"))
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", reader("grok"))
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", reader("muse"))
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm_reader)
         root = tmp_path / "events_root"
-        sources = _sources(root, hosts=("codex", "grok"))
+        sources = _sources(root, hosts=("codex", "muse"))
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
-        retried = ["codex", "grok"] if codex_warm == "complete" else ["grok"]
+        retried = ["codex", "muse"] if codex_warm == "complete" else ["muse"]
         assert calls == (
-            ([] if preinvoke else ["read:codex", "read:grok"]) + ["warm:codex", "warm:grok"]
+            ([] if preinvoke else ["read:codex", "read:muse"]) + ["warm:codex", "warm:muse"]
         )
-        assert merge_sets == [{"codex"}, {"grok"}]
+        assert merge_sets == [{"codex"}, {"muse"}]
         row = next(r for r in _rows(root) if r["type"] == "host-usage-snapshot")
         assert row["token_sources"] == retried
         assert row.get("degraded_sources", []) == ([] if codex_warm == "complete" else ["codex"])
-        assert row["tokens_by_day"][day]["by_model"]["grok-4.6-build"] == _usage(7)
+        assert row["tokens_by_day"][day]["by_model"]["muse-1"] == _usage(7)
         assert len(degradations) == (0 if codex_warm == "complete" else 1)
         err = capsys.readouterr().err
-        assert "reading grok usage beyond [retro] host_usage_interactive_budget_ms" in err
+        assert "reading muse usage beyond [retro] host_usage_interactive_budget_ms" in err
         assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
@@ -1554,10 +1499,10 @@ class TestColdCacheWarmAndRetry:
         assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
-    def test_interactive_push_warms_a_dropped_grok_reader_then_retries(self, tmp_path, monkeypatch):
+    def test_interactive_push_warms_a_dropped_muse_reader_then_retries(self, tmp_path, monkeypatch):
         """X-2: the warm target comes from ``dropped``, not the no-row labels."""
         events_root = tmp_path / "events_root"
-        sources = _sources(events_root, hosts=("codex", "grok"))
+        sources = _sources(events_root, hosts=("codex", "muse"))
         _stub_fast_walks(monkeypatch)
         state = {"warm": False}
         calls: list[str] = []
@@ -1566,8 +1511,8 @@ class TestColdCacheWarmAndRetry:
             calls.append("codex")
             return _complete()
 
-        def grok(*, deadline, consented=False):
-            calls.append("grok")
+        def muse(*, deadline, consented=False):
+            calls.append("muse")
             return _complete() if state["warm"] else _incomplete("deadline")
 
         def synth(*, deadline, consented=False):
@@ -1580,14 +1525,12 @@ class TestColdCacheWarmAndRetry:
             return _complete()
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
-            return orig(
-                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
-            ) + ((SYNTH, synth),)
+        def with_synth(sources, *, cursor_consented=False):
+            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1597,26 +1540,26 @@ class TestColdCacheWarmAndRetry:
 
         assert calls == [
             "codex",
-            "grok",
+            "muse",
             SYNTH,
-            "warm:grok",
+            "warm:muse",
         ]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert row["token_sources"] == ["codex", "grok", SYNTH]
+        assert row["token_sources"] == ["codex", "muse", SYNTH]
         assert "degraded_sources" not in row
 
     def test_warm_retry_preserves_completed_first_pass_readers(self, tmp_path, monkeypatch):
-        """A warm Grok retry must not replace prior completed-reader totals.
+        """A warm Muse retry must not replace prior completed-reader totals.
 
         The second Codex call deliberately raises: retrying every reader and
         replacing the first capture would drop its completed totals. Only the
-        deadline-dropped Grok reader is safe to retry. A synthetic third
+        deadline-dropped Muse reader is safe to retry. A synthetic third
         reader keeps the "completed sibling is not retried" contract
         discriminating past first-vs-second.
         """
         events_root = tmp_path / "events_root"
-        sources = _sources(events_root, hosts=("codex", "grok"))
+        sources = _sources(events_root, hosts=("codex", "muse"))
         _stub_fast_walks(monkeypatch)
         state = {"warm": False}
         calls: list[str] = []
@@ -1627,11 +1570,11 @@ class TestColdCacheWarmAndRetry:
                 raise AssertionError("completed Codex reader must not be retried")
             return _complete({"codex": {"2026-08-15": _usage(3)}})
 
-        def grok(*, deadline, consented=False):
-            calls.append("grok")
+        def muse(*, deadline, consented=False):
+            calls.append("muse")
             if not state["warm"]:
                 return _incomplete("deadline")
-            return _complete({"grok": {"2026-08-15": _usage(5)}})
+            return _complete({"muse": {"2026-08-15": _usage(5)}})
 
         def synth(*, deadline, consented=False):
             calls.append(SYNTH)
@@ -1642,17 +1585,15 @@ class TestColdCacheWarmAndRetry:
         def warm(*, reader):
             calls.append(f"warm:{reader}")
             state["warm"] = True
-            return _complete({"grok": {"2026-08-15": _usage(5)}})
+            return _complete({"muse": {"2026-08-15": _usage(5)}})
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, grok_consented=False, cursor_consented=False):
-            return orig(
-                sources, grok_consented=grok_consented, cursor_consented=cursor_consented
-            ) + ((SYNTH, synth),)
+        def with_synth(sources, *, cursor_consented=False):
+            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1660,22 +1601,22 @@ class TestColdCacheWarmAndRetry:
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["codex", "grok", SYNTH, "warm:grok"]
+        assert calls == ["codex", "muse", SYNTH, "warm:muse"]
         assert degradations == []
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {
             "codex": {"2026-08-15": _usage(7)},
-            "grok": {"2026-08-15": _usage(5)},
+            "muse": {"2026-08-15": _usage(5)},
         }
-        assert row["token_sources"] == ["codex", "grok", SYNTH]
+        assert row["token_sources"] == ["codex", "muse", SYNTH]
         assert "degraded_sources" not in row
 
     def test_warm_retry_keeps_first_pass_data_when_the_reader_still_fails(
         self, tmp_path, monkeypatch
     ):
-        """An unsuccessful retry declares Grok without discarding Codex."""
+        """An unsuccessful retry declares Muse without discarding Codex."""
         events_root = tmp_path / "events_root"
-        sources = _sources(events_root, hosts=("codex", "grok"))
+        sources = _sources(events_root, hosts=("codex", "muse"))
         _stub_fast_walks(monkeypatch)
         calls: list[str] = []
 
@@ -1683,8 +1624,8 @@ class TestColdCacheWarmAndRetry:
             calls.append("codex")
             return _complete({"codex": {"2026-08-15": _usage(3)}})
 
-        def grok(*, deadline, consented=False):
-            calls.append("grok")
+        def muse(*, deadline, consented=False):
+            calls.append("muse")
             return _incomplete("deadline")
 
         def warm(*, reader):
@@ -1692,62 +1633,62 @@ class TestColdCacheWarmAndRetry:
             return _incomplete("deadline")
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", grok)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
         monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
 
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
         )
 
-        assert calls == ["codex", "grok", "warm:grok"]
+        assert calls == ["codex", "muse", "warm:muse"]
         assert len(degradations) == 1
-        assert degradations[0].startswith("host-usage snapshot skipped (grok deadline)")
+        assert degradations[0].startswith("host-usage snapshot skipped (muse deadline)")
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(3)}}
         assert row["token_sources"] == ["codex"]
-        assert row["degraded_sources"] == ["grok"]
+        assert row["degraded_sources"] == ["muse"]
 
     def test_preinvoke_retry_keeps_the_initial_deadline_declarations(self):
         """A retry that never starts cannot replace first-pass outcomes."""
         initial = events_tail.HostUsageCapture(
             {"codex": {"2026-08-15": _usage(3)}},
             token_sources=("codex",),
-            dropped=(("grok", "deadline"), (SYNTH, "deadline")),
+            dropped=(("muse", "deadline"), (SYNTH, "deadline")),
             invoked=True,
         )
-        retry = events_tail.HostUsageCapture(None, "grok", "deadline", invoked=False)
+        retry = events_tail.HostUsageCapture(None, "muse", "deadline", invoked=False)
 
         merged = events_tail._merge_warm_retry_capture(
             initial,
             retry,
             readers=_readers(
                 ("codex", lambda **_kw: _complete()),
-                ("grok", lambda **_kw: _complete()),
+                ("muse", lambda **_kw: _complete()),
                 (SYNTH, lambda **_kw: _complete()),
             ),
-            retried_names={"grok", SYNTH},
+            retried_names={"muse", SYNTH},
         )
 
         assert merged.hosts == {"codex": {"2026-08-15": _usage(3)}}
         assert merged.token_sources == ("codex",)
-        assert merged.dropped == (("grok", "deadline"), (SYNTH, "deadline"))
+        assert merged.dropped == (("muse", "deadline"), (SYNTH, "deadline"))
 
     def test_warm_retry_preserves_first_pass_per_model(self):
         initial = events_tail.HostUsageCapture(
             {"codex": {"2026-08-15": _usage(3)}},
             token_sources=("codex",),
-            dropped=(("grok", "deadline"),),
+            dropped=(("muse", "deadline"),),
             invoked=True,
             tokens_by_day={
                 "2026-08-15": {**_usage(3), "by_model": {"gpt-5": _usage(3)}},
             },
         )
         retry = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(4)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(4)}},
+            token_sources=("muse",),
             invoked=True,
             tokens_by_day={
-                "2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}},
+                "2026-08-15": {**_usage(4), "by_model": {"muse-1": _usage(4)}},
             },
         )
         merged = events_tail._merge_warm_retry_capture(
@@ -1755,15 +1696,15 @@ class TestColdCacheWarmAndRetry:
             retry,
             readers=_readers(
                 ("codex", lambda **_kw: _complete()),
-                ("grok", lambda **_kw: _complete()),
+                ("muse", lambda **_kw: _complete()),
             ),
-            retried_names={"grok"},
+            retried_names={"muse"},
         )
         assert merged.hosts["codex"]["2026-08-15"]["input"] == 3
-        assert merged.hosts["grok"]["2026-08-15"]["input"] == 4
+        assert merged.hosts["muse"]["2026-08-15"]["input"] == 4
         models = merged.tokens_by_day["2026-08-15"]["by_model"]
         assert models["gpt-5"]["input"] == 3
-        assert models["grok-4"]["input"] == 4
+        assert models["muse-1"]["input"] == 4
         assert merged.tokens_by_day["2026-08-15"]["input"] == 7
 
     def test_autopush_never_warms(self, tmp_path, monkeypatch):
@@ -1777,7 +1718,7 @@ class TestColdCacheWarmAndRetry:
         self._flaky_codex(monkeypatch, calls)
 
         degradations = events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=True
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=True
         )
 
         assert calls == ["read-cold"], "autopush must not warm or retry"
@@ -1816,7 +1757,7 @@ class TestColdCacheWarmAndRetry:
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
         calls: list[str] = []
-        _stub_hosts(monkeypatch, grok=_incomplete(reason), calls=calls)
+        _stub_hosts(monkeypatch, muse=_incomplete(reason), calls=calls)
         monkeypatch.setattr(
             _mm_host_usage,
             "warm_host_cache_inline",
@@ -1824,7 +1765,7 @@ class TestColdCacheWarmAndRetry:
         )
 
         events_tail._run_events_tail(
-            _tail_config(sources, grok=True), sources, "dev-a", dry_run=False, quiet=False
+            _tail_config(sources, muse=True), sources, "dev-a", dry_run=False, quiet=False
         )
 
         assert "warm" not in calls
@@ -1848,7 +1789,7 @@ class TestColdCacheWarmAndRetry:
             return _incomplete("deadline")
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", lambda **_kw: _complete())
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **_kw: _complete())
         # The warm runs but cannot finish either.
         monkeypatch.setattr(
             _mm_host_usage, "warm_host_cache_inline", lambda *_a, **_kw: _incomplete("deadline")
@@ -1938,7 +1879,7 @@ class TestHostCaptureDoesNotDisturbTheWalkBudget:
             return _complete()
 
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", slow_read)
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", slow_read)
+        monkeypatch.setattr(_mm_host_usage, "read_muse_usage", slow_read)
 
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=True
@@ -1957,14 +1898,14 @@ class TestPartialDayMerges:
         initial = events_tail.HostUsageCapture(
             {"codex": {"2026-08-15": _usage(3)}},
             token_sources=("codex",),
-            dropped=(("grok", "deadline"),),
+            dropped=(("muse", "deadline"),),
             invoked=True,
             partial_days={"codex": frozenset({"2026-08-15"})},
             partial=("codex",),
         )
         retry = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(4)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(4)}},
+            token_sources=("muse",),
             invoked=True,
         )
         merged = events_tail._merge_warm_retry_capture(
@@ -1972,48 +1913,48 @@ class TestPartialDayMerges:
             retry,
             readers=_readers(
                 ("codex", lambda **_kw: _complete()),
-                ("grok", lambda **_kw: _complete()),
+                ("muse", lambda **_kw: _complete()),
             ),
-            retried_names={"grok"},
+            retried_names={"muse"},
         )
         assert merged.partial == ("codex",)
         assert merged.partial_days["codex"] == frozenset({"2026-08-15"})
-        assert merged.token_sources == ("codex", "grok")
+        assert merged.token_sources == ("codex", "muse")
 
     def test_c2_partial_retry_result_appears(self):
         initial = events_tail.HostUsageCapture(
             {"codex": {"2026-08-15": _usage(3)}},
             token_sources=("codex",),
-            dropped=(("grok", "deadline"),),
+            dropped=(("muse", "deadline"),),
             invoked=True,
         )
         retry = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(4)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(4)}},
+            token_sources=("muse",),
             invoked=True,
-            partial_days={"grok": frozenset({"2026-08-15"})},
-            partial=("grok",),
+            partial_days={"muse": frozenset({"2026-08-15"})},
+            partial=("muse",),
         )
         merged = events_tail._merge_warm_retry_capture(
             initial,
             retry,
             readers=_readers(
                 ("codex", lambda **_kw: _complete()),
-                ("grok", lambda **_kw: _complete()),
+                ("muse", lambda **_kw: _complete()),
             ),
-            retried_names={"grok"},
+            retried_names={"muse"},
         )
-        assert merged.partial == ("grok",)
-        assert merged.partial_days["grok"] == frozenset({"2026-08-15"})
+        assert merged.partial == ("muse",)
+        assert merged.partial_days["muse"] == frozenset({"2026-08-15"})
 
     def test_c3_retry_failure_cannot_erase_initial_partial(self):
         initial = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(3)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(3)}},
+            token_sources=("muse",),
             dropped=(("codex", "deadline"),),
             invoked=True,
-            partial_days={"grok": frozenset({"2026-08-14"})},
-            partial=("grok",),
+            partial_days={"muse": frozenset({"2026-08-14"})},
+            partial=("muse",),
         )
         retry = events_tail.HostUsageCapture(None, "codex", "deadline", invoked=True)
         merged = events_tail._merge_warm_retry_capture(
@@ -2021,64 +1962,64 @@ class TestPartialDayMerges:
             retry,
             readers=_readers(
                 ("codex", lambda **_kw: _complete()),
-                ("grok", lambda **_kw: _complete()),
+                ("muse", lambda **_kw: _complete()),
             ),
             retried_names={"codex"},
         )
-        assert merged.partial == ("grok",)
-        assert merged.partial_days["grok"] == frozenset({"2026-08-14"})
+        assert merged.partial == ("muse",)
+        assert merged.partial_days["muse"] == frozenset({"2026-08-14"})
         assert merged.hosts is not None
 
     def test_c4_merge_is_set_union_then_canonical_rebuild(self):
         initial = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(3)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(3)}},
+            token_sources=("muse",),
             invoked=True,
-            partial_days={"grok": frozenset({"2026-08-15"})},
-            partial=("grok",),
+            partial_days={"muse": frozenset({"2026-08-15"})},
+            partial=("muse",),
         )
         retry = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-16": _usage(1)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-16": _usage(1)}},
+            token_sources=("muse",),
             invoked=True,
-            partial_days={"grok": frozenset({"2026-08-15"})},
-            partial=("grok",),
+            partial_days={"muse": frozenset({"2026-08-15"})},
+            partial=("muse",),
         )
         merged = events_tail._merge_warm_retry_capture(
             initial,
             retry,
-            readers=_readers(("grok", lambda **_kw: _complete())),
-            retried_names={"grok"},
+            readers=_readers(("muse", lambda **_kw: _complete())),
+            retried_names={"muse"},
         )
-        assert merged.partial == ("grok",)
-        assert merged.partial != ("grok", "grok")
+        assert merged.partial == ("muse",)
+        assert merged.partial != ("muse", "muse")
 
     def test_c5_merge_does_not_alias_input_maps(self):
-        initial_days = {"grok": frozenset({"2026-08-15"})}
-        retry_days = {"grok": frozenset({"2026-08-16"})}
+        initial_days = {"muse": frozenset({"2026-08-15"})}
+        retry_days = {"muse": frozenset({"2026-08-16"})}
         initial = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-15": _usage(3)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-15": _usage(3)}},
+            token_sources=("muse",),
             invoked=True,
             partial_days=initial_days,
-            partial=("grok",),
+            partial=("muse",),
         )
         retry = events_tail.HostUsageCapture(
-            {"grok": {"2026-08-16": _usage(1)}},
-            token_sources=("grok",),
+            {"muse": {"2026-08-16": _usage(1)}},
+            token_sources=("muse",),
             invoked=True,
             partial_days=retry_days,
-            partial=("grok",),
+            partial=("muse",),
         )
         merged = events_tail._merge_warm_retry_capture(
             initial,
             retry,
-            readers=_readers(("grok", lambda **_kw: _complete())),
-            retried_names={"grok"},
+            readers=_readers(("muse", lambda **_kw: _complete())),
+            retried_names={"muse"},
         )
-        initial_days["grok"] = frozenset()
+        initial_days["muse"] = frozenset()
         retry_days.clear()
-        assert merged.partial_days["grok"] == frozenset({"2026-08-15", "2026-08-16"})
+        assert merged.partial_days["muse"] == frozenset({"2026-08-15", "2026-08-16"})
 
     def test_c6_bucket_helper_never_sees_reader_identity(self):
         params = inspect.signature(events_tail._merge_host_usage_maps).parameters
@@ -2088,18 +2029,18 @@ class TestPartialDayMerges:
         assert "reader" not in params
 
     def test_c7_capture_copies_reader_partial_days(self):
-        grok = _complete(
-            {"grok": {"2026-08-15": _usage(4)}},
-            {"2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}}},
+        muse = _complete(
+            {"muse": {"2026-08-15": _usage(4)}},
+            {"2026-08-15": {**_usage(4), "by_model": {"muse-1": _usage(4)}}},
             partial_days=frozenset({"2026-08-15"}),
         )
         capture = events_tail._capture_host_usage(
-            _readers(("grok", lambda **_kw: grok)),
+            _readers(("muse", lambda **_kw: muse)),
             deadline=1_000.0,
             now=lambda: 0.0,
         )
-        assert capture.partial_days["grok"] == frozenset({"2026-08-15"})
-        assert capture.partial == ("grok",)
+        assert capture.partial_days["muse"] == frozenset({"2026-08-15"})
+        assert capture.partial == ("muse",)
 
     def test_c8_tail_writes_partial_sources_on_the_snapshot_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2109,21 +2050,21 @@ class TestPartialDayMerges:
         _stub_fast_walks(monkeypatch)
         _stub_hosts(
             monkeypatch,
-            grok=_complete(
-                {"grok": {"2026-08-15": _usage(4)}},
-                {"2026-08-15": {**_usage(4), "by_model": {"grok-4": _usage(4)}}},
+            muse=_complete(
+                {"muse": {"2026-08-15": _usage(4)}},
+                {"2026-08-15": {**_usage(4), "by_model": {"muse-1": _usage(4)}}},
                 partial_days=frozenset({"2026-08-15"}),
             ),
         )
         events_tail._run_events_tail(
-            _tail_config(sources, grok=True),
+            _tail_config(sources, muse=True),
             sources,
             "dev-a",
             dry_run=False,
             quiet=True,
         )
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
-        assert row["partial_sources"] == ["grok"]
+        assert row["partial_sources"] == ["muse"]
 
     def test_c9_git_snapshot_rows_carry_git_capture(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2156,7 +2097,7 @@ if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_partial_takes_the_retry_sentence_not_warming(reader):
     phrase = events_tail._host_skip_phrase(reader, "partial", readiness="ready")
     assert phrase.endswith(
@@ -2176,7 +2117,7 @@ def test_cursor_deadline_reports_retained_runs():
     assert "run files" not in phrase
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_deadline_names_bounded_interactive_warm(reader):
     phrase = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
     assert "An attended mm push can warm cold readers" in phrase
@@ -2195,9 +2136,9 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
         calls.append("codex-bounded")
         return _incomplete("deadline")
 
-    def grok(*, deadline):
-        calls.append("grok-bounded")
-        return _complete({"grok": {day: _usage(3)}})
+    def muse(*, deadline):
+        calls.append("muse-bounded")
+        return _complete({"muse": {day: _usage(3)}})
 
     def warm(*, reader):
         assert reader == "codex"
@@ -2217,7 +2158,7 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
         )
 
     monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
-    readers = (("codex", codex), ("grok", grok)) if mixed else (("codex", codex),)
+    readers = (("codex", codex), ("muse", muse)) if mixed else (("codex", codex),)
     capture, rows = events_tail._capture_host_snapshot(
         "dev-a",
         readers,
@@ -2225,12 +2166,12 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
         warm_host_cache=events_tail._warm_host_cache_with_notice,
     )
     assert calls == (
-        ["codex-bounded", "grok-bounded", "codex-warm"]
+        ["codex-bounded", "muse-bounded", "codex-warm"]
         if mixed
         else ["codex-bounded", "codex-warm"]
     )
     if mixed:
-        assert rows[0]["hosts"]["grok"][day] == _usage(3)
+        assert rows[0]["hosts"]["muse"][day] == _usage(3)
     if outcome in {"usage", "partial"}:
         assert rows[0]["hosts"]["codex"][day] == _usage(7)
         assert rows[0]["tokens_by_day"][day]["by_model"]["gpt-5"] == _usage(7)
@@ -2250,7 +2191,7 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
         assert "host reader codex raised: RuntimeError" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize("verb", ["push", "init"])
 @pytest.mark.parametrize("in_diag", [False, True])
 @pytest.mark.parametrize("evidence_state", ["absent", "unknown", "known"])
@@ -2275,7 +2216,7 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert f"this {verb}'s read budget" in phrase
         assert "An attended mm push can warm cold readers" in phrase
     else:
-        unit = "ledgers" if reader == "grok" else "rollouts"
+        unit = "session logs" if reader == "muse" else "rollouts"
         assert (
             "raise `[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage"
             in phrase
@@ -2290,7 +2231,7 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert "`mm diag`" not in phrase
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_attended_deadline_does_not_promise_escaping_its_own_budget(reader):
     background = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
     attended = events_tail._host_skip_phrase(reader, "deadline", readiness="ready", attended=True)
@@ -2344,9 +2285,6 @@ def test_cursor_gate_none_requires_own_consent(monkeypatch):
     source = [{"name": "cursor", "path": "/unused", "type": "generic"}]
     assert events_tail.HOST_READER_SOURCE_GATE["cursor"] is None
     assert events_tail._default_host_readers(source) == ()
-    assert [n for n, _ in events_tail._default_host_readers(source, grok_consented=True)] == [
-        "grok"
-    ]
     seen = []
 
     def read(*, deadline, consented):
@@ -2452,10 +2390,6 @@ def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path
         notices.append((message, degraded))
 
     readers = (
-        (
-            host_usage.GROK_CACHE_PATH,
-            lambda: host_usage.read_grok_usage(root=tmp_path / "no-grok", consented=True),
-        ),
         (
             host_usage.MUSE_CACHE_PATH,
             lambda: host_usage.read_muse_usage(root=tmp_path / "no-muse", consented=True),

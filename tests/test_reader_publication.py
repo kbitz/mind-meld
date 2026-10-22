@@ -20,13 +20,13 @@ def host_row(*, hosts=None, **kwargs):
     return events.make_host_usage_snapshot(
         device="local",
         hosts={"other": {TODAY: token_usage.zero_model_bucket()}} if hosts is None else hosts,
-        token_sources=["codex", "grok"],
+        token_sources=["codex", "agy"],
         ts=NOW,
         **kwargs,
     )
 
 
-def publication(row, readers=("codex", "grok")):
+def publication(row, readers=("codex", "agy")):
     _key, projected = aggregator.local_host_capture_candidate(row, until=NOW)
     scan = events.EventScan(rows={"host-usage-snapshot": projected})
     return events.project_host_publication(scan, readers, None, now=NOW)
@@ -35,11 +35,11 @@ def publication(row, readers=("codex", "grok")):
 @pytest.mark.parametrize(
     "hosts,usage_days,expected",
     [
-        (None, {"codex": [TODAY], "grok": []}, ["grok"]),
-        ({}, {"codex": [], "grok": []}, ["codex", "grok"]),
-        (None, {"codex": [TODAY], "grok": [TODAY]}, []),
+        (None, {"codex": [TODAY], "agy": []}, ["agy"]),
+        ({}, {"codex": [], "agy": []}, ["codex", "agy"]),
+        (None, {"codex": [TODAY], "agy": [TODAY]}, []),
         (None, None, None),
-        ({}, None, ["codex", "grok"]),
+        ({}, None, ["codex", "agy"]),
     ],
 )
 def test_reader_empty_presence_and_legacy_inference(hosts, usage_days, expected):
@@ -47,7 +47,7 @@ def test_reader_empty_presence_and_legacy_inference(hosts, usage_days, expected)
     assert ("empty_sources" in row) == (usage_days is not None)
     pub = publication(row)
     assert pub["empty_readers"] == expected
-    assert pub["readers"] == {"codex": "contributed", "grok": "contributed"}
+    assert pub["readers"] == {"codex": "contributed", "agy": "contributed"}
     assert pub["empty"] == (hosts == {})
     assert not pub["coverage_invalid"]
 
@@ -57,9 +57,9 @@ def test_reader_empty_presence_and_legacy_inference(hosts, usage_days, expected)
     [
         (None, ["bad\x1b[2J"], []),
         (None, ["future_reader"], []),
-        (None, ["codex", "grok"], []),
+        (None, ["codex", "agy"], []),
         ({}, [], []),
-        ({}, ["grok"], []),
+        ({}, ["agy"], []),
         (None, ["codex"], ["codex"]),
         (None, None, []),
     ],
@@ -72,14 +72,14 @@ def test_invalid_empty_claim_drops_field_keeps_row_and_legacy_fallback(hosts, em
     assert accepted.empty_reason == "invalid_coverage"
     pub = publication(row)
     assert pub["coverage_invalid"]
-    assert pub["empty_readers"] == (["codex", "grok"] if hosts == {} else None)
+    assert pub["empty_readers"] == (["codex", "agy"] if hosts == {} else None)
     assert "bad" not in json.dumps(pub)
 
 
 def test_empty_names_intersect_consent_and_live_reader_allowlist():
-    row = {**host_row(hosts={}), "token_sources": ["codex", "grok", "future_reader"]}
+    row = {**host_row(hosts={}), "token_sources": ["codex", "agy", "future_reader"]}
     row["empty_sources"] = row["token_sources"]
-    assert publication(row, ("grok", "future_reader"))["empty_readers"] == ["grok"]
+    assert publication(row, ("agy", "future_reader"))["empty_readers"] == ["agy"]
 
 
 def test_reader_days_trim_with_partial_days_and_count_zero_buckets():
@@ -88,15 +88,15 @@ def test_reader_days_trim_with_partial_days_and_count_zero_buckets():
             "codex": {OLD: token_usage.zero_model_bucket()},
             "other": {TODAY: token_usage.zero_model_bucket()},
         },
-        usage_days={"codex": [OLD], "grok": [TODAY]},
+        usage_days={"codex": [OLD], "agy": [TODAY]},
         partial_days={"codex": [OLD]},
         max_days=1,
     )
     assert row["empty_sources"] == ["codex"]
     assert "partial_sources" not in row
-    assert events.host_reader_outcomes(row, ["codex", "grok"]) == {
+    assert events.host_reader_outcomes(row, ["codex", "agy"]) == {
         "codex": "empty",
-        "grok": "contributed",
+        "agy": "contributed",
     }
 
 
@@ -113,7 +113,7 @@ def test_production_capture_preserves_day_sets_through_warm_retry(monkeypatch):
                 {"other": {TODAY: token_usage.zero_model_bucket()}}, complete=True
             ),
         ),
-        ("grok", lambda **kw: host_usage.HostUsageResult({}, complete=False, reason="deadline")),
+        ("agy", lambda **kw: host_usage.HostUsageResult({}, complete=False, reason="deadline")),
     )
     capture, rows = events_tail._capture_host_snapshot(
         "local",
@@ -121,16 +121,16 @@ def test_production_capture_preserves_day_sets_through_warm_retry(monkeypatch):
         host_budget_ms=500,
         warm_host_cache=lambda name: None,
     )
-    assert capture.usage_days == {"codex": frozenset({TODAY}), "grok": frozenset()}
-    assert rows[0]["empty_sources"] == ["grok"]
+    assert capture.usage_days == {"codex": frozenset({TODAY}), "agy": frozenset()}
+    assert rows[0]["empty_sources"] == ["agy"]
 
 
 def test_empty_presence_list_and_invalid_reason_break_ties_deterministically():
     rows = [
         host_row(),
-        host_row(usage_days={"codex": [TODAY], "grok": [TODAY]}),
-        host_row(usage_days={"codex": [TODAY], "grok": []}),
-        {**host_row(), "empty_sources": ["grok", "codex"]},
+        host_row(usage_days={"codex": [TODAY], "agy": [TODAY]}),
+        host_row(usage_days={"codex": [TODAY], "agy": []}),
+        {**host_row(), "empty_sources": ["agy", "codex"]},
     ]
     candidates = [aggregator.local_host_capture_candidate(row, until=NOW) for row in rows]
     assert len({key for key, _ in candidates}) == len(rows)
@@ -140,7 +140,7 @@ def test_empty_presence_list_and_invalid_reason_break_ties_deterministically():
 
 
 def test_receipt_single_open_exhausts_and_normalizes_row(tmp_path, monkeypatch):
-    row = {**host_row(), "token_sources": ("codex", "grok")}
+    row = {**host_row(), "token_sources": ("codex", "agy")}
     path = tmp_path / "local.jsonl"
     payload = (json.dumps(row) + '\n{"later":true}\n').encode()
     path.write_bytes(payload)
@@ -256,7 +256,7 @@ def test_accepted_oversized_bytes_are_unverified_in_receipt_and_status(tmp_path,
         },
     )
     assert len(scan.files["host-usage-snapshot"]) == 2
-    pub = events.project_host_publication(scan, ["codex", "grok"], manifest, now=NOW)
+    pub = events.project_host_publication(scan, ["codex", "agy"], manifest, now=NOW)
     assert pub["publication"] == "unverified"
     assert pub["publication_reason"] == "oversized-line"
 
@@ -410,11 +410,11 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
     from mind_meld import attemptlog
 
     row = host_row(
-        usage_days={"codex": [TODAY], "grok": [] if example == "mixed-empty" else [TODAY]}
+        usage_days={"codex": [TODAY], "agy": [] if example == "mixed-empty" else [TODAY]}
     )
     outcomes = {
         "codex": "contributed",
-        "grok": "empty" if example == "mixed-empty" else "contributed",
+        "agy": "empty" if example == "mixed-empty" else "contributed",
     }
     attempt = attemptlog.CaptureOutcome(attempted_at=NOW.isoformat(), readers=outcomes)
     attempt.appended = (tmp_path / "day.jsonl", row)
@@ -422,7 +422,7 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
     if example == "failed-refresh":
         row["ts"] = (NOW - timedelta(hours=1)).isoformat()
         attempt.appended = None
-        attempt.readers = {"codex": "dropped:unsupported", "grok": "dropped:deadline"}
+        attempt.readers = {"codex": "dropped:unsupported", "agy": "dropped:deadline"}
         attempt.finish("no-row")
     if example == "unverified":
         attempt.finish("unverified", "oversized-line")
@@ -436,7 +436,7 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
             publication="unverified",
             publication_reason="oversized-line",
         )
-    state.update(attemptlog.project(["codex", "grok"], state["ts"]))
+    state.update(attemptlog.project(["codex", "agy"], state["ts"]))
     monkeypatch.setattr(events_tail, "host_read_age", lambda timestamp: "0 s ago")
     output = io.StringIO()
     # Height must be set too: on a dumb terminal Rich ignores width alone and

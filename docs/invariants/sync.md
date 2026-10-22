@@ -13,7 +13,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/cli.py` — `_register_and_save` / `_quarantine_corrupt_manifest` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/cli.py` — `_prove_omitted_paths_absent` / `_warn_push_growth` / `_freeze_nested_checkout_entries` / `_drop_unfrozen_checkout_files` / `_incoming_nested_roots` / `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
@@ -302,7 +302,7 @@ narrowing that tuple fails a test.
 
 Publishing scans (`_push_core`, including the mm-events rescan) use strict mode: directory enumeration, classification, descriptor identity, and hash errors raise `SnapshotError` instead of omitting the path. Status also uses strict mode to avoid a falsely healthy comparison; other diagnostic walkers stay permissive. A published entry's digest and size describe the accepted file bytes and mtime describes that same observed revision. This is not a filesystem-wide atomic snapshot.
 
-**One changing file is held, not a refusal (Track 75A).** `SnapshotChanged(SnapshotError)` (`errors.py`, with `reason` `changed`, `vanished` or `grew`) is the only transient snapshot exception. It comes from `read_file_revision` and `_upload_changed_blobs`, classified at the raise site and never by message text. The reader reports changed, vanished or grew past `max_file_size` *while being read*: a file under the cap at its pre-open lstat and over it at the descriptor is `grew`; over it at both is the unchanged `_FileTooLarge` skip. The per-file lstat in the grok, muse and generic loops separately re-probes `FileNotFoundError` once, then records `vanished` directly when a collector is present or raises plain `SnapshotError` without one. Everything else stays a plain `SnapshotError` and refuses the whole push, so a retry that lands in one of them refuses instead of holding: could not be read, directory enumeration (including a discovered directory that vanishes and `.extend-root` marker discovery), confinement (symlink, non-regular file, hardlink privacy), missing previously published roots, and still-present omissions. The subclass keeps every `except SnapshotError` handler, pull's included, unchanged.
+**One changing file is held, not a refusal (Track 75A).** `SnapshotChanged(SnapshotError)` (`errors.py`, with `reason` `changed`, `vanished` or `grew`) is the only transient snapshot exception. It comes from `read_file_revision` and `_upload_changed_blobs`, classified at the raise site and never by message text. The reader reports changed, vanished or grew past `max_file_size` *while being read*: a file under the cap at its pre-open lstat and over it at the descriptor is `grew`; over it at both is the unchanged `_FileTooLarge` skip. The per-file lstat in the muse and generic loops separately re-probes `FileNotFoundError` once, then records `vanished` directly when a collector is present or raises plain `SnapshotError` without one. Everything else stays a plain `SnapshotError` and refuses the whole push, so a retry that lands in one of them refuses instead of holding: could not be read, directory enumeration (including a discovered directory that vanishes and `.extend-root` marker discovery), confinement (symlink, non-regular file, hardlink privacy), missing previously published roots, and still-present omissions. The subclass keeps every `except SnapshotError` handler, pull's included, unchanged.
 
 Each site re-reads **once**, counted exactly: scan read 1 in `_record_file`, immediate read 2; upload read 1 is the verify read, read 2 is deferred to the end of that source's upload loop (the other uploads are the settle delay; no sleep; there is no read 3). A verified read 2 publishes *its own* revision, which need not equal read 1 or the scan: at upload its blob is keyed by its own digest and `_upload_changed_blobs` returns the replacement entry in `UploadOutcome.patches` (a read-2 digest equal to the scanned one is an idempotent put plus an mtime-only republish, no special case). A file still changing after read 2 is **held** when the caller passed a collector (`build_manifest_v2(held=..., held_candidates=...)`, opt-in like `nested_roots`; status and diff pass none, and a transient without one raises after its retry). A hold leaves the previously published version in place: the file keeps its accepted prior entry (no upload, no tombstone), or, if it was never published, is left out. Only the accepted prior entry is ever carried, never a first-scan revision: that revision's blob is not stored until the upload loop, so carrying it would publish a dangling entry. The same file is therefore never both held and re-uploaded, and a held scan path reads as unchanged and cannot be held again at upload.
 
@@ -671,11 +671,15 @@ warning and attended migration prompt, which re-adds it by default.
 Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source
 names to skip on this device only (config.toml is per-machine, never synced).
 `get_sources()` filters by name after resolution and before the path-existence
-filter. The default `grok` source (`type: "grok"`) is Claude-shaped: the walker
-hardcodes `skills/`, `commands/`, and `rules/` at `~/.grok`. The fallback and
-auto-detect paths only activate it when one of those dirs exists — `~/.grok`
-itself is present on every Grok install and is not consent. The default
-`muse` source (`type: "muse"`) has the same walker shape (`memory/` hardcoded
+filter. Retired source names (`RETIRED_SOURCE_NAMES = frozenset({"grok", "opencode"})`)
+are dropped silently so old configs and peer manifests continue working without
+minting deletion tombstones. The default `agy` source (`type: "generic"`) syncs
+`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md` at `~/.gemini/config`, excluding
+`agents/`, `mcp_config.json`, `hooks.json`, `skills.json`, and `projects/`. Like
+`muse`, it never auto-activates on legacy configs without explicit `[[sync.sources]]`
+opt-in; `mm init` and `mm reconfigure-sources` treat it as detected/available
+when either `~/.gemini/config` or `agy_sessions_root()` exists. The default
+`muse` source (`type: "muse"`) has its own walker shape (`memory/` hardcoded
 at `~/.local/share/muse`, `.muse-memory.lock` excluded on push and pull) but
 never auto-activates: Muse creates `memory/` itself on first run, so neither
 the data root nor that tree is consent. Only `mm enable-source muse`, or an

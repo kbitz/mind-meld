@@ -874,7 +874,6 @@ def test_every_extracted_module_has_a_routing_row() -> None:
         "skill_link.py",
         "retention.py",
         "conflictmtime.py",
-        "host_skill_discovery.py",
         "gitenv.py",
     ):
         assert f"`{mod}:" in table, f"{mod} has no routing row — Group 17 would fly blind"
@@ -991,20 +990,11 @@ _DIAG_JSON_TOP_LEVEL = (
     "last_attended_runs",
     "sync_run_projection",
     "skill_links",
-    "host_skill_discovery",
     "host_usage",
     "host_read_budgets",
     "host_publication",
     "discovery",
     "git_capture",
-)
-_HOST_SKILL_DISCOVERY_FIELDS = (
-    "host",
-    "status",
-    "claude_skills_compat",
-    "retro_fleet_resolved",
-    "retro_fleet_path",
-    "grok_version",
 )
 _SKILL_LINKS_ROW_FIELDS = (
     "key",
@@ -1037,8 +1027,7 @@ def test_readme_diag_json_fields_match_emitted_keys() -> None:
     """README's documented `mm diag --json` field list must match the code.
 
     Nothing enforced this, so README.md's troubleshooting entry could name
-    fields `_collect_diag_state` no longer emits, or omit a new sibling key
-    like `host_skill_discovery`.
+    fields `_collect_diag_state` no longer emits, or omit a new sibling key.
     """
     emitted = _collect_diag_state_keys()
     assert emitted == set(_DIAG_JSON_TOP_LEVEL), (
@@ -1049,8 +1038,6 @@ def test_readme_diag_json_fields_match_emitted_keys() -> None:
     assert "`mm diag --json`" in readme
     missing_top = [k for k in _DIAG_JSON_TOP_LEVEL if f"`{k}`" not in readme]
     assert missing_top == [], f"README does not name mm diag --json top-level keys {missing_top}"
-    missing_hsd = [k for k in _HOST_SKILL_DISCOVERY_FIELDS if f"`{k}`" not in readme]
-    assert missing_hsd == [], f"README does not name host_skill_discovery fields {missing_hsd}"
     missing_rows = [k for k in _SKILL_LINKS_ROW_FIELDS if f"`{k}`" not in readme]
     assert missing_rows == [], f"README does not name skill_links row fields {missing_rows}"
 

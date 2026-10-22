@@ -104,7 +104,7 @@ def _enable_capture_sources(tmp_path, *, readers):
             continue
         root = tmp_path / name
         root.mkdir(exist_ok=True)
-        hardcoded = name in ("grok", "muse")
+        hardcoded = name == "muse"
         cfg["sync"]["sources"].append(
             {
                 "name": name,
@@ -120,7 +120,7 @@ def _enable_capture_sources(tmp_path, *, readers):
     "state", ["ready", "disabled", "unavailable", "default-missing", "no-reader", "unknown"]
 )
 @pytest.mark.parametrize("inventory", ["deadline", "rebuild", "warming", "unsupported"])
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_capture_remedies_respect_readiness_without_bootstrapping(
     tmp_path, monkeypatch, state, inventory, reader
 ):
@@ -156,7 +156,7 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
         "files_cached": 1,
         "files_on_disk": 3,
     }
-    monkeypatch.setattr(host_usage, f"{reader}_usage_diag", lambda: cache_state)
+    monkeypatch.setattr(host_usage, f"{reader}_usage_diag", lambda **_kw: cache_state)
     before = root.exists()
     commands = ["diag"] if state == "unknown" else ["status", "diag"]
     expected = "ready" if state == "default-missing" else state
@@ -201,7 +201,7 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
                 assert "No host reader is consented" in flat
                 assert "Usage capture unavailable" in flat
                 assert "mm enable-source codex" in flat
-                assert "mm enable-source grok" in flat
+                assert "mm enable-source muse" in flat
         assert root.exists() == before
     diag = runner.invoke(app, ["diag", "--json"])
     assert diag.exit_code == 0, diag.output
@@ -214,11 +214,11 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
 def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkeypatch, other):
     _setup(tmp_path, monkeypatch)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-    _enable_capture_sources(tmp_path, readers=("codex", "grok"))
+    _enable_capture_sources(tmp_path, readers=("codex", "muse"))
     monkeypatch.setattr(
         host_usage,
-        "grok_usage_diag",
-        lambda: {
+        "muse_usage_diag",
+        lambda **_kw: {
             "last_reason": "unsupported",
             "complete_once": False,
             "usage_less_skipped": 0,
@@ -247,14 +247,14 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
         assert "mm push" not in flat
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_unconsented_cached_reader_does_not_deny_siblings_consent(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)
-    _enable_capture_sources(tmp_path, readers=("grok" if reader == "codex" else "codex",))
+    _enable_capture_sources(tmp_path, readers=("muse" if reader == "codex" else "codex",))
     monkeypatch.setattr(
         host_usage,
         f"{reader}_usage_diag",
-        lambda: {
+        lambda **_kw: {
             "last_reason": "deadline",
             "complete_once": False,
             "usage_less_skipped": 0,
@@ -305,12 +305,14 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
     daydir.mkdir(parents=True)
     codex = tmp_path / "codex"
     codex.mkdir()
+    muse = tmp_path / "muse"
+    muse.mkdir()
     cfg = load_config()
     cfg["sync"]["sources"] = [
         {"name": "mm-events", "path": str(root), "type": "generic", "include_dirs": ["events"]},
         {"name": "codex", "path": str(codex), "type": "generic"},
+        {"name": "muse", "path": str(muse), "type": "muse"},
     ]
-    cfg["retro"] = {"grok_host_usage": True}
     save_config(cfg)
     now = datetime.now(timezone.utc)
     ts = now - timedelta(days=5) if mode in ("stale", "unreadable") else now
@@ -319,7 +321,7 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
             device="not-trusted",
             hosts={},
             ts=ts,
-            token_sources=["grok"] if mode == "degraded" else ["codex", "grok"],
+            token_sources=["muse"] if mode == "degraded" else ["codex", "muse"],
             degraded_sources=["codex"] if mode == "degraded" else [],
         )
         (daydir / f"mac-a-{ts.date()}.jsonl").write_text(json.dumps(row) + "\n")
@@ -368,7 +370,7 @@ def test_host_publication_states_on_both_surfaces(tmp_path, monkeypatch, mode):
         assert "Host usage last recorded capture" in flat
         assert "Last recorded attended attempt: unknown" in flat
         assert flat.index("Host usage last recorded capture") < flat.index(
-            "Grok usage capture" if command == ["status"] else "grok consented"
+            "Muse usage capture" if command == ["status"] else "muse consented"
         )
         if mode == "empty":
             assert "completed, no usage" in flat
@@ -539,7 +541,6 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "storage_inventory",
         "last_autorun",
         "skill_links",
-        "host_skill_discovery",
         "host_usage",
         "host_read_budgets",
         "host_publication",
@@ -547,8 +548,8 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
         "git_capture",
     ):
         assert section in payload, f"missing {section}"
-    grok_hu = payload["host_usage"]["grok"]
-    assert set(grok_hu) == {
+    muse_hu = payload["host_usage"]["muse"]
+    assert set(muse_hu) == {
         "consented",
         "complete_once",
         "usage_less_skipped",
@@ -582,7 +583,7 @@ def test_diag_json_includes_all_expected_sections(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize(
     "reason,since,version,expected_reason,expected_since",
     [
@@ -605,12 +606,13 @@ def test_diag_blocker_fields_are_validated_and_rendered(
 ):
     _setup(tmp_path, monkeypatch)
     _enable_capture_sources(tmp_path, readers=(reader,))
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
         json.dumps(
             {
                 "version": version,
+                "muse_format": 2,
                 "files": {},
                 "complete_once": True,
                 "last_reason": reason,
@@ -627,9 +629,9 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     assert plain.exit_code == 0, plain.output
     text = " ".join(plain.output.split())
     assert f"{reader} cache inventory:" in text
-    if reader == "grok" and version != host_usage.CACHE_VERSION:
-        assert "grok ledgers cached: unknown of" in text
-        assert "grok usage read blocker:" not in text
+    if reader == "muse" and version != host_usage.CACHE_VERSION:
+        assert "muse session logs cached: unknown of" in text
+        assert "muse usage read blocker:" not in text
         return
     assert f"{reader} usage read blocker:" in text
     if expected_reason is None:
@@ -647,11 +649,11 @@ def test_diag_blocker_fields_are_validated_and_rendered(
     assert "\x1b" not in plain.output
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize("state", ["missing", "unreadable"])
 def test_diag_omits_blocker_line_when_cache_is_not_ok(tmp_path, monkeypatch, reader, state):
     _setup(tmp_path, monkeypatch)
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     if state == "unreadable":
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text("{broken")
@@ -661,12 +663,12 @@ def test_diag_omits_blocker_line_when_cache_is_not_ok(tmp_path, monkeypatch, rea
     assert "blocker: none" not in result.output
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_diag_legacy_root_emits_null_blocker_fields(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"version": 1, "files": {}}))
+    cache.write_text(json.dumps({"version": 1, "muse_format": 2, "files": {}}))
     before = cache.read_bytes()
     result = runner.invoke(app, ["diag", "--json"])
     assert result.exit_code == 0, result.output
@@ -679,10 +681,11 @@ def test_diag_legacy_root_emits_null_blocker_fields(tmp_path, monkeypatch, reade
 def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
     """Diag counts ledger paths but never opens their contents."""
     _setup(tmp_path, monkeypatch)
-    ledger = tmp_path / "grok-sessions" / "workspace" / "session" / "updates.jsonl"
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    ledger = tmp_path / "muse-logs" / "2026" / "10" / "22" / "session-1" / "session.jsonl"
     ledger.parent.mkdir(parents=True)
     ledger.write_text("not a log to parse")
-    monkeypatch.setattr(host_usage, "GROK_SESSIONS_PATH", ledger.parents[2])
+    monkeypatch.setattr(host_usage, "MUSE_SESSIONS_PATH", ledger.parents[4])
     real_open = Path.open
 
     def checked_open(path, *args, **kwargs):
@@ -693,37 +696,41 @@ def test_diag_host_usage_does_not_open_the_host_store(tmp_path, monkeypatch):
     result = runner.invoke(app, ["diag", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["host_usage"]["grok"]["cache_state"] in {"missing", "ok", "unreadable"}
-    assert payload["host_usage"]["grok"]["files_on_disk"] == 1
-    grok = payload["host_usage"]["grok"]
-    assert "model_count" in grok
-    assert isinstance(grok["models"], list)
+    assert payload["host_usage"]["muse"]["cache_state"] in {"missing", "ok", "unreadable"}
+    assert payload["host_usage"]["muse"]["files_on_disk"] == 1
+    muse = payload["host_usage"]["muse"]
+    assert "model_count" in muse
+    assert isinstance(muse["models"], list)
     assert "model_count" in payload["host_usage"]["codex"]
 
 
 @pytest.mark.parametrize("files", [None, {}, {"one": {}}])
-def test_diag_grok_ledger_count_replaces_duplicate_cache_line(tmp_path, monkeypatch, files):
+def test_diag_muse_log_count_replaces_duplicate_cache_line(tmp_path, monkeypatch, files):
     _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("muse",))
     if files is not None:
-        cache = host_usage.GROK_CACHE_PATH
+        cache = host_usage.MUSE_CACHE_PATH
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps({"version": host_usage.CACHE_VERSION, "files": files}))
+        cache.write_text(
+            json.dumps({"version": host_usage.CACHE_VERSION, "muse_format": 2, "files": files})
+        )
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
     count = "unknown" if files is None else str(len(files))
-    assert f"grok ledgers cached: {count} of 0" in text
-    assert "grok cache:" not in text
+    assert f"muse session logs cached: {count} of 0" in text
+    assert "muse cache:" not in text
 
 
-def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
+def test_diag_reports_cached_muse_usage_less_tally(tmp_path, monkeypatch):
     """T2-10: diag is a cache-only view, including a partial scan's tally."""
     _setup(tmp_path, monkeypatch)
-    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True)
-    host_usage.GROK_CACHE_PATH.write_text(
+    host_usage.MUSE_CACHE_PATH.parent.mkdir(parents=True)
+    host_usage.MUSE_CACHE_PATH.write_text(
         json.dumps(
             {
                 "version": host_usage.CACHE_VERSION,
+                "muse_format": 2,
                 "complete_once": False,
                 "usage_less_skipped": 3,
                 "files": {},
@@ -733,25 +740,26 @@ def test_diag_reports_cached_grok_usage_less_tally(tmp_path, monkeypatch):
     )
 
     def boom(*_args, **_kwargs):
-        raise AssertionError("diag must not open the Grok host store")
+        raise AssertionError("diag must not open the Muse host store")
 
-    monkeypatch.setattr("mind_meld.host_usage.read_grok_usage", boom)
+    monkeypatch.setattr("mind_meld.host_usage.read_muse_usage", boom)
     result = runner.invoke(app, ["diag", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["host_usage"]["grok"]["usage_less_skipped"] == 3
-    assert payload["host_usage"]["grok"]["last_reason"] is None
-    assert "grok usage read blocker" not in result.output
+    assert payload["host_usage"]["muse"]["usage_less_skipped"] == 3
+    assert payload["host_usage"]["muse"]["last_reason"] is None
+    assert "muse usage read blocker" not in result.output
 
 
 def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
-    _enable_capture_sources(tmp_path, readers=("grok",))
-    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    host_usage.GROK_CACHE_PATH.write_text(
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    host_usage.MUSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.MUSE_CACHE_PATH.write_text(
         json.dumps(
             {
                 "version": host_usage.CACHE_VERSION,
+                "muse_format": 2,
                 "complete_once": False,
                 "usage_less_skipped": 0,
                 "last_reason": "unsupported",
@@ -763,35 +771,35 @@ def test_diag_renders_persisted_last_reason(tmp_path, monkeypatch):
     json_result = runner.invoke(app, ["diag", "--json"])
     assert json_result.exit_code == 0, json_result.output
     payload = json.loads(json_result.stdout)
-    assert payload["host_usage"]["grok"]["last_reason"] == "unsupported"
+    assert payload["host_usage"]["muse"]["last_reason"] == "unsupported"
     plain = runner.invoke(app, ["diag"])
     assert plain.exit_code == 0, plain.output
-    assert "grok usage read blocker" in plain.output
+    assert "muse usage read blocker" in plain.output
     assert "mm update" in plain.output
 
 
-def test_diag_grok_consent_matches_an_auto_detected_resolved_source(tmp_path, monkeypatch):
-    """Legacy auto-detection is a real source gate, not merely a config hint."""
+def test_diag_muse_consent_matches_a_resolved_source(tmp_path, monkeypatch):
+    """A resolved source authorizes the reader and sets consented=True."""
     _, cfg_path, _ = _setup(tmp_path, monkeypatch)
     cfg = load_config(cfg_path)
-    cfg["sync"].pop("sources")
+    muse_dir = tmp_path / "muse"
+    muse_dir.mkdir()
+    cfg["sync"]["sources"].append({"name": "muse", "path": str(muse_dir), "type": "muse"})
     save_config(cfg, cfg_path)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".grok" / "skills").mkdir(parents=True)
 
     result = runner.invoke(app, ["diag", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["host_usage"]["grok"]["consented"] is True
+    assert payload["host_usage"]["muse"]["consented"] is True
 
 
-def test_diag_grok_consent_excludes_an_unresolved_explicit_source(tmp_path, monkeypatch):
+def test_diag_muse_consent_excludes_an_unresolved_explicit_source(tmp_path, monkeypatch):
     """A config entry filtered out by get_sources() cannot authorize a read."""
     _, cfg_path, _ = _setup(tmp_path, monkeypatch)
     cfg = load_config(cfg_path)
     cfg["sync"]["sources"].append(
-        {"name": "grok", "path": str(tmp_path / "missing-grok"), "type": "grok"}
+        {"name": "muse", "path": str(tmp_path / "missing-muse"), "type": "muse"}
     )
     save_config(cfg, cfg_path)
 
@@ -799,7 +807,7 @@ def test_diag_grok_consent_excludes_an_unresolved_explicit_source(tmp_path, monk
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert payload["host_usage"]["grok"]["consented"] is False
+    assert payload["host_usage"]["muse"]["consented"] is False
 
 
 def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
@@ -807,11 +815,12 @@ def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
     block is the surface a user pastes into support; a JSON-only field does
     not discharge that."""
     _setup(tmp_path, monkeypatch)
-    host_usage.GROK_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    host_usage.GROK_CACHE_PATH.write_text(
+    host_usage.MUSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    host_usage.MUSE_CACHE_PATH.write_text(
         json.dumps(
             {
                 "version": host_usage.CACHE_VERSION,
+                "muse_format": 2,
                 "complete_once": True,
                 "usage_less_skipped": 0,
                 "files": {
@@ -829,7 +838,7 @@ def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
                             {
                                 "key": "k" * 64,
                                 "day": "2026-08-15",
-                                "model": "grok-4",
+                                "model": "muse-1",
                                 "usage": {
                                     "input": 1,
                                     "cache_create": 0,
@@ -848,8 +857,8 @@ def test_diag_plain_text_names_cached_models(tmp_path, monkeypatch):
     result = runner.invoke(app, ["diag"])
 
     assert result.exit_code == 0, result.output
-    assert "grok models cached:" in result.output
-    assert "grok-4" in result.output
+    assert "muse models cached:" in result.output
+    assert "muse-1" in result.output
     assert "codex models cached:" in result.output
 
 
@@ -933,10 +942,9 @@ def test_diag_plain_text_is_human_readable(tmp_path, monkeypatch):
     assert "Sidecar" in result.stdout
     assert "Storage inventory" in result.stdout
     assert "Skill links" in result.stdout
-    assert "Host skill discovery" in result.stdout
     assert "Host usage" in result.stdout
-    assert "grok prior successful scan" in result.stdout
-    assert "grok last scan" not in result.stdout
+    assert "muse prior successful scan" in result.stdout
+    assert "muse last scan" not in result.stdout
     assert "Git-root discovery" in result.stdout
     assert "Git capture" in result.stdout
     assert "recorded" in result.stdout
@@ -1026,7 +1034,7 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["config"]["state"].startswith("error")
-    assert payload["host_usage"]["grok"]["consented"] is None
+    assert payload["host_usage"]["muse"]["consented"] is None
     assert observed_roots == [storage]
 
 
@@ -1056,10 +1064,8 @@ def test_diag_handles_unresolvable_explicit_source(tmp_path, monkeypatch):
         row["maintain_links"].startswith("unknown (config invalid:")
         for row in payload["skill_links"]
     )
-    assert "host_skill_discovery" in payload
-    assert payload["host_skill_discovery"].get("host") == "grok"
     assert "host_usage" in payload
-    assert payload["host_usage"]["grok"]["consented"] is None
+    assert payload["host_usage"]["muse"]["consented"] is None
     assert all("claude_skills_compat" not in row for row in payload["skill_links"])
 
 
@@ -1426,7 +1432,7 @@ class TestDiagGitCapture:
         ("both", 215, "35 ms spare"),
         ("over", 268, "over by 18 ms"),
         ("codex-only", 197, "53 ms spare"),
-        ("grok-only", 18, "232 ms spare"),
+        ("muse-only", 18, "232 ms spare"),
         ("missing-read", None, "a reader has no complete read"),
         ("none", None, "no reader enabled"),
     ],
@@ -1442,27 +1448,30 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     config = load_config()
     codex = tmp_path / "codex"
     codex.mkdir()
-    config["sync"]["sources"] = (
-        [{"name": "codex", "path": str(codex), "type": "generic"}]
-        if case not in {"none", "grok-only"}
-        else []
-    )
+    muse = tmp_path / "muse"
+    muse.mkdir()
+    sources = []
+    if case not in {"none", "muse-only"}:
+        sources.append({"name": "codex", "path": str(codex), "type": "generic"})
+    if case not in {"none", "codex-only"}:
+        sources.append({"name": "muse", "path": str(muse), "type": "muse"})
+    config["sync"]["sources"] = sources
     config["retro"] = {
-        "grok_host_usage": case not in {"none", "codex-only"},
         "host_usage_interactive_budget_ms": 500,
     }
     save_config(config)
     _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
-    for reader, ms in (("codex", 250 if case == "over" else 197), ("grok", 18)):
-        path = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    for reader, ms in (("codex", 250 if case == "over" else 197), ("muse", 18)):
+        path = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
                 {
                     "version": 1,
+                    "muse_format": 2,
                     "files": {},
-                    "last_complete_ms": None if case == "missing-read" and reader == "grok" else ms,
+                    "last_complete_ms": None if case == "missing-read" and reader == "muse" else ms,
                     "last_complete_at": at,
                     "last_reason": "deadline",
                     "last_deadline_allotted_ms": 250,
@@ -1474,7 +1483,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         pytest.fail("diag must not read host logs")
 
     monkeypatch.setattr(host_usage, "read_codex_usage", never_read)
-    monkeypatch.setattr(host_usage, "read_grok_usage", never_read)
+    monkeypatch.setattr(host_usage, "read_muse_usage", never_read)
     selection = []
     real_select = events_tail._default_host_readers
 
@@ -1519,7 +1528,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         assert "Last read allowed 250 ms; last complete read 197 ms" in plain
     elif case == "over":
         assert "Last read allowed 250 ms; last complete read 250 ms" in plain
-    elif case == "grok-only":
+    elif case == "muse-only":
         assert "Last read allowed 250 ms; last complete read 18 ms" in plain
 
 
@@ -1545,23 +1554,29 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
     assert "host read budgets: unknown (config unavailable)" in plain
     assert "host read sweep estimate: unknown (config unavailable)" in plain
     assert "codex last complete read: unknown" in plain
-    assert "grok last complete read: unknown" in plain
+    assert "muse last complete read: unknown" in plain
     assert "nested repository skips: unknown (config unavailable)" in plain
     result = runner.invoke(app, ["diag", "--json"])
     assert json.loads(result.stdout)["sync_scope"] == {"skipped_nested_repositories": None}
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize(
     "timestamp", ["2999-01-01T00:00:00+00:00", "bad\nforged", "2026-09-17", None]
 )
 def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch, reader, timestamp):
     _setup(tmp_path, monkeypatch)
-    path = host_usage.CACHE_PATH if reader == "codex" else host_usage.GROK_CACHE_PATH
+    path = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
-            {"version": 1, "files": {}, "last_complete_ms": 197, "last_complete_at": timestamp}
+            {
+                "version": 1,
+                "muse_format": 2,
+                "files": {},
+                "last_complete_ms": 197,
+                "last_complete_at": timestamp,
+            }
         )
     )
     result = runner.invoke(app, ["diag"])
@@ -1746,7 +1761,7 @@ def test_schema_unreadable_notice_names_the_linked_sqlite_version(tmp_path, monk
     assert state["last_reason"] is None and state["last_reason_detail"] is None
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok", "cursor", "muse"])
+@pytest.mark.parametrize("reader", ["codex", "cursor", "muse"])
 def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader):
     from mind_meld import cli, events
 

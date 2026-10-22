@@ -160,7 +160,7 @@ walker; documentation alone does not prove fleet path portability. See
   cover both controls separately.
 - New commands, flags, exit codes, output fields, wire records and
   configuration keys are classified under the
-  [1.x compatibility contract](../invariants/auto-upgrade.md#compatibility-1x).
+  [storage-format gates](../invariants/auto-upgrade.md#storage-format-gates).
   If qualification classifies a new record format as format-changing, the
   crypto-init version byte in the reserved 0x03-0x0F window is its older-side
   gate, and the newer-side fleet gate extends the

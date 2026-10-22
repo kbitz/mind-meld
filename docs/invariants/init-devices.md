@@ -182,7 +182,7 @@ copies, and push writes only its
 own manifest. Init rescans immediately before bootstrap and again before
 accepting a new salt, so a newer copy that arrives during the prompts refuses
 without saving config. This is an optimistic local recheck, not a distributed transaction.
-See [Compatibility (1.x)](auto-upgrade.md#compatibility-1x).
+See [Storage-format gates](auto-upgrade.md#storage-format-gates).
 
 Tests: `TestNewerFormats66A` in `tests/test_crypto.py` (including newer canonical
 plus valid older copy, byte-for-byte preservation and late arrival),

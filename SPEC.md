@@ -403,7 +403,7 @@ receipt or proof that another Mac has received a row. See
 This numbered algorithm is historical. For the current source-selection and
 publication gates, read [sync invariants](docs/invariants/sync.md); for
 attended push's conditional activity tail and exit contract, read
-[host usage capture](README.md#host-usage-capture-codex-and-grok) and
+[host usage capture](README.md#host-usage-capture) and
 [events/retro invariants](docs/invariants/events-retro.md).
 
 1. Acquire lockfile (`~/.config/mind-meld/mind-meld.lock`). Fail if another operation is running.
@@ -821,7 +821,7 @@ Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
 `no-row`, `capture-failed`, `append-failed`, `max-file-size`, or
 `not-published: <cause>` tokens and an actionable remedy; most also state the
 content-sync outcome and link the [host usage
-capture](README.md#host-usage-capture-codex-and-grok) section. Capture failures do
+capture](README.md#host-usage-capture) section. Capture failures do
 not stop content sync. `push-failed` is a content-sync stop (an `Error:` line,
 exit 1), not a capture-only exit.
 
