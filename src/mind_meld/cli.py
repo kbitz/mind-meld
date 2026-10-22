@@ -430,9 +430,11 @@ def _list_devices_warn(backend: LocalBackend) -> list[dict]:
     """
 
     def _warn(key: str, reason: str) -> None:
-        stderr_console.print(
-            f"[yellow]Warning:[/yellow] dropped device entry {safe_str(key)} — {safe_str(reason)}"
-        )
+        with _pause_sync_progress():
+            stderr_console.print(
+                "[yellow]Warning:[/yellow] dropped device entry "
+                f"{safe_str(key)} — {safe_str(reason)}"
+            )
 
     return _list_devices_impl(backend, on_drop=_warn)
 
@@ -630,7 +632,8 @@ def _init_crypto_session(
             # load_config and this call (concurrent editor crash, disk issue).
             # Per the v0.8.1 visible-failure contract (docs/invariants/sync.md): data-at-risk
             # signals reach stderr even in quiet mode.
-            print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
+            with _pause_sync_progress():
+                print(f"mm: warning: backfill skipped — {e}", file=sys.stderr)
 
     return fetch.argon2_memory_kb
 
@@ -1589,12 +1592,13 @@ def _recover_prior_manifest(
                 f"{rewrite} from local files, keeping deletion records from the "
                 "local sidecar."
             )
-        if quiet:
-            # Rewriting a manifest from conflict copies is data-at-risk work;
-            # autopush must still surface it.
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        with _pause_sync_progress():
+            if quiet:
+                # Rewriting a manifest from conflict copies is data-at-risk work;
+                # autopush must still surface it.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
         if sidecar_manifest is None:
             return fetch.manifest
         return _merge_manifests([fetch.manifest, sidecar_manifest])
@@ -1608,13 +1612,14 @@ def _recover_prior_manifest(
             "remote manifest corrupt; recovered prior state from local "
             f"sidecar ({sidecar.sidecar_path()})."
         )
-        if quiet:
-            # Load-bearing: silently swallowing a corrupt-manifest recovery
-            # in autopush leaves the user with no signal that storage is
-            # degrading. Always surface to stderr.
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        with _pause_sync_progress():
+            if quiet:
+                # Load-bearing: silently swallowing a corrupt-manifest recovery
+                # in autopush leaves the user with no signal that storage is
+                # degrading. Always surface to stderr.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
         return sidecar_manifest
 
     # No sidecar — try peer fallback
@@ -1626,13 +1631,14 @@ def _recover_prior_manifest(
             "Recent local deletions may be lost — verify no files have "
             "resurrected."
         )
-        if quiet:
-            # Load-bearing: peer-fallback recovery is the riskiest branch
-            # (recent deletions can be lost). Must reach the user even in
-            # autopush.
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        with _pause_sync_progress():
+            if quiet:
+                # Load-bearing: peer-fallback recovery is the riskiest branch
+                # (recent deletions can be lost). Must reach the user even in
+                # autopush.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
         # Synthetic prior manifest: no prior file list (so fresh-deletion
         # detection is disabled — we have no basis for it), but the
         # carry-forward loop in generate_tombstones() preserves these.
@@ -1910,6 +1916,9 @@ def _upload_changed_blobs(
             or not mtime_ok
         )
 
+    if to_upload:
+        _sync_progress_ensure_batch("Uploading files", len(to_upload), "files")
+
     with pullhistory.batch():
         outcome = UploadOutcome()
 
@@ -1931,6 +1940,7 @@ def _upload_changed_blobs(
 
             if verbose:
                 console.print(f"  [green]\u2191[/green] {safe_str(rel_path)}")
+            _sync_progress_advance()
 
         deferred: list[tuple[str, dict]] = []
         for rel_path, info in to_upload.items():
@@ -1952,6 +1962,7 @@ def _upload_changed_blobs(
                 if not allow_hold:
                     raise
                 outcome.held[rel_path] = e.reason
+                _sync_progress_advance()
                 continue
             assert revision.data is not None
             # Read 2 publishes its own verified revision. Record the entry
@@ -2135,63 +2146,64 @@ def _prompt_conflict_choice(
         )
     )
 
-    console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
-    console.print(render_banner("local", local_path.name, None))
-    console.print(render_time_line([("modified", local_mtime_ts), ("created", local_btime_ts)]))
-    console.print(
-        render_banner(
-            "remote",
-            local_path.name,
-            peer_name,
-            ambiguous_count=ambiguous_count,
-        )
-    )
-    console.print(render_time_line([("modified", remote_mtime_ts)]))
-    _verdict = render_verdict(local_mtime_ts, remote_mtime_ts)
-    if _verdict is not None:
-        console.print(_verdict)
-
-    # Inline pull-time site is post_inversion only (see comment above):
-    # diff is local -> remote, so m = local-only, n = remote-only directly.
-    m, n, k = count_divergent_lines(diff)
-    if k:
+    with _pause_sync_progress():
+        console.print(f"\n[bold yellow]Conflict:[/bold yellow] {safe_rel}")
+        console.print(render_banner("local", local_path.name, None))
+        console.print(render_time_line([("modified", local_mtime_ts), ("created", local_btime_ts)]))
         console.print(
-            f"  [dim]{m} unique line{'' if m == 1 else 's'} of yours; "
-            f"{n} unique line{'' if n == 1 else 's'} from peer; "
-            f"{k} total diff lines.[/dim]"
+            render_banner(
+                "remote",
+                local_path.name,
+                peer_name,
+                ambiguous_count=ambiguous_count,
+            )
         )
+        console.print(render_time_line([("modified", remote_mtime_ts)]))
+        _verdict = render_verdict(local_mtime_ts, remote_mtime_ts)
+        if _verdict is not None:
+            console.print(_verdict)
 
-    # Shared rendering owns terminal-safe peer content, but inline pull keeps
-    # its historical 60-entry consent window (mm resolve uses 80).
-    for renderable in conflictdiff.render_capped_diff(diff, cap=60):
-        console.print(renderable)
+        # Inline pull-time site is post_inversion only (see comment above):
+        # diff is local -> remote, so m = local-only, n = remote-only directly.
+        m, n, k = count_divergent_lines(diff)
+        if k:
+            console.print(
+                f"  [dim]{m} unique line{'' if m == 1 else 's'} of yours; "
+                f"{n} unique line{'' if n == 1 else 's'} from peer; "
+                f"{k} total diff lines.[/dim]"
+            )
 
-    # The conflict file is not on disk yet at this site -- _apply_conflict
-    # writes it AFTER this function returns "keep-both" -- so render_prompt's
-    # "discard <conflict-name>" copy doesn't quite apply at first glance.
-    # Use the bare basename of the local file as both labels: the canonical
-    # filename in both positions so the user sees the action's target.
-    # Suppress drop-count annotations on empty-diff (binary) -- annotating
-    # "drops 0 lines" when we couldn't compare would be a false reassurance.
-    prompt_m: int | None = m if diff else None
-    prompt_n: int | None = n if diff else None
-    console.print(
-        render_prompt(
-            safe_rel,
-            safe_rel,
-            "post_inversion",
-            merge_available=merge_available,
-            merge_conflicts=max(merge_conflicts, 0),
-            local_only_lines=prompt_m,
-            remote_only_lines=prompt_n,
+        # Shared rendering owns terminal-safe peer content, but inline pull keeps
+        # its historical 60-entry consent window (mm resolve uses 80).
+        for renderable in conflictdiff.render_capped_diff(diff, cap=60):
+            console.print(renderable)
+
+        # The conflict file is not on disk yet at this site -- _apply_conflict
+        # writes it AFTER this function returns "keep-both" -- so render_prompt's
+        # "discard <conflict-name>" copy doesn't quite apply at first glance.
+        # Use the bare basename of the local file as both labels: the canonical
+        # filename in both positions so the user sees the action's target.
+        # Suppress drop-count annotations on empty-diff (binary) -- annotating
+        # "drops 0 lines" when we couldn't compare would be a false reassurance.
+        prompt_m: int | None = m if diff else None
+        prompt_n: int | None = n if diff else None
+        console.print(
+            render_prompt(
+                safe_rel,
+                safe_rel,
+                "post_inversion",
+                merge_available=merge_available,
+                merge_conflicts=max(merge_conflicts, 0),
+                local_only_lines=prompt_m,
+                remote_only_lines=prompt_n,
+            )
         )
-    )
-    # Default key is always (s)kip -- never (m)erge. A clean LCS merge of two
-    # genuinely-different documents has zero conflict markers, so defaulting
-    # Enter to (m) means one keystroke silently accepts a Frankenstein file.
-    # (m)erge stays a fully available choice; the user must type it.
-    prompt_default = "s"
-    choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
+        # Default key is always (s)kip -- never (m)erge. A clean LCS merge of two
+        # genuinely-different documents has zero conflict markers, so defaulting
+        # Enter to (m) means one keystroke silently accepts a Frankenstein file.
+        # (m)erge stays a fully available choice; the user must type it.
+        prompt_default = "s"
+        choice = typer.prompt("Choice", default=prompt_default, show_default=False).strip().lower()
 
     if choice in ("l", "local", "keep-canonical"):
         return "keep-canonical", None
@@ -2346,10 +2358,11 @@ def _first_existing_ancestor(path: Path) -> Path:
 
 def _print_apply_warning(message: str) -> None:
     """A dead stderr must not turn a contained failure into a batch failure."""
-    try:
-        print(message, file=sys.stderr)
-    except OSError:
-        pass
+    with _pause_sync_progress():
+        try:
+            print(message, file=sys.stderr)
+        except OSError:
+            pass
 
 
 def _warn_apply_failure(
@@ -2813,10 +2826,11 @@ def _apply_incoming_file(
         )
     except (TypeError, ValueError, OverflowError, OSError) as e:
         # Malformed mtime or filesystem error: fall through to conflict path.
-        console.print(
-            f"  [yellow]timestamp could not be interpreted; treating as a conflict:[/yellow] "
-            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
-        )
+        with _pause_sync_progress():
+            console.print(
+                "  [yellow]timestamp could not be interpreted; treating as a "
+                f"conflict:[/yellow] {safe_str(rel_path)} \u2014 {safe_str(e)}"
+            )
         local_mtime = None
         remote_mtime = None
     if local_newer:
@@ -2953,9 +2967,13 @@ def _download_and_apply(
     keep-canonical branch. Both halves no-op when ``pending_inline_bumps``
     is None (non-interactive pulls).
 
-    Progress display (Track 5B Task 4):
+    Progress display (Track 5B Task 4, plus the sync spinner):
       - quiet=True: no progress output; apply failures still warn on stderr.
-      - TTY + not quiet: Rich Progress widget renders bar + count + elapsed.
+      - Non-verbose attended pull inside `_sync_outcome`: `_SyncProgress`
+        renders the transient spinner and Applying-files counter; the widget
+        below stays off (`show_progress` requires verbose or no sync scope).
+      - TTY + not quiet (verbose/direct callers): Rich Progress widget
+        renders bar + count + elapsed.
         First-pull-on-new-Mac case (the 2026-04-24 first-pull session): per-file
         backend.get(bkey) blocks on iCloud placeholder materialization;
         before this, the entire 286-file / 263s pull was indistinguishable
@@ -3000,10 +3018,14 @@ def _download_and_apply(
         # Non-TTY: emit a single start banner. Per-file lines would spam
         # logs; the totals line at the end of pull surfaces the result.
         console.print(f"  downloading {total} file(s)...")
+    if total > 0 and not quiet:
+        _sync_progress_start_batch("Applying files", total, "files")
 
     def _advance() -> None:
         if progress is not None and task_id is not None:
             progress.advance(task_id)
+        if not quiet:
+            _sync_progress_advance()
 
     # Quiet-mode contract: per-file decorations skipped in quiet (autopull);
     # the summary routes per-source totals to stderr in _print_pull_summary
@@ -3019,10 +3041,11 @@ def _download_and_apply(
                 # isolation: fail this file, keep walking — matches the
                 # v0.8.1 empty-device_id handling in _apply_conflict.
                 if not quiet:
-                    console.print(
-                        f"  [red]bad blob key (local preserved):[/red] "
-                        f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
-                    )
+                    with _pause_sync_progress():
+                        console.print(
+                            f"  [red]bad blob key (local preserved):[/red] "
+                            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
+                        )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -3030,7 +3053,8 @@ def _download_and_apply(
                 enc_data = backend.get(bkey)
             except MindMeldError:
                 if verbose and not quiet:
-                    console.print(f"  [yellow]blob missing: {safe_str(bkey)}[/yellow]")
+                    with _pause_sync_progress():
+                        console.print(f"  [yellow]blob missing: {safe_str(bkey)}[/yellow]")
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -3049,9 +3073,11 @@ def _download_and_apply(
                         preserved="local preserved",
                     )
                 elif not quiet:
-                    console.print(
-                        f"  [red]decrypt failed:[/red] {safe_str(rel_path)} \u2014 {safe_str(e)}"
-                    )
+                    with _pause_sync_progress():
+                        console.print(
+                            "  [red]decrypt failed:[/red] "
+                            f"{safe_str(rel_path)} \u2014 {safe_str(e)}"
+                        )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -3065,10 +3091,11 @@ def _download_and_apply(
             # let atomic_write_bytes replace local routing with peer content.
             if pullplan._has_symlinked_component(local_path, base_path):
                 if not quiet:
-                    console.print(
-                        f"  [yellow]skipped (local symlink preserved):[/yellow] "
-                        f"{safe_str(rel_path)}"
-                    )
+                    with _pause_sync_progress():
+                        console.print(
+                            f"  [yellow]skipped (local symlink preserved):[/yellow] "
+                            f"{safe_str(rel_path)}"
+                        )
                 outcomes["skipped"].append(rel_path)
                 _advance()
                 continue
@@ -3090,9 +3117,11 @@ def _download_and_apply(
                 _path_inside_base = False
             if not _path_inside_base:
                 if not quiet:
-                    console.print(
-                        f"  [red]rejected (would escape source root):[/red] {safe_str(rel_path)}"
-                    )
+                    with _pause_sync_progress():
+                        console.print(
+                            "  [red]rejected (would escape source root):[/red] "
+                            f"{safe_str(rel_path)}"
+                        )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -3101,11 +3130,12 @@ def _download_and_apply(
             actual = hashlib.sha256(plain_data).hexdigest()
             if not isinstance(advertised, str) or actual != advertised:
                 if not quiet:
-                    console.print(
-                        f"  [red]content check failed:[/red] {safe_str(rel_path)} "
-                        "does not match the sending snapshot. Local file kept. "
-                        f"see {SNAPSHOT_FAILURES_URL}."
-                    )
+                    with _pause_sync_progress():
+                        console.print(
+                            f"  [red]content check failed:[/red] {safe_str(rel_path)} "
+                            "does not match the sending snapshot. Local file kept. "
+                            f"see {SNAPSHOT_FAILURES_URL}."
+                        )
                 outcomes["failed"].append(rel_path)
                 _advance()
                 continue
@@ -3806,6 +3836,282 @@ def init() -> None:
 _SYNC_OUTPUT = ContextVar("sync_output", default=None)
 
 
+class _SyncProgress:
+    """Transient terminal spinner and counter display for attended push/pull.
+
+    Uses the same Rich columns, 100ms ticker thread, and display-failure
+    isolation as `_run_update_with_progress`, with `transient=True` so the
+    working line clears before warnings, prompts, or the final outcome line.
+    """
+
+    def __init__(self, *, enabled: bool) -> None:
+        self._enabled = enabled
+        self._lock = threading.RLock()
+        self._progress: Progress | None = None
+        self._task: Any = None
+        self._stop_ticking: threading.Event | None = None
+        self._ticker: threading.Thread | None = None
+        self._state = updateprogress.UpdateProgress("")
+        self._batch_phase = ""
+        self._batch_unit = ""
+        self._batch_completed = 0
+        self._batch_total = 0
+        self._pause_depth = 0
+        self._stopped = False
+        self._last_render_at = 0.0
+
+    def _can_draw(self) -> bool:
+        # A closed/replaced stdout makes isatty() raise; that is a display
+        # failure, never a sync failure.
+        try:
+            return (
+                self._enabled
+                and not self._stopped
+                and console.is_terminal
+                and console.file.isatty()
+            )
+        except (Exception, SystemExit):
+            return False
+
+    def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
+        self._state = state
+        if (
+            not self._enabled
+            or self._progress is None
+            or self._task is None
+            or self._pause_depth > 0
+        ):
+            return
+        measured = state.total is not None and state.completed is not None
+        detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
+        # Per-file advances only update the task fields; the ticker paints
+        # them at 10 Hz. A synchronous redraw per file would let a stalled
+        # terminal block the sync mid-run, lock held. Forced renders (phase
+        # changes, first/final file) paint immediately.
+        now = time.monotonic()
+        do_refresh = force or now - self._last_render_at >= _UPDATE_SPINNER_TICK_SECONDS
+        try:
+            self._progress.update(
+                self._task,
+                completed=0,
+                description=state.phase,
+                detail=detail.rstrip(),
+                refresh=do_refresh,
+            )
+        except (Exception, SystemExit):
+            # Dead terminal: stop retrying the draw on every remaining file.
+            self._enabled = False
+            return
+        if do_refresh:
+            self._last_render_at = now
+
+    def start(self, phase: str) -> None:
+        with self._lock:
+            self._state = updateprogress.UpdateProgress(phase)
+            self._batch_total = 0
+            if self._progress is not None:
+                self._render_locked(self._state, force=True)
+                return
+            if not self._can_draw():
+                return
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}", markup=False),
+                TextColumn("{task.fields[detail]}", markup=False),
+                console=console,
+                transient=True,
+                auto_refresh=False,
+                redirect_stdout=False,
+                redirect_stderr=False,
+            )
+            task = progress.add_task(phase, total=1, detail="")
+            stop_ticking = threading.Event()
+
+            def tick() -> None:
+                while not stop_ticking.wait(_UPDATE_SPINNER_TICK_SECONDS):
+                    if self._stopped or self._pause_depth > 0 or self._progress is not progress:
+                        continue
+                    try:
+                        progress.refresh()
+                    except (Exception, SystemExit):  # First failed draw: timer off.
+                        return
+
+            ticker = threading.Thread(target=tick, name="mm-sync-spinner", daemon=True)
+            try:
+                progress.start()
+            except (Exception, SystemExit):
+                with suppress(Exception, SystemExit):
+                    progress.stop()
+                with suppress(Exception, SystemExit):
+                    console.show_cursor(True)  # A failed start can skip Rich's own restore.
+                self._enabled = False
+                return
+            self._progress = progress
+            self._last_render_at = time.monotonic()
+            self._task = task
+            self._stop_ticking = stop_ticking
+            self._ticker = ticker
+            try:
+                with suppress(Exception):  # No ticker thread: state changes still redraw.
+                    ticker.start()
+            except BaseException:
+                self.stop()
+                raise
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self._batch_total = 0
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
+
+    def start_batch(self, phase: str, total: int, unit: str) -> None:
+        with self._lock:
+            self._batch_phase = phase
+            self._batch_unit = unit
+            self._batch_completed = 0
+            self._batch_total = max(total, 0)
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
+
+    def ensure_batch(self, phase: str, total: int, unit: str) -> None:
+        with self._lock:
+            if (
+                self._batch_total > 0
+                and self._batch_completed < self._batch_total
+                and self._batch_phase == phase
+            ):
+                return
+            self.start_batch(phase, total, unit)
+
+    def advance(self, step: int = 1) -> None:
+        with self._lock:
+            if self._batch_total <= 0:
+                return
+            self._batch_completed = min(self._batch_total, self._batch_completed + step)
+            detail = f"{self._batch_completed}/{self._batch_total} {self._batch_unit}".rstrip()
+            self._render_locked(
+                updateprogress.UpdateProgress(
+                    self._batch_phase,
+                    completed=self._batch_completed,
+                    total=self._batch_total,
+                    detail=detail,
+                ),
+                force=self._batch_completed in (1, self._batch_total),
+            )
+
+    @contextmanager
+    def paused(self):
+        with self._lock:
+            self._pause_depth += 1
+            progress = self._progress if self._pause_depth == 1 else None
+        if progress is not None:
+            with suppress(Exception, SystemExit):
+                progress.stop()
+        propagating = False
+        try:
+            yield
+        except BaseException:
+            # Unwinding (e.g. Ctrl-C at a prompt): do not resurrect the
+            # spinner on the way out. A pause inside a handled `except:`
+            # block is not propagation and still resumes.
+            propagating = True
+            raise
+        finally:
+            with self._lock:
+                self._pause_depth = max(0, self._pause_depth - 1)
+                if (
+                    self._pause_depth == 0
+                    and self._progress is not None
+                    and not self._stopped
+                    and not propagating
+                    and self._can_draw()
+                ):
+                    try:
+                        self._progress.start()
+                        self._render_locked(self._state, force=True)
+                    except (Exception, SystemExit):
+                        with suppress(Exception, SystemExit):
+                            self._progress.stop()
+                        with suppress(Exception, SystemExit):
+                            console.show_cursor(True)
+                        # Match start() failure: drop the dead display so no
+                        # later render targets it. Ticker refs stay for stop().
+                        self._progress = None
+                        self._task = None
+                        self._enabled = False
+
+    def stop(self) -> None:
+        self._stopped = True
+        progress = self._progress
+        stop_ticking = self._stop_ticking
+        ticker = self._ticker
+        self._progress = None
+        self._task = None
+        self._stop_ticking = None
+        self._ticker = None
+        if stop_ticking is not None:
+            stop_ticking.set()
+        if ticker is not None:
+            with suppress(Exception, SystemExit):
+                if ticker.ident is not None:
+                    ticker.join(timeout=_UPDATE_SPINNER_JOIN_SECONDS)
+        if progress is not None and (ticker is None or not ticker.is_alive()):
+            with suppress(Exception, SystemExit):
+                progress.stop()
+
+
+def _current_sync_progress() -> _SyncProgress | None:
+    state = _SYNC_OUTPUT.get()
+    if state is None:
+        return None
+    progress = state.get("progress")
+    return progress if isinstance(progress, _SyncProgress) else None
+
+
+def _start_sync_progress(phase: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.start(phase)
+
+
+def _sync_progress_phase(phase: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.set_phase(phase)
+
+
+def _sync_progress_start_batch(phase: str, total: int, unit: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.start_batch(phase, total, unit)
+
+
+def _sync_progress_ensure_batch(phase: str, total: int, unit: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.ensure_batch(phase, total, unit)
+
+
+def _sync_progress_advance(step: int = 1) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.advance(step)
+
+
+def _stop_sync_progress() -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.stop()
+
+
+@contextmanager
+def _pause_sync_progress():
+    progress = _current_sync_progress()
+    if progress is None:
+        yield
+        return
+    with progress.paused():
+        yield
+
+
 def _sync_diagnostic(message: str, degraded: bool = False) -> None:
     """Retain facts before best-effort rendering; never change execution policy."""
     state = _SYNC_OUTPUT.get()
@@ -3854,6 +4160,7 @@ def _capture_attended_usage(
                 "Content sync continues."
             )
             return outcome.finish("prerequisites", readiness)
+        _sync_progress_phase("Capturing host usage")
         capture, rows = events_tail._capture_host_snapshot(
             config["device"]["id"],
             readers,
@@ -4284,7 +4591,8 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     if dry_run:
         yield
         return
-    state = {"verbose": verbose, "diagnostics": events_tail.Degradations()}
+    progress = _SyncProgress(enabled=not verbose)
+    state = {"verbose": verbose, "diagnostics": events_tail.Degradations(), "progress": progress}
     token = _SYNC_OUTPUT.set(state)
     error = None
     try:
@@ -4293,6 +4601,7 @@ def _sync_outcome(verb: str, *, verbose: bool, dry_run: bool):
     except (Exception, KeyboardInterrupt, SystemExit) as exc:
         error = exc
     finally:
+        progress.stop()
         _SYNC_OUTPUT.reset(token)
     result = state.get("run", {}).get("result")
     failed = error is not None or isinstance(result, PullResult) and result.total_failed > 0
@@ -4520,6 +4829,7 @@ def push(
                 _error(str(e))
 
             try:
+                _start_sync_progress("Unlocking storage")
                 if not dry_run and not pullhistory.failed():
                     pullhistory.record_failure(statedb.recover_if_needed())
                 backend = get_backend(config)
@@ -4583,6 +4893,7 @@ def push(
                 # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
                 if not dry_run and result and result.content_changed:
                     try:
+                        _sync_progress_phase("Cleaning up orphaned blobs")
                         gc_count = _do_gc(
                             config,
                             passphrase,
@@ -4598,20 +4909,24 @@ def push(
                         if not result.host_usage_published:
                             raise
                         problem = (_SYNC_OUTPUT.get() or {}).get("message", "GC refused")
-                        stderr_console.print(
-                            "mm: warning: Host usage was published; post-publication GC stopped. "
-                            f"{safe_str(problem)} Run mm gc for details."
-                        )
+                        with _pause_sync_progress():
+                            stderr_console.print(
+                                "mm: warning: Host usage was published; "
+                                f"post-publication GC stopped. {safe_str(problem)} "
+                                "Run mm gc for details."
+                            )
                     except (OSError, MindMeldError) as e:
                         result.maintenance_failures += 1
-                        stderr_console.print(
-                            f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
-                        )
+                        with _pause_sync_progress():
+                            stderr_console.print(
+                                f"mm: warning: GC skipped ({safe_str(e)}). Run mm gc for details."
+                            )
             except (KeyboardInterrupt, typer.Abort):
                 # Only a storage-error record may carry errno.
                 stop_cause, stop_errno = "interrupted", None
                 raise
             finally:
+                _stop_sync_progress()
                 try:
                     if not dry_run and attempt.outcome is not None:
                         if not core_finished:
@@ -4678,9 +4993,10 @@ def _ensure_device_registered(
     try:
         register_device(backend, device_id, device_name)
     except Exception as e:
-        stderr_console.print(
-            f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
-        )
+        with _pause_sync_progress():
+            stderr_console.print(
+                f"mm: warning: device entry self-heal failed ({type(e).__name__}): {e}"
+            )
         raise
 
 
@@ -4997,12 +5313,13 @@ def _warn_push_growth(source_diffs: list) -> None:
     )
     if large:
         detail = "; ".join(f"{path} ({count} new files)" for path, count in large[:3])
-        print(
-            "mm: warning: large sync growth: "
-            + safety.safe_terminal_str(detail)
-            + ". Check these subtrees before adding more files to sync.",
-            file=sys.stderr,
-        )
+        with _pause_sync_progress():
+            print(
+                "mm: warning: large sync growth: "
+                + safety.safe_terminal_str(detail)
+                + ". Check these subtrees before adding more files to sync.",
+                file=sys.stderr,
+            )
 
 
 def _push_core(
@@ -5045,6 +5362,7 @@ def _push_core(
     max_file_size = config["sync"]["max_file_size"]
 
     backend = get_backend(config)
+    _sync_progress_phase("Checking remote manifest")
     _ensure_device_registered(backend, device_id, device_name, dry_run=dry_run)
 
     # Resolve under the lock, then recover prior sources before capturing so
@@ -5064,7 +5382,8 @@ def _push_core(
     ]
     for src in skipped_internal:
         message = _config_module._missing_custom_mm_events_message(src["path"])
-        print(f"mm: warning: {safety.safe_terminal_str(message)}", file=sys.stderr)
+        with _pause_sync_progress():
+            print(f"mm: warning: {safety.safe_terminal_str(message)}", file=sys.stderr)
         events_degradations.append(message)
     if skipped_internal:
         resolution = replace(
@@ -5093,16 +5412,18 @@ def _push_core(
                     may_create=may_create,
                 )
         except Exception as e:
-            stderr_console.print(
-                f"mm: notice: retro-fleet skill installation failed: "
-                f"{type(e).__name__}: {safe_str(e)}"
-            )
+            with _pause_sync_progress():
+                stderr_console.print(
+                    f"mm: notice: retro-fleet skill installation failed: "
+                    f"{type(e).__name__}: {safe_str(e)}"
+                )
     if not resolution.selected and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
-        if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        with _pause_sync_progress():
+            if quiet:
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
         return (
             PushResult(no_sources=True, events_degradations=events_degradations)
             if result_observer is not None
@@ -5143,10 +5464,11 @@ def _push_core(
     _refuse_unavailable_selected_sources(resolution, remote_manifest, sources)
     if not sources and not skipped_internal:
         msg = "no sync sources found. Run 'mm init' to configure."
-        if quiet:
-            print(f"mm: warning: {msg}", file=sys.stderr)
-        else:
-            console.print(f"[yellow]Warning:[/yellow] {msg}")
+        with _pause_sync_progress():
+            if quiet:
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
         return (
             PushResult(no_sources=True, events_degradations=events_degradations)
             if result_observer is not None
@@ -5186,10 +5508,12 @@ def _push_core(
             # Autopush stays silent; attended push, preview, status and diag report it.
             if show and path not in skipped_repos:
                 skipped_repos.add(path)
-                print(
-                    f"mm: notice: skipped: nested git repository {safety.safe_terminal_str(path)}",
-                    file=sys.stderr,
-                )
+                with _pause_sync_progress():
+                    print(
+                        "mm: notice: skipped: nested git repository "
+                        f"{safety.safe_terminal_str(path)}",
+                        file=sys.stderr,
+                    )
             return
         skipped.append((path, reason))
         if verbose and not quiet:
@@ -5198,6 +5522,7 @@ def _push_core(
     # Scan before the activity tail. A captured host row can itself require
     # an upload, but only user-content changes then warrant activity capture.
     # With no host row, the existing substantive-change gate stays in force.
+    _sync_progress_phase("Scanning sources")
     if show:
         console.print("[bold]Building manifest...[/bold]")
     local_manifest = build_manifest_v2(
@@ -5397,6 +5722,7 @@ def _push_core(
     # the tail's own writes; the re-walk reads existing on-disk state.
     # Skipped entirely when no mm-internal source is selected for this push.
     if any(src["name"] in MM_INTERNAL_SOURCE_NAMES for src in sources):
+        _sync_progress_phase("Recording activity")
         events_degradations.extend(
             events_tail._run_events_tail(
                 config,
@@ -5479,10 +5805,22 @@ def _push_core(
     total_modified = 0
     total_deleted = 0
     upload_held = False
+    source_diffs_to_upload = list(
+        iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
+    )
+    if not dry_run:
+        # diff.new and diff.modified are disjoint; count both without merging.
+        total_to_upload = sum(
+            1
+            for src_name, _src_data, _remote_src, diff in source_diffs_to_upload
+            for changes in (diff.new, diff.modified)
+            for rel in changes
+            if rel not in frozen.get(src_name, ()) and rel not in held_files.get(src_name, ())
+        )
+        if total_to_upload > 0:
+            _sync_progress_start_batch("Uploading files", total_to_upload, "files")
 
-    for src_name, src_data, _remote_src, diff in iter_source_diffs(
-        local_manifest, remote_sources, skip_unchanged=True
-    ):
+    for src_name, src_data, _remote_src, diff in source_diffs_to_upload:
         if dry_run:
             if show:
                 console.print(f"\n[bold]Source '{src_name}':[/bold]")
@@ -5588,6 +5926,7 @@ def _push_core(
             console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
+    _sync_progress_phase("Saving manifest")
     manifest_data = serialize_manifest(local_manifest)
     enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
     mkey = manifest_key(device_id)
@@ -5650,10 +5989,11 @@ def _push_core(
             if show:
                 _print_usage_push_mode(result)
         except OSError as e:
-            stderr_console.print(
-                f"mm: warning: Content sync reached manifest acceptance; "
-                f"post-publication maintenance failed: {safe_str(e)}. Run mm status."
-            )
+            with _pause_sync_progress():
+                stderr_console.print(
+                    f"mm: warning: Content sync reached manifest acceptance; "
+                    f"post-publication maintenance failed: {safe_str(e)}. Run mm status."
+                )
     # Write sidecar (best-effort: failure warns but does not abort push;
     # the remote manifest succeeded, so peers still have a path to recovery).
     # Warn on both paths: without the sidecar, future corruption recovery
@@ -5663,19 +6003,20 @@ def _push_core(
         sidecar.write(local_manifest)
     except (OSError, StorageError) as e:
         result.maintenance_failures += 1
-        if quiet:
-            print(
-                f"mm: warning: failed to write recovery sidecar "
-                f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
-                f"corruption recovery will fall back to peer devices.",
-                file=sys.stderr,
-            )
-        else:
-            console.print(
-                f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
-                f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
-                f"corruption recovery will fall back to peer devices."
-            )
+        with _pause_sync_progress():
+            if quiet:
+                print(
+                    f"mm: warning: failed to write recovery sidecar "
+                    f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
+                    f"corruption recovery will fall back to peer devices.",
+                    file=sys.stderr,
+                )
+            else:
+                console.print(
+                    f"[yellow]Warning:[/yellow] failed to write recovery sidecar "
+                    f"({sidecar.sidecar_path()}): {e}. Push succeeded; future "
+                    f"corruption recovery will fall back to peer devices."
+                )
 
     try:
         update_last_seen(backend, device_id)
@@ -5684,10 +6025,11 @@ def _push_core(
         result.maintenance_failures += 1
         if not attended:
             raise
-        stderr_console.print(
-            f"mm: warning: Content sync reached manifest acceptance; "
-            f"post-publication maintenance failed: {safe_str(e)}. Run mm diag."
-        )
+        with _pause_sync_progress():
+            stderr_console.print(
+                f"mm: warning: Content sync reached manifest acceptance; "
+                f"post-publication maintenance failed: {safe_str(e)}. Run mm diag."
+            )
 
     elapsed = time.time() - start
     result.elapsed = elapsed
@@ -5796,6 +6138,7 @@ def pull(
                 _error(str(e))
 
             try:
+                _start_sync_progress("Unlocking storage")
                 if not dry_run and not pullhistory.failed():
                     pullhistory.record_failure(statedb.recover_if_needed())
                 backend = get_backend(config)
@@ -5829,6 +6172,7 @@ def pull(
                     _error(str(e) + refusal_suffix)
                 raise
             finally:
+                _stop_sync_progress()
                 _release_sync_lock()
 
             # Seam 2 — interactive pull tail: self-update, or the nudge. Runs AFTER
@@ -6037,12 +6381,15 @@ def _prefetch_manifests(
     """
     cache: dict[str, dict | None] = {}
     corrupt: list[_CorruptPeer] = []
+    if devices:
+        _sync_progress_start_batch("Reading peer manifests", len(devices), "manifests")
     for d in devices:
         did = d["device_id"]
         peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
         if peer_fetch.status == "corrupt":
             corrupt.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
         cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+        _sync_progress_advance()
     return cache, corrupt
 
 
@@ -6287,10 +6634,11 @@ def _record_source_bookkeeping(
             )
         except (OSError, StorageError) as e:
             msg = f"sync log write failed: {e}"
-            if quiet:
-                print(f"mm: warning: {msg}", file=sys.stderr)
-            else:
-                console.print(f"  [yellow]warning:[/yellow] {msg}")
+            with _pause_sync_progress():
+                if quiet:
+                    print(f"mm: warning: {msg}", file=sys.stderr)
+                else:
+                    console.print(f"  [yellow]warning:[/yellow] {msg}")
         else:
             if verbose and not quiet and logs:
                 for log in logs:
@@ -6677,6 +7025,7 @@ def _pull_core(
         # pre-inversion migration sweep so we don't accidentally migrate
         # files in a refusal scenario where the user is about to upgrade
         # their peers and re-pull. Exits via _error → typer.Exit(1).
+        _sync_progress_phase("Reading peer manifests")
         _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
 
         # Pre-inversion conflict-file migration. Runs once per pull under the
@@ -6687,7 +7036,10 @@ def _pull_core(
         # inversion files indistinguishable except by mtime — and resolve's
         # dual-mode dispatch needs the prefix, not the timestamp.
         if not dry_run:
-            resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
+            # resolveflow is a leaf and cannot pause the cli-layer spinner;
+            # pause around the sweep so its migration warnings print clean.
+            with _pause_sync_progress():
+                resolveflow._find_conflict_files(config, migrate_pre_inversion=True)
 
         # Widened to carry path + type per source. Type is load-bearing for
         # the sync-log gate in _pull_one_source — keying on type (not name)
@@ -6723,6 +7075,7 @@ def _pull_core(
         manifest_cache, corrupt_peers = _prefetch_manifests(
             backend, all_devices, passphrase, memory_kb
         )
+        _sync_progress_phase("Checking local files")
 
         # Consumer-boundary exclude_patterns filter for pull. Drops excluded
         # paths from each peer manifest before tombstone collection AND before
@@ -6828,19 +7181,20 @@ def _pull_core(
         # peers.
         case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
         if case_collisions:
-            for src_name, clusters in case_collisions.items():
-                for paths in clusters.values():
-                    # src_name and paths come from peer manifests — sanitize
-                    # before render (Group 7 preflight #1 sweep extension).
-                    safe_kept = safe_str(paths[0])
-                    safe_dropped = ", ".join(safe_str(p) for p in paths[1:])
-                    stderr_console.print(
-                        f"mm: warning: case-collision in source "
-                        f"'{safe_str(src_name)}' on case-insensitive FS — "
-                        f"keeping '{safe_kept}', skipping [{safe_dropped}] "
-                        f"(Linux peer can legitimately push both; this device "
-                        f"can only represent one)"
-                    )
+            with _pause_sync_progress():
+                for src_name, clusters in case_collisions.items():
+                    for paths in clusters.values():
+                        # src_name and paths come from peer manifests — sanitize
+                        # before render (Group 7 preflight #1 sweep extension).
+                        safe_kept = safe_str(paths[0])
+                        safe_dropped = ", ".join(safe_str(p) for p in paths[1:])
+                        stderr_console.print(
+                            f"mm: warning: case-collision in source "
+                            f"'{safe_str(src_name)}' on case-insensitive FS — "
+                            f"keeping '{safe_kept}', skipping [{safe_dropped}] "
+                            f"(Linux peer can legitimately push both; this device "
+                            f"can only represent one)"
+                        )
             manifest_cache = _drop_case_collisions_from_manifests(manifest_cache, case_collisions)
 
         all_tombstones = collect_tombstones(
@@ -6877,6 +7231,7 @@ def _pull_core(
             assert planner is not None
             predicted = _fail_mode_refusals(planner.predictions)
             if predicted:
+                _stop_sync_progress()
                 _print_pull_summary(
                     PullResult(),
                     corrupt_peers,
@@ -7040,10 +7395,11 @@ def _pull_core(
                             _cleanup_conflict_copies(backend, did, passphrase, memory_kb)
                         except (OSError, StorageError) as e:
                             msg = f"manifest conflict-copy cleanup failed for {dname}: {e}"
-                            if quiet:
-                                print(f"mm: warning: {msg}", file=sys.stderr)
-                            else:
-                                console.print(f"  [yellow]warning:[/yellow] {msg}")
+                            with _pause_sync_progress():
+                                if quiet:
+                                    print(f"mm: warning: {msg}", file=sys.stderr)
+                                else:
+                                    console.print(f"  [yellow]warning:[/yellow] {msg}")
 
             fsync_warnings = _fsync_touched_parents(touched_parents)
 
@@ -7104,6 +7460,7 @@ def _pull_core(
                 with suppress(Exception, SystemExit):
                     result_observer(_partial_result)
             exception_in_flight = sys.exc_info()[0] is not None
+            _stop_sync_progress()
             try:
                 _print_pull_summary(
                     _partial_result,
@@ -9303,11 +9660,12 @@ def _do_gc(
     referenced_hashes: set[str] = set()
 
     def _skip_missing() -> int:
-        stderr_console.print(
-            f"mm: warning: this device's manifest is missing: {safe_str(label)}. "
-            "Blob collection was skipped; no blobs were deleted. "
-            "Wait for sync, inspect with 'mm diag', then retry 'mm gc'."
-        )
+        with _pause_sync_progress():
+            stderr_console.print(
+                f"mm: warning: this device's manifest is missing: {safe_str(label)}. "
+                "Blob collection was skipped; no blobs were deleted. "
+                "Wait for sync, inspect with 'mm diag', then retry 'mm gc'."
+            )
         return 0
 
     def _refuse_unless_complete(fetch: ManifestFetch) -> None:
@@ -9393,10 +9751,11 @@ def _do_gc(
     if malformed_count and not (verbose or dry_run):
         # Always summarize malformed-path count even in non-verbose mode, so
         # the user has a signal that something weird is sitting in storage.
-        console.print(
-            f"  [yellow]warning:[/yellow] {malformed_count} blob(s) at unexpected "
-            f"path depth (skipped; run with --verbose to see)."
-        )
+        with _pause_sync_progress():
+            console.print(
+                f"  [yellow]warning:[/yellow] {malformed_count} blob(s) at unexpected "
+                f"path depth (skipped; run with --verbose to see)."
+            )
 
     if dry_run:
         console.print(f"\n[bold]Dry run:[/bold] {orphan_count} orphaned blobs found.")

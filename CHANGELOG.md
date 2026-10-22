@@ -2,7 +2,7 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## [1.11.7] - 2026-10-22
+## [1.11.8] - 2026-10-22
 
 **Antigravity context and usage now join the fleet.** Run `mm enable-source agy` to sync allowlisted skills and rules and include local token totals in `retro-fleet`. Session databases, settings, and credentials stay local.
 
@@ -15,6 +15,19 @@ All notable changes to Mind Meld will be documented in this file.
 
 - Standalone Grok Build sync and usage capture, and the retired OpenCode skill-link cleanup. Old source entries are ignored without deleting local files or creating deletion tombstones; `mm migrate-config` removes their inert config blocks. Grok usage from Cursor remains supported.
 - The retired 1.x CLI compatibility freeze. Storage-format refusal gates remain in force.
+
+## [1.11.7] - 2026-10-22
+
+**`mm push` and `mm pull` show what they are working on.** In an interactive terminal, a spinner shows the current phase and file or manifest counts, then clears before the final outcome line.
+
+### Added
+
+- Attended push and pull show progress through unlocking, scanning, uploading, reading manifests, and applying files. Push counts span sources; pull counts cover each source batch.
+- The spinner pauses for push/pull warnings and conflict prompts. Redraws are throttled, and terminal display failures do not change the sync result.
+
+### Upgrade notes
+
+- Redirected output, `--verbose`, `--dry-run`, `autopush`, and `autopull` keep their existing output. Storage and command flags are unchanged.
 
 ## [1.11.6] - 2026-10-22
 
