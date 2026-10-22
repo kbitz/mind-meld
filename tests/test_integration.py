@@ -2000,6 +2000,15 @@ class TestMigrateConfigCommand:
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         assert gstack["include_patterns"] == []
 
+    def test_non_generic_gstack_source_skips_recommended_includes(self, tmp_path):
+        """A source named gstack with a non-generic type must not receive
+        recommended include_patterns (which _validate_sources rejects on
+        non-generic sources)."""
+        diffs = cli_module._compute_recommended_includes_diff(
+            [{"name": "gstack", "path": str(tmp_path / ".gstack"), "type": "claude"}]
+        )
+        assert diffs == []
+
     def test_adds_missing_recommended_excludes(self, tmp_path, monkeypatch):
         """A source without exclude_patterns gets the recommended set."""
         config_path = self._write_explicit_config(tmp_path, exclude_patterns=None)

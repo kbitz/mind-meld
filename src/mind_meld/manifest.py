@@ -834,7 +834,7 @@ def _compile_include_pattern(pattern: str) -> re.Pattern[str]:
         out.append(
             "".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in seg)
         )
-    return re.compile("^" + "".join(out) + "$", re.DOTALL)
+    return re.compile("^" + "".join(out) + r"\Z", re.DOTALL)
 
 
 def matches_include_patterns(rel_path: str, include_patterns: list[str] | tuple[str, ...]) -> bool:

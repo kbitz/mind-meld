@@ -10200,7 +10200,7 @@ def _compute_recommended_includes_diff(
     """
     diffs: list[tuple[str, list[str]]] = []
     for src in sources:
-        if "include_patterns" in src:
+        if src.get("type") != "generic" or "include_patterns" in src:
             continue
         default = get_default_source(src.get("name", ""))
         if default is None:

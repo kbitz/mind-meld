@@ -3446,6 +3446,10 @@ class TestMatchesIncludePatterns:
             "projects/slug/checkpoints/line1\nline2.md",
             ["projects/*/checkpoints/**"],
         )
+        assert not matches_include_patterns(
+            "projects/slug/learnings.jsonl\n",
+            ["projects/*/learnings.jsonl"],
+        )
 
     def test_is_excluded_applies_allowlist_after_excludes(self):
         pats = ["projects/*/checkpoints/**", "projects/*/pair-review/*"]
