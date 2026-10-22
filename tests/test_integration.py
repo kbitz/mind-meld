@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import inspect
+import io
 import json
 import os
 import shutil
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
@@ -14581,3 +14583,285 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         cli_module._SYNC_OUTPUT.reset(token)
     err = capsys.readouterr().err
     assert "1 conflict copy kept; run mm conflicts to review, mm resolve to pick a winner" in err
+
+
+class _SyncTerminalBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capture61, monkeypatch):
+    memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
+    (memory / "user_role.md").write_text("updated content")
+    (memory / "second.md").write_text("second file")
+    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _mm_host_usage,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
+    )
+    monkeypatch.setattr(
+        _mm_events,
+        "discover_git_roots",
+        lambda *a, **k: _mm_events.GitRootDiscovery((), ()),
+    )
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: 2 content changes published; usage published.\n"
+    assert result.stderr == ""
+    output = terminal.getvalue()
+    assert "⠋ Unlocking storage" in output
+    assert "━" not in output
+    assert "\x1b[?25h" in output
+    positions = [
+        output.index("Unlocking storage"),
+        output.index("Checking remote manifest"),
+        output.index("Capturing host usage"),
+        output.index("Scanning sources"),
+        output.index("Recording activity"),
+        output.index("Uploading files"),
+        output.index("33.3% 1/3 files"),
+        output.index("66.7% 2/3 files"),
+        output.index("100.0% 3/3 files"),
+        output.index("Saving manifest"),
+        output.index("Cleaning up orphaned blobs"),
+    ]
+    assert positions == sorted(positions)
+
+
+def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
+    apply_failure_fleet, monkeypatch
+):
+    fleet = apply_failure_fleet
+    fleet.publish({"alpha.md": b"alpha", "beta.md": b"beta"})
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["pull"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Pull: 2 files applied.\n"
+    assert result.stderr == ""
+    output = terminal.getvalue()
+    assert "⠋ Unlocking storage" in output
+    assert "━" not in output
+    assert "\x1b[?25h" in output
+    positions = [
+        output.index("Unlocking storage"),
+        output.index("Reading peer manifests"),
+        output.index("50.0% 1/2 manifests"),
+        output.index("100.0% 2/2 manifests"),
+        output.index("Checking local files"),
+        output.index("Applying files"),
+        output.index("50.0% 1/2 files"),
+        output.index("100.0% 2/2 files"),
+    ]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["push", "--verbose"],
+        ["push", "--dry-run"],
+        ["pull", "--verbose"],
+        ["pull", "--dry-run"],
+        ["autopush"],
+        ["autopull"],
+    ],
+)
+def test_sync_progress_disabled_for_non_tty_verbose_dry_run_and_auto_commands(
+    status77, monkeypatch, args
+):
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert "Unlocking storage" not in terminal.getvalue()
+    assert "\x1b[?25l" not in terminal.getvalue()
+
+
+def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monkeypatch):
+    piped = io.StringIO()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=piped, force_terminal=True, color_system=None, width=80),
+    )
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: no content changes.\n"
+    assert piped.getvalue() == ""
+
+
+def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status77, monkeypatch):
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    failed = threading.Event()
+
+    class DyingTerminal(_SyncTerminalBuffer):
+        dead = False
+        failed_writes = 0
+        failing_thread = None
+
+        def write(self, text):
+            if self.dead:
+                self.failed_writes += 1
+                self.failing_thread = threading.current_thread()
+                failed.set()
+                raise OSError("terminal gone")
+            return super().write(text)
+
+    terminal = DyingTerminal()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def scanning_frames() -> set[str]:
+        output = terminal.getvalue()
+        return {frame for frame in frames if f"{frame} Scanning sources" in output}
+
+    original_build = cli_module.build_manifest_v2
+
+    def slow_build(*args, **kwargs):
+        deadline = time.monotonic() + 5
+        while len(scanning_frames()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        terminal.dead = True
+        try:
+            assert failed.wait(5), "timer never attempted a redraw"
+            assert terminal.failing_thread is not threading.current_thread()
+            terminal.failing_thread.join(timeout=5)
+            assert not terminal.failing_thread.is_alive()
+            assert terminal.failed_writes == 1
+        finally:
+            terminal.dead = False
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "build_manifest_v2", slow_build)
+    thread_errors: list = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert len(scanning_frames()) >= 2
+    assert thread_errors == []
+    assert result.stdout == "Push: no content changes.\n"
+
+
+def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
+    status77, monkeypatch
+):
+    class FlakyTerminal(_SyncTerminalBuffer):
+        failed = False
+
+        def write(self, text):
+            if "\x1b[?25l" in text and not self.failed:
+                self.failed = True
+                raise BlockingIOError(35, "Resource temporarily unavailable")
+            return super().write(text)
+
+    flaky = FlakyTerminal()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=flaky, force_terminal=True, color_system=None, width=80),
+    )
+    res = runner.invoke(app, ["push"])
+    assert res.exit_code == 0, res.output
+    assert res.stdout == "Push: no content changes.\n"
+
+    # Blocked ticker does not hang stop()
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=_SyncTerminalBuffer(), force_terminal=True, color_system=None, width=80),
+    )
+    drawing = threading.Event()
+    release_draw = threading.Event()
+    tickers, displays, stopped = [], [], []
+    original_refresh = cli_module.Progress.refresh
+    original_stop = cli_module.Progress.stop
+
+    def refresh(progress):
+        if not displays:
+            displays.append(progress)
+        if threading.current_thread().name == "mm-sync-spinner":
+            tickers.append(threading.current_thread())
+            drawing.set()
+            release_draw.wait()
+        return original_refresh(progress)
+
+    def stop(progress):
+        stopped.append(progress)
+        return original_stop(progress)
+
+    monkeypatch.setattr(cli_module.Progress, "refresh", refresh)
+    monkeypatch.setattr(cli_module.Progress, "stop", stop)
+    sp = cli_module._SyncProgress(enabled=True)
+    sp.start("Unlocking storage")
+    try:
+        assert drawing.wait(5), "ticker never entered blocked draw"
+        sp.stop()
+        assert len(tickers) == 1 and tickers[0].is_alive() and tickers[0].daemon
+        assert stopped == []
+    finally:
+        release_draw.set()
+        for ticker in tickers:
+            ticker.join(timeout=5)
+        for progress in displays:
+            original_stop(progress)
+
+
+def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_fleet, monkeypatch):
+    fleet = apply_failure_fleet
+    local_file = fleet.memory / "note.md"
+    local_file.write_text("local version\n")
+    os.utime(local_file, (1, 1))
+    fleet.publish({"note.md": b"remote version\n"})
+
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    paused_states: list[int] = []
+    original_prompt = typer.prompt
+
+    def observe_prompt(*args, **kwargs):
+        current = cli_module._current_sync_progress()
+        assert current is not None
+        paused_states.append(current._pause_depth)
+        return original_prompt(*args, **kwargs)
+
+    monkeypatch.setattr(typer, "prompt", observe_prompt)
+    result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\n")
+    assert result.exit_code == 0, result.output
+    assert paused_states == [1]
+    output = terminal.getvalue()
+    assert "Applying files" in output
+    assert f"Conflict: {fleet.prefix}note.md" in output
+    assert "\x1b[?25h" in output

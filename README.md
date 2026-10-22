@@ -427,6 +427,14 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 
 ### Sync outcomes
 
+In an interactive terminal without `--verbose` or `--dry-run`, `mm push` and
+`mm pull` show a transient spinner with live phase labels and file/manifest
+progress counters (`Uploading files 50.0% 1/2 files`, `Reading peer manifests
+50.0% 1/2 manifests`, `Applying files 50.0% 1/2 files`), pausing cleanly for
+any mid-run warnings or conflict prompts and clearing before the final outcome
+line. Redirected output (even with `FORCE_COLOR`), `--verbose`, `--dry-run`,
+`autopush`, and `autopull` omit the spinner.
+
 Default and verbose commands share the same final logical line; a narrow
 terminal may wrap it visually. Success is on stdout, failure on stderr.
 These examples describe possible results, not commands that guarantee them:
