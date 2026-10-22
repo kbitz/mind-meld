@@ -3954,9 +3954,9 @@ def _read_single_agy_db(
                 if cache_create > 0:
                     partial_days.add(day_str)
 
-                turn_key = hashlib.sha256(f"agy\0{bot_id}".encode("utf-8")).hexdigest()
+                digest = hashlib.sha256(f"agy\0{bot_id}".encode("utf-8")).hexdigest()
                 turn_data = {
-                    "key": turn_key,
+                    "key": digest,
                     "day": day_str,
                     "model": model_slug,
                     "usage": {
@@ -3966,12 +3966,12 @@ def _read_single_agy_db(
                         "cache_create": cache_create,
                     },
                 }
-                if turn_key in seen_turn_keys:
-                    existing = next(t for t in turns if t["key"] == turn_key)
+                if digest in seen_turn_keys:
+                    existing = next(t for t in turns if t["key"] == digest)
                     if existing != turn_data:
                         raise _ReadFailure("malformed", cause="bot_id_conflict")
                     continue
-                seen_turn_keys.add(turn_key)
+                seen_turn_keys.add(digest)
                 turns.append(turn_data)
     except (sqlite3.Error, _ReadFailure) as exc:
         failure = exc
