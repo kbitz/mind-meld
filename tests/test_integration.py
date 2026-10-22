@@ -14933,3 +14933,96 @@ def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
     assert "100.0% 3/3 files" in output
     assert "1/1 files" not in output
     assert output.index("33.3% 1/3 files") < output.index("100.0% 3/3 files")
+
+
+@pytest.mark.parametrize("fault", ["isatty", "update", "resume", "thread-start"])
+def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fault):
+    # Value: protects=display failures preserve successful sync and its final outcome;
+    # fails_when=TTY probing, redraw, resume, or thread-start errors escape;
+    # why_new=existing terminal tests cover only initial start and timer refresh failures;
+    # seam=none; no_claim=real terminal drivers (Rich is real, failures are injected)
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    triggered = []
+
+    def fail(*args, **kwargs):
+        triggered.append(fault)
+        raise OSError("synthetic display failure")
+
+    if fault == "isatty":
+        monkeypatch.setattr(terminal, "isatty", fail)
+    elif fault == "update":
+        monkeypatch.setattr(cli_module.Progress, "update", fail)
+    elif fault == "resume":
+        original_start = cli_module.Progress.start
+        starts = []
+
+        def start(progress):
+            starts.append(True)
+            if len(starts) > 1:
+                fail()
+            return original_start(progress)
+
+        monkeypatch.setattr(cli_module.Progress, "start", start)
+        original_build = cli_module.build_manifest_v2
+
+        def build(*args, **kwargs):
+            cli_module._print_apply_warning("synthetic apply warning")
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(cli_module, "build_manifest_v2", build)
+    else:
+        original_thread_start = threading.Thread.start
+
+        def thread_start(thread):
+            if thread.name == "mm-sync-spinner":
+                fail()
+            return original_thread_start(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", thread_start)
+
+    result = runner.invoke(app, ["push"])
+    assert triggered, "the injected display failure was not reached"
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Push: no content changes.\n"
+    assert result.stderr == ("synthetic apply warning\n" if fault == "resume" else "")
+    if fault != "isatty":
+        assert "\x1b[?25h" in terminal.getvalue()
+    assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
+
+
+def test_sync_progress_nested_pause_and_interrupt_do_not_restart_display(monkeypatch):
+    # Value: protects=nested warning pauses resume once and interrupted pauses stay cleared;
+    # fails_when=an inner pause or exception exit restarts the transient display;
+    # why_new=existing warning test resumes normally and interrupt test stops during scan;
+    # seam=none; no_claim=full CLI conflict routing (real Rich lifecycle at its owner)
+    terminal = _SyncTerminalBuffer()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(
+        cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    progress = cli_module._SyncProgress(enabled=True)
+    progress.start("Working")
+    try:
+        with progress.paused():
+            clears = terminal.getvalue().count("\x1b[?25h")
+            starts = terminal.getvalue().count("\x1b[?25l")
+            with progress.paused():
+                progress.set_phase("Next phase")
+            assert terminal.getvalue().count("\x1b[?25l") == starts
+            assert terminal.getvalue().count("\x1b[?25h") == clears
+        assert terminal.getvalue().count("\x1b[?25l") == starts + 1
+        with pytest.raises(KeyboardInterrupt), progress.paused():
+            starts = terminal.getvalue().count("\x1b[?25l")
+            raise KeyboardInterrupt
+        assert terminal.getvalue().count("\x1b[?25l") == starts
+    finally:
+        progress.stop()
+    assert not [t for t in threading.enumerate() if t.name == "mm-sync-spinner" and t.is_alive()]
