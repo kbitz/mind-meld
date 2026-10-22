@@ -44,37 +44,21 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:track=76A] Repair archived-design pointers at the next roadmap regeneration
-- **Why:** `docs/ROADMAP.md` (the Track 76A card itself and the _read-first_ or _Source_ lines of Tracks 84A to 89A) still cites the design's old path under `docs/designs/`, which now holds only a "# Moved" redirect to `docs/archive/store-v2.md`. Repair those pointers at the next `/roadmap` regeneration and reconcile `docs/roadmap-future.md`, whose link Track 76A already repointed. Track 89A also cites the design's §13 (cutover) as evidence, which the `docs/SPEC.md` evidence list and the archive header omit; reconcile all three. Regeneration must precede starting any Track whose `_read-first_` cites the old design path.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** The Track 76A plan kept generator-owned `docs/ROADMAP.md` untouched and left the redirect at the old path so its pointers still resolve. Revisit at the next `/roadmap` regeneration.
-
-### [plan-eng-review:track=76A] Mention the abandoned code removal in the next release
-- **Why:** Add a one-line CHANGELOG note that the abandoned store code and simulator were removed and mm sync behavior is unchanged.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** The Track 76A plan took no version bump, so the deletion rides the next release. Revisit when preparing that release's CHANGELOG.
-
-### [review:track=76A] Retire pre-2026-10-19 Track IDs from the state.db invariants and their siblings
-- **Why:** The "Pull/push history log (Track 73B)" section of `docs/invariants/sync.md` still assigns the four provisional tables, `incremental_vacuum`, ledger durability and the authoritative-recovery remedy to the Tracks 75A to 81A that the 2026-10-19 rewrite killed or re-carded. Track 76A removed only the deleted simulator's reader claims and added a note that these IDs are not the current roadmap's. A reader for every persisted field, or an explicit "no reader", is still owed. The same old IDs survive in `src/mind_meld/statedb.py` (the `expire_displaced` docstring's "76A"), `docs/invariants/README.md` ("Track 75A and later writers ... 82A deletes the temporary LocalBackend rows", although the 2026-10-19 drain moved that guard obligation to Tracks 85A and 87A and killed the old 82A that would have retired the backend), `docs/invariants/init-devices.md` ("Track 80A's Linux passphrase flow", now Track 85A) and a `tests/test_pullhistory.py` comment ("75A's committed row").
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Found by the Track 76A review; the owner chose the minimal fix there. No current Track card owns the provisional tables: 87A's last-synced base or 88A's peer status should decide reuse or drop. Revisit when Track 87A or 88A starts, or at the next `/roadmap` regeneration if it reaches these references first.
-
-### [plan-eng-review:track=75A] Name held and refusing files in status and escalate a file held on every push
-- **Why:** Track 75A holds a still-changing file at its published version and names it only in that push's outcome and the autopush breadcrumb (count plus up to three paths). Nothing persists which path a snapshot refusal named, and a file held on every push never escalates, so a continuously written file can lag indefinitely with only a repeating count. 77A's run record is the reader that can carry both.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** Deferred from the 2026-10-19 /autoplan of 75A (CEO and DX outside voices). Revisit in 77A, or sooner if the same held count repeats across pushes with no way to name the file outside a verbose push. Scope: persist the refusing path and class for snapshot refusals, and a consecutive-hold counter that `mm status` escalates. Not built in 75A.
-
-### [discovered:track=75A] Marker discovery still refuses when a listed entry vanishes before its stat
-- **Why:** `_collect_marker_files` (`.extend-root` discovery for generic sources, run before the file walk and by `_build_exclude_map`) has its own entry stat that refuses with "disappeared while being read". It is the same rename-away race the 75A hold candidates cover in `_collect_regular_files_scandir`, but it cannot carry a collector and was outside the approved census, so a temp file renamed away at that instant still refuses a whole push.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Found while implementing 75A. A vanished entry whose name is not `.extend-root` cannot be a marker, so ignoring it is provably safe unless it was a directory that held markers; decide that shape rule before changing it. Revisit if a push refuses with `disappeared while being read` and the path is not a source file.
-
 ## Drain records
+
+### Roadmap drain — 2026-10-21
+
+5 inbox items: **3 placed, 0 deferred, 2 killed, 0 discharged**. Authored-false rate: 0 / (3 + 0) = 0%. Verification baseline: `be13eab` (v1.11.5). Tracks 75A (v1.11.3, PR #219), 76A (PR #220, first released in v1.11.4), 77A (v1.11.4, PR #221) and 78A (v1.11.5, PR #222) were recorded independently in shipped history; Groups 75–78 are tombstoned. The eleven leftover Tracks keep their numbers (79A–89A): the packer emits the same eleven serial bins. Track 78A's `; usage published` suffix against SPEC O8.2 is deferred to Future until the quiet-output checkpoint decision; neither v1.11.4 nor v1.11.5 claims that checkpoint. No active pins were declared.
+
+| Inbox item | Disposition |
+|---|---|
+| [plan-eng-review:track=76A] Repair archived-design pointers at the next roadmap regeneration | place → this regeneration: Tracks 84A–89A now cite `docs/archive/store-v2.md`; naming §13 in docs/SPEC.md's evidence list rides Track 89A |
+| [plan-eng-review:track=76A] Mention the abandoned code removal in the next release | place → Track 79A's CHANGELOG entry (v1.11.4 and v1.11.5 shipped without the line; verified at `be13eab`) |
+| [review:track=76A] Retire pre-2026-10-19 Track IDs from the state.db invariants and their siblings | place → Track 87A (the obligation-binding half landed in PR #220; the reader-or-no-reader rewrite rides the first non-history `state.db` writer) |
+| [plan-eng-review:track=75A] Name held and refusing files in status and escalate a file held on every push | kill: held outcomes already persist count-level in Track 77A's run record; escalation and refusing-path persistence are unobserved publication-status precision, refused by the standing constraint; reversible — reopen if the same held count repeats with no way to name the file |
+| [discovered:track=75A] Marker discovery still refuses when a listed entry vanishes before its stat | kill: unobserved; reversible (one refused push, rerun succeeds); reopen if a push refuses with `disappeared while being read` on a non-source path |
+
+**Version:** documentation-only regeneration; no bump. Quiet output (O8) and complete usage (O7) checkpoints remain unaccepted, so the next code release stays PATCH under the spec's release policy.
 
 ### Roadmap drain — 2026-10-19
 

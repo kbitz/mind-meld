@@ -525,3 +525,38 @@ _tombstone: 74_
 - 2026-10-19: merged [PR #217](https://github.com/kbitz/mind-meld/pull/217) (commit `408766d4570df82e3074a5d90dd21ac0ddce1974`); verified land-time Track 74A, original/current Group 74. Lineage: the carried remainder of Track 71B (introduced by `643e467` on 2026-10-11; its shared-helper half shipped in v1.7.1, PR #204, without acceptance), renumbered 74A by the 2026-10-15 regeneration `1d2b297` (PR #211) and kept by `7040a6d` on 2026-10-18 (PR #216). PATCH release.
 - Closure evidence: approved plan `74a-plan.md` (SHA-256 `fb5bf70e4f86f7467dce65261d208c47b0a99c36954bc2403f72a7737dbd9711`); the [preparation receipt](https://github.com/kbitz/mind-meld/pull/217#issuecomment-6266833316) records 30 of 30 rows VERIFIED. The owner's UC2 decision at the 2026-10-18 /autoplan gate narrowed the card: the guard covers the named raw-writer inventory under an active pytest guard, backed by a static census, and claims neither suite-wide nor simulator safety (TODOS `[roadmap:track=74A]`, drained 2026-10-19).
 - Delivered: each named raw writer refuses the real account trees, agent trees, configured `storage.path` and source paths under pytest before its first mutation, which closes the 2026-10-08 `_log_unexpected` leak path and Track 71B's carried obligation; `fsutil.flock_append_jsonl(on_locked=)` is removed.
+## Individual Track history
+_tombstone: 75_
+
+### Track 75A: Hold a file that changes during push instead of refusing the push ✓ Shipped (v1.11.3)
+
+- 2026-10-20: merged [PR #219](https://github.com/kbitz/mind-meld/pull/219) (commit `e013df3e85c7b797fe0aeb351da0e5695e000c7a`); verified land-time Track 75A, original/current Group 75. Introduced by the 2026-10-19 regeneration `e32da01` (PR #218). PATCH release.
+- Closure evidence: the PR records 62 plan rows verified with the gate green; row 75A-63 (the owner's attended push) was explicitly deferred until after deploy and is soak evidence for the O8 checkpoint, not a Track obligation. Hold escalation for a file held on every push was deferred at /autoplan and killed by the 2026-10-21 regeneration (unobserved; publication-status standing constraint); marker discovery (`_collect_marker_files`) still refuses on a vanished entry by the same decision.
+- Delivered: `SnapshotChanged` re-reads once at scan and upload, then holds a still-changing file at its accepted published entry (never-published files are omitted, no tombstone) while the rest of the push publishes; `PushResult.held` names the count on the outcome line and in the autopush breadcrumb; recovery from a sidecar, peers or conflict copies still refuses.
+
+## Individual Track history
+_tombstone: 76_
+
+### Track 76A: Delete the abandoned store-v2 code and simulator ✓ Shipped (v1.11.4)
+
+- 2026-10-20: merged [PR #220](https://github.com/kbitz/mind-meld/pull/220) (commit `ab811f9df72f7726b7754f9bf6af6e532a0c63ed`); verified land-time Track 76A, original/current Group 76. No version bump in the PR; first released in v1.11.4.
+- Closure evidence: `src/mind_meld/store/`, `tests/sim/`, `tests/test_store_format.py` and `docs/invariants/store.md` are deleted, the conftest and module-boundary hooks and README's `MM_SIM_DEEP` note are gone, and the design is archived at `docs/archive/store-v2.md`. One recorded deviation: a "# Moved" redirect remains at `docs/designs/store-v2.md` so the then-current ROADMAP pointers kept resolving; the 2026-10-21 regeneration repointed those cards at the archive. The release-note line for the removal rides Track 79A's CHANGELOG entry.
+- Delivered: the repository no longer carries the store-v2 package, its ~12k-line simulator or its invariant doc as live authority; the existing `state.db` tables stay.
+
+## Individual Track history
+_tombstone: 77_
+
+### Track 77A: Open mm status with a verdict ✓ Shipped (v1.11.4)
+
+- 2026-10-21: merged [PR #221](https://github.com/kbitz/mind-meld/pull/221) (commit `34bc6fc86aaf34bfe28aa6dc5b7322dbf9e6cc18`); verified land-time Track 77A, original/current Group 77. PATCH release; the PR explicitly does not accept the quiet-output checkpoint.
+- Closure evidence: `./bin/check` green in the PR (8,328 tests); `_status_verdict` opens the post-authentication report, attended push and pull write bounded run records (`attemptlog.make_run` / `write_run`), superseded autorun breadcrumbs move to `mm diag`, and per-item listings fold into counts. The PR's scope note excludes hold escalation, which the 2026-10-21 regeneration killed as unobserved.
+- Delivered: the first line of `mm status` says whether local content matches this device's last push, the exact pending counts, or the one fixing command; a later attended success clears an older automatic failure of the same verb.
+
+## Individual Track history
+_tombstone: 78_
+
+### Track 78A: End push and pull with one outcome line ✓ Shipped (v1.11.5)
+
+- 2026-10-21: merged [PR #222](https://github.com/kbitz/mind-meld/pull/222) (commit `be13eababce64232611e510ea808d1856fc34449`); verified land-time Track 78A, original/current Group 78. PATCH release; the quiet-output checkpoint stays unclaimed.
+- Closure evidence: `./bin/check` green in the PR (8,407 tests); capture, cache and budget notices moved to `--verbose` and the run record, the update tail and history notice run before the final line, attended `mm pull` exits 1 on failed files while autopull keeps 0, and successful autopush and autopull print nothing. Known residual: the success line can append `; usage published`, which docs/SPEC.md O8.2's "prints nothing during a push" does not clearly allow — deferred in Future until the checkpoint decision.
+- Delivered: attended `mm push` and `mm pull` end with one outcome line (success on stdout, failure last on stderr with its `Run:` command).

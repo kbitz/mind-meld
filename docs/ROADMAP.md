@@ -28,101 +28,12 @@ _tombstone: 27, 70, 71, 72, 73, 74_
 
 ### Phase 4: Quiet sync and complete usage
 
-**End-state:** On today's store, a push publishes while agents keep writing; push, pull and status each report one outcome; the abandoned store-v2 code is gone; Grok Build support is removed and Muse has its own family; and retro capture completes within one budget, so docs/SPEC.md O7 and O8 hold on the owner's Macs.
-**Groups:** 75, 76, 77, 78, 79, 80, 81, 82, 83
-
-#### Group 75: Unblock push
-
-_Depends on: none_
-
-**This group delivers:** A push publishes while agents keep writing files, holding a changing file at its last published version.
-
-##### Track 75A: Hold a file that changes during push instead of refusing the push
-_2 tasks . ~300 LOC . medium risk . 9 files_
-**Outcome:** The owner's push succeeds while agents keep writing files: a file that changes while mm reads it keeps its previously published version and goes out with a later push.
-**Supports:** MVP-1, docs/SPEC.md O1.3 and O8.1.
-**Done when:** a file whose bytes change during the scan or between scan and upload is re-read once and, if still changing, held at its accepted remote entry (a never-published file is left out, with no tombstone); the rest of the push publishes; the outcome line names the held count and autopush records it in its breadcrumb; a push still refuses when the prior manifest was recovered from the sidecar, peers or conflict copies; tests cover scan-time and upload-time changes; `docs/invariants/sync.md` "Complete snapshots" and README "Snapshot failures" describe the hold; `./bin/check` passes.
-_touches: src/mind_meld/errors.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, tests/test_manifest.py, tests/test_pull_helpers.py, tests/test_integration.py, docs/invariants/sync.md, README.md, SPEC.md_
-_out: 76A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md_
-_session: fresh · effort: high · verify: ./bin/check tests/test_manifest.py tests/test_pull_helpers.py tests/test_integration.py_
-
-_Source: manifested 2026-10-19 on device 889e42c0: the attended push at 15:02 UTC uploaded content (history rows at 15:03:32) and then stopped `push-failed (snapshot-refused)`, leaving about 19k changes unpublished, while `mm push --dry-run` on the same tree passed (it does not preview upload re-reads). At 408766d `cli._upload_changed_blobs` refuses when a re-read no longer matches the scan and `manifest.read_file_revision` refuses on change during the scan; neither retries._
-
-- **Retry once, then hold** -- A transient `SnapshotChanged` subclass of `SnapshotError` for changed, vanished or grown input; one re-read in the scan and in `_upload_changed_blobs`; a still-changing file reuses the frozen-entry path. _src/mind_meld/errors.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, tests/test_manifest.py, tests/test_pull_helpers.py, ~200 lines._ (M)
-- **Report held files** -- `PushResult.held`, the outcome line, the autopush breadcrumb and the docs. _src/mind_meld/cli.py, tests/test_integration.py, docs/invariants/sync.md, README.md, SPEC.md, ~100 lines._ (S)
-
-#### Group 76: Remove the store-v2 code
-
-_Depends on: Group 75_
-
-**This group delivers:** The abandoned store-v2 package, simulator and invariants leave the repository.
-
-##### Track 76A: Delete the abandoned store-v2 code and simulator
-_3 tasks . ~15,000 LOC (del) . low risk . 6 files_
-**Outcome:** The repository stops carrying the store-v2 package, its simulator and its invariants, so agents and `./bin/check` no longer read and run a design the spec dropped.
-**Supports:** MVP-1; docs/SPEC.md (2026-10-19): 2.0 carries the 1.x store, and the superseded design must not stay an active invariant authority.
-**Done when:** `src/mind_meld/store/`, `tests/sim/`, `tests/test_store_format.py`, `docs/invariants/store.md`, the simulator hooks in `tests/conftest.py` and the `test_store_*` module-boundary tests are gone; the routing README rows that name them and README's `MM_SIM_DEEP` sentence are removed; `docs/designs/store-v2.md` moves to `docs/archive/` with its superseded notice, and the links in docs/SPEC.md, root SPEC.md and docs/roadmap-future.md follow; the existing `state.db` tables stay; `./bin/check` passes.
-_touches: src/mind_meld/store/, tests/sim/, tests/test_store_format.py, tests/conftest.py, tests/test_module_boundaries.py, tests/test_docs_routing.py, docs/invariants/store.md, docs/invariants/README.md, docs/designs/store-v2.md, docs/archive/store-v2.md (new), docs/SPEC.md, SPEC.md, docs/roadmap-future.md, README.md_
-_blocked-by: Track 75A_
-_out: 77A_
-_read-first: docs/invariants/README.md_
-_session: fresh · effort: medium · verify: ./bin/check_
-
-_Source: docs/SPEC.md rewrite (2026-10-19, owner decision "evolve 1.x"). At 408766d no production module imports `mind_meld.store`; the package is 1,111 lines, `tests/sim/` about 12.3k and `tests/test_store_format.py` 1,766._
-
-- **Delete the package, simulator and format tests** -- _src/mind_meld/store/, tests/sim/, tests/test_store_format.py, docs/invariants/store.md, ~15,000 lines (del)._ (S)
-- **Unhook the suite and the routing** -- Remove the conftest simulator summary, the module-boundary store tests, the routing rows and the README sentence. _tests/conftest.py, tests/test_module_boundaries.py, tests/test_docs_routing.py, docs/invariants/README.md, README.md, ~80 lines._ (M)
-- **Archive the design** -- Move store-v2.md to the archive and repair its links. _docs/designs/store-v2.md, docs/archive/store-v2.md, docs/SPEC.md, SPEC.md, ~20 lines._ (S)
-
-#### Group 77: Status verdict
-
-_Depends on: Group 76_
-
-**This group delivers:** `mm status` opens with one verdict and drops superseded breadcrumbs.
-
-##### Track 77A: Open mm status with a verdict
-_2 tasks . ~350 LOC . low risk . 9 files_
-**Outcome:** The first line of `mm status` tells the owner whether everything is in sync, how many changes are waiting, or what to do; breadcrumbs from runs that later runs replaced no longer show.
-**Supports:** MVP-1, docs/SPEC.md O8.4, and the place O8.1 moves diagnostics to.
-**Done when:** status prints a one-line verdict first; attended push and pull record their outcome and degradations (including `PushResult.events_degradations`) so status can show them; an autorun breadcrumb older than a later attended run of the same verb moves from status to `mm diag`; per-item listings such as skipped nested repositories fold into a count with detail in diag; a regression covers a stale crypto-error breadcrumb under a newer successful push; README's status section matches; `./bin/check` passes.
-_touches: src/mind_meld/cli.py, src/mind_meld/attemptlog.py, tests/test_silent_failure_contract.py, tests/test_diag.py, tests/test_attemptlog.py, tests/test_integration.py, docs/invariants/sync.md, docs/invariants/events-retro.md, README.md_
-_blocked-by: Track 76A_
-_out: 78A, 88A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_silent_failure_contract.py tests/test_diag.py tests/test_attemptlog.py_
-
-_Source: observed 2026-10-19 on 889e42c0: `mm status` listed 18 skipped nested repositories, then a 266-hour-old autopush crypto-error written by the 2026-10-08 test leak ("this Mac runs mm 1.5.3") and a one-file autopull failure, with no overall verdict. At 408766d `_breadcrumb_staleness_suffix` marks age only, and attended push and pull write no breadcrumb._
-
-- **Record attended runs** -- Attended push and pull write a run record with outcome and degradations; superseded autorun breadcrumbs move to diag. _src/mind_meld/cli.py, src/mind_meld/attemptlog.py, tests/test_attemptlog.py, tests/test_diag.py, ~180 lines._ (M)
-- **Verdict first** -- Compute and print the verdict; fold per-item listings into counts. _src/mind_meld/cli.py, tests/test_silent_failure_contract.py, tests/test_integration.py, docs/invariants/sync.md, docs/invariants/events-retro.md, README.md, ~170 lines._ (M)
-
-#### Group 78: One outcome line
-
-_Depends on: Group 77_
-
-**This group delivers:** Push and pull print one outcome line, or end with what broke and its fix.
-
-##### Track 78A: End push and pull with one outcome line
-_3 tasks . ~500 LOC . medium risk . 12 files_
-**Outcome:** The owner's `mm push` and `mm pull` print one line that says what moved, or end with what broke and the one command that fixes it; capture, cache and budget notices appear only with `--verbose`.
-**Supports:** MVP-1, docs/SPEC.md O8.1 to O8.3.
-**Done when:** on attended push and pull, progress lines, nested-repository notices and the identity-cache, retro-cursor, discovery-budget, events-tail and host-reader notices print only with `--verbose` and reach `mm status` through Track 77A's run record; data-at-risk warnings and actionable warnings (large sync growth, config migration, missing custom mm-events folder) still print, before the outcome line; the auto-update tail, the history notice and lock release run before the final line, so the outcome or the failure prints last; interactive `mm pull` exits 1 when any file failed to apply while `mm autopull` keeps exit 0; `mm autopush` and `mm autopull` print nothing on success; the events-retro, sync and auto-upgrade invariants and the README exit-code table match; integration tests pin the success, failure and degraded-capture output; `./bin/check` passes.
-_touches: src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/identity.py, src/mind_meld/token_usage.py, src/mind_meld/host_usage.py, src/mind_meld/upgrade.py, src/mind_meld/pullhistory.py, tests/test_integration.py, tests/test_host_usage_snapshot.py, tests/test_events_budget_scope.py, tests/test_identity.py, tests/test_self_update.py, docs/invariants/events-retro.md, docs/invariants/sync.md, docs/invariants/auto-upgrade.md, README.md_
-_blocked-by: Track 77A_
-_out: 79A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/invariants/auto-upgrade.md_
-_session: fresh · effort: high · verify: ./bin/check tests/test_integration.py tests/test_host_usage_snapshot.py tests/test_events_budget_scope.py tests/test_identity.py tests/test_self_update.py_
-
-_Source: the owner's 2026-10-19 push: about 30 stderr lines, one of them actionable, before the refusal ("all this extraneous info is useless to me in current form"). At 408766d `push`'s `finally` block runs `upgrade.update_or_nudge` after `_error`, and `pullhistory.command_scope` can print after that. Future "Interactive `mm pull` exit code when files failed to apply" is promoted: its exit-0 decision (Track 53A gate) rested on the 1.x compatibility contract that docs/SPEC.md retired on 2026-10-19._
-
-- **Quiet the capture and scan notices** -- Route non-actionable notices to `--verbose` and the run record. _src/mind_meld/cli.py, src/mind_meld/events_tail.py, src/mind_meld/identity.py, src/mind_meld/token_usage.py, src/mind_meld/host_usage.py, tests/test_host_usage_snapshot.py, tests/test_events_budget_scope.py, tests/test_identity.py, ~250 lines._ (M)
-- **Outcome last, and pull's exit code** -- Reorder the update tail and history notice, print one success line, put a failure last with its fix, and exit 1 from `mm pull` on failed files. _src/mind_meld/cli.py, src/mind_meld/upgrade.py, src/mind_meld/pullhistory.py, tests/test_integration.py, tests/test_self_update.py, ~150 lines._ (M)
-- **Docs** -- The three invariant docs and the README exit-code table. _docs/invariants/events-retro.md, docs/invariants/sync.md, docs/invariants/auto-upgrade.md, README.md, ~100 lines._ (S)
+**End-state:** On today's store, the 1.x compatibility tripwires are gone, Muse has its own retro family, Grok Build support is removed, and retro capture completes within one budget, so docs/SPEC.md O7 holds on the owner's Macs. (Groups 75-78 shipped the O8 half in v1.11.3-v1.11.5.)
+**Groups:** 79, 80, 81, 82, 83
 
 #### Group 79: Compatibility contract and Muse family
 
-_Depends on: Group 78_
+_Depends on: none_
 
 **This group delivers:** Muse gets its own retro row and the 1.x compatibility tripwires are gone.
 
@@ -130,7 +41,7 @@ _Depends on: Group 78_
 _3 tasks . ~260 LOC (+700 del) . medium risk . 9 files_
 **Outcome:** Muse usage shows in its own Muse row in `retro-fleet`, and releases stop carrying the 1.x compatibility tripwires; only the storage-format refusal gates stay tested.
 **Supports:** MVP-1, docs/SPEC.md O7.1 and the release policy's compatibility surface.
-**Done when:** `test_closed_vocabularies`, the CLI-surface golden and its fixture, and `EXIT_EVIDENCE` with its checks are deleted, and the usage, rejected-value and abort exit tests move to `tests/test_integration.py`; the format-constant, frozen-reader and device-registry-writer tests stay; `auto-upgrade.md` "Compatibility (1.x)" becomes a short storage-format gates section, and README, the routing README, `init-devices.md` and `events-retro.md` stop citing the contract; `host_usage.HostFamily` and `AGENT_ROW_ORDER` gain `muse` and `muse-*` models classify as Muse; README Upgrading says an un-upgraded peer drops a snapshot carrying the new family until it updates; `./bin/check` passes.
+**Done when:** `test_closed_vocabularies`, the CLI-surface golden and its fixture, and `EXIT_EVIDENCE` with its checks are deleted, and the usage, rejected-value and abort exit tests move to `tests/test_integration.py`; the format-constant, frozen-reader and device-registry-writer tests stay; `auto-upgrade.md` "Compatibility (1.x)" becomes a short storage-format gates section, and README, the routing README, `init-devices.md` and `events-retro.md` stop citing the contract; `host_usage.HostFamily` and `AGENT_ROW_ORDER` gain `muse` and `muse-*` models classify as Muse; README Upgrading says an un-upgraded peer drops a snapshot carrying the new family until it updates; the release's CHANGELOG entry carries one line noting Track 76A's removal of the abandoned store code and simulator (sync behavior unchanged; v1.11.4 and v1.11.5 shipped without it); `./bin/check` passes.
 _touches: tests/test_compat_contract.py, tests/fixtures/cli_surface_1_x.json, tests/fixtures/compat_1_0/README.md, src/mind_meld/host_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/_host_usage_oracle.py, tests/test_muse_usage.py, tests/test_host_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_integration.py, docs/invariants/auto-upgrade.md, docs/invariants/README.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, README.md_
 _blocked-by: Track 78A_
 _out: 80A, 81A_
@@ -253,10 +164,10 @@ _2 tasks . ~190 LOC . medium risk . 8 files_
 _touches: src/mind_meld/storage/local.py, src/mind_meld/devices.py, src/mind_meld/errors.py, src/mind_meld/cli.py, tests/test_storage_local.py, tests/test_devices.py, tests/test_diag.py, tests/test_pull_result.py, docs/invariants/sync.md_
 _blocked-by: Track 83A_
 _out: 85A, 87A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/designs/store-v2.md_
+_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/archive/store-v2.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_storage_local.py tests/test_devices.py tests/test_diag.py tests/test_pull_result.py_
 
-_Source: docs/designs/store-v2.md "Why a new store" hazards, re-checked at 408766d: `_download_and_apply` counts a missing blob as `failed`; `_fetch_remote_manifest` checks `exists` and then `get`, so a swapped file reads as corrupt; `devices.list_devices_with_drops` drops an unreadable entry and `_check_fleet_version_or_refuse` then refuses the pull; `devices._list_devices_impl` accepts any `*.json`; `LocalBackend.find_conflict_copies` knows only iCloud and Dropbox names._
+_Source: docs/archive/store-v2.md "Why a new store" hazards, re-checked at 408766d: `_download_and_apply` counts a missing blob as `failed`; `_fetch_remote_manifest` checks `exists` and then `get`, so a swapped file reads as corrupt; `devices.list_devices_with_drops` drops an unreadable entry and `_check_fleet_version_or_refuse` then refuses the pull; `devices._list_devices_impl` accepts any `*.json`; `LocalBackend.find_conflict_copies` knows only iCloud and Dropbox names._
 
 - **Ignore foreign files and retry swaps** -- _src/mind_meld/storage/local.py, src/mind_meld/devices.py, src/mind_meld/cli.py, tests/test_storage_local.py, tests/test_devices.py, tests/test_diag.py, ~110 lines._ (M)
 - **A waiting outcome** -- _src/mind_meld/errors.py, src/mind_meld/cli.py, tests/test_pull_result.py, docs/invariants/sync.md, ~80 lines._ (M)
@@ -278,7 +189,7 @@ _out: 86A, 89A_
 _read-first: docs/invariants/README.md, docs/invariants/init-devices.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_crypto.py tests/test_integration.py_
 
-_Source: docs/designs/store-v2.md hazard "Init on an unsynced folder mints a second root_salt", re-checked at 408766d: `init` treats a `"missing"` crypto-init fetch as a first device and `crypto.bootstrap_crypto_init` writes a new salt; `_init_storage_guard` warns only when blobs or manifests already exist; `crypto.apply_crypto_init_repair` rewrites the canonical file on push and pull; `_init_crypto_session` still says "Run 'mm init'" when the file is missing._
+_Source: docs/archive/store-v2.md hazard "Init on an unsynced folder mints a second root_salt", re-checked at 408766d: `init` treats a `"missing"` crypto-init fetch as a first device and `crypto.bootstrap_crypto_init` writes a new salt; `_init_storage_guard` warns only when blobs or manifests already exist; `crypto.apply_crypto_init_repair` rewrites the canonical file on push and pull; `_init_crypto_session` still says "Run 'mm init'" when the file is missing._
 
 - **New fleet versus join** -- _src/mind_meld/cli.py, src/mind_meld/crypto.py, tests/test_crypto.py, tests/test_integration.py, ~100 lines._ (M)
 - **Write-once key header** -- _src/mind_meld/crypto.py, tests/test_crypto.py, ~40 lines._ (S)
@@ -298,10 +209,10 @@ _2 tasks . ~270 LOC . high risk . 6 files_
 _touches: src/mind_meld/manifest.py, src/mind_meld/cli.py, src/mind_meld/synclog.py, tests/test_manifest.py, tests/test_integration.py, tests/test_synclog.py, docs/invariants/sync.md, README.md_
 _blocked-by: Track 85A_
 _out: 87A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/designs/store-v2.md_
+_read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/archive/store-v2.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_manifest.py tests/test_integration.py tests/test_synclog.py_
 
-_Source: docs/designs/store-v2.md §7 (current evidence) and its hazard row on absolute-path folder names; at 408766d `manifest.walk_claude_source` publishes `projects/-Users-<name>-…` wire paths._
+_Source: docs/archive/store-v2.md §7 (current evidence) and its hazard row on absolute-path folder names; at 408766d `manifest.walk_claude_source` publishes `projects/-Users-<name>-…` wire paths._
 
 - **Home-relative wire paths** -- _src/mind_meld/manifest.py, src/mind_meld/cli.py, tests/test_manifest.py, tests/test_integration.py, ~150 lines._ (M)
 - **Tombstones and history follow** -- _src/mind_meld/manifest.py, src/mind_meld/synclog.py, tests/test_synclog.py, docs/invariants/sync.md, README.md, ~120 lines._ (M)
@@ -316,21 +227,21 @@ _Depends on: Group 84, Group 86_
 _2 tasks . ~450 LOC . high risk . 9 files_
 **Outcome:** A peer's change to a file the owner has not touched simply applies, a conflict appears only when both machines changed the file, deleted `MEMORY.md` lines stay deleted, and a file deleted on one machine is deleted on the others with a 30-day recovery copy.
 **Supports:** MVP-1, docs/SPEC.md O1.1.
-**Done when:** a `state.db` migration adds a per-peer last-synced base (`peer, source, path, sha`); `_apply_incoming_file` skips when the remote equals the base, fast-forwards with no union when the local file equals the base, and unions a mergeable file or writes a conflict copy only when both changed, falling back to today's rule when no base exists; a peer tombstone deletes the local file when it still equals the base and keeps the bytes recoverable for 30 days; bases are recorded after applied, matched and deleted outcomes, never after failed or waiting ones; `pullplan` predicts the same; `conflicts.md` and `sync.md` describe the rule; tests cover each branch and a three-machine sequence; the recovery-copy writer calls `fsutil.refuse_real_state_write_under_pytest` before its first mutation and joins the raw-writer census; `./bin/check` passes.
-_touches: src/mind_meld/statedb.py, src/mind_meld/cli.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, src/mind_meld/retention.py, tests/test_statedb.py, tests/test_merge.py, tests/test_additive_sync.py, tests/test_integration.py, tests/test_fsutil.py, docs/invariants/conflicts.md, docs/invariants/sync.md, README.md_
+**Done when:** a `state.db` migration adds a per-peer last-synced base (`peer, source, path, sha`); `_apply_incoming_file` skips when the remote equals the base, fast-forwards with no union when the local file equals the base, and unions a mergeable file or writes a conflict copy only when both changed, falling back to today's rule when no base exists; a peer tombstone deletes the local file when it still equals the base and keeps the bytes recoverable for 30 days; bases are recorded after applied, matched and deleted outcomes, never after failed or waiting ones; `pullplan` predicts the same; `conflicts.md` and `sync.md` describe the rule; tests cover each branch and a three-machine sequence; the recovery-copy writer calls `fsutil.refuse_real_state_write_under_pytest` before its first mutation and joins the raw-writer census; the provisional `state.db` tables each name a reader or an explicit no-reader, and the pre-2026-10-19 Track IDs in `sync.md`'s history-log section, `statedb.py`, the routing README, `init-devices.md` and `tests/test_pullhistory.py` are retired (including `sync.md`'s deferred hold-escalation pointer, killed 2026-10-21 as unobserved); `./bin/check` passes.
+_touches: src/mind_meld/statedb.py, src/mind_meld/cli.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, src/mind_meld/retention.py, tests/test_statedb.py, tests/test_merge.py, tests/test_additive_sync.py, tests/test_integration.py, tests/test_fsutil.py, docs/invariants/conflicts.md, docs/invariants/sync.md, README.md, docs/invariants/README.md, docs/invariants/init-devices.md, tests/test_pullhistory.py_
 _blocked-by: Track 84A, Track 86A_
 _out: 88A, 89A_
 _read-first: docs/invariants/README.md, docs/invariants/conflicts.md, docs/invariants/sync.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_statedb.py tests/test_merge.py tests/test_additive_sync.py tests/test_integration.py_
 
-_Source: docs/designs/store-v2.md hazard rows "Every peer edit to an untouched file is a conflict" and "Line deletions in `MEMORY.md` and `.jsonl` never stick", re-checked at 408766d: `_apply_incoming_file` union-merges every update of a mergeable file, then keeps a newer local file or writes a conflict copy; pull never deletes local files (tombstones only stop re-download); `statedb` has an unused `ledger` table and no base._
+_Source: docs/archive/store-v2.md hazard rows "Every peer edit to an untouched file is a conflict" and "Line deletions in `MEMORY.md` and `.jsonl` never stick", re-checked at 408766d: `_apply_incoming_file` union-merges every update of a mergeable file, then keeps a newer local file or writes a conflict copy; pull never deletes local files (tombstones only stop re-download); `statedb` has an unused `ledger` table and no base._
 
 - **Base table and the fast-forward rule** -- _src/mind_meld/statedb.py, src/mind_meld/cli.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, tests/test_statedb.py, tests/test_merge.py, tests/test_additive_sync.py, ~300 lines._ (L)
 - **Propagated deletions with recovery** -- _src/mind_meld/cli.py, src/mind_meld/retention.py, tests/test_integration.py, docs/invariants/conflicts.md, docs/invariants/sync.md, README.md, ~150 lines._ (M)
 
 #### Group 88: Syncthing status
 
-_Depends on: Group 77, Group 87_
+_Depends on: Group 87_
 
 **This group delivers:** Status shows Syncthing's state and each machine's latest push.
 
@@ -342,10 +253,10 @@ _2 tasks . ~350 LOC . medium risk . 7 files_
 _touches: src/mind_meld/syncthing.py (new), src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_syncthing.py (new), tests/test_diag.py, tests/test_module_boundaries.py, README.md, docs/invariants/README.md_
 _blocked-by: Track 77A, Track 87A_
 _out: 89A_
-_read-first: docs/invariants/README.md, docs/designs/store-v2.md_
+_read-first: docs/invariants/README.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_syncthing.py tests/test_diag.py tests/test_module_boundaries.py_
 
-_Source: docs/SPEC.md O2.2 and O3.2; docs/designs/store-v2.md §10 folder options (current evidence; Syncthing option semantics verified against docs.syncthing.net on 2026-10-11 for the former Track 81A)._
+_Source: docs/SPEC.md O2.2 and O3.2; docs/archive/store-v2.md §10 folder options (current evidence; Syncthing option semantics verified against docs.syncthing.net on 2026-10-11 for the former Track 81A)._
 
 - **Read-only Syncthing client and diag lint** -- _src/mind_meld/syncthing.py, src/mind_meld/cli.py, tests/test_syncthing.py, tests/test_module_boundaries.py, docs/invariants/README.md, ~200 lines._ (M)
 - **Each peer's push in status** -- _src/mind_meld/cli.py, src/mind_meld/statedb.py, tests/test_diag.py, README.md, ~150 lines._ (M)
@@ -360,13 +271,13 @@ _Depends on: Group 85, Group 87, Group 88_
 _2 tasks . ~400 LOC . low risk . 7 files_
 **Outcome:** The owner has a step-by-step runbook to move the fleet from iCloud Drive to Syncthing and bring the Linux machine in, and every document an agent reads describes the Syncthing store.
 **Supports:** MVP-1, docs/SPEC.md O1 to O4 (cutover and soak).
-**Done when:** README covers installing Syncthing on macOS and Arch, pairing, the folder options mm relies on, and a cutover runbook (update every machine, stop hooks, move the store folder from iCloud Drive into the Syncthing folder, point `storage.path` at it, join the Linux machine with `mm init`, remove a dead machine's directories by hand, delete the iCloud folder two weeks later); AGENTS.md Key Principles and root SPEC.md's storage sections describe the Syncthing folder; `sync.md` and `init-devices.md` drop iCloud-only rules; `pyproject.toml` description and keywords drop iCloud; `./bin/check` passes.
-_touches: README.md, AGENTS.md, SPEC.md, docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/README.md, pyproject.toml_
+**Done when:** README covers installing Syncthing on macOS and Arch, pairing, the folder options mm relies on, and a cutover runbook (update every machine, stop hooks, move the store folder from iCloud Drive into the Syncthing folder, point `storage.path` at it, join the Linux machine with `mm init`, remove a dead machine's directories by hand, delete the iCloud folder two weeks later); AGENTS.md Key Principles and root SPEC.md's storage sections describe the Syncthing folder; `sync.md` and `init-devices.md` drop iCloud-only rules; `pyproject.toml` description and keywords drop iCloud; docs/SPEC.md's superseded-history entry for the store design names §13 (cutover) as evidence alongside §7, §10 and §11; `./bin/check` passes.
+_touches: README.md, AGENTS.md, SPEC.md, docs/SPEC.md, docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/README.md, pyproject.toml_
 _blocked-by: Track 85A, Track 87A, Track 88A_
-_read-first: docs/SPEC.md, docs/designs/store-v2.md_
+_read-first: docs/SPEC.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_docs_routing.py_
 
-_Source: docs/SPEC.md O1 to O4 and the accepted manual cutover step; docs/designs/store-v2.md §11 (Linux) and §13 (cutover) as evidence._
+_Source: docs/SPEC.md O1 to O4 and the accepted manual cutover step; docs/archive/store-v2.md §11 (Linux) and §13 (cutover) as evidence._
 
 - **Runbook and Syncthing setup** -- _README.md, ~250 lines._ (M)
 - **Agent-facing docs** -- _AGENTS.md, SPEC.md, docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/README.md, pyproject.toml, ~150 lines._ (M)
@@ -379,11 +290,7 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 75 ← {}
-- Group 76 ← {75}
-- Group 77 ← {76}
-- Group 78 ← {77}
-- Group 79 ← {78}
+- Group 79 ← {}
 - Group 80 ← {79}
 - Group 81 ← {79, 80}
 - Group 82 ← {80, 81}
@@ -392,21 +299,13 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 - Group 85 ← {84}
 - Group 86 ← {85}
 - Group 87 ← {84, 86}
-- Group 88 ← {77, 87}
+- Group 88 ← {87}
 - Group 89 ← {85, 87, 88}
 ```
 
 Track detail per group:
 
 ```
-Group 75: Unblock push
-  +-- Track 75A ........... ~M . 2 tasks
-Group 76: Remove the store-v2 code
-  +-- Track 76A ........... ~L . 3 tasks
-Group 77: Status verdict
-  +-- Track 77A ........... ~L . 2 tasks
-Group 78: One outcome line
-  +-- Track 78A ........... ~L . 3 tasks
 Group 79: Compatibility contract and Muse family
   +-- Track 79A ........... ~L . 3 tasks
 Group 80: Grok Build usage reader
@@ -431,9 +330,9 @@ Group 89: Cutover runbook
   +-- Track 89A ........... ~L . 2 tasks
 ```
 
-**Total: 2 phases . 15 groups . 15 tracks remaining.**
+**Total: 2 phases . 11 groups . 11 tracks remaining.**
 
-Nearly every Track edits `cli.py` and README, so the plan is one serial chain; the explicit `_blocked-by` edges set its priority: the refused push first, then output, then usage capture, then Syncthing.
+Nearly every Track edits `cli.py` and README, so the plan stays one serial chain; the explicit `_blocked-by` edges set its priority: host cleanup and usage capture first, then Syncthing.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 89's runbook. Deferred work, including Codex memory sync and per-path conflict policies, waits in Future with its triggers.
 
@@ -441,7 +340,7 @@ The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (16 items)
+Deferred: docs/roadmap-future.md (17 items)
 
 ## Shipped
 
