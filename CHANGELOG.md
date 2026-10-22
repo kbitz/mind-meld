@@ -8,7 +8,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Added
 
-- Antigravity source enrollment, `retro-fleet` skill installation, usage capture, recapture, and status/diagnostic reporting. Usage reads are bounded and read-only, with incomplete captures reported explicitly.
+- Antigravity source enrollment, `retro-fleet` skill installation, usage capture, and status/diagnostic reporting. Usage reads are bounded and read-only, with incomplete captures reported explicitly.
 - Separate Muse and Antigravity rows in fleet reports, with Gemini pricing for the supported model families.
 
 ### Removed
