@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.7] - 2026-10-22
+
+**Antigravity context and usage now join the fleet.** Run `mm enable-source agy` to sync allowlisted skills and rules and include local token totals in `retro-fleet`. Session databases, settings, and credentials stay local.
+
+### Added
+
+- Antigravity source enrollment, `retro-fleet` skill installation, usage capture, recapture, and status/diagnostic reporting. Usage reads are bounded and read-only, with incomplete captures reported explicitly.
+- Separate Muse and Antigravity rows in fleet reports, with Gemini pricing for the supported model families.
+
+### Removed
+
+- Standalone Grok Build sync and usage capture, and the retired OpenCode skill-link cleanup. Old source entries are ignored without deleting local files or creating deletion tombstones; `mm migrate-config` removes their inert config blocks. Grok usage from Cursor remains supported.
+- The retired 1.x CLI compatibility freeze. Storage-format refusal gates remain in force.
+
 ## [1.11.6] - 2026-10-22
 
 **gstack sync now keeps per-run output on the Mac that produced it.** Checkpoints, plans, learnings, decisions, timelines, and handoffs still sync. Review-prep trees, loop state, and gate diffs stay local. A new install gets this allowlist. An existing config opts in with `mm migrate-config`.
