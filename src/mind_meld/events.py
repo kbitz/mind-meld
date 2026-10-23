@@ -13,9 +13,11 @@ under the mm-events synced source. Four supported event types:
                       absent only when no consulted reader completed, so
                       absence means "unknown", never zero.
 
-The events log itself is the cursor (no separate cursor file): the most
-recent `mm-push` event's `ts` answers "since when do I scan?" on the next
-push. History in `pullhistory.py` is forensic only and is not this cursor.
+The events log owns the global cursor: its latest advancing `mm-push`
+answers "since when do I scan?" A private local cache retains per-repository
+intervals when discovery or a git walk needs more than one push. Missing
+cache commits are reconstructed from retained event batches. History in
+`pullhistory.py` is forensic only and is not this cursor.
 
 Same-push upload semantics. `_push_core` captures attended host usage before
 its manifest scan, then runs the activity tail only when needed and rebuilds
@@ -62,7 +64,8 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
 from urllib.parse import urlsplit
 
-from mind_meld import fsutil, gitenv, token_usage
+from mind_meld import config as mm_config
+from mind_meld import fsutil, gitenv, lockedjson, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import safe_terminal_str
 
@@ -574,10 +577,60 @@ def _strip_dot_git(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _default_git_capture_cache() -> dict:
+    return {
+        "version": 1,
+        "projects": {},
+        "discovery_resume_after": None,
+        "pending_refresh_since": None,
+        "repo_cursors": {},
+        "incomplete_streak": 0,
+    }
+
+
+def _normalize_git_capture_cache(cache: dict) -> None:
+    if cache.get("version") != 1:
+        cache.clear()
+        cache.update(_default_git_capture_cache())
+    for key in ("projects", "repo_cursors"):
+        if not isinstance(cache.get(key), dict):
+            cache[key] = {}
+    cache["projects"] = {
+        name: entry
+        for name, entry in cache["projects"].items()
+        if isinstance(name, str) and isinstance(entry, dict)
+    }
+    cache["repo_cursors"] = {
+        root: ts
+        for root, ts in cache["repo_cursors"].items()
+        if isinstance(root, str) and _parse_aware_ts(ts) is not None
+    }
+    for key in ("discovery_resume_after", "pending_refresh_since"):
+        if not isinstance(cache.get(key), str):
+            cache[key] = None
+    if _parse_aware_ts(cache.get("pending_refresh_since")) is None:
+        cache["pending_refresh_since"] = None
+    if type(cache.get("incomplete_streak")) is not int or cache["incomplete_streak"] < 0:
+        cache["incomplete_streak"] = 0
+
+
+def read_git_capture_cache() -> dict:
+    """Diagnostics and previews never create a cache or its lock."""
+    try:
+        with lockedjson.locked_json_snapshot(mm_config.GIT_CAPTURE_CACHE_PATH) as snapshot:
+            cache = snapshot.data if snapshot.state == "valid" else {}
+            _normalize_git_capture_cache(cache)
+            return cache
+    except OSError:
+        return _default_git_capture_cache()
+
+
 def discover_git_roots(
     config: dict,
     *,
     deadline_monotonic: float | None = None,
+    persist: bool = False,
+    since: datetime | None = None,
 ) -> GitRootDiscovery:
     """Discover git roots with one cooperative, call-scoped deadline.
 
@@ -594,6 +647,8 @@ def discover_git_roots(
     if deadline_monotonic is None:
         deadline_monotonic = time.monotonic() + ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS / 1000.0
 
+    cache = read_git_capture_cache()
+    original_cache = json.loads(json.dumps(cache))
     errors: list[str] = []
     roots: list[Path] = []
     seen: set[Path] = set()
@@ -626,7 +681,7 @@ def discover_git_roots(
             except PermissionError:
                 record_reject("unreadable", candidate)
                 continue
-            except OSError:
+            except (OSError, RuntimeError, ValueError):
                 record_reject("gone", candidate)
                 continue
             if resolved in seen:
@@ -677,9 +732,36 @@ def discover_git_roots(
             mark_exceeded()
             break
         try:
-            candidates = prober(deadline_monotonic=deadline_monotonic)
+            candidates = prober(deadline_monotonic=deadline_monotonic, cache=cache, since=since)
             probers_ran.append(name)
-            if not validate(candidates, name):
+            indexed_complete = cache.pop("_discovery_complete", None)
+            if indexed_complete is not None:
+                for candidate in candidates:
+                    try:
+                        resolved = candidate.resolve()
+                    except PermissionError:
+                        record_reject("unreadable", candidate)
+                        continue
+                    except (OSError, RuntimeError, ValueError):
+                        record_reject("gone", candidate)
+                        continue
+                    if resolved in seen:
+                        continue
+                    seen.add(resolved)
+                    if _classify_git_root(resolved):
+                        roots.append(resolved)
+                        attribution.append((name, resolved))
+                    else:
+                        record_reject(_reject_reason(resolved), resolved)
+                        stale_roots = {str(resolved), str(candidate)}
+                        for stale in stale_roots:
+                            cache["repo_cursors"].pop(stale, None)
+                        for entry in cache["projects"].values():
+                            if entry.get("git_root") in stale_roots:
+                                entry["git_root"] = None
+                if not indexed_complete:
+                    mark_exceeded()
+            elif not validate(candidates, name):
                 break
         except Exception as e:
             if name not in probers_ran:
@@ -687,8 +769,38 @@ def discover_git_roots(
             errors.append(f"{name} prober: {type(e).__name__}: {e}")
             continue
 
-    if deadline_expired():
+    if deadline_expired() and "claude" not in probers_ran:
         mark_exceeded()
+    if not exceeded and not errors:
+        # Complete discovery is authoritative for source removal as well as
+        # additions. Historical cursors must not keep a deselected repo pending.
+        if "claude" not in enabled_sources:
+            cache["projects"] = {}
+            cache["discovery_resume_after"] = None
+            cache["pending_refresh_since"] = None
+        active_roots = {str(root) for root in roots}
+        cache["repo_cursors"] = {
+            root: ts for root, ts in cache["repo_cursors"].items() if root in active_roots
+        }
+    if persist:
+        try:
+            with lockedjson.locked_json_rmw(
+                mm_config.GIT_CAPTURE_CACHE_PATH,
+                default_factory=_default_git_capture_cache,
+                on_contention="raise",
+            ) as locked:
+                _normalize_git_capture_cache(locked.data)
+                # Merge only discovery-owned fields; cursor commits have their own lock interval.
+                for key in ("projects", "discovery_resume_after", "pending_refresh_since"):
+                    locked.data[key] = cache[key]
+                for root, ts in cache["repo_cursors"].items():
+                    if original_cache["repo_cursors"].get(root) != ts:
+                        previous = locked.data["repo_cursors"].get(root)
+                        locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
+                for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
+                    locked.data["repo_cursors"].pop(root, None)
+        except OSError:
+            pass
     if exceeded:
         errors.append(GIT_ROOT_DISCOVERY_BUDGET_ERROR)
     return GitRootDiscovery(
@@ -722,39 +834,191 @@ def _enabled_source_names(config: dict) -> set[str]:
     return {n for n in names if isinstance(n, str) and n not in disabled}
 
 
-def _probe_claude(*, deadline_monotonic: float | None = None) -> list[Path]:
-    """Read Claude project cwd evidence until the shared deadline expires."""
-    base = Path.home() / ".claude" / "projects"
+def _claude_projects_dir() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def _probe_claude(
+    *,
+    deadline_monotonic: float | None = None,
+    cache: dict | None = None,
+    since: datetime | None = None,
+) -> list[Path]:
+    """Index new directories first, then refresh changed indexed directories.
+
+    A missing cwd is a completed observation; an interrupted read is not.
+    Warm projects need only their directory and newest JSONL stat before reuse.
+    """
+    cache = cache if cache is not None else _default_git_capture_cache()
+    projects = cache["projects"]
+    base = _claude_projects_dir()
+    scandir_complete = True
     try:
-        if _deadline_expired(deadline_monotonic) or not base.exists():
-            return []
-    except OSError:
+        if _deadline_expired(deadline_monotonic):
+            scandir_complete = False
+            directories = []
+        else:
+            with os.scandir(base) as entries:
+                directories = []
+                for entry_item in entries:
+                    if _deadline_expired(deadline_monotonic):
+                        scandir_complete = False
+                        break
+                    try:
+                        if entry_item.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry_item.path))
+                    except OSError:
+                        continue
+                directories.sort()
+    except FileNotFoundError:
+        cache["_discovery_complete"] = True
         return []
-    out: list[Path] = []
-    try:
-        project_dirs = iter(base.iterdir())
-        while not _deadline_expired(deadline_monotonic):
-            try:
-                proj_dir = next(project_dirs)
-            except StopIteration:
-                break
-            if not proj_dir.is_dir() or _deadline_expired(deadline_monotonic):
-                continue
-            cwd = _read_cwd_from_latest_jsonl(proj_dir, deadline_monotonic=deadline_monotonic)
-            if cwd:
-                out.append(Path(cwd).expanduser())
+    if not scandir_complete:
+        roots = [
+            Path(entry["git_root"])
+            for entry in projects.values()
+            if isinstance(entry, dict) and isinstance(entry.get("git_root"), str)
+        ]
+        cache["_discovery_complete"] = False
+        return list(dict.fromkeys(roots))
+    names = {str(p) for p in directories}
+    for name in projects.keys() - names:
+        del projects[name]
+    resume = cache.get("discovery_resume_after") or ""
+    unindexed = [p for p in directories if str(p) not in projects]
+    unindexed.sort(key=lambda p: (str(p) <= resume, str(p)))
+    indexed_directories = [p for p in directories if str(p) in projects]
+    indexed_directories.sort(key=lambda p: (str(p) <= resume, str(p)))
+    roots = [
+        Path(entry["git_root"])
+        for directory in directories
+        if isinstance((entry := projects.get(str(directory))), dict)
+        and isinstance(entry.get("git_root"), str)
+    ]
+    deferred = False
+
+    def pin_refresh():
+        timestamp = (since or datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        old = cache.get("pending_refresh_since")
+        cache["pending_refresh_since"] = min(old, timestamp) if old else timestamp
+
+    def probe(directory: Path, refresh: bool) -> bool:
+        if _deadline_expired(deadline_monotonic):
+            return False
+        try:
+            directory_stat = directory.stat()
+            jsonls = []
+            for candidate in directory.iterdir():
+                if _deadline_expired(deadline_monotonic):
+                    return False
+                if candidate.suffix == ".jsonl":
+                    try:
+                        st = candidate.stat()
+                        jsonls.append((st.st_mtime_ns, candidate.name, st.st_size))
+                    except OSError:
+                        continue
+        except OSError:
             if _deadline_expired(deadline_monotonic):
-                break
-    except OSError:
-        return out
-    return out
+                return False
+            entry = dict(projects.get(str(directory), {}))
+            entry.update(
+                dir_mtime_ns=None,
+                newest_jsonl_name=None,
+                newest_jsonl_mtime_ns=None,
+                newest_jsonl_size=None,
+                cwd=None,
+                git_root=None,
+            )
+            projects[str(directory)] = entry
+            return True
+        cwd, completed = _read_cwd_from_latest_jsonl(
+            directory, deadline_monotonic=deadline_monotonic
+        )
+        if not completed:
+            return False
+        root = None
+        if cwd:
+            try:
+                resolved_root = Path(cwd).expanduser().resolve()
+            except (OSError, RuntimeError, ValueError):
+                resolved_root = None
+            if resolved_root is not None and _classify_git_root(resolved_root):
+                root = resolved_root
+        newest = max(jsonls, default=(None, None, None))
+        previous_entry = projects.get(str(directory), {})
+        previous_git_root = previous_entry.get("git_root")
+        entry = dict(previous_entry)
+        entry.update(
+            dir_mtime_ns=directory_stat.st_mtime_ns,
+            newest_jsonl_name=newest[1],
+            newest_jsonl_mtime_ns=newest[0],
+            newest_jsonl_size=newest[2],
+            cwd=cwd,
+            git_root=str(root) if root else None,
+        )
+        projects[str(directory)] = entry
+        if root is not None:
+            roots.append(root)
+            if refresh and cache.get("pending_refresh_since"):
+                key = str(root)
+                old = cache["repo_cursors"].get(key)
+                pinned = cache["pending_refresh_since"]
+                if old is None or previous_git_root != key:
+                    cache["repo_cursors"][key] = min(old, pinned) if old else pinned
+        return True
+
+    for directory in unindexed:
+        if not probe(directory, False):
+            break
+        cache["discovery_resume_after"] = str(directory)
+    complete = all(str(p) in projects for p in directories)
+    cache["_discovery_complete"] = complete
+    if complete:
+        cache["discovery_resume_after"] = None
+    last_checked: str | None = None
+    for directory in indexed_directories:
+        entry = projects.get(str(directory))
+        if entry is None:
+            continue
+        if _deadline_expired(deadline_monotonic):
+            if (
+                not unindexed
+                or cache.get("pending_refresh_since") is not None
+                or last_checked is not None
+            ):
+                deferred = True
+                pin_refresh()
+                if complete and last_checked is not None:
+                    cache["discovery_resume_after"] = last_checked
+            break
+        try:
+            unchanged = directory.stat().st_mtime_ns == entry.get("dir_mtime_ns")
+            newest = entry.get("newest_jsonl_name")
+            if unchanged and isinstance(newest, str):
+                st = (directory / newest).stat()
+                unchanged = (st.st_mtime_ns, st.st_size) == (
+                    entry.get("newest_jsonl_mtime_ns"),
+                    entry.get("newest_jsonl_size"),
+                )
+        except OSError:
+            unchanged = False
+        if not unchanged and not probe(directory, True):
+            deferred = True
+            pin_refresh()
+            if complete and last_checked is not None:
+                cache["discovery_resume_after"] = last_checked
+            break
+        last_checked = str(directory)
+    if not deferred:
+        cache["pending_refresh_since"] = None
+    return list(dict.fromkeys(roots))
 
 
 def _read_cwd_from_latest_jsonl(
     proj_dir: Path,
     *,
     deadline_monotonic: float | None = None,
-) -> str | None:
+) -> tuple[str | None, bool]:
     """Find a cwd in the newest readable JSONL before the shared deadline.
 
     Binary bounded-line reading keeps malformed UTF-8 and pathological lines
@@ -762,7 +1026,7 @@ def _read_cwd_from_latest_jsonl(
     and line operation; a call already in progress remains cooperative.
     """
     if _deadline_expired(deadline_monotonic):
-        return None
+        return None, False
     jsonls: list[tuple[float, Path]] = []
     try:
         candidates = iter(proj_dir.iterdir())
@@ -778,13 +1042,13 @@ def _read_cwd_from_latest_jsonl(
             except OSError:
                 continue
     except OSError:
-        return None
+        return None, not _deadline_expired(deadline_monotonic)
     if _deadline_expired(deadline_monotonic):
-        return None
+        return None, False
     jsonls.sort(key=lambda pair: pair[0], reverse=True)
     for _mtime, jsonl_path in jsonls:
         if _deadline_expired(deadline_monotonic):
-            return None
+            return None, False
         try:
             with open(jsonl_path, "rb") as file_handle:
                 lines = iter(
@@ -810,10 +1074,10 @@ def _read_cwd_from_latest_jsonl(
                         continue
                     cwd = obj.get("cwd") if isinstance(obj, dict) else None
                     if isinstance(cwd, str) and cwd:
-                        return cwd
+                        return cwd, True
         except OSError:
             continue
-    return None
+    return None, not _deadline_expired(deadline_monotonic)
 
 
 def _deadline_expired(deadline_monotonic: float | None) -> bool:
@@ -837,7 +1101,7 @@ def _classify_git_root(path: Path) -> bool:
         if git.is_file():
             return _gitfile_points_at_gitdir(git)
         return False
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -896,6 +1160,7 @@ def walk_git_projects(
     total_budget_ms: int,
     *,
     diagnostic=None,
+    use_repo_cursors: bool = False,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -915,6 +1180,11 @@ def walk_git_projects(
     Per-repo failures fold into the row's `skipped` field (A5). Whole-walk
     failure surfaces as `mm: notice:` and we return an empty/partial row.
     """
+    cache = read_git_capture_cache() if use_repo_cursors else {}
+    root_cursors = cache.get("repo_cursors", {})
+    root_since = {root: _parse_aware_ts(root_cursors.get(str(root))) or since for root in roots}
+    if use_repo_cursors:
+        roots = sorted(dict.fromkeys(roots), key=lambda root: (root_since[root], str(root)))
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: GitSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
@@ -940,7 +1210,6 @@ def walk_git_projects(
     )
 
     deadline = time.monotonic() + (total_budget_ms / 1000.0)
-    since_iso = since.isoformat()
 
     executor = None
     futures: dict[Future, Path] = {}
@@ -949,7 +1218,11 @@ def walk_git_projects(
     try:
         executor = ThreadPoolExecutor(max_workers=MAX_GIT_WORKERS)
         for root in roots:
-            futures[executor.submit(_walk_one_repo, root, since_iso, per_repo_timeout_ms)] = root
+            futures[
+                executor.submit(
+                    _walk_one_repo, root, root_since[root].isoformat(), per_repo_timeout_ms
+                )
+            ] = root
         # Futures already drained by the pump below. The budget-abort handler
         # MUST skip these (v0.12.16): it iterates all of `futures.items()`,
         # so without this set every repo that finished before the timeout was
@@ -1311,7 +1584,7 @@ def _scan_one_project(
     # the hoist: 20 jsonls -> 20 calls -> 400 file opens; 15ms at N=10,
     # 1.44s at N=100, 13.2s at N=300 for a SINGLE project, against a
     # 250ms autopush budget. Keep this call out of any per-file loop.
-    cwd = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
+    cwd, _completed = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
     decoded_path = cwd or proj_entry.name  # fallback to encoded name
     last_iso = datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat() if last_mtime else ""
     meta: SessionMetadata = {
@@ -1510,6 +1783,186 @@ def window_syntax_error(s: str) -> str:
     return f"window must be of the form Nd (e.g. '7d', '30d'); got {s!r}{hint}"
 
 
+def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> datetime:
+    """Oldest retained repository interval, also used for budget escalation."""
+    cursors = read_git_capture_cache()["repo_cursors"]
+    names = [str(root) for root in roots] if roots else list(cursors)
+    return min([since, *[ts for name in names if (ts := _parse_aware_ts(cursors.get(name)))]])
+
+
+def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> int:
+    """Count live roots behind the requested capture, without repairing state."""
+    cache = read_git_capture_cache()
+    cursors = cache["repo_cursors"]
+    names = {str(root) for root in roots} | set(cursors)
+    names.update(
+        entry["git_root"]
+        for entry in cache["projects"].values()
+        if isinstance(entry.get("git_root"), str)
+    )
+    return sum(
+        1
+        for name in names
+        if _classify_git_root(Path(name))
+        and ((cursor := _parse_aware_ts(cursors.get(name))) is None or cursor < since)
+    )
+
+
+def _prune_invalid_repo_cursors(cursors: dict) -> None:
+    for root in list(cursors):
+        if not _classify_git_root(Path(root)):
+            del cursors[root]
+
+
+def _apply_repo_cursors_to_cache(
+    cache: dict,
+    git_rows: Sequence[dict],
+    *,
+    since: datetime,
+    cursor_ts: datetime,
+    recorded: datetime | None,
+    complete: bool,
+    reconciling: bool = False,
+    prune_invalid_roots: bool = True,
+) -> bool:
+    previous = _parse_aware_ts(cache.get("last_committed_push_ts"))
+    if recorded is not None and previous is not None and recorded <= previous:
+        return False
+    stamp = max(cursor_ts, recorded) if recorded is not None else cursor_ts
+    completed: set[str] = set()
+    failed: set[str] = set()
+    for row in git_rows:
+        for project in row.get("projects") or []:
+            if isinstance(project, dict) and isinstance(project.get("local_path"), str):
+                completed.add(project["local_path"])
+        for skipped in row.get("skipped") or []:
+            if not isinstance(skipped, dict) or not isinstance(skipped.get("path"), str):
+                continue
+            if skipped.get("reason") == WALK_SKIP_NO_COMMITS:
+                completed.add(skipped["path"])
+            else:
+                failed.add(skipped["path"])
+    cursors = cache["repo_cursors"]
+    for root in completed - failed:
+        old = _parse_aware_ts(cursors.get(root))
+        if recorded is None and old is not None and since > old:
+            continue
+        cursors[root] = max(old, stamp).isoformat() if old is not None else stamp.isoformat()
+    if recorded is not None:
+        for root in failed:
+            old = _parse_aware_ts(cursors.get(root))
+            if old is None or (reconciling and since < old):
+                cursors[root] = since.isoformat()
+    if prune_invalid_roots:
+        _prune_invalid_repo_cursors(cursors)
+    caught_up = complete and not failed and cache.get("pending_refresh_since") is None
+    if caught_up:
+        cache["incomplete_streak"] = 0
+    elif recorded is not None:
+        cache["incomplete_streak"] = cache["incomplete_streak"] + 1
+    if recorded is not None:
+        cache["last_committed_push_ts"] = recorded.isoformat()
+    return True
+
+
+def commit_repo_cursors(
+    git_rows: Sequence[dict],
+    *,
+    since: datetime,
+    cursor_ts: datetime,
+    recorded_ts: str | datetime | None = None,
+    complete: bool = True,
+    _reconciling: bool = False,
+) -> None:
+    """Commit repository progress only after the caller verifies the event append.
+
+    Failed roots keep the exact previously retained interval. New failed roots
+    acquire the capture's old interval before the global event cursor advances.
+    A completed empty repository is progress just like a successful git log.
+    """
+    recorded = recorded_ts if isinstance(recorded_ts, datetime) else _parse_aware_ts(recorded_ts)
+    try:
+        with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
+            cache = state.data
+            _normalize_git_capture_cache(cache)
+            if not _apply_repo_cursors_to_cache(
+                cache,
+                git_rows,
+                since=since,
+                cursor_ts=cursor_ts,
+                recorded=recorded,
+                complete=complete,
+                reconciling=_reconciling,
+            ):
+                state.write_on_exit = False
+    except OSError:
+        pass  # The event log remains authoritative; reconciliation retries later.
+
+
+def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None:
+    """Replay retained push batches missing their local cursor-cache commit.
+
+    Replay oldest first: reconciling only the latest row would lose a skipped
+    interval when several appends succeeded while the cache was unwritable.
+    Only git snapshots preceding a terminal mm-push belong to its batch.
+    """
+    marker = _parse_aware_ts(read_git_capture_cache().get("last_committed_push_ts"))
+    marker_day = marker.astimezone(timezone.utc).date() if marker is not None else None
+    now = datetime.now(timezone.utc)
+    batches: list[tuple[datetime, dict, list[dict]]] = []
+    for delta in range(-1, CURSOR_SCAN_DAYS + 1):
+        day = now.date() - timedelta(days=delta)
+        if marker_day is not None and day < marker_day:
+            break
+        path = events_dir / f"{_safe_device_filename(device_id)}-{day.isoformat()}.jsonl"
+        pending: list[dict] = []
+        for row in _iter_typed_objs(path, {"mm-push", "git-snapshot"}, EventScan(), {}):
+            if row.get("type") == "git-snapshot":
+                if row.get("origin") not in (
+                    GIT_SNAPSHOT_ORIGIN_INIT,
+                    GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+                ):
+                    pending.append(row)
+                continue
+            ts = _parse_aware_ts(row.get("ts"))
+            if ts is not None and ts <= now and (marker is None or ts > marker):
+                batches.append((ts, row, pending))
+            pending = []
+    if not batches:
+        return
+    ordered = sorted(batches, key=lambda batch: batch[0])
+    try:
+        with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
+            cache = state.data
+            _normalize_git_capture_cache(cache)
+            mutated = False
+            for ts, row, git_rows in ordered:
+                cap = row.get("git_capture")
+                since = _parse_aware_ts(cap.get("since")) if isinstance(cap, dict) else None
+                if since is None:
+                    continue
+                aborts, errors = walk_skip_counts(
+                    [skip for git_row in git_rows for skip in git_row.get("skipped") or []]
+                )
+                if _apply_repo_cursors_to_cache(
+                    cache,
+                    git_rows,
+                    since=since,
+                    cursor_ts=ts,
+                    recorded=ts,
+                    complete=capture_advances_cursor(cap) and aborts == 0 and errors == 0,
+                    reconciling=True,
+                    prune_invalid_roots=False,
+                ):
+                    mutated = True
+            if mutated:
+                _prune_invalid_repo_cursors(cache["repo_cursors"])
+            else:
+                state.write_on_exit = False
+    except OSError:
+        pass
+
+
 def last_push_ts(events_dir: Path, device_id: str) -> datetime:
     """Return the git-walk cursor for this device.
 
@@ -1519,10 +1972,9 @@ def last_push_ts(events_dir: Path, device_id: str) -> datetime:
     absent / no usable mm-push found, returns
     ``now - INITIAL_CURSOR_LOOKBACK_DAYS``.
 
-    The mm-events log file IS the cursor state of truth (state.db history is
-    forensic only). No
-    separate cursor file means no separate flock domain (A3 + A4
-    elimination)."""
+    The mm-events log owns the global cursor (state.db history is forensic
+    only). The local capture cache separately preserves unfinished per-repo
+    intervals; it never replaces this event cursor."""
     return resolve_push_cursor(events_dir, device_id).since
 
 
@@ -1576,7 +2028,7 @@ def resolve_push_cursor(
     return CursorResolution(since=floor, used_floor=True)
 
 
-def _parse_aware_ts(value: object) -> datetime | None:
+def parse_aware_ts(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
@@ -1588,11 +2040,15 @@ def _parse_aware_ts(value: object) -> datetime | None:
     return ts
 
 
+_parse_aware_ts = parse_aware_ts
+
+
 @dataclass
 class EventScan:
     """One filename-scoped scan, including uncertainty and file revisions."""
 
     rows: dict[str, dict] = field(default_factory=dict)
+    cursor: CursorResolution | None = None
     files: dict[str, tuple[str, str | None]] = field(default_factory=dict)
     file_reasons: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
@@ -1701,6 +2157,9 @@ def latest_event_rows(
         scan.errors.append(str(events_dir))
         return scan
     keys: dict[str, tuple] = {}
+    cursor_complete: tuple[tuple, datetime] | None = None
+    cursor_hold: tuple | None = None
+    cursor_hold_since: tuple[tuple, datetime] | None = None
 
     def mark_uncertain(day, winners=()) -> None:
         for kind in row_types:
@@ -1720,7 +2179,11 @@ def latest_event_rows(
     # the caller's day margin can therefore sit one UTC day ahead of this
     # clock. Look that day up only for scans that opted into a margin; the
     # cursor's backward window stays put.
-    forward_days = 1 if any(day_margins.get(kind) for kind in row_types) else 0
+    forward_days = (
+        1
+        if ("mm-push" in row_types or "git-snapshot" in row_types or any(day_margins.values()))
+        else 0
+    )
     for delta in range(-forward_days, CURSOR_SCAN_DAYS + 1):
         day = now.date() - timedelta(days=delta)
         path = events_dir / f"{safe_device}-{day.isoformat()}.jsonl"
@@ -1738,7 +2201,27 @@ def latest_event_rows(
         err_before = len(scan.errors)
         for index, row in enumerate(_iter_typed_objs(path, row_types, scan, revision)):
             kind = row["type"]
-            selected = selectors[kind](row) if kind in selectors else ((-delta, index), row)
+            row_ts = _parse_aware_ts(row.get("ts"))
+            if kind == "mm-push":
+                order = (-delta, index)
+                if row_ts is not None and row_ts <= now:
+                    cap = row.get("git_capture")
+                    if capture_advances_cursor(cap):
+                        if cursor_complete is None or order > cursor_complete[0]:
+                            cursor_complete = (order, row_ts)
+                    else:
+                        cursor_hold = max(cursor_hold, order) if cursor_hold else order
+                        held_since = _parse_aware_ts(cap.get("since"))
+                        if held_since is not None and held_since <= row_ts:
+                            if cursor_hold_since is None or order > cursor_hold_since[0]:
+                                cursor_hold_since = (order, held_since)
+            if kind in selectors:
+                selected = selectors[kind](row)
+            else:
+                valid = int(row_ts is not None and row_ts <= now)
+                if delta < 0 and not valid:
+                    continue
+                selected = ((valid, -delta, index), row)
             if selected is None:
                 continue
             key, projected = selected
@@ -1752,6 +2235,20 @@ def latest_event_rows(
             scan.files[kind] = (f"events/{path.name}", revision.get("sha256"))
         if revision.get("reason") and (winners or len(scan.errors) > err_before):
             scan.file_reasons[f"events/{path.name}"] = revision["reason"]
+    if "mm-push" in row_types:
+        if cursor_complete is not None:
+            scan.cursor = CursorResolution(
+                since=cursor_complete[1],
+                held=cursor_hold is not None and cursor_hold > cursor_complete[0],
+            )
+        elif cursor_hold_since is not None:
+            scan.cursor = CursorResolution(since=cursor_hold_since[1], held=True)
+        else:
+            scan.cursor = CursorResolution(
+                since=now - timedelta(days=INITIAL_CURSOR_LOOKBACK_DAYS),
+                used_floor=True,
+                floored_after_incomplete=cursor_hold is not None,
+            )
     return scan
 
 

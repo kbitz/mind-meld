@@ -22,6 +22,7 @@ from mind_meld.safety import safe_terminal_str
 CONFIG_DIR = Path.home() / ".config" / "mind-meld"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 LOCK_PATH = CONFIG_DIR / "mind-meld.lock"
+GIT_CAPTURE_CACHE_PATH = CONFIG_DIR / "git-capture-cache.json"
 
 # Defaults. Paths use tilde-form so they round-trip through TOML readably.
 # Expansion happens at use sites (get_sources, walker, storage) — keeping

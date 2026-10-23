@@ -119,9 +119,53 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 **Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline before the independent git/session walks: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic Claude probes (the gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path). The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11-3.13 and return False on 3.14+ (see the Python 3.14 audit item in docs/TODOS.md); the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
 
+**Resumable Git discovery and capture (Track 82A).** The private local
+`GIT_CAPTURE_CACHE_PATH` JSON cache contains `projects`, `discovery_resume_after`,
+`pending_refresh_since`, `repo_cursors`, and `incomplete_streak`. Discovery reads
+it by default; only real push, init backfill, recapture and explicit identity
+refresh persist progress. Inspection and previews never create the cache or its
+lock. Cache locking uses `lockedjson`; an unavailable cache remains best effort.
+Each indexed project retains its directory mtime, newest JSONL stat, cwd (including
+`None`), and Git root. Warm projects check the two stats before directory listing;
+these cached checks and root validation reuse indexed evidence even when a
+changed-project JSONL refresh must wait for the next deadline. Cached roots are reclassified so deleted worktrees cannot survive as repositories.
+Unknown per-project fields remain intact for Track 83A compatibility. Complete
+discovery retires cursors for repositories no longer selected; disabling Claude
+clears its automatic project index. Partial discovery keeps retained cursors,
+so removal cannot be inferred from an interrupted scan.
+
+Discovery completes its first pass over unindexed and cached projects before
+refreshing changed indexed projects. A probe interrupted mid-directory cannot
+become a cached empty cwd or advance the resume marker. Deferred changes pin
+`pending_refresh_since` to the oldest required window without making an already
+fully indexed project inventory incomplete. Newly discovered roots inherit that
+window. Session-metadata indexing remains outside this Track.
+
+Push walks roots from their oldest effective per-root cursor, breaking ties by
+path. Budget aborts and errors keep the old lower bound; successful roots and
+benign `no_commits` advance only after the exact event append is observed on disk.
+`write_push_event` keeps its existing non-strict return contract: a `None` return
+alone never proves persistence. Push confirms its terminal `mm-push` row before
+committing cursor state and stamps completion no earlier than that row's timestamp.
+Init and explicit recapture confirm their exact Git snapshot; recapture uses the
+requested full window rather than incremental cursors. Before the next push walk,
+reconciliation restores skipped roots from a persisted batch whose cache commit
+was interrupted. A failed or size-skipped append never advances cursors.
+
+Attended push may cross the substantive-change gate when Git catch-up is pending,
+including a usage-only refresh or no-content push. Dry runs and autopush retain
+their existing gates. Healthy no-content attended pushes still omit activity.
+`mm status` reports pending repositories and the next `mm push` within the retained
+90-day window; a floored incomplete cursor, older gap, empty discovery, walk errors
+without budget aborts, or at least three incomplete captures uses the explicit
+recapture remedy. `mm diag` exposes read-only `git_capture.fresh.pending_repos` in
+both formats. Tail degradation literals remain unchanged for breadcrumb consumers.
+This Git-only continuation does not replace the other capture budgets or claim
+complete O7.2 acceptance for session metadata or the fleet.
+
 **Incomplete identity discovery never refreshes cache.** When the supplied `GitRootDiscovery` is incomplete, identity may return `cached identities ∪ newly gathered identities` to that event only, under the phase-3 cache lock. It MUST NOT write cache bytes or `refreshed_at`, even for `refresh_identity_cache(force=True)`: persisting that union would make identities removed from config or a repository survive as trusted local identities. A later complete refresh remains authoritative and may prune them. The version-upgrade normalization below may first mark the cache stale, retaining its old emails; incomplete discovery never persists the newly gathered union.
 
-**No content heartbeat.** The substantive-change gate remains authoritative across UTC rollover: a no-op push without a host append writes no `mm-push` row, does not advance the retro cursor, and must not create a daily activity row merely to express liveness. Attended host usage is a separate observation and may create its daily file. The next substantive push uses the old cursor and captures the idle interval. A no-op `autopush` can still refresh its local `last-autorun.json` success breadcrumb; that means the hook ran, **not** that fleet retro received activity. Liveness needs a separate signal if it is ever required.
+**No content heartbeat.** The substantive-change gate remains authoritative across UTC rollover: a no-op push without a host append or pending Git catch-up writes no `mm-push` row, does not advance the retro cursor, and must not create a daily activity row merely to express liveness. Attended host usage is a separate observation and may create its daily file. The next substantive push uses the old cursor and captures the idle interval; attended Git catch-up may also resume that interval under Track 82A. A no-op `autopush` can still refresh its local `last-autorun.json` success breadcrumb; that means the hook ran, **not** that fleet retro received activity. Liveness needs a separate signal if it is ever required.
 
 **Forensic-only invariant, and why stderr is NOT the load-bearing signal (v0.12.16).** The whole block is wrapped in `try / except Exception`; failures emit `mm: notice: events tail failed: <type>: <safe_str(msg)>` to stderr and the push continues. `safe_str(e)` defangs peer-controlled escapes per the v0.10.1 sanitization invariant (a corrupt peer manifest could otherwise smuggle ANSI through an exception's `__str__`).
 
@@ -265,7 +309,7 @@ Git-walk cost is *monotone in cursor age*. Discovery cost and a zero-root walk a
 
 The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositories this push. Run mm recapture --dry-run to check current repository failures, then mm recapture 30d to recover the omitted commits`. It contains no `; ` separator. Status repeats the current-failures check before its `mm diag` link. Dry-run lists each skipped path via `safe_str` and its typed reason, labels `no_commits` benign, and links `GIT_WALK_FAILURES_URL` for non-benign skips. These paths already ride the synced git-snapshot row. The dry-run is a fresh scan with interactive budgets, not evidence about an earlier push: a clean result cannot establish that the earlier capture was complete. Partial recapture gives a same-window retry for Git failures and narrower-window advice for budget aborts; mixed failures show both with separate counts.
 
-**`mm recapture [WINDOW]`** is the only path that recovers already-orphaned intervals. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Partial recovery exits 4 (exit 3 is `pull --conflict-mode fail`). Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
+**`mm recapture [WINDOW]`** explicitly recovers historical intervals beyond automatic retained catch-up and retries persistent failures. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Partial recovery exits 4 (exit 3 is `pull --conflict-mode fail`). Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
@@ -1747,7 +1791,7 @@ receipt/status/diag and is verbose during sync.
 separate facts. When no host row was appended, the existing activity tail stays
 enabled for every substantive push, including mm-events-only recovery, internal
 selection and internal mtime changes on a no-reader Mac. No capture means no
-usage-only mode line. When a row was appended, `capture_activity=content_changed`.
+usage-only mode line. When a row was appended, `capture_activity=content_changed or retro_catchup_pending` (Track 82A).
 `content_changed` comprises non-internal byte diffs from one materialization of
 `iter_source_diffs`, forward-only per-source mtime drift, and the symmetric
 source-name selection difference minus `MM_INTERNAL_SOURCE_NAMES`. Removed user
@@ -1763,7 +1807,7 @@ its own copy as newer instead of recording a conflict. Restoring identical bytes
 with an older mtime is rare; carrying the advertised mtime forward would make the
 manifest stop reflecting local truth, so it is not done.
 
-A usage-only refresh skips cursor lookup, Git/session walks, identity gathering,
+A usage-only refresh without pending Git catch-up skips cursor lookup, Git/session walks, identity gathering,
 activity rows and token-cache locks; retro push counts and cursor remain unchanged.
 It has no activity degradation and writes no autorun breadcrumb. The usage-only
 mode line names the unchanged cursor and `mm recapture 30d`; content-changing
@@ -1775,7 +1819,7 @@ an appended host row normally re-encrypts/uploads the day file, refreshes last-s
 and rewrites the sidecar, even with converged user content. A Track 75A hold defers
 the new row's publication and preserves only the accepted prior entry, if any.
 Recovery is per invocation:
-a later attended push with another appended host row remains usage-only;
+a later attended push with another appended host row remains usage-only when Git catch-up is complete;
 autopush recovery still captures ordinary activity and counts once.
 
 **Maintenance and GC cadence.** Auto-GC is gated on `result.content_changed`,

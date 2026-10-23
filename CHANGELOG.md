@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.9] - 2026-10-23
+
+**Git commit counts catch up across later pushes.** An attended `mm push` resumes unfinished Git walks even when no user files changed. `mm status` says how many repositories are still catching up. Use `mm recapture` when capture fails repeatedly or the gap is older than the 90-day window.
+
+### Changed
+
+- Discovery keeps a private local project index, so unchanged projects are not rescanned and a budget cut resumes on the next attended push.
+- Each repository keeps its own cursor. Stale repositories continue first, and a walk that stops early keeps that repository's place.
+- A short `mm recapture` does not move an older repository cursor past commits it did not scan. `mm autopush` and `--dry-run` stay change-gated.
+
 ## [1.11.8] - 2026-10-22
 
 **Antigravity context and usage now join the fleet.** Run `mm enable-source agy` to sync allowlisted skills and rules and include local token totals in `retro-fleet`. Session databases, settings, and credentials stay local.

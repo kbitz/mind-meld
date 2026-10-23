@@ -5494,6 +5494,7 @@ def _push_core(
             outcome=captured,
         )
     host_row_appended = captured is not None and captured.appended is not None
+    retro_catchup_pending = attended and not dry_run and _retro_catchup_pending(sources, device_id)
     skipped: list[tuple[str, str]] = []
     skipped_repos: set[str] = set()
     nested_roots: dict[str, set[str]] = {}
@@ -5675,6 +5676,7 @@ def _push_core(
         and not has_mtime_only
         and not recovering_from_corrupt
         and not has_selection_change
+        and not retro_catchup_pending
     ):
         scan_held = _held_list(held_files)
         if show and (dry_run or result_observer is None):
@@ -5734,7 +5736,7 @@ def _push_core(
                 dry_run=dry_run,
                 quiet=quiet,
                 suppress_host_capture=capture_attempted,
-                capture_activity=not host_row_appended or content_changed,
+                capture_activity=retro_catchup_pending or not host_row_appended or content_changed,
             )
         )
     if not dry_run:
@@ -5989,7 +5991,7 @@ def _push_core(
             _warn_publication_evidence_unavailable(e, "Content sync succeeded.", attempt=attempt)
     if captured is not None and captured.appended is not None:
         try:
-            if show:
+            if show and not retro_catchup_pending:
                 _print_usage_push_mode(result)
         except OSError as e:
             with _pause_sync_progress():
@@ -8614,6 +8616,37 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
             return
 
 
+def _retro_catchup_pending(sources: list[dict], device_id: str) -> bool:
+    """Read local progress without probing projects or mutating capture state."""
+    source = next((s for s in sources if s.get("name") == "mm-events"), None)
+    if source is None:
+        return False
+    events_dir = Path(source["path"]).expanduser() / "events"
+    try:
+        scan = events.latest_event_rows(events_dir, device_id, {"mm-push"})
+        projected = events.project_recorded_capture(scan.rows.get("mm-push"))
+        cache = events.read_git_capture_cache()
+        if projected is None:
+            return bool(cache.get("discovery_resume_after") or cache.get("pending_refresh_since"))
+        since = (
+            scan.cursor.since
+            if scan.cursor is not None
+            else events.resolve_push_cursor(events_dir, device_id).since
+        )
+        observed = events.parse_aware_ts(projected.get("ts"))
+        if observed is not None:
+            since = max(since, observed)
+        return bool(
+            projected.get("discovery") == "partial"
+            or projected.get("walk_budget_aborts")
+            or cache.get("discovery_resume_after")
+            or cache.get("pending_refresh_since")
+            or events.count_pending_repositories([], since)
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def _print_retro_capture_status(
     sources: list[dict], device_id: str, *, scan: events.EventScan | None = None
 ) -> bool:
@@ -8633,9 +8666,29 @@ def _print_retro_capture_status(
     aborts = projected.get("walk_budget_aborts") or 0
     errs = projected.get("walk_errors") or 0
     skipped = aborts + errs
-    incomplete = (not projected.get("advances_cursor", True)) or skipped > 0
+    pending_since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)
+    if isinstance(projected.get("ts"), str):
+        try:
+            observed = datetime.fromisoformat(projected["ts"])
+            if observed.tzinfo is not None:
+                pending_since = observed
+        except ValueError:
+            pass
+    pending = events.count_pending_repositories([], pending_since)
+    cache = events.read_git_capture_cache()
+    incomplete = (
+        not projected.get("advances_cursor", True)
+        or skipped > 0
+        or pending > 0
+        or bool(cache.get("pending_refresh_since"))
+    )
     if not incomplete:
         return False
+    cursor = (
+        scan.cursor
+        if scan is not None and scan.cursor is not None
+        else events.resolve_push_cursor(events_dir, device_id)
+    )
     since_s = projected.get("since") or projected.get("ts")
     since_day = since_s[:10] if isinstance(since_s, str) and len(since_s) >= 10 else "unknown"
     days = events.INITIAL_CURSOR_LOOKBACK_DAYS
@@ -8647,6 +8700,33 @@ def _print_retro_capture_status(
                 days = max(1, min(events.RECAPTURE_WINDOW_MAX_DAYS, delta_days or 1))
         except (TypeError, ValueError):
             pass
+    capture_since = cursor.since
+    if isinstance(since_s, str):
+        try:
+            observed_since = datetime.fromisoformat(since_s)
+            if observed_since.tzinfo is not None:
+                capture_since = min(capture_since, observed_since)
+        except ValueError:
+            pass
+    recovery_required = (
+        cursor.floored_after_incomplete
+        or datetime.now(timezone.utc) - events.effective_capture_since([], capture_since)
+        > timedelta(days=events.CURSOR_SCAN_DAYS)
+        or projected.get("discovery") == "empty"
+        or (aborts == 0 and errs > 0)
+        or cache.get("incomplete_streak", 0) >= 3
+    )
+    if not recovery_required:
+        noun = "repository" if pending == 1 else "repositories"
+        qualifier = "known " if pending == 0 else ""
+        console.print(
+            f"  [yellow]Retro capture:[/yellow] {pending} {qualifier}{noun} left to catch up."
+        )
+        if projected.get("discovery") == "partial":
+            console.print("  Repository discovery is still catching up.")
+        console.print("  Continue capture on this Mac: [bold]mm push[/bold]")
+        console.print("  Details: [bold]mm diag[/bold]")
+        return True
     if skipped == 1:
         skip_phrase = "1 repository was skipped"
     elif skipped > 1:
@@ -8706,9 +8786,19 @@ def _collect_git_capture_diag(
                     recorded = _sanitize_recorded_capture(projected)
         except Exception:
             recorded = None
+    since = datetime.now(timezone.utc) - timedelta(days=events.INITIAL_CURSOR_LOOKBACK_DAYS)
+    if recorded and isinstance(recorded.get("ts"), str):
+        try:
+            observed = datetime.fromisoformat(recorded["ts"])
+            if observed.tzinfo is not None:
+                since = observed
+        except ValueError:
+            pass
+    pending = events.count_pending_repositories(discovery.get("roots") or [], since)
     return {
         "recorded": recorded,
         "fresh": {
+            "pending_repos": pending,
             "discovery": _fresh_discovery_label(discovery),
             "status": discovery.get("status"),
             "roots": len(discovery.get("roots") or []),
@@ -9349,6 +9439,7 @@ def diag(
     console.print(f"    discovery:           {fresh.get('discovery')}")
     console.print(f"    status:              {safe_str(str(fresh.get('status', '')))}")
     console.print(f"    roots:               {fresh.get('roots')}")
+    console.print(f"    pending_repos:       {fresh.get('pending_repos')}")
     console.print(f"    exceeded:            {fresh.get('exceeded')}")
     console.print(f"    error_count:         {fresh.get('error_count')}")
 
@@ -11116,7 +11207,7 @@ def recapture(
 
             since = datetime.now(timezone.utc) - timedelta(days=days)
             prepared = events_tail._prepare_recapture(
-                config, sources, config["device"]["id"], since=since
+                config, sources, config["device"]["id"], since=since, persist=not dry_run
             )
             assert prepared is not None  # mm-events availability was checked above.
 
@@ -11200,6 +11291,17 @@ def recapture(
                     "or shrink the day file, then retry mm recapture."
                 )
 
+            events_tail._commit_recorded_git_rows(
+                prepared.events_dir,
+                device_id,
+                prepared.git_rows,
+                since=prepared.since,
+                complete=(
+                    events.classify_discovery(prepared.root_discovery) not in {"partial", "empty"}
+                    and not prepared.walk_budget_aborts
+                    and not prepared.walk_errors
+                ),
+            )
             try:
                 with pullhistory.batch():
                     result = _push_core(config, passphrase, memory_kb, verbose=False, dry_run=False)
@@ -11590,7 +11692,13 @@ def refresh_identity_cmd(
     rebuilds with what was reachable.
     """
     previous = identity.read_cached_identities()
-    emails = identity.refresh_identity_cache(force=True)
+    try:
+        config = load_config()
+    except ConfigError:
+        discovery = None
+    else:
+        discovery = events.discover_git_roots(config, persist=True)
+    emails = identity.refresh_identity_cache(force=True, root_discovery=discovery)
     if json_output:
         typer.echo(json.dumps(sorted(emails)))
         return
