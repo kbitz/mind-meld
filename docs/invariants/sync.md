@@ -769,12 +769,12 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 Track IDs 75A to 81A in this section and its subsections name the Tracks from
 before the 2026-10-19 spec rewrite, not the current roadmap's Tracks of the
 same number: 75A to 78A were killed, and 81A's read-only peer status became
-Track 88A while its retirement was killed. The four provisional tables below
+Track 92A while its retirement was killed. The four provisional tables below
 have no current reader; whichever current Track first needs per-peer state
-(87A's last-synced base or 88A's peer status) decides whether to reuse or drop
+(91A's last-synced base or 92A's peer status) decides whether to reuse or drop
 them. Obligations this section gives those old Tracks bind whichever current
 Track first writes non-history `state.db` data; README's History database
-section already names Track 87A for the move-aside remedy.
+section already names Track 91A for the move-aside remedy.
 
 `pullhistory` owns the forensic `history` table in the local, never-synced
 `~/.config/mind-meld/state.db` (0600; a directory statedb creates is 0700, an
@@ -1152,6 +1152,6 @@ not lost work. Keep auto hook-age meaning in diag; attended age is not hook
 liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
 both diag formats. Status shows only selected summaries plus current capture
 facts; only existing latest_attempt_superseded proof hides a capture row.
-No history engine, hold escalation, future capture counters or Track 88A
+No history engine, hold escalation, future capture counters or Track 92A
 peer-state assessment is introduced. Track 78A changes exits/tails only as
 described above.
