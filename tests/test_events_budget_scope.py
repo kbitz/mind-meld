@@ -9,6 +9,8 @@ walk-budget notice. See docs/invariants/events-retro.md invariant 4.
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -753,3 +755,82 @@ def test_repo_cursor_reconcile_recovers_skips_after_append_before_cache_commit(t
     assert cache["incomplete_streak"] == 1
     _mm_events.reconcile_uncommitted_push_cursors(events_dir, "dev-a")
     assert _mm_events.read_git_capture_cache() == cache
+
+
+def test_probe_claude_preserves_cursor_when_changed_project_keeps_same_git_root(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    repo = _cursor_repo(tmp_path, "repo")
+    proj = tmp_path / ".claude" / "projects" / "p1"
+    proj.mkdir(parents=True)
+    log = proj / "session.jsonl"
+    log.write_text(json.dumps({"cwd": str(repo)}) + "\n")
+    cfg = {"sync": {"sources": [{"name": "claude"}]}}
+
+    res1 = _mm_events.discover_git_roots(cfg, persist=True)
+    assert res1.errors == ()
+    advanced_ts = datetime.now(timezone.utc).isoformat()
+    cache = _mm_events.read_git_capture_cache()
+    cache["repo_cursors"][str(repo.resolve())] = advanced_ts
+    cache["pending_refresh_since"] = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+    _write_git_cursor_cache(cache)
+
+    log.write_text(json.dumps({"cwd": str(repo)}) + "\n" + json.dumps({"cwd": str(repo)}) + "\n")
+    os.utime(proj, None)
+    res2 = _mm_events.discover_git_roots(cfg, persist=True)
+    assert res2.errors == ()
+    after = _mm_events.read_git_capture_cache()
+    assert after["repo_cursors"][str(repo.resolve())] == advanced_ts
+
+
+def test_side_channel_recapture_commit_does_not_increment_streak_or_seed_failed_cursor(tmp_path):
+    ok_repo = _cursor_repo(tmp_path, "ok")
+    fail_repo = _cursor_repo(tmp_path, "fail")
+    since = datetime.now(timezone.utc) - timedelta(days=90)
+    cursor_ts = datetime.now(timezone.utc)
+    rows = [
+        {
+            "v": 1,
+            "type": "git-snapshot",
+            "ts": cursor_ts.isoformat(),
+            "device": "dev-a",
+            "origin": "recapture",
+            "projects": [{"local_path": str(ok_repo), "commits": []}],
+            "skipped": [{"path": str(fail_repo), "reason": _mm_events.WALK_SKIP_BUDGET_ABORT}],
+        }
+    ]
+    _mm_events.commit_repo_cursors(
+        rows, since=since, cursor_ts=cursor_ts, recorded_ts=None, complete=False
+    )
+    cache = _mm_events.read_git_capture_cache()
+    assert cache["repo_cursors"] == {str(ok_repo): cursor_ts.isoformat()}
+    assert cache["incomplete_streak"] == 0
+    assert "last_committed_push_ts" not in cache
+
+
+def test_latest_event_rows_ignores_future_clock_skew_for_mm_push_and_git_snapshot(tmp_path):
+    events_dir = tmp_path / "events"
+    events_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    real_ts = (now - timedelta(seconds=5)).isoformat()
+    future_ts = (now + timedelta(hours=12)).isoformat()
+    today_file = events_dir / f"dev-a-{now.strftime('%Y-%m-%d')}.jsonl"
+    tomorrow_file = events_dir / f"dev-a-{(now + timedelta(days=1)).strftime('%Y-%m-%d')}.jsonl"
+    today_file.write_text(
+        json.dumps({"v": 1, "type": "git-snapshot", "ts": real_ts, "device": "dev-a"})
+        + "\n"
+        + json.dumps({"v": 1, "type": "mm-push", "ts": real_ts, "device": "dev-a"})
+        + "\n"
+    )
+    tomorrow_file.write_text(
+        json.dumps({"v": 1, "type": "git-snapshot", "ts": future_ts, "device": "dev-a"})
+        + "\n"
+        + json.dumps({"v": 1, "type": "mm-push", "ts": future_ts, "device": "dev-a"})
+        + "\n"
+    )
+    scan = _mm_events.latest_event_rows(events_dir, "dev-a", {"mm-push", "git-snapshot"})
+    assert scan.rows["mm-push"]["ts"] == real_ts
+    assert scan.rows["git-snapshot"]["ts"] == real_ts

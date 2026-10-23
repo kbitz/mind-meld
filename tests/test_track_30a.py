@@ -975,3 +975,26 @@ def test_old_failed_walk_requires_recovery_with_a_recent_global_cursor(tmp_path,
     )
     assert cli._print_retro_capture_status([{"name": "mm-events", "path": str(tmp_path)}], "dev-a")
     assert "mm recapture" in capsys.readouterr().out
+
+
+def test_retro_catchup_pending_false_on_fresh_or_empty_discovery_without_backlog(
+    tmp_path, monkeypatch
+):
+    source = {"name": "mm-events", "path": str(tmp_path)}
+    monkeypatch.setattr(events, "read_git_capture_cache", events._default_git_capture_cache)
+    monkeypatch.setattr(events, "count_pending_repositories", lambda *a: 0)
+    assert not cli._retro_catchup_pending([source], "dev-a")
+
+    now = datetime.now(timezone.utc)
+    _write_push(tmp_path / "events", "dev-a", ts=now, since=now, discovery="empty")
+    assert not cli._retro_catchup_pending([source], "dev-a")
+
+    _write_push(
+        tmp_path / "events",
+        "dev-a",
+        ts=now + timedelta(seconds=1),
+        since=now,
+        discovery="complete",
+        walk_errors=1,
+    )
+    assert not cli._retro_catchup_pending([source], "dev-a")

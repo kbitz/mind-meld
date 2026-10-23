@@ -8623,24 +8623,25 @@ def _retro_catchup_pending(sources: list[dict], device_id: str) -> bool:
         return False
     events_dir = Path(source["path"]).expanduser() / "events"
     try:
-        row = events.latest_mm_push_row(events_dir, device_id)
-        projected = events.project_recorded_capture(row)
+        scan = events.latest_event_rows(events_dir, device_id, {"mm-push"})
+        projected = events.project_recorded_capture(scan.rows.get("mm-push"))
+        cache = events.read_git_capture_cache()
         if projected is None:
-            return True
-        since = events.resolve_push_cursor(events_dir, device_id).since
-        if isinstance(projected.get("ts"), str):
-            try:
-                observed = datetime.fromisoformat(projected["ts"])
-                if observed.tzinfo is not None:
-                    since = max(since, observed)
-            except ValueError:
-                pass
+            return bool(cache.get("discovery_resume_after") or cache.get("pending_refresh_since"))
+        since = (
+            scan.cursor.since
+            if scan.cursor is not None
+            else events.resolve_push_cursor(events_dir, device_id).since
+        )
+        observed = events._parse_aware_ts(projected.get("ts"))
+        if observed is not None:
+            since = max(since, observed)
         return bool(
-            not projected.get("advances_cursor", True)
+            projected.get("discovery") == "partial"
             or projected.get("walk_budget_aborts")
-            or projected.get("walk_errors")
+            or cache.get("discovery_resume_after")
+            or cache.get("pending_refresh_since")
             or events.count_pending_repositories([], since)
-            or events.read_git_capture_cache().get("pending_refresh_since")
         )
     except (OSError, ValueError):
         return False
@@ -11694,8 +11695,9 @@ def refresh_identity_cmd(
     try:
         config = load_config()
     except ConfigError:
-        config = {}
-    discovery = events.discover_git_roots(config, persist=True)
+        discovery = None
+    else:
+        discovery = events.discover_git_roots(config, persist=True)
     emails = identity.refresh_identity_cache(force=True, root_discovery=discovery)
     if json_output:
         typer.echo(json.dumps(sorted(emails)))
