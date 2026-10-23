@@ -1009,7 +1009,7 @@ done
 
 History recorded since import is lost from `mm log`; the next write re-imports
 the remaining legacy JSONL. Preserve the moved files for investigation. This
-remedy expires before Track 87A stores a per-peer sync base in `state.db`.
+remedy expires before Track 91A stores a per-peer sync base in `state.db`.
 That Track has to supply recovery for the base before this move-aside is safe.
 
 
