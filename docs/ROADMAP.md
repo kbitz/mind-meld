@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Cursor and Muse.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support is being removed; Grok models used through Cursor stay in the Grok row. Memory capture, recall and sync parity remain deferred ([the memory continuity design](designs/memory-continuity.md)).
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Cursor, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support is being removed; Grok models used through Cursor stay in the Grok row. Memory capture, recall and sync parity remain deferred ([the memory continuity design](designs/memory-continuity.md)).
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -28,81 +28,12 @@ _tombstone: 27, 70, 71, 72, 73, 74_
 
 ### Phase 4: Quiet sync and complete usage
 
-**End-state:** On today's store, the 1.x compatibility tripwires are gone, Muse has its own retro family, Grok Build support is removed, and retro capture completes within one budget, so docs/SPEC.md O7 holds on the owner's Macs. (Groups 75-78 shipped the O8 half in v1.11.3-v1.11.5.)
-**Groups:** 79, 80, 81, 82, 83
-
-#### Group 79: Compatibility contract and Muse family
-
-_Depends on: none_
-
-**This group delivers:** Muse gets its own retro row and the 1.x compatibility tripwires are gone.
-
-##### Track 79A: Retire the compatibility contract and give Muse its own family
-_3 tasks . ~260 LOC (+700 del) . medium risk . 9 files_
-**Outcome:** Muse usage shows in its own Muse row in `retro-fleet`, and releases stop carrying the 1.x compatibility tripwires; only the storage-format refusal gates stay tested.
-**Supports:** MVP-1, docs/SPEC.md O7.1 and the release policy's compatibility surface.
-**Done when:** `test_closed_vocabularies`, the CLI-surface golden and its fixture, and `EXIT_EVIDENCE` with its checks are deleted, and the usage, rejected-value and abort exit tests move to `tests/test_integration.py`; the format-constant, frozen-reader and device-registry-writer tests stay; `auto-upgrade.md` "Compatibility (1.x)" becomes a short storage-format gates section, and README, the routing README, `init-devices.md` and `events-retro.md` stop citing the contract; `host_usage.HostFamily` and `AGENT_ROW_ORDER` gain `muse` and `muse-*` models classify as Muse; README Upgrading says an un-upgraded peer drops a snapshot carrying the new family until it updates; the release's CHANGELOG entry carries one line noting Track 76A's removal of the abandoned store code and simulator (sync behavior unchanged; v1.11.4 and v1.11.5 shipped without it); `./bin/check` passes.
-_touches: tests/test_compat_contract.py, tests/fixtures/cli_surface_1_x.json, tests/fixtures/compat_1_0/README.md, src/mind_meld/host_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/_host_usage_oracle.py, tests/test_muse_usage.py, tests/test_host_usage.py, tests/test_retro_fleet_aggregator.py, tests/test_integration.py, docs/invariants/auto-upgrade.md, docs/invariants/README.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, README.md_
-_blocked-by: Track 78A_
-_out: 80A, 81A_
-_read-first: docs/invariants/README.md, docs/invariants/auto-upgrade.md, docs/invariants/events-retro.md_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_compat_contract.py tests/test_muse_usage.py tests/test_host_usage.py tests/test_retro_fleet_aggregator.py_
-
-_Source: Future "Add the `muse` host family" (promoted: its deferral rested on the 1.x contract that docs/SPEC.md retired on 2026-10-19); owner decision 2026-10-19 that compatibility is not a concern for a single user. At 408766d `aggregator._accept_hosts_payload` rejects an unknown family as `invalid_counter`._
-
-- **Cut the contract tripwires** -- Delete the closed-vocabulary, CLI-golden and exit-evidence checks; move the surviving exit tests. _tests/test_compat_contract.py, tests/fixtures/cli_surface_1_x.json, tests/fixtures/compat_1_0/README.md, tests/test_integration.py, ~100 lines (+700 del)._ (M)
-- **Add the Muse family** -- _src/mind_meld/host_usage.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/_host_usage_oracle.py, tests/test_muse_usage.py, tests/test_host_usage.py, tests/test_retro_fleet_aggregator.py, ~100 lines._ (M)
-- **Rewrite the compatibility docs** -- _docs/invariants/auto-upgrade.md, docs/invariants/README.md, docs/invariants/init-devices.md, docs/invariants/events-retro.md, README.md, ~60 lines._ (S)
-
-#### Group 80: Grok Build usage reader
-
-_Depends on: Group 79_
-
-**This group delivers:** Pushes stop reading Grok Build logs; Cursor's Grok models still price.
-
-##### Track 80A: Remove the Grok Build usage reader
-_3 tasks . ~150 LOC (+3,800 del) . medium risk . 13 files_
-**Outcome:** Pushes stop spending time and output on Grok Build's logs, while Grok models used through Cursor still classify and price in the Grok row.
-**Supports:** MVP-1, docs/SPEC.md host table, O7.2 and O8.2 (one capture budget).
-**Done when:** `read_grok_usage` and its helpers, `host_skill_discovery.py`, the grok reader gate, consent and warm entries, the status and diag grok blocks, and the Grok Build fixtures and tests are gone; `HostFamily` "grok", the `grok-` prefix check, Grok pricing (grok-4.6 kept for retained rows) and the Cursor model refiners stay, and a test shows a Cursor grok-4.7 run still prices in the Grok row; README, the routing README and `events-retro.md` drop the reader; `./bin/check` passes.
-_touches: src/mind_meld/host_usage.py, src/mind_meld/host_skill_discovery.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, src/mind_meld/cli.py, src/mind_meld/errors.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/test_host_skill_discovery.py, tests/fixtures/host_sessions/grok/, tests/_host_usage_oracle.py, tests/test_docs_routing.py, tests/conftest.py, docs/invariants/events-retro.md, docs/invariants/README.md, README.md_
-_blocked-by: Track 79A_
-_out: 81A, 82A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_host_usage.py tests/test_host_usage_snapshot.py tests/test_docs_routing.py_
-
-_Source: owner decision 2026-10-19. `mm diag` on 889e42c0 the same day: Cursor models cached `grok-4.7`; Grok Build ledgers 224 of 224, models `grok-4.6-build` and `grok-4.7-build`; the push printed "reading grok usage beyond … budget" and "grok coverage is partial"._
-
-- **Delete the reader and skill discovery** -- _src/mind_meld/host_usage.py, src/mind_meld/host_skill_discovery.py, src/mind_meld/events_tail.py, src/mind_meld/events.py, src/mind_meld/cli.py, src/mind_meld/errors.py, tests/test_host_usage.py, tests/test_host_usage_snapshot.py, tests/test_host_skill_discovery.py, tests/fixtures/host_sessions/grok/, tests/_host_usage_oracle.py, tests/test_docs_routing.py, tests/conftest.py, ~3,800 lines (del)._ (S)
-- **Keep Cursor's Grok models priced** -- _src/mind_meld/host_usage.py, tests/test_host_usage.py, ~150 lines._ (M)
-- **Docs** -- _docs/invariants/events-retro.md, docs/invariants/README.md, README.md, ~50 lines._ (S)
-
-#### Group 81: Grok Build sync source
-
-_Depends on: Group 79, Group 80_
-
-**This group delivers:** The Grok Build source is gone without breaking old configs or peers.
-
-##### Track 81A: Remove the Grok Build sync source
-_3 tasks . ~150 LOC (+600 del) . medium risk . 8 files_
-**Outcome:** mm no longer offers or syncs a Grok Build customization source, and a config or an un-upgraded peer that still lists one keeps syncing everything else.
-**Supports:** MVP-1, docs/SPEC.md host table (standalone Grok Build removed, owner decision 2026-10-19).
-**Done when:** the `grok` default source, `walk_grok_source`, the `grok` source type and its enable, disable and reconfigure branches are gone; a retired-name filter (`opencode`, `grok`) applies to configured sources and to peers' manifests on pull, so an explicit `type = "grok"` source neither wedges push nor marks autopull degraded; `mm migrate-config` removes a leftover grok source without minting tombstones; README and `sync.md` drop the source; `docs/designs/grok-build-usage-reader.md` moves to `docs/archive/` with a superseded notice, and its links in docs/SPEC.md and AGENTS.md follow; `./bin/check` passes.
-_touches: src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_source_toggle.py, tests/test_config.py, tests/test_manifest.py, tests/test_integration.py, docs/invariants/sync.md, README.md, docs/designs/grok-build-usage-reader.md, docs/archive/grok-build-usage-reader.md (new), docs/SPEC.md, AGENTS.md_
-_blocked-by: Track 79A, Track 80A_
-_out: 82A_
-_read-first: docs/invariants/README.md, docs/invariants/sync.md_
-_session: fresh · effort: medium · verify: ./bin/check tests/test_source_toggle.py tests/test_config.py tests/test_manifest.py tests/test_integration.py_
-
-_Source: owner decision 2026-10-19 ("i rarely use grok independently anymore"). At 408766d `load_config` does not validate source types, so an explicit grok source would reach the walker dispatch and raise `ManifestError("unknown source type 'grok'")` on every push once the type is deleted._
-
-- **Retired-name filter and migration** -- _src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_config.py, tests/test_integration.py, ~120 lines._ (M)
-- **Delete the source type** -- _src/mind_meld/config.py, src/mind_meld/manifest.py, src/mind_meld/cli.py, src/mind_meld/resolveflow.py, tests/test_source_toggle.py, tests/test_manifest.py, ~600 lines (del)._ (S)
-- **Docs and the reader's design archive** -- _docs/invariants/sync.md, README.md, docs/designs/grok-build-usage-reader.md, docs/archive/grok-build-usage-reader.md, docs/SPEC.md, AGENTS.md, ~50 lines._ (S)
+**End-state:** On today's store, retro git and usage capture complete within one budget across pushes, so docs/SPEC.md O7 holds on the owner's Macs. (Groups 75-78 shipped the O8 half in v1.11.3-v1.11.5; Groups 79-81 shipped the 1.x compatibility retirement, Grok Build / OpenCode removal, Muse family and Antigravity parity in v1.11.8.)
+**Groups:** 82, 83
 
 #### Group 82: Git capture catch-up
 
-_Depends on: Group 80, Group 81_
+_Depends on: none_
 
 **This group delivers:** Retro commit capture completes on its own across pushes.
 
@@ -290,10 +221,7 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 79 ← {}
-- Group 80 ← {79}
-- Group 81 ← {79, 80}
-- Group 82 ← {80, 81}
+- Group 82 ← {}
 - Group 83 ← {82}
 - Group 84 ← {83}
 - Group 85 ← {84}
@@ -306,12 +234,6 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 Track detail per group:
 
 ```
-Group 79: Compatibility contract and Muse family
-  +-- Track 79A ........... ~L . 3 tasks
-Group 80: Grok Build usage reader
-  +-- Track 80A ........... ~L . 3 tasks
-Group 81: Grok Build sync source
-  +-- Track 81A ........... ~L . 3 tasks
 Group 82: Git capture catch-up
   +-- Track 82A ........... ~L . 2 tasks
 Group 83: One capture budget
@@ -330,9 +252,9 @@ Group 89: Cutover runbook
   +-- Track 89A ........... ~L . 2 tasks
 ```
 
-**Total: 2 phases . 11 groups . 11 tracks remaining.**
+**Total: 2 phases . 8 groups . 8 tracks remaining.**
 
-Nearly every Track edits `cli.py` and README, so the plan stays one serial chain; the explicit `_blocked-by` edges set its priority: host cleanup and usage capture first, then Syncthing.
+Nearly every Track edits `cli.py` and README, so the plan stays one serial chain; the explicit `_blocked-by` edges set its priority: usage capture first, then Syncthing.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 89's runbook. Deferred work, including Codex memory sync and per-path conflict policies, waits in Future with its triggers.
 

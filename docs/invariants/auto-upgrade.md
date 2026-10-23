@@ -470,10 +470,8 @@ the running package's skill; see [the README recipe](../../README.md#upgrading).
 refusal to downgrade, and `test_empty_store_installs_running_package` pins
 publication into an empty store.
 
-**Release tripwires:** `tests/test_compat_contract.py` pins format constants,
-closed vocabularies, the registry shape, and the detailed CLI surface in
-`tests/fixtures/cli_surface_1_x.json` (root options, hidden options, arguments,
-names, requiredness, flag/value, multiplicity, arity, types and choices).
-Additions and removals both fail: classify before updating the golden.
-Frozen `tests/fixtures/compat_1_0/` payloads are decrypted/parsed by the current
-readers, never regenerated during tests: a 1.x reader must read what 1.0 wrote.
+**Release tripwires:** `tests/test_compat_contract.py` pins format constants
+(`test_format_constants`), the device-registry writer fields
+(`test_device_registry_writer_fields`), and frozen `tests/fixtures/compat_1_0/`
+payloads (decrypted and parsed by the current readers, never regenerated during
+tests: a 1.x reader must read what 1.0 wrote).

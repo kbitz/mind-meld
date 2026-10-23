@@ -46,6 +46,12 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap drain — 2026-10-23
+
+0 inbox items: **0 placed, 0 deferred, 0 killed, 0 discharged**. Verification baseline: `fb0e12d` (v1.11.8). Out-of-band releases v1.11.6 (PR #224, `5dc484b`, segment-aware `include_patterns` allowlist for gstack sync) and v1.11.7 (PR #225, `02d671f`, attended push/pull terminal progress spinner) are recorded under `## Additional release history` in `docs/roadmap-shipped.md`. Tracks 79A, 80A and 81A shipped together with full Antigravity (`agy`) host parity and OpenCode skill-link reaper removal in v1.11.8 (PR #226, `fb0e12d`) and are recorded independently in `docs/roadmap-shipped.md`; Groups 79–81 are tombstoned. Two doc stragglers from Track 79A (`docs/invariants/auto-upgrade.md`'s remaining `cli_surface_1_x.json` release-tripwire bullet and `CHANGELOG.md`'s Track 76A abandoned store/simulator removal note) are recorded in the 79A receipt and cleaned up in a separate docs commit immediately after this regeneration. The eight leftover Tracks keep their numbers (82A–89A): the first free Group integer after shipped history is 82, and the packer emits the eight serial singleton bins `82A | 83A | 84A | 85A | 86A | 87A | 88A | 89A`. Premises for all eight remaining Tracks were re-verified against `fb0e12d`. Future stays at 17 items (byte-identical). No active pins were declared.
+
+**Version:** documentation-only regeneration; no bump. Quiet output (O8) and complete usage (O7) checkpoints remain unaccepted, so the next code release stays PATCH under the spec's release policy.
+
 ### Roadmap drain — 2026-10-21
 
 5 inbox items: **3 placed, 0 deferred, 2 killed, 0 discharged**. Authored-false rate: 0 / (3 + 0) = 0%. Verification baseline: `be13eab` (v1.11.5). Tracks 75A (v1.11.3, PR #219), 76A (PR #220, first released in v1.11.4), 77A (v1.11.4, PR #221) and 78A (v1.11.5, PR #222) were recorded independently in shipped history; Groups 75–78 are tombstoned. The eleven leftover Tracks keep their numbers (79A–89A): the packer emits the same eleven serial bins. Track 78A's `; usage published` suffix against SPEC O8.2 is deferred to Future until the quiet-output checkpoint decision; neither v1.11.4 nor v1.11.5 claims that checkpoint. No active pins were declared.
