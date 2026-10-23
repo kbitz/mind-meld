@@ -58,4 +58,7 @@ if [ -z "$launcher_py" ]; then
   exit 1
 fi
 
+# exec, never a child: the driver must keep this PID, because it owns the pytest
+# process group and ends it when it gets INT/TERM/HUP (tests/test_bin_check.py
+# pins this). A wrapper shell here would swallow those signals.
 exec "$launcher_py" "$DRIVER" "$@"

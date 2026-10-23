@@ -72,11 +72,14 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 `./bin/check` is the verification entry point: bootstraps `.venv` if needed, then runs `ruff check .`, `ruff format --check .`, and pytest (default scope `tests/`). Use `tmp_path` for local backends.
 
 ```
-./bin/check                         # full portable checks
+./bin/check --affected              # while working and reviewing: tests the change reaches
+./bin/check                         # full portable checks; CI runs this before merge
 ./bin/check tests/test_config.py    # scoped pytest; still lints the whole repo
 ```
 
-`--tests` skips lint; `--lint` skips pytest. Ruff is pinned in dev dependencies and enforces E/F/W/I. Every roadmap card's `verify:` field must use `./bin/check <scope>`; cards must not encode where Python lives. The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing; see [init/device invariants](docs/invariants/init-devices.md).
+Use `--affected` during work and review. It runs the tests whose recorded coverage reaches the files changed since the merge base (default `origin/main`, or `--base REF`), plus new or changed test files, and prints "ran N of M collected tests". The first run, a stale record (new interpreter, packages, config or merge base) or `--refresh` runs the whole suite once to record coverage under the ignored `.mm-test-selection/`. It runs everything and says why for runner, config, conftest, non-Python and module-scope changes, so a green `--affected` is never a CI substitute; plain `./bin/check` and CI stay the full run. It rejects test paths, pytest arguments and `--lint`. `bin/check` runs pytest in its own process group and ends the whole group on exit, error, SIGINT, SIGTERM and SIGHUP (SIGKILL cannot be caught).
+
+`--tests` skips lint; `--lint` skips pytest. Ruff is pinned in dev dependencies and enforces E/F/W/I. Every roadmap card's `verify:` field must use `./bin/check --affected` (or `./bin/check <scope>` when it needs a named scope); cards must not encode where Python lives. The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing; see [init/device invariants](docs/invariants/init-devices.md).
 
 ## CI
 

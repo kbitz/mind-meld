@@ -1,5 +1,6 @@
 .venv/
 .mm-check.lock
+.mm-test-selection/
 .conductor/settings.local.toml
 .conductor-setup.log
 __pycache__/

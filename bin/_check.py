@@ -7,12 +7,17 @@ This file is not packaged (pyproject packages = src/mind_meld only).
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,6 +34,25 @@ STAMP_NAME = ".mm-check-stamp"
 LOCK_NAME = ".mm-check.lock"
 PIP_TIMEOUT_S = 300
 
+# --affected (Track 82B). State is per worktree and gitignored.
+SELECT_DIR = ".mm-test-selection"
+SELECT_OWNER = ".owner"
+SELECT_RECORD = "record.json"
+SELECT_FAILED = "failed.json"
+SELECT_LOCK = ".lock"
+SELECT_SCHEMA = 1
+SELECT_DEFAULT_BASE = "origin/main"
+# A change to any of these can alter what every test does: never narrow.
+SELECT_CONFIG_PATHS = ("pyproject.toml", "bin/check", "bin/_check.py")
+
+# Owned pytest process group (Track 82B). Catchable signals only.
+OWNED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+GROUP_GRACE_S = 1.0  # leader gone, workers still exiting
+GROUP_TERM_S = 5.0
+GROUP_KILL_S = 3.0
+SIGNALLED_LEADER_S = 10.0  # leader's time to exit after a forwarded signal
+CLEANUP_FAILED_CODE = 70
+
 
 class Args:
     __slots__ = (
@@ -38,6 +62,10 @@ class Args:
         "tests_only",
         "serial",
         "rebuild",
+        "affected",
+        "refresh",
+        "base",
+        "scope_given",
         "scope",
         "pytest_extra",
     )
@@ -49,6 +77,10 @@ class Args:
         self.tests_only = False
         self.serial = False
         self.rebuild = False
+        self.affected = False
+        self.refresh = False
+        self.base: str | None = None
+        self.scope_given = False
         self.scope: list[str] = []
         self.pytest_extra: list[str] = []
 
@@ -86,11 +118,29 @@ def parse_argv(argv: list[str]) -> Args:
             args.serial = True
         elif a == "--rebuild":
             args.rebuild = True
+        elif a == "--affected":
+            args.affected = True
+        elif a == "--refresh":
+            args.refresh = True
+        elif a == "--base" or a.startswith("--base="):
+            if a == "--base":
+                i += 1
+                value = argv[i] if i < len(argv) else ""
+            else:
+                value = a.split("=", 1)[1]
+            if not value or value.startswith("-"):
+                die(
+                    "--base needs a git ref",
+                    "no ref followed --base",
+                    "  ./bin/check --affected --base origin/main",
+                )
+            args.base = value
         elif a.startswith("-"):
             args.pytest_extra.extend(argv[i:])
             break
         else:
             args.scope.append(a)
+            args.scope_given = True
         i += 1
     if not args.scope:
         args.scope = ["tests/"]
@@ -457,6 +507,141 @@ def xdist_args(python: Path, serial: bool, extra: list[str]) -> list[str]:
     return ["-n", workers]
 
 
+def _signal_group(pgid: int, sig: int) -> None:
+    """Signal the owned group; an already-gone group is success."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_group_gone(pgid: int, seconds: float, state: dict) -> bool:
+    deadline = time.monotonic() + seconds
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline or state["count"] > 1:
+            return not _group_alive(pgid)
+        time.sleep(0.02)
+    return True
+
+
+def _reap_group(pgid: int, state: dict) -> str | None:
+    """End every member of the owned group. Returns a failure cause or None."""
+    try:
+        if not _group_alive(pgid):
+            return None
+        if not _wait_group_gone(pgid, GROUP_GRACE_S, state):
+            _signal_group(pgid, signal.SIGTERM)
+            if not _wait_group_gone(pgid, GROUP_TERM_S, state):
+                _signal_group(pgid, signal.SIGKILL)
+                if not _wait_group_gone(pgid, GROUP_KILL_S, state):
+                    return "members still alive after SIGTERM and SIGKILL"
+    except OSError as exc:
+        return f"cannot signal the group: {exc}"
+    return None
+
+
+def _leader_status(returncode: int) -> int:
+    return 128 - returncode if returncode < 0 else returncode
+
+
+def _await_leader(proc: subprocess.Popen, state: dict) -> None:
+    """Wait for the leader. After a forwarded signal it gets SIGNALLED_LEADER_S
+    (or a second signal) before the group is TERMed, then KILLed."""
+    first_seen = None
+    while True:
+        try:
+            proc.wait(timeout=0.25)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        if state["first"] is None:
+            continue
+        if first_seen is None:
+            first_seen = time.monotonic()
+        if state["count"] > 1 or time.monotonic() - first_seen >= SIGNALLED_LEADER_S:
+            _signal_group(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=GROUP_TERM_S)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc.pid, signal.SIGKILL)
+                proc.wait()
+            return
+
+
+def run_owned(argv: list[str], env: dict[str, str] | None = None) -> int:
+    """Run argv as the leader of its own session and process group, and end
+    the whole group before returning, on success, error and catchable signals.
+
+    The first INT/TERM/HUP is forwarded to the group (held until the group is
+    recorded if it lands during the spawn); repeated ones only hurry the
+    bounded TERM/KILL teardown. The result is the leader's status, or 128+N for
+    the first signal received.
+    SIGKILL of this driver cannot run cleanup (no parent-death watchdog).
+    """
+    state = {"pgid": None, "first": None, "count": 0, "error": None, "forwarded": False}
+
+    def forward(signum: int) -> None:
+        state["forwarded"] = True
+        try:
+            _signal_group(state["pgid"], signum)
+        except OSError as exc:
+            state["error"] = f"cannot forward signal {signum}: {exc}"
+
+    def handler(signum, _frame) -> None:
+        state["count"] += 1
+        if state["first"] is None:
+            state["first"] = signum
+        if state["pgid"] is not None and not state["forwarded"]:
+            forward(signum)
+
+    # No signal mask across the spawn: the child would inherit it and ignore
+    # the signals its own tests send. A signal that lands before the group is
+    # recorded is held in state and forwarded right after.
+    main = threading.current_thread() is threading.main_thread()
+    old = {}
+    if main:
+        for sig in OWNED_SIGNALS:
+            old[sig] = signal.signal(sig, handler)
+    try:
+        proc = subprocess.Popen(argv, env=env, start_new_session=True)
+        state["pgid"] = proc.pid
+        if state["first"] is not None and not state["forwarded"]:
+            forward(state["first"])
+        try:
+            _await_leader(proc, state)
+        except BaseException:
+            _reap_group(proc.pid, state)
+            raise
+
+        cause = _reap_group(proc.pid, state) or state["error"]
+        result = _leader_status(proc.returncode)
+        if state["first"] is not None:
+            result = 128 + state["first"]
+        if cause:
+            die(
+                "pytest process group could not be ended",
+                f"group {proc.pid} (pytest result: exit {result}): {cause}",
+                f"  ps -axo pid,pgid,command    # members have pgid {proc.pid}\n"
+                "  end only the listed pytest/xdist pids that you started",
+                code=CLEANUP_FAILED_CODE,
+            )
+        return result
+    finally:
+        if main:
+            for sig, previous in old.items():
+                signal.signal(sig, previous)
+
+
 def run_tool(argv: list[str], name: str, fix: str) -> None:
     log(name)
     proc = subprocess.run(argv, check=False)
@@ -469,6 +654,763 @@ def run_tool(argv: list[str], name: str, fix: str) -> None:
         )
 
 
+def run_pytest(argv: list[str], name: str, fix: str, env: dict[str, str] | None = None) -> None:
+    log(name)
+    result = run_owned(argv, env)
+    if result != 0:
+        die(
+            f"{name} failed (exit {result})",
+            f"see {name}'s output above",
+            fix,
+            code=result,
+        )
+
+
+SELECT_PLUGIN = '''\
+"""Generated by bin/_check.py for --affected. Do not edit."""
+
+import json
+import os
+import sys
+
+import pytest
+
+_CFG = json.load(open(os.environ["MM_SELECT_CONFIG"], encoding="utf-8"))
+_ROOT = _CFG["root"]
+_PREFIX = _ROOT.rstrip("/") + "/"
+_RECORD = _CFG["mode"] == "record"
+_SPAWN_EVENTS = {"os.system", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn", "os.exec"}
+_SHELLS = ("sh", "bash", "zsh", "mm", "pytest", "check")
+_current = None
+_reads = {}
+_opaque = set()
+_collected = []
+_totals = {"total": 0, "kept": 0}
+_state = {"filtered": False, "filters": [], "failed": set(), "worker": False}
+_cov = None
+
+
+def _audit(event, args):
+    cur = _current
+    if cur is None:
+        return
+    if event == "open":
+        path = args[0]
+        if isinstance(path, str) and path.endswith(".py"):
+            if not path.startswith("/"):
+                path = os.path.join(os.getcwd(), path)
+            if path.startswith(_PREFIX):
+                rel = path[len(_PREFIX):]
+                if not rel.startswith((".venv/", ".mm-test-selection/")):
+                    _reads.setdefault(cur, set()).add(rel)
+    elif event == "subprocess.Popen":
+        try:
+            argv = [str(a) for a in (args[1] or ())]
+            exe = os.path.basename(str(args[0] or (argv[0] if argv else "")))
+            if exe.startswith("python") or exe in _SHELLS or any(
+                a.startswith(_PREFIX) for a in argv
+            ):
+                _opaque.add(cur)
+        except Exception:
+            _opaque.add(cur)
+    elif event in _SPAWN_EVENTS:
+        _opaque.add(cur)
+
+
+if _RECORD:
+    import coverage
+
+    _cov = coverage.Coverage(
+        data_file=None,
+        source=[os.path.join(_ROOT, "src", "mind_meld")],
+        config_file=False,
+    )
+    _cov.start()
+    sys.addaudithook(_audit)
+
+
+def _is_worker(config):
+    return hasattr(config, "workerinput")
+
+
+def _is_controller(config):
+    return not _is_worker(config) and getattr(config.option, "dist", "no") != "no"
+
+
+def pytest_configure(config):
+    _state["worker"] = _is_worker(config)
+    if _RECORD:
+        opt = config.option
+        for name in (
+            "keyword", "markexpr", "deselect", "ignore", "ignore_glob",
+            "lf", "failedfirst", "stepwise", "collectonly", "maxfail",
+        ):
+            if getattr(opt, name, None):
+                _state["filtered"] = True
+                _state["filters"].append(name)
+        if _is_controller(config):
+            _cov.stop()
+
+
+def pytest_deselected(items):
+    if _RECORD and items:
+        _state["filtered"] = True
+        _state["filters"].append("deselected")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    total = len(items)
+    if not _RECORD:
+        ids = set(_CFG["ids"])
+        files = set(_CFG["files"])
+        keep, gone = [], []
+        for i in items:
+            wanted = i.nodeid in ids or i.nodeid.split("::", 1)[0] in files
+            (keep if wanted else gone).append(i)
+        if gone:
+            config.hook.pytest_deselected(items=gone)
+        items[:] = keep
+    _totals["total"] = total
+    _totals["kept"] = len(items)
+    _collected[:] = [i.nodeid for i in items]
+    if _is_worker(config):
+        config.workeroutput["mm_total"] = total
+        config.workeroutput["mm_kept"] = len(items)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    global _current
+    if _RECORD:
+        _cov.switch_context(item.nodeid)
+        _current = item.nodeid
+    yield
+    if _RECORD:
+        _current = None
+        _cov.switch_context("")
+
+
+def pytest_runtest_logreport(report):
+    if report.failed and not _state["worker"]:
+        _state["failed"].add(report.nodeid)
+
+
+def pytest_testnodedown(node, error):
+    out = getattr(node, "workeroutput", None) or {}
+    if "mm_total" in out and not _totals["total"]:
+        _totals["total"] = out["mm_total"]
+        _totals["kept"] = out["mm_kept"]
+
+
+def _dump(path, payload):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, path)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    config = session.config
+    if _RECORD and not _is_controller(config):
+        _cov.stop()
+        data = _cov.get_data()
+        ctx = {}
+        for name in data.measured_files():
+            if not name.startswith(_PREFIX):
+                continue
+            seen = set()
+            for contexts in data.contexts_by_lineno(name).values():
+                seen.update(c for c in contexts if c)
+            ctx[name[len(_PREFIX):]] = sorted(seen)
+        part = {
+            "ctx": ctx,
+            "reads": {k: sorted(v) for k, v in _reads.items()},
+            "opaque": sorted(_opaque),
+            "collected": list(_collected),
+            "total": _totals["total"],
+            "filtered": _state["filtered"],
+            "filters": sorted(set(_state["filters"])),
+        }
+        _dump(os.path.join(_CFG["out_dir"], "part-%d.json" % os.getpid()), part)
+    if not _is_worker(config) and _CFG.get("failed_path"):
+        _dump(_CFG["failed_path"], sorted(_state["failed"]))
+
+
+def pytest_terminal_summary(terminalreporter, config):
+    if _RECORD:
+        return
+    terminalreporter.write_line(
+        "bin/check: affected: ran %d of %d collected tests" % (_totals["kept"], _totals["total"])
+    )
+'''
+
+
+class SelectError(Exception):
+    """A selector failure. The caller reports it and runs the full suite."""
+
+    def __init__(self, operation: str, cause: str, code: str, action: str) -> None:
+        super().__init__(f"{operation}: {cause}")
+        self.operation = operation
+        self.cause = cause
+        self.code = code
+        self.action = action
+
+
+def select_error_report(err: SelectError, base: str, sel_dir: Path) -> None:
+    log(f"affected: {err.operation} failed: {err.cause}")
+    log(f"affected: code={err.code} base={base} cache={sel_dir}")
+    log(f"affected: {err.action}")
+    log("affected: running the full suite instead")
+
+
+def _git(root: Path, *args: str, op: str) -> bytes:
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            timeout=60,
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SelectError(
+            op, f"git did not run ({exc})", "git-unavailable", "install git, or run ./bin/check"
+        ) from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()[:1]
+        raise SelectError(
+            op,
+            f"git exited {proc.returncode}: {detail[0] if detail else 'no output'}",
+            "git-failed",
+            "run from a git clone with the base ref present, or pass --base REF",
+        )
+    return proc.stdout
+
+
+def resolve_merge_base(root: Path, base: str) -> str:
+    _git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}", op="resolve base")
+    return _git(root, "merge-base", base, "HEAD", op="merge base").decode().strip()
+
+
+def changed_since(root: Path, merge_base: str) -> dict[str, str]:
+    """Paths that differ from the merge base: committed, staged, unstaged and
+    untracked. A rename arrives as a delete plus an add, so both paths show."""
+    out = _git(root, "diff", "--name-status", "-z", "--no-renames", merge_base, op="changed files")
+    parts = out.decode("utf-8", "surrogateescape").split("\0")
+    changed: dict[str, str] = {}
+    for i in range(0, len(parts) - 1, 2):
+        changed[parts[i + 1]] = parts[i][:1]
+    new = _git(root, "ls-files", "-z", "--others", "--exclude-standard", op="untracked files")
+    for path in new.decode("utf-8", "surrogateescape").split("\0"):
+        if path:
+            changed[path] = "A"
+    return {p: s for p, s in changed.items() if not p.startswith(SELECT_DIR + "/")}
+
+
+def _strip_bodies(node: ast.AST) -> None:
+    """Skeleton: drop undecorated defs (they only run when called, and a call
+    runs lines the record attributes per test); keep decorated defs' headers
+    (decorators run at import) with the body replaced."""
+    for field, value in ast.iter_fields(node):
+        if not isinstance(value, list):
+            continue
+        kept = []
+        for child in value:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not child.decorator_list:
+                    continue
+                child.body = [ast.Pass()]
+            elif isinstance(child, ast.AST):
+                _strip_bodies(child)
+            kept.append(child)
+        setattr(node, field, kept)
+
+
+def skeleton_digest(source: bytes) -> str | None:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    _strip_bodies(tree)
+    return hashlib.sha256(ast.dump(tree).encode()).hexdigest()
+
+
+def _sha(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def inventory(root: Path) -> dict[str, str]:
+    """sha256 of every Python file the selector reasons about, plus the
+    runner/config files, keyed by repo-relative path."""
+    found: dict[str, str] = {}
+    for top in ("src/mind_meld", "tests", "bin"):
+        for path in sorted((root / top).rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest = _sha(path)
+            if digest:
+                found[path.relative_to(root).as_posix()] = digest
+    for name in SELECT_CONFIG_PATHS:
+        digest = _sha(root / name)
+        if digest:
+            found[name] = digest
+    return found
+
+
+def config_digest(root: Path) -> str:
+    hasher = hashlib.sha256()
+    names = list(SELECT_CONFIG_PATHS)
+    names += sorted(p.relative_to(root).as_posix() for p in (root / "tests").rglob("conftest.py"))
+    for name in sorted(set(names)):
+        hasher.update(f"{name}={_sha(root / name)}\n".encode())
+    return hasher.hexdigest()
+
+
+ENV_PROBE = """\
+import hashlib, importlib.metadata as m, json, os, sys
+dists = sorted({"%s==%s" % (d.metadata["Name"], d.version) for d in m.distributions()})
+try:
+    import coverage
+    cov = True
+except ImportError:
+    cov = False
+fp = hashlib.sha256(
+    ("\\n".join(dists) + sys.version + os.path.realpath(sys.executable)).encode()
+).hexdigest()
+print(json.dumps({"fp": fp, "coverage": cov}))
+"""
+
+
+def probe_env(tool: Path) -> dict:
+    try:
+        proc = subprocess.run(
+            [str(tool), "-c", ENV_PROBE], capture_output=True, text=True, timeout=60, check=False
+        )
+        result = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        result = None
+    if not isinstance(result, dict):
+        raise SelectError(
+            "probe tool environment",
+            f"{tool} could not report its packages",
+            "env-probe",
+            "check that this interpreter runs, or run ./bin/check",
+        )
+    return result
+
+
+def ensure_select_dir(root: Path) -> Path:
+    sel = root / SELECT_DIR
+    if sel.is_symlink():
+        raise SelectError(
+            "open cache",
+            f"{sel} is a symlink",
+            "cache-symlink",
+            f"remove it yourself ({sel}); bin/check will not follow it",
+        )
+    owner = sel / SELECT_OWNER
+    if sel.exists():
+        if not owner.is_file() and any(sel.iterdir()):
+            raise SelectError(
+                "open cache",
+                f"{sel} exists but bin/check did not create it",
+                "cache-unowned",
+                f"move it aside: mv {SELECT_DIR} {SELECT_DIR}.bak",
+            )
+    try:
+        sel.mkdir(exist_ok=True)
+        owner.write_text(OWNER_BODY, encoding="utf-8")
+    except OSError as exc:
+        raise SelectError(
+            "open cache", str(exc), "cache-unwritable", f"make {sel} writable, or run ./bin/check"
+        ) from exc
+    return sel
+
+
+def atomic_write_json(path: Path, payload: object) -> None:
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_record(sel: Path, env: dict, config: str, merge_base: str) -> tuple[dict | None, str]:
+    """A record is usable only if complete, readable and made for this
+    interpreter, configuration and merge base. Returns (record, reason)."""
+    path = sel / SELECT_RECORD
+    if not path.is_file():
+        return None, "no coverage record yet (first --affected run)"
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        nodes = rec["nodes"]
+        ok = (
+            rec["schema"] == SELECT_SCHEMA
+            and rec["complete"] is True
+            and isinstance(nodes, list)
+            and isinstance(rec["ctx"], dict)
+            and isinstance(rec["reads"], dict)
+            and isinstance(rec["opaque"], list)
+            and isinstance(rec["files"], dict)
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, f"coverage record at {path} is unreadable or truncated"
+    if not ok:
+        return None, "coverage record has an unknown schema"
+    if not nodes:
+        return None, "coverage record holds no tests"
+    if rec.get("env") != env["fp"]:
+        return None, "interpreter or installed packages changed since the record"
+    if rec.get("config") != config:
+        return None, "runner, pyproject or conftest changed since the record"
+    if rec.get("merge_base") != merge_base:
+        return None, "merge base moved since the record"
+    if not rec["ctx"]:
+        return None, "record has no coverage of src/mind_meld in this worktree"
+    return rec, ""
+
+
+class Plan:
+    __slots__ = ("full", "ids", "files", "reasons", "total")
+
+    def __init__(self, total: int) -> None:
+        self.full: str | None = None
+        self.ids: set[str] = set()
+        self.files: set[str] = set()
+        self.reasons: list[str] = []
+        self.total = total
+
+    @property
+    def empty(self) -> bool:
+        return self.full is None and not self.ids and not self.files
+
+
+def _is_test_module(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return (
+        path.startswith("tests/")
+        and name.endswith(".py")
+        and (name.startswith("test_") or name.endswith("_test.py"))
+    )
+
+
+def plan_selection(
+    root: Path, rec: dict, merge_base: str, changed: dict[str, str], failed: list[str]
+) -> Plan:
+    """Which tests does the change reach? Anything this cannot prove narrow
+    becomes a full run with its reason; uncertainty never selects zero."""
+    nodes: list[str] = rec["nodes"]
+    plan = Plan(len(nodes))
+    now = inventory(root)
+    recorded: dict[str, dict] = rec["files"]
+    drifted = {p for p in set(recorded) | set(now) if recorded.get(p, {}).get("sha") != now.get(p)}
+    paths = sorted(set(changed) | drifted)
+    readers = rec["reads"]
+    ctx = rec["ctx"]
+    src_changed = False
+    for path in paths:
+        if path in SELECT_CONFIG_PATHS or path.endswith("conftest.py"):
+            plan.full = f"runner, config or conftest changed: {path}"
+        elif path.startswith("tests/") and not _is_test_module(path):
+            plan.full = f"shared test input changed: {path}"
+        elif not path.endswith(".py"):
+            plan.full = f"non-Python file changed: {path}"
+        elif _is_test_module(path):
+            plan.files.add(path)
+            plan.ids.update(nodes[i] for i in readers.get(path, []))
+        elif path.startswith("src/mind_meld/"):
+            reason = _module_scope_change(root, rec, merge_base, path, changed, path in drifted)
+            if reason:
+                plan.full = reason
+            else:
+                src_changed = True
+                for table in (ctx, readers):
+                    plan.ids.update(nodes[i] for i in table.get(path, []))
+        else:
+            plan.full = f"Python file outside src/ and tests/ changed: {path}"
+        if plan.full:
+            return plan
+    if src_changed:
+        plan.ids.update(nodes[i] for i in rec["opaque"])
+    plan.ids.update(failed)
+    # A node whose test file is gone cannot run; its file is already a change.
+    plan.ids = {n for n in plan.ids if (root / n.split("::", 1)[0]).is_file()}
+    plan.files = {f for f in plan.files if (root / f).is_file()}
+    return plan
+
+
+def _module_scope_change(
+    root: Path, rec: dict, merge_base: str, path: str, changed: dict[str, str], drift: bool
+) -> str | None:
+    """None when only function bodies differ; otherwise why we cannot say."""
+    here = root / path
+    if not here.is_file():
+        return f"module removed: {path}"
+    if path in changed and changed[path] == "A":
+        return f"module added: {path}"
+    current = skeleton_digest(here.read_bytes())
+    if current is None:
+        return f"cannot parse {path}"
+    if path in changed:
+        old = _git(root, "show", f"{merge_base}:{path}", op="read base file")
+        if skeleton_digest(old) != current:
+            return f"module-scope change in {path}"
+    if drift:
+        entry = rec["files"].get(path)
+        if not entry or entry.get("skel") != current:
+            return f"module-scope change in {path} since the record"
+    return None
+
+
+def write_plugin(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "mm_select_plugin.py").write_text(SELECT_PLUGIN, encoding="utf-8")
+
+
+def pytest_env(directory: Path, config_path: Path) -> dict[str, str]:
+    env = dict(os.environ)
+    old = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(directory) + (os.pathsep + old if old else "")
+    env["MM_SELECT_CONFIG"] = str(config_path)
+    return env
+
+
+def _merge_parts(out_dir: Path) -> dict:
+    parts = []
+    for path in sorted(out_dir.glob("part-*.json")):
+        parts.append(json.loads(path.read_text(encoding="utf-8")))
+    if not parts:
+        raise ValueError("no coverage part was written")
+    for part in parts:
+        if part["filtered"]:
+            raise ValueError("pytest filtered the run (%s)" % ", ".join(part["filters"]))
+    collected = parts[0]["collected"]
+    if any(part["collected"] != collected for part in parts if part["collected"]):
+        raise ValueError("workers collected different tests")
+    if not collected:
+        raise ValueError("collected no tests")
+    return {
+        "nodes": sorted(collected),
+        "parts": parts,
+    }
+
+
+def build_record(
+    root: Path, out_dir: Path, start: dict[str, str], env: dict, config: str, merge_base: str
+) -> dict:
+    merged = _merge_parts(out_dir)
+    nodes = merged["nodes"]
+    index = {n: i for i, n in enumerate(nodes)}
+    ctx: dict[str, set[int]] = {}
+    reads: dict[str, set[int]] = {}
+    opaque: set[int] = set()
+    for part in merged["parts"]:
+        for path, contexts in part["ctx"].items():
+            ctx.setdefault(path, set()).update(index[c] for c in contexts if c in index)
+        for node, paths in part["reads"].items():
+            if node in index:
+                for path in paths:
+                    reads.setdefault(path, set()).add(index[node])
+        opaque.update(index[n] for n in part["opaque"] if n in index)
+    files = {}
+    for path, sha in start.items():
+        entry = {"sha": sha}
+        if path.startswith("src/mind_meld/"):
+            entry["skel"] = skeleton_digest((root / path).read_bytes())
+        files[path] = entry
+    return {
+        "schema": SELECT_SCHEMA,
+        "complete": True,
+        "env": env["fp"],
+        "config": config,
+        "merge_base": merge_base,
+        "nodes": nodes,
+        "ctx": {p: sorted(v) for p, v in ctx.items()},
+        "reads": {p: sorted(v) for p, v in reads.items()},
+        "opaque": sorted(opaque),
+        "files": files,
+    }
+
+
+def full_pytest(args: Args, tool: Path, n_args: list[str]) -> int:
+    name = "pytest " + " ".join(args.scope)
+    log(name)
+    return run_owned([str(tool), "-m", "pytest", *args.scope, *n_args])
+
+
+def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
+    """--affected: returns the pytest result; selector trouble means a full run."""
+    base = args.base or SELECT_DEFAULT_BASE
+    sel = root / SELECT_DIR
+    try:
+        sel = ensure_select_dir(root)
+        merge_base = resolve_merge_base(root, base)
+        env = probe_env(tool)
+        config = config_digest(root)
+        record, why = load_record(sel, env, config, merge_base)
+        if args.refresh:
+            record, why = None, "refresh requested"
+        if record is None:
+            if not env["coverage"]:
+                raise SelectError(
+                    "record coverage",
+                    f"the coverage package is missing from {tool}",
+                    "coverage-missing",
+                    "run ./bin/check once without MM_VENV/VIRTUAL_ENV to install dev deps",
+                )
+            log(f"affected: {why}; running the full suite to record coverage")
+            return seed_record(args, root, sel, tool, n_args, env, config, merge_base)
+        failed = _load_failed(sel)
+        plan = plan_selection(root, record, merge_base, changed_since(root, merge_base), failed)
+    except SelectError as err:
+        select_error_report(err, base, sel)
+        return full_pytest(args, tool, n_args)
+    except Exception as exc:
+        err = SelectError("select tests", f"{type(exc).__name__}: {exc}", "unexpected", "report it")
+        select_error_report(err, base, sel)
+        return full_pytest(args, tool, n_args)
+    if plan.full:
+        log(f"affected: {plan.full}; running the full suite")
+        return _clean_failed_on_green(sel, full_pytest(args, tool, n_args))
+    if plan.empty:
+        log(f"affected: ran 0 of {plan.total} recorded tests: nothing the record reaches changed")
+        return 0
+    log(
+        f"affected: base {base} ({merge_base[:9]}): "
+        f"{len(plan.ids)} recorded tests plus {len(plan.files)} changed test files"
+    )
+    return select_run(args, sel, tool, n_args, plan)
+
+
+def _load_failed(sel: Path) -> list[str]:
+    try:
+        data = json.loads((sel / SELECT_FAILED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [n for n in data if isinstance(n, str)] if isinstance(data, list) else []
+
+
+def _clean_failed_on_green(sel: Path, result: int) -> int:
+    if result == 0:
+        try:
+            (sel / SELECT_FAILED).unlink()
+        except OSError:
+            pass
+    return result
+
+
+def select_run(args: Args, sel: Path, tool: Path, n_args: list[str], plan: Plan) -> int:
+    run = sel / f"run-{os.getpid()}"
+    try:
+        write_plugin(run)
+        cfg = run / "config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "mode": "select",
+                    "root": str(sel.parent),
+                    "ids": sorted(plan.ids),
+                    "files": sorted(plan.files),
+                    "failed_path": str(sel / SELECT_FAILED),
+                }
+            ),
+            encoding="utf-8",
+        )
+        log("pytest " + " ".join(args.scope) + " (affected)")
+        return run_owned(
+            [str(tool), "-m", "pytest", *args.scope, "-p", "mm_select_plugin", *n_args],
+            pytest_env(run, cfg),
+        )
+    finally:
+        shutil.rmtree(run, ignore_errors=True)
+
+
+def seed_record(
+    args: Args,
+    root: Path,
+    sel: Path,
+    tool: Path,
+    n_args: list[str],
+    env: dict,
+    config: str,
+    merge_base: str,
+) -> int:
+    fd = os.open(sel / SELECT_LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die(
+                "another --affected run is recording coverage here",
+                f"{sel / SELECT_LOCK} is held; the existing record is untouched",
+                "  wait for it to finish, then re-run ./bin/check --affected",
+            )
+        cand = sel / f"candidate-{os.getpid()}"
+        try:
+            shutil.rmtree(cand, ignore_errors=True)
+            write_plugin(cand)
+            cfg = cand / "config.json"
+            cfg.write_text(
+                json.dumps({"mode": "record", "root": str(root), "out_dir": str(cand)}),
+                encoding="utf-8",
+            )
+            start = inventory(root)
+            log("pytest " + " ".join(args.scope) + " (recording coverage)")
+            result = run_owned(
+                [str(tool), "-m", "pytest", *args.scope, "-p", "mm_select_plugin", *n_args],
+                pytest_env(cand, cfg),
+            )
+            if result != 0:
+                log("affected: run was not green; the coverage record is unchanged")
+                return result
+            try:
+                if inventory(root) != start:
+                    raise ValueError("files changed while the suite ran")
+                record = build_record(root, cand, start, env, config, merge_base)
+                if not record["ctx"]:
+                    raise ValueError(f"no coverage of src/mind_meld under {root}")
+                atomic_write_json(sel / SELECT_RECORD, record)
+            except (OSError, ValueError, KeyError) as exc:
+                log(f"affected: record not updated: {exc}")
+                return result
+            _clean_failed_on_green(sel, result)
+            log(f"affected: recorded coverage for {len(record['nodes'])} tests")
+            return result
+        finally:
+            shutil.rmtree(cand, ignore_errors=True)
+    finally:
+        os.close(fd)
+
+
+def validate_affected(args: Args) -> None:
+    if (args.refresh or args.base) and not args.affected:
+        die(
+            "--base and --refresh only work with --affected",
+            "neither changes a plain run",
+            "  ./bin/check --affected --refresh",
+        )
+    if args.affected:
+        clash = [
+            label
+            for label, hit in (
+                ("a test path", args.scope_given),
+                ("pytest arguments", bool(args.pytest_extra)),
+                ("--lint", args.lint),
+            )
+            if hit
+        ]
+        if clash:
+            die(
+                "--affected selects the tests itself",
+                "it cannot be combined with " + ", ".join(clash),
+                "  ./bin/check --affected          # tests the change reaches\n"
+                "  ./bin/check tests/x.py -- -k n  # your own scope",
+            )
+
+
 def print_help() -> None:
     text = """\
 usage: ./bin/check [paths...] [-- pytest-args]
@@ -478,6 +1420,14 @@ they must not know where Python lives.
 
 Default: ruff check .  ->  ruff format --check .  ->  pytest tests/
 Cheap gates first. Fail-fast; each tool's exit code is preserved.
+
+While working and reviewing, use --affected: it runs only the tests whose
+recorded coverage reaches the files changed since the merge base (plus new or
+changed test files) and prints "ran N of M collected tests". CI and plain
+./bin/check run the whole suite; --affected never replaces that before merge.
+The first run (or a stale record, or --refresh) runs everything once to record
+coverage in .mm-test-selection/ (ignored). Runner, config, conftest, non-Python
+and module-scope changes run everything and say why.
 
 A scoped pytest still lints the whole repo. That is intended — ruff is
 ~0.07s — but --tests would otherwise mislead. Use --tests to skip lint,
@@ -493,6 +1443,10 @@ flags:
   --tests          pytest only (no ruff)
   --serial         do not pass -n auto (for -x / --pdb)
   --rebuild        recreate an owned .venv, then install
+  --affected       pytest only the tests the change reaches (not with paths,
+                   pytest args or --lint)
+  --base REF       merge-base ref for --affected (default: origin/main)
+  --refresh        with --affected: re-record coverage from a full run
 
 env:
   MM_PYTHON        interpreter for the venv (default: python3.13, then 3.14,
@@ -520,6 +1474,8 @@ def main(argv: list[str] | None = None) -> int:
             "  ./bin/check --lint    # ruff only\n"
             "  ./bin/check --tests   # pytest only",
         )
+
+    validate_affected(args)
 
     root = repo_root()
     try:
@@ -574,11 +1530,21 @@ def main(argv: list[str] | None = None) -> int:
     if run_tests:
         extra = args.pytest_extra
         n_args = xdist_args(Path(tool), args.serial, extra)
-        run_tool(
-            [str(tool), "-m", "pytest", *args.scope, *n_args, *extra],
-            "pytest " + " ".join(args.scope),
-            "see pytest's output above",
-        )
+        if args.affected:
+            result = run_affected(args, root, Path(tool), n_args)
+            if result != 0:
+                die(
+                    f"pytest (affected) failed (exit {result})",
+                    "see pytest's output above",
+                    "see pytest's output above",
+                    code=result,
+                )
+        else:
+            run_pytest(
+                [str(tool), "-m", "pytest", *args.scope, *n_args, *extra],
+                "pytest " + " ".join(args.scope),
+                "see pytest's output above",
+            )
     return 0
 
 

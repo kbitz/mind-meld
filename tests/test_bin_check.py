@@ -8,8 +8,10 @@ clean-clone case uses a one-node --tests scope.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -546,6 +548,7 @@ def test_help_lists_flags_and_non_compound_fallback() -> None:
         "--tests",
         "--serial",
         "--rebuild",
+        "--affected",
         "MM_PYTHON",
         "MM_VENV",
     ):
@@ -618,3 +621,722 @@ def test_clean_clone_end_to_end(tmp_path: Path) -> None:
         pytest.skip("pip unavailable in isolated cache: " + proc.stderr[-400:])
     assert proc.returncode == 0, proc.stderr[-2000:] + proc.stdout[-500:]
     assert "interpreter" in proc.stderr
+
+
+# --- Track 82B: --affected selection and owned pytest process groups ---------
+
+GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+
+PROJECT_FILES = {
+    "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src"]\ntestpaths = ["tests"]\n',
+    ".gitignore": ".mm-test-selection/\n__pycache__/\n.pytest_cache/\n",
+    "src/mind_meld/__init__.py": "",
+    "src/mind_meld/leaf.py": "def leaf():\n    return 1\n",
+    "src/mind_meld/shared.py": (
+        "from mind_meld import leaf\n\n\ndef shared():\n    return leaf.leaf() + 1\n"
+    ),
+    "tests/conftest.py": (
+        "import os\n\nimport pytest\n\n\n@pytest.fixture(autouse=True)\n"
+        "def _ran(request):\n    log = os.environ.get('RAN_LOG')\n    if log:\n"
+        "        with open(log, 'a') as fh:\n            fh.write(request.node.nodeid + '\\n')\n"
+    ),
+    "tests/test_leaf.py": (
+        "import pytest\nfrom mind_meld import leaf\n\n\n@pytest.mark.parametrize('n', [1, 2])\n"
+        "def test_leaf(n):\n    assert leaf.leaf() == 1\n"
+    ),
+    "tests/test_shared.py": (
+        "from mind_meld import shared\n\n\ndef test_shared():\n    assert shared.shared() == 2\n"
+    ),
+    "tests/test_other.py": "def test_other():\n    assert True\n",
+}
+
+
+def make_project(root: Path, files: dict[str, str] | None = None) -> Path:
+    for name, body in {**PROJECT_FILES, **(files or {})}.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    subprocess.run([*GIT, "init", "-q", "-b", "main", str(root)], check=True)
+    subprocess.run([*GIT, "-C", str(root), "add", "-A"], check=True)
+    subprocess.run([*GIT, "-C", str(root), "commit", "-q", "-m", "base"], check=True)
+    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return root
+
+
+def git(root: Path, *args: str) -> None:
+    subprocess.run([*GIT, "-C", str(root), *args], check=True, capture_output=True)
+
+
+def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180):
+    full = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
+    }
+    full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, RAN_LOG=str(ran_log(root)))
+    full.update(env or {})
+    return subprocess.run(
+        [sys.executable, str(ROOT / "bin" / "_check.py"), "--no-bootstrap", "--tests", *args],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        env=full,
+        timeout=timeout,
+    )
+
+
+def ran_log(root: Path) -> Path:
+    return root.parent / (root.name + ".ran")
+
+
+def ran(root: Path) -> set[str]:
+    log = ran_log(root)
+    seen = set(log.read_text().split()) if log.exists() else set()
+    log.unlink(missing_ok=True)
+    return seen
+
+
+def both(proc) -> str:
+    return proc.stdout + proc.stderr
+
+
+LEAF_TESTS = {
+    "tests/test_leaf.py::test_leaf[1]",
+    "tests/test_leaf.py::test_leaf[2]",
+    "tests/test_shared.py::test_shared",
+}
+ALL_TESTS = LEAF_TESTS | {"tests/test_other.py::test_other"}
+
+
+@pytest.fixture(scope="module")
+def seeded(tmp_path_factory) -> Path:
+    base = tmp_path_factory.mktemp("seeded")
+    root = make_project(base / "proj")
+    proc = check(root, "--affected", "--serial")
+    assert proc.returncode == 0, both(proc)
+    assert "recorded coverage for 4 tests" in proc.stderr
+    assert ran(root) == ALL_TESTS
+    return root
+
+
+@pytest.fixture
+def proj(seeded, tmp_path) -> Path:
+    root = tmp_path / "proj"
+    shutil.copytree(seeded, root, symlinks=True)
+    return root
+
+
+def edit(root: Path, name: str, old: str, new: str) -> None:
+    path = root / name
+    text = path.read_text()
+    assert old in text
+    stat_before = path.stat()
+    path.write_text(text.replace(old, new))
+    # Same-size edits inside one second would keep a stale .pyc valid.
+    later = stat_before.st_mtime_ns + 10_000_000_000
+    os.utime(path, ns=(later, later))
+
+
+def affected(root: Path, *args: str, **kw):
+    return check(root, "--affected", "--serial", *args, **kw)
+
+
+class TestAffectedArgv:
+    def test_flags_parse(self) -> None:
+        mod = load_check()
+        args = mod.parse_argv(["--affected", "--refresh", "--base", "main"])
+        assert (args.affected, args.refresh, args.base) == (True, True, "main")
+        assert mod.parse_argv(["--affected", "--base=dev"]).base == "dev"
+        assert mod.parse_argv(["--affected"]).scope_given is False
+        assert mod.parse_argv(["tests/x.py"]).scope_given is True
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["--affected", "tests/x.py"],
+            ["--affected", "--", "-k", "x"],
+            ["--affected", "-k", "x"],
+            ["--affected", "--lint"],
+            ["--refresh"],
+            ["--base", "main"],
+            ["--affected", "--base"],
+        ],
+    )
+    def test_competing_scopes_and_orphan_flags_are_rejected_before_work(
+        self, argv: list[str], monkeypatch
+    ) -> None:
+        mod = load_check()
+        monkeypatch.setattr(mod, "resolve_interpreter", lambda: pytest.fail("bootstrapped"))
+        with pytest.raises(SystemExit) as ei:
+            mod.main(argv)
+        assert ei.value.code != 0
+
+    def test_ordinary_argv_is_unchanged(self) -> None:
+        mod = load_check()
+        mod.validate_affected(mod.parse_argv(["--affected", "--tests", "--serial"]))
+        args = mod.parse_argv(["tests/x.py", "--tests", "--serial", "-k", "n"])
+        assert (args.affected, args.refresh, args.base) == (False, False, None)
+        assert args.scope == ["tests/x.py"] and args.pytest_extra == ["-k", "n"]
+
+    def test_help_says_when_to_use_affected(self, capsys) -> None:
+        mod = load_check()
+        mod.main(["--help"])
+        out = capsys.readouterr().out
+        for needle in ("--affected", "--base", "--refresh", "CI"):
+            assert needle in out
+
+
+class TestAffectedSelection:
+    def test_leaf_edit_runs_only_the_tests_that_reach_it_and_is_not_last_run_based(
+        self, proj: Path
+    ) -> None:
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        for _ in range(2):
+            proc = affected(proj)
+            assert proc.returncode == 0, both(proc)
+            assert "ran 3 of 4 collected tests" in both(proc)
+            assert ran(proj) == LEAF_TESTS
+
+    def test_shared_edit_reaches_its_callers_only(self, proj: Path) -> None:
+        edit(proj, "src/mind_meld/shared.py", "+ 1", "+ int(1)")
+        assert affected(proj).returncode == 0
+        assert ran(proj) == {"tests/test_shared.py::test_shared"}
+
+    def test_committed_staged_unstaged_and_untracked_changes_all_count(self, proj: Path) -> None:
+        git(proj, "checkout", "-q", "-b", "work")
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        git(proj, "commit", "-q", "-am", "leaf")
+        edit(proj, "tests/test_other.py", "True", "1 == 1")
+        git(proj, "add", "tests/test_other.py")
+        (proj / "tests" / "test_new.py").write_text("def test_new():\n    assert True\n")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == ALL_TESTS | {"tests/test_new.py::test_new"}
+
+    def test_deleted_test_is_a_proven_empty_selection(self, proj: Path) -> None:
+        git(proj, "rm", "-q", "tests/test_other.py")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert "ran 0 of 4" in both(proc)
+        assert ran(proj) == set()
+
+    def test_renamed_test_runs_under_its_new_name(self, proj: Path) -> None:
+        git(proj, "mv", "tests/test_other.py", "tests/test_renamed.py")
+        assert affected(proj).returncode == 0
+        assert ran(proj) == {"tests/test_renamed.py::test_other"}
+
+    def test_unchanged_tree_runs_nothing_and_succeeds(self, proj: Path) -> None:
+        proc = affected(proj)
+        assert proc.returncode == 0
+        assert "ran 0 of 4" in both(proc)
+        assert ran(proj) == set()
+
+    @pytest.mark.parametrize(
+        ("name", "text", "why"),
+        [
+            (
+                "src/mind_meld/leaf.py",
+                "\nCONST = 1\n",
+                "module-scope change in src/mind_meld/leaf.py",
+            ),
+            ("README.md", "hello\n", "non-Python file changed: README.md"),
+            (
+                "tests/conftest.py",
+                "\n# x\n",
+                "runner, pyproject or conftest changed since the record",
+            ),
+            ("pyproject.toml", "\n# x\n", "runner, pyproject or conftest changed since the record"),
+            ("src/mind_meld/new.py", "X = 1\n", "module added: src/mind_meld/new.py"),
+        ],
+    )
+    def test_changes_the_record_cannot_attribute_run_everything_and_say_why(
+        self, proj: Path, name: str, text: str, why: str
+    ) -> None:
+        path = proj / name
+        path.write_text((path.read_text() if path.exists() else "") + text)
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert why in proc.stderr and "running the full suite" in proc.stderr
+        assert ran(proj) == ALL_TESTS
+
+    def test_tests_that_read_source_or_spawn_python_are_never_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """Coverage cannot see source read as data or code run in a child."""
+        reader = (
+            "def test_reader():\n    assert 'def leaf' in open('src/mind_meld/leaf.py').read()\n"
+        )
+        child = (
+            "import subprocess, sys\n\n\ndef test_child():\n"
+            "    code = 'import sys; sys.path.insert(0, \"src\"); import mind_meld.leaf'\n"
+            "    assert subprocess.run([sys.executable, '-c', code]).returncode == 0\n"
+        )
+        root = make_project(
+            tmp_path / "proj", {"tests/test_reader.py": reader, "tests/test_child.py": child}
+        )
+        assert affected(root).returncode == 0
+        ran(root)
+        edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        proc = affected(root)
+        assert proc.returncode == 0, both(proc)
+        assert ran(root) == LEAF_TESTS | {
+            "tests/test_reader.py::test_reader",
+            "tests/test_child.py::test_child",
+        }
+
+    def test_config_that_differs_from_the_merge_base_is_never_narrowed(
+        self, tmp_path: Path
+    ) -> None:
+        root = make_project(tmp_path / "proj")
+        edit(root, "tests/conftest.py", "import os", "import os  # edited")
+        assert affected(root).returncode == 0
+        ran(root)
+        proc = affected(root)
+        assert "conftest changed: tests/conftest.py" in proc.stderr
+        assert ran(root) == ALL_TESTS
+
+    def test_failures_are_reselected_until_they_pass(self, proj: Path) -> None:
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
+        assert affected(proj).returncode != 0
+        ran(proj)
+        git(proj, "checkout", "--", "src/mind_meld/leaf.py")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == LEAF_TESTS
+        assert "ran 0 of 4" in both(affected(proj))
+
+    def test_collection_failure_is_not_converted_to_success(self, proj: Path) -> None:
+        (proj / "tests" / "test_broken.py").write_text("def test_x(:\n")
+        proc = affected(proj)
+        assert proc.returncode != 0
+        assert (proj / ".mm-test-selection" / "record.json").is_file()
+
+    def test_xdist_record_and_selection(self, tmp_path: Path) -> None:
+        root = make_project(tmp_path / "proj")
+        env = {"MM_PYTEST_WORKERS": "2"}
+        proc = check(root, "--affected", env=env)
+        assert proc.returncode == 0, both(proc)
+        assert ran(root) == ALL_TESTS
+        record = json.loads((root / ".mm-test-selection" / "record.json").read_text())
+        assert len(record["nodes"]) == 4
+        edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        proc = check(root, "--affected", env=env)
+        assert proc.returncode == 0, both(proc)
+        assert "ran 3 of 4 collected tests" in both(proc)
+        assert ran(root) == LEAF_TESTS
+
+    def test_refresh_rerecords_the_whole_suite(self, proj: Path) -> None:
+        (proj / "tests" / "test_new.py").write_text("def test_new():\n    assert True\n")
+        proc = affected(proj, "--refresh")
+        assert proc.returncode == 0, both(proc)
+        assert "refresh requested" in proc.stderr
+        record = json.loads((proj / ".mm-test-selection" / "record.json").read_text())
+        assert len(record["nodes"]) == 5
+
+    @pytest.mark.parametrize(
+        ("mutate", "why"),
+        [
+            (lambda r, p: p.write_text(p.read_text()[:40]), "unreadable or truncated"),
+            (lambda r, p: p.write_text(json.dumps({**r, "schema": 99})), "unknown schema"),
+            (lambda r, p: p.write_text(json.dumps({**r, "env": "x"})), "interpreter or installed"),
+            (lambda r, p: p.write_text(json.dumps({**r, "config": "x"})), "runner, pyproject"),
+            (lambda r, p: p.write_text(json.dumps({**r, "nodes": []})), "holds no tests"),
+            (lambda r, p: p.write_text(json.dumps({**r, "ctx": {}})), "no coverage of src"),
+            (lambda r, p: p.write_text(json.dumps({**r, "complete": False})), "unknown schema"),
+        ],
+    )
+    def test_unusable_record_runs_everything_with_the_reason_and_reseeds(
+        self, proj: Path, mutate, why: str
+    ) -> None:
+        path = proj / ".mm-test-selection" / "record.json"
+        mutate(json.loads(path.read_text()), path)
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert why in proc.stderr
+        assert ran(proj) == ALL_TESTS
+        assert len(json.loads(path.read_text())["nodes"]) == 4
+
+    def test_moved_merge_base_reseeds(self, proj: Path) -> None:
+        git(proj, "commit", "-q", "--allow-empty", "-m", "moved")
+        git(proj, "update-ref", "refs/remotes/origin/main", "HEAD")
+        proc = affected(proj)
+        assert "merge base moved" in proc.stderr
+        assert ran(proj) == ALL_TESTS
+
+    def test_filtered_run_never_becomes_the_baseline(self, tmp_path: Path) -> None:
+        root = make_project(tmp_path / "proj")
+        record = root / ".mm-test-selection" / "record.json"
+        proc = affected(root, env={"PYTEST_ADDOPTS": "-k test_other"})
+        assert proc.returncode == 0, both(proc)
+        assert "record not updated" in proc.stderr and "keyword" in proc.stderr
+        assert not record.exists()
+        ran(root)
+        assert affected(root).returncode == 0
+        assert ran(root) == ALL_TESTS
+        assert record.is_file()
+
+    def test_inputs_changing_during_the_run_block_promotion(self, tmp_path: Path) -> None:
+        touch = (
+            "import os\n\n\ndef test_other():\n"
+            "    with open(os.path.join(os.environ['PROJ'], 'src/mind_meld/leaf.py'), 'a') as f:\n"
+            "        f.write('# changed mid-run\\n')\n"
+        )
+        root = make_project(tmp_path / "proj", {"tests/test_other.py": touch})
+        proc = affected(root, env={"PROJ": str(root)})
+        assert proc.returncode == 0, both(proc)
+        assert "files changed while the suite ran" in proc.stderr
+        assert not (root / ".mm-test-selection" / "record.json").exists()
+
+    def test_a_second_recorder_is_refused_without_touching_the_baseline(self, proj: Path) -> None:
+        import fcntl
+
+        record = proj / ".mm-test-selection" / "record.json"
+        before = record.read_bytes()
+        fd = os.open(proj / ".mm-test-selection" / ".lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            proc = affected(proj, "--refresh")
+        finally:
+            os.close(fd)
+        assert proc.returncode != 0
+        assert "another --affected run is recording" in proc.stderr
+        assert ran(proj) == set()
+        assert record.read_bytes() == before
+
+    def test_a_red_refresh_keeps_the_prior_record(self, proj: Path) -> None:
+        record = proj / ".mm-test-selection" / "record.json"
+        before = record.read_bytes()
+        edit(proj, "tests/test_other.py", "assert True", "assert False")
+        proc = affected(proj, "--refresh")
+        assert proc.returncode != 0
+        assert record.read_bytes() == before
+
+    def test_unresolved_base_runs_everything_and_explains(self, proj: Path) -> None:
+        proc = affected(proj, "--base", "nosuch")
+        assert proc.returncode == 0, proc.stderr
+        for needle in ("resolve base", "code=git-failed", "base=nosuch", "--base REF"):
+            assert needle in proc.stderr
+        assert "running the full suite instead" in proc.stderr
+        assert ran(proj) == ALL_TESTS
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+    def test_unwritable_cache_falls_back_with_the_cause(self, tmp_path: Path) -> None:
+        root = make_project(tmp_path / "proj")
+        root.chmod(0o500)
+        try:
+            proc = affected(root)
+        finally:
+            root.chmod(0o700)
+        assert proc.returncode == 0, both(proc)
+        assert "code=cache-unwritable" in proc.stderr
+        assert ran(root) == ALL_TESTS
+
+    def test_missing_coverage_package_is_reported_and_falls_back(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        mod = load_check()
+        root = make_project(tmp_path / "proj")
+        monkeypatch.setattr(mod, "probe_env", lambda tool: {"fp": "x", "coverage": False})
+        monkeypatch.setattr(mod, "full_pytest", lambda *a: 0)
+        args = mod.parse_argv(["--affected"])
+        assert mod.run_affected(args, root, Path(sys.executable), []) == 0
+        err = capsys.readouterr().err
+        assert "coverage-missing" in err and "running the full suite instead" in err
+
+    def test_unexpected_selector_error_keeps_the_type_and_falls_back(
+        self, proj: Path, monkeypatch, capsys
+    ) -> None:
+        mod = load_check()
+
+        def boom(*_a):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(mod, "changed_since", boom)
+        monkeypatch.setattr(mod, "full_pytest", lambda *a: 7)
+        args = mod.parse_argv(["--affected"])
+        assert mod.run_affected(args, proj, Path(sys.executable), []) == 7
+        err = capsys.readouterr().err
+        assert "RuntimeError: kaboom" in err and "code=unexpected" in err
+
+    def test_symlinked_or_foreign_cache_is_refused(self, tmp_path: Path) -> None:
+        mod = load_check()
+        (tmp_path / "elsewhere").mkdir()
+        (tmp_path / ".mm-test-selection").symlink_to(tmp_path / "elsewhere")
+        with pytest.raises(mod.SelectError) as ei:
+            mod.ensure_select_dir(tmp_path)
+        assert ei.value.code == "cache-symlink"
+        other = tmp_path / "other"
+        (other / ".mm-test-selection").mkdir(parents=True)
+        (other / ".mm-test-selection" / "stuff").write_text("x")
+        with pytest.raises(mod.SelectError) as ei:
+            mod.ensure_select_dir(other)
+        assert ei.value.code == "cache-unowned"
+
+
+class TestSkeleton:
+    @pytest.mark.parametrize(
+        ("old", "new", "same"),
+        [
+            ("def f():\n    return 1\n", "def f():\n    return 2\n", True),
+            ("def f():\n    return 1\n", "def f(a=3):\n    return 1\n", True),
+            ("def f():\n    return 1\n", "def f():\n    return 1\n\n\ndef g():\n    pass\n", True),
+            ("X = 1\n", "X = 2\n", False),
+            ("import os\n", "import os\nimport sys\n", False),
+            ("@d\ndef f():\n    return 1\n", "@d\ndef f():\n    return 2\n", True),
+            ("@d\ndef f():\n    pass\n", "@e\ndef f():\n    pass\n", False),
+            (
+                "class A:\n    def m(self):\n        return 1\n",
+                "class A:\n    def m(self):\n        return 2\n",
+                True,
+            ),
+            ("class A:\n    x = 1\n", "class A:\n    x = 2\n", False),
+        ],
+    )
+    def test_only_function_bodies_are_invisible(self, old: str, new: str, same: bool) -> None:
+        mod = load_check()
+        a, b = mod.skeleton_digest(old.encode()), mod.skeleton_digest(new.encode())
+        assert (a == b) is same
+
+    def test_unparseable_source_has_no_skeleton(self) -> None:
+        assert load_check().skeleton_digest(b"def (:\n") is None
+
+
+def _wait_gone(pid: int, seconds: float = 8.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.fixture
+def sentinel():
+    proc = subprocess.Popen(["sleep", "120"], start_new_session=True)
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+LEADER = (
+    "import subprocess, sys\n"
+    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+    "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    "sys.exit(int(sys.argv[2]))\n"
+)
+
+
+class TestOwnedGroup:
+    def _leader(self, tmp_path: Path, code: int) -> tuple[list[str], Path]:
+        script = tmp_path / "leader.py"
+        script.write_text(LEADER)
+        pidfile = tmp_path / "child.pid"
+        return [sys.executable, str(script), str(pidfile), str(code)], pidfile
+
+    @pytest.mark.parametrize("code", [0, 3, 5])
+    def test_run_end_leaves_no_owned_worker_and_keeps_the_result(
+        self, tmp_path: Path, monkeypatch, sentinel, code: int
+    ) -> None:
+        mod = load_check()
+        monkeypatch.setattr(mod, "GROUP_GRACE_S", 0.05)
+        argv, pidfile = self._leader(tmp_path, code)
+        assert mod.run_owned(argv) == code
+        assert _wait_gone(int(pidfile.read_text()))
+        assert sentinel.poll() is None
+
+    def test_group_that_already_ended_is_success(self, monkeypatch) -> None:
+        mod = load_check()
+        assert mod.run_owned([sys.executable, "-c", "raise SystemExit(4)"]) == 4
+
+    def test_a_failed_spawn_signals_no_group(self, monkeypatch) -> None:
+        mod = load_check()
+        calls: list[tuple] = []
+        monkeypatch.setattr(mod.os, "killpg", lambda *a: calls.append(a))
+        with pytest.raises(FileNotFoundError):
+            mod.run_owned(["/nonexistent/pytest"])
+        assert calls == []
+
+    @pytest.mark.parametrize("cause", ["stuck", "denied"])
+    def test_cleanup_failure_is_distinct_and_names_the_owned_group(
+        self, tmp_path: Path, monkeypatch, capsys, cause: str
+    ) -> None:
+        mod = load_check()
+        for name in ("GROUP_GRACE_S", "GROUP_TERM_S", "GROUP_KILL_S"):
+            monkeypatch.setattr(mod, name, 0.05)
+        argv, pidfile = self._leader(tmp_path, 3)
+        if cause == "stuck":
+            monkeypatch.setattr(mod, "_signal_group", lambda *a: None)
+            monkeypatch.setattr(mod, "_group_alive", lambda pgid: True)
+        else:
+
+            def denied(*_a):
+                raise PermissionError("nope")
+
+            monkeypatch.setattr(mod, "_signal_group", denied)
+            monkeypatch.setattr(mod, "_group_alive", lambda pgid: True)
+        try:
+            with pytest.raises(SystemExit) as ei:
+                mod.run_owned(argv)
+        finally:
+            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        assert ei.value.code == mod.CLEANUP_FAILED_CODE
+        err = capsys.readouterr().err
+        assert "pytest result: exit 3" in err and "group " in err
+        assert "kill -9" not in err and "killall" not in err and "pkill" not in err
+
+    def test_launcher_keeps_exec_so_signals_reach_the_driver(self, tmp_path: Path) -> None:
+        stub = tmp_path / "py"
+        pidfile = tmp_path / "pid"
+        stub.write_text(f'#!/bin/sh\necho $$ > "{pidfile}"\n')
+        stub.chmod(0o755)
+        proc = subprocess.Popen(
+            [str(ROOT / "bin" / "check")], env={**os.environ, "MM_PYTHON": str(stub)}
+        )
+        proc.wait(timeout=30)
+        assert pidfile.read_text().strip() == str(proc.pid)
+
+
+HANG = (
+    "import os, signal, subprocess, sys, time\n\n\ndef test_hang():\n"
+    "    ready = os.environ['READY']\n"
+    "    code = 'import time; time.sleep(300)'\n"
+    "    if os.environ.get('STUBBORN'):\n"
+    "        for s in (signal.SIGINT, signal.SIGTERM):\n"
+    "            signal.signal(s, signal.SIG_IGN)\n"
+    "        code = ('import signal, time; [signal.signal(s, signal.SIG_IGN) for s in "
+    "(signal.SIGINT, signal.SIGTERM)]; time.sleep(300)')\n"
+    "    child = subprocess.Popen([sys.executable, '-c', code])\n"
+    "    with open(os.path.join(ready, 'p%d' % os.getpid()), 'w') as fh:\n"
+    "        fh.write('%d %d' % (os.getpid(), child.pid))\n"
+    "    time.sleep(300)\n"
+)
+
+
+def _hang_project(tmp_path: Path, copies: int = 1) -> tuple[Path, Path]:
+    root = tmp_path / "hang"
+    (root / "tests").mkdir(parents=True)
+    (root / "pyproject.toml").write_text('[tool.pytest.ini_options]\ntestpaths = ["tests"]\n')
+    for i in range(copies):
+        (root / "tests" / f"test_hang{i}.py").write_text(HANG)
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    return root, ready
+
+
+def _start_driver(root: Path, ready: Path, *args: str, env: dict | None = None):
+    full = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
+    }
+    full.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable, READY=str(ready))
+    full.update(env or {})
+    return subprocess.Popen(
+        [sys.executable, str(ROOT / "bin" / "_check.py"), "--no-bootstrap", "--tests", *args],
+        env=full,
+        cwd=root,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _wait_ready(ready: Path, count: int, seconds: float = 60.0) -> list[int]:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        files = list(ready.glob("p*"))
+        if len(files) >= count and all(f.read_text().count(" ") for f in files):
+            return [int(p) for f in files for p in f.read_text().split()]
+        time.sleep(0.05)
+    raise AssertionError("tests never signalled readiness")
+
+
+class TestInterruptCleanup:
+    @pytest.mark.parametrize(
+        ("sig", "status"),
+        [(signal.SIGINT, 130), (signal.SIGTERM, 143), (signal.SIGHUP, 129)],
+    )
+    def test_signal_to_the_driver_ends_pytest_and_its_workers(
+        self, tmp_path: Path, sentinel, sig, status: int
+    ) -> None:
+        root, ready = _hang_project(tmp_path)
+        driver = _start_driver(root, ready, "--serial")
+        pids = _wait_ready(ready, 1)
+        os.kill(driver.pid, sig)
+        assert driver.wait(timeout=60) == status
+        assert all(_wait_gone(pid) for pid in pids)
+        assert sentinel.poll() is None
+
+    def test_real_xdist_workers_do_not_survive_an_interrupt(self, tmp_path: Path, sentinel) -> None:
+        root, ready = _hang_project(tmp_path, copies=2)
+        driver = _start_driver(root, ready, env={"MM_PYTEST_WORKERS": "2"})
+        pids = _wait_ready(ready, 2)
+        os.kill(driver.pid, signal.SIGINT)
+        assert driver.wait(timeout=60) == 130
+        assert all(_wait_gone(pid) for pid in pids)
+        assert sentinel.poll() is None
+
+    def test_repeated_interrupts_still_finish_cleanup_in_bounded_time(
+        self, tmp_path: Path, sentinel
+    ) -> None:
+        root, ready = _hang_project(tmp_path)
+        driver = _start_driver(root, ready, "--serial", env={"STUBBORN": "1"})
+        pids = _wait_ready(ready, 1)
+        os.kill(driver.pid, signal.SIGINT)
+        time.sleep(0.5)
+        os.kill(driver.pid, signal.SIGINT)
+        assert driver.wait(timeout=60) == 130
+        assert all(_wait_gone(pid) for pid in pids)
+        assert sentinel.poll() is None
+
+    def test_signal_during_startup_still_ends_cleanly(self, tmp_path: Path, sentinel) -> None:
+        root, ready = _hang_project(tmp_path)
+        driver = _start_driver(root, ready, "--serial")
+        assert driver.stderr is not None
+        for line in driver.stderr:
+            if line.startswith("bin/check: pytest"):
+                break
+        os.kill(driver.pid, signal.SIGINT)
+        assert driver.wait(timeout=60) == 130
+        for f in ready.glob("p*"):
+            assert all(_wait_gone(int(p)) for p in f.read_text().split())
+        assert sentinel.poll() is None
+
+    def test_pipe_stdin_and_pty_output_still_work_in_the_new_session(self, tmp_path: Path) -> None:
+        import pty
+
+        root = make_project(tmp_path / "proj")
+        master, slave = pty.openpty()
+        env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "MM_VENV")}
+        env.update(MM_CHECK_ROOT=str(root), MM_PYTHON=sys.executable)
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "bin" / "_check.py"),
+                "--no-bootstrap",
+                "--tests",
+                "--serial",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=slave,
+            stderr=slave,
+            env=env,
+            cwd=root,
+        )
+        os.close(slave)
+        assert proc.stdin is not None
+        proc.stdin.close()
+        out = b""
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.close(master)
+        assert proc.wait(timeout=30) == 0
+        assert b"4 passed" in out
