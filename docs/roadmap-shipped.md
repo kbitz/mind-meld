@@ -560,3 +560,40 @@ _tombstone: 78_
 - 2026-10-21: merged [PR #222](https://github.com/kbitz/mind-meld/pull/222) (commit `be13eababce64232611e510ea808d1856fc34449`); verified land-time Track 78A, original/current Group 78. PATCH release; the quiet-output checkpoint stays unclaimed.
 - Closure evidence: `./bin/check` green in the PR (8,407 tests); capture, cache and budget notices moved to `--verbose` and the run record, the update tail and history notice run before the final line, attended `mm pull` exits 1 on failed files while autopull keeps 0, and successful autopush and autopull print nothing. Known residual: the success line can append `; usage published`, which docs/SPEC.md O8.2's "prints nothing during a push" does not clearly allow — deferred in Future until the checkpoint decision.
 - Delivered: attended `mm push` and `mm pull` end with one outcome line (success on stdout, failure last on stderr with its `Run:` command).
+
+## Additional release history
+
+### v1.11.6: segment-aware include_patterns allowlist for gstack sync
+
+- 2026-10-22: merged [PR #224](https://github.com/kbitz/mind-meld/pull/224) (commit `5dc484b0b3296a882638d43acbb13a405336e81d`). No declared roadmap Track; no retrospective Track ID is assigned. PATCH release. Generic sync sources gain a segment-aware `include_patterns` allowlist (`*` and `?` within a path segment, `**` across segments, evaluated after global `EXCLUDED`, `.extend-root` skip prefixes and `exclude_patterns`), and `DEFAULT_SOURCES["gstack"]` configures `_GSTACK_INCLUDE_PATTERNS` to narrow `~/.gstack/projects/*` sync from about 43,705 files / 1.5 GB to about 3,421 files / 41 MB while keeping per-run review-prep trees, loop state, gate diffs and defect candidates local. Consumer-boundary inverse filtering at push, pull, status and diff mints zero deletion tombstones and deletes nothing on any Mac; `mm migrate-config` offers the allowlist on existing configs.
+
+### v1.11.7: transient terminal progress for push and pull
+
+- 2026-10-22: merged [PR #225](https://github.com/kbitz/mind-meld/pull/225) (commit `02d671fac265f56fbbce032a3600c18408e8150e`). No declared roadmap Track; no retrospective Track ID is assigned. PATCH release. Attended `mm push` and `mm pull` on a real terminal show a transient Rich spinner (`_SyncProgress`) with phase and cross-source upload or per-source pull counters, pause for warnings and conflict prompts, and clear before the final outcome line; redirected output, `--verbose`, previews and auto-commands keep their existing output, and display errors preserve the sync outcome.
+
+## Individual Track history
+_tombstone: 79_
+
+### Track 79A: Retire the 1.x compatibility contract and give Muse its own family ✓ Shipped (v1.11.8)
+
+- 2026-10-22: merged [PR #226](https://github.com/kbitz/mind-meld/pull/226) (commit `fb0e12daf50ba541b61d698a6b9b19dc8f01fbdb`); verified land-time Track 79A, original/current Group 79. Introduced by the 2026-10-19 regeneration `e32da01` (PR #218) and amended by `7999368` (PR #223). PATCH release, combined in one owner-approved PR with Tracks 80A and 81A and full Antigravity (`agy`) host parity (`add-antigravity-agy-host-remove-grok-opencode-autoplan-20261022.md`, SHA-256 `4510d8b0eadc2553d665b6a7ef0a1147b6a0378b54db02301b07d3943f388b00`).
+- Closure evidence: the [46-row completion receipt](https://github.com/kbitz/mind-meld/pull/226#issuecomment-6354026489) records 46/46 VERIFIED with all three final-head CI jobs passing (macOS 8,440, Linux 8,451, live Secret Service 4). `test_closed_vocabularies`, `tests/fixtures/cli_surface_1_x.json`, `EXIT_EVIDENCE`, `test_exit_code_ast_all_modules` and `test_resolve_help_and_skill_step4` are deleted from `tests/test_compat_contract.py`; the three behavioral exit checks live in `tests/test_integration.py` and the storage-format refusal gates stay in `tests/test_compat_contract.py`. `host_usage.HostFamily` and `aggregator.AGENT_ROW_ORDER` gain `muse` (`Muse`) and `agy` (`Antigravity`), `muse-*` and `gemini-*` models classify into their families while preserving historical `"other"` snapshots for pricing, and verified Google Gemini rates (`gemini-4-argon`, `gemini-3.8-flash`) join `token_usage.py`. Two doc stragglers from the card (`auto-upgrade.md`'s remaining `cli_surface_1_x.json` release-tripwire bullet and `CHANGELOG.md`'s Track 76A store/simulator removal note) are cleaned up immediately after this regeneration.
+- Delivered: storage-only compatibility gates, first-class `Muse` and `Antigravity` (`agy`) families in `retro-fleet` with verified Gemini pricing, and full `agy` host support (`~/.gemini/config` sync source, `retro-fleet` skill link, and read-only SQLite+protobuf `read_agy_usage` / `agy_usage_diag` over `~/.gemini/antigravity-cli/conversations/*.db`). Live Antigravity corpus provenance and multi-machine operation were not independently qualified; the complete-usage checkpoint (O7) remains unclaimed.
+
+## Individual Track history
+_tombstone: 80_
+
+### Track 80A: Remove the Grok Build usage reader ✓ Shipped (v1.11.8)
+
+- 2026-10-22: merged [PR #226](https://github.com/kbitz/mind-meld/pull/226) (commit `fb0e12daf50ba541b61d698a6b9b19dc8f01fbdb`); verified land-time Track 80A, original/current Group 80. Introduced by `e32da01` on 2026-10-19. Shipped in the combined v1.11.8 PR.
+- Closure evidence: rows 1b.1–1b.3 of the [PR #226 completion receipt](https://github.com/kbitz/mind-meld/pull/226#issuecomment-6354026489) verified at `fb0e12d`: `read_grok_usage`, `grok_usage_diag`, `grok_completed_once`, `grok_sessions_root`, `GROK_SESSIONS_PATH`, `GROK_CACHE_PATH`, `[retro] grok_host_usage`, `src/mind_meld/host_skill_discovery.py`, `tests/test_host_skill_discovery.py` and `tests/fixtures/host_sessions/grok/` are deleted; shared turn-cache helpers are renamed to neutral `_turn_*` names; `HostFamily` `"grok"`, `grok-` prefix classification, Cursor's `grok-4.7` model refiners and xAI pricing in `token_usage.py` stay for Cursor-hosted Grok runs and retained historical rows.
+- Delivered: standalone Grok Build usage reading, diagnostics and skill-discovery probing are gone from `mm`, while Cursor's Grok runs and historical rows still classify and price under `Grok`.
+
+## Individual Track history
+_tombstone: 81_
+
+### Track 81A: Remove the Grok Build sync source ✓ Shipped (v1.11.8)
+
+- 2026-10-22: merged [PR #226](https://github.com/kbitz/mind-meld/pull/226) (commit `fb0e12daf50ba541b61d698a6b9b19dc8f01fbdb`); verified land-time Track 81A, original/current Group 81. Introduced by `e32da01` on 2026-10-19. Shipped in the combined v1.11.8 PR.
+- Closure evidence: rows 2c.11–2c.13 and 2d.1–2d.2 of the [PR #226 completion receipt](https://github.com/kbitz/mind-meld/pull/226#issuecomment-6354026489) verified at `fb0e12d`: `DEFAULT_GROK_DIR`, the `grok` default source, `walk_grok_source`, `GROK_SYNCED_SUBDIRS`, `GROK_EXCLUDE_PATTERNS`, `_include_prior_grok_if_needed` and leftover `_reap_retired_opencode_skill_link` are deleted; `config.RETIRED_SOURCE_NAMES = frozenset({"grok", "opencode"})` skips `_validate_sources` type restrictions on un-migrated configs, drops retired entries from `_configured_sources`, peer manifests on pull and unselected remote manifests before `generate_tombstones` on push, rejects `mm enable-source grok` before `--force` with a pointer to `mm migrate-config`, and strips leftover `grok` or `opencode` `[[sync.sources]]` blocks in `mm migrate-config`; `docs/designs/grok-build-usage-reader.md` is archived at `docs/archive/grok-build-usage-reader.md` with its superseded notice.
+- Delivered: standalone Grok Build source sync and the leftover OpenCode skill-link reaper are removed without minting remote deletion tombstones or breaking un-migrated configs.
