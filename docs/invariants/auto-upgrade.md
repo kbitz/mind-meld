@@ -470,8 +470,8 @@ the running package's skill; see [the README recipe](../../README.md#upgrading).
 refusal to downgrade, and `test_empty_store_installs_running_package` pins
 publication into an empty store.
 
-**Release tripwires:** `tests/test_compat_contract.py` pins format constants,
-the device-registry writer whitelist, and frozen `tests/fixtures/compat_1_0/`
+**Release tripwires:** `tests/test_compat_contract.py` pins format constants
+(`test_format_constants`), the device-registry writer fields
+(`test_device_registry_writer_fields`), and frozen `tests/fixtures/compat_1_0/`
 payloads (decrypted and parsed by the current readers, never regenerated during
-tests) alongside the newer-format refusal suite (`TestNewerFormats66A`,
-`TestNewerStorage66A`).
+tests: a 1.x reader must read what 1.0 wrote).
