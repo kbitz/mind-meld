@@ -11,7 +11,9 @@ by `/project-spec` to refocus the product: context sync and fleet usage
 reporting are the two products, 2.0 carries the existing store onto Syncthing
 instead of building the store-v2 log design, standalone Grok Build support is
 removed, the 1.x compatibility contract is retired, and command output follows
-one rule (O8). Earlier text lives in `git log -- docs/SPEC.md`.
+one rule (O8). Amended 2026-10-23 to add the core-and-extensions engineering
+constraint; outcomes, target and release policy are unchanged. Earlier text
+lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -179,6 +181,15 @@ manual step.
   promise. Commands, flags, config keys, output and host families can change
   in any release, with a README Upgrading note. Every machine stays current
   through auto-update.
+- Core and extensions (owner, 2026-10-23). Host adapters (each agent's sync
+  source and usage reader) and command groups are extensions to a small
+  shared core, so a change is tested and reviewed against the piece it
+  touches, not the whole project. Before a Track changes a host adapter or
+  command group that still lives in `cli.py` or `host_usage.py`, that piece
+  moves into its own module behind a contract test, with no behavior change.
+  Code no planned change touches stays where it is; there is no one-shot
+  rewrite. While working and reviewing, run only the tests whose recorded
+  coverage reaches the changed code; the full suite runs in CI before merge.
 - Accepted manual steps: installing Syncthing, pairing machines and sharing
   the folder with the README's options; running the cutover runbook once;
   `mm resolve` for real conflicts; unlocking the Linux keyring before hooks
