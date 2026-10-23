@@ -3039,3 +3039,51 @@ def test_complete_discovery_retires_deselected_repository_cursors(tmp_path, monk
     events.discover_git_roots(config, persist=True)
     assert events.count_pending_repositories([], datetime.now(timezone.utc)) == 0
     assert events.read_git_capture_cache()["repo_cursors"] == {}
+
+
+def test_warm_refresh_resumes_across_pushes_and_scandir_respects_deadline(tmp_path, monkeypatch):
+    config, directories, roots = TestResumableProjectIndex.projects(tmp_path, monkeypatch, 2)
+    since = datetime.now(timezone.utc) - timedelta(days=15)
+    events.discover_git_roots(config, persist=True, since=since)
+    other = tmp_path / "other-root"
+    _init_git_repo(other)
+    (directories[1] / "session.jsonl").write_text(json.dumps({"cwd": str(other)}))
+    clock = [0.0]
+    monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+    real_stat = Path.stat
+
+    def expire_after_first_dir(path, **kwargs):
+        result = real_stat(path, **kwargs)
+        if path == directories[0] / "session.jsonl":
+            clock[0] = 2.0
+        return result
+
+    monkeypatch.setattr(Path, "stat", expire_after_first_dir)
+    first = events.discover_git_roots(config, persist=True, since=since, deadline_monotonic=1.0)
+    assert not first.exceeded
+    cache = events.read_git_capture_cache()
+    assert cache["discovery_resume_after"] == str(directories[0])
+    assert cache["pending_refresh_since"] == since.isoformat()
+    monkeypatch.setattr(Path, "stat", real_stat)
+    clock[0] = 0.0
+    second = events.discover_git_roots(
+        config, persist=True, since=since + timedelta(days=5), deadline_monotonic=1.0
+    )
+    assert other in second.roots
+    assert events.read_git_capture_cache()["pending_refresh_since"] is None
+    import contextlib
+
+    real_scandir = events.os.scandir
+
+    @contextlib.contextmanager
+    def expire_during_scandir(path):
+        with real_scandir(path) as it:
+            clock[0] = 2.0
+            yield it
+
+    monkeypatch.setattr(events.os, "scandir", expire_during_scandir)
+    clock[0] = 0.0
+    expired = events.discover_git_roots(config, persist=True, since=since, deadline_monotonic=1.0)
+    assert expired.exceeded
+    assert set(expired.roots) == {roots[0], other}
+    assert len(events.read_git_capture_cache()["projects"]) == 2

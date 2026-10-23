@@ -852,59 +852,55 @@ def _probe_claude(
     cache = cache if cache is not None else _default_git_capture_cache()
     projects = cache["projects"]
     base = _claude_projects_dir()
+    scandir_complete = True
     try:
-        with os.scandir(base) as entries:
+        if _deadline_expired(deadline_monotonic):
+            scandir_complete = False
             directories = []
-            for entry_item in entries:
-                try:
-                    if entry_item.is_dir(follow_symlinks=False):
-                        directories.append(Path(entry_item.path))
-                except OSError:
-                    continue
-            directories.sort()
+        else:
+            with os.scandir(base) as entries:
+                directories = []
+                for entry_item in entries:
+                    if _deadline_expired(deadline_monotonic):
+                        scandir_complete = False
+                        break
+                    try:
+                        if entry_item.is_dir(follow_symlinks=False):
+                            directories.append(Path(entry_item.path))
+                    except OSError:
+                        continue
+                directories.sort()
     except FileNotFoundError:
         cache["_discovery_complete"] = True
         return []
+    if not scandir_complete:
+        roots = [
+            Path(entry["git_root"])
+            for entry in projects.values()
+            if isinstance(entry, dict) and isinstance(entry.get("git_root"), str)
+        ]
+        cache["_discovery_complete"] = False
+        return list(dict.fromkeys(roots))
     names = {str(p) for p in directories}
     for name in projects.keys() - names:
         del projects[name]
     resume = cache.get("discovery_resume_after") or ""
     unindexed = [p for p in directories if str(p) not in projects]
     unindexed.sort(key=lambda p: (str(p) <= resume, str(p)))
-    changed = []
-    roots = []
+    indexed_directories = [p for p in directories if str(p) in projects]
+    indexed_directories.sort(key=lambda p: (str(p) <= resume, str(p)))
+    roots = [
+        Path(entry["git_root"])
+        for directory in directories
+        if isinstance((entry := projects.get(str(directory))), dict)
+        and isinstance(entry.get("git_root"), str)
+    ]
     deferred = False
 
     def pin_refresh():
         timestamp = (since or datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         old = cache.get("pending_refresh_since")
         cache["pending_refresh_since"] = min(old, timestamp) if old else timestamp
-
-    for directory in directories:
-        entry = projects.get(str(directory))
-        if entry is None:
-            continue
-        root = entry.get("git_root")
-        if isinstance(root, str):
-            roots.append(Path(root))
-        if deferred or _deadline_expired(deadline_monotonic):
-            if not deferred:
-                deferred = True
-                pin_refresh()
-            continue
-        try:
-            unchanged = directory.stat().st_mtime_ns == entry.get("dir_mtime_ns")
-            newest = entry.get("newest_jsonl_name")
-            if unchanged and isinstance(newest, str):
-                st = (directory / newest).stat()
-                unchanged = (st.st_mtime_ns, st.st_size) == (
-                    entry.get("newest_jsonl_mtime_ns"),
-                    entry.get("newest_jsonl_size"),
-                )
-            if not unchanged:
-                changed.append(directory)
-        except OSError:
-            changed.append(directory)
 
     def probe(directory: Path, refresh: bool) -> bool:
         if _deadline_expired(deadline_monotonic):
@@ -979,11 +975,40 @@ def _probe_claude(
     cache["_discovery_complete"] = complete
     if complete:
         cache["discovery_resume_after"] = None
-    for directory in changed:
-        if not probe(directory, True):
+    last_checked: str | None = None
+    for directory in indexed_directories:
+        entry = projects.get(str(directory))
+        if entry is None:
+            continue
+        if _deadline_expired(deadline_monotonic):
+            if (
+                not unindexed
+                or cache.get("pending_refresh_since") is not None
+                or last_checked is not None
+            ):
+                deferred = True
+                pin_refresh()
+                if complete and last_checked is not None:
+                    cache["discovery_resume_after"] = last_checked
+            break
+        try:
+            unchanged = directory.stat().st_mtime_ns == entry.get("dir_mtime_ns")
+            newest = entry.get("newest_jsonl_name")
+            if unchanged and isinstance(newest, str):
+                st = (directory / newest).stat()
+                unchanged = (st.st_mtime_ns, st.st_size) == (
+                    entry.get("newest_jsonl_mtime_ns"),
+                    entry.get("newest_jsonl_size"),
+                )
+        except OSError:
+            unchanged = False
+        if not unchanged and not probe(directory, True):
             deferred = True
             pin_refresh()
+            if complete and last_checked is not None:
+                cache["discovery_resume_after"] = last_checked
             break
+        last_checked = str(directory)
     if not deferred:
         cache["pending_refresh_since"] = None
     return list(dict.fromkeys(roots))
@@ -1820,6 +1845,8 @@ def _apply_repo_cursors_to_cache(
     cursors = cache["repo_cursors"]
     for root in completed - failed:
         old = _parse_aware_ts(cursors.get(root))
+        if recorded is None and old is not None and since > old:
+            continue
         cursors[root] = max(old, stamp).isoformat() if old is not None else stamp.isoformat()
     if recorded is not None:
         for root in failed:

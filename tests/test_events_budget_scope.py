@@ -809,6 +809,16 @@ def test_side_channel_recapture_commit_does_not_increment_streak_or_seed_failed_
     assert cache["repo_cursors"] == {str(ok_repo): cursor_ts.isoformat()}
     assert cache["incomplete_streak"] == 0
     assert "last_committed_push_ts" not in cache
+    older = cursor_ts - timedelta(days=20)
+    _write_git_cursor_cache({"repo_cursors": {str(ok_repo): older.isoformat()}})
+    _mm_events.commit_repo_cursors(
+        rows,
+        since=cursor_ts - timedelta(days=1),
+        cursor_ts=cursor_ts,
+        recorded_ts=None,
+        complete=True,
+    )
+    assert _mm_events.read_git_capture_cache()["repo_cursors"][str(ok_repo)] == older.isoformat()
 
 
 def test_latest_event_rows_ignores_future_clock_skew_for_mm_push_and_git_snapshot(tmp_path):
