@@ -15,6 +15,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 - Standalone Grok Build sync and usage capture, and the retired OpenCode skill-link cleanup. Old source entries are ignored without deleting local files or creating deletion tombstones; `mm migrate-config` removes their inert config blocks. Grok usage from Cursor remains supported.
 - The retired 1.x CLI compatibility freeze. Storage-format refusal gates remain in force.
+- The abandoned store-v2 package and simulator (`src/mind_meld/store/`, `tests/sim/`, `docs/invariants/store.md`; sync behavior unchanged, shipped in v1.11.4 without a changelog line).
 
 ## [1.11.7] - 2026-10-22
 
