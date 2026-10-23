@@ -940,7 +940,7 @@ def _capture_git_rows(
     if use_repo_cursors:
         since = events.effective_capture_since(roots, since)
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
-    if use_repo_cursors:
+    if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
     git_rows = events.walk_git_projects(
         roots,

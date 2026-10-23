@@ -834,6 +834,10 @@ def _enabled_source_names(config: dict) -> set[str]:
     return {n for n in names if isinstance(n, str) and n not in disabled}
 
 
+def _claude_projects_dir() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
 def _probe_claude(
     *,
     deadline_monotonic: float | None = None,
@@ -847,7 +851,7 @@ def _probe_claude(
     """
     cache = cache if cache is not None else _default_git_capture_cache()
     projects = cache["projects"]
-    base = Path.home() / ".claude" / "projects"
+    base = _claude_projects_dir()
     try:
         with os.scandir(base) as entries:
             directories = []

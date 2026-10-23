@@ -2891,15 +2891,15 @@ class TestResumableProjectIndex:
         events.discover_git_roots(config, persist=True, since=since)
         other = tmp_path / "new-root"
         _init_git_repo(other)
-        session = directories[0] / "session.jsonl"
-        session.write_text(json.dumps({"cwd": str(other)}))
+        log_file = directories[0] / "session.jsonl"
+        log_file.write_text(json.dumps({"cwd": str(other)}))
         clock = [0.0]
         monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
         real_stat = Path.stat
 
         def expire_after_warm_stat(path, **kwargs):
             result = real_stat(path, **kwargs)
-            if path == session:
+            if path == log_file:
                 clock[0] = 2.0
             return result
 
