@@ -691,7 +691,7 @@ def ran_log(root: Path) -> Path:
 
 def ran(root: Path) -> set[str]:
     log = ran_log(root)
-    seen = set(log.read_text().split()) if log.exists() else set()
+    seen = set(log.read_text().splitlines()) if log.exists() else set()
     log.unlink(missing_ok=True)
     return seen
 
@@ -942,6 +942,10 @@ class TestAffectedSelection:
             (lambda r, p: p.write_text(json.dumps({**r, "config": "x"})), "runner, pyproject"),
             (lambda r, p: p.write_text(json.dumps({**r, "nodes": []})), "holds no tests"),
             (lambda r, p: p.write_text(json.dumps({**r, "ctx": {}})), "no coverage of src"),
+            (
+                lambda r, p: p.write_text(json.dumps({**r, "ctx": {"src/mind_meld/leaf.py": []}})),
+                "no coverage of src",
+            ),
             (lambda r, p: p.write_text(json.dumps({**r, "complete": False})), "unknown schema"),
         ],
     )
@@ -1010,6 +1014,169 @@ class TestAffectedSelection:
         proc = affected(proj, "--refresh")
         assert proc.returncode != 0
         assert record.read_bytes() == before
+        # Red refresh also records the failing node so reverting the edit reselects it.
+        ran(proj)
+        git(proj, "checkout", "--", "tests/test_other.py")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == {"tests/test_other.py::test_other"}
+
+    def test_prior_failures_survive_collection_error_and_green_fallback_clears_them(
+        self, proj: Path
+    ) -> None:
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
+        assert affected(proj).returncode != 0
+        ran(proj)
+        git(proj, "checkout", "--", "src/mind_meld/leaf.py")
+        broken = proj / "tests" / "test_broken.py"
+        broken.write_text("def test_x(:\n")
+        assert affected(proj).returncode != 0
+        broken.unlink()
+        ran(proj)
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == LEAF_TESTS
+        # A green fallback full run also clears failed.json.
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return 2")
+        assert affected(proj).returncode != 0
+        git(proj, "checkout", "--", "src/mind_meld/leaf.py")
+        assert affected(proj, "--base", "nosuch").returncode == 0
+        assert not (proj / ".mm-test-selection" / "failed.json").exists()
+
+    def test_reverting_added_failing_test_or_emptying_test_file_does_not_fail_exit_5(
+        self, proj: Path
+    ) -> None:
+        other = proj / "tests" / "test_other.py"
+        orig = other.read_text()
+        other.write_text(orig + "\ndef test_temp_fail():\n    assert False\n")
+        assert affected(proj).returncode != 0
+        other.write_text(orig)
+        ran(proj)
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        # If a test file is edited to contain only helpers (0 tests), selection still exits 0.
+        other.write_text("HELPER = 1\n")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert "ran 0 of 3 collected tests" in both(proc)
+
+    def test_empty_suite_preserves_pytest_exit_5(self, tmp_path: Path) -> None:
+        root = make_project(
+            tmp_path / "empty",
+            {
+                "tests/test_leaf.py": "# no tests\n",
+                "tests/test_shared.py": "# no tests\n",
+                "tests/test_other.py": "# no tests\n",
+            },
+        )
+        proc = affected(root)
+        assert proc.returncode == 5
+        assert not (root / ".mm-test-selection" / "record.json").exists()
+
+    def test_whitespace_test_path_and_cross_test_imports_are_selected(self, proj: Path) -> None:
+        spaced = proj / "tests" / "test_with space.py"
+        spaced.write_text(
+            "import tests.test_other as other_mod\n\n\n"
+            "def test_spaced():\n    assert hasattr(other_mod, 'test_other')\n"
+        )
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == {"tests/test_with space.py::test_spaced"}
+        # Editing test_other.py now also selects its importer (test_with space.py).
+        edit(proj, "tests/test_other.py", "assert True", "assert 1 == 1")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == {
+            "tests/test_other.py::test_other",
+            "tests/test_with space.py::test_spaced",
+        }
+
+    def test_fixture_setup_and_teardown_only_coverage_is_attributed(self, tmp_path: Path) -> None:
+        fixture_test = (
+            "import pytest\nfrom mind_meld import leaf\n\n\n"
+            "@pytest.fixture\ndef _touch_leaf():\n    leaf.leaf()\n    yield\n    leaf.leaf()\n\n\n"
+            "def test_via_fixture(_touch_leaf):\n    assert True\n"
+        )
+        root = make_project(tmp_path / "proj", {"tests/test_fixture_only.py": fixture_test})
+        assert affected(root).returncode == 0
+        ran(root)
+        edit(root, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        proc = affected(root)
+        assert proc.returncode == 0, both(proc)
+        assert "tests/test_fixture_only.py::test_via_fixture" in ran(root)
+
+    def test_reverting_dirty_non_python_file_seeded_during_refresh_triggers_full_run(
+        self, proj: Path
+    ) -> None:
+        doc = proj / "README.md"
+        doc.write_text("dirty at refresh\n")
+        assert affected(proj, "--refresh").returncode == 0
+        ran(proj)
+        doc.unlink()
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert "non-Python file changed: README.md" in proc.stderr
+        assert ran(proj) == ALL_TESTS
+
+    def test_cancelled_refresh_writer_leaves_prior_record_readable(self, proj: Path) -> None:
+        record = proj / ".mm-test-selection" / "record.json"
+        before = record.read_bytes()
+        ready = proj / "cancel_ready"
+        (proj / "tests" / "test_other.py").write_text(
+            "import os, time\n\n\ndef test_other():\n"
+            f"    open({str(ready)!r}, 'w').write('1')\n"
+            "    time.sleep(60)\n"
+        )
+        driver = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "bin" / "_check.py"),
+                "--no-bootstrap",
+                "--tests",
+                "--affected",
+                "--refresh",
+                "--serial",
+            ],
+            cwd=proj,
+            env={
+                **{
+                    k: v
+                    for k, v in os.environ.items()
+                    if k not in ("VIRTUAL_ENV", "MM_VENV", "PYTEST_ADDOPTS", "MM_PYTEST_WORKERS")
+                },
+                "MM_CHECK_ROOT": str(proj),
+                "MM_PYTHON": sys.executable,
+            },
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert ready.exists()
+            os.kill(driver.pid, signal.SIGINT)
+            assert driver.wait(timeout=30) == 130
+        finally:
+            if driver.poll() is None:
+                driver.kill()
+                driver.wait()
+        assert record.read_bytes() == before
+        git(proj, "checkout", "--", "tests/test_other.py")
+        ready.unlink(missing_ok=True)
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        proc = affected(proj)
+        assert proc.returncode == 0, both(proc)
+        assert ran(proj) == LEAF_TESTS
+
+    def test_git_scrubs_inherited_git_env_vars(self, proj: Path, monkeypatch) -> None:
+        mod = load_check()
+        monkeypatch.setenv("GIT_DIR", "/nonexistent/git-dir")
+        monkeypatch.setenv("GIT_WORK_TREE", "/nonexistent/work-tree")
+        monkeypatch.setenv("GIT_INDEX_FILE", "/nonexistent/index")
+        mb = mod.resolve_merge_base(proj, "origin/main")
+        assert len(mb) == 40
+        assert mod.changed_since(proj, mb) == {}
 
     def test_unresolved_base_runs_everything_and_explains(self, proj: Path) -> None:
         proc = affected(proj, "--base", "nosuch")
@@ -1078,12 +1245,27 @@ class TestSkeleton:
         ("old", "new", "same"),
         [
             ("def f():\n    return 1\n", "def f():\n    return 2\n", True),
-            ("def f():\n    return 1\n", "def f(a=3):\n    return 1\n", True),
-            ("def f():\n    return 1\n", "def f():\n    return 1\n\n\ndef g():\n    pass\n", True),
+            (
+                'def f():\n    """v1"""\n    return 1\n',
+                'def f():\n    """v2"""\n    return 2\n',
+                True,
+            ),
+            ("def f():\n    return 1\n", "def f(a=3):\n    return 1\n", False),
+            ("def f():\n    return 1\n", "def f():\n    return 1\n\n\ndef g():\n    pass\n", False),
             ("X = 1\n", "X = 2\n", False),
             ("import os\n", "import os\nimport sys\n", False),
             ("@d\ndef f():\n    return 1\n", "@d\ndef f():\n    return 2\n", True),
+            (
+                '@d\ndef f():\n    """v1"""\n    return 1\n',
+                '@d\ndef f():\n    """v2"""\n    return 1\n',
+                False,
+            ),
             ("@d\ndef f():\n    pass\n", "@e\ndef f():\n    pass\n", False),
+            (
+                "def _tier(x):\n    return x\n\nTABLE = _tier(1)\n",
+                "def _tier(x):\n    return x + 1\n\nTABLE = _tier(1)\n",
+                False,
+            ),
             (
                 "class A:\n    def m(self):\n        return 1\n",
                 "class A:\n    def m(self):\n        return 2\n",
@@ -1110,6 +1292,18 @@ def _wait_gone(pid: int, seconds: float = 8.0) -> bool:
             return True
         time.sleep(0.05)
     return False
+
+
+def _kill_pids(pids: list[int]) -> None:
+    for pid in pids:
+        for kill_fn in (
+            lambda p: os.killpg(p, signal.SIGKILL),
+            lambda p: os.kill(p, signal.SIGKILL),
+        ):
+            try:
+                kill_fn(pid)
+            except OSError:
+                pass
 
 
 @pytest.fixture
@@ -1142,8 +1336,41 @@ class TestOwnedGroup:
         mod = load_check()
         monkeypatch.setattr(mod, "GROUP_GRACE_S", 0.05)
         argv, pidfile = self._leader(tmp_path, code)
-        assert mod.run_owned(argv) == code
-        assert _wait_gone(int(pidfile.read_text()))
+        try:
+            assert mod.run_owned(argv) == code
+            child_pid = int(pidfile.read_text())
+            assert _wait_gone(child_pid)
+            assert sentinel.poll() is None
+        finally:
+            if pidfile.exists():
+                _kill_pids([int(pidfile.read_text())])
+
+    def test_reap_group_waits_for_sigkill_even_after_repeated_signals(self, sentinel) -> None:
+        mod = load_check()
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            start_new_session=True,
+        )
+        try:
+            assert mod._reap_group(proc.pid, {"count": 2}, leader=proc) is None
+            assert _wait_gone(proc.pid)
+            assert sentinel.poll() is None
+        finally:
+            _kill_pids([proc.pid])
+            proc.wait()
+
+    def test_signal_landing_during_spawn_is_held_and_forwarded(self, monkeypatch, sentinel) -> None:
+        mod = load_check()
+        real_popen = subprocess.Popen
+
+        def popen_with_early_signal(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            os.kill(os.getpid(), signal.SIGINT)
+            return proc
+
+        monkeypatch.setattr(mod.subprocess, "Popen", popen_with_early_signal)
+        status = mod.run_owned([sys.executable, "-c", "import time; time.sleep(300)"])
+        assert status == 130
         assert sentinel.poll() is None
 
     def test_group_that_already_ended_is_success(self, monkeypatch) -> None:
@@ -1180,7 +1407,8 @@ class TestOwnedGroup:
             with pytest.raises(SystemExit) as ei:
                 mod.run_owned(argv)
         finally:
-            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            if pidfile.exists():
+                _kill_pids([int(pidfile.read_text())])
         assert ei.value.code == mod.CLEANUP_FAILED_CODE
         err = capsys.readouterr().err
         assert "pytest result: exit 3" in err and "group " in err
@@ -1252,6 +1480,21 @@ def _wait_ready(ready: Path, count: int, seconds: float = 60.0) -> list[int]:
     raise AssertionError("tests never signalled readiness")
 
 
+def _cleanup_driver(driver: subprocess.Popen, ready: Path, pids: list[int]) -> None:
+    discovered = list(pids)
+    for f in ready.glob("p*"):
+        try:
+            discovered.extend(int(p) for p in f.read_text().split())
+        except (OSError, ValueError):
+            pass
+    _kill_pids([driver.pid, *discovered])
+    if driver.poll() is None:
+        try:
+            driver.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 class TestInterruptCleanup:
     @pytest.mark.parametrize(
         ("sig", "status"),
@@ -1262,46 +1505,62 @@ class TestInterruptCleanup:
     ) -> None:
         root, ready = _hang_project(tmp_path)
         driver = _start_driver(root, ready, "--serial")
-        pids = _wait_ready(ready, 1)
-        os.kill(driver.pid, sig)
-        assert driver.wait(timeout=60) == status
-        assert all(_wait_gone(pid) for pid in pids)
-        assert sentinel.poll() is None
+        pids: list[int] = []
+        try:
+            pids = _wait_ready(ready, 1)
+            os.kill(driver.pid, sig)
+            assert driver.wait(timeout=60) == status
+            assert all(_wait_gone(pid) for pid in pids)
+            assert sentinel.poll() is None
+        finally:
+            _cleanup_driver(driver, ready, pids)
 
     def test_real_xdist_workers_do_not_survive_an_interrupt(self, tmp_path: Path, sentinel) -> None:
         root, ready = _hang_project(tmp_path, copies=2)
         driver = _start_driver(root, ready, env={"MM_PYTEST_WORKERS": "2"})
-        pids = _wait_ready(ready, 2)
-        os.kill(driver.pid, signal.SIGINT)
-        assert driver.wait(timeout=60) == 130
-        assert all(_wait_gone(pid) for pid in pids)
-        assert sentinel.poll() is None
+        pids: list[int] = []
+        try:
+            pids = _wait_ready(ready, 2)
+            os.kill(driver.pid, signal.SIGINT)
+            assert driver.wait(timeout=60) == 130
+            assert all(_wait_gone(pid) for pid in pids)
+            assert sentinel.poll() is None
+        finally:
+            _cleanup_driver(driver, ready, pids)
 
     def test_repeated_interrupts_still_finish_cleanup_in_bounded_time(
         self, tmp_path: Path, sentinel
     ) -> None:
         root, ready = _hang_project(tmp_path)
         driver = _start_driver(root, ready, "--serial", env={"STUBBORN": "1"})
-        pids = _wait_ready(ready, 1)
-        os.kill(driver.pid, signal.SIGINT)
-        time.sleep(0.5)
-        os.kill(driver.pid, signal.SIGINT)
-        assert driver.wait(timeout=60) == 130
-        assert all(_wait_gone(pid) for pid in pids)
-        assert sentinel.poll() is None
+        pids: list[int] = []
+        try:
+            pids = _wait_ready(ready, 1)
+            os.kill(driver.pid, signal.SIGINT)
+            time.sleep(0.5)
+            os.kill(driver.pid, signal.SIGINT)
+            assert driver.wait(timeout=60) == 130
+            assert all(_wait_gone(pid) for pid in pids)
+            assert sentinel.poll() is None
+        finally:
+            _cleanup_driver(driver, ready, pids)
 
     def test_signal_during_startup_still_ends_cleanly(self, tmp_path: Path, sentinel) -> None:
         root, ready = _hang_project(tmp_path)
         driver = _start_driver(root, ready, "--serial")
-        assert driver.stderr is not None
-        for line in driver.stderr:
-            if line.startswith("bin/check: pytest"):
-                break
-        os.kill(driver.pid, signal.SIGINT)
-        assert driver.wait(timeout=60) == 130
-        for f in ready.glob("p*"):
-            assert all(_wait_gone(int(p)) for p in f.read_text().split())
-        assert sentinel.poll() is None
+        pids: list[int] = []
+        try:
+            assert driver.stderr is not None
+            for line in driver.stderr:
+                if line.startswith("bin/check: pytest"):
+                    break
+            os.kill(driver.pid, signal.SIGINT)
+            assert driver.wait(timeout=60) == 130
+            for f in ready.glob("p*"):
+                assert all(_wait_gone(int(p)) for p in f.read_text().split())
+            assert sentinel.poll() is None
+        finally:
+            _cleanup_driver(driver, ready, pids)
 
     def test_pipe_stdin_and_pty_output_still_work_in_the_new_session(self, tmp_path: Path) -> None:
         import pty
