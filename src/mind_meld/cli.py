@@ -8633,7 +8633,7 @@ def _retro_catchup_pending(sources: list[dict], device_id: str) -> bool:
             if scan.cursor is not None
             else events.resolve_push_cursor(events_dir, device_id).since
         )
-        observed = events._parse_aware_ts(projected.get("ts"))
+        observed = events.parse_aware_ts(projected.get("ts"))
         if observed is not None:
             since = max(since, observed)
         return bool(

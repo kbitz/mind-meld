@@ -883,10 +883,11 @@ def _probe_claude(
         root = entry.get("git_root")
         if isinstance(root, str):
             roots.append(Path(root))
-        if _deadline_expired(deadline_monotonic):
-            deferred = True
-            pin_refresh()
-            break
+        if deferred or _deadline_expired(deadline_monotonic):
+            if not deferred:
+                deferred = True
+                pin_refresh()
+            continue
         try:
             unchanged = directory.stat().st_mtime_ns == entry.get("dir_mtime_ns")
             newest = entry.get("newest_jsonl_name")
@@ -1760,14 +1761,9 @@ def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> dat
     return min([since, *[ts for name in names if (ts := _parse_aware_ts(cursors.get(name)))]])
 
 
-def count_pending_repositories(
-    roots: Sequence[Path | str],
-    since: datetime,
-    *,
-    cache: dict | None = None,
-) -> int:
+def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> int:
     """Count live roots behind the requested capture, without repairing state."""
-    cache = cache if cache is not None else read_git_capture_cache()
+    cache = read_git_capture_cache()
     cursors = cache["repo_cursors"]
     names = {str(root) for root in roots} | set(cursors)
     names.update(
@@ -1783,6 +1779,12 @@ def count_pending_repositories(
     )
 
 
+def _prune_invalid_repo_cursors(cursors: dict) -> None:
+    for root in list(cursors):
+        if not _classify_git_root(Path(root)):
+            del cursors[root]
+
+
 def _apply_repo_cursors_to_cache(
     cache: dict,
     git_rows: Sequence[dict],
@@ -1791,7 +1793,7 @@ def _apply_repo_cursors_to_cache(
     cursor_ts: datetime,
     recorded: datetime | None,
     complete: bool,
-    _reconciling: bool,
+    reconciling: bool = False,
     prune_invalid_roots: bool = True,
 ) -> bool:
     previous = _parse_aware_ts(cache.get("last_committed_push_ts"))
@@ -1818,12 +1820,10 @@ def _apply_repo_cursors_to_cache(
     if recorded is not None:
         for root in failed:
             old = _parse_aware_ts(cursors.get(root))
-            if old is None or (_reconciling and since < old):
+            if old is None or (reconciling and since < old):
                 cursors[root] = since.isoformat()
     if prune_invalid_roots:
-        for root in list(cursors):
-            if not _classify_git_root(Path(root)):
-                del cursors[root]
+        _prune_invalid_repo_cursors(cursors)
     caught_up = complete and not failed and cache.get("pending_refresh_since") is None
     if caught_up:
         cache["incomplete_streak"] = 0
@@ -1861,7 +1861,7 @@ def commit_repo_cursors(
                 cursor_ts=cursor_ts,
                 recorded=recorded,
                 complete=complete,
-                _reconciling=_reconciling,
+                reconciling=_reconciling,
             ):
                 state.write_on_exit = False
     except OSError:
@@ -1920,15 +1920,12 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                     cursor_ts=ts,
                     recorded=ts,
                     complete=capture_advances_cursor(cap) and aborts == 0 and errors == 0,
-                    _reconciling=True,
+                    reconciling=True,
                     prune_invalid_roots=False,
                 ):
                     mutated = True
             if mutated:
-                cursors = cache["repo_cursors"]
-                for root in list(cursors):
-                    if not _classify_git_root(Path(root)):
-                        del cursors[root]
+                _prune_invalid_repo_cursors(cache["repo_cursors"])
             else:
                 state.write_on_exit = False
     except OSError:
@@ -2000,7 +1997,7 @@ def resolve_push_cursor(
     return CursorResolution(since=floor, used_floor=True)
 
 
-def _parse_aware_ts(value: object) -> datetime | None:
+def parse_aware_ts(value: object) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
@@ -2010,6 +2007,9 @@ def _parse_aware_ts(value: object) -> datetime | None:
     if ts.tzinfo is None:
         return None
     return ts
+
+
+_parse_aware_ts = parse_aware_ts
 
 
 @dataclass
@@ -2186,18 +2186,11 @@ def latest_event_rows(
                                 cursor_hold_since = (order, held_since)
             if kind in selectors:
                 selected = selectors[kind](row)
-            elif delta < 0:
-                if row_ts is None or row_ts > now:
-                    continue
-                selected = ((0, row_ts, 1, index), row)
             else:
-                bucket = 0 if delta == 0 else -delta
-                effective_ts = (
-                    row_ts
-                    if (delta == 0 and row_ts is not None and row_ts <= now)
-                    else datetime.max.replace(tzinfo=timezone.utc)
-                )
-                selected = ((bucket, effective_ts, -delta, index), row)
+                valid = int(row_ts is not None and row_ts <= now)
+                if delta < 0 and not valid:
+                    continue
+                selected = ((valid, -delta, index), row)
             if selected is None:
                 continue
             key, projected = selected

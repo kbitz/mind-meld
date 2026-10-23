@@ -820,7 +820,11 @@ def test_latest_event_rows_ignores_future_clock_skew_for_mm_push_and_git_snapsho
     today_file = events_dir / f"dev-a-{now.strftime('%Y-%m-%d')}.jsonl"
     tomorrow_file = events_dir / f"dev-a-{(now + timedelta(days=1)).strftime('%Y-%m-%d')}.jsonl"
     today_file.write_text(
-        json.dumps({"v": 1, "type": "git-snapshot", "ts": real_ts, "device": "dev-a"})
+        json.dumps({"v": 1, "type": "git-snapshot", "ts": future_ts, "device": "dev-a"})
+        + "\n"
+        + json.dumps({"v": 1, "type": "mm-push", "ts": future_ts, "device": "dev-a"})
+        + "\n"
+        + json.dumps({"v": 1, "type": "git-snapshot", "ts": real_ts, "device": "dev-a"})
         + "\n"
         + json.dumps({"v": 1, "type": "mm-push", "ts": real_ts, "device": "dev-a"})
         + "\n"
