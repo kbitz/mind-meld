@@ -733,6 +733,7 @@ class TestDiscoverGitRoots:
         second = base / "second"
         first.mkdir(parents=True)
         second.mkdir()
+        _init_git_repo(tmp_path / "repo")
         clock = [0.0]
         seen: list[Path] = []
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
@@ -741,7 +742,7 @@ class TestDiscoverGitRoots:
         def read_cwd(project, *, deadline_monotonic=None):
             seen.append(project)
             clock[0] = 2.0
-            return str(tmp_path / "repo")
+            return str(tmp_path / "repo"), True
 
         monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", read_cwd)
         assert events._probe_claude(deadline_monotonic=1.0) == [tmp_path / "repo"]
@@ -1207,7 +1208,7 @@ class TestWalkSessionMetadata:
         # /review by swapping the per-line `continue` for a per-file `break`
         # (i.e. abandon the file on first bad byte) — all 84 events tests
         # still passed. Per-line tolerance is the contract; pin the value.
-        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/real/path", (
+        assert events._read_cwd_from_latest_jsonl(proj) == ("/tmp/real/path", True), (
             "reader abandoned the file on the bad byte instead of skipping one line"
         )
         out = events.walk_session_metadata(
@@ -1264,7 +1265,7 @@ class TestWalkSessionMetadata:
             + json.dumps({"cwd": "/tmp/after/oversize"}).encode()
             + b"\n"
         )
-        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/after/oversize"
+        assert events._read_cwd_from_latest_jsonl(proj) == ("/tmp/after/oversize", True)
         err = capsys.readouterr().err
         assert "skipping oversize line" in err, "bounded reader not in the cwd read path"
         # The notice is deduped by PATH only, so in production the label is
@@ -1291,7 +1292,7 @@ class TestWalkSessionMetadata:
         (proj / "session.jsonl").write_bytes(
             json.dumps({"cwd": "/tmp/mid/write", "type": "user"}).encode()  # no \n
         )
-        assert events._read_cwd_from_latest_jsonl(proj) == "/tmp/mid/write"
+        assert events._read_cwd_from_latest_jsonl(proj) == ("/tmp/mid/write", True)
 
     def test_source_root_field_emitted(self, tmp_path):
         """Group 8 hotfix #4: every emitted SessionMetadata carries a
@@ -2801,3 +2802,240 @@ def test_append_ceiling_includes_torn_separator_and_exact_boundary(tmp_path, str
     )
     assert result == (path if strict else None)
     assert path.read_bytes() == prefix + b"\n" + payload
+
+
+class TestResumableProjectIndex:
+    @staticmethod
+    def projects(tmp_path, monkeypatch, count=3):
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        directories = []
+        roots = []
+        for n in range(count):
+            root = tmp_path / f"repo{n}"
+            _init_git_repo(root)
+            directory = tmp_path / ".claude" / "projects" / f"project{n}"
+            directory.mkdir(parents=True)
+            (directory / "session.jsonl").write_text(json.dumps({"cwd": str(root)}))
+            roots.append(root)
+            directories.append(directory)
+        return {"sync": {"sources": [{"name": "claude"}]}}, directories, roots
+
+    def test_cold_resume_then_warm_two_stats_without_listing(self, tmp_path, monkeypatch):
+        config, directories, roots = self.projects(tmp_path, monkeypatch)
+        clock = [0.0]
+        monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+        reader = events._read_cwd_from_latest_jsonl
+
+        def one_per_push(directory, **kwargs):
+            result = reader(directory, **kwargs)
+            clock[0] = 2.0
+            return result
+
+        monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", one_per_push)
+        for index in range(3):
+            clock[0] = 0.0
+            result = events.discover_git_roots(config, persist=True, deadline_monotonic=1.0)
+            assert result.exceeded == (index < 2)
+            assert len(events.read_git_capture_cache()["projects"]) == index + 1
+        assert set(result.roots) == set(roots)
+        assert events.read_git_capture_cache()["discovery_resume_after"] is None
+        monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", reader)
+        real_iterdir = Path.iterdir
+        real_stat = Path.stat
+        stats = []
+
+        def list_only_registry(path):
+            assert path not in directories, "warm project must not list its session logs"
+            return real_iterdir(path)
+
+        def track_stat(path, **kwargs):
+            if path == directories[0] or path == directories[0] / "session.jsonl":
+                stats.append(path)
+            return real_stat(path, **kwargs)
+
+        monkeypatch.setattr(Path, "iterdir", list_only_registry)
+        monkeypatch.setattr(Path, "stat", track_stat)
+        clock[0] = 0.0
+        result = events.discover_git_roots(config, deadline_monotonic=1.0)
+        assert not result.exceeded
+        # The registry's is_dir check is separate from the two warm index checks.
+        assert stats.count(directories[0] / "session.jsonl") == 1
+        assert stats.count(directories[0]) <= 2
+
+    def test_interrupted_probe_is_not_negative_cache(self, tmp_path, monkeypatch):
+        config, directories, _roots = self.projects(tmp_path, monkeypatch, count=1)
+        monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", lambda *a, **kw: (None, False))
+        result = events.discover_git_roots(config, persist=True)
+        cache = events.read_git_capture_cache()
+        assert result.exceeded
+        assert str(directories[0]) not in cache["projects"]
+        assert cache["discovery_resume_after"] is None
+
+    def test_negative_cwd_cached_and_unknown_project_fields_preserved(self, tmp_path, monkeypatch):
+        config, directories, _roots = self.projects(tmp_path, monkeypatch, count=1)
+        (directories[0] / "session.jsonl").write_text('{"type":"user"}\n')
+        events.discover_git_roots(config, persist=True)
+        cache = events.read_git_capture_cache()
+        assert cache["projects"][str(directories[0])]["cwd"] is None
+        cache["projects"][str(directories[0])]["future83"] = {"reader": 1}
+        events._normalize_git_capture_cache(cache)
+        assert cache["projects"][str(directories[0])]["future83"] == {"reader": 1}
+        monkeypatch.setattr(
+            events, "_read_cwd_from_latest_jsonl", lambda *a, **kw: pytest.fail("cached")
+        )
+        events.discover_git_roots(config, persist=True)
+
+    def test_deferred_changed_project_pins_window_and_seeds_new_root(self, tmp_path, monkeypatch):
+        config, directories, roots = self.projects(tmp_path, monkeypatch, count=1)
+        since = datetime.now(timezone.utc) - timedelta(days=20)
+        events.discover_git_roots(config, persist=True, since=since)
+        other = tmp_path / "new-root"
+        _init_git_repo(other)
+        session = directories[0] / "session.jsonl"
+        session.write_text(json.dumps({"cwd": str(other)}))
+        clock = [0.0]
+        monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+        real_stat = Path.stat
+
+        def expire_after_warm_stat(path, **kwargs):
+            result = real_stat(path, **kwargs)
+            if path == session:
+                clock[0] = 2.0
+            return result
+
+        monkeypatch.setattr(Path, "stat", expire_after_warm_stat)
+        result = events.discover_git_roots(config, persist=True, since=since, deadline_monotonic=1)
+        assert not result.exceeded
+        assert events.read_git_capture_cache()["pending_refresh_since"] == since.isoformat()
+        monkeypatch.setattr(Path, "stat", real_stat)
+        clock[0] = 0
+        result = events.discover_git_roots(
+            config, persist=True, since=since + timedelta(days=10), deadline_monotonic=1
+        )
+        assert other in result.roots
+        cache = events.read_git_capture_cache()
+        assert cache["repo_cursors"][str(other)] == since.isoformat()
+        assert cache["pending_refresh_since"] is None
+        assert roots[0] in result.roots
+
+    def test_dead_worktree_prunes_cached_root_even_with_unchanged_project(
+        self, tmp_path, monkeypatch
+    ):
+        config, directories, roots = self.projects(tmp_path, monkeypatch, count=1)
+        events.discover_git_roots(config, persist=True)
+        from mind_meld import config as mm_config
+
+        cache = events.read_git_capture_cache()
+        cache["repo_cursors"][str(roots[0])] = datetime.now(timezone.utc).isoformat()
+        mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+        shutil.rmtree(roots[0])
+        result = events.discover_git_roots(config, persist=True)
+        cache = events.read_git_capture_cache()
+        assert not result.roots
+        assert cache["projects"][str(directories[0])]["git_root"] is None
+        assert str(roots[0]) not in cache["repo_cursors"]
+
+    def test_read_only_and_cache_io_failure_keep_discovery_working(self, tmp_path, monkeypatch):
+        config, _directories, roots = self.projects(tmp_path, monkeypatch, count=1)
+        from mind_meld import config as mm_config
+
+        result = events.discover_git_roots(config)
+        assert set(result.roots) == set(roots)
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+        monkeypatch.setattr(mm_config, "GIT_CAPTURE_CACHE_PATH", tmp_path / "not-dir" / "cache")
+        (tmp_path / "not-dir").write_text("blocked")
+        assert events.discover_git_roots(config, persist=True).roots == tuple(roots)
+
+
+def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, monkeypatch):
+    from mind_meld import events_tail, identity
+
+    config, _directories, roots = TestResumableProjectIndex.projects(tmp_path, monkeypatch)
+    for root in roots:
+        _seed_commit(root)
+    source = {"name": "mm-events", "path": str(tmp_path / "activity"), "type": "generic"}
+    sources = [*config["sync"]["sources"], source]
+    config["sync"]["sources"] = sources
+    # Bound discovery deterministically to one new directory per push. Git
+    # workers still read real repositories and append real event batches.
+    clock = [0.0]
+    monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+    reader = events._read_cwd_from_latest_jsonl
+
+    def one_directory(directory, **kwargs):
+        result = reader(directory, **kwargs)
+        clock[0] = 1.0
+        return result
+
+    monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", one_directory)
+    monkeypatch.setattr(identity, "_do_full_gather", lambda **kw: ["test@example.com"])
+    monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda *a, **kw: False)
+    for push in range(3):
+        clock[0] = 0.0
+        events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
+        row = events.latest_mm_push_row(tmp_path / "activity" / "events", "dev-a")
+        assert row is not None
+        assert row["git_capture"]["discovery"] == ("partial" if push < 2 else "complete")
+        assert row["git_capture"]["walk_budget_aborts"] == 0
+        if push < 2:
+            assert not json.loads(identity.CACHE_PATH.read_text())["refreshed_at"]
+    assert json.loads(identity.CACHE_PATH.read_text())["refreshed_at"]
+    cache = events.read_git_capture_cache()
+    assert set(cache["repo_cursors"]) == {str(root) for root in roots}
+    assert cache["incomplete_streak"] == 0
+    assert events.count_pending_repositories(roots, datetime.fromisoformat(row["ts"])) == 0
+    captured = set()
+    for file in (tmp_path / "activity" / "events").glob("*.jsonl"):
+        for event in map(json.loads, file.read_text().splitlines()):
+            for project in event.get("projects", []):
+                if project.get("commits"):
+                    captured.add(project["local_path"])
+    assert captured == {str(root) for root in roots}
+
+
+@pytest.mark.parametrize("failure", ["skipped", "error", "unconfirmed"])
+def test_tail_does_not_commit_cursors_without_confirmed_append(tmp_path, monkeypatch, failure):
+    from mind_meld import events_tail, identity
+
+    config, _directories, roots = TestResumableProjectIndex.projects(tmp_path, monkeypatch, 1)
+    _seed_commit(roots[0])
+    source = {"name": "mm-events", "path": str(tmp_path / "activity"), "type": "generic"}
+    config["sync"]["sources"].append(source)
+    monkeypatch.setattr(identity, "_do_full_gather", lambda **kw: [])
+    monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda *a, **kw: False)
+
+    def append(*args, **kwargs):
+        if failure == "error":
+            raise OSError("append failed")
+        if failure == "skipped":
+            return events.EventAppendSkipped(tmp_path / "activity")
+        return None
+
+    monkeypatch.setattr(events, "write_push_event", append)
+    monkeypatch.setattr(events, "commit_repo_cursors", lambda *a, **kw: pytest.fail("unrecorded"))
+    events_tail._run_events_tail(
+        config, config["sync"]["sources"], "dev-a", dry_run=False, quiet=False
+    )
+    assert events.read_git_capture_cache()["repo_cursors"] == {}
+
+
+@pytest.mark.parametrize("remove", ["registry", "consent", "manual"])
+def test_complete_discovery_retires_deselected_repository_cursors(tmp_path, monkeypatch, remove):
+    from mind_meld import config as mm_config
+
+    config, directories, roots = TestResumableProjectIndex.projects(tmp_path, monkeypatch, 1)
+    events.discover_git_roots(config, persist=True)
+    cache = events.read_git_capture_cache()
+    cache["repo_cursors"][str(roots[0])] = (
+        datetime.now(timezone.utc) - timedelta(days=1)
+    ).isoformat()
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    if remove == "registry":
+        shutil.rmtree(directories[0])
+    elif remove == "consent":
+        config["sync"]["disabled_sources"] = ["claude"]
+    else:
+        config = {"sync": {"sources": []}, "retro": {"repo_roots": []}}
+    events.discover_git_roots(config, persist=True)
+    assert events.count_pending_repositories([], datetime.now(timezone.utc)) == 0
+    assert events.read_git_capture_cache()["repo_cursors"] == {}

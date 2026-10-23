@@ -408,7 +408,8 @@ def test_deeply_nested_sidecar_does_not_crash_status_or_diag(tmp_path, monkeypat
     assert diag.exit_code == 0, diag.output
 
 
-def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch):
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch, incomplete):
     import builtins
     from datetime import datetime, timedelta, timezone
 
@@ -428,9 +429,15 @@ def test_status_opens_each_day_once_even_without_host_rows(tmp_path, monkeypatch
     for delta in range(3):
         ts = now - timedelta(days=delta)
         path = root / "events" / f"mac-a-{ts.date()}.jsonl"
-        path.write_text(
-            json.dumps(events.make_mm_push_event(device="mac-a", mm_version="1", ts=ts)) + "\n"
-        )
+        row = events.make_mm_push_event(device="mac-a", mm_version="1", ts=ts)
+        if incomplete:
+            row["git_capture"] = events.make_git_capture(
+                since=ts - timedelta(days=1),
+                discovery="partial",
+                walk_budget_aborts=1,
+                walk_errors=0,
+            )
+        path.write_text(json.dumps(row) + "\n")
         paths.append(path)
     opened = []
     real = builtins.open
@@ -1947,3 +1954,19 @@ def test_diag77_superseded_capture_stays_forensic(tmp_path, monkeypatch):
         cli._print_host_publication(state, reader_states={})
     assert "push-failed" not in status_capture.get()
     assert "push-failed" in diag_capture.get()
+
+
+def test_git_capture_diag_reports_read_only_pending_repositories(tmp_path, monkeypatch):
+    from mind_meld import cli, events
+    from mind_meld.config import GIT_CAPTURE_CACHE_PATH
+
+    _setup(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        events, "count_pending_repositories", lambda roots, since: calls.append(roots) or 3
+    )
+    discovery = {"roots": [str(tmp_path / "repository")], "status": "complete"}
+    state = cli._collect_git_capture_diag({}, None, discovery)
+    assert state["fresh"]["pending_repos"] == 3
+    assert calls == [discovery["roots"]]
+    assert not GIT_CAPTURE_CACHE_PATH.exists()

@@ -568,7 +568,7 @@ def test_recapture_partial_walk_exits_4(tmp_path, monkeypatch):
     repo_a.mkdir()
     repo_b.mkdir()
 
-    def fake_walk(roots, since, total_budget_ms):
+    def fake_walk(roots, since, total_budget_ms, **_kw):
         return [
             {
                 "v": 2,
@@ -634,7 +634,7 @@ def test_timeout_skip_degrades_the_tail(tmp_path, monkeypatch):
     monkeypatch.setattr(
         events,
         "walk_git_projects",
-        lambda roots, since, total_budget_ms: [
+        lambda roots, since, total_budget_ms, **_kw: [
             {
                 "v": 2,
                 "type": "git-snapshot",
@@ -671,7 +671,7 @@ def test_no_commits_skip_does_not_degrade_the_tail(tmp_path, monkeypatch):
     monkeypatch.setattr(
         events,
         "walk_git_projects",
-        lambda roots, since, total_budget_ms: [
+        lambda roots, since, total_budget_ms, **_kw: [
             {
                 "v": 2,
                 "type": "git-snapshot",
@@ -836,13 +836,18 @@ def test_refresh_identity_reports_changes_from_known_cache(
         calls.append("read")
         return previous
 
-    def refresh(*, force):
+    def refresh(*, force, root_discovery):
+        assert isinstance(root_discovery, events.GitRootDiscovery)
         assert force is True
         calls.append("refresh")
         return current
 
     monkeypatch.setattr(identity, "read_cached_identities", read)
     monkeypatch.setattr(identity, "refresh_identity_cache", refresh)
+    monkeypatch.setattr(cli, "load_config", lambda: {})
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda cfg, **kw: events.GitRootDiscovery((), (), False)
+    )
     result = runner.invoke(app, ["refresh-identity", *(["--json"] if json_output else [])])
     assert calls == ["read", "refresh"]
     assert result.exit_code == exit_code, result.output
@@ -857,3 +862,116 @@ def test_refresh_identity_reports_changes_from_known_cache(
         assert result.output.index("Changes vs previous cache:") < result.output.index(
             "mm: warning:"
         )
+
+
+@pytest.mark.parametrize(
+    "discovery,aborts,errors,streak,age,floored,recovery",
+    [
+        ("partial", 1, 0, 1, 2, False, False),
+        ("complete", 1, 0, 2, 2, False, False),
+        ("complete", 1, 0, 3, 2, False, True),
+        ("empty", 0, 0, 1, 2, False, True),
+        ("complete", 0, 1, 1, 2, False, True),
+        ("partial", 1, 0, 1, 91, False, True),
+        ("partial", 1, 0, 1, 2, True, True),
+    ],
+)
+def test_status_reports_pending_git_repositories_or_recovery(
+    tmp_path, monkeypatch, capsys, discovery, aborts, errors, streak, age, floored, recovery
+):
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=age)
+    source = {"name": "mm-events", "path": str(tmp_path)}
+    _write_push(
+        tmp_path / "events",
+        "dev-a",
+        ts=now,
+        since=since,
+        discovery=discovery,
+        walk_budget_aborts=aborts,
+        walk_errors=errors,
+    )
+    monkeypatch.setattr(events, "count_pending_repositories", lambda *a: 2)
+    monkeypatch.setattr(events, "read_git_capture_cache", lambda: {"incomplete_streak": streak})
+    monkeypatch.setattr(
+        events,
+        "resolve_push_cursor",
+        lambda *a: events.CursorResolution(since=since, floored_after_incomplete=floored),
+    )
+    monkeypatch.setattr(events, "effective_capture_since", lambda roots, lower: lower)
+    assert cli._print_retro_capture_status([source], "dev-a")
+    output = capsys.readouterr().out
+    assert ("mm recapture" in output) == recovery
+    if not recovery:
+        assert "2 repositories left to catch up" in output
+        assert "mm push" in output
+
+
+def test_deferred_project_refresh_keeps_clean_push_eligible(tmp_path, monkeypatch):
+    source = {"name": "mm-events", "path": str(tmp_path)}
+    now = datetime.now(timezone.utc)
+    _write_push(tmp_path / "events", "dev-a", ts=now)
+    monkeypatch.setattr(events, "count_pending_repositories", lambda *a: 0)
+    monkeypatch.setattr(
+        events, "read_git_capture_cache", lambda: {"pending_refresh_since": now.isoformat()}
+    )
+    assert cli._retro_catchup_pending([source], "dev-a")
+
+
+def test_attended_clean_push_runs_activity_when_git_catchup_pending(tmp_path, monkeypatch):
+    from mind_meld import token_usage
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
+    token_usage.warm_token_cache_inline([claude_root])
+    assert runner.invoke(app, ["push"]).exit_code == 0
+    monkeypatch.setattr(cli, "_retro_catchup_pending", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(events_tail, "_run_events_tail", lambda *a, **kw: calls.append(kw) or [])
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert len(calls) == 1
+    assert calls[0]["capture_activity"] is True
+
+
+def test_git_cursor_commit_requires_exact_recorded_snapshot(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    row = {"type": "git-snapshot", "ts": now.isoformat(), "projects": [], "origin": "recapture"}
+    calls = []
+    monkeypatch.setattr(events, "commit_repo_cursors", lambda *a, **kw: calls.append(kw))
+    events_tail._commit_recorded_git_rows(tmp_path, "dev-a", [row], since=now, complete=True)
+    assert calls == []
+    events.write_push_event(tmp_path, "dev-a", [row])
+    events_tail._commit_recorded_git_rows(tmp_path, "dev-a", [row], since=now, complete=True)
+    assert len(calls) == 1
+    assert calls[0]["cursor_ts"] == now
+
+
+def test_idle_completed_capture_does_not_become_pending_without_a_new_push(tmp_path, monkeypatch):
+    ts = datetime.now(timezone.utc) - timedelta(days=45)
+    root = tmp_path / "repo"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    from mind_meld import config
+
+    cache = events._default_git_capture_cache()
+    cache["repo_cursors"][str(root)] = ts.isoformat()
+    config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    _write_push(tmp_path / "events", "dev-a", ts=ts, since=ts, discovery="complete")
+    assert not cli._print_retro_capture_status(
+        [{"name": "mm-events", "path": str(tmp_path)}], "dev-a"
+    )
+
+
+def test_old_failed_walk_requires_recovery_with_a_recent_global_cursor(tmp_path, capsys):
+    now = datetime.now(timezone.utc)
+    _write_push(
+        tmp_path / "events",
+        "dev-a",
+        ts=now,
+        since=now - timedelta(days=91),
+        discovery="complete",
+        walk_budget_aborts=1,
+    )
+    assert cli._print_retro_capture_status([{"name": "mm-events", "path": str(tmp_path)}], "dev-a")
+    assert "mm recapture" in capsys.readouterr().out

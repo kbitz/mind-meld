@@ -246,6 +246,13 @@ def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_git_capture_cache(monkeypatch, tmp_path):
+    from mind_meld import config
+
+    monkeypatch.setattr(config, "GIT_CAPTURE_CACHE_PATH", tmp_path / "git-capture-cache.json")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.identity.CACHE_PATH`` to a per-test path.
 

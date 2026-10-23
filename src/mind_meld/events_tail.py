@@ -798,8 +798,10 @@ def _capture_event_snapshots(
     warm_host_cache: Callable[[str], None] | None = None,
     suppress_host_capture: bool = False,
     origin: str | None = None,
+    persist: bool = False,
+    use_repo_cursors: bool = False,
 ) -> CaptureResult:
-    """Capture device-stamped git, session, and host snapshot rows without writing.
+    """Capture device-stamped snapshots; persist discovery only when requested.
 
     Callers retain token-cache policy in ``prepare_token_cache``; it runs after
     the bounded git walk and returns whether token data is available and, when
@@ -833,6 +835,8 @@ def _capture_event_snapshots(
         config,
         device_id,
         since=since,
+        persist=persist,
+        use_repo_cursors=use_repo_cursors,
         walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
         root_discovery_budget_ms=root_discovery_budget_ms,
         origin=origin,
@@ -917,8 +921,10 @@ def _capture_git_rows(
     walk_budget_ms: int,
     root_discovery_budget_ms: int,
     origin: str | None = None,
+    persist: bool = False,
+    use_repo_cursors: bool = False,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
-    """Discover roots and walk git. No writes, no notices, no mm-push.
+    """Discover roots and walk git, optionally persisting the local project index.
 
     Shared by the push tail, init backfill, and recapture. ``origin`` marks
     non-push rows (init and recapture) so the aggregator can exclude them
@@ -927,11 +933,20 @@ def _capture_git_rows(
     root_discovery = events.discover_git_roots(
         config,
         deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+        persist=persist,
+        since=since,
     )
     roots, _discovery_errors = root_discovery
+    if use_repo_cursors:
+        since = events.effective_capture_since(roots, since)
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
+    if use_repo_cursors:
+        walk_kwargs["use_repo_cursors"] = True
     git_rows = events.walk_git_projects(
-        roots, since=since, total_budget_ms=walk_budget_ms, **walk_kwargs
+        roots,
+        since=since,
+        total_budget_ms=walk_budget_ms,
+        **walk_kwargs,
     )
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)
@@ -1001,8 +1016,9 @@ def _run_events_tail(
         return degradations
     try:
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
+        events.reconcile_uncommitted_push_cursors(events_dir, device_id)
         cursor = events.resolve_push_cursor(events_dir, device_id)
-        since = cursor.since
+        since = events.effective_capture_since([], cursor.since)
         # Session-walk budget stays the quiet/interactive pair. Git-walk
         # budget escalates independently when the cursor is old — mixing
         # the two would make a first-run 30-day cursor silently raise the
@@ -1030,6 +1046,8 @@ def _run_events_tail(
             since=since,
             budget_ms=budget_ms,
             git_budget_ms=git_budget_ms,
+            persist=True,
+            use_repo_cursors=True,
             root_discovery_budget_ms=(
                 events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
                 if quiet
@@ -1048,6 +1066,8 @@ def _run_events_tail(
             ),
         )
 
+        if capture.git_rows:
+            since = datetime.fromisoformat(capture.git_rows[0]["git_capture"]["since"])
         source_names = [s["name"] for s in sources if isinstance(s.get("name"), str)]
         # Fleet-wide author-email trust set (v0.11.17). gather_local_identities
         # is cache-first: hot path is ~1ms; cold/stale path emits a single
@@ -1094,6 +1114,18 @@ def _run_events_tail(
         )
         if isinstance(append_result, events.EventAppendSkipped):
             degradations.append("event append skipped (max-file-size)")
+        elif events.latest_mm_push_row(events_dir, device_id) == mm_event:
+            events.commit_repo_cursors(
+                capture.git_rows,
+                since=since,
+                cursor_ts=datetime.fromisoformat(mm_event["ts"]),
+                recorded_ts=mm_event["ts"],
+                complete=(
+                    events.classify_discovery(capture.root_discovery) not in {"partial", "empty"}
+                    and not capture.walk_budget_aborts
+                    and not capture.walk_errors
+                ),
+            )
 
         if cursor.held:
             degradations.append(_CURSOR_HOLD_DEGRADATION)
@@ -1231,6 +1263,7 @@ def _run_events_backfill(
             warm_host_cache=_warm_host_cache_with_notice,
             prepare_token_cache=prepare_backfill_token_cache,
             origin=events.GIT_SNAPSHOT_ORIGIN_INIT,
+            persist=True,
             host_readers=_default_host_readers(
                 sources,
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
@@ -1239,7 +1272,7 @@ def _run_events_backfill(
 
         rows_to_write = [*capture.git_rows, *capture.session_rows, *capture.host_rows]
         if rows_to_write:
-            events.write_push_event(
+            appended = events.write_push_event(
                 events_dir,
                 device_id,
                 rows_to_write,
@@ -1247,6 +1280,19 @@ def _run_events_backfill(
                     "max_file_size", mm_config.DEFAULT_MAX_FILE_SIZE
                 ),
             )
+            if not isinstance(appended, events.EventAppendSkipped):
+                _commit_recorded_git_rows(
+                    events_dir,
+                    device_id,
+                    capture.git_rows,
+                    since=since,
+                    complete=(
+                        events.classify_discovery(capture.root_discovery)
+                        not in {"partial", "empty"}
+                        and not capture.walk_budget_aborts
+                        and not capture.walk_errors
+                    ),
+                )
 
         # Warm the identity cache at init (v0.11.17, D5 from /plan-eng-review).
         # First push after init then has hot identity data and emits no
@@ -1297,6 +1343,28 @@ def _run_events_backfill(
         _diagnostic(f"mm: notice: events backfill failed: {_exception_detail(e)}\n")
 
 
+def _commit_recorded_git_rows(
+    events_dir: Path,
+    device_id: str,
+    git_rows: list[dict],
+    *,
+    since: datetime,
+    complete: bool,
+) -> None:
+    """Advance local progress only after observing the exact persisted snapshot."""
+    if not git_rows:
+        return
+    scan = events.latest_event_rows(events_dir, device_id, {"git-snapshot"})
+    if scan.rows.get("git-snapshot") != git_rows[-1]:
+        return
+    events.commit_repo_cursors(
+        git_rows,
+        since=since,
+        cursor_ts=datetime.fromisoformat(git_rows[-1]["ts"]),
+        complete=complete,
+    )
+
+
 @dataclass
 class RecaptureCapture:
     """Git-only recapture observation. No writes. No mm-push row."""
@@ -1316,6 +1384,7 @@ def _prepare_recapture(
     device_id: str,
     *,
     since: datetime,
+    persist: bool = False,
 ) -> RecaptureCapture | None:
     """Git-only capture at interactive budgets. ``None`` if mm-events is unresolved."""
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
@@ -1332,6 +1401,7 @@ def _prepare_recapture(
         walk_budget_ms=events.WALK_TIME_BUDGET_INTERACTIVE_MS,
         root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
         origin=events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+        persist=persist,
     )
     return RecaptureCapture(
         git_rows=git_rows,
