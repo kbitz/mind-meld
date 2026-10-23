@@ -1152,6 +1152,6 @@ not lost work. Keep auto hook-age meaning in diag; attended age is not hook
 liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
 both diag formats. Status shows only selected summaries plus current capture
 facts; only existing latest_attempt_superseded proof hides a capture row.
-No history engine, hold escalation, future capture counters or Track 88A
+No history engine, hold escalation, future capture counters or Track 92A
 peer-state assessment is introduced. Track 78A changes exits/tails only as
 described above.
