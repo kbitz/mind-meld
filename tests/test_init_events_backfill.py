@@ -246,7 +246,7 @@ class TestBackfillHostSnapshot:
     failure policy: one safe notice, no ``mm-push`` row, no autorun
     breadcrumb (init has neither)."""
 
-    def _stub(self, monkeypatch, *, codex=None, grok=None, calls=None):
+    def _stub(self, monkeypatch, *, codex=None, muse=None, grok=None, calls=None):
         monkeypatch.setattr(
             _mm_events,
             "discover_git_roots",
@@ -284,7 +284,9 @@ class TestBackfillHostSnapshot:
 
         empty = _mm_host_usage.HostUsageResult({}, complete=True)
         monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex", codex or empty))
-        monkeypatch.setattr(_mm_host_usage, "read_grok_usage", reader("grok", grok or empty))
+        monkeypatch.setattr(
+            _mm_host_usage, "read_muse_usage", reader("muse", muse or grok or empty)
+        )
 
     def test_row_order_is_git_sessions_host_and_never_mm_push(self, tmp_path, monkeypatch):
         events_root = tmp_path / "events_root"
@@ -334,14 +336,14 @@ class TestBackfillHostSnapshot:
         self, tmp_path, monkeypatch, capsys
     ):
         events_root = tmp_path / "events_root"
-        sources = _make_sources(events_root, claude_dir=None)
+        sources = _make_sources(events_root, claude_dir=None, hosts=("muse",))
         self._stub(
             monkeypatch,
-            grok=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
+            muse=_mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
         )
 
         events_tail._run_events_backfill(
-            {"sync": {"sources": sources}, "retro": {"grok_host_usage": True}},
+            {"sync": {"sources": sources}},
             sources,
             "dev-a",
         )
@@ -351,11 +353,11 @@ class TestBackfillHostSnapshot:
         err = capsys.readouterr().err
         assert err.count("host-usage snapshot skipped") == 1
         assert (
-            "mm: notice: host-usage snapshot skipped (grok unsupported) — "
+            "mm: notice: host-usage snapshot skipped (muse unsupported) — "
             "content sync and git/session capture unaffected. "
-            "grok wrote a record this version cannot read. A newer mm may read it: "
+            "muse wrote a record this version cannot read. A newer mm may read it: "
             "run `mm update`, or run "
-            "`mm disable-source grok` to stop retrying.\n" in err
+            "`mm disable-source muse` to stop retrying.\n" in err
         )
         assert "The next push that uploads a change retries" not in err, (
             "unsupported storage is permanent — never promise a retry"

@@ -78,6 +78,7 @@ class AgentRow:
     success_marker: str
     conflict_marker: str
     consent_source: str
+    agent_root: str | None = None
 
 
 # Active supported agents. Result order is a documented contract
@@ -101,6 +102,15 @@ AGENT_ROWS: tuple[AgentRow, ...] = (
         success_marker="codex-skill-link-checked",
         conflict_marker="codex-skill-link-conflict",
         consent_source="codex",
+    ),
+    AgentRow(
+        key="agy",
+        display_name="Antigravity",
+        skills_root="~/.gemini/config/skills",
+        success_marker="agy-skill-link-checked",
+        conflict_marker="agy-skill-link-conflict",
+        consent_source="agy",
+        agent_root="~/.gemini",
     ),
 )
 
@@ -139,18 +149,13 @@ def _real_guard_paths() -> tuple[Path, ...]:
     """Canonical real-home paths the pytest guard must refuse.
 
     Derived from ``AGENT_ROWS`` (never from ``_TEST_SKILL_ROOT_OVERRIDES``)
-    plus the explicit extras: the retired OpenCode skills dir, the marker
-    dir, and the 24A skill store.
+    plus the explicit extras: the marker dir, and the 24A skill store.
     Ordinary test isolation patches the override map; if this derived from
     that map the guard's target set would become the tmp paths and go
     blind to every real agent dir, with a green suite.
     """
     return (
         *(_REAL_HOME / _home_relative(row.skills_root) for row in AGENT_ROWS),
-        # Retired but still guarded — the OpenCode link may still be on
-        # disk until the one-shot reaper runs, and 67 measured tests once
-        # wrote the developer's real agent dirs.
-        _REAL_HOME / ".config" / "opencode" / "skills",
         _REAL_HOME / ".config" / "mind-meld",
         _REAL_HOME / ".local" / "share" / "mind-meld" / "agent-skills",
     )
@@ -310,10 +315,16 @@ def _root_for(row: AgentRow) -> str:
 
 def _descriptor_from_row(row: AgentRow) -> SkillTarget:
     skills_dir = Path(_root_for(row)).expanduser()
+    if row.key in _TEST_SKILL_ROOT_OVERRIDES:
+        agent_root = skills_dir.parent
+    else:
+        agent_root = (
+            Path(row.agent_root).expanduser() if row.agent_root is not None else skills_dir.parent
+        )
     return SkillTarget(
         key=row.key,
         display_name=row.display_name,
-        agent_root=skills_dir.parent,
+        agent_root=agent_root,
         skills_dir=skills_dir,
         success_marker=row.success_marker,
         conflict_marker=row.conflict_marker,
@@ -766,52 +777,6 @@ def render_skill_status(result: SkillInstallResult) -> str:
     return f"{target}: {result.status}"
 
 
-def _reap_retired_opencode_skill_link() -> None:
-    """One-shot, best-effort removal of the retro-fleet link mm created
-    under ``~/.config/opencode/skills``.
-
-    Ownership proof is ``os.readlink(target) == store``. A regular file, a
-    directory, or a link pointing anywhere else is the user's and is left
-    untouched. A dangling store-backed symlink is still ours and is
-    unlinked — ``os.readlink`` does not care about liveness. ``lstat``,
-    never ``resolve()`` — following the symlink defeats the check.
-    Re-readlink immediately before ``unlink`` so a same-uid swap between
-    the check and the delete is not applied. ``except OSError: pass``.
-    Idempotent: later runs are no-ops once the link is gone. Do not add
-    a persistent "did I reap it" marker.
-
-    This does not conflict with Track 28A. That guard says an ABSENT link
-    is user intent and must not be recreated. It says nothing about mm
-    removing a link it created and no longer maintains.
-    """
-    target = Path("~/.config/opencode/skills/retro-fleet").expanduser()
-    if _is_real_agent_dir_under_pytest(target):
-        return
-    store = str(_skill_store_dir())
-    try:
-        st = os.lstat(target)
-    except OSError:
-        pass
-    else:
-        if stat.S_ISLNK(st.st_mode):
-            try:
-                if os.readlink(target) == store:
-                    still = os.readlink(target)
-                    if still == store:
-                        os.unlink(target)
-            except OSError:
-                pass
-    marker_dir = _marker_dir()
-    for name in (
-        "opencode-skill-link-checked",
-        "opencode-skill-link-conflict",
-    ):
-        try:
-            os.unlink(marker_dir / f".{name}")
-        except OSError:
-            pass
-
-
 def _ensure_retro_skill_links(
     *,
     dry_run: bool = False,
@@ -847,16 +812,6 @@ def _ensure_retro_skill_links(
     absent store is created only when at least one row is consented.
     """
     write = bool(allow_mutate and not dry_run)
-    if write:
-        # Retirement of the OpenCode skill link mm created. Init and
-        # mm install-skills reach it here. Interactive mm push also
-        # calls it from _push_core even when the 24h drift gate is
-        # shut, so a fresh Claude/Codex marker cannot skip cleanup.
-        # Not on mm status or mm diag — those are read-only. Track 28A
-        # says an ABSENT link is user intent and must not be recreated;
-        # this path is mm removing a link it created and no longer
-        # maintains.
-        _reap_retired_opencode_skill_link()
     descriptors = _skill_target_descriptors()
     results: list[SkillInstallResult | None] = [None] * len(descriptors)
     available: list[tuple[int, SkillTarget]] = []
@@ -1010,6 +965,21 @@ def _install_available_skill_target(
     except FileNotFoundError:
         if write:
             try:
+                if descriptor.skills_dir.parent != descriptor.agent_root:
+                    parent = descriptor.skills_dir.parent
+                    try:
+                        parent_info = parent.lstat()
+                    except FileNotFoundError:
+                        parent.mkdir(mode=0o700)
+                    else:
+                        if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(
+                            parent_info.st_mode
+                        ):
+                            return _failed_result(
+                                descriptor,
+                                "skills directory setup",
+                                NotADirectoryError(f"{parent} is not a directory"),
+                            )
                 descriptor.skills_dir.mkdir(mode=0o700)
             except OSError as error:
                 return _failed_result(descriptor, "skills directory setup", error)

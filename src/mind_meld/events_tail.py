@@ -43,7 +43,6 @@ from mind_meld import config as mm_config
 from mind_meld.config import (
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
-    grok_host_usage_enabled,
 )
 from mind_meld.errors import HOST_USAGE_CAPTURE_URL
 from mind_meld.safety import safe_str, safe_terminal_str
@@ -197,14 +196,11 @@ _HOST_PERMANENT_REASONS = frozenset(host_usage.PERMANENT_REASONS)
 
 HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     "codex": "codex",
-    # Grok is a real scoped sync source (Track 22B). Source-enabled is
-    # consent, matching Codex. The 21A [retro].grok_host_usage bit remains
-    # an OR so a prior usage-only opt-in does not go dark.
-    "grok": "grok",
     # Muse is a scoped sync source too (``type: "muse"``, hardcoded
-    # ``memory/``). Source-enabled is consent, matching Codex and Grok;
+    # ``memory/``). Source-enabled is consent, matching Codex;
     # there is no separate retro bit.
     "muse": "muse",
+    "agy": "agy",
     **dict.fromkeys(mm_config.HOST_USAGE_ONLY_CONSENT),
 }
 """Which enabled sync source each reader's consent derives from.
@@ -217,7 +213,7 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
-WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor", "muse"})
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "cursor", "muse", "agy"})
 """Readers with cached totals an attended warm can populate.
 
 A future reader whose cache stores no totals must not be added here.
@@ -381,15 +377,12 @@ def _decide_token_walk_policy(
 def _default_host_readers(
     sources: list[dict],
     *,
-    grok_consented: bool = False,
     cursor_consented: bool = False,
 ) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
-    see ``HOST_READER_SOURCE_GATE``. Grok is included when the grok source is
-    enabled or when ``grok_consented`` is true (21A bit), bound to
-    ``consented=True``. Cursor has no sync source: ``cursor_consented`` is its
+    see ``HOST_READER_SOURCE_GATE``. Cursor has no sync source: ``cursor_consented`` is its
     only gate (``HOST_USAGE_ONLY_CONSENT``).
 
     Module-qualified lookups on purpose (docs/invariants/README.md's
@@ -400,12 +393,6 @@ def _default_host_readers(
     chosen: list[tuple[str, HostReader]] = []
     if HOST_READER_SOURCE_GATE["codex"] in enabled:
         chosen.append(("codex", host_usage.read_codex_usage))
-    if HOST_READER_SOURCE_GATE["grok"] in enabled or grok_consented:
-
-        def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
-            return host_usage.read_grok_usage(deadline=deadline, consented=True)
-
-        chosen.append(("grok", _read_grok))
     if cursor_consented:
 
         def _read_cursor(*, deadline: float) -> host_usage.HostUsageResult:
@@ -418,6 +405,12 @@ def _default_host_readers(
             return host_usage.read_muse_usage(deadline=deadline, consented=True)
 
         chosen.append(("muse", _read_muse))
+    if HOST_READER_SOURCE_GATE["agy"] in enabled:
+
+        def _read_agy(*, deadline: float) -> host_usage.HostUsageResult:
+            return host_usage.read_agy_usage(deadline=deadline, consented=True)
+
+        chosen.append(("agy", _read_agy))
     return tuple(chosen)
 
 
@@ -688,7 +681,7 @@ def _host_skip_phrase(
             def shown(value: int | None) -> str:
                 return "unknown" if value is None else str(value)
 
-            unit = {"grok": "ledgers", "muse": "session logs"}.get(reader, "rollouts")
+            unit = {"muse": "session logs", "agy": "conversation DBs"}.get(reader, "rollouts")
             if reader == "cursor":
                 progress = (
                     f"{shown(evidence.files_cached)} retained runs; "
@@ -1051,7 +1044,6 @@ def _run_events_tail(
             prepare_token_cache=prepare_tail_token_cache,
             host_readers=_default_host_readers(
                 sources,
-                grok_consented=grok_host_usage_enabled(config),
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
             ),
         )
@@ -1241,7 +1233,6 @@ def _run_events_backfill(
             origin=events.GIT_SNAPSHOT_ORIGIN_INIT,
             host_readers=_default_host_readers(
                 sources,
-                grok_consented=grok_host_usage_enabled(config),
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
             ),
         )

@@ -430,6 +430,13 @@ REVIEWED = {
             "timeout=min(remaining, _CURSOR_SQLITE_BUSY_S))",
         ],
     ),
+    "host_usage.py:_read_single_agy_db": (
+        "read-only",
+        "read-only SQLite URI (mode=ro); its RuntimeError guard refuses the real Antigravity store",
+        [
+            "sqlite3.connect(uri, uri=True, isolation_level=None, timeout=min(remaining, 5.0))",
+        ],
+    ),
     "host_usage.py:_read_cursor_file": (
         *_READ_ONLY,
         [
@@ -460,12 +467,6 @@ REVIEWED = {
         "isolated Cursor spool recovery; raw unlink residual",
         [
             "merging.unlink()",
-        ],
-    ),
-    "host_usage.py:_read_grok_file": (
-        *_READ_ONLY,
-        [
-            "path.open('rb')",
         ],
     ),
     "host_usage.py:_read_muse_file": (
@@ -707,16 +708,10 @@ REVIEWED = {
             "os.unlink(tmp)",
         ],
     ),
-    "skill_link.py:_reap_retired_opencode_skill_link": (
-        *_OWN_GUARD,
-        [
-            "os.unlink(target)",
-            "os.unlink(marker_dir / f'.{name}')",
-        ],
-    ),
     "skill_link.py:_install_available_skill_target": (
         *_OWN_GUARD,
         [
+            "parent.mkdir(mode=448)",
             "descriptor.skills_dir.mkdir(mode=448)",
             "os.symlink(str(store), target)",
         ],

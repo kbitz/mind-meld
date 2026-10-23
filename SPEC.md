@@ -319,13 +319,11 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_skill_discovery, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
                             # maintain_links is enabled | disabled (...) | unknown (config invalid: ...) | unknown (policy not resolved)
-                            # `host_skill_discovery` is a sibling key (Grok inspect probe), never a skill_links row
-                            # host_skill_discovery: host, status (ok | binary-absent | timeout | nonzero-exit | malformed-json | unsupported-schema), claude_skills_compat, retro_fleet_resolved, retro_fleet_path, grok_version
 mm devices [--format table|json]   # list registered devices (json: stable schema for scripts / retro-fleet)
 mm diff [--from DEVICE] [--source NAME]   # compare local files with this Mac's last push (or --from DEVICE); changes nothing, not even the lock file
                                              # annotates each modified file with its predicted pull outcome; for incoming changes from other Macs use mm pull --dry-run (v0.14.15)
@@ -338,14 +336,12 @@ mm resolve [PATH]           # interactively resolve conflict files (unified diff
 mm autopull                 # silent pull for Claude Code (one-line output, never prompts)
 mm autopush                 # silent push for Claude Code (one-line output, never prompts)
 mm enable-source NAME       # turn a configured sync source ON for this machine
-                            # NAME=grok adds its scoped skills/ commands/ rules/
-                            # source and keeps [retro].grok_host_usage enabled
+                            # NAME=agy adds scoped skills/ rules/ AGENTS.md GEMINI.md sync and authorizes its usage reader
                             # NAME=muse adds its scoped memory/ source (never auto-enabled) and authorizes its usage reader
                             # NAME=cursor is a usage-only alias (no files sync): installs mm's stop hook in ~/.cursor/hooks.json, then sets [retro].cursor_host_usage (v1.5.0)
                             # an explicitly configured file source named cursor keeps its ordinary file-source toggle
 mm disable-source NAME [--force]   # turn a configured sync source OFF for this machine; --force accepts unknown names (forward-compat for not-yet-shipped sources)
-                            # NAME=grok disables that scoped source and clears
-                            # its retained usage-consent compatibility bit
+                            # retired grok/opencode names are rejected even with --force; use mm migrate-config
                             # NAME=cursor revokes that consent first, then removes mm's hook; a hooks.json mm cannot edit only warns
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
 mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
@@ -403,7 +399,7 @@ receipt or proof that another Mac has received a row. See
 This numbered algorithm is historical. For the current source-selection and
 publication gates, read [sync invariants](docs/invariants/sync.md); for
 attended push's conditional activity tail and exit contract, read
-[host usage capture](README.md#host-usage-capture-codex-and-grok) and
+[host usage capture](README.md#host-usage-capture) and
 [events/retro invariants](docs/invariants/events-retro.md).
 
 1. Acquire lockfile (`~/.config/mind-meld/mind-meld.lock`). Fail if another operation is running.
@@ -607,9 +603,9 @@ Each sync source has a type that determines how files are discovered:
 SYNCED_SUBDIRS = ["memory", "todos"]
 ```
 
-**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack` and for the Codex customization allowlist.
+**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack`, Codex and Antigravity customization allowlists.
 
-**`grok` type** — Claude-shaped walker for `~/.grok`. Hardcodes `skills/`, `commands/`, and `rules/` at the source root. Sessions, credentials, and `config.toml` are never entered. See [Host Interchangeability](#host-interchangeability).
+**Retired sources.** Standalone Grok Build and OpenCode sources are ignored on push and pull without creating deletion tombstones. `mm migrate-config` removes their obsolete config entries; it does not remove local files. The `grok` source type is no longer supported.
 
 **`muse` type** — Claude-shaped walker for `~/.local/share/muse`. Hardcodes `memory/` at the source root; Muse's `.muse-memory.lock` is excluded on push and pull. Sessions, the session index and bundled skills are never entered, and `~/.config/muse` is not a source. See [host parity](docs/designs/host-parity.md#muse-1x-minor-2026-10-14).
 
@@ -730,16 +726,14 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 ### Source Types
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
-- **`grok`** — Claude-shaped walker. Scans `skills/`, `commands/`, and `rules/` at `~/.grok`. Sessions and `auth.json` are never synced.
 - **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. The default source never auto-activates: only `mm enable-source muse`, or an explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it. Both prompts default to N.
-- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex customization allowlist.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex and Antigravity customization allowlists.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 - **`gstack` / `gstack-extend` / `mm-events`** — structured activity and the fleet event log.
 - **`codex`** — `skills/`, `plugins/`, `AGENTS.md`. Not `config.toml` (credentials). Not `sessions/`.
-
-**`grok` is a source type** (`type: "grok"`). The walker hardcodes `skills/`, `commands/`, and `rules/` at the source root — the same shape as Claude's hardcoded `memory/` + `todos/`. Sessions, `auth.json`, and `config.toml` are never walked. `mm enable-source grok` is the one verb: it appends the source and keeps the usage-consent bit so token totals still publish. See [Host Interchangeability](#host-interchangeability).
+- **`agy`** — `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`. Agent definitions, settings, hooks, credentials and conversation databases stay local. See [Host Interchangeability](#host-interchangeability).
 
 ### JSONL Merge on Pull
 
@@ -778,32 +772,32 @@ v2 manifests carry a `sources` dict keyed by source name. Compat with older on-d
 
 ## Host Interchangeability
 
-Claude, Codex, and Grok are the three hosts. They are peers for **fleet usage display**, not for **whole-home-directory sync**. Grok also has a narrow customization source. There is no OpenCode sync source and no OpenCode skill-link row. The design and the remaining work live in `docs/designs/host-parity.md`. This section is the product contract.
+[docs/SPEC.md](docs/SPEC.md#what-mm-syncs-and-reports) owns the supported host
+scope. Claude Code, Codex, Cursor, Muse and Antigravity feed fleet usage;
+Cursor runs count under their model family, including Grok. The Agents table
+orders Claude, Codex, Grok, Muse, Antigravity and Unclassified.
 
-### What "parity" means
-
-| If someone asks for… | The answer |
+| Host | Context sync and consent |
 |---|---|
-| Grok (or Codex) rows next to Claude on the fleet retro | Shipped in v1.1 as one `## Agents` table and one card `AGENTS` block; the rows share a unit. 18D is the Grok reader; 21A is consent + publish. Tracks 22A / 23A were the pre-1.1 card. |
-| Grok skills / home rules roaming across Macs | `type: "grok"` source. Walker hardcodes `skills/`, `commands/`, `rules/`. Same verb as usage: `mm enable-source grok`. |
-| `retro-fleet` installed into `~/.grok/skills` | No. Plan C resolved in v0.12.43: Grok 1.0.5 already discovers `~/.claude/skills` via default-on Claude compat, so mm maintains no Grok skill link. `mm diag --json` reports that under the sibling `host_skill_discovery` key, never as a `skill_links` row. |
-| Uploading Grok / Codex / Claude sessions | No. Claude does not sync `~/.claude/projects/**/*.jsonl` either. |
+| Claude Code | Project `memory/` and `todos/`; session transcripts stay local. |
+| Codex | `skills/`, `plugins/`, `AGENTS.md`; enabling the source also authorizes usage capture. |
+| Cursor | No built-in file source; `mm enable-source cursor` enrolls the CLI hook and authorizes local usage capture. |
+| Muse | `memory/` only; explicit opt-in authorizes local usage capture. |
+| Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config`; `mm enable-source agy` also authorizes conversation-step usage capture. |
 
-### Why we do not sync the Grok home root
+No host's session transcripts or credentials sync. Antigravity's conversation
+DBs remain outside its source root. On legacy configs, Muse and Antigravity
+remain unselected until explicitly enabled or selected in the interactive picker.
 
-Grok's installed root mixes `auth.json`, `config.toml`, session streams (`updates.jsonl` is not a metadata-only ledger), chat history, plans, tool output, logs, and worktrees. Walking `~/.grok` as `include_dirs: ["."]` would upload prompts. The `type: "grok"` walker never enters those trees.
+mm maintains `retro-fleet` skill links for Claude Code, Codex and Antigravity.
+Muse discovers `~/.claude/skills` itself. Standalone Grok Build and OpenCode
+support is retired: no reader, source walker, discovery probe or link reaper
+runs for them. Historical Grok usage and Grok models used through Cursor still
+appear in the Grok row.
 
-`mm enable-source grok` is now both: it appends the scoped `type: "grok"` source and authorizes the 18D reader. The walker never opens `sessions/` or `auth.json`. A root-level `include_dirs: ["."]` walk is not possible because those keys are not on the Claude-shaped row.
-
-### What the events tail still does not walk
-
-Claude's tail also emits a `sessions-snapshot` (repos, session counts, skill names). Codex and Grok do not. Their session files are not a metadata-only project ledger, and an encoded cwd on disk is a path, not something that goes on the wire. That gap is documented, not a missed 18D task. Do not close it by decoding host paths.
-
-### Planned follow-ups (not 18D / 21A)
-
-1. **Plan A (shipped, then superseded in v1.1):** Groups 22 and 23 rendered accepted host snapshots beside Claude totals, with coverage, not false zeros. v1.1 replaced that split card with one Agents table.
-2. **Plan B (Track 22B):** a `type: "grok"` source named `grok`. Walker hardcodes `skills/`, `commands/`, `rules/`. Never `sessions/`, credentials, or `config.toml`.
-3. **Plan C (resolved, v0.12.43):** mm maintains **no** Grok skill link. Grok 1.0.5 discovers `~/.claude/skills` at the same documented priority tier as `~/.grok/skills` (verified with `grok inspect --json`), so a fourth `skill_link` target would duplicate a link the host already reads. `mm diag` reports discovery under `host_skill_discovery` instead. Exit criterion for any future host: mm maintains a skill link only for hosts that do not discover `~/.claude/skills`. See `docs/designs/host-parity.md`.
+Claude's events tail also emits project/session/skill snapshots. The other
+host readers publish aggregate usage only; they do not publish encoded host
+paths as project identities.
 
 ---
 
@@ -821,7 +815,7 @@ Usage-capture warnings go to stderr with `prerequisites: <state>`, `readers`,
 `no-row`, `capture-failed`, `append-failed`, `max-file-size`, or
 `not-published: <cause>` tokens and an actionable remedy; most also state the
 content-sync outcome and link the [host usage
-capture](README.md#host-usage-capture-codex-and-grok) section. Capture failures do
+capture](README.md#host-usage-capture) section. Capture failures do
 not stop content sync. `push-failed` is a content-sync stop (an `Error:` line,
 exit 1), not a capture-only exit.
 

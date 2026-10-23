@@ -568,6 +568,8 @@ AGENT_ROW_ORDER: tuple[tuple[str, str], ...] = (
     ("claude", "Claude"),
     ("codex", "Codex"),
     ("grok", "Grok"),
+    ("muse", "Muse"),
+    ("agy", "Antigravity"),
     ("other", "Unclassified"),
 )
 """Display order for the unified Agents table and card block.
@@ -793,7 +795,7 @@ def aggregate_agent_usage(
             # versions. Never price one family's volume under another label.
             by_model = {}
         for model, usage in by_model.items():
-            family = host_usage.host_family(model)
+            family = _host_model_family(snap, model)
             if family not in _HOST_FAMILIES:
                 continue
             dest = fam_by_model.setdefault(family, {}).setdefault(
@@ -864,7 +866,7 @@ def aggregate_agent_usage(
                 per_family.setdefault(family, set()).add(cause)
         for family in touched:
             family_slice = {
-                m: u for m, u in by_model.items() if host_usage.host_family(m) == family
+                m: u for m, u in by_model.items() if _host_model_family(snap, m) == family
             }
             long_context = _long_context_cause(family_slice, incomplete=coverage_unknown)
             if long_context:
@@ -3655,6 +3657,19 @@ def _windowed_host_by_model(
     return merged, residual
 
 
+def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
+    """Preserve the recorded family for models promoted out of ``other``.
+
+    Older writers classified Muse and Gemini as ``other``. Keep their pricing
+    beside that accepted volume until the writer publishes the new family;
+    the ordinary day/counter reconciliation still bounds their combined sum.
+    """
+    family = host_usage.host_family(model)
+    if family in {"muse", "agy"} and family not in snap.lifetime_by_family:
+        return "other"
+    return family
+
+
 def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bool:
     """Check pricing attribution without rejecting a cross-version snapshot.
 
@@ -3674,7 +3689,7 @@ def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bo
         for model, usage in by_model.items():
             if not isinstance(model, str) or not isinstance(usage, dict):
                 continue
-            family = host_usage.host_family(model)
+            family = _host_model_family(snap, model)
             dest = classified.setdefault(family, token_usage.zero_model_bucket())
             token_usage.merge_usage_bucket(dest, usage)
         for family, usage in classified.items():
@@ -3780,7 +3795,7 @@ def _agent_coverage_notes(
             # the latter as a consent failure.
             notes.append(
                 "No agent-log reader contributed on any machine. If no source is enabled, "
-                "enable with `mm enable-source codex` (or `grok` / `muse`), then "
+                "enable with `mm enable-source codex` (or `cursor`, `muse`, or `agy`), then "
                 f"{_attended_usage_remedy()}; readers with no attributable local ledger "
                 "are also omitted."
             )
@@ -4362,6 +4377,8 @@ def _render_health_block(health: list[dict]) -> list[str]:
             "cursor_url": "https://cursor.com/docs/models/grok-4-7",
             "xai_verified": token_usage.PRICING_XAI_LAST_UPDATED,
             "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
+            "google_verified": token_usage.PRICING_GOOGLE_LAST_UPDATED,
+            "google_url": "https://ai.google.dev/gemini-api/docs/pricing",
             "basis": (
                 "Historical usage is repriced at the rates bundled with this mm release. "
                 "Not subscription spend. `~` is an estimate, `≥` a floor, `—` unavailable "

@@ -2126,135 +2126,12 @@ class TestUserRemovedLink:
         assert "installation failed" not in result.output
 
 
-class TestRetiredOpencodeSkillLink:
-    def test_mm_owned_opencode_link_is_removed_but_a_user_link_is_left(
-        self, _isolate_paths, skill_src, store, config_dir
-    ):
-        """Track 37C reaper: mm unlinks only a store-backed symlink."""
-        skill_link._ensure_retro_skill_links(may_create=None)
-        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
-        opencode_link.parent.mkdir(parents=True, exist_ok=True)
-        checked = config_dir / ".opencode-skill-link-checked"
-        conflict = config_dir / ".opencode-skill-link-conflict"
-
-        opencode_link.symlink_to(store)
-        checked.touch()
-        conflict.touch()
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert not opencode_link.exists()
-        assert not opencode_link.is_symlink()
-        assert not checked.exists()
-        assert not conflict.exists()
-
-        opencode_link.write_text("user file")
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert opencode_link.read_text() == "user file"
-
-        opencode_link.unlink()
-        opencode_link.mkdir()
-        (opencode_link / "SKILL.md").write_text("user dir")
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert opencode_link.is_dir()
-        assert (opencode_link / "SKILL.md").read_text() == "user dir"
-
-        import shutil
-
-        shutil.rmtree(opencode_link)
-        elsewhere = _isolate_paths / "elsewhere-skill"
-        elsewhere.mkdir()
-        opencode_link.symlink_to(elsewhere)
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert opencode_link.is_symlink()
-        assert os.readlink(opencode_link) == str(elsewhere)
-
-        opencode_link.unlink()
-        opencode_link.symlink_to(store)
-        shutil.rmtree(store)
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert not opencode_link.exists()
-        assert not opencode_link.is_symlink()
-
-        missing = _isolate_paths / "missing-skill"
-        opencode_link.symlink_to(missing)
-        skill_link._ensure_retro_skill_links(may_create=None)
-        assert opencode_link.is_symlink()
-        assert os.readlink(opencode_link) == str(missing)
-
-    def test_reaper_is_a_no_op_on_dry_run_and_autopush(
-        self, _isolate_paths, skill_src, store, config_dir
-    ):
-        skill_link._ensure_retro_skill_links(may_create=None)
-        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
-        opencode_link.parent.mkdir(parents=True, exist_ok=True)
-        checked = config_dir / ".opencode-skill-link-checked"
-        conflict = config_dir / ".opencode-skill-link-conflict"
-        opencode_link.symlink_to(store)
-        checked.touch()
-        conflict.touch()
-
-        skill_link._ensure_retro_skill_links(dry_run=True, may_create=None)
-        assert opencode_link.is_symlink()
-        assert os.readlink(opencode_link) == str(store)
-        assert checked.exists()
-        assert conflict.exists()
-
-        skill_link._ensure_retro_skill_links(allow_mutate=False, may_create=None)
-        assert opencode_link.is_symlink()
-        assert os.readlink(opencode_link) == str(store)
-        assert checked.exists()
-        assert conflict.exists()
-
-    def test_interactive_push_reaps_even_when_drift_gate_is_shut(
-        self, _isolate_paths, skill_src, store, monkeypatch
-    ):
-        skill_link._ensure_retro_skill_links(may_create=None)
-        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
-        opencode_link.parent.mkdir(parents=True, exist_ok=True)
-        opencode_link.symlink_to(store)
-        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
-        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
-        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
-        monkeypatch.setattr(
-            cli_module,
-            "resolve_sources",
-            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
-        )
-        config = {
-            "device": {"id": "dev-a", "name": "Mac A"},
-            "sync": {"max_file_size": 1024},
-        }
-        assert cli_module._push_core(config, "pw", 1024) is None
-        assert not opencode_link.exists()
-        assert not opencode_link.is_symlink()
-
-    def test_autopush_does_not_reap_when_drift_gate_is_shut(
-        self, _isolate_paths, skill_src, store, monkeypatch
-    ):
-        skill_link._ensure_retro_skill_links(may_create=None)
-        opencode_link = _isolate_paths / ".config" / "opencode" / "skills" / "retro-fleet"
-        opencode_link.parent.mkdir(parents=True, exist_ok=True)
-        opencode_link.symlink_to(store)
-        monkeypatch.setattr(skill_link, "_skill_links_check_due", lambda *, may_create: False)
-        monkeypatch.setattr(cli_module, "get_backend", lambda _config: object())
-        monkeypatch.setattr(cli_module, "_ensure_device_registered", lambda *_a, **_k: None)
-        monkeypatch.setattr(
-            cli_module,
-            "resolve_sources",
-            lambda *_a, **_k: cli_module.SourceResolution(selected=[], available=[]),
-        )
-        config = {
-            "device": {"id": "dev-a", "name": "Mac A"},
-            "sync": {"max_file_size": 1024},
-        }
-        assert cli_module._push_core(config, "pw", 1024, quiet=True) is None
-        assert opencode_link.is_symlink()
-        assert os.readlink(opencode_link) == str(store)
-
+class TestUnsupportedSkillAgents:
     def test_skills_agents_that_becomes_empty_after_retirement_surfaces_a_notice(
         self, _isolate_paths, capsys, monkeypatch
     ):
         monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
-        cfg = _write_mm_config(_isolate_paths, agents=["opencode"])
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent"])
         granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
         assert granted == frozenset()
         skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
@@ -2267,7 +2144,7 @@ class TestRetiredOpencodeSkillLink:
         self, _isolate_paths, capsys, monkeypatch
     ):
         monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
-        cfg = _write_mm_config(_isolate_paths, agents=["opencode", "claude"])
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent", "claude"])
         granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
         assert granted == frozenset({"claude"})
         err = capsys.readouterr().err
@@ -2278,7 +2155,7 @@ class TestRetiredOpencodeSkillLink:
         self, _isolate_paths, capsys, monkeypatch
     ):
         monkeypatch.setattr(skill_link, "_EMPTY_AGENTS_NOTICE_EMITTED", False)
-        cfg = _write_mm_config(_isolate_paths, agents=["opencode"], maintain_links=False)
+        cfg = _write_mm_config(_isolate_paths, agents=["retired-agent"], maintain_links=False)
         granted = skill_link.consented_agent_keys(cfg, sources=cfg["sync"]["sources"])
         assert granted == frozenset()
         err = capsys.readouterr().err
@@ -2313,3 +2190,22 @@ class TestShellCompletion:
         opts = {name for param in typer.main.get_command(app).params for name in param.opts}
         assert "--install-completion" in opts
         assert "--show-completion" in opts
+
+
+@pytest.mark.parametrize("allow_mutate", [False, True])
+def test_agy_install_creates_nested_private_config_only_when_mutating(
+    _isolate_paths, skill_src, allow_mutate
+):
+    """The host root can exist before Antigravity creates its config tree."""
+    agent_root = _isolate_paths / ".gemini"
+    agent_root.mkdir()
+    config_root = agent_root / "config"
+    result = _install("agy", allow_mutate=allow_mutate)
+    if allow_mutate:
+        assert result.status == "installed"
+        assert config_root.stat().st_mode & 0o777 == 0o700
+        assert (config_root / "skills").stat().st_mode & 0o777 == 0o700
+        _assert_store_link(config_root / "skills" / "retro-fleet")
+    else:
+        assert not config_root.exists()
+        assert result.status != "installed"

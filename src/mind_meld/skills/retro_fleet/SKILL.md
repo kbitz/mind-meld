@@ -50,7 +50,7 @@ deterministic padding solves it without making the card content dumber.
 
 ## One table, every agent
 
-Claude, Codex and Grok are reported **identically**: fleet-summed tokens,
+Claude, Codex, Grok, Muse, and Antigravity are reported **identically**: fleet-summed tokens,
 active days, contributing machines, estimated cost, top model. Both the card's
 `AGENTS` block and the body's `## Agents` table use that one shape.
 
@@ -75,8 +75,7 @@ Four things are still true and still matter:
    inclusive counters use `legacy_counters`, with affected machines and an
    upgrade remedy, and never carry numeric or extrapolated pricing claims.
 3. **Sources still differ.** Claude's tokens come from Claude Code session
-   logs; Codex, Grok and Muse come from each machine's local agent ledger
-   (Muse models currently sit in the Unclassified row). Both are
+   logs; Codex, Cursor, Muse, and Antigravity come from each machine's local agent ledger. Both are
    fleet sums; both can double-count a migrated home directory. The detector
    below flags possible host-ledger overlap; it does not prove that Claude Code
    session histories are disjoint.

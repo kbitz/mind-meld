@@ -421,113 +421,44 @@ prevent publication.
 
 **PROGRESS row convention (load-bearing).** The PROGRESS.md row goes in the SAME PR as the `pyproject.toml` + `CHANGELOG.md` bump — not a workflow side-effect. The original v0.11.24 design tried to auto-append via `git push` from the workflow, which was rejected by branch protection ("Changes must be made through a pull request") on every release where the row wasn't already in the PR. v0.11.23 only "succeeded" because the row was pre-added in the PR and the script's idempotent-skip exited 0 before the push. v0.11.24 and v0.11.27 both hit the wall and shipped without rows. Lesson: a workflow that pushes to a protected branch is broken by definition; don't reintroduce that step. The row format mirrors what the old auto-append produced — CHANGELOG body lead paragraph (text from `## [version]` to first `### Section` or next `## [`), pipes escaped, single line, inserted directly after the `|---|---|---|` separator (newest at top). **The row is now CI-enforced** (Track 16A): `tests/test_docs_routing.py::test_every_changelog_version_has_a_progress_row` fails any PR that bumps the version without adding the row, enforced from 0.11.0 forward. That closes the recurrence the v0.11.24 auto-append design could not — a workflow that pushes to a protected branch is broken by definition, but a test in the PR is not. Still does NOT solve parallel-workspace version collisions (two open PRs both claiming the same version slot) — that remains deferred.
 
-## Compatibility (1.x)
+<a id="storage-format-gates"></a>
+<a id="compatibility-1x"></a>
 
-> **Retired on 2026-10-19 by [docs/SPEC.md](../SPEC.md) release policy, except
-> the storage-format gates:** an mm still refuses storage written in a format it
-> cannot read. Command, flag, config, output, token-field and host-family
-> stability is no longer promised. Track 79A removes the tripwire tests and
-> rewrites this section; until then it describes code, not policy.
+## Storage-format gates
 
-1.0 freezes the interoperable storage/wire formats, command and flag names,
-positional arguments, documented prompt keys, `config.toml` keys, exit-code
-meanings, and the machine-readable surfaces listed below. Mixed 0.14.x/1.0.0
-fleets interoperate: this release changes no wire or storage format.
+Mind Meld has one user and makes no compatibility promise beyond its storage
+formats: an older mm refuses storage written in a format it cannot read and tells
+you to upgrade. Commands, flags, config keys, exit codes, and output can change
+in any release under the release policy in [docs/SPEC.md](../SPEC.md).
 
-| Release | Classification |
-|---|---|
-| MAJOR | A change after which a 1.x peer cannot read newer storage or sync with its writer; removing/renaming a command, flag, argument, documented prompt key, config key or stable output field; incompatible argument type/arity/requiredness/choices; changing an exit meaning, including making a currently successful outcome fail. |
-| MINOR | Compatible additions: commands, flags, optional config keys, output fields and enum values **where existing readers tolerate them**. Also changes needing downgrade care, and raising the Python floor, announced in Upgrade notes. |
-| PATCH | Other compatible fixes, including repairs to best-effort vendor usage readers. |
-
-**MAJOR exceptions to additive changes:** a new host family, token counter
-field, reordering known token-source names, or changing the device-registry
-field contract. Host families are closed (`host_usage.HostFamily` and
-`aggregator._accept_hosts_payload`); token buckets require exactly
-`TOKEN_FIELDS` (`aggregator._copy_usage_bucket`). Known token-source order is
-checked by `_token_sources_subsequence`. The registry's `device_id`,
-`device_name`, `registered`, `last_seen`, and `last_seen_version` are pinned;
-`_list_devices_impl` requires identity/name and the fleet gate interprets the
-last-seen version. A missing last-seen version on a never-pushed legacy device
-retains its existing treatment. `test_closed_vocabularies` and
-`test_device_registry_writer_fields` enforce these exceptions.
-
-There is no blanket unknown-value promise. Existing behavior is:
-
-- Host snapshot unknown **top-level** fields are ignored by
-  `_accept_host_usage_snapshot`; unknown nested families or token keys reject
-  the row. A new reader/token-source name is MINOR: bounded unknown names are
-  retained by `_token_sources_subsequence`, with known names still ordered.
-- `manifest.load_manifest` preserves unknown top-level metadata while
-  validating known sources/tombstones; it does not make arbitrary changes
-  to known fields safe. Event consumers dispatch by `type` and ignore types
-  they do not consume (`aggregate_pushes`, `aggregate_host_usage`).
-- Consumers of additive public JSON fields must ignore unfamiliar keys;
-  enum additions qualify as MINOR only after checking the affected reader.
-  Do not infer tolerance of nested values from top-level tolerance.
-
-**Both sides of a format-changing MAJOR must refuse safely.** The
-`mm-crypto-init` version byte is the older-side gate. Any MAJOR changing blob,
+**Both sides of a format-changing release must refuse safely.** The
+`mm-crypto-init` version byte is the older-side gate. Any release changing blob,
 manifest, mm-events row, or conflict-filename formats must bump that byte in
 the same release, within the reserved **0x03–0x0F** window. Future blob bytes
 must also stay in that window. Write new crypto-init before any new-format
 manifest/blob. The newer-side fleet gate must refuse while any registered
-peer runs below 1.0.0, because 0.14.x lacks the older-side protection; extend
-the `_check_fleet_version_or_refuse` pattern for that release.
+peer runs an older format.
 
-In 1.0, any observed newer crypto-init copy refuses selection and repair;
+In 1.0+, any observed newer crypto-init copy refuses selection and repair;
 repair re-fetches before mutation and again immediately before replacing
 canonical. iCloud can deliver files out of order: with an older init still
 visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
 sibling, so pull skips that peer and GC leaves its namespace untouched. GC
 refuses only on this device's own manifest, when it is unreadable (including a
 late newer-format recheck) or held only by conflict copies; the shared
-crypto-init gate still refuses every crypto session.
-Push rewrites only this
-Mac's own manifest. A push
-can finish publication and then exit 1 when required auto-GC refuses. Newer
-blob errors reach the per-file pull warning; manifest validators intentionally
-fold them into corruption. These are the implemented limits, not an
-iCloud-wide transaction. `TestNewerFormats66A`, `TestNewerStorage66A`, and
-[the init invariant](init-devices.md#newer-format-refusal-track-66a-v100)
+crypto-init gate still refuses every crypto session. Push rewrites only this
+Mac's own manifest. A push can finish publication and then exit 1 when required
+auto-GC refuses. Newer blob errors reach the per-file pull warning; manifest
+validators intentionally fold them into corruption. `TestNewerFormats66A`,
+`TestNewerStorage66A`, and [the init invariant](init-devices.md#newer-format-refusal-track-66a-v100)
 pin the gate, late-copy recheck and arrival windows.
 
-**Machine-readable surfaces:**
-
-| Surface | Stable scope |
-|---|---|
-| `diag --json` | Top-level keys pinned by `_DIAG_JSON_TOP_LEVEL` in `tests/test_docs_routing.py`, plus the fields documented in README (including `crypto_init.newer_version`). Other nested diagnostics may change in a MINOR. |
-| `refresh-identity --json` | The documented identity result fields. |
-| `devices --format json` | Device records and their existing field meanings. |
-| `log --format jsonl` | Existing history row fields; row variants retain their own shapes. |
-| `retro-fleet --dump-host-usage` | Existing forensic inventory fields and meanings. |
-| `MM_THEMES_PROMPT` JSON block in `retro-fleet` | Versioned with SKILL.md; additive fields are MINOR. |
-
-Plain-text status/diag/pull output, prompt wording, defaults (including
-`exclude_patterns`), and private vendor usage formats are not stable surfaces.
-Host readers remain best-effort: vendor format repairs are PATCH or MINOR.
-Framework-owned `--help`, completion options and parse-error presentation are
-excluded from the CLI golden; their usage errors remain documented exit 2.
-The supported Python floor is `requires-python`; CI qualifies Python 3.13
-(macOS) and 3.14 (Linux) only. A higher floor is MINOR with Upgrade notes, not
-evidence that other interpreters were tested.
-
-**Exit outcomes:** [one README table](../../README.md#exit-codes) is the
-operator reference, including post-parse value errors (1), usage errors (2),
-pull preflight (3), and partial recapture (4). Valid autopull/autopush
-invocations exit 0 even on refusal or contained apply failures. Track 78A makes
-attended partial-pull failures exit 1 without an opt-in flag under the current
-SPEC policy; preflight remains 3. The retired 1.x policy does not govern this change.
-`tests/test_compat_contract.py:EXIT_EVIDENCE` maps every outcome to behavioral
-tests and checks those references exist. Its all-module exit AST scan is
-supplementary, not a substitute for those tests.
-
-**Deprecation and downgrade:** a deprecated item keeps working until its
-named removal MAJOR and emits `mm: notice:` naming that MAJOR when used.
-`--no-save` remains a hidden no-op until **2.0**. Retired prompt keys `b`,
-`both`, `c`, and `f` are never reassigned during 1.x. The prompt fallback
-tests in `test_conflict_copy.py` and no-op tests in
-`test_retro_fleet_aggregator.py` pin today's behavior.
+**Peer snapshot compatibility:**
+Host usage snapshot records (`host-usage-snapshot`) validate known host families
+and model tokens. An un-upgraded peer that does not yet recognize `"muse"` or
+`"agy"` drops incoming snapshots carrying those families until it updates. Content
+sync is unaffected. Upgrading the peer restores full fleet aggregation in
+`retro-fleet`.
 
 Rollback within 1.x is a reinstall unless an intervening MINOR's Upgrade
 notes say otherwise. The upgrade nudge selects the highest release tag and

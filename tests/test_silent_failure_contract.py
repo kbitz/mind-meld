@@ -99,7 +99,7 @@ def _enable_test_host_source(tmp_path, reader, *, disabled=False):
     cfg["sync"]["sources"].append(
         {
             "name": reader,
-            "type": "grok" if reader == "grok" else "generic",
+            "type": "muse" if reader == "muse" else "generic",
             "path": str(source),
             **({"include_dirs": ["skills"]} if reader == "codex" else {}),
         }
@@ -120,12 +120,12 @@ def _enable_test_host_source(tmp_path, reader, *, disabled=False):
     save_config(cfg, CONFIG_PATH)
 
 
-@pytest.mark.parametrize("reader", ["codex", "grok"])
+@pytest.mark.parametrize("reader", ["codex", "muse"])
 @pytest.mark.parametrize("reason", sorted(_mm_host_usage.PERSISTABLE_REASONS))
 def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch, reader, reason):
     _setup_real_config(tmp_path, monkeypatch)
     _enable_test_host_source(tmp_path, reader)
-    cache = _mm_host_usage.CACHE_PATH if reader == "codex" else _mm_host_usage.GROK_CACHE_PATH
+    cache = _mm_host_usage.CACHE_PATH if reader == "codex" else _mm_host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
         json.dumps(
@@ -244,20 +244,19 @@ def test_status_and_diag_inventory_nags_when_no_blocker(tmp_path, monkeypatch):
 def test_autopush_failed_codex_read_reaches_status_after_noop_success(tmp_path, monkeypatch):
     from tests.test_host_usage import (
         _context,
-        _grok_turn,
         _token,
-        _write_grok_session,
+        _write_muse_session,
         _write_rollout,
     )
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
     _mm_token_usage.warm_token_cache_inline([claude_root])
     _enable_test_host_source(tmp_path, "codex")
-    _enable_test_host_source(tmp_path, "grok")
+    _enable_test_host_source(tmp_path, "muse")
     bad = _token(100)
     bad["payload"]["info"]["total_token_usage"]["input_tokens"] = "unreadable"
     _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-failing.jsonl", [_context(), bad])
-    _write_grok_session(_mm_host_usage.GROK_SESSIONS_PATH, lines=[_grok_turn()])
+    _write_muse_session(_mm_host_usage.MUSE_SESSIONS_PATH)
 
     first = runner.invoke(app, ["autopush"])
     assert first.exit_code == 0, first.output
@@ -271,7 +270,7 @@ def test_autopush_failed_codex_read_reaches_status_after_noop_success(tmp_path, 
         for line in path.read_text().splitlines()
     ]
     snapshot = next(row for row in rows if row["type"] == "host-usage-snapshot")
-    assert snapshot["token_sources"] == ["grok"]
+    assert snapshot["token_sources"] == ["muse"]
     assert snapshot["degraded_sources"] == ["codex"]
     for attempt in range(2):
         status = runner.invoke(app, ["status"])
@@ -2072,14 +2071,11 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
 
     iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
     token_usage.warm_token_cache_inline([claude_root])
-    from mind_meld.config import CONFIG_PATH, load_config, save_config
 
-    cfg = load_config(CONFIG_PATH)
-    cfg["retro"] = {"grok_host_usage": True}
-    save_config(cfg, CONFIG_PATH)
+    _enable_test_host_source(tmp_path, "muse")
     monkeypatch.setattr(
         _mm_host_usage,
-        "read_grok_usage",
+        "read_muse_usage",
         lambda **_kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
     )
 
@@ -2088,10 +2084,10 @@ def test_autopush_breadcrumb_degraded_when_host_snapshot_is_withheld(tmp_path, m
     payload = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
     assert payload["outcome"] == "degraded", payload
     assert payload["detail"] == (
-        "host-usage snapshot skipped (grok unsupported) — "
+        "host-usage snapshot skipped (muse unsupported) — "
         "content sync and git/session capture unaffected. "
-        "grok wrote a record this version cannot read. A newer mm may read it: "
-        "run `mm update`, or run `mm disable-source grok` to stop retrying."
+        "muse wrote a record this version cannot read. A newer mm may read it: "
+        "run `mm update`, or run `mm disable-source muse` to stop retrying."
     )
     # Safe by construction: no path, transcript, query, or exception text.
     assert str(tmp_path) not in payload["detail"]

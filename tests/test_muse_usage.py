@@ -95,7 +95,7 @@ def test_fixture_totals_are_disjoint_and_attribution_is_not_counted(muse_cache):
     result = hu.read_muse_usage(FIXTURES, consented=True)
     assert result.complete
     assert result.hosts == {
-        "other": {
+        "muse": {
             "2026-10-13": {"input": 1200, "cache_create": 0, "cache_read": 500, "output": 170},
             "2026-10-14": {"input": 0, "cache_create": 0, "cache_read": 300, "output": 30},
         }
@@ -150,7 +150,7 @@ def test_equal_duplicate_counts_once_and_conflict_refuses(muse_cache, tmp_path):
     _write_session(tmp_path, [record, record])
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-13"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-13"]["input"] == 60
 
     conflict = _record("e1", _usage(input_tokens=200))
     _write_session(tmp_path, [record, conflict])
@@ -177,7 +177,7 @@ def test_step_restated_in_another_log_counts_once_and_conflict_refuses(muse_cach
     _write_session(tmp_path, [record], session="s1/subagent/c1")
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-13"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-13"]["input"] == 60
 
     _write_session(tmp_path, [_record("e1", _usage(output_tokens=11))], session="s2")
     refused = hu.read_muse_usage(tmp_path, consented=True)
@@ -212,14 +212,14 @@ def test_recorded_at_out_of_bounds_refuses(muse_cache, tmp_path, stamp, reason):
 def test_append_resume_picks_up_new_steps(muse_cache, tmp_path):
     path = _write_session(tmp_path, [_record("e1", _usage())])
     first = hu.read_muse_usage(tmp_path, consented=True)
-    assert first.hosts["other"]["2026-10-13"]["output"] == 10
+    assert first.hosts["muse"]["2026-10-13"]["output"] == 10
 
     with path.open("a") as fp:
         fp.write(json.dumps(_record("e2", _usage(output_tokens=7))) + "\n")
     second = hu.read_muse_usage(tmp_path, consented=True)
     assert second.complete
-    assert second.hosts["other"]["2026-10-13"]["output"] == 17
-    assert second.hosts["other"]["2026-10-13"]["input"] == 120
+    assert second.hosts["muse"]["2026-10-13"]["output"] == 17
+    assert second.hosts["muse"]["2026-10-13"]["input"] == 120
 
 
 def test_nonzero_cache_write_marks_the_day_partial(muse_cache, tmp_path):
@@ -227,7 +227,7 @@ def test_nonzero_cache_write_marks_the_day_partial(muse_cache, tmp_path):
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
     assert result.partial_days == frozenset({"2026-10-13"})
-    assert result.hosts["other"]["2026-10-13"]["cache_create"] == 5
+    assert result.hosts["muse"]["2026-10-13"]["cache_create"] == 5
 
 
 def test_symlinked_session_log_is_never_read(muse_cache, tmp_path):
@@ -237,24 +237,16 @@ def test_symlinked_session_log_is_never_read(muse_cache, tmp_path):
     (link_dir / "session.jsonl").symlink_to(real)
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-13"]["output"] == 10
+    assert result.hosts["muse"]["2026-10-13"]["output"] == 10
 
 
-def test_muse_models_stay_unclassified_in_1x():
-    # A "muse" host family is a MAJOR under the 1.x compatibility
-    # contract; the reader name is the MINOR. Models classify as
-    # "other" until 2.0 rewrites the contract.
-    assert hu.host_family("muse-wonder-full-1.0") == "other"
-    assert hu.host_family("MUSE-Spark-1.3") == "other"
+def test_muse_models_classify_as_muse():
+    assert hu.host_family("muse-wonder-full-1.0") == "muse"
+    assert hu.host_family("MUSE-Spark-1.3") == "muse"
 
 
 def test_muse_snapshot_row_is_accepted_by_the_aggregator(muse_cache):
-    """Writer -> wire -> acceptor, the MINOR contract end to end.
-
-    The muse reader name rides in ``token_sources`` (retained by older
-    peers as an unknown-but-bounded name) while its models stay in the
-    closed ``other`` family, so no 1.x peer rejects the row.
-    """
+    """Writer -> wire -> acceptor, the muse family contract end to end."""
     from mind_meld import events
     from mind_meld.skills.retro_fleet import aggregator
 
@@ -268,7 +260,7 @@ def test_muse_snapshot_row_is_accepted_by_the_aggregator(muse_cache):
     accepted = aggregator._accept_host_usage_snapshot(dict(row))
     assert isinstance(accepted, aggregator._AcceptedHostRow), accepted
     assert accepted.consulted == ("muse",)
-    assert accepted.lifetime_by_family["other"]["2026-10-13"]["output"] == 170
+    assert accepted.lifetime_by_family["muse"]["2026-10-13"]["output"] == 170
 
 
 def test_muse_contract_census_pin_matches_src_constant():
@@ -289,7 +281,7 @@ def test_unchanged_log_is_a_stat_only_hit_and_append_resumes(muse_cache, tmp_pat
     with monkeypatch.context() as m:
         m.setattr(hu, "_read_full_muse_file", Mock(side_effect=AssertionError("full re-read")))
         second = hu.read_muse_usage(tmp_path, consented=True)
-    assert second.hosts["other"]["2026-10-13"]["output"] == 17
+    assert second.hosts["muse"]["2026-10-13"]["output"] == 17
 
 
 def test_rewritten_log_rewalks_without_double_counting(muse_cache, tmp_path):
@@ -300,9 +292,9 @@ def test_rewritten_log_rewalks_without_double_counting(muse_cache, tmp_path):
         "".join(json.dumps(r) + "\n" for r in [_record("e1", _usage()), _record("e2", _usage())])
     )
     os.replace(tmp, path)  # new inode, grown
-    assert hu.read_muse_usage(tmp_path, consented=True).hosts["other"]["2026-10-13"]["input"] == 120
+    assert hu.read_muse_usage(tmp_path, consented=True).hosts["muse"]["2026-10-13"]["input"] == 120
     path.write_text(json.dumps(_record("e2", _usage())) + "\n")  # same inode, shrunk
-    assert hu.read_muse_usage(tmp_path, consented=True).hosts["other"]["2026-10-13"]["input"] == 60
+    assert hu.read_muse_usage(tmp_path, consented=True).hosts["muse"]["2026-10-13"]["input"] == 60
     with path.open("r+") as fp:  # same inode, grown, head changed
         fp.truncate(0)
         fp.write(
@@ -312,7 +304,7 @@ def test_rewritten_log_rewalks_without_double_counting(muse_cache, tmp_path):
             + "\n"
         )
     result = hu.read_muse_usage(tmp_path, consented=True)
-    assert result.hosts["other"]["2026-10-13"] == {
+    assert result.hosts["muse"]["2026-10-13"] == {
         "input": 120,
         "cache_create": 0,
         "cache_read": 80,
@@ -323,7 +315,7 @@ def test_rewritten_log_rewalks_without_double_counting(muse_cache, tmp_path):
 def test_cache_write_is_subtracted_from_inclusive_input(muse_cache, tmp_path):
     _write_session(tmp_path, [_record("e1", _usage(cache_write_tokens=5))])
     result = hu.read_muse_usage(tmp_path, consented=True)
-    assert result.hosts["other"]["2026-10-13"] == {
+    assert result.hosts["muse"]["2026-10-13"] == {
         "input": 55,
         "cache_create": 5,
         "cache_read": 40,
@@ -345,7 +337,7 @@ def test_walk_descends_only_literal_subagent_dirs(muse_cache, tmp_path):
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
     # s1 + grandchild g1 + s3 once; other/ and the symlinked child are never walked.
-    assert result.hosts["other"]["2026-10-13"]["input"] == 180
+    assert result.hosts["muse"]["2026-10-13"]["input"] == 180
 
 
 def test_settled_day_freezes_and_is_never_reopened(muse_cache, tmp_path, monkeypatch):
@@ -363,7 +355,7 @@ def test_settled_day_freezes_and_is_never_reopened(muse_cache, tmp_path, monkeyp
         m.setattr(hu, "_read_muse_file", Mock(side_effect=AssertionError("reopened")))
         again = hu.read_muse_usage(tmp_path, consented=True)
     assert again == first
-    assert again.hosts["other"]["2026-10-10"]["input"] == 60
+    assert again.hosts["muse"]["2026-10-10"]["input"] == 60
     diag = hu.muse_usage_diag(count_logs=False)
     assert diag["files_cached"] == 2
     assert diag["models"] == ["muse-wonder-1.0"]
@@ -390,7 +382,7 @@ def test_frozen_day_that_grows_is_unfrozen_and_recounted(muse_cache, tmp_path):
     _age(path, timedelta(hours=1))
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-10"]["output"] == 15
+    assert result.hosts["muse"]["2026-10-10"]["output"] == 15
     assert _cache(muse_cache)["frozen"] == {}
 
 
@@ -424,7 +416,7 @@ def test_attended_budget_checks_every_frozen_day(muse_cache, tmp_path):
     _settled_session(tmp_path, "d", "2026/10/10")
     first = hu.read_muse_usage(tmp_path, consented=True)
     assert set(_cache(muse_cache)["frozen"]) == {"2026/10/08", "2026/10/09", "2026/10/10"}
-    assert first.hosts["other"]["2026-10-08"]["input"] == 120
+    assert first.hosts["muse"]["2026-10-08"]["input"] == 120
 
     pruned.unlink()
     with resumed.open("a") as fp:
@@ -436,9 +428,9 @@ def test_attended_budget_checks_every_frozen_day(muse_cache, tmp_path):
     _settled_session(tmp_path, "e", "2026/10/10", session="s9")
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-08"]["input"] == 60
-    assert result.hosts["other"]["2026-10-09"]["output"] == 15
-    assert result.hosts["other"]["2026-10-10"]["input"] == 120
+    assert result.hosts["muse"]["2026-10-08"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-09"]["output"] == 15
+    assert result.hosts["muse"]["2026-10-10"]["input"] == 120
 
 
 def test_deadline_while_unfreezing_keeps_the_frozen_day(muse_cache, tmp_path, monkeypatch):
@@ -454,7 +446,7 @@ def test_deadline_while_unfreezing_keeps_the_frozen_day(muse_cache, tmp_path, mo
     assert _cache(muse_cache)["frozen"] == frozen
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-10"]["input"] == 120
+    assert result.hosts["muse"]["2026-10-10"]["input"] == 120
 
 
 def test_history_copied_into_a_later_session_refuses(muse_cache, tmp_path):
@@ -474,7 +466,7 @@ def test_days_sharing_a_step_stay_live_and_count_it_once(muse_cache, tmp_path):
         _age(_write_session(tmp_path, [shared], day=day), timedelta(days=3))
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-09"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-09"]["input"] == 60
     assert _cache(muse_cache)["frozen"] == {}
 
 
@@ -487,7 +479,7 @@ def test_pre_release_cache_layout_is_rebuilt(muse_cache, tmp_path):
         entry["turns"][0]["key"] = "0" * 64
     muse_cache.write_text(json.dumps(cache))
     rebuilt = hu.read_muse_usage(tmp_path, consented=True)
-    assert rebuilt.hosts["other"]["2026-10-13"]["input"] == 60
+    assert rebuilt.hosts["muse"]["2026-10-13"]["input"] == 60
     cache = _cache(muse_cache)
     assert cache["muse_format"] == hu._MUSE_CACHE_FORMAT
     assert all(entry["turns"][0]["key"] != "0" * 64 for entry in cache["files"].values())
@@ -594,8 +586,8 @@ def test_line_caught_mid_append_is_partial_then_counted(muse_cache, tmp_path):
         fp.write(tail[40:] + "\n")
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-13"]["output"] == 17
-    assert result.hosts["other"]["2026-10-13"]["input"] == 120
+    assert result.hosts["muse"]["2026-10-13"]["output"] == 17
+    assert result.hosts["muse"]["2026-10-13"]["input"] == 120
 
 
 def _negative_counter(record: dict) -> None:
@@ -649,7 +641,7 @@ def test_malformed_frozen_record_is_recounted_from_logs(muse_cache, tmp_path, ta
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
     assert result == first
-    assert result.hosts["other"]["2026-10-10"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-10"]["input"] == 60
     assert _cache(muse_cache)["frozen"] == original
 
 
@@ -663,7 +655,7 @@ def test_freezing_keeps_a_same_day_restated_step_counted_once(muse_cache, tmp_pa
         _settled_session(tmp_path, "shared", "2026/10/10", session=session)
     first = hu.read_muse_usage(tmp_path, consented=True)
     assert first.complete
-    assert first.hosts["other"]["2026-10-10"]["input"] == 60
+    assert first.hosts["muse"]["2026-10-10"]["input"] == 60
     frozen = _cache(muse_cache)["frozen"]["2026/10/10"]
     assert frozen["logs"] == 2
     assert frozen["days"]["2026-10-10"]["muse-wonder-1.0"]["input"] == 60
@@ -680,7 +672,7 @@ def test_old_day_directories_are_read_and_counted(muse_cache, tmp_path, monkeypa
     monkeypatch.setattr(hu, "MUSE_SESSIONS_PATH", tmp_path)
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert set(result.hosts["other"]) == {"2026-07-01", "2026-10-13"}
+    assert set(result.hosts["muse"]) == {"2026-07-01", "2026-10-13"}
     assert hu.muse_usage_diag(count_logs=True)["files_on_disk"] == 2
     assert hu.muse_usage_diag()["files_on_disk"] is None  # fail closed
 
@@ -700,7 +692,7 @@ def test_a_frozen_day_whose_directory_is_gone_is_evicted(muse_cache, tmp_path):
     }
     muse_cache.write_text(json.dumps(cache))
     result = hu.read_muse_usage(tmp_path, consented=True)
-    assert set(result.hosts["other"]) == {"2026-10-13"}
+    assert set(result.hosts["muse"]) == {"2026-10-13"}
     assert "2026/07/02" not in _cache(muse_cache)["frozen"]
 
 
@@ -715,8 +707,8 @@ def test_a_session_resumed_months_later_is_counted(muse_cache, tmp_path):
     _age(path, timedelta(hours=1))
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-06-01"]["input"] == 60
-    assert result.hosts["other"]["2026-10-14"]["output"] == 5
+    assert result.hosts["muse"]["2026-06-01"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-14"]["output"] == 5
 
 
 def test_a_copy_into_an_existing_older_session_counts_once(muse_cache, tmp_path):
@@ -735,7 +727,7 @@ def test_a_copy_into_an_existing_older_session_counts_once(muse_cache, tmp_path)
         fp.write(json.dumps(original) + "\n")
     counted = hu.read_muse_usage(tmp_path, consented=True)
     assert counted.complete
-    assert counted.hosts["other"]["2026-10-10"]["input"] == 60  # once, not twice
+    assert counted.hosts["muse"]["2026-10-10"]["input"] == 60  # once, not twice
     assert "2026/10/10" not in _cache(muse_cache)["frozen"]  # shared step keeps it live
 
 
@@ -780,7 +772,7 @@ def test_idle_live_days_do_not_hold_frozen_keys_open(muse_cache, tmp_path):
     assert set(frozen) == {"2026/10/01", "2026/10/05", "2026/10/10"}  # the pair stays live
     # First read over old history stores no keys: nothing open can accept a copy.
     assert all(record["keys"] == [] for record in frozen.values())
-    assert result.hosts["other"]["2026-03-01"]["input"] == 60  # the pair counts once
+    assert result.hosts["muse"]["2026-03-01"]["input"] == 60  # the pair counts once
 
 
 def test_status_diag_path_never_walks_muse_sessions(muse_cache, tmp_path, monkeypatch):
@@ -802,15 +794,15 @@ def test_a_frozen_cache_write_day_stays_partial(muse_cache, tmp_path, monkeypatc
     first = hu.read_muse_usage(tmp_path, consented=True)
     assert first.complete
     assert first.partial_days == frozenset({"2026-10-10"})
-    assert first.hosts["other"]["2026-10-10"]["cache_create"] == 5
-    assert first.hosts["other"]["2026-10-10"]["input"] == 55
+    assert first.hosts["muse"]["2026-10-10"]["cache_create"] == 5
+    assert first.hosts["muse"]["2026-10-10"]["input"] == 55
 
     with monkeypatch.context() as m:
         m.setattr(hu, "_read_muse_file", Mock(side_effect=AssertionError("reopened")))
         second = hu.read_muse_usage(tmp_path, consented=True)
     assert second.partial_days == frozenset({"2026-10-10"})
-    assert second.hosts["other"]["2026-10-10"]["cache_create"] == 5
-    assert second.hosts["other"]["2026-10-10"]["input"] == 55
+    assert second.hosts["muse"]["2026-10-10"]["cache_create"] == 5
+    assert second.hosts["muse"]["2026-10-10"]["input"] == 55
 
 
 # Generated by the /ship test coverage audit.
@@ -849,8 +841,8 @@ def test_a_copied_step_unfreezes_only_its_frozen_day(muse_cache, tmp_path, monke
     monkeypatch.setattr(hu, "_read_muse_file", guard)
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-10"]["input"] == 60
-    assert result.hosts["other"]["2026-10-12"]["output"] == 4
+    assert result.hosts["muse"]["2026-10-10"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-12"]["output"] == 4
     kept = _cache(muse_cache)["frozen"]
     assert set(kept) == {"2026/10/12"}
 
@@ -870,7 +862,7 @@ def test_a_horizon_day_keeps_keys_so_a_later_copy_counts_once(muse_cache, tmp_pa
     _write_session(tmp_path, [step], "later", day="2026/10/13")
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert result.complete
-    assert result.hosts["other"]["2026-10-12"]["input"] == 60
+    assert result.hosts["muse"]["2026-10-12"]["input"] == 60
     assert "2026/10/12" not in _cache(muse_cache)["frozen"]
 
 

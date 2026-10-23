@@ -249,11 +249,12 @@ def _pytest_refused_roots(
             ".local/share/mind-meld",
             ".claude",
             ".codex",
-            ".grok",
             ".gstack",
             ".gstack-extend",
             ".cursor",
             ".local/share/muse",
+            ".gemini/config",
+            ".gemini/antigravity-cli",
         )
     ]
     stamp = _pytest_config_stamp(home)

@@ -30,14 +30,16 @@ DEFAULT_MAX_FILE_SIZE = 52_428_800  # 50MB
 DEFAULT_ARGON2_MEMORY_KB = 65_536  # 64MB
 DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
-DEFAULT_GROK_DIR = "~/.grok"
 DEFAULT_MUSE_DIR = "~/.local/share/muse"
+DEFAULT_AGY_DIR = "~/.gemini/config"
 DEFAULT_STORAGE_PATH = str(
     Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
 )
 # Source names that are mm-owned infrastructure (auto-included at init,
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})
+
+RETIRED_SOURCE_NAMES: frozenset[str] = frozenset({"grok", "opencode"})
 
 UsageCaptureReadiness = Literal["ready", "disabled", "unavailable", "no-reader", "unknown"]
 
@@ -91,10 +93,8 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
         "disabled": "Run mm enable-source mm-events to enable usage publication.",
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (
-            "No host reader is consented. Run mm enable-source codex, mm enable-source grok "
-            "or mm enable-source muse; "
-            "Grok usage-only consent also accepts [retro] grok_host_usage = true. "
-            "Run mm enable-source cursor to enroll Cursor usage capture."
+            "No host reader is consented. Run mm enable-source codex, mm enable-source cursor, "
+            "mm enable-source muse, or mm enable-source agy."
         ),
         "unknown": "Usage capture readiness is unknown; repair the unreadable config first.",
     }[readiness]
@@ -348,15 +348,6 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         ],
     },
     {
-        # Claude-shaped: name/path/type only. The walker hardcodes
-        # skills/, commands/, rules/ — not user-editable include_dirs —
-        # so a config edit cannot widen the walk onto sessions/ or
-        # auth.json. See manifest.GROK_SYNCED_SUBDIRS.
-        "name": "grok",
-        "path": DEFAULT_GROK_DIR,
-        "type": "grok",
-    },
-    {
         # Same Claude-shaped entry: name/path/type only. The walker
         # hardcodes memory/ — not user-editable include_dirs — so a
         # config edit cannot widen the walk onto sessions/ or the
@@ -364,6 +355,19 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
         "name": "muse",
         "path": DEFAULT_MUSE_DIR,
         "type": "muse",
+    },
+    {
+        "name": "agy",
+        "path": DEFAULT_AGY_DIR,
+        "type": "generic",
+        "include_dirs": ["skills", "rules"],
+        "include_files": ["AGENTS.md", "GEMINI.md"],
+        "exclude_patterns": [
+            "skills/gstack-*",
+            "skills/log-work/*",
+            "skills/retro-fleet/*",
+            *_GENERATED_HOST_SKILL_GLOBS,
+        ],
     },
 ]
 
@@ -460,7 +464,7 @@ def _validate(config: dict[str, Any]) -> None:
                 f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
                 f"retro.host_usage_interactive_budget_ms ({interactive})."
             )
-        for key in ("grok_host_usage", "cursor_host_usage"):
+        for key in ("cursor_host_usage",):
             if key in retro and not isinstance(retro[key], bool):
                 raise ConfigError(
                     f"config: retro.{key} must be a boolean, got {type(retro[key]).__name__}."
@@ -511,6 +515,9 @@ def _validate_sources(sources: Any) -> None:
     for i, src in enumerate(sources):
         if not isinstance(src, dict):
             raise ConfigError(f"config: source #{i} must be a table, got {type(src).__name__}.")
+        name = src.get("name")
+        if isinstance(name, str) and name in RETIRED_SOURCE_NAMES:
+            continue
         for field in ("name", "path", "type"):
             if field not in src:
                 raise ConfigError(f"config: source #{i} missing required field '{field}'.")
@@ -520,22 +527,11 @@ def _validate_sources(sources: Any) -> None:
                     f"got {type(src[field]).__name__}."
                 )
         name = src["name"]
-        if src["type"] == "grok" and name != "grok":
+        if src["type"] == "grok":
             raise ConfigError(
-                "config: type 'grok' is reserved for source name 'grok' so only its "
-                "hardcoded customization allowlist is walked."
+                "config: type 'grok' is no longer supported; "
+                f"remove source '{name}' from config.toml. Local files are preserved."
             )
-        if name == "grok":
-            if src["type"] != "grok":
-                raise ConfigError(
-                    "config: source 'grok' must use type 'grok' so only its "
-                    "hardcoded customization allowlist is walked."
-                )
-            if "include_dirs" in src or "include_files" in src:
-                raise ConfigError(
-                    "config: source 'grok' does not support include_dirs or include_files; "
-                    "it syncs skills/, commands/, and rules/ only."
-                )
         if src["type"] == "muse" and name != "muse":
             raise ConfigError(
                 "config: type 'muse' is reserved for source name 'muse' so only its "
@@ -661,44 +657,6 @@ def _validate_exclude_patterns(patterns: Any, source_name: str) -> None:
     _validate_pattern_list(patterns, source_name, "exclude_patterns")
 
 
-def grok_customization_dirs_exist(
-    root: Path,
-    *,
-    strict: bool = False,
-    source_name: str = "grok",
-) -> bool:
-    """True if any hardcoded Grok customization dir exists under ``root``.
-
-    ``~/.grok`` itself exists on every Grok install (sessions + auth).
-    That is not a signal that there is anything to roam. Strict publishing
-    probes raise on permission/I/O errors instead of treating them as
-    absence.
-    """
-    from mind_meld.manifest import GROK_SYNCED_SUBDIRS
-
-    for name in GROK_SYNCED_SUBDIRS:
-        candidate = root / name
-        try:
-            st = candidate.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=name,
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
-            continue
-        if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
-            return True
-    return False
-
-
 def muse_memory_dir_exists(root: Path) -> bool:
     """True if the hardcoded Muse ``memory/`` dir exists under ``root``.
 
@@ -718,17 +676,6 @@ def muse_memory_dir_exists(root: Path) -> bool:
         if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
             return True
     return False
-
-
-def grok_host_usage_enabled(config: dict[str, Any]) -> bool:
-    """True only when ``[retro].grok_host_usage`` is the boolean ``true``.
-
-    Absent table, absent key, or any other value is false. Track 22B also
-    gates the Grok usage reader on the grok sync source being enabled;
-    this bit remains an OR so a 21A-only opt-in does not go dark.
-    """
-    retro = config.get("retro")
-    return isinstance(retro, dict) and retro.get("grok_host_usage") is True
 
 
 def cursor_host_usage_enabled(config: dict[str, Any]) -> bool:
@@ -789,6 +736,10 @@ def _source_path_available(path_str: str, *, strict: bool, source_name: str) -> 
         path.stat()
         return True
     except FileNotFoundError:
+        if source_name == "agy" and path == Path(DEFAULT_AGY_DIR).expanduser():
+            from mind_meld import host_usage
+
+            return host_usage.agy_sessions_root().exists()
         return False
     except OSError as e:
         if strict:
@@ -813,12 +764,11 @@ def _configured_sources(
     sync = config.get("sync", {})
     disabled = set(sync.get("disabled_sources", []) or [])
     explicit_sources = "sources" in sync
-    grok_strict = strict and "grok" not in disabled
 
     if explicit_sources:
         sources = []
         for src in sync["sources"]:
-            if src.get("name") in disabled:
+            if src.get("name") in RETIRED_SOURCE_NAMES or src.get("name") in disabled:
                 continue
             try:
                 path = _resolve_source_path(src["path"], label=f"source {src['name']!r}")
@@ -843,23 +793,16 @@ def _configured_sources(
         # .resolve() here keeps a cyclic user symlink (e.g. broken ~/.gstack)
         # from breaking get_sources for every command startup.
         sources = [{**src, "path": str(Path(src["path"]).expanduser())} for src in DEFAULT_SOURCES]
-        # ~/.grok exists on every Grok install. Only activate the default
-        # grok source when a hardcoded customization dir is present.
-        # Skip the probe entirely when grok is disabled (S07).
+        # Muse and Antigravity never auto-activate on legacy non-explicit configs.
+        # Muse creates memory/ itself on first run, and Antigravity DBs live
+        # separately; an enabled source also authorizes their usage readers.
+        # Only `mm enable-source`, or explicit inclusion at `mm init` or
+        # `mm reconfigure-sources`, activates them.
         sources = [
             s
             for s in sources
-            if s.get("type") != "grok"
-            or s["name"] in disabled
-            or grok_customization_dirs_exist(Path(s["path"]), strict=grok_strict)
+            if (s.get("type") != "muse" and s["name"] != "agy") or s["name"] in disabled
         ]
-        # Muse never auto-activates. Muse creates memory/ itself on first
-        # run (holding only its PID lock), so no tree under its root is a
-        # consent signal, and an enabled source also authorizes the usage
-        # reader. Only `mm enable-source muse`, or an explicit "y" at
-        # `mm init` or `mm reconfigure-sources`, adds it. Both prompts
-        # default to N.
-        sources = [s for s in sources if s.get("type") != "muse" or s["name"] in disabled]
 
     # Auto-detect: append default gstack source if ~/.gstack exists but
     # no gstack source is already in the list.
@@ -910,17 +853,10 @@ def _configured_sources(
     # Explicit `sync.sources` is intentional user curation, so it remains an
     # opt-in surface (via `mm enable-source codex`).
     if not explicit_sources:
-        for source_name, source_path in (
-            ("codex", Path.home() / ".codex"),
-            ("grok", Path.home() / ".grok"),
-        ):
+        for source_name, source_path in (("codex", Path.home() / ".codex"),):
             if source_name in disabled or any(s["name"] == source_name for s in sources):
                 continue
-            present = (
-                grok_customization_dirs_exist(source_path, strict=False)
-                if source_name == "grok"
-                else _optional_host_present(source_path)
-            )
+            present = _optional_host_present(source_path)
             if present:
                 default_source = get_default_source(source_name)
                 if default_source:

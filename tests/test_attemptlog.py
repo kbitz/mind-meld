@@ -18,7 +18,7 @@ def record(**updates):
         "class": "published",
         "cause": None,
         "row_ts": NOW.isoformat(),
-        "readers": {"codex": "contributed", "grok": "empty"},
+        "readers": {"codex": "contributed", "agy": "empty"},
         **updates,
     }
 
@@ -40,8 +40,8 @@ def save(value):
         record(cause="wrong"),
         record(**{"class": "unverified", "cause": "invented"}),
         record(readers={"bad\x1b[2J": "contributed"}),
-        record(readers={"grok": "dropped:invented"}),
-        record(readers={"grok": {}}),
+        record(readers={"agy": "dropped:invented"}),
+        record(readers={"agy": {}}),
         record(cause=[]),
         record(**{"class": []}),
     ],
@@ -49,7 +49,7 @@ def save(value):
 def test_malformed_record_is_corrupt(value):
     save(value)
     assert attemptlog.read() == (None, "corrupt")
-    state = attemptlog.project(["codex", "grok"], None)
+    state = attemptlog.project(["codex", "agy"], None)
     assert state["latest_attempt_reason"] == "corrupt"
     assert attemptlog.render(state, age="unknown", path="local")[0] == (
         "Last recorded attended attempt: unknown "
@@ -94,7 +94,7 @@ def test_missing_and_unreadable_records_are_distinct_without_writes(monkeypatch)
 )
 def test_closed_outcomes_roundtrip_private_file(kind, cause):
     outcome = attemptlog.CaptureOutcome(
-        attempted_at=NOW.isoformat(), readers={"grok": "dropped:deadline"}
+        attempted_at=NOW.isoformat(), readers={"agy": "dropped:deadline"}
     )
     attemptlog.write(outcome.finish(kind, cause))
     written, reason = attemptlog.read()
@@ -107,9 +107,9 @@ def test_closed_outcomes_roundtrip_private_file(kind, cause):
 @pytest.mark.parametrize("offset", [-1, 0, 1])
 def test_superseded_requires_newer_than_attempt_and_row_and_nonpublished(kind, offset):
     save(record(**{"class": kind}, row_ts=(NOW + timedelta(hours=1)).isoformat()))
-    state = attemptlog.project(["grok"], (NOW + timedelta(hours=1, seconds=offset)).isoformat())
+    state = attemptlog.project(["agy"], (NOW + timedelta(hours=1, seconds=offset)).isoformat())
     assert state["latest_attempt_superseded"] == (kind != "published" and offset > 0)
-    assert state["latest_attempt_readers"] == {"grok": "empty"}
+    assert state["latest_attempt_readers"] == {"agy": "empty"}
     rendered = attemptlog.render(state, age="in the future", path="local")
     assert "(in the future)" in rendered[0]
     assert ("a later capture has since been recorded" in rendered[0]) == (
@@ -159,8 +159,8 @@ def test_missing_attempt_offers_push_only_when_refresh_is_ready():
 
 
 def test_healthy_attended_attempt_does_not_claim_superseded_by_autopush():
-    save(record(readers={"codex": "contributed", "grok": "contributed"}))
-    state = attemptlog.project(["codex", "grok"], (NOW + timedelta(days=1)).isoformat())
+    save(record(readers={"codex": "contributed", "agy": "contributed"}))
+    state = attemptlog.project(["codex", "agy"], (NOW + timedelta(days=1)).isoformat())
     assert attemptlog.render(state, age="1 d ago", path="local") == [
         f"Last recorded attended attempt: {NOW.isoformat()} (1 d ago) — published"
     ]

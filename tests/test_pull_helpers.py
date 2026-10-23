@@ -28,7 +28,6 @@ from mind_meld.cli import (
     _FsyncWarning,
     _held_breadcrumb_detail,
     _held_count_phrase,
-    _include_prior_grok_if_needed,
     _include_prior_host_if_needed,
     _inject_held_entries,
     _load_prior_device_metadata,
@@ -2126,9 +2125,9 @@ class TestPromptSources:
         assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
 
     def test_mm_init_does_not_prompt_for_opencode(self, monkeypatch) -> None:
-        """Track 37B: DEFAULT_SOURCES no longer ships opencode, so init asks
+        """DEFAULT_SOURCES no longer ships opencode or grok, so init asks
         for the six user-facing names (claude, gstack, gstack-extend,
-        codex, grok, muse). mm-events auto-includes."""
+        codex, muse, agy). mm-events auto-includes."""
         from mind_meld import cli as cli_module
 
         prompted: list[str] = []
@@ -2142,8 +2141,11 @@ class TestPromptSources:
         user_facing = [s["name"] for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
         assert len(user_facing) == 6
         assert "opencode" not in user_facing
+        assert "grok" not in user_facing
+        assert "agy" in user_facing
         assert len(prompted) == 6
         assert all("opencode" not in p for p in prompted)
+        assert all("grok" not in p for p in prompted)
 
     def test_claude_only(self, monkeypatch) -> None:
         """User answers Y for claude and n for the other agent sources. mm-events is
@@ -3186,7 +3188,7 @@ class TestSnapshotPublicationHelpers:
         assert outcome.bytes_transferred == len(b"enc")
         assert outcome.patches == {} and outcome.held == {}
 
-    @pytest.mark.parametrize(("source_type", "subdir"), [("grok", "skills"), ("muse", "memory")])
+    @pytest.mark.parametrize(("source_type", "subdir"), [("muse", "memory")])
     def test_upload_refuses_hardlink_replacement(self, tmp_path, source_type, subdir):
         base = tmp_path / source_type
         tree = base / subdir
@@ -3246,54 +3248,6 @@ class TestSnapshotPublicationHelpers:
         local = {"sources": {"muse": {"files": {}}}}
         _prove_omitted_paths_absent(local, prior, [muse_cfg], max_file_size=1024)
 
-    def test_prior_grok_missing_root_refuses(self, tmp_path):
-        missing = tmp_path / "gone-grok"
-        grok_cfg = {"name": "grok", "path": str(missing), "type": "grok"}
-        resolution = SourceResolution(selected=[grok_cfg], available=[])
-        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
-        with pytest.raises(SnapshotError, match="source grok"):
-            _include_prior_grok_if_needed(
-                {"sync": {}},
-                resolution,
-                remote,
-                [],
-            )
-
-    def test_prior_grok_empty_customization_dirs_scans(self, tmp_path):
-        from mind_meld.manifest import build_manifest_v2
-
-        root = tmp_path / ".grok"
-        root.mkdir()
-        grok_cfg = {"name": "grok", "path": str(root), "type": "grok"}
-        resolution = SourceResolution(selected=[grok_cfg], available=[])
-        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
-        sources = _include_prior_grok_if_needed(
-            {"sync": {}},
-            resolution,
-            remote,
-            [],
-        )
-        assert any(src["name"] == "grok" for src in sources)
-        # Recovery fixes selection before capture; the caller then scans it.
-        local = build_manifest_v2("dev", "A", sources, 1024, strict=True)
-        assert "grok" in local["sources"]
-        assert local["sources"]["grok"]["files"] == {}
-
-    def test_explicit_config_does_not_reinject_retired_grok(self, tmp_path):
-        root = tmp_path / ".grok"
-        root.mkdir()
-        (root / "skills").mkdir()
-        (root / "skills" / "a.md").write_text("x")
-        resolution = SourceResolution(selected=[], available=[], explicit=True)
-        remote = {"sources": {"grok": {"files": {"skills/a.md": {"sha256": "a" * 64}}}}}
-        sources = _include_prior_grok_if_needed(
-            {"sync": {"sources": []}},
-            resolution,
-            remote,
-            [],
-        )
-        assert sources == []
-
     def test_legacy_prior_default_source_stays_selected(self):
         resolution = SourceResolution(
             selected=[{"name": "claude", "path": "/tmp/claude", "type": "claude"}],
@@ -3311,22 +3265,29 @@ class TestSnapshotPublicationHelpers:
         kept = _retain_prior_default_sources(explicit, remote, {"sync": {}})
         assert not any(src["name"] == "gstack" for src in kept.selected)
 
-    def test_omission_proof_skips_walker_excluded_grok_path(self, tmp_path):
-        root = tmp_path / ".grok"
+    def test_omission_proof_skips_walker_excluded_codex_path(self, tmp_path):
+        root = tmp_path / ".codex"
         generated = root / "skills" / "gstack-foo"
         generated.mkdir(parents=True)
         (generated / "SKILL.md").write_text("generated")
         prior = {
             "sources": {
-                "grok": {
+                "codex": {
                     "files": {"skills/gstack-foo/SKILL.md": {"sha256": "a" * 64}},
                 }
             }
         }
         _prove_omitted_paths_absent(
-            {"sources": {"grok": {"files": {}}}},
+            {"sources": {"codex": {"files": {}}}},
             prior,
-            [{"name": "grok", "path": str(root), "type": "grok"}],
+            [
+                {
+                    "name": "codex",
+                    "path": str(root),
+                    "type": "codex",
+                    "exclude_patterns": ["skills/gstack-*"],
+                }
+            ],
             max_file_size=1024,
         )
 
@@ -4243,8 +4204,8 @@ def test_deferred_upload_privacy_loss_refuses(tmp_path, monkeypatch, kind):
             "dev-a",
             "pw",
             1024,
-            src_name="grok",
-            source_type="grok",
+            src_name="muse",
+            source_type="muse",
             allow_hold=True,
         )
     assert calls["reads"] == 2

@@ -4570,7 +4570,7 @@ class TestHostSnapshotAcceptance:
         assert result.reason == "naive_timestamp"
 
     def test_token_sources_out_of_order_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4803,16 +4803,16 @@ class TestHostSnapshotWireCompat:
         assert "mm diag" in rendered
 
     def test_known_name_out_of_order_still_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
 
     def test_unknown_name_does_not_mask_known_name_out_of_order(self):
-        """A naive continue-on-unknown would accept this by dropping grok's
+        """A naive continue-on-unknown would accept this by dropping cursor's
         successor check. Membership is tested before the positional scan,
         and an unknown name must not advance the known-name cursor."""
-        ev = _host_event("dev-a", self.TS, token_sources=("grok", "opencode", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "opencode", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4984,11 +4984,11 @@ class TestCoverageAcceptor:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
-            degraded_sources=("grok",),
+            degraded_sources=("cursor",),
             partial_days={"codex": ["2026-04-20"]},
         )
         accepted = _accepted(json.loads(json.dumps(row)))
-        assert accepted.degraded == ("grok",)
+        assert accepted.degraded == ("cursor",)
         assert accepted.degraded_reason is None
         assert accepted.partial == ("codex",)
         assert accepted.partial_reason is None
@@ -5212,14 +5212,14 @@ class TestHostSnapshotNoWindowSpend:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=ts,
-            degraded_sources=("grok",),
+            degraded_sources=("cursor",),
         )
         accepted_plain = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(plain)))
         accepted_degraded = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(degraded)))
         assert isinstance(accepted_plain, aggregator._AcceptedHostRow)
         assert isinstance(accepted_degraded, aggregator._AcceptedHostRow)
         assert accepted_plain.tie_key == accepted_degraded.tie_key
-        assert accepted_degraded.degraded == ("grok",)
+        assert accepted_degraded.degraded == ("cursor",)
         assert aggregator._sibling_tie_key(accepted_plain) != aggregator._sibling_tie_key(
             accepted_degraded
         )
@@ -6470,7 +6470,7 @@ class TestAgentCoverageNotes:
                         self.UNTIL,
                         families={"codex": {"2026-04-22": _usage(1)}},
                         consulted=("codex",),
-                        degraded=("grok",),
+                        degraded=("agy",),
                     )
                 ]
             )
@@ -6478,9 +6478,9 @@ class TestAgentCoverageNotes:
         hit = [n for n in notes if "failed on the latest push" in n]
         assert len(hit) == 1
         assert "laptop" in hit[0]
-        assert "grok" in hit[0]
+        assert "Antigravity" in hit[0]
         assert "mm diag" in hit[0]
-        assert "host_usage.grok" in hit[0]
+        assert "host_usage.agy" in hit[0]
         assert "mm push" not in hit[0]
 
     def test_f1b_one_partial_machine_names_machine_reader_and_diag(self):
@@ -6490,9 +6490,9 @@ class TestAgentCoverageNotes:
                     _snap(
                         "laptop",
                         self.UNTIL,
-                        families={"grok": {"2026-04-22": _usage(1)}},
-                        consulted=("grok",),
-                        partial=("grok",),
+                        families={"agy": {"2026-04-22": _usage(1)}},
+                        consulted=("agy",),
+                        partial=("agy",),
                     )
                 ]
             )
@@ -6500,17 +6500,17 @@ class TestAgentCoverageNotes:
         hit = [n for n in notes if "are incomplete" in n]
         assert len(hit) == 1
         assert "laptop" in hit[0]
-        assert "grok" in hit[0]
+        assert "Antigravity" in hit[0]
         assert "mm diag" in hit[0]
-        assert "host_usage.grok" in hit[0]
+        assert "host_usage.agy" in hit[0]
         assert "mm push" not in hit[0]
 
     def test_f2_n_degraded_machines_is_one_aggregated_note(self):
         notes = aggregator._agent_coverage_notes(
             self._data(
                 [
-                    _snap("laptop", self.UNTIL, degraded=("grok",)),
-                    _snap("desktop", self.UNTIL, degraded=("grok",)),
+                    _snap("laptop", self.UNTIL, degraded=("agy",)),
+                    _snap("desktop", self.UNTIL, degraded=("agy",)),
                 ]
             )
         )
@@ -6518,6 +6518,7 @@ class TestAgentCoverageNotes:
         assert len(hits) == 1
         assert "laptop" in hits[0]
         assert "desktop" in hits[0]
+        assert "Antigravity" in hits[0]
 
     def test_f3_zero_degraded_emits_no_coverage_note(self):
         notes = aggregator._agent_coverage_notes(
@@ -6801,6 +6802,81 @@ class TestUnifiedAgents:
         usage = self._usage_for(self._data([snap], known_ids=("dev-a",)))
         assert all(not row.by_model for row in usage.rows)
 
+    @pytest.mark.parametrize(
+        "promoted_family, promoted_model",
+        [
+            ("muse", "muse-wonder-full-1.0"),
+            ("agy", "gemini-3.8-flash"),
+        ],
+    )
+    @pytest.mark.parametrize("historical", [True, False])
+    def test_promoted_classification_keeps_sibling_model_pricing(
+        self, promoted_family, promoted_model, historical
+    ):
+        day = "2026-04-22"
+        reported_family = "other" if historical else promoted_family
+        models = {
+            "gpt-6-astra": _usage(1_000_000),
+            "grok-4.7": _usage(2_000_000),
+            promoted_model: _usage(3_000_000),
+        }
+        hosts = {
+            "codex": {day: models["gpt-6-astra"]},
+            "grok": {day: models["grok-4.7"]},
+            reported_family: {day: models[promoted_model]},
+        }
+        ev = _host_event(
+            "dev-a",
+            self.UNTIL.isoformat(),
+            hosts=hosts,
+            token_sources=("codex", "cursor", "muse"),
+            extra={"tokens_by_day": {day: {**_usage(6_000_000), "by_model": models}}},
+        )
+        data = self._data([], known_ids=("dev-a",))
+        data.host_inventory = aggregator.aggregate_host_usage(
+            [ev], since=self.SINCE, until=self.UNTIL, registered_ids={"dev-a"}
+        )
+        usage = self._usage_for(data)
+        for family, model in (
+            ("codex", "gpt-6-astra"),
+            ("grok", "grok-4.7"),
+            (reported_family, promoted_model),
+        ):
+            row = self._row(usage, family)
+            assert row.tokens == models[model]["input"]
+            assert row.by_model == {model: models[model]}
+            assert aggregator._agent_top_model(row) != "—"
+            assert not any("different family classification" in c for c in row.floor_causes)
+        assert aggregator._agent_row_cost(self._row(usage, "codex"))[0] == 10.0
+        assert aggregator._agent_row_cost(self._row(usage, "grok"))[0] is not None
+        assert data.host_inventory.by_device["dev-a"].lifetime_by_family == hosts
+
+    @pytest.mark.parametrize("promoted_model", ["muse-wonder-full-1.0", "gemini-3.8-flash"])
+    @pytest.mark.parametrize("field", ["input", "output", "cache_read", "cache_create"])
+    def test_legacy_promoted_mapping_still_checks_combined_other_counters(
+        self, field, promoted_model
+    ):
+        day = "2026-04-22"
+        other = {**_usage(0), field: 10}
+        codex = {**_usage(0), field: 5}
+        hosts = {"other": {day: other}, "codex": {day: codex}}
+        # Flat totals match, but the promoted and a genuine unclassified model
+        # over-attribute the old `other` family by one token.
+        models = {
+            promoted_model: {**_usage(0), field: 6},
+            "unknown-model": {**_usage(0), field: 5},
+            "gpt-6-astra": {**_usage(0), field: 4},
+        }
+        snap = _snap(
+            "dev-a",
+            self.UNTIL,
+            families=hosts,
+            tokens_by_day={day: {**_usage(0), field: 15, "by_model": models}},
+        )
+        usage = self._usage_for(self._data([snap]))
+        assert all(not row.by_model for row in usage.rows)
+        assert {row.key: row.tokens for row in usage.rows} == {"codex": 5, "other": 10}
+
     def test_capped_model_detail_still_prices_a_floor(self):
         hosts = {"codex": {"2026-04-22": _usage(1_000_000)}}
         snap = _snap("dev-a", self.UNTIL, families=hosts, counter_semantics="disjoint-v1")
@@ -7009,8 +7085,12 @@ class TestUnifiedAgents:
         usage = self._usage_for(data)
         codex_causes = self._row(usage, "codex").floor_causes
         grok_causes = self._row(usage, "grok").floor_causes
-        assert any("grok" in c and "incomplete" in c for c in codex_causes), codex_causes
-        assert any("grok" in c and "incomplete" in c for c in grok_causes), grok_causes
+        assert any("unknown/retired reader" in c and "incomplete" in c for c in codex_causes), (
+            codex_causes
+        )
+        assert any("unknown/retired reader" in c and "incomplete" in c for c in grok_causes), (
+            grok_causes
+        )
 
     def test_partial_codex_serving_claude_floors_claude_cost(self):
         counters = {**_usage(1_000_000), "cache_create": 1_000_000}

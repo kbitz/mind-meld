@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Cursor, Muse). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
+Mind Meld (mm) — CLI that keeps one person's AI coding-agent context (Claude Code memory, Codex skills, Muse memory, gstack state) identical across their machines, end-to-end encrypted, and reports agent usage across the fleet with `retro-fleet` (Claude Code, Codex, Cursor, Muse, Antigravity). 1.x syncs over iCloud Drive on macOS; 2.0 carries the same store to a Syncthing folder so Arch-based Linux machines join. [docs/SPEC.md](docs/SPEC.md) is the product authority, including what each host gets.
 
 <!-- roadmap:parallelism_cap=8 -->
 Up to eight Tracks can run across separate workspaces; the host owns branch and worktree lifecycle.
@@ -102,5 +102,5 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 - [README](README.md): commands, configuration, previews, integration, and development.
 - [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
 - [SPEC](SPEC.md): architecture, data model and CLI reference; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 carries this store onto Syncthing ([docs/SPEC.md](docs/SPEC.md)).
-- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md), [Grok reader](docs/designs/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
+- Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md); the Grok reader design is archived at [docs/archive/grok-build-usage-reader.md](docs/archive/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
 - [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.
