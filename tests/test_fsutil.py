@@ -2027,7 +2027,7 @@ def test_log_unexpected_refusal_releases_held_auto_command_lock(
     monkeypatch.setattr(sidecar, "SIDECAR_DIR", root)
     monkeypatch.setattr(cli, "_auto_command_setup", lambda verb: SimpleNamespace(config={}))
     monkeypatch.setattr(cli, "_write_migration_breadcrumb", lambda missing: None)
-    monkeypatch.setattr(cli, "_config_missing_recommended_excludes", lambda config: [])
+    monkeypatch.setattr(cli.core, "_config_missing_recommended_excludes", lambda config: [])
     lock_path = tmp_path / "safe-lock"
     monkeypatch.setattr(lockfile, "LOCK_PATH", lock_path)
     original = RuntimeError("core failure")

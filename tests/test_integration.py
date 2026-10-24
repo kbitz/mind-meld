@@ -3511,7 +3511,7 @@ class TestGCSafety:
             raise AssertionError("GC read the peer registry")
 
         monkeypatch.setattr(LocalBackend, "get", get)
-        monkeypatch.setattr(cli_module, "_list_devices_warn", forbidden)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", forbidden)
         assert cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False) == 1
         assert not backend.exists(own)
         assert backend.get(peer) == b"peer"
@@ -3742,7 +3742,7 @@ class TestGCSafety:
             manifest = {"sources": {"late": {"files": files}}, "tombstones": {}}
             return cli_module.ManifestFetch(status="ok", manifest=manifest, **fields)
 
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fetch)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
         if late in ("corrupt", "unreadable"):
             with pytest.raises(typer.Exit):
                 cli_module._do_gc(env["config"], PASSPHRASE, MEMORY_KB, False, False)
@@ -3769,7 +3769,9 @@ class TestGCSafety:
         config = {**env["config"], "device": {**env["config"]["device"], "name": "Mac [work]"}}
         buf = StringIO()
         monkeypatch.setattr(
-            cli_module, "stderr_console", Console(file=buf, width=300, color_system=None)
+            cli_module.core if state == "corrupt" else cli_module,
+            "stderr_console",
+            Console(file=buf, width=300, color_system=None),
         )
         if state == "corrupt":
             with pytest.raises(typer.Exit):
@@ -3933,7 +3935,7 @@ class TestAutoCommands:
         def boom(*_a, **_kw):
             raise OSError("keychain is locked")
 
-        monkeypatch.setattr(cli_mod, "get_passphrase", boom)
+        monkeypatch.setattr(cli_mod.core, "get_passphrase", boom)
 
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 1
@@ -5286,7 +5288,7 @@ class TestBackfillPreservesRawPaths:
             (path or config_path).unlink()
             real_helper(updates, path=path)
 
-        monkeypatch.setattr("mind_meld.cli.patch_config_on_disk", delete_then_call)
+        monkeypatch.setattr("mind_meld.core.patch_config_on_disk", delete_then_call)
 
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
@@ -5978,7 +5980,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
     before = env["dayfile"].read_text().splitlines()
     keychain = []
     monkeypatch.setattr(
-        cli_module, "_get_passphrase_or_exit", lambda: keychain.append(True) or PASSPHRASE
+        cli_module.core, "_get_passphrase_or_exit", lambda: keychain.append(True) or PASSPHRASE
     )
     monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: pytest.fail("reader"))
     result = runner.invoke(app, ["push", "--verbose"])
@@ -7619,7 +7621,7 @@ class TestCompleteSnapshots:
                 raise cli_module.SnapshotError("second proof failed")
             return real_prove(*a, **kw)
 
-        monkeypatch.setattr(cli_module, "_prove_omitted_paths_absent", flaky)
+        monkeypatch.setattr(cli_module.core, "_prove_omitted_paths_absent", flaky)
         result = self._push()
         self._assert_prior_kept(env, prior, result)
         assert calls["n"] >= 2
@@ -9305,12 +9307,19 @@ def _check_read_only_policy62(source):
             self.owner = prior
 
         def visit_Call(self, node):
-            if isinstance(node.func, ast.Name) and node.func.id in {
+            name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else node.func.attr
+                if isinstance(node.func, ast.Attribute)
+                else None
+            )
+            if name in {
                 "_get_config",
                 "_maybe_prompt_migration",
             }:
                 assert any(k.arg == "read_only" for k in node.keywords), (
-                    f"{self.owner}:{node.lineno}: {node.func.id} requires read_only"
+                    f"{self.owner}:{node.lineno}: {name} requires read_only"
                 )
             if (
                 isinstance(node.func, ast.Attribute)
@@ -9325,14 +9334,16 @@ def _check_read_only_policy62(source):
 
 
 def test_read_only_policy62():
-    _check_read_only_policy62(Path(cli_module.__file__).read_text())
-    for function in (cli_module._get_config, cli_module._maybe_prompt_migration):
+    for module in (cli_module, cli_module.core, cli_module.statusflow):
+        _check_read_only_policy62(Path(module.__file__).read_text())
+    for function in (cli_module.core._get_config, cli_module._maybe_prompt_migration):
         parameter = inspect.signature(function).parameters["read_only"]
         assert parameter.kind == inspect.Parameter.KEYWORD_ONLY
         assert parameter.default is inspect.Parameter.empty
     for source in (
         "def wrong(): _get_config()",
         "def wrong(): _maybe_prompt_migration({})",
+        "def wrong(): core._get_config()",
         "def wrong(): upgrade.run_transition_hook({})",
     ):
         with pytest.raises(AssertionError):
@@ -10009,7 +10020,7 @@ def test_crypto_refusal_suffix62(preview62, monkeypatch, command):
     def refuse(*a, **kw):
         raise CryptoError("crypto refused")
 
-    monkeypatch.setattr(cli_module, "_init_crypto_session", refuse)
+    monkeypatch.setattr(cli_module.core, "_init_crypto_session", refuse)
     _assert_preview_refused(preview62["audit"]([command, "--dry-run"]))
 
 
@@ -10862,7 +10873,7 @@ class TestNewerStorage66A:
             (backend.root / "mm-crypto-init 2").write_bytes(older)
         before = _preview_tree(backend.root)
         monkeypatch.setattr(
-            cli_module, "_fetch_remote_manifest", lambda *a, **kw: pytest.fail("read manifest")
+            cli_module.core, "_fetch_remote_manifest", lambda *a, **kw: pytest.fail("read manifest")
         )
         result = runner.invoke(app, [command])
         assert result.exit_code == (0 if command.startswith("auto") else 1), result.output
@@ -11127,7 +11138,7 @@ class TestNewerStorage66A:
                 return cli_module.ManifestFetch(status="corrupt", newer_version=3)
             return result
 
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fetch)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
         published = backend.get(key) if backend.exists(key) else None
         pushed = runner.invoke(app, ["push"])
         assert pushed.exit_code == 1, pushed.output
@@ -12656,7 +12667,7 @@ def test_interrupt_inside_storage_failure_handler_keeps_a_valid_record(capture61
         return original_error(message, *args, **kwargs)
 
     monkeypatch.setattr(LocalBackend, "put", put)
-    monkeypatch.setattr(cli_module, "_error", interrupted_error)
+    monkeypatch.setattr(cli_module.core, "_error", interrupted_error)
     (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
     result = runner.invoke(app, ["push"])
     assert result.exit_code != 0
@@ -13671,7 +13682,7 @@ def test_status77_verdict_first_both_streams_narrow_and_notty(status77, monkeypa
         print("preparatory stderr notice", file=sys.stderr)
         return original(*a, **k)
 
-    monkeypatch.setattr(cli_module, "_read_capture_rows", notices)
+    monkeypatch.setattr(cli_module.statusflow, "_read_capture_rows", notices)
     shown = runner.invoke(app, ["status"])
     assert shown.exit_code == 0, shown.output
     assert shown.output.splitlines()[0] == "In sync with this device's last push."
@@ -13689,7 +13700,7 @@ def test_status77_fatal_replays_notices_preserves_exception(status77, monkeypatc
         print("ancillary stderr", file=sys.stderr)
         raise RuntimeError("original")
 
-    monkeypatch.setattr(cli_module, "_host_publication" if late else "get_backend", fail)
+    monkeypatch.setattr(cli_module.statusflow, "_host_publication" if late else "get_backend", fail)
     shown = runner.invoke(app, ["status"])
     assert isinstance(shown.exception, RuntimeError)
     assert str(shown.exception) == "original"
@@ -13824,7 +13835,7 @@ def test_status77_typed_fatal_keeps_message_and_remedy(
             print("ancillary stderr", file=sys.stderr)
         raise CryptoError(message)
 
-    monkeypatch.setattr(cli_module, "_init_crypto_session", refuse)
+    monkeypatch.setattr(cli_module.core, "_init_crypto_session", refuse)
     path = attemptlog.runs_path()
     before = (path.read_bytes(), path.stat().st_mtime_ns)
     shown = runner.invoke(app, ["status"], color=True)
@@ -14434,8 +14445,8 @@ def test_sync78_passphrase_env_guidance_only_without_terminal(status77, monkeypa
     def cancelled(*args, **kwargs):
         raise cli_module.CryptoError("init: passphrase input cancelled.")
 
-    monkeypatch.setattr(cli_module, "get_passphrase", cancelled)
-    monkeypatch.setattr(cli_module, "_stdin_is_terminal", lambda: terminal)
+    monkeypatch.setattr(cli_module.core, "get_passphrase", cancelled)
+    monkeypatch.setattr(cli_module.core, "_stdin_is_terminal", lambda: terminal)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 1
     last = result.stderr.splitlines()[-1]
@@ -14673,7 +14684,7 @@ def test_resolve_abort_exit(tmp_path, monkeypatch, interrupt):
     local.write_bytes(b"local\n")
     remote = tmp_path / "note.sync-conflict-20260922-120000-v1-peer1234.md"
     remote.write_bytes(b"peer\n")
-    monkeypatch.setattr(cli_module, "_get_config", lambda **kw: {})
+    monkeypatch.setattr(cli_module.core, "_get_config", lambda **kw: {})
     monkeypatch.setattr(cli_module, "get_backend", lambda cfg: LocalBackend(tmp_path / "storage"))
     monkeypatch.setattr(cli_module, "get_sources", lambda cfg: [])
     monkeypatch.setattr(

@@ -387,7 +387,7 @@ class TestContentionGuidance:
         text = lockfile._contention_message(pid)
         buf = io.StringIO()
         monkeypatch.setattr(
-            cli,
+            cli.core,
             "stderr_console",
             Console(file=buf, width=width, force_terminal=terminal, color_system=None),
         )

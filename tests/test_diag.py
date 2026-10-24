@@ -35,7 +35,7 @@ def _setup(tmp_path, monkeypatch, *, with_config=True, with_crypto_init=True):
     """Shared setup: tmp storage + config + optional crypto bootstrap."""
     storage = tmp_path / "icloud"
     storage.mkdir()
-    monkeypatch.setattr("mind_meld.cli.DEFAULT_STORAGE_PATH", str(storage))
+    monkeypatch.setattr("mind_meld.statusflow.DEFAULT_STORAGE_PATH", str(storage))
     backend = LocalBackend(storage)
     if with_crypto_init:
         bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
@@ -1034,7 +1034,7 @@ def test_diag_handles_missing_config(tmp_path, monkeypatch):
         assert root == storage
         return LocalBackend(root)
 
-    monkeypatch.setattr("mind_meld.cli.LocalBackend", isolated_backend)
+    monkeypatch.setattr("mind_meld.statusflow.LocalBackend", isolated_backend)
     # The cfg_path monkeypatch points at a non-existent file.
     result = runner.invoke(app, ["diag", "--json"])
     # Exit 0 — diag must be robust to config failures.
@@ -1138,11 +1138,11 @@ class TestDiagDiscovery:
             return real(config, deadline_monotonic=deadline_monotonic)
 
         monkeypatch.setattr(events_mod, "discover_git_roots", spy)
-        monkeypatch.setattr("mind_meld.cli.events.discover_git_roots", spy)
+        monkeypatch.setattr("mind_meld.statusflow.events.discover_git_roots", spy)
         import time as time_mod
 
         monkeypatch.setattr(time_mod, "monotonic", lambda: 1000.0)
-        monkeypatch.setattr("mind_meld.cli.time.monotonic", lambda: 1000.0)
+        monkeypatch.setattr("mind_meld.statusflow.time.monotonic", lambda: 1000.0)
         runner.invoke(app, ["diag", "--json"])
         assert captured, "discover_git_roots was not called"
         remaining = captured[0] - 1000.0
@@ -1154,7 +1154,7 @@ class TestDiagDiscovery:
 
         dead = tmp_path / "dead-workspace"
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: GitRootDiscovery(
                 (),
                 (),
@@ -1177,7 +1177,7 @@ class TestDiagDiscovery:
         repo = tmp_path / "repo"
         repo.mkdir()
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: GitRootDiscovery(
                 (repo,),
                 (),
@@ -1223,7 +1223,7 @@ class TestDiagDiscovery:
         assert "none ran" in text.stdout
 
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: __import__(
                 "mind_meld.events", fromlist=["GitRootDiscovery"]
             ).GitRootDiscovery((), (), False, (), (), (), ("claude",)),
@@ -1237,7 +1237,7 @@ class TestDiagDiscovery:
         from mind_meld.events import GIT_ROOT_DISCOVERY_BUDGET_ERROR, GitRootDiscovery
 
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: GitRootDiscovery((), (GIT_ROOT_DISCOVERY_BUDGET_ERROR,), True),
         )
         payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
@@ -1251,7 +1251,7 @@ class TestDiagDiscovery:
         nasty = tmp_path / "[red]boom"
         nasty.mkdir()
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: GitRootDiscovery(
                 (nasty,),
                 (),
@@ -1285,7 +1285,7 @@ class TestDiagDiscovery:
 
         sample = tuple(("gone", tmp_path / f"dead{i}") for i in range(80))
         monkeypatch.setattr(
-            "mind_meld.cli.events.discover_git_roots",
+            "mind_meld.statusflow.events.discover_git_roots",
             lambda _cfg, **_kw: GitRootDiscovery(
                 (),
                 (),
@@ -1310,7 +1310,7 @@ class TestDiagDiscovery:
             calls["n"] += 1
             return GitRootDiscovery((), (), False, (), (), (), ("claude",))
 
-        monkeypatch.setattr("mind_meld.cli.events.discover_git_roots", spy)
+        monkeypatch.setattr("mind_meld.statusflow.events.discover_git_roots", spy)
         runner.invoke(app, ["diag", "--json"])
         assert calls["n"] == 1
         calls["n"] = 0

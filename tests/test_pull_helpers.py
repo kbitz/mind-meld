@@ -485,7 +485,7 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module,
+            cli_module.core,
             "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
@@ -501,7 +501,7 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module,
+            cli_module.core,
             "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
@@ -518,7 +518,7 @@ class TestSelectDevices:
         from mind_meld import cli as cli_module
 
         monkeypatch.setattr(
-            cli_module,
+            cli_module.core,
             "_list_devices_warn",
             lambda b: [
                 {"device_id": "self1", "device_name": "me"},
@@ -539,7 +539,7 @@ class TestSelectDevices:
             calls.append(1)
             return [{"device_id": "peerA", "device_name": "A"}]
 
-        monkeypatch.setattr(cli_module, "_list_devices_warn", counting_list)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", counting_list)
         _select_devices(backend=None, my_device_id="self1", from_device=None)
         assert len(calls) == 1
 
@@ -553,7 +553,7 @@ class TestPrefetchManifests:
         from mind_meld.cli import ManifestFetch
 
         monkeypatch.setattr(
-            cli_module,
+            cli_module.core,
             "_fetch_remote_manifest",
             lambda backend, did, pp, mk: ManifestFetch(
                 status="ok", manifest={"sources": {}, "tombstones": {}}
@@ -576,7 +576,7 @@ class TestPrefetchManifests:
                 return ManifestFetch(status="corrupt")
             return ManifestFetch(status="ok", manifest={"sources": {}, "tombstones": {}})
 
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch)
         devices = [
             {"device_id": "good", "device_name": "GoodMac"},
             {"device_id": "bad", "device_name": "BadMac"},
@@ -593,7 +593,7 @@ class TestPrefetchManifests:
         from mind_meld.cli import ManifestFetch
 
         monkeypatch.setattr(
-            cli_module,
+            cli_module.core,
             "_fetch_remote_manifest",
             lambda *a, **kw: ManifestFetch(status="missing"),
         )
@@ -1882,8 +1882,8 @@ class TestWarningsSurvivePartialPull:
 
         # Stub out crypto-init bootstrap (get_backend should work; we
         # monkeypatch the deeper operations).
-        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_download_and_apply)
         monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", raising_cleanup)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
@@ -1982,8 +1982,8 @@ class TestWriteSyncLogBestEffort:
         def boom_write_sync_log(**kw):
             raise OSError("disk full")
 
-        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(cli_module, "_download_and_apply", fake_download_and_apply)
         monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: 0)
         monkeypatch.setattr(cli_module, "write_sync_log", boom_write_sync_log)

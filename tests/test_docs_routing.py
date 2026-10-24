@@ -333,6 +333,7 @@ _ROW = re.compile(r"^\|(?P<cell>[^|]*)\|", re.M)
 # Any `path/to/file.py:symbol` occurrence anywhere in the routing cell.
 _CITATION = re.compile(r"`(?P<file>[\w/]+\.py):")
 _SYMBOL = re.compile(r"`?([A-Za-z_][\w.]*\*?)`?")
+_OBSOLETE_ROUTING_CITATIONS = frozenset({("cli.py", "status"), ("cli.py", "diag")})
 
 
 def _defined_names(path: Path) -> set[str]:
@@ -530,6 +531,9 @@ def test_every_routing_row_resolves_at_least_one_symbol() -> None:
 @pytest.mark.parametrize("fname,symbol", _routing_citations())
 def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     """Every `<file>.py:<symbol>` in the table names a real definition."""
+    assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
+        f"{ROUTING_MD_REL} routes to the cli.py:{symbol} command shell; cite statusflow.py"
+    )
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
     assert path is not None, f"{ROUTING_MD_REL} routes to {fname}, which does not exist"
@@ -869,6 +873,8 @@ def test_every_extracted_module_has_a_routing_row() -> None:
     """
     table = ROUTING_MD.read_text(encoding="utf-8")
     for mod in (
+        "core.py",
+        "statusflow.py",
         "resolveflow.py",
         "events_tail.py",
         "skill_link.py",
@@ -954,6 +960,9 @@ def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> N
     gate that only read the routing table could not see any of it — an agent would be
     routed correctly and then sent straight back to the wrong file.
     """
+    assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
+        f"{doc} routes to the cli.py:{symbol} command shell; cite statusflow.py"
+    )
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
     assert path is not None, f"{doc} routes to src/mind_meld/{fname}, which does not exist"
@@ -1008,7 +1017,7 @@ _SKILL_LINKS_ROW_FIELDS = (
 
 
 def _collect_diag_state_keys() -> set[str]:
-    tree = ast.parse((SRC / "cli.py").read_text(encoding="utf-8"))
+    tree = ast.parse((SRC / "statusflow.py").read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == "_collect_diag_state":
             for child in ast.walk(node):

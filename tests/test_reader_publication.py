@@ -442,7 +442,7 @@ def test_readme_host_usage_recipe_matches_fixed_width_console(tmp_path, monkeypa
     # Height must be set too: on a dumb terminal Rich ignores width alone and
     # wraps at 80 columns, which breaks these exact-output pins.
     monkeypatch.setattr(
-        cli, "console", Console(file=output, width=160, height=40, color_system=None)
+        cli.statusflow, "console", Console(file=output, width=160, height=40, color_system=None)
     )
     cli._print_host_publication(state, reader_states={})
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()

@@ -196,7 +196,7 @@ REVIEWED = {
             "datetime.min.replace(tzinfo=timezone.utc)",
         ],
     ),
-    "cli.py:_retain_prior_default_sources": (
+    "core.py:_retain_prior_default_sources": (
         *_READ_ONLY,
         [
             "replace(resolution, selected=selected, available=list(resolution.available))",
@@ -263,7 +263,7 @@ REVIEWED = {
             "os.unlink(src)",
         ],
     ),
-    "cli.py:_breadcrumb_staleness_suffix": (
+    "statusflow.py:_breadcrumb_staleness_suffix": (
         *_READ_ONLY,
         [
             "ts.replace('Z', '+00:00')",

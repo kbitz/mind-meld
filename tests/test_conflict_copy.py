@@ -2582,8 +2582,8 @@ class TestResolveLocalMtimeBump:
                 ).timestamp()
             raise typer.Abort()
 
-        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(cli_module, "_download_and_apply", aborting_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
@@ -2675,8 +2675,8 @@ class TestResolveLocalMtimeBump:
                 "failed": [],
             }
 
-        monkeypatch.setattr(cli_module, "_list_devices_warn", fake_list_devices_warn)
-        monkeypatch.setattr(cli_module, "_fetch_remote_manifest", fake_fetch_remote_manifest)
+        monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(cli_module, "_download_and_apply", keep_local_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
         monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
