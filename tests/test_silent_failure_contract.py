@@ -2182,7 +2182,7 @@ class TestAutopushHeldBreadcrumb75A:
         # Degradations are never dropped; the held fragment sheds its paths first
         # when they leave no room, but always keeps its count.
         assert "1 file held, not yet synced (still changing)" in detail
-        assert detail.index("budget") < detail.index("held")
+        assert detail.index("budget") < detail.index("1 file held")
 
     def test_many_held_files_cap_paths_and_keep_the_detail_bounded(self, tmp_path, monkeypatch):
         iso, claude_root = _setup_events_tail_config(tmp_path, monkeypatch)
