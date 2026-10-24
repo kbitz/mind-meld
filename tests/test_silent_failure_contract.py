@@ -55,7 +55,7 @@ def test_git_walk_degradation_names_current_failure_check():
 
 def test_status_retro_capture_nag_names_current_failure_check(tmp_path, monkeypatch):
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.console, "_width", 240)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
     now = datetime.now(timezone.utc).isoformat()
     _mm_events.write_push_event(
         tmp_path / "mm-events" / "events",
@@ -1022,8 +1022,8 @@ def test_status_hint_for_every_keyring_outcome(tmp_path, monkeypatch, outcome, d
     # Private size fields, not the width property: the setter's undo pins
     # the computed size for the rest of the worker. Rich ignores a
     # width-only pin when TERM=dumb and wraps at 80 columns.
-    monkeypatch.setattr(cli_module.console, "_width", 240)
-    monkeypatch.setattr(cli_module.console, "_height", 50)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
+    monkeypatch.setattr(cli_module.statusflow.console, "_height", 50)
     cli_module._write_autorun_breadcrumb("pull", outcome, detail)
 
     r = runner.invoke(app, ["status"])
@@ -1042,8 +1042,8 @@ def test_status_hint_after_keyring_skip(tmp_path, monkeypatch, ss_harness):
     # Private size fields, not the width property: the setter's undo pins
     # the computed size for the rest of the worker. Rich ignores a
     # width-only pin when TERM=dumb and wraps at 80 columns.
-    monkeypatch.setattr(cli_module.console, "_width", 240)
-    monkeypatch.setattr(cli_module.console, "_height", 50)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
+    monkeypatch.setattr(cli_module.statusflow.console, "_height", 50)
 
     control = runner.invoke(app, ["status"])
     assert control.exit_code == 0, control.output
@@ -1475,7 +1475,7 @@ def test_autopull_unexpected_crypto_error_logs(tmp_path, monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("unexpected crypto boom")
 
-    monkeypatch.setattr("mind_meld.cli._init_crypto_session", boom)
+    monkeypatch.setattr("mind_meld.core._init_crypto_session", boom)
 
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0
@@ -2636,7 +2636,7 @@ def test_status77_stale_crypto_replaced_by_real_attended_push(tmp_path, monkeypa
     from mind_meld import attemptlog
 
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.console, "_width", 240)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
     cli_module._write_autorun_breadcrumb("push", "crypto-error", "old-crypto-diagnostic")
     path = cli_module._autorun_breadcrumb_path()
     raw = json.loads(path.read_text())
@@ -2707,7 +2707,9 @@ def test_attended77_callback_failure_matrix(tmp_path, monkeypatch, verb, stage, 
     def fail(*args, **kwargs):
         raise failures[stage]
 
-    monkeypatch.setattr(cli_module, target, fail)
+    monkeypatch.setattr(
+        cli_module.core if stage in ("setup", "authentication") else cli_module, target, fail
+    )
     result = runner.invoke(app, [verb])
     assert result.exit_code == {"exit": 3}.get(stage, 1)
     recorded = attemptlog.read_runs()["runs"][verb]
@@ -2919,7 +2921,7 @@ def test_status77_skip_and_opposite_verb_regressions(tmp_path, monkeypatch, late
     from mind_meld import attemptlog
 
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module.console, "_width", 240)
+    monkeypatch.setattr(cli_module.statusflow.console, "_width", 240)
     assert runner.invoke(app, ["push"]).exit_code == 0
     now = datetime.now(timezone.utc)
     path = cli_module._autorun_breadcrumb_path()

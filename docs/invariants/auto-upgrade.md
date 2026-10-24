@@ -4,7 +4,9 @@ Read BEFORE editing any of these:
 
 - `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
 - `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
-- `src/mind_meld/cli.py` — the 3 transition-detection hook seams (`_get_config`, `_auto_command_setup`, `init_cmd`); the 4 self-update seams (tail of `push` / `pull` / `autopull` / `autopush`) and `recapture`'s nudge-only tail; the `update` command and `_run_update_with_progress`; `mm status` upgrade surfacing
+- `src/mind_meld/core.py` — `_get_config` / (read-only transition gate)
+- `src/mind_meld/cli.py` — `_auto_command_setup` / `init` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / (transition and update/nudge seams)
+- `src/mind_meld/statusflow.py` — `status` / (cached upgrade surfacing)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
@@ -341,9 +343,9 @@ the latter because `0.9.4+local > 0.9.4` per packaging) → max-semver. Cap at
 releases (~3 years at current velocity). Why tags not raw-pyproject-on-main:
 HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 
-**3 hook seams in cli.py:**
+**3 hook seams across core.py and cli.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
-   3 load_config sites: `_get_config`, `_auto_command_setup`, `init`.
+   3 load_config sites: `core._get_config`, `cli._auto_command_setup`, `cli.init`.
    `_get_config(*, read_only: bool)` has no default: every caller states its
    policy. Read-only callers defer the entire transition to the next mutating
    command. The AST gate also confines direct transition calls to these three
@@ -390,7 +392,7 @@ column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empt
 
 ## Read-only callers (Tracks 56A/62A)
 
-`cli._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `update_or_nudge` at its CLI call site: no cache creation/rewrite, HTTP request or pipx run, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; every preview and inspection preserves it. See the [README Previews table](../../README.md#previews) and `COMMAND_INTENTS62` for the complete command contract. `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
+`core._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `update_or_nudge` at its CLI call site: no cache creation/rewrite, HTTP request or pipx run, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; every preview and inspection preserves it. See the [README Previews table](../../README.md#previews) and `COMMAND_INTENTS62` for the complete command contract. `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
 
 ## Release discipline (enforced by mm auto-upgrade)
 

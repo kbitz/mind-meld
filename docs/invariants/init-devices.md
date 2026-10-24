@@ -123,7 +123,7 @@ named `Keyring`, so bare names identify nothing) and closed-vocabulary
 `unavailable` without the keyring package and `unknown` when discovery
 raises. It never reads a secret (`search_items` only,
 for presence), never prompts, and degrades any exception to
-`unknown` + the exception class name. `cli.py` calls it module-qualified
+`unknown` + the exception class name. `statusflow.py` calls it module-qualified
 (`crypto._secret_service_state()`) so test patches on the owner module
 reach it.
 

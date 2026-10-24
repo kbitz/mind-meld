@@ -33,6 +33,8 @@ EXTRACTED = [
     "events_tail",
     "resolveflow",
     "retention",
+    "core",
+    "statusflow",
 ]
 
 LEAVES = [
@@ -794,6 +796,8 @@ def test_no_consumer_owned_agent_name_lists() -> None:
     files = [
         SRC / "skill_link.py",
         SRC / "cli.py",
+        SRC / "core.py",
+        SRC / "statusflow.py",
         Path(__file__).resolve().parent / "conftest.py",
         Path(__file__).resolve().parent / "test_skill_link.py",
         Path(__file__),
@@ -918,3 +922,217 @@ def test_statedb_import_allowlist():
                 assert [a.name for a in node.names] == ["fsutil"]
             else:
                 assert node.module.split(".")[0] in sys.stdlib_module_names
+
+
+# Track 83A: fixed ownership inventory, including shared types and constants.
+CORE_DEFINITIONS = frozenset(
+    """
+    FetchStatus
+    ManifestFetch
+    _AUTORUN_VERBS
+    _SYNC_OUTPUT
+    _apply_verified_crypto_repair
+    _autorun_breadcrumb_path
+    _build_exclude_map
+    _build_include_map
+    _compute_recommended_excludes_diff
+    _compute_recommended_includes_diff
+    _config_missing_recommended_excludes
+    _count
+    _error
+    _fetch_remote_manifest
+    _filter_disabled_sources
+    _filter_excluded_paths
+    _filter_symlinked_paths
+    _freeze_nested_checkout_entries
+    _get_config
+    _get_passphrase_or_exit
+    _has_mtime_only_changes_vs_remote
+    _home_relative_path
+    _init_crypto_session
+    _list_devices_warn
+    _manifest_content_hash
+    _merge_manifests
+    _newer_format_message
+    _normalize_autorun_breadcrumbs
+    _pause_sync_progress
+    _prove_omitted_paths_absent
+    _require_published_source_root
+    _resolve_all_configured_sources
+    _retain_prior_default_sources
+    _stdin_is_terminal
+    iter_source_diffs
+    """.split()
+)
+
+STATUSFLOW_DEFINITIONS = frozenset(
+    """
+    _BREADCRUMB_STALE_AFTER_HOURS
+    _BROKEN_DIAG_STATUS_TO_INSTALL
+    _CURSOR_DETAIL_NO_CLAUSE
+    _CURSOR_DISABLE
+    _CURSOR_ROW_CAUSES
+    _DIAG_CAPTURE_CLAMP
+    _DIAG_MODELS_SHOWN
+    _DISCOVERY_REJECT_REASONS
+    _breadcrumb_staleness_suffix
+    _clamp_peer_text
+    _collect_diag_state
+    _collect_discovery_diag
+    _collect_git_capture_diag
+    _cursor_store_detail_clause
+    _cursor_unsupported_clause
+    _diag_models_line
+    _fresh_discovery_label
+    _host_complete_read_line
+    _host_publication
+    _host_read_budgets
+    _host_read_sweep_line
+    _host_usage_blocker
+    _host_usage_module
+    _print_host_publication
+    _print_retro_capture_status
+    _read_autorun_breadcrumbs
+    _read_autorun_evidence
+    _read_capture_rows
+    _reader_capture_readiness
+    _render_broken_skill_status
+    _sanitize_recorded_capture
+    _sqlite_version
+    _status_notices
+    _status_verdict
+    _usage_capture_needs_upgrade
+    _usage_capture_remedy
+    diag
+    status
+    """.split()
+)
+
+
+def _top_level_definitions(source: str) -> set[str]:
+    names = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(
+                child.id
+                for target in targets
+                for child in ast.walk(target)
+                if isinstance(child, ast.Name)
+            )
+    return names
+
+
+def _unqualified_owner_calls(source: str, consumer: str) -> list[tuple[int, str]]:
+    """Reject dead aliases while allowing names bound inside a local scope."""
+    import symtable
+
+    # The compiler's scope table distinguishes statusflow's nested _count
+    # from the shared core helper, unlike a textual name search.
+    scopes = symtable.symtable(source, "consumer.py", "exec")
+    scope_by_location = {}
+
+    def index(scope):
+        for child in scope.get_children():
+            scope_by_location[(child.get_name(), child.get_lineno())] = child
+            index(child)
+
+    index(scopes)
+    owners = dict.fromkeys(CORE_DEFINITIONS, "core")
+    owners.update(dict.fromkeys(STATUSFLOW_DEFINITIONS, "statusflow"))
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            module = (node.module or "").split(".")[-1]
+            if module in {"core", "statusflow"}:
+                for alias in node.names:
+                    if owners.get(alias.name) == module:
+                        owners[alias.asname or alias.name] = module
+    hits = []
+
+    class Calls(ast.NodeVisitor):
+        scope = scopes
+
+        def visit_FunctionDef(self, node):
+            previous = self.scope
+            self.scope = scope_by_location[(node.name, node.lineno)]
+            for statement in node.body:
+                self.visit(statement)
+            self.scope = previous
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+                if name in owners and owners[name] != consumer:
+                    binding = self.scope.lookup(name)
+                    if binding.is_global():
+                        hits.append((node.lineno, name))
+            self.generic_visit(node)
+
+    Calls().visit(ast.parse(source))
+    return hits
+
+
+def test_status_core_single_ownership_and_qualified_calls():
+    inventories = {"core": CORE_DEFINITIONS, "statusflow": STATUSFLOW_DEFINITIONS}
+    moved = CORE_DEFINITIONS | STATUSFLOW_DEFINITIONS
+    for module in ("cli", "core", "statusflow"):
+        source = (SRC / f"{module}.py").read_text()
+        expected = {"status", "diag"} if module == "cli" else inventories[module]
+        assert _top_level_definitions(source) & moved == expected
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(CORE_DEFINITIONS) == 35
+    assert len(STATUSFLOW_DEFINITIONS) == 38
+
+
+@pytest.mark.parametrize(
+    "source,consumer,flags",
+    [
+        ("def caller(): _get_config(read_only=True)", "cli", True),
+        ("def caller(): core._get_config(read_only=True)", "cli", False),
+        ("def caller(): _status_verdict()", "cli", True),
+        ("def caller(): statusflow._status_verdict()", "cli", False),
+        ("def caller(): _get_config(read_only=True)", "statusflow", True),
+        (
+            "from mind_meld.core import _get_config as load\ndef caller(): load(read_only=True)",
+            "statusflow",
+            True,
+        ),
+        ("def caller(): _status_verdict()", "statusflow", False),
+        ("def caller():\n def _count(): pass\n _count()", "statusflow", False),
+    ],
+)
+def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
+    assert bool(_unqualified_owner_calls(source, consumer)) is flags
+
+
+def test_core_does_not_import_statusflow():
+    tree = ast.parse((SRC / "core.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(a.name != "mind_meld.statusflow" for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.module not in {"mind_meld.statusflow", "statusflow"}
+            if node.module == "mind_meld" or (node.level and not node.module):
+                assert all(a.name != "statusflow" for a in node.names)
+
+
+def test_statusflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import statusflow; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_core_sync_output_is_shared_with_cli():
+    from mind_meld import cli, core
+
+    assert cli._SYNC_OUTPUT is core._SYNC_OUTPUT

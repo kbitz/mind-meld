@@ -272,7 +272,7 @@ class TestFinalOutputSinks:
         from mind_meld import cli
 
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "stderr_console", self._console(buf))
+        monkeypatch.setattr(cli.core, "stderr_console", self._console(buf))
         with pytest.raises(typer.Exit):
             cli._error("bad \x1b]52;c;ZXZpbA==\x07[red]configuration[/red]")
 
@@ -285,14 +285,14 @@ class TestFinalOutputSinks:
         from mind_meld import cli
 
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "stderr_console", self._console(buf))
+        monkeypatch.setattr(cli.core, "stderr_console", self._console(buf))
         evil = "peer\x1b]52;c;ZXZpbA==\x07[red]name[/red]"
 
         def fake_list_devices_impl(_backend, *, on_drop):
             on_drop(evil, evil)
             return []
 
-        monkeypatch.setattr(cli, "_list_devices_impl", fake_list_devices_impl)
+        monkeypatch.setattr(cli.core, "_list_devices_impl", fake_list_devices_impl)
         assert cli._list_devices_warn(object()) == []
 
         out = buf.getvalue()
@@ -310,28 +310,30 @@ class TestFinalOutputSinks:
             "device": {"id": "self", "name": "self"},
             "sync": {"max_file_size": 0, "disabled_sources": []},
         }
-        monkeypatch.setattr(cli, "console", self._console(buf))
-        monkeypatch.setattr(cli, "_get_config", lambda **kwargs: config)
-        monkeypatch.setattr(cli, "_get_passphrase_or_exit", lambda: "passphrase")
-        monkeypatch.setattr(cli, "get_backend", lambda _config: object())
-        monkeypatch.setattr(cli, "_init_crypto_session", lambda *args, **kwargs: 1024)
-        monkeypatch.setattr(cli, "get_sources", lambda _config: [])
-        monkeypatch.setattr(cli, "build_manifest_v2", lambda *args, **kwargs: {"sources": {}})
+        monkeypatch.setattr(cli.statusflow, "console", self._console(buf))
+        monkeypatch.setattr(cli.core, "_get_config", lambda **kwargs: config)
+        monkeypatch.setattr(cli.core, "_get_passphrase_or_exit", lambda: "passphrase")
+        monkeypatch.setattr(cli.statusflow, "get_backend", lambda _config: object())
+        monkeypatch.setattr(cli.core, "_init_crypto_session", lambda *args, **kwargs: 1024)
+        monkeypatch.setattr(cli.statusflow, "get_sources", lambda _config: [])
         monkeypatch.setattr(
-            cli,
+            cli.statusflow, "build_manifest_v2", lambda *args, **kwargs: {"sources": {}}
+        )
+        monkeypatch.setattr(
+            cli.core,
             "_fetch_remote_manifest",
             lambda *args: SimpleNamespace(is_ok=False, manifest=None, status="missing"),
         )
         monkeypatch.setattr(
-            cli,
+            cli.core,
             "_list_devices_warn",
             lambda _backend: [
                 {"device_id": "self", "device_name": "self"},
                 {"device_id": peer_id, "device_name": peer_name},
             ],
         )
-        monkeypatch.setattr(cli, "_autorun_breadcrumb_path", lambda: tmp_path / "missing")
-        monkeypatch.setattr(cli, "_config_missing_recommended_excludes", lambda _config: [])
+        monkeypatch.setattr(cli.core, "_autorun_breadcrumb_path", lambda: tmp_path / "missing")
+        monkeypatch.setattr(cli.core, "_config_missing_recommended_excludes", lambda _config: [])
         monkeypatch.setattr(
             cli.upgrade,
             "cached_upgrade_view",
@@ -339,8 +341,10 @@ class TestFinalOutputSinks:
         )
         monkeypatch.setattr(cli.seen_sources, "read", lambda *, initial: set())
         monkeypatch.setattr(cli.seen_sources, "compute_new_sources", lambda **kwargs: [])
-        monkeypatch.setattr(cli, "iter_source_diffs", lambda *args, **kwargs: iter(()))
-        monkeypatch.setattr(cli, "_has_mtime_only_changes_vs_remote", lambda *args, **kwargs: False)
+        monkeypatch.setattr(cli.core, "iter_source_diffs", lambda *args, **kwargs: iter(()))
+        monkeypatch.setattr(
+            cli.core, "_has_mtime_only_changes_vs_remote", lambda *args, **kwargs: False
+        )
 
         cli.status(source=None)
 
@@ -357,7 +361,7 @@ class TestFinalOutputSinks:
 
         buf = io.StringIO()
         monkeypatch.setattr(
-            cli,
+            cli.core,
             "stderr_console",
             Console(
                 file=buf,
