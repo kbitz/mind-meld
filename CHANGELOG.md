@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.11] - 2026-10-24
+
+**`mm status` and `mm diag` behave the same.** Output, flags, exit codes, encryption, and read-only checks are unchanged.
+
+### Changed
+
+- Status and diagnostics keep the same verdicts, flags, exit codes, and stored data.
+
 ## [1.11.10] - 2026-10-24
 
 **`./bin/check --affected` runs the tests that cover files changed since the merge base.** The first run, a stale record, or a change the selector cannot narrow still runs the full suite and says why. Stopping the check also stops the pytest workers it started.
