@@ -625,7 +625,7 @@ def test_clean_clone_end_to_end(tmp_path: Path) -> None:
 
 # --- Track 82B: --affected selection and owned pytest process groups ---------
 
-GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false"]
 
 PROJECT_FILES = {
     "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src"]\ntestpaths = ["tests"]\n',
@@ -636,12 +636,14 @@ PROJECT_FILES = {
         "from mind_meld import leaf\n\n\ndef shared():\n    return leaf.leaf() + 1\n"
     ),
     "tests/conftest.py": (
-        "import os\n\nimport pytest\n\n\n@pytest.fixture(autouse=True)\n"
+        "import os\n\nimport pytest\n\n\n"
+        "@pytest.fixture(autouse=True)\n"
         "def _ran(request):\n    log = os.environ.get('RAN_LOG')\n    if log:\n"
         "        with open(log, 'a') as fh:\n            fh.write(request.node.nodeid + '\\n')\n"
     ),
     "tests/test_leaf.py": (
-        "import pytest\nfrom mind_meld import leaf\n\n\n@pytest.mark.parametrize('n', [1, 2])\n"
+        "import pytest\nfrom mind_meld import leaf\n\n\n"
+        "@pytest.mark.parametrize('n', [1, 2])\n"
         "def test_leaf(n):\n    assert leaf.leaf() == 1\n"
     ),
     "tests/test_shared.py": (
@@ -1153,6 +1155,7 @@ class TestAffectedSelection:
         try:
             deadline = time.monotonic() + 30
             while not ready.exists() and time.monotonic() < deadline:
+                # gstack-timing-ok: poll ready sentinel file with bounded deadline
                 time.sleep(0.05)
             assert ready.exists()
             os.kill(driver.pid, signal.SIGINT)
@@ -1537,6 +1540,7 @@ class TestInterruptCleanup:
         try:
             pids = _wait_ready(ready, 1)
             os.kill(driver.pid, signal.SIGINT)
+            # gstack-timing-ok: pause between first and second interrupt during active run
             time.sleep(0.5)
             os.kill(driver.pid, signal.SIGINT)
             assert driver.wait(timeout=60) == 130

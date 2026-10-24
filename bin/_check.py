@@ -909,7 +909,7 @@ def _git(root: Path, *args: str, op: str) -> bytes:
         proc = subprocess.run(
             ["git", "-C", str(root), *args],
             capture_output=True,
-            timeout=60,
+            timeout=15,
             check=False,
             env=env,
         )
@@ -1073,7 +1073,7 @@ print(json.dumps({"fp": fp, "coverage": cov}))
 def probe_env(tool: Path) -> dict:
     try:
         proc = subprocess.run(
-            [str(tool), "-c", ENV_PROBE], capture_output=True, text=True, timeout=60, check=False
+            [str(tool), "-c", ENV_PROBE], capture_output=True, text=True, timeout=15, check=False
         )
         result = json.loads(proc.stdout) if proc.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
