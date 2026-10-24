@@ -667,6 +667,8 @@ def make_project(root: Path, files: dict[str, str] | None = None) -> Path:
 
 def git(root: Path, *args: str) -> None:
     subprocess.run([*GIT, "-C", str(root), *args], check=True, capture_output=True)
+    for cache in root.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def check(root: Path, *args: str, env: dict | None = None, timeout: float = 180):
@@ -737,6 +739,8 @@ def edit(root: Path, name: str, old: str, new: str) -> None:
     # Same-size edits inside one second would keep a stale .pyc valid.
     later = stat_before.st_mtime_ns + 10_000_000_000
     os.utime(path, ns=(later, later))
+    for cache in root.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def affected(root: Path, *args: str, **kw):
@@ -1119,6 +1123,41 @@ class TestAffectedSelection:
         assert proc.returncode == 0, both(proc)
         assert "non-Python file changed: README.md" in proc.stderr
         assert ran(proj) == ALL_TESTS
+
+    def test_select_mode_rejects_pytest_addopts_filter_without_clearing_failed(
+        self, proj: Path
+    ) -> None:
+        failed_file = proj / ".mm-test-selection" / "failed.json"
+        failed_file.write_text(json.dumps(["tests/test_leaf.py::test_leaf[1]"]))
+        edit(proj, "src/mind_meld/leaf.py", "return 1", "return int(1)")
+        proc = affected(proj, env={"PYTEST_ADDOPTS": "-k test_other"})
+        assert proc.returncode != 0
+        assert "--affected cannot run with pytest filters" in both(proc)
+        assert json.loads(failed_file.read_text()) == ["tests/test_leaf.py::test_leaf[1]"]
+
+    def test_fallback_full_run_records_failed_tests_for_subsequent_affected_run(
+        self, proj: Path
+    ) -> None:
+        (proj / "tests" / "test_other.py").write_text(
+            "import os\n\n\ndef test_other():\n    assert os.environ.get('FAIL_OTHER') != '1'\n"
+        )
+        git(proj, "add", "tests/test_other.py")
+        git(proj, "commit", "-m", "make test_other env-toggleable")
+        git(proj, "update-ref", "refs/remotes/origin/main", "HEAD")
+        assert affected(proj, "--refresh").returncode == 0
+        ran(proj)
+
+        doc = proj / "README.md"
+        doc.write_text("trigger fallback\n")
+        fail_run = affected(proj, env={"FAIL_OTHER": "1"})
+        assert fail_run.returncode != 0
+        assert "non-Python file changed: README.md" in fail_run.stderr
+        ran(proj)
+
+        doc.unlink()
+        rerun = affected(proj)
+        assert rerun.returncode == 0, both(rerun)
+        assert ran(proj) == {"tests/test_other.py::test_other"}
 
     def test_cancelled_refresh_writer_leaves_prior_record_readable(self, proj: Path) -> None:
         record = proj / ".mm-test-selection" / "record.json"
@@ -1603,3 +1642,22 @@ class TestInterruptCleanup:
         os.close(master)
         assert proc.wait(timeout=30) == 0
         assert b"4 passed" in out
+
+    def test_group_alive_treats_zombie_only_proc_group_as_gone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mod = load_check()
+        proc_root = tmp_path / "proc"
+        p1 = proc_root / "4242"
+        p1.mkdir(parents=True)
+        (p1 / "stat").write_text("4242 (python (worker)) Z 1 9999 9999 0 -1\n")
+        monkeypatch.setattr(mod.os, "waitpid", lambda *_a, **_kw: (0, 0))
+        monkeypatch.setattr(mod.os, "killpg", lambda *_a, **_kw: None)
+        assert mod._only_zombies_in_proc(9999, proc_root) is True
+        assert mod._group_alive(9999, proc_root) is False
+
+        p2 = proc_root / "4243"
+        p2.mkdir()
+        (p2 / "stat").write_text("4243 (python) S 1 9999 9999 0 -1\n")
+        assert mod._only_zombies_in_proc(9999, proc_root) is False
+        assert mod._group_alive(9999, proc_root) is True

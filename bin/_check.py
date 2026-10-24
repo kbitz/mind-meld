@@ -515,13 +515,48 @@ def _signal_group(pgid: int, sig: int) -> None:
         pass
 
 
-def _group_alive(pgid: int) -> bool:
+def _only_zombies_in_proc(pgid: int, proc_root: Path = Path("/proc")) -> bool:
+    """True on Linux when /proc shows pgid exists only as unreaped zombies."""
+    if not proc_root.is_dir():
+        return False
+    found = False
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        _, sep, rest = text.rpartition(")")
+        if not sep:
+            continue
+        fields = rest.split()
+        if len(fields) < 3:
+            continue
+        try:
+            member_pgid = int(fields[2])
+        except ValueError:
+            continue
+        if member_pgid == pgid:
+            found = True
+            if fields[0] != "Z":
+                return False
+    return found
+
+
+def _group_alive(pgid: int, proc_root: Path = Path("/proc")) -> bool:
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    if _only_zombies_in_proc(pgid, proc_root):
+        return False
     return True
 
 
@@ -560,6 +595,8 @@ def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) 
                 ):
                     return "members still alive after SIGTERM and SIGKILL"
     except OSError as exc:
+        if _wait_group_gone(pgid, GROUP_KILL_S, state, allow_hurry=False, leader=leader):
+            return None
         return f"cannot signal the group: {exc}"
     return None
 
@@ -583,11 +620,17 @@ def _await_leader(proc: subprocess.Popen, state: dict) -> None:
         if first_seen is None:
             first_seen = time.monotonic()
         if state["count"] > 1 or time.monotonic() - first_seen >= SIGNALLED_LEADER_S:
-            _signal_group(proc.pid, signal.SIGTERM)
+            try:
+                _signal_group(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
             try:
                 proc.wait(timeout=GROUP_TERM_S)
             except subprocess.TimeoutExpired:
-                _signal_group(proc.pid, signal.SIGKILL)
+                try:
+                    _signal_group(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
                 proc.wait()
             return
 
@@ -681,6 +724,7 @@ _CFG = json.load(open(os.environ["MM_SELECT_CONFIG"], encoding="utf-8"))
 _ROOT = _CFG["root"]
 _PREFIX = _ROOT.rstrip("/") + "/"
 _RECORD = _CFG["mode"] == "record"
+_SELECT = _CFG["mode"] == "select"
 _SPAWN_EVENTS = {"os.system", "os.fork", "os.forkpty", "os.posix_spawn", "os.spawn", "os.exec"}
 _SHELLS = ("sh", "bash", "zsh", "mm", "pytest", "check")
 _current = None
@@ -688,7 +732,14 @@ _reads = {}
 _opaque = set()
 _collected = []
 _totals = {"total": 0, "kept": 0}
-_state = {"filtered": False, "filters": [], "failed": set(), "passed": set(), "worker": False}
+_state = {
+    "filtered": False,
+    "filters": [],
+    "own_deselect": False,
+    "failed": set(),
+    "passed": set(),
+    "worker": False,
+}
 _cov = None
 
 
@@ -723,11 +774,13 @@ def _audit(event, args):
 if _RECORD:
     import coverage
 
+    os.environ.setdefault("COVERAGE_CORE", "ctrace")
     _cov = coverage.Coverage(
         data_file=None,
         source=[os.path.join(_ROOT, "src", "mind_meld")],
         config_file=False,
     )
+    _cov.set_option("run:core", "ctrace")
     _cov.start()
     sys.addaudithook(_audit)
 
@@ -742,7 +795,7 @@ def _is_controller(config):
 
 def pytest_configure(config):
     _state["worker"] = _is_worker(config)
-    if _RECORD:
+    if _RECORD or _SELECT:
         opt = config.option
         for name in (
             "keyword", "markexpr", "deselect", "ignore", "ignore_glob",
@@ -751,12 +804,12 @@ def pytest_configure(config):
             if getattr(opt, name, None):
                 _state["filtered"] = True
                 _state["filters"].append(name)
-        if _is_controller(config):
-            _cov.stop()
+    if _RECORD and _is_controller(config):
+        _cov.stop()
 
 
 def pytest_deselected(items):
-    if _RECORD and items:
+    if (_RECORD or _SELECT) and items and not _state["own_deselect"]:
         _state["filtered"] = True
         _state["filters"].append("deselected")
 
@@ -764,7 +817,12 @@ def pytest_deselected(items):
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     total = len(items)
-    if not _RECORD:
+    if _SELECT:
+        if _state["filtered"]:
+            raise pytest.UsageError(
+                "bin/check: --affected cannot run with pytest filters (%s)"
+                % ", ".join(sorted(set(_state["filters"])))
+            )
         ids = set(_CFG["ids"])
         files = set(_CFG["files"])
         keep, gone = [], []
@@ -772,7 +830,11 @@ def pytest_collection_modifyitems(config, items):
             wanted = i.nodeid in ids or i.nodeid.split("::", 1)[0] in files
             (keep if wanted else gone).append(i)
         if gone:
-            config.hook.pytest_deselected(items=gone)
+            _state["own_deselect"] = True
+            try:
+                config.hook.pytest_deselected(items=gone)
+            finally:
+                _state["own_deselect"] = False
         items[:] = keep
     _totals["total"] = total
     _totals["kept"] = len(items)
@@ -827,7 +889,13 @@ def _read_prior_failed(path):
 
 def pytest_sessionfinish(session, exitstatus):
     config = session.config
-    if not _RECORD and exitstatus == 5 and _totals["total"] > 0 and _totals["kept"] == 0:
+    if (
+        _SELECT
+        and not _state["filtered"]
+        and exitstatus == 5
+        and _totals["total"] > 0
+        and _totals["kept"] == 0
+    ):
         session.exitstatus = 0
         exitstatus = 0
     if _RECORD and not _is_controller(config):
@@ -852,7 +920,7 @@ def pytest_sessionfinish(session, exitstatus):
             "filters": sorted(set(_state["filters"])),
         }
         _dump(os.path.join(_CFG["out_dir"], "part-%d.json" % os.getpid()), part)
-    if not _is_worker(config) and _CFG.get("failed_path"):
+    if not _is_worker(config) and not _state["filtered"] and _CFG.get("failed_path"):
         failed_path = _CFG["failed_path"]
         if exitstatus == 0 and not _state["failed"]:
             _dump(failed_path, [])
@@ -865,7 +933,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 def pytest_terminal_summary(terminalreporter, config):
-    if _RECORD:
+    if not _SELECT:
         return
     terminalreporter.write_line(
         "bin/check: affected: ran %d of %d collected tests" % (_totals["kept"], _totals["total"])
@@ -1375,10 +1443,42 @@ def build_record(
     }
 
 
-def full_pytest(args: Args, tool: Path, n_args: list[str]) -> int:
+def full_pytest(
+    args: Args, tool: Path, n_args: list[str], env: dict[str, str] | None = None
+) -> int:
     name = "pytest " + " ".join(args.scope)
     log(name)
-    return run_owned([str(tool), "-m", "pytest", *args.scope, *n_args])
+    return run_owned([str(tool), "-m", "pytest", *args.scope, *n_args], env)
+
+
+def fallback_pytest(args: Args, sel: Path, tool: Path, n_args: list[str]) -> int:
+    """Full-suite fallback for --affected that still tracks failed.json when sel is writable."""
+    run = sel / f"fallback-{os.getpid()}"
+    try:
+        if not sel.is_dir() or sel.is_symlink():
+            raise OSError("selection dir unavailable")
+        write_plugin(run)
+        cfg = run / "config.json"
+        cfg.write_text(
+            json.dumps(
+                {
+                    "mode": "fallback",
+                    "root": str(sel.parent),
+                    "failed_path": str(sel / SELECT_FAILED),
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        shutil.rmtree(run, ignore_errors=True)
+        return _clean_failed_on_green(sel, full_pytest(args, tool, n_args))
+    try:
+        return _clean_failed_on_green(
+            sel,
+            full_pytest(args, tool, ["-p", "mm_select_plugin", *n_args], pytest_env(run, cfg)),
+        )
+    finally:
+        shutil.rmtree(run, ignore_errors=True)
 
 
 def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
@@ -1407,14 +1507,14 @@ def run_affected(args: Args, root: Path, tool: Path, n_args: list[str]) -> int:
         plan = plan_selection(root, record, merge_base, changed_since(root, merge_base), failed)
     except SelectError as err:
         select_error_report(err, base, sel)
-        return _clean_failed_on_green(sel, full_pytest(args, tool, n_args))
+        return fallback_pytest(args, sel, tool, n_args)
     except Exception as exc:
         err = SelectError("select tests", f"{type(exc).__name__}: {exc}", "unexpected", "report it")
         select_error_report(err, base, sel)
-        return _clean_failed_on_green(sel, full_pytest(args, tool, n_args))
+        return fallback_pytest(args, sel, tool, n_args)
     if plan.full:
         log(f"affected: {plan.full}; running the full suite")
-        return _clean_failed_on_green(sel, full_pytest(args, tool, n_args))
+        return fallback_pytest(args, sel, tool, n_args)
     if plan.empty:
         log(f"affected: ran 0 of {plan.total} recorded tests: nothing the record reaches changed")
         return 0
