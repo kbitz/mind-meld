@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.10] - 2026-10-24
+
+**`./bin/check --affected` runs the tests that cover files changed since the merge base.** The first run, a stale record, or a change the selector cannot narrow still runs the full suite and says why. Stopping the check also stops the pytest workers it started.
+
+### Added
+
+- `--affected`, `--base`, and `--refresh` select tests from recorded coverage, including new or changed tests and tests that failed last time.
+- Pytest runs in its own process group, so an interrupt reaches the workers and leftover processes are reaped.
+
+### Changed
+
+- Development installs include `coverage` 7.6 or newer, which `--affected` uses to record that coverage.
+
 ## [1.11.9] - 2026-10-23
 
 **Git commit counts catch up across later pushes.** An attended `mm push` resumes unfinished Git walks even when no user files changed. `mm status` says how many repositories are still catching up. Use `mm recapture` when capture fails repeatedly or the gap is older than the 90-day window.

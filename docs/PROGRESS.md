@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.10 | 2026-10-24 | **`./bin/check --affected` runs the tests that cover files changed since the merge base.** The first run, a stale record, or a change the selector cannot narrow still runs the full suite and says why. Stopping the check also stops the pytest workers it started. |
 | 1.11.9 | 2026-10-23 | **Git commit counts catch up across later pushes.** An attended `mm push` resumes unfinished Git walks even when no user files changed. `mm status` says how many repositories are still catching up. Use `mm recapture` when capture fails repeatedly or the gap is older than the 90-day window. |
 | 1.11.8 | 2026-10-22 | **Antigravity context and usage now join the fleet.** `mm enable-source agy` enrolls allowlisted skills and rules, local token capture, and the `retro-fleet` skill. Fleet reports distinguish Muse and Antigravity and price supported Gemini models. Standalone Grok Build support and retired OpenCode cleanup are removed; local files remain untouched, and Grok usage through Cursor remains supported. |
 | 1.11.7 | 2026-10-22 | **`mm push` and `mm pull` show what they are working on.** In an interactive terminal, a spinner shows the current phase and file or manifest counts, then clears before the final outcome line. |
