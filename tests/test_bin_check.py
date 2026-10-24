@@ -1415,6 +1415,29 @@ class TestOwnedGroup:
             _kill_pids([proc.pid])
             proc.wait()
 
+    def test_reap_does_not_signal_a_foreign_group_that_uses_this_pid(
+        self, monkeypatch, sentinel
+    ) -> None:
+        mod = load_check()
+        monkeypatch.setattr(mod, "GROUP_GRACE_S", 0.05)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        killpg_signals: list[int] = []
+
+        def foreign_group(pgid: int, sig: int) -> None:
+            killpg_signals.append(sig)
+            raise ProcessLookupError
+
+        monkeypatch.setattr(mod.os, "getpgid", lambda _pid: os.getpgrp())
+        monkeypatch.setattr(mod.os, "killpg", foreign_group)
+        try:
+            assert mod._reap_group(proc.pid, {"count": 2}, leader=proc) is None
+            assert proc.wait(timeout=2) is not None
+            assert killpg_signals == []
+            assert sentinel.poll() is None
+        finally:
+            _kill_pids([proc.pid])
+            proc.wait()
+
     def test_signal_landing_during_spawn_is_held_and_forwarded(self, monkeypatch, sentinel) -> None:
         mod = load_check()
         real_popen = subprocess.Popen
@@ -1450,11 +1473,11 @@ class TestOwnedGroup:
             monkeypatch.setattr(mod, name, 0.05)
         argv, pidfile = self._leader(tmp_path, 3)
         if cause == "stuck":
-            monkeypatch.setattr(mod, "_signal_group", lambda *a: None)
+            monkeypatch.setattr(mod, "_signal_group", lambda *a, **_k: None)
             monkeypatch.setattr(mod, "_group_alive", lambda pgid: True)
         else:
 
-            def denied(*_a):
+            def denied(*_a, **_k):
                 raise PermissionError("nope")
 
             monkeypatch.setattr(mod, "_signal_group", denied)

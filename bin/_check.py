@@ -507,46 +507,66 @@ def xdist_args(python: Path, serial: bool, extra: list[str]) -> list[str]:
     return ["-n", workers]
 
 
-def _pid_alive(pid: int) -> bool:
-    """True when pid exists, including a zombie this process has not reaped."""
+def _child_leads_its_group(pid: int) -> bool | None:
+    """True when this pid leads its group, False when it is alive in another, None when gone.
+
+    killpg(pid) is the wrong probe. A new pid can equal some other process
+    group id, so a successful killpg can signal that other group while this
+    child is still alive. setsid also fails in that case, and the child stays
+    in its parent's group.
+    """
     try:
-        os.kill(pid, 0)
+        return os.getpgid(pid) == pid
     except ProcessLookupError:
-        return False
+        return None
     except PermissionError:
-        return True
-    return True
+        return False
 
 
-def _signal_group(pgid: int, sig: int) -> None:
-    """Signal the owned group; an already-gone group is success."""
+def _signal_group(pgid: int, sig: int, *, confirmed: bool = False) -> None:
+    """Signal the owned group; an already-gone group is success.
+
+    Until this pid is its own leader, signal only that pid. killpg would hit
+    whatever other group currently uses this number. After the leader was
+    observed to own the group, killpg stays correct even once that pid is gone:
+    workers can outlive it, and no other group can hold the id while they do.
+    """
+    if not confirmed:
+        owns = _child_leads_its_group(pgid)
+        if owns is None:
+            return
+        if not owns:
+            try:
+                os.kill(pgid, sig)
+            except ProcessLookupError:
+                pass
+            return
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
 
 
-def _wait_until_signallable(pgid: int, leader: subprocess.Popen | None, seconds: float) -> None:
-    """Wait until pgid is a process group, or the leader has already exited.
+def _wait_until_signallable(pid: int, leader: subprocess.Popen | None, seconds: float) -> bool:
+    """True once this pid is observed leading its group.
 
-    Popen returns before the child runs setsid. Until then killpg(pid) raises
-    ProcessLookupError while the child is still alive, which is not an
-    already-gone group.
+    A leader that has already exited returns False. Callers that saw True
+    earlier keep that fact: workers can outlive the leader, and getpgid cannot
+    confirm the group after the leader has been reaped.
     """
     deadline = time.monotonic() + seconds
     while True:
         if leader is not None:
             leader.poll()
             if leader.returncode is not None:
-                return
-        try:
-            os.killpg(pgid, 0)
-            return
-        except ProcessLookupError:
-            if not _pid_alive(pgid):
-                return
+                return False
+        owns = _child_leads_its_group(pid)
+        if owns:
+            return True
+        if owns is None:
+            return False
         if time.monotonic() >= deadline:
-            return
+            return False
         time.sleep(0.02)
 
 
@@ -617,27 +637,33 @@ def _wait_group_gone(
 def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) -> str | None:
     """End every member of the owned group. Returns a failure cause or None."""
     try:
-        _wait_until_signallable(pgid, leader, GROUP_GRACE_S)
+        if "owns_group" not in state:
+            state["owns_group"] = _wait_until_signallable(pgid, leader, GROUP_GRACE_S)
         if leader is not None:
             leader.poll()
+        owns = _child_leads_its_group(pgid)
+        if not state["owns_group"] and owns is not True:
+            # Still our unreaped child, but not its own group. Signal that pid
+            # only. killpg(pid) would be some other group that reused the number.
+            if owns is None:
+                return None
+            if leader is None:
+                return "members still alive after SIGTERM and SIGKILL"
+            try:
+                os.kill(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                leader.wait(timeout=GROUP_KILL_S)
+            except subprocess.TimeoutExpired:
+                return "members still alive after SIGTERM and SIGKILL"
+            return None
         if not _group_alive(pgid):
-            # Still our unreaped child, but never became a group leader.
-            # killpg cannot see it; signal the pid. Only that child, and only
-            # while we have not reaped it, so a reused pid is not a target.
-            if leader is not None and leader.returncode is None and _pid_alive(pgid):
-                try:
-                    os.kill(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    leader.wait(timeout=GROUP_KILL_S)
-                except subprocess.TimeoutExpired:
-                    return "members still alive after SIGTERM and SIGKILL"
             return None
         if not _wait_group_gone(pgid, GROUP_GRACE_S, state, leader=leader):
-            _signal_group(pgid, signal.SIGTERM)
+            _signal_group(pgid, signal.SIGTERM, confirmed=True)
             if not _wait_group_gone(pgid, GROUP_TERM_S, state, leader=leader):
-                _signal_group(pgid, signal.SIGKILL)
+                _signal_group(pgid, signal.SIGKILL, confirmed=True)
                 if not _wait_group_gone(
                     pgid, GROUP_KILL_S, state, allow_hurry=False, leader=leader
                 ):
@@ -720,6 +746,7 @@ def run_owned(argv: list[str], env: dict[str, str] | None = None) -> int:
     try:
         proc = subprocess.Popen(argv, env=env, start_new_session=True)
         state["pgid"] = proc.pid
+        state["owns_group"] = _wait_until_signallable(proc.pid, proc, GROUP_GRACE_S)
         if state["first"] is not None and not state["forwarded"]:
             forward(state["first"])
         try:

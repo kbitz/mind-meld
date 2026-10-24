@@ -17,7 +17,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Fixed
 
-- Stopping `./bin/check` still ends a pytest process that has not become a session leader yet. That moment used to look like the process group was already gone.
+- Stopping `./bin/check` still ends a pytest process that has not become a session leader yet. A pid that matches some other process group is not that group, and it is not treated as already gone.
 
 ## [1.11.9] - 2026-10-23
 
