@@ -1401,6 +1401,20 @@ class TestOwnedGroup:
             _kill_pids([proc.pid])
             proc.wait()
 
+    def test_reap_kills_a_live_child_that_is_not_a_group_leader(
+        self, monkeypatch, sentinel
+    ) -> None:
+        mod = load_check()
+        monkeypatch.setattr(mod, "GROUP_GRACE_S", 0.05)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+        try:
+            assert mod._reap_group(proc.pid, {"count": 2}, leader=proc) is None
+            assert _wait_gone(proc.pid)
+            assert sentinel.poll() is None
+        finally:
+            _kill_pids([proc.pid])
+            proc.wait()
+
     def test_signal_landing_during_spawn_is_held_and_forwarded(self, monkeypatch, sentinel) -> None:
         mod = load_check()
         real_popen = subprocess.Popen

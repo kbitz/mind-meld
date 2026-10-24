@@ -15,6 +15,10 @@ All notable changes to Mind Meld will be documented in this file.
 
 - Development installs include `coverage` 7.6 or newer, which `--affected` uses to record that coverage.
 
+### Fixed
+
+- Stopping `./bin/check` still ends a pytest process that has not become a session leader yet. That moment used to look like the process group was already gone.
+
 ## [1.11.9] - 2026-10-23
 
 **Git commit counts catch up across later pushes.** An attended `mm push` resumes unfinished Git walks even when no user files changed. `mm status` says how many repositories are still catching up. Use `mm recapture` when capture fails repeatedly or the gap is older than the 90-day window.

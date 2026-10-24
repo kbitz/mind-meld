@@ -507,12 +507,47 @@ def xdist_args(python: Path, serial: bool, extra: list[str]) -> list[str]:
     return ["-n", workers]
 
 
+def _pid_alive(pid: int) -> bool:
+    """True when pid exists, including a zombie this process has not reaped."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _signal_group(pgid: int, sig: int) -> None:
     """Signal the owned group; an already-gone group is success."""
     try:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass
+
+
+def _wait_until_signallable(pgid: int, leader: subprocess.Popen | None, seconds: float) -> None:
+    """Wait until pgid is a process group, or the leader has already exited.
+
+    Popen returns before the child runs setsid. Until then killpg(pid) raises
+    ProcessLookupError while the child is still alive, which is not an
+    already-gone group.
+    """
+    deadline = time.monotonic() + seconds
+    while True:
+        if leader is not None:
+            leader.poll()
+            if leader.returncode is not None:
+                return
+        try:
+            os.killpg(pgid, 0)
+            return
+        except ProcessLookupError:
+            if not _pid_alive(pgid):
+                return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.02)
 
 
 def _only_zombies_in_proc(pgid: int, proc_root: Path = Path("/proc")) -> bool:
@@ -582,9 +617,22 @@ def _wait_group_gone(
 def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) -> str | None:
     """End every member of the owned group. Returns a failure cause or None."""
     try:
+        _wait_until_signallable(pgid, leader, GROUP_GRACE_S)
         if leader is not None:
             leader.poll()
         if not _group_alive(pgid):
+            # Still our unreaped child, but never became a group leader.
+            # killpg cannot see it; signal the pid. Only that child, and only
+            # while we have not reaped it, so a reused pid is not a target.
+            if leader is not None and leader.returncode is None and _pid_alive(pgid):
+                try:
+                    os.kill(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    leader.wait(timeout=GROUP_KILL_S)
+                except subprocess.TimeoutExpired:
+                    return "members still alive after SIGTERM and SIGKILL"
             return None
         if not _wait_group_gone(pgid, GROUP_GRACE_S, state, leader=leader):
             _signal_group(pgid, signal.SIGTERM)
