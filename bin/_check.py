@@ -634,6 +634,26 @@ def _wait_group_gone(
         time.sleep(0.02)
 
 
+def _ensure_leader_dead(leader: subprocess.Popen | None) -> str | None:
+    """Kill the leader pid if it is still running.
+
+    Group checks can report the group gone while this child is alive: a pid
+    can match another group, and a /proc zombie scan can miss the leader.
+    Success means this Popen has been reaped.
+    """
+    if leader is None or leader.poll() is not None:
+        return None
+    try:
+        os.kill(leader.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        leader.wait(timeout=GROUP_KILL_S)
+    except subprocess.TimeoutExpired:
+        return "members still alive after SIGTERM and SIGKILL"
+    return None
+
+
 def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) -> str | None:
     """End every member of the owned group. Returns a failure cause or None."""
     try:
@@ -646,7 +666,7 @@ def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) 
             # Still our unreaped child, but not its own group. Signal that pid
             # only. killpg(pid) would be some other group that reused the number.
             if owns is None:
-                return None
+                return _ensure_leader_dead(leader)
             if leader is None:
                 return "members still alive after SIGTERM and SIGKILL"
             try:
@@ -659,7 +679,7 @@ def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) 
                 return "members still alive after SIGTERM and SIGKILL"
             return None
         if not _group_alive(pgid):
-            return None
+            return _ensure_leader_dead(leader)
         if not _wait_group_gone(pgid, GROUP_GRACE_S, state, leader=leader):
             _signal_group(pgid, signal.SIGTERM, confirmed=True)
             if not _wait_group_gone(pgid, GROUP_TERM_S, state, leader=leader):
@@ -670,9 +690,9 @@ def _reap_group(pgid: int, state: dict, leader: subprocess.Popen | None = None) 
                     return "members still alive after SIGTERM and SIGKILL"
     except OSError as exc:
         if _wait_group_gone(pgid, GROUP_KILL_S, state, allow_hurry=False, leader=leader):
-            return None
+            return _ensure_leader_dead(leader)
         return f"cannot signal the group: {exc}"
-    return None
+    return _ensure_leader_dead(leader)
 
 
 def _leader_status(returncode: int) -> int:
