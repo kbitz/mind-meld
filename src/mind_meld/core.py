@@ -212,7 +212,7 @@ def _get_passphrase_or_exit() -> str:
 
 
 def _newer_format_message(version: int, subject: str = "mm-crypto-init") -> str:
-    """One upgrade remedy for newer envelopes, owned by the CLI layer."""
+    """One upgrade remedy for newer envelopes, owned by the shared command core."""
     return (
         f"crypto: {subject} was written by a newer mm (format 0x{version:02x}) "
         f"or is damaged; this Mac runs mm {__version__}. "
@@ -988,7 +988,7 @@ def _merge_manifests(manifests: list[dict]) -> dict:
                                                                             find_conflict_copies.
 
     `device_id` is NOT in the sort key: every input here is a conflict copy
-    of the SAME device's manifest (cli.py:_fetch_remote_manifest keys the
+    of the SAME device's manifest (core.py:_fetch_remote_manifest keys the
     fetch by device_id), so device_id is constant across inputs and would
     be a no-op tiebreaker.
     """

@@ -343,7 +343,7 @@ the latter because `0.9.4+local > 0.9.4` per packaging) → max-semver. Cap at
 releases (~3 years at current velocity). Why tags not raw-pyproject-on-main:
 HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 
-**3 hook seams across core.py and cli.py:**
+**3 hook seams across core.py, cli.py and statusflow.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
    3 load_config sites: `core._get_config`, `cli._auto_command_setup`, `cli.init`.
    `_get_config(*, read_only: bool)` has no default: every caller states its
