@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.12] - 2026-10-25
+
+**Codex usage in the fleet is unchanged.** The reader now sits behind the host adapter. Commands, output, and the cache stay the same.
+
+### Changed
+
+- Registered readers, including Codex, keep their current consent, failure, and cache behavior.
+- An unknown reader name, which production dispatch does not use, now raises ValueError instead of being treated as Codex.
+
 ## [1.11.11] - 2026-10-24
 
 **`mm status` and `mm diag` behave the same.** Output, flags, exit codes, encryption, and read-only checks are unchanged.
