@@ -22,7 +22,11 @@ import pytest
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "mind_meld"
 
-# The modules extracted out of cli.py, plus the two leaves they depend on.
+HOST_ADAPTER_MODULES = [
+    f"hosts.{p.stem}" for p in sorted((SRC / "hosts").glob("*.py")) if p.name != "__init__.py"
+]
+
+# The modules extracted out of cli.py / host_usage.py, plus the leaves they depend on.
 # Adding a module here is how a future extraction opts into every gate below.
 EXTRACTED = [
     "attemptlog",
@@ -35,6 +39,8 @@ EXTRACTED = [
     "retention",
     "core",
     "statusflow",
+    "host_registry",
+    *HOST_ADAPTER_MODULES,
 ]
 
 LEAVES = [
@@ -180,7 +186,7 @@ def test_cycle_detector_is_not_vacuous(source: str, should_flag: bool, tmp_path:
 
 @pytest.mark.parametrize("mod", EXTRACTED)
 def test_extracted_module_never_imports_cli(mod: str) -> None:
-    hits = _imports_cli(SRC / f"{mod}.py")
+    hits = _imports_cli(SRC / f"{mod.replace('.', '/')}.py")
     assert hits == [], f"{mod}.py imports cli at {hits} — that is the cycle, not a workaround"
 
 
@@ -1136,3 +1142,432 @@ def test_core_sync_output_is_shared_with_cli():
     from mind_meld import cli, core
 
     assert cli._SYNC_OUTPUT is core._SYNC_OUTPUT
+
+
+# ---------------------------------------------------------------------------
+# Track 84A — Codex host reader adapter & host_registry boundaries.
+# ---------------------------------------------------------------------------
+
+CODEX_HOST_DEFINITIONS = frozenset(
+    """
+    CACHE_PATH
+    CODEX_ARCHIVED_SESSIONS_PATH
+    CODEX_SESSIONS_PATH
+    _CacheEntry
+    _ROLLOUT_NAME
+    _Walk
+    _archive_root_exists
+    _cache_entry
+    _cache_hit
+    _carries_usage
+    _context_model
+    _context_turn
+    _counter
+    _counter_list_ok
+    _counters
+    _diag_model_ids
+    _empty_cache
+    _flush_pending
+    _is_token_count
+    _iter_archived_rollouts
+    _iter_rollouts
+    _no_ledger_entry
+    _read_full_rollout
+    _read_rollout
+    _reading_from_record
+    _record_day
+    _resumable_entry
+    _resume_rollout
+    _same_cache_metadata
+    _same_fingerprint
+    _scan_codex_root
+    _validated_counter_list
+    _validated_entry
+    _validated_pending
+    _validated_turn_id
+    _walk_from_entry
+    codex_usage_diag
+    read_codex_usage
+    """.split()
+)
+
+HOST_REGISTRY_DEFINITIONS = frozenset(
+    """
+    HOST_READER_DIAGS
+    HostReaderDiag
+    reader_cache_cold
+    reader_usage_diag
+    warm_host_cache_inline
+    """.split()
+)
+
+MOVED_HOST_DEFINITIONS = CODEX_HOST_DEFINITIONS | HOST_REGISTRY_DEFINITIONS
+
+ALLOWED_HOST_ADAPTER_IMPORTS = frozenset(
+    {"host_usage", "token_usage", "lockedjson", "fsutil", "errors"}
+)
+
+
+def test_codex_and_registry_single_ownership():
+    from mind_meld import host_usage
+
+    assert len(CODEX_HOST_DEFINITIONS) == 38
+    assert len(HOST_REGISTRY_DEFINITIONS) == 5
+    codex_defs = _top_level_definitions((SRC / "hosts" / "codex.py").read_text(encoding="utf-8"))
+    registry_defs = _top_level_definitions((SRC / "host_registry.py").read_text(encoding="utf-8"))
+    usage_defs = _top_level_definitions((SRC / "host_usage.py").read_text(encoding="utf-8"))
+    assert codex_defs == CODEX_HOST_DEFINITIONS
+    assert registry_defs == HOST_REGISTRY_DEFINITIONS
+    assert usage_defs & MOVED_HOST_DEFINITIONS == set()
+    for name in MOVED_HOST_DEFINITIONS:
+        assert not hasattr(host_usage, name), f"{name} still present on host_usage"
+        assert name not in host_usage.__all__, f"{name} still exported in host_usage.__all__"
+
+
+def test_hosts_init_is_empty():
+    init_path = SRC / "hosts" / "__init__.py"
+    tree = ast.parse(init_path.read_text(encoding="utf-8"))
+    non_doc = [
+        node
+        for node in tree.body
+        if not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+    ]
+    assert non_doc == [], f"hosts/__init__.py must stay empty; found {non_doc}"
+
+
+def _host_adapter_import_violations(source: str) -> list[tuple[int, str]]:
+    """Return (lineno, description) for disallowed imports in a hosts/*.py adapter."""
+    stdlib = sys.stdlib_module_names | {"__future__"}
+    hits: list[tuple[int, str]] = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top not in stdlib:
+                    hits.append((node.lineno, f"import {alias.name}"))
+                elif alias.name == "mind_meld.host_usage" and alias.asname:
+                    hits.append((node.lineno, f"import {alias.name} as {alias.asname}"))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                hits.append((node.lineno, f"relative import level={node.level}"))
+                continue
+            mod = node.module or ""
+            top = mod.split(".")[0]
+            if top in stdlib:
+                continue
+            if mod == "mind_meld":
+                for alias in node.names:
+                    if alias.name not in ALLOWED_HOST_ADAPTER_IMPORTS:
+                        hits.append((node.lineno, f"from mind_meld import {alias.name}"))
+                    elif alias.name == "host_usage" and alias.asname:
+                        hits.append(
+                            (
+                                node.lineno,
+                                f"from mind_meld import host_usage as {alias.asname}",
+                            )
+                        )
+            elif mod.startswith("mind_meld."):
+                sub = mod.removeprefix("mind_meld.")
+                if sub not in (ALLOWED_HOST_ADAPTER_IMPORTS - {"host_usage"}):
+                    hits.append((node.lineno, f"from {mod} import ..."))
+            else:
+                hits.append((node.lineno, f"from {mod} import ..."))
+    return hits
+
+
+@pytest.mark.parametrize("mod", HOST_ADAPTER_MODULES)
+def test_host_adapter_import_allowlist(mod: str) -> None:
+    path = SRC / f"{mod.replace('.', '/')}.py"
+    hits = _host_adapter_import_violations(path.read_text(encoding="utf-8"))
+    assert hits == [], f"{mod} has disallowed imports: {hits}"
+
+
+def test_host_usage_never_imports_hosts_or_registry():
+    tree = ast.parse((SRC / "host_usage.py").read_text(encoding="utf-8"))
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in {"mind_meld.hosts", "mind_meld.host_registry"} or a.name.startswith(
+                    "mind_meld.hosts."
+                ):
+                    hits.append((node.lineno, a.name))
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod in {"mind_meld.hosts", "hosts", "mind_meld.host_registry", "host_registry"} or (
+                mod.startswith("mind_meld.hosts.") or mod.startswith("hosts.")
+            ):
+                hits.append((node.lineno, mod))
+            elif mod == "mind_meld" or (node.level and not mod):
+                for a in node.names:
+                    if a.name in {"hosts", "host_registry"}:
+                        hits.append((node.lineno, a.name))
+    assert hits == [], f"host_usage.py must never import hosts or host_registry: {hits}"
+
+
+def test_host_registry_never_imports_cli_or_events_tail():
+    tree = ast.parse((SRC / "host_registry.py").read_text(encoding="utf-8"))
+    hits: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in {"mind_meld.cli", "mind_meld.events_tail"} or a.name.startswith(
+                    ("mind_meld.cli.", "mind_meld.events_tail.")
+                ):
+                    hits.append((node.lineno, a.name))
+                elif a.name == "mind_meld.host_usage" and a.asname:
+                    hits.append((node.lineno, f"alias {a.asname}"))
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod in {
+                "mind_meld.cli",
+                "cli",
+                "mind_meld.events_tail",
+                "events_tail",
+                "mind_meld.host_usage",
+                "host_usage",
+            } or mod.startswith(("mind_meld.cli.", "mind_meld.events_tail.")):
+                hits.append((node.lineno, mod))
+            elif mod == "mind_meld" or (node.level and not mod):
+                for a in node.names:
+                    if a.name in {"cli", "events_tail"}:
+                        hits.append((node.lineno, a.name))
+                    elif a.name == "host_usage" and a.asname:
+                        hits.append((node.lineno, f"alias {a.asname}"))
+    assert hits == [], f"host_registry.py import violation: {hits}"
+
+
+def test_hosts_and_registry_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import mind_meld.hosts.codex; import mind_meld.host_registry; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _unresolved_host_usage_attrs(source: str) -> list[tuple[int, str]]:
+    from mind_meld import host_usage
+
+    hits: list[tuple[int, str]] = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "host_usage"
+            and not hasattr(host_usage, node.attr)
+        ):
+            hits.append((node.lineno, node.attr))
+    return hits
+
+
+@pytest.mark.parametrize("mod", ["host_registry", *HOST_ADAPTER_MODULES])
+def test_every_qualified_host_usage_attribute_resolves(mod: str) -> None:
+    path = SRC / f"{mod.replace('.', '/')}.py"
+    hits = _unresolved_host_usage_attrs(path.read_text(encoding="utf-8"))
+    assert hits == [], f"{mod} references missing host_usage attributes: {hits}"
+
+
+def _stale_moved_references_or_patches(source: str) -> list[tuple[int, str]]:
+    """Detect references/patches to moved Codex/registry names on host_usage aliases,
+    plus one-sided clock patches in tests that call read_codex_usage."""
+    tree = ast.parse(source)
+    hu_aliases: set[str] = set()
+    codex_aliases: set[str] = set()
+    hits: list[tuple[int, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "mind_meld":
+                for alias in node.names:
+                    if alias.name == "host_usage":
+                        hu_aliases.add(alias.asname or "host_usage")
+                    elif alias.name in MOVED_HOST_DEFINITIONS:
+                        hits.append((node.lineno, f"from mind_meld import {alias.name}"))
+            elif node.module == "mind_meld.host_usage":
+                for alias in node.names:
+                    if alias.name in MOVED_HOST_DEFINITIONS:
+                        hits.append((node.lineno, f"from mind_meld.host_usage import {alias.name}"))
+            elif node.module == "mind_meld.hosts":
+                for alias in node.names:
+                    if alias.name == "codex":
+                        codex_aliases.add(alias.asname or "codex")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "mind_meld.host_usage":
+                    hu_aliases.add(alias.asname or "host_usage")
+                elif alias.name == "mind_meld.hosts.codex":
+                    codex_aliases.add(alias.asname or "codex")
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in MOVED_HOST_DEFINITIONS
+            and isinstance(node.value, ast.Name)
+            and node.value.id in hu_aliases
+        ):
+            hits.append((node.lineno, f"{node.value.id}.{node.attr}"))
+        elif isinstance(node, ast.Call):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    for moved in MOVED_HOST_DEFINITIONS:
+                        if f"host_usage.{moved}" in arg.value:
+                            hits.append((node.lineno, arg.value))
+            if (
+                len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in hu_aliases
+            ):
+                if (
+                    isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in MOVED_HOST_DEFINITIONS
+                ):
+                    hits.append(
+                        (
+                            node.lineno,
+                            f"setattr/getattr({node.args[0].id}, {node.args[1].value!r})",
+                        )
+                    )
+                elif isinstance(node.args[1], ast.JoinedStr):
+                    pieces = "".join(
+                        v.value
+                        for v in node.args[1].values
+                        if isinstance(v, ast.Constant) and isinstance(v.value, str)
+                    )
+                    if any(
+                        token in pieces
+                        for token in ("_usage_diag", "_codex_usage", "_scan_", "_rollout")
+                    ):
+                        hits.append(
+                            (
+                                node.lineno,
+                                f"dynamic setattr/getattr({node.args[0].id}, f'...{pieces}...')",
+                            )
+                        )
+
+    # Check function scopes for one-sided module-attribute clock patches (`setattr(hu, "time", ...)`
+    # without `setattr(codex_host, "time", ...)` when `read_codex_usage` is called in the function).
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        calls_codex = False
+        patched_hu_time = False
+        patched_codex_time = False
+        for sub in ast.walk(fn):
+            if isinstance(sub, ast.Attribute) and sub.attr == "read_codex_usage":
+                calls_codex = True
+            elif (
+                isinstance(sub, ast.Call)
+                and len(sub.args) >= 2
+                and isinstance(sub.args[0], ast.Name)
+                and isinstance(sub.args[1], ast.Constant)
+                and sub.args[1].value == "time"
+            ):
+                if sub.args[0].id in hu_aliases:
+                    patched_hu_time = True
+                elif sub.args[0].id in codex_aliases:
+                    patched_codex_time = True
+        if calls_codex and patched_hu_time and not patched_codex_time:
+            hits.append((fn.lineno, f"one-sided time patch in {fn.name}"))
+    return hits
+
+
+def test_no_stale_host_usage_references_or_patches_across_repo():
+    tests_dir = Path(__file__).resolve().parent
+    offenders: dict[str, list[tuple[int, str]]] = {}
+    for root in (SRC, tests_dir):
+        for path in sorted(root.rglob("*.py")):
+            if path == Path(__file__).resolve():
+                continue
+            hits = _stale_moved_references_or_patches(path.read_text(encoding="utf-8"))
+            if hits:
+                offenders[str(path.relative_to(SRC.parents[1]))] = hits
+    assert offenders == {}, f"stale host_usage references or patches: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "source,should_flag",
+    [
+        ("from mind_meld import host_usage, lockedjson, token_usage\n", False),
+        ("from mind_meld import cli\n", True),
+        ("from mind_meld import events_tail\n", True),
+        ("from mind_meld import host_registry\n", True),
+        ("from mind_meld.hosts import other\n", True),
+        ("from mind_meld.host_usage import _expired\n", True),
+        ("from mind_meld import host_usage as hu\n", True),
+        ("from . import codex\n", True),
+    ],
+)
+def test_host_adapter_import_gate_is_not_vacuous(source: str, should_flag: bool) -> None:
+    assert bool(_host_adapter_import_violations(source)) is should_flag
+
+
+@pytest.mark.parametrize(
+    "source,should_flag",
+    [
+        ("host_usage._expired(1.0)\n", False),
+        ("host_usage._nonexistent_helper_84a(1.0)\n", True),
+    ],
+)
+def test_unresolved_host_usage_attr_gate_is_not_vacuous(source: str, should_flag: bool) -> None:
+    assert bool(_unresolved_host_usage_attrs(source)) is should_flag
+
+
+@pytest.mark.parametrize(
+    "source,should_flag",
+    [
+        (
+            "from mind_meld import host_usage as hu\nhu.read_muse_usage()\n",
+            False,
+        ),
+        (
+            "from mind_meld import host_usage as hu\nhu.read_codex_usage()\n",
+            True,
+        ),
+        (
+            "from mind_meld import host_usage as hu\nmonkeypatch.setattr(hu, 'CACHE_PATH', p)\n",
+            True,
+        ),
+        (
+            "from mind_meld import host_usage as hu\n"
+            "monkeypatch.setattr(hu, f'{reader}_usage_diag', fn)\n",
+            True,
+        ),
+        (
+            "monkeypatch.setattr('mind_meld.host_usage.read_codex_usage', fn)\n",
+            True,
+        ),
+        (
+            "from mind_meld import host_usage as hu\n"
+            "from mind_meld.hosts import codex as codex_host\n"
+            "def test_one_sided(monkeypatch):\n"
+            "    monkeypatch.setattr(hu, 'time', clock)\n"
+            "    codex_host.read_codex_usage()\n",
+            True,
+        ),
+        (
+            "from mind_meld import host_usage as hu\n"
+            "from mind_meld.hosts import codex as codex_host\n"
+            "def test_dual(monkeypatch):\n"
+            "    monkeypatch.setattr(hu, 'time', clock)\n"
+            "    monkeypatch.setattr(codex_host, 'time', clock)\n"
+            "    codex_host.read_codex_usage()\n",
+            False,
+        ),
+    ],
+)
+def test_stale_reference_and_clock_patch_gate_is_not_vacuous(
+    source: str, should_flag: bool
+) -> None:
+    assert bool(_stale_moved_references_or_patches(source)) is should_flag

@@ -18,12 +18,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from mind_meld import host_usage
+from mind_meld import host_registry, host_usage
 from mind_meld import sidecar as sidecar_mod
 from mind_meld.cli import app
 from mind_meld.config import load_config, save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
+from mind_meld.hosts import codex as codex_host
 from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "diag-test-passphrase"
@@ -156,7 +157,8 @@ def test_capture_remedies_respect_readiness_without_bootstrapping(
         "files_cached": 1,
         "files_on_disk": 3,
     }
-    monkeypatch.setattr(host_usage, f"{reader}_usage_diag", lambda **_kw: cache_state)
+    spec = host_registry.HOST_READER_DIAGS[reader]
+    monkeypatch.setattr(spec.owner, spec.function, lambda **_kw: cache_state)
     before = root.exists()
     commands = ["diag"] if state == "unknown" else ["status", "diag"]
     expected = "ready" if state == "default-missing" else state
@@ -226,7 +228,7 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
         },
     )
     monkeypatch.setattr(
-        host_usage,
+        codex_host,
         "codex_usage_diag",
         lambda: {
             "last_reason": "deadline" if other == "deadline" else None,
@@ -251,9 +253,10 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
 def test_unconsented_cached_reader_does_not_deny_siblings_consent(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)
     _enable_capture_sources(tmp_path, readers=("muse" if reader == "codex" else "codex",))
+    spec = host_registry.HOST_READER_DIAGS[reader]
     monkeypatch.setattr(
-        host_usage,
-        f"{reader}_usage_diag",
+        spec.owner,
+        spec.function,
         lambda **_kw: {
             "last_reason": "deadline",
             "complete_once": False,
@@ -613,7 +616,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
 ):
     _setup(tmp_path, monkeypatch)
     _enable_capture_sources(tmp_path, readers=(reader,))
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
+    cache = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
         json.dumps(
@@ -660,7 +663,7 @@ def test_diag_blocker_fields_are_validated_and_rendered(
 @pytest.mark.parametrize("state", ["missing", "unreadable"])
 def test_diag_omits_blocker_line_when_cache_is_not_ok(tmp_path, monkeypatch, reader, state):
     _setup(tmp_path, monkeypatch)
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
+    cache = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     if state == "unreadable":
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text("{broken")
@@ -673,7 +676,7 @@ def test_diag_omits_blocker_line_when_cache_is_not_ok(tmp_path, monkeypatch, rea
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_diag_legacy_root_emits_null_blocker_fields(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)
-    cache = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
+    cache = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"version": 1, "muse_format": 2, "files": {}}))
     before = cache.read_bytes()
@@ -912,8 +915,8 @@ def test_diag_json_reports_cached_codex_models(tmp_path, monkeypatch):
     wrote, which is what makes this field free of a re-walk.
     """
     _setup(tmp_path, monkeypatch)
-    host_usage.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    host_usage.CACHE_PATH.write_text(
+    codex_host.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    codex_host.CACHE_PATH.write_text(
         json.dumps(
             {
                 "version": host_usage.CACHE_VERSION,
@@ -1470,7 +1473,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     _enable_capture_sources(tmp_path, readers=())
     at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(timespec="seconds")
     for reader, ms in (("codex", 250 if case == "over" else 197), ("muse", 18)):
-        path = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
+        path = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
@@ -1489,7 +1492,7 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     def never_read(*args, **kwargs):
         pytest.fail("diag must not read host logs")
 
-    monkeypatch.setattr(host_usage, "read_codex_usage", never_read)
+    monkeypatch.setattr(codex_host, "read_codex_usage", never_read)
     monkeypatch.setattr(host_usage, "read_muse_usage", never_read)
     selection = []
     real_select = events_tail._default_host_readers
@@ -1573,7 +1576,7 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
 )
 def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch, reader, timestamp):
     _setup(tmp_path, monkeypatch)
-    path = host_usage.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
+    path = codex_host.CACHE_PATH if reader == "codex" else host_usage.MUSE_CACHE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -1778,11 +1781,11 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
     cfg = load_config()
     cfg.setdefault("retro", {})["cursor_host_usage"] = reader == "cursor"
     save_config(cfg)
-    assert tuple(host_usage.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS
-    for name in host_usage.HOST_READER_DIAGS:
+    assert tuple(host_registry.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS
+    for name, spec in host_registry.HOST_READER_DIAGS.items():
         monkeypatch.setattr(
-            host_usage,
-            f"{name}_usage_diag",
+            spec.owner,
+            spec.function,
             lambda name=name, **_kw: {
                 "cache_state": "ok",
                 "state": "ready",
@@ -1796,9 +1799,10 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         assert result.exit_code == 0, result.output
         # Other readers' cached unsupported formats cannot poison this consent set.
         assert "mm update" not in " ".join(result.output.split())
+    reader_spec = host_registry.HOST_READER_DIAGS[reader]
     monkeypatch.setattr(
-        host_usage,
-        f"{reader}_usage_diag",
+        reader_spec.owner,
+        reader_spec.function,
         lambda **_kw: {
             "cache_state": "ok",
             "state": "ready",
@@ -1817,8 +1821,8 @@ def test_registered_reader_remedy_uses_own_diag67a(tmp_path, monkeypatch, reader
         assert "disable-source cursor" in result.output
     with monkeypatch.context() as ready:
         ready.setattr(
-            host_usage,
-            f"{reader}_usage_diag",
+            reader_spec.owner,
+            reader_spec.function,
             lambda **_kw: {
                 "state": "ready",
                 "complete_once": True,

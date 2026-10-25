@@ -44,6 +44,14 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=84A] Settle Track 85A's Codex settled-day approach under core-and-extensions
+- **Why:** Track 85A's "Codex newest-first with settled days" task freezes settled days "the way the Muse reader does" and lists `src/mind_meld/host_usage.py`, but the Muse freeze code (`_freeze_muse_day`, `_cached_muse_frozen`, `_validated_muse_frozen`, `_MUSE_SETTLE_DAYS`) is Muse-owned and stays in `host_usage.py` after Track 84A. Under docs/SPEC.md "Core and extensions", 85A cannot generalize it there without a Muse move-only Track first.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Surfaced by the Track 84A /autoplan-lean CEO review (2026-10-24, decision d12). Options: 85A implements Codex freezing inside `hosts/codex.py` without editing Muse code (accepting duplication), or /roadmap adds a Muse move-only Track before 85A. Either way, correct 85A's touch list.
+
+Codex day keying differs from Muse: `_record_day` assigns usage to each record's timestamp day, not the rollout's directory date, so a session spanning midnight or a later append adds tokens to later days; archived rollouts move to a flat directory under a new path and `_aggregate`'s lineage keys dedupe them. A Codex freeze therefore cannot key on directory date or path the way `_muse_dir_date` does; it needs per-file idle mtime plus lineage keys.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-23

@@ -881,6 +881,8 @@ def test_every_extracted_module_has_a_routing_row() -> None:
         "retention.py",
         "conflictmtime.py",
         "gitenv.py",
+        "hosts/codex.py",
+        "host_registry.py",
     ):
         assert f"`{mod}:" in table, f"{mod} has no routing row — Group 17 would fly blind"
 

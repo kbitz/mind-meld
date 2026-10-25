@@ -10,7 +10,9 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/host_usage.py` — `read_codex_usage` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `warm_host_cache_inline` / `_scan_codex_root` / `_read_rollout` / `_carries_usage` / `_no_ledger_entry` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
+- `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry`
+- `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
+- `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
 - `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
@@ -18,7 +20,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`.
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`.
 
 
 ## Sync diagnostic presentation (Track 78A)
@@ -79,6 +81,7 @@ terminal outcome and finalization order; auto-upgrade.md owns update eligibility
 - [Sessions snapshot v=2](#sessions-snapshot-v2-full-inventory-load-bearing-v0110)
 - [Cost estimation](#cost-estimation--one-predicate-honest-degradation-load-bearing-v01213)
 - [Fleet-wide author email](#fleet-wide-author-email-trust-set-load-bearing-v01117)
+- [Host reader adapter contract (Track 84A)](#host-reader-adapter-contract)
 
 ---
 
@@ -1019,7 +1022,7 @@ any reader**.
 
 Since Track 32A every reader is per-turn. A day key is *the work actually
 recorded on that UTC day*: Codex differences the host's own cumulative counter
-between consecutive readings (`host_usage._read_rollout` collects `_TurnState`
+between consecutive readings (`hosts/codex.py:_read_rollout` collects `_TurnState`
 readings, `_aggregate` keys transitions by `(lineage, previous, current)` and
 sums them), Grok has been per-turn since v0.12.47 (`_aggregate_grok` over
 `entry["turns"]`). `_aggregate` passes those already-disjoint Grok turns
@@ -3441,3 +3444,94 @@ No live keyring, wheel, Linux Secret Service or fleet acceptance is inferred
 from portable tests. This track does not complete all quiet-output acceptance
 and does not claim owner/fleet quiet-output acceptance. Track 78A now owns
 the attended partial-pull exit 1 and outcome-last order described above.
+
+
+<a id="host-reader-adapter-contract"></a>
+## Host reader adapter contract (Track 84A)
+
+Under [docs/SPEC.md](../SPEC.md) Constraints ("Core and extensions"), host-specific
+usage readers live in `src/mind_meld/hosts/<host>.py` (starting with
+`src/mind_meld/hosts/codex.py` in Track 84A), while `src/mind_meld/host_registry.py`
+owns the reader registry and dispatch (`HOST_READER_DIAGS`, `HostReaderDiag`,
+`reader_usage_diag`, `reader_cache_cold`, `warm_host_cache_inline`) and
+`src/mind_meld/host_usage.py` retains the shared reader kit (`HostUsageResult`,
+`HostUsageBuckets`, `_aggregate`, `_fingerprint`, `_carry_reason`,
+`_carry_read_timing`, `_cached_read_timing`, `_skip_failed_cache_write`,
+`_pause_gc`, `_normalize_inclusive_counters`, `PERMANENT_REASONS`,
+`PERSISTABLE_REASONS`, and the remaining in-place readers until their own moves).
+Every host usage reader adapter and its registry entry must satisfy nine runtime
+clauses, enforced by `tests/test_host_adapter_contract.py` and
+`tests/test_module_boundaries.py`:
+
+1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
+   Every reader in `events.ACTIVE_HOST_READERS` has an entry in
+   `HOST_READER_SOURCE_GATE`. When its gating source is absent from resolved
+   sources, `_default_host_readers(sources)` omits the reader; for readers that
+   carry a `consented` parameter (`read_muse_usage`, `read_cursor_usage`,
+   `read_agy_usage`), the default is `consented=False` and an unconsented call
+   returns `_incomplete("no_metadata_ledger")` before any filesystem stat,
+   directory listing, file open, or cache creation.
+2. **Failure isolation (`events_tail._capture_host_usage`).**
+   Each reader runs inside its own failure boundary in `_capture_host_usage`:
+   an incomplete result (`reason` in `PERSISTABLE_REASONS | {"locked", "no_metadata_ledger"}`)
+   or an unexpected exception from one reader records that reader's skip/degradation
+   and leaves sibling consented readers' completed buckets, `tokens_by_day`, and
+   publication intact.
+3. **Bounded scan and deadline carry (`_expired`, `_carry_reason`, `_carry_read_timing`).**
+   Pre-lock deadline expiry returns `_incomplete("deadline")` without touching or
+   creating the cache file. Post-lock expiry before or after scanning preserves
+   prior cached file entries, records `last_reason="deadline"` according to
+   standing-blocker precedence (`PERMANENT_REASONS` outrank transient reasons),
+   carries `last_complete_ms` / `last_complete_at`, and records
+   `last_deadline_allotted_ms` only while `last_reason == "deadline"`. A scan
+   that completes before the deadline is checked and only then overruns During
+   commit still preserves its completed result or commits its verified file
+   progress without losing cached entries.
+4. **Private cache durability, permissions, and compact encoding (`lockedjson.locked_json_rmw`).**
+   Reader caches live under `~/.config/mind-meld/` at mode `0600`, guarded by
+   `locked_json_rmw(..., compact=True)` (or `locked_json_durable_rmw` for Cursor)
+   and `fsutil.refuse_real_state_write_under_pytest`. Lock contention returns
+   `_incomplete("locked")` without mutating the cache. A cache write `OSError`
+   is routed through `_skip_failed_cache_write` (notice + diagnostic capture)
+   and preserves the scan's in-memory `HostUsageResult`. Unchanged failed sweeps
+   do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
+   pair, the deadline allotment, nor any learned file entry changed.
+5. **GC pause restoration (`_pause_gc`).**
+   Full reader passes run inside `with host_usage._pause_gc():`, disabling
+   cyclic garbage collection during the scan and restoring the caller's prior
+   `gc.isenabled()` state on normal return and on any exception (`RuntimeError`,
+   `KeyboardInterrupt`).
+6. **Disjoint counter semantics (`events.COUNTER_SEMANTICS_DISJOINT_V1`).**
+   Every reader emits disjoint day and per-model buckets (`input` is uncached
+   input; `input + cache_create + cache_read + output` is total tokens), with
+   day keys matching `tu.TOKEN_FIELDS` on `hosts` and `tu.TOKEN_FIELDS + ("by_model",)`
+   on `tokens_by_day`. Inclusive host ledgers normalize through
+   `host_usage._normalize_inclusive_counters` before aggregation so
+   `cache_read + cache_create > input` fails closed with `reason="malformed"`.
+7. **Registry and diagnostic completeness (`host_registry.HOST_READER_DIAGS`, `reader_usage_diag`, `reader_cache_cold`, `warm_host_cache_inline`).**
+   `tuple(HOST_READER_DIAGS)` equals `events.ACTIVE_HOST_READERS` in order;
+   `events_tail.WARMABLE_HOST_READERS` is a subset of `ACTIVE_HOST_READERS`.
+   Each `HostReaderDiag` names its `owner` module, `function`, `ready_key`,
+   `ready_value`, and `label`. Every `<reader>_usage_diag()` returns at least
+   `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
+   `files_cached`, `files_on_disk`, and `spec.ready_key`. `warm_host_cache_inline`
+   raises `ValueError` naming `host_registry.py` and this section anchor when
+   given an unknown reader name.
+8. **Call-time owner resolution (monkeypatch contract).**
+   `host_registry.reader_usage_diag`, `host_registry.warm_host_cache_inline`,
+   and `events_tail._default_host_readers` resolve reader and diagnostic
+   callables on their owner modules (`codex_host.read_codex_usage`,
+   `getattr(descriptor.owner, descriptor.function)`) at call time rather than
+   binding function references at import time, and `hosts/*.py` calls shared
+   `host_usage` helpers module-qualified (`host_usage._expired(...)`). Patching
+   the owner module in tests therefore intercepts every production dispatch site.
+9. **Import boundaries and test-time path isolation.**
+   `hosts/__init__.py` is empty. Every `hosts/*.py` module imports only stdlib
+   and `mind_meld.{host_usage, token_usage, lockedjson, fsutil, errors}` — never
+   `cli`, `core`, `statusflow`, `events_tail`, `host_registry`, or sibling
+   `hosts.*`. `host_usage` never imports `hosts/*` or `host_registry`;
+   `host_registry` never imports `cli` or `events_tail`. Importing any
+   `mind_meld.hosts.<host>` or `mind_meld.host_registry` in a fresh interpreter
+   never loads `mind_meld.cli`. Under pytest, `tests/conftest.py:_isolate_host_usage`
+   redirects every reader's session roots and cache paths on its owner module
+   into `tmp_path`.

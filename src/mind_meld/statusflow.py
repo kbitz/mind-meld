@@ -20,6 +20,7 @@ from mind_meld import (
     crypto,
     events,
     events_tail,
+    host_registry,
     manifest,
     resolveflow,
     safety,
@@ -320,13 +321,13 @@ def status(
             config, sources_configs, capture_rows, selected=source_resolution.selected
         )
         reader_states = {
-            name: _host_usage.reader_usage_diag(name) for name in publication["readers"]
+            name: host_registry.reader_usage_diag(name) for name in publication["readers"]
         }
         for name, state in reader_states.items():
             if name in {"muse", "agy"} and state.get("last_reason") == "deadline":
                 # Only deadline progress uses on-disk counts. Healthy status
                 # stays cache-only instead of walking the host's full history.
-                reader_states[name] = _host_usage.reader_usage_diag(name, count_logs=True)
+                reader_states[name] = host_registry.reader_usage_diag(name, count_logs=True)
         capture_action = None
         if publication["readers"] and publication["readiness"] in ("disabled", "unavailable"):
             capture_action = "Usage capture unavailable. " + _usage_capture_remedy(
@@ -713,7 +714,7 @@ def status(
             if isinstance(unsupported, dict) and unsupported.get("count"):
                 narrative += "; " + safe_str(_cursor_unsupported_clause(unsupported))
             console.print(
-                f"  {_host_usage.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
+                f"  {host_registry.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
             )
 
         # Per-source breakdown
@@ -1104,13 +1105,12 @@ def _print_host_publication(
     console.print(
         f"    Publication: {safe_str(state['publication'] + reason)} (accepted manifest evidence)"
     )
-    from mind_meld import host_usage as _host_usage
 
     for reader, coverage in state["readers"].items():
         if reader not in events.HOST_USAGE_TOKEN_SOURCES:
             continue
         outcome = "empty" if reader in (state.get("empty_readers") or ()) else coverage
-        descriptor = _host_usage.HOST_READER_DIAGS.get(reader)
+        descriptor = host_registry.HOST_READER_DIAGS.get(reader)
         label = descriptor.label if descriptor is not None else reader
         console.print(f"    {safe_str(label)}: {safe_str(events.host_reader_label(outcome))}")
     for line in (
@@ -1537,9 +1537,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             if name == "muse"
             else _host_usage.agy_usage_diag(count_logs=agy_consented is True)
             if name == "agy"
-            else _host_usage.reader_usage_diag(name)
+            else host_registry.reader_usage_diag(name)
         )
-        for name in _host_usage.HOST_READER_DIAGS
+        for name in host_registry.HOST_READER_DIAGS
     }
     host_usage_state["muse"]["consented"] = muse_consented
     host_usage_state["agy"]["consented"] = agy_consented
@@ -1857,9 +1857,7 @@ def diag(
         )
 
     cursor_state = state["host_usage"].get("cursor", {})
-    from mind_meld.host_usage import HOST_READER_DIAGS
-
-    console.print(f"  {HOST_READER_DIAGS['cursor'].label}:")
+    console.print(f"  {host_registry.HOST_READER_DIAGS['cursor'].label}:")
     consent = cursor_state.get("consented")
     console.print(
         "    consented: " + ("unknown" if consent is None else "yes" if consent else "no")

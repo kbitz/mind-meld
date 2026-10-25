@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import gc
 import hashlib
 import json
 import os
@@ -22,9 +21,10 @@ from unittest.mock import Mock
 
 import pytest
 
+from mind_meld import host_registry, lockedjson
 from mind_meld import host_usage as hu
-from mind_meld import lockedjson
 from mind_meld import token_usage as tu
+from mind_meld.hosts import codex as codex_host
 from tests import _host_usage_oracle as oracle
 
 FIXTURES = Path(__file__).parent / "fixtures" / "host_sessions"
@@ -595,7 +595,7 @@ def _write_rollout(root: Path, name: str, records: list[dict], *, partial: bytes
 @pytest.fixture
 def isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     cache = tmp_path / "config" / "host-tokens.json"
-    monkeypatch.setattr(hu, "CACHE_PATH", cache)
+    monkeypatch.setattr(codex_host, "CACHE_PATH", cache)
     return cache
 
 
@@ -646,33 +646,6 @@ def _write_muse_session(root: Path, rid: str = "e1") -> Path:
     return path
 
 
-@pytest.fixture(params=["codex", "muse"])
-def reader_case(request, tmp_path, monkeypatch):
-    name = request.param
-    cache = {"codex": hu.CACHE_PATH, "muse": hu.MUSE_CACHE_PATH}[name]
-    root = tmp_path / "reader-sessions"
-    monkeypatch.setattr(hu, "CODEX_SESSIONS_PATH", root)
-
-    def read():
-        if name == "codex":
-            return hu.read_codex_usage(root)
-        return hu.read_muse_usage(root, consented=True)
-
-    diag = {"codex": hu.codex_usage_diag, "muse": hu.muse_usage_diag}[name]
-
-    def set_scan(result, staged=None, learned=False):
-        if name == "muse":
-            # Muse also returns its frozen days: (result, live, frozen, learned, saw).
-            output = (result, staged or {}, {}, learned, True)
-        else:
-            output = (result, staged or {}, learned)
-        scan = Mock(return_value=output)
-        monkeypatch.setattr(hu, f"_scan_{name}_root", scan)
-        return scan
-
-    return read, cache, diag, set_scan
-
-
 @pytest.mark.parametrize(
     "prior,since,result,expected",
     [
@@ -696,10 +669,10 @@ def test_codex_unsupported_is_visible_and_recovery_clears_it(
     new_file, isolated_cache, tmp_path, monkeypatch
 ):
     root = tmp_path / "sessions"
-    monkeypatch.setattr(hu, "CODEX_SESSIONS_PATH", root)
+    monkeypatch.setattr(codex_host, "CODEX_SESSIONS_PATH", root)
     records = [_context(), _token(100)]
     _write_rollout(root, "rollout-a.jsonl", records)
-    assert hu.read_codex_usage(root).complete
+    assert codex_host.read_codex_usage(root).complete
     cached = json.loads(isolated_cache.read_text())["files"]
     bad = _token(200)
     bad["payload"]["info"]["total_token_usage"]["input_tokens"] = "broken"
@@ -707,180 +680,36 @@ def test_codex_unsupported_is_visible_and_recovery_clears_it(
     _write_rollout(root, name, [*records, bad])
     writer = Mock(wraps=lockedjson._write_json)
     monkeypatch.setattr(lockedjson, "_write_json", writer)
-    assert hu.read_codex_usage(root).reason == "unsupported"
+    assert codex_host.read_codex_usage(root).reason == "unsupported"
     writer.assert_called_once()
     data = json.loads(isolated_cache.read_text())
     assert data["files"] == cached
     assert data["version"] == hu.CACHE_VERSION == 1
     assert data["last_reason"] == "unsupported"
     assert hu._cached_reason_since(data) is not None
-    diag = hu.codex_usage_diag()
+    diag = codex_host.codex_usage_diag()
     assert diag["state"] == ("migrating" if new_file else "ready")
     assert diag["pending"] == int(new_file)
     assert diag["last_reason"] == "unsupported"
     writer.reset_mock()
-    assert hu.read_codex_usage(root).reason == "unsupported"
+    assert codex_host.read_codex_usage(root).reason == "unsupported"
     writer.assert_not_called()
     _write_rollout(root, name, records)
-    assert hu.read_codex_usage(root).complete
-    assert hu.codex_usage_diag()["last_reason"] is None
-    assert hu.codex_usage_diag()["last_reason_since"] is None
-
-
-@pytest.mark.parametrize("since", [None, "garbage", "2026-09-04T10:00:00"])
-def test_migrated_reader_root_gains_first_observed_once(reader_case, since, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache, since=since)
-    set_scan(hu._incomplete("unsupported"))
-    carry = hu._carry_reason
-    monkeypatch.setattr(hu, "_carry_reason", lambda a, b, c, now, **kw: carry(a, b, c, _NOW, **kw))
-    writer = Mock(wraps=lockedjson._write_json)
-    monkeypatch.setattr(lockedjson, "_write_json", writer)
-    assert read().reason == "unsupported"
-    writer.assert_called_once()
-    assert diag()["last_reason_since"] == _NOW.isoformat()
-    writer.reset_mock()
-    assert read().reason == "unsupported"
-    writer.assert_not_called()
-    assert diag()["last_reason_since"] == _NOW.isoformat()
-
-
-@pytest.mark.parametrize("learned", [False, True])
-def test_failed_reader_writes_only_when_pair_changes_or_file_learned(
-    reader_case, learned, monkeypatch
-):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache)
-    staged = {"learned": {"no_ledger": True}} if learned else {}
-    set_scan(hu._incomplete("deadline"), staged, learned)
-    writer = Mock(wraps=lockedjson._write_json)
-    monkeypatch.setattr(lockedjson, "_write_json", writer)
-    assert read().reason == "deadline"
-    assert writer.call_count == int(learned)
-    assert json.loads(cache.read_text())["files"] == staged
-    assert diag()["last_reason"] == "unsupported"
-    assert diag()["last_reason_since"] == _OBSERVED
-
-
-def test_pre_lock_expiry_never_creates_cache(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    scan = set_scan(hu.HostUsageResult({}, True))
-    monkeypatch.setattr(hu, "_expired", lambda d: True)
-    assert read().reason == "deadline"
-    assert not cache.exists()
-    scan.assert_not_called()
-
-
-def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    files = {"kept": {"no_ledger": True, "usage_less_skipped": 2}}
-    _seed_blocker(cache, reason=None, since=None, files=files)
-    scan = set_scan(hu.HostUsageResult({}, True))
-    writer = Mock(wraps=lockedjson._write_json)
-    monkeypatch.setattr(lockedjson, "_write_json", writer)
-    for attempt in range(2):
-        ticks = iter([False, True])
-        monkeypatch.setattr(hu, "_expired", lambda d: next(ticks))
-        assert read().reason == "deadline"
-        scan.assert_not_called()
-        assert writer.call_count == 1
-        data = json.loads(cache.read_text())
-        assert data["files"] == files
-        assert diag()["last_reason"] == "deadline"
-        if "complete_once" in data:
-            assert data["complete_once"] is True
-            # Muse has no usage-less records, so its root tally is always 0.
-            assert data["usage_less_skipped"] == (0 if cache == hu.MUSE_CACHE_PATH else 2)
-
-
-def test_complete_then_expired_records_deadline_and_keeps_cache(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache)
-    set_scan(hu.HostUsageResult({}, True), {"learned": {"no_ledger": True}}, True)
-    ticks = iter([False, False, True])
-    monkeypatch.setattr(hu, "_expired", lambda d: next(ticks))
-    assert read().reason == "deadline"
-    assert "learned" in json.loads(cache.read_text())["files"]
-    assert diag()["last_reason"] == "deadline"
-    assert diag()["last_reason_since"] != _OBSERVED
-
-
-@pytest.mark.parametrize("write_state", ["intact", "empty", "partial"])
-@pytest.mark.parametrize("complete", [False, True])
-def test_cache_write_failure_notices_and_preserves_scan_result(
-    reader_case, write_state, complete, monkeypatch, capsys
-):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache)
-    before = cache.read_bytes()
-    result = hu.HostUsageResult({}, True) if complete else hu._incomplete("partial")
-    set_scan(result, {"learned": {"no_ledger": True}}, True)
-    real_write = lockedjson._write_json
-
-    def fail_write(fd, data, **kwargs):
-        if write_state != "intact":
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            if write_state == "partial":
-                os.write(fd, b'{"files":')
-        return OSError(errno.ENOSPC, "sensitive path must never be printed")
-
-    monkeypatch.setattr(lockedjson, "_write_json", fail_write)
-    assert read() is result
-    assert capsys.readouterr().err == "mm: notice: host token cache write failed: ENOSPC\n"
-    if write_state != "intact":
-        assert diag()["cache_state"] == ("missing" if write_state == "empty" else "unreadable")
-        assert diag()["last_reason"] is None
-    else:
-        assert cache.read_bytes() == before
-    monkeypatch.setattr(lockedjson, "_write_json", real_write)
-    set_scan(hu._incomplete("unsupported"))
-    assert read().reason == "unsupported"
-    assert diag()["last_reason"] == "unsupported"
-
-
-def test_slow_commit_does_not_reclassify_completed_read(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache)
-    result = hu.HostUsageResult({}, True)
-    set_scan(result)
-    expired = False
-    real_write = lockedjson._write_json
-
-    def commit_after_deadline(fd, data, **kwargs):
-        nonlocal expired
-        expired = True
-        return real_write(fd, data, **kwargs)
-
-    monkeypatch.setattr(hu, "_expired", lambda d: expired)
-    monkeypatch.setattr(lockedjson, "_write_json", commit_after_deadline)
-    assert read() is result
-    assert diag()["last_reason"] is None
-
-
-def test_contended_reader_keeps_prior_blocker(reader_case):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache)
-    scan = set_scan(hu.HostUsageResult({}, True))
-    before = cache.read_bytes()
-    with cache.open("r+") as fp:
-        fcntl.flock(fp, fcntl.LOCK_EX)
-        assert read().reason == "locked"
-    scan.assert_not_called()
-    assert cache.read_bytes() == before
-    assert diag()["last_reason"] == "unsupported"
+    assert codex_host.read_codex_usage(root).complete
+    assert codex_host.codex_usage_diag()["last_reason"] is None
+    assert codex_host.codex_usage_diag()["last_reason_since"] is None
 
 
 def test_legacy_codex_root_does_not_force_file_rewalk(isolated_cache, tmp_path, monkeypatch):
     root = tmp_path / "sessions"
     _write_rollout(root, "rollout-old.jsonl", [_context(), _token(100)])
-    before = hu.read_codex_usage(root)
+    before = codex_host.read_codex_usage(root)
     data = json.loads(isolated_cache.read_text())
     del data["last_reason"]
     del data["last_reason_since"]
     isolated_cache.write_text(json.dumps(data))
-    monkeypatch.setattr(hu, "_read_full_rollout", lambda *a: pytest.fail("re-walked"))
-    assert hu.read_codex_usage(root) == before
+    monkeypatch.setattr(codex_host, "_read_full_rollout", lambda *a: pytest.fail("re-walked"))
+    assert codex_host.read_codex_usage(root) == before
     assert json.loads(isolated_cache.read_text())["version"] == 1
 
 
@@ -926,7 +755,7 @@ class TestCodexFixture:
         root = tmp_path / "sessions"
         shutil.copytree(FIXTURES, root)
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.reason is None
@@ -965,7 +794,7 @@ class TestCodexFixture:
             root, "rollout-reasoning.jsonl", [_context(), _token(1, output=9, reasoning=7)]
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.hosts["codex"]["2026-08-15"]["output"] == 9
 
@@ -979,7 +808,7 @@ class TestCodexFixture:
             [_context("gpt-5"), _token(10), _context("grok-4")],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert set(result.hosts) == {"codex"}
@@ -993,7 +822,7 @@ class TestCodexFixture:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-no-context.jsonl", [_token(10)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
@@ -1027,7 +856,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
             [_context(), self._null_info_token(), _token(42, output=7)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 42
@@ -1044,7 +873,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         }
         _write_rollout(root, "rollout-no-info-key.jsonl", [_context(), marker, _token(5)])
 
-        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 5
+        assert codex_host.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 5
 
     def test_present_but_malformed_info_is_still_fatal(
         self, isolated_cache: Path, tmp_path: Path
@@ -1059,7 +888,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         }
         _write_rollout(root, "rollout-broken-info.jsonl", [_context(), broken])
 
-        assert hu.read_codex_usage(root).reason == "unsupported"
+        assert codex_host.read_codex_usage(root).reason == "unsupported"
 
     def test_ledger_before_first_turn_context_is_skipped(
         self, isolated_cache: Path, tmp_path: Path
@@ -1074,7 +903,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
             [_token(10), _token(20), _context("gpt-5"), _token(30, output=4)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         # The LAST attributable cumulative total wins — never a sum.
@@ -1094,7 +923,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
         _write_rollout(root, "rollout-real.jsonl", [_context(), _token(99)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 99
@@ -1110,7 +939,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         for i in range(5):
             _write_rollout(root, f"rollout-zzz-{i}.jsonl", [_context(), _token(10)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 50
@@ -1135,7 +964,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         _write_rollout(root, "rollout-bbb-bare-marker.jsonl", [self._null_info_token()])
         _write_rollout(root, "rollout-zzz-real.jsonl", [_context(), _token(11)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True, result
         assert result.hosts["codex"]["2026-08-15"]["input"] == 11
@@ -1164,7 +993,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         }
         _write_rollout(root, "rollout-empty-info.jsonl", [_context(), record])
 
-        assert hu.read_codex_usage(root).reason == "unsupported"
+        assert codex_host.read_codex_usage(root).reason == "unsupported"
 
     def test_broken_ledger_before_any_turn_context_is_still_fatal(
         self, isolated_cache: Path, tmp_path: Path
@@ -1180,7 +1009,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         }
         _write_rollout(root, "rollout-early-broken.jsonl", [broken, _context(), _token(10)])
 
-        assert hu.read_codex_usage(root).reason == "unsupported"
+        assert codex_host.read_codex_usage(root).reason == "unsupported"
 
     def test_no_ledger_rollout_caches_identity_only_and_hits_next_scan(
         self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1195,7 +1024,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         abandoned = _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
         _write_rollout(root, "rollout-real.jsonl", [_context(), _token(1)])
 
-        first = hu.read_codex_usage(root)
+        first = codex_host.read_codex_usage(root)
         assert first.complete is True
         assert set(first.hosts) == {"codex"}, "a no-ledger file must not create a bucket"
 
@@ -1207,9 +1036,11 @@ class TestOrdinaryCodexShapesAreNotRefused:
 
         # Unchanged on the next scan → cache hit, not a re-parse.
         monkeypatch.setattr(
-            hu, "_read_full_rollout", lambda *a, **k: pytest.fail("no-ledger file was re-parsed")
+            codex_host,
+            "_read_full_rollout",
+            lambda *a, **k: pytest.fail("no-ledger file was re-parsed"),
         )
-        second = hu.read_codex_usage(root)
+        second = codex_host.read_codex_usage(root)
         assert second.complete is True
         assert second.hosts == first.hosts
 
@@ -1220,7 +1051,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         riding along behind it rather than trusting the pair."""
         root = tmp_path / "sessions"
         abandoned = _write_rollout(root, "rollout-abandoned.jsonl", [_context()])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
 
         cache = json.loads(isolated_cache.read_text(encoding="utf-8"))
         cache["files"][hu._cache_key(abandoned)].update(
@@ -1232,7 +1063,7 @@ class TestOrdinaryCodexShapesAreNotRefused:
         )
         isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts == {}, "smuggled totals must not reach the aggregate"
@@ -1244,14 +1075,14 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-cached.jsonl", [_context(), _token(100)])
-        first = hu.read_codex_usage(root)
+        first = codex_host.read_codex_usage(root)
         assert first.complete is True
 
         def should_not_reread(*args: object, **kwargs: object) -> object:
             raise AssertionError("unchanged rollout should be a cache hit")
 
-        monkeypatch.setattr(hu, "_read_full_rollout", should_not_reread)
-        second = hu.read_codex_usage(root)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", should_not_reread)
+        second = codex_host.read_codex_usage(root)
 
         assert second == first
 
@@ -1260,7 +1091,7 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         rollout = _write_rollout(root, "rollout-rewrite.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
+        assert codex_host.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
         before = rollout.stat()
 
         _write_rollout(root, "rollout-rewrite.jsonl", [_context(), _token(400)])
@@ -1268,7 +1099,7 @@ class TestCacheLifecycle:
         assert rollout.stat().st_size == before.st_size
         assert rollout.stat().st_mtime_ns == before.st_mtime_ns
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 400
@@ -1278,7 +1109,7 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         rollout = _write_rollout(root, "rollout-append.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
+        assert codex_host.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
 
         with rollout.open("ab") as fp:
             fp.write(json.dumps(_token(400)).encode("utf-8") + b"\n")
@@ -1286,8 +1117,8 @@ class TestCacheLifecycle:
         def full_parse_would_violate_resume(*args: object, **kwargs: object) -> object:
             raise AssertionError("verified append should resume from the cache offset")
 
-        monkeypatch.setattr(hu, "_read_full_rollout", full_parse_would_violate_resume)
-        result = hu.read_codex_usage(root)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", full_parse_would_violate_resume)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 400
@@ -1297,7 +1128,7 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         rollout = _write_rollout(root, "rollout-provenance.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
 
         # Keep the original byte length, then append. The cached tail and head
         # no longer prove this is an append, so it must receive a full parse.
@@ -1305,7 +1136,7 @@ class TestCacheLifecycle:
         with rollout.open("ab") as fp:
             fp.write(json.dumps(_token(400)).encode("utf-8") + b"\n")
 
-        full_parse = hu._read_full_rollout
+        full_parse = codex_host._read_full_rollout
         calls = 0
 
         def record_full_parse(*args: object, **kwargs: object) -> object:
@@ -1313,8 +1144,8 @@ class TestCacheLifecycle:
             calls += 1
             return full_parse(*args, **kwargs)
 
-        monkeypatch.setattr(hu, "_read_full_rollout", record_full_parse)
-        result = hu.read_codex_usage(root)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", record_full_parse)
+        result = codex_host.read_codex_usage(root)
 
         assert calls == 1
         assert result.complete is True
@@ -1325,7 +1156,7 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-race-full.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
         cache_before = isolated_cache.read_bytes()
         _write_rollout(root, "rollout-race-full.jsonl", [_context(), _token(300)])
 
@@ -1340,7 +1171,7 @@ class TestCacheLifecycle:
             return regular_stat(path)
 
         monkeypatch.setattr(hu, "_regular_stat", mutate_after_full_parse)
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="stale")
         data = json.loads(isolated_cache.read_text())
@@ -1353,7 +1184,7 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         rollout = _write_rollout(root, "rollout-race-resume.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
         cache_before = isolated_cache.read_bytes()
         with rollout.open("ab") as fp:
             fp.write(json.dumps(_token(300)).encode("utf-8") + b"\n")
@@ -1370,7 +1201,7 @@ class TestCacheLifecycle:
             return regular_stat(path)
 
         monkeypatch.setattr(hu, "_regular_stat", mutate_after_append_proof)
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="stale")
         data = json.loads(isolated_cache.read_text())
@@ -1383,14 +1214,14 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-fingerprint-deadline.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
         cache_before = isolated_cache.read_bytes()
 
         def expire_fingerprint(*args: object, **kwargs: object) -> object:
             raise hu._ReadFailure("deadline")
 
         monkeypatch.setattr(hu, "_fingerprint", expire_fingerprint)
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
         data = json.loads(isolated_cache.read_text())
@@ -1420,7 +1251,7 @@ class TestCacheLifecycle:
         root = tmp_path / "sessions"
         rollout_a = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
         rollout_b = _write_rollout(root, "rollout-b.jsonl", [_context(), _token(100)])
-        first = hu.read_codex_usage(root)
+        first = codex_host.read_codex_usage(root)
         assert first.hosts["codex"]["2026-08-15"]["input"] == 300
         keys_before = set(json.loads(isolated_cache.read_text(encoding="utf-8"))["files"])
         key_a, key_b = hu._cache_key(rollout_a), hu._cache_key(rollout_b)
@@ -1429,7 +1260,7 @@ class TestCacheLifecycle:
         rollout_b.unlink()
         _write_rollout(root, "rollout-c.jsonl", [_context()], partial=b'{"type":"event_msg"')
 
-        incomplete = hu.read_codex_usage(root)
+        incomplete = codex_host.read_codex_usage(root)
 
         assert incomplete == hu.HostUsageResult({}, complete=False, reason="partial")
         files_after = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
@@ -1444,7 +1275,7 @@ class TestCacheLifecycle:
         assert incomplete.hosts == {}
 
         (root / "2026" / "08" / "14" / "rollout-c.jsonl").unlink()
-        stable = hu.read_codex_usage(root)
+        stable = codex_host.read_codex_usage(root)
         assert stable.complete is True
         assert stable.hosts["codex"]["2026-08-15"]["input"] == 400
         assert rollout_a.exists()
@@ -1470,12 +1301,13 @@ class TestCacheLifecycle:
 
         clock = _FakeTime()
         monkeypatch.setattr(hu, "time", clock)
+        monkeypatch.setattr(codex_host, "time", clock)
 
         root = tmp_path / "sessions"
         for i in range(10):
             _write_rollout(root, f"rollout-{i:02d}.jsonl", [_context(), _token(10 + i)])
 
-        real_full_read = hu._read_full_rollout
+        real_full_read = codex_host._read_full_rollout
         parses: list[int] = [0]
 
         def timed_full_read(path: Path, before: object, deadline: float):
@@ -1483,12 +1315,12 @@ class TestCacheLifecycle:
             clock.now += 0.1  # each cold parse costs 100ms of fake wall clock
             return real_full_read(path, before, deadline)
 
-        monkeypatch.setattr(hu, "_read_full_rollout", timed_full_read)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", timed_full_read)
 
         cached_entries, attempts, result = [], 0, None
         while attempts < 20:
             attempts += 1
-            result = hu.read_codex_usage(root, deadline=clock.now + 0.25)
+            result = codex_host.read_codex_usage(root, deadline=clock.now + 0.25)
             cached_entries.append(len(json.loads(isolated_cache.read_text())["files"]))
             if result.complete:
                 break
@@ -1522,7 +1354,7 @@ class TestCacheLifecycle:
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
 
         _seed_blocker(isolated_cache)
-        real_scan = hu._scan_codex_root
+        real_scan = codex_host._scan_codex_root
         blown = {"on": False}
         real_expired = hu._expired
 
@@ -1531,24 +1363,24 @@ class TestCacheLifecycle:
             blown["on"] = True
             return outcome
 
-        monkeypatch.setattr(hu, "_scan_codex_root", scan_then_blow_the_budget)
+        monkeypatch.setattr(codex_host, "_scan_codex_root", scan_then_blow_the_budget)
         monkeypatch.setattr(hu, "_expired", lambda d: blown["on"] or real_expired(d))
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
         files = json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
-        assert hu.codex_usage_diag()["last_reason"] == "deadline"
-        assert hu.codex_usage_diag()["last_complete_ms"] is not None
+        assert codex_host.codex_usage_diag()["last_reason"] == "deadline"
+        assert codex_host.codex_usage_diag()["last_complete_ms"] is not None
         assert len(files) == 1, "a complete-but-overbudget scan must still keep its work"
 
         # ...and the work counts: the next in-budget scan re-parses nothing.
         monkeypatch.setattr(hu, "_expired", real_expired)
-        monkeypatch.setattr(hu, "_scan_codex_root", real_scan)
+        monkeypatch.setattr(codex_host, "_scan_codex_root", real_scan)
         monkeypatch.setattr(
-            hu, "_read_full_rollout", lambda *a, **k: pytest.fail("prefix was re-parsed")
+            codex_host, "_read_full_rollout", lambda *a, **k: pytest.fail("prefix was re-parsed")
         )
-        assert hu.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
+        assert codex_host.read_codex_usage(root).hosts["codex"]["2026-08-15"]["input"] == 200
 
     def test_uncacheable_rollouts_do_not_block_convergence(
         self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1566,6 +1398,7 @@ class TestCacheLifecycle:
 
         clock = _FakeTime()
         monkeypatch.setattr(hu, "time", clock)
+        monkeypatch.setattr(codex_host, "time", clock)
 
         root = tmp_path / "sessions"
         for i in range(4):  # sort AHEAD of the real ones
@@ -1573,18 +1406,18 @@ class TestCacheLifecycle:
         for i in range(6):
             _write_rollout(root, f"rollout-zzz-{i:02d}.jsonl", [_context(), _token(10 + i)])
 
-        real_full_read = hu._read_full_rollout
+        real_full_read = codex_host._read_full_rollout
 
         def timed_full_read(path, before, deadline):
             clock.now += 0.1
             return real_full_read(path, before, deadline)
 
-        monkeypatch.setattr(hu, "_read_full_rollout", timed_full_read)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", timed_full_read)
 
         attempts, result = 0, None
         while attempts < 20:
             attempts += 1
-            result = hu.read_codex_usage(root, deadline=clock.now + 0.25)
+            result = codex_host.read_codex_usage(root, deadline=clock.now + 0.25)
             if result.complete:
                 break
 
@@ -1603,7 +1436,7 @@ class TestCacheLifecycle:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-warm.jsonl", [_context(), _token(77)])
 
-        result = hu.warm_host_cache_inline(root)
+        result = host_registry.warm_host_cache_inline(root)
 
         assert result.complete is True, result
         assert result.hosts["codex"]["2026-08-15"]["input"] == 77
@@ -1617,14 +1450,14 @@ class TestCacheLifecycle:
         UTC offset — a per-machine identifier the row must never carry."""
         root = tmp_path / "sessions"
         path = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
 
         cache = json.loads(isolated_cache.read_text(encoding="utf-8"))
         cache["files"][hu._cache_key(path)]["day"] = "2026-08-15T23:59:59-07:00"
         isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
 
         # Rejected as a cache hit -> re-parsed -> canonical day restored.
-        assert hu.read_codex_usage(root).hosts["codex"] == {
+        assert codex_host.read_codex_usage(root).hosts["codex"] == {
             "2026-08-15": {"input": 200, "cache_create": 0, "cache_read": 0, "output": 0}
         }
 
@@ -1634,10 +1467,10 @@ class TestCacheLifecycle:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
         rollout_b = _write_rollout(root, "rollout-b.jsonl", [_context("grok-4"), _token(100)])
-        assert set(hu.read_codex_usage(root).hosts) == {"codex", "grok"}
+        assert set(codex_host.read_codex_usage(root).hosts) == {"codex", "grok"}
 
         rollout_b.unlink()
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert set(result.hosts) == {"codex"}
@@ -1647,11 +1480,11 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-stable.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
         cache_before = isolated_cache.read_bytes()
 
         _write_rollout(root, "rollout-stable.jsonl", [_context(), _token(300)], partial=b"{")
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="partial")
         data = json.loads(isolated_cache.read_text())
@@ -1664,12 +1497,12 @@ class TestCacheLifecycle:
     ) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-locked.jsonl", [_context(), _token(200)])
-        assert hu.read_codex_usage(root).complete is True
+        assert codex_host.read_codex_usage(root).complete is True
         cache_before = isolated_cache.read_bytes()
         fd = os.open(str(isolated_cache), os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            result = hu.read_codex_usage(root, deadline=time.monotonic() + 1.0)
+            result = codex_host.read_codex_usage(root, deadline=time.monotonic() + 1.0)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
@@ -1682,14 +1515,16 @@ class TestFailureAndTraversalContracts:
     def test_missing_root_is_complete_empty_scan(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
-        result = hu.read_codex_usage(tmp_path / "missing")
+        result = codex_host.read_codex_usage(tmp_path / "missing")
 
         assert result == hu.HostUsageResult({}, complete=True)
 
     def test_expired_deadline_does_not_create_cache(
         self, isolated_cache: Path, tmp_path: Path
     ) -> None:
-        result = hu.read_codex_usage(tmp_path / "sessions", deadline=time.monotonic() - 0.001)
+        result = codex_host.read_codex_usage(
+            tmp_path / "sessions", deadline=time.monotonic() - 0.001
+        )
 
         assert result == hu.HostUsageResult({}, complete=False, reason="deadline")
         assert not isolated_cache.exists()
@@ -1701,7 +1536,7 @@ class TestFailureAndTraversalContracts:
         malformed = root / "2026" / "08" / "14" / "rollout-malformed.jsonl"
         malformed.parent.mkdir(parents=True, exist_ok=True)
         malformed.write_text("not json\n", encoding="utf-8")
-        assert hu.read_codex_usage(root).reason == "malformed"
+        assert codex_host.read_codex_usage(root).reason == "malformed"
 
         malformed.unlink()
         _write_rollout(root, "rollout-unsupported.jsonl", [_context(), _token(10)])
@@ -1711,7 +1546,7 @@ class TestFailureAndTraversalContracts:
         unsupported_path.write_text(
             json.dumps(_context()) + "\n" + json.dumps(unsupported) + "\n", encoding="utf-8"
         )
-        assert hu.read_codex_usage(root).reason == "unsupported"
+        assert codex_host.read_codex_usage(root).reason == "unsupported"
 
     def test_foreign_and_symlink_files_are_not_rollouts(
         self, isolated_cache: Path, tmp_path: Path
@@ -1724,7 +1559,7 @@ class TestFailureAndTraversalContracts:
         target.write_text("not json\n", encoding="utf-8")
         (day / "rollout-link.jsonl").symlink_to(target)
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=True)
 
@@ -1753,7 +1588,7 @@ class TestCodexTurnDedup:
         _write_rollout(root, "rollout-fork-1.jsonl", shared)
         _write_rollout(root, "rollout-fork-2.jsonl", shared)
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
@@ -1771,7 +1606,7 @@ class TestCodexTurnDedup:
         _write_rollout(root, "rollout-fork-1.jsonl", [*prefix, _token(150)])
         _write_rollout(root, "rollout-fork-2.jsonl", [*prefix, _token(130)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         # 40 opening + 60 shared + 50 on one branch + 30 on the other.
         # Deduping READINGS instead would treat 130 as a waypoint to 150 and
@@ -1800,8 +1635,10 @@ class TestCodexTurnDedup:
         _write_rollout(root_b, "rollout-1.jsonl", [*prefix, _token(130)])
         _write_rollout(root_b, "rollout-2.jsonl", [*prefix, _token(150)])
 
-        assert hu.read_codex_usage(root_a).hosts == hu.read_codex_usage(root_b).hosts
-        assert hu.read_codex_usage(root_a).hosts["codex"]["2026-08-15"]["input"] == 180
+        assert (
+            codex_host.read_codex_usage(root_a).hosts == codex_host.read_codex_usage(root_b).hosts
+        )
+        assert codex_host.read_codex_usage(root_a).hosts["codex"]["2026-08-15"]["input"] == 180
 
     def test_turn_boundary_reemission_is_not_counted_twice(
         self, isolated_cache: Path, tmp_path: Path
@@ -1833,7 +1670,7 @@ class TestCodexTurnDedup:
             ],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         # 160 is the session's terminal cumulative. Counting the re-emission
         # would report 220.
@@ -1866,7 +1703,7 @@ class TestCodexTurnDedup:
             [_context(turn="shared"), _token(100, last=60), _token(150)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         # 40 + 60 (parent's own transition) + 50 (child's own). NOT 210.
         assert result.hosts["codex"]["2026-08-15"]["input"] == 150
@@ -1887,7 +1724,7 @@ class TestCodexTurnDedup:
             [_context(turn="t"), _token(40, last=40), _token(90), _token(90)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.hosts["codex"]["2026-08-15"]["input"] == 90
 
@@ -1915,7 +1752,7 @@ class TestCodexTurnDedup:
             ],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         day = result.hosts["codex"]["2026-08-15"]
 
         assert day["input"] == 80
@@ -1937,7 +1774,7 @@ class TestCodexTurnDedup:
             [_context(turn="child"), _token(5000, last=90), _token(5150)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         # 90 of its own, then a 150 increment. NOT 5150.
         assert result.hosts["codex"]["2026-08-15"]["input"] == 240
@@ -1959,7 +1796,7 @@ class TestCodexTurnDedup:
             [_context(turn="t"), _token(100, last=100), _token(40, last=40)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         day = result.hosts["codex"]["2026-08-15"]
 
         assert day["input"] >= 0
@@ -1969,7 +1806,7 @@ class TestCodexTurnDedup:
 
 
 def _write_archived(name: str, records: list[dict]) -> Path:
-    path = hu.CODEX_ARCHIVED_SESSIONS_PATH / name
+    path = codex_host.CODEX_ARCHIVED_SESSIONS_PATH / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"".join(json.dumps(record).encode("utf-8") + b"\n" for record in records))
     return path
@@ -1990,38 +1827,42 @@ class TestCodexArchivedRollouts:
     def test_archived_only_rollout_is_counted(self) -> None:
         _write_archived("rollout-archived.jsonl", [_context(), _token(100)])
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
 
     def test_rollout_copied_to_both_roots_is_counted_once(self) -> None:
         records = [_context(turn="turn-a"), _token(40, last=40), _token(100)]
-        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
+        _write_rollout(codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
         _write_archived("rollout-a.jsonl", records)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
-        assert len(json.loads(hu.CACHE_PATH.read_text())["files"]) == 2, "both paths were read"
+        assert len(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == 2, (
+            "both paths were read"
+        )
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
 
     def test_hard_link_without_turn_id_is_counted_once(self) -> None:
         """The per-file ``own`` lineage (dev:ino:size:mtime) is what collapses a
         rename seen at both paths when no turn names the session."""
         records = [_context(), _token(40, last=40), _token(100)]
-        live = _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
-        hu.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
-        os.link(live, hu.CODEX_ARCHIVED_SESSIONS_PATH / live.name)
+        live = _write_rollout(codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", records)
+        codex_host.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
+        os.link(live, codex_host.CODEX_ARCHIVED_SESSIONS_PATH / live.name)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
-        assert len(json.loads(hu.CACHE_PATH.read_text())["files"]) == 2, "both paths were read"
+        assert len(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == 2, (
+            "both paths were read"
+        )
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
 
     def test_archive_reads_only_flat_regular_rollouts(self, tmp_path: Path) -> None:
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         _write_archived("rollout-real.jsonl", [_context(), _token(100)])
         _write_archived("notes.jsonl", [_context(), _token(1_000)])
         _write_archived("nested/rollout-nested.jsonl", [_context(), _token(10_000)])
@@ -2031,7 +1872,7 @@ class TestCodexArchivedRollouts:
         )
         (archive / "rollout-link.jsonl").symlink_to(outside)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
@@ -2039,18 +1880,18 @@ class TestCodexArchivedRollouts:
     def test_partial_pass_merges_and_complete_pass_prunes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        live_root = hu.CODEX_SESSIONS_PATH
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        live_root = codex_host.CODEX_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         live = _write_rollout(live_root, "rollout-a.jsonl", [_context(), _token(100)])
         kept = _write_archived("rollout-b1.jsonl", [_context(), _token(10)])
         gone = _write_archived("rollout-b2.jsonl", [_context(), _token(1)])
-        assert hu.read_codex_usage().complete is True
+        assert codex_host.read_codex_usage().complete is True
         keys = {
             "live": _codex_key(live, live_root),
             "kept": _codex_key(kept, archive),
             "gone": _codex_key(gone, archive),
         }
-        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == set(keys.values())
+        assert set(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == set(keys.values())
 
         # Learn something on the live root, then expire on reaching the archive.
         with live.open("ab") as fp:
@@ -2066,42 +1907,44 @@ class TestCodexArchivedRollouts:
         with monkeypatch.context() as patched:
             patched.setattr(hu, "_cache_key", key_then_blow_at_archive)
             patched.setattr(hu, "_expired", lambda d: blown["on"] or real_expired(d))
-            assert hu.read_codex_usage().reason == "deadline"
+            assert codex_host.read_codex_usage().reason == "deadline"
 
-        files = json.loads(hu.CACHE_PATH.read_text())["files"]
+        files = json.loads(codex_host.CACHE_PATH.read_text())["files"]
         assert files[keys["live"]]["size"] == live.stat().st_size, "the partial pass was written"
         assert set(files) == set(keys.values()), "a partial pass must merge, not replace"
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 210
-        files = json.loads(hu.CACHE_PATH.read_text())["files"]
+        files = json.loads(codex_host.CACHE_PATH.read_text())["files"]
         assert set(files) == {keys["live"], keys["kept"]}
 
     def test_rollout_moved_between_passes_keeps_its_total(self) -> None:
-        live = _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
-        assert hu.read_codex_usage().hosts["codex"]["2026-08-15"]["input"] == 100
-        live_key = _codex_key(live, hu.CODEX_SESSIONS_PATH)
-        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {live_key}
+        live = _write_rollout(
+            codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)]
+        )
+        assert codex_host.read_codex_usage().hosts["codex"]["2026-08-15"]["input"] == 100
+        live_key = _codex_key(live, codex_host.CODEX_SESSIONS_PATH)
+        assert set(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == {live_key}
 
-        hu.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
-        archived = hu.CODEX_ARCHIVED_SESSIONS_PATH / live.name
+        codex_host.CODEX_ARCHIVED_SESSIONS_PATH.mkdir(parents=True)
+        archived = codex_host.CODEX_ARCHIVED_SESSIONS_PATH / live.name
         os.rename(live, archived)
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
-        files = json.loads(hu.CACHE_PATH.read_text())["files"]
-        assert set(files) == {_codex_key(archived, hu.CODEX_ARCHIVED_SESSIONS_PATH)}
+        files = json.loads(codex_host.CACHE_PATH.read_text())["files"]
+        assert set(files) == {_codex_key(archived, codex_host.CODEX_ARCHIVED_SESSIONS_PATH)}
 
     def test_rollout_archived_between_listings_is_read_from_the_archive(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
+        listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
         _write_archived(listed.name, [_context(), _token(100)])
-        monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+        monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
@@ -2113,18 +1956,18 @@ class TestCodexArchivedRollouts:
         self, case: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         if case == "no-archive-match":
-            listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
+            listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
             _write_archived("rollout-other.jsonl", [_context(), _token(100)])
-            monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+            monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
         elif case == "archived-path-vanished":
-            listed = hu.CODEX_ARCHIVED_SESSIONS_PATH / "rollout-gone.jsonl"
+            listed = codex_host.CODEX_ARCHIVED_SESSIONS_PATH / "rollout-gone.jsonl"
             monkeypatch.setattr(
-                hu, "_iter_archived_rollouts", lambda root, deadline: iter([listed])
+                codex_host, "_iter_archived_rollouts", lambda root, deadline: iter([listed])
             )
         else:
-            listed = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-denied.jsonl"
+            listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-denied.jsonl"
             _write_archived(listed.name, [_context(), _token(100)])
-            monkeypatch.setattr(hu, "_iter_rollouts", lambda root, deadline: iter([listed]))
+            monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
             real_stat = hu._regular_stat
 
             def denied_live_stat(path):
@@ -2137,7 +1980,7 @@ class TestCodexArchivedRollouts:
 
             monkeypatch.setattr(hu, "_regular_stat", denied_live_stat)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
         assert result.complete is False
         assert result.reason == "io_error"
         assert result.hosts == {}
@@ -2163,7 +2006,7 @@ class TestCodexArchivedRollouts:
         monkeypatch.setattr(hu, "_is_regular_non_symlink", stat_then_expire)
 
         with pytest.raises(hu._ReadFailure) as caught:
-            list(hu._iter_archived_rollouts(archive, float("inf")))
+            list(codex_host._iter_archived_rollouts(archive, float("inf")))
 
         assert caught.value.reason == "deadline"
         assert calls == ["rollout-a.jsonl"]
@@ -2171,11 +2014,11 @@ class TestCodexArchivedRollouts:
     def test_unarchive_during_discovery_refuses_partial_totals(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
-        assert hu.read_codex_usage().complete is True
+        assert codex_host.read_codex_usage().complete is True
         key = _codex_key(archived, archive)
-        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        target = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
         real_children = hu._sorted_children
 
         def unarchive_after_listing(path, deadline):
@@ -2187,20 +2030,20 @@ class TestCodexArchivedRollouts:
 
         monkeypatch.setattr(hu, "_sorted_children", unarchive_after_listing)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is False
         assert result.reason == "io_error"
         assert result.hosts == {}
-        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
+        assert key in json.loads(codex_host.CACHE_PATH.read_text())["files"]
 
     def test_diag_listed_archive_disappearance_is_unknown(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
-        assert hu.read_codex_usage().complete is True
-        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        assert codex_host.read_codex_usage().complete is True
+        target = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
         real_children = Path.iterdir
 
         def unarchive_after_listing(path):
@@ -2212,19 +2055,19 @@ class TestCodexArchivedRollouts:
 
         monkeypatch.setattr(Path, "iterdir", unarchive_after_listing)
 
-        diag = hu.codex_usage_diag()
+        diag = codex_host.codex_usage_diag()
         assert diag["cache_state"] == "ok"
         assert diag["files_on_disk"] is None
 
     def test_unarchive_between_inventories_refuses_partial_totals(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
-        assert hu.read_codex_usage().complete is True
+        assert codex_host.read_codex_usage().complete is True
         key = _codex_key(archived, archive)
-        target = hu.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
-        real_archive = hu._iter_archived_rollouts
+        target = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / archived.name
+        real_archive = codex_host._iter_archived_rollouts
 
         def unarchive_before_listing(root, deadline):
             if archived.exists():
@@ -2232,20 +2075,20 @@ class TestCodexArchivedRollouts:
                 archived.rename(target)
             return real_archive(root, deadline)
 
-        monkeypatch.setattr(hu, "_iter_archived_rollouts", unarchive_before_listing)
+        monkeypatch.setattr(codex_host, "_iter_archived_rollouts", unarchive_before_listing)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is False
         assert result.reason == "io_error"
         assert result.hosts == {}
-        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
+        assert key in json.loads(codex_host.CACHE_PATH.read_text())["files"]
 
-        retried = hu.read_codex_usage()
+        retried = codex_host.read_codex_usage()
         assert retried.complete is True
         assert retried.hosts["codex"]["2026-08-15"]["input"] == 100
-        assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {
-            _codex_key(target, hu.CODEX_SESSIONS_PATH)
+        assert set(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == {
+            _codex_key(target, codex_host.CODEX_SESSIONS_PATH)
         }
 
     @pytest.mark.parametrize("error", [errno.EACCES, errno.EIO])
@@ -2253,14 +2096,14 @@ class TestCodexArchivedRollouts:
     def test_archive_root_stat_error_is_incomplete_not_absent(
         self, error: int, symlink_root: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        archive = hu.CODEX_ARCHIVED_SESSIONS_PATH
+        archive = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
         if symlink_root:
             actual = tmp_path / "archive-target"
             actual.mkdir()
             archive.parent.mkdir(parents=True)
             archive.symlink_to(actual, target_is_directory=True)
         archived = _write_archived("rollout-a.jsonl", [_context(), _token(100)])
-        assert hu.read_codex_usage().complete is True
+        assert codex_host.read_codex_usage().complete is True
         key = _codex_key(archived, archive)
         real_stat = Path.stat
 
@@ -2281,54 +2124,56 @@ class TestCodexArchivedRollouts:
         monkeypatch.setattr(Path, "stat", failed_archive_stat)
         monkeypatch.setattr(Path, "exists", python314_exists)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is False
         assert result.reason == "io_error"
         assert result.hosts == {}
-        assert key in json.loads(hu.CACHE_PATH.read_text())["files"]
-        diag = hu.codex_usage_diag()
+        assert key in json.loads(codex_host.CACHE_PATH.read_text())["files"]
+        diag = codex_host.codex_usage_diag()
         assert diag["cache_state"] == "ok"
         assert diag["files_on_disk"] is None
 
     def test_missing_archive_needs_only_one_live_inventory(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
-        real_live = hu._iter_rollouts
+        _write_rollout(codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
+        real_live = codex_host._iter_rollouts
         calls: list[Path] = []
 
         def counted_live(root, deadline):
             calls.append(root)
             return real_live(root, deadline)
 
-        monkeypatch.setattr(hu, "_iter_rollouts", counted_live)
+        monkeypatch.setattr(codex_host, "_iter_rollouts", counted_live)
 
-        result = hu.read_codex_usage()
+        result = codex_host.read_codex_usage()
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
-        assert calls == [hu.CODEX_SESSIONS_PATH]
+        assert calls == [codex_host.CODEX_SESSIONS_PATH]
 
     def test_explicit_root_ignores_the_archive(self, tmp_path: Path) -> None:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-live.jsonl", [_context(), _token(100)])
         _write_archived("rollout-archived.jsonl", [_context(), _token(1_000)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 100
 
     def test_diag_counts_archived_rollouts_on_disk(self) -> None:
-        _write_rollout(hu.CODEX_SESSIONS_PATH, "rollout-live.jsonl", [_context(), _token(100)])
+        _write_rollout(
+            codex_host.CODEX_SESSIONS_PATH, "rollout-live.jsonl", [_context(), _token(100)]
+        )
         _write_archived("rollout-b1.jsonl", [_context(), _token(10)])
         _write_archived("rollout-b2.jsonl", [_context(), _token(1)])
         _write_archived("notes.jsonl", [_context(), _token(1)])
         _write_archived("nested/rollout-nested.jsonl", [_context(), _token(1)])
-        assert hu.read_codex_usage().complete is True
+        assert codex_host.read_codex_usage().complete is True
 
-        diag = hu.codex_usage_diag()
+        diag = codex_host.codex_usage_diag()
 
         assert diag["files_on_disk"] == 3
         assert diag["files_cached"] == 3
@@ -2355,7 +2200,7 @@ class TestCodexPreContextBuffer:
             [_token(10, last=10), _token(20), _context(turn="t"), _token(30)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"]["input"] == 30
@@ -2373,7 +2218,7 @@ class TestCodexPreContextBuffer:
         root = tmp_path / "sessions"
         _write_rollout(root, "rollout-no-context.jsonl", [_token(10), _token(20)])
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result == hu.HostUsageResult({}, complete=False, reason="unsupported")
 
@@ -2424,7 +2269,7 @@ class TestCodexCacheMigration:
             encoding="utf-8",
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         # The stale 999,999 is never trusted; the file is re-read.
         assert result.hosts["codex"]["2026-08-15"]["input"] == 50
@@ -2459,7 +2304,7 @@ class TestCodexWireShape:
             [_context(turn="t"), _token(40, last=40), _token(90)],
         )
 
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
 
         assert result.hosts
         for days in result.hosts.values():
@@ -2512,7 +2357,7 @@ class TestHostUsageBuckets:
             "rollout-models.jsonl",
             [_context("gpt-5-codex", turn="t"), _token(40, last=40)],
         )
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         assert result.complete is True
         assert "gpt-5-codex" in result.tokens_by_day["2026-08-15"]["by_model"]
         assert (
@@ -2530,16 +2375,16 @@ class TestHostUsageBuckets:
             "rollout-warm.jsonl",
             [_context("gpt-5-codex", turn="t"), _token(50, last=50)],
         )
-        first = hu.read_codex_usage(root)
+        first = codex_host.read_codex_usage(root)
         assert first.complete is True
         assert "gpt-5-codex" in first.tokens_by_day["2026-08-15"]["by_model"]
 
         def should_not_reread(*args: object, **kwargs: object) -> object:
             raise AssertionError("warm v0.12.48 cache must not reopen the jsonl")
 
-        monkeypatch.setattr(hu, "_read_full_rollout", should_not_reread)
-        monkeypatch.setattr(hu, "_resume_rollout", should_not_reread)
-        second = hu.read_codex_usage(root)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", should_not_reread)
+        monkeypatch.setattr(codex_host, "_resume_rollout", should_not_reread)
+        second = codex_host.read_codex_usage(root)
         assert second.complete is True
         assert second.tokens_by_day == first.tokens_by_day
         assert second.hosts == first.hosts
@@ -2556,7 +2401,7 @@ class TestHostUsageBuckets:
                 _token(20, last=20, timestamp="2026-08-14T12:00:00Z"),
             ],
         )
-        first = hu.read_codex_usage(root)
+        first = codex_host.read_codex_usage(root)
         day = "2026-08-14"
         first_input = first.tokens_by_day[day]["input"]
         with path.open("ab") as fp:
@@ -2564,7 +2409,7 @@ class TestHostUsageBuckets:
                 json.dumps(_token(30, last=10, timestamp="2026-08-15T12:00:00Z")).encode("utf-8")
                 + b"\n"
             )
-        second = hu.read_codex_usage(root)
+        second = codex_host.read_codex_usage(root)
         assert second.tokens_by_day[day]["input"] == first_input
         assert "2026-08-15" in second.tokens_by_day
 
@@ -2581,7 +2426,7 @@ class TestHostUsageBuckets:
                 _token(25, last=5, timestamp="2026-08-16T12:00:00Z"),
             ],
         )
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         assert "2026-08-14" in result.tokens_by_day
         assert "2026-08-16" in result.tokens_by_day
 
@@ -2608,13 +2453,15 @@ class TestCounterSemantics:
             assert {key: day[key] for key in tu.TOKEN_FIELDS} == counters
             assert day["by_model"] == {model: counters}
 
-        check(hu.read_codex_usage(root), expected)
-        monkeypatch.setattr(hu, "_read_full_rollout", lambda *a: pytest.fail("full re-walk"))
-        check(hu.read_codex_usage(root), expected)
+        check(codex_host.read_codex_usage(root), expected)
+        monkeypatch.setattr(
+            codex_host, "_read_full_rollout", lambda *a: pytest.fail("full re-walk")
+        )
+        check(codex_host.read_codex_usage(root), expected)
         with path.open("a") as fp:
             fp.write(json.dumps(_token(2_802_950, cache_read=2_668_388, output=11_833)) + "\n")
         check(
-            hu.read_codex_usage(root),
+            codex_host.read_codex_usage(root),
             {**expected, "input": 134_562, "cache_read": 2_668_388, "output": 11_833},
         )
 
@@ -2641,7 +2488,7 @@ class TestCounterSemantics:
             "rollout-malformed.jsonl",
             [_context(turn="t"), _token(10, cache_read=20, cache_create=0)],
         )
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         assert result.complete is False
         assert result.reason == "malformed"
         assert result.hosts == {}
@@ -2687,7 +2534,7 @@ class TestCounterSemantics:
                 _token(1_000_000, cache_read=100_000, cache_create=40_000),
             ],
         )
-        result = hu.read_codex_usage(root)
+        result = codex_host.read_codex_usage(root)
         assert result.complete is True
         assert result.hosts["codex"]["2026-08-15"] == {
             "input": 860_000,
@@ -2851,7 +2698,7 @@ def test_seeded_lineages_match_frozen_oracle(seed):
             entries.append(entry)
     rng.shuffle(entries)
     for entry in entries:
-        assert json.dumps(hu._validated_entry(entry)) == json.dumps(
+        assert json.dumps(codex_host._validated_entry(entry)) == json.dumps(
             oracle._validated_entry(entry)
         ), (seed, _ORACLE_RULE)
     assert _ordered_reduction(hu, entries) == _ordered_reduction(oracle, entries), (
@@ -2910,7 +2757,7 @@ def test_validator_tamper_corpus_matches_frozen_oracle():
         for key in location[:-1]:
             parent = parent[key]
         parent[location[-1]] = bad
-        assert json.dumps(hu._validated_entry(entry)) == json.dumps(
+        assert json.dumps(codex_host._validated_entry(entry)) == json.dumps(
             oracle._validated_entry(entry)
         ), (location, bad, _ORACLE_RULE)
 
@@ -2922,7 +2769,7 @@ def test_appended_file_validates_cached_entry_once(reader, tmp_path, monkeypatch
         path = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
 
         def read():
-            return hu.read_codex_usage(root)
+            return codex_host.read_codex_usage(root)
 
         validator = "_validated_entry"
         extra = _token(150)
@@ -2938,8 +2785,8 @@ def test_appended_file_validates_cached_entry_once(reader, tmp_path, monkeypatch
     assert read().complete
     with path.open("a") as fp:
         fp.write(json.dumps(extra) + "\n")
-    spy = Mock(wraps=getattr(hu, validator))
-    monkeypatch.setattr(hu, validator, spy)
+    spy = Mock(wraps=getattr(codex_host, validator))
+    monkeypatch.setattr(codex_host, validator, spy)
     assert read().complete
     assert spy.call_count == 1
 
@@ -2955,8 +2802,8 @@ def test_scan_cache_key_matches_canonical_path(symlinked, tmp_path, monkeypatch)
         root = link
     expected = hashlib.sha256(os.fsencode(path.resolve())).hexdigest()
     assert hu._cache_key(path, root=root, canonical_root=root.resolve()) == expected
-    assert hu.read_codex_usage(root).complete
-    assert set(json.loads(hu.CACHE_PATH.read_text())["files"]) == {expected}
+    assert codex_host.read_codex_usage(root).complete
+    assert set(json.loads(codex_host.CACHE_PATH.read_text())["files"]) == {expected}
 
 
 def test_fingerprint_opens_once_and_keeps_digests_and_short_read_failure(tmp_path, monkeypatch):
@@ -2996,138 +2843,6 @@ def test_fingerprint_open_oserror_is_io_error(tmp_path, monkeypatch):
     assert err.value.reason == "io_error"
 
 
-@pytest.mark.parametrize("error", [None, RuntimeError, KeyboardInterrupt])
-@pytest.mark.parametrize("enabled", [True, False])
-def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, error, enabled):
-    read, cache, diag, set_scan = reader_case
-    prior = gc.isenabled()
-    thresholds = gc.get_threshold()
-    starts = []
-
-    def callback(phase, info):
-        if phase == "start":
-            starts.append(info)
-
-    def scan(*args, **kwargs):
-        assert not gc.isenabled()
-        before = len(starts)
-        cycles = []
-        for _ in range(100):
-            cycle = []
-            cycle.append(cycle)
-            cycles.append(cycle)
-        assert len(starts) == before
-        if error:
-            raise error()
-        if cache == hu.MUSE_CACHE_PATH:
-            return (hu.HostUsageResult({}, True), {}, {}, False, False)
-        return (hu.HostUsageResult({}, True), {}, False)
-
-    name = {
-        hu.CACHE_PATH: "_scan_codex_root",
-        hu.MUSE_CACHE_PATH: "_scan_muse_root",
-    }[cache]
-    monkeypatch.setattr(hu, name, scan)
-    try:
-        gc.set_threshold(1, 1, 1)
-        gc.callbacks.append(callback)
-        (gc.enable if enabled else gc.disable)()
-        if error:
-            with pytest.raises(error):
-                read()
-        else:
-            assert read().complete
-        assert gc.isenabled() is enabled
-    finally:
-        gc.callbacks.remove(callback)
-        gc.set_threshold(*thresholds)
-        (gc.enable if prior else gc.disable)()
-
-
-def test_complete_late_timing_prunes_and_preserves_deadline_since(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    _seed_blocker(cache, files={"deleted": {}})
-    set_scan(hu.HostUsageResult({}, True), {"live": {"no_ledger": True}})
-    for _ in range(2):
-        clock = iter([10.0, 10.3])  # reader entry, result ready
-        expiry = iter([False, False, True])
-        monkeypatch.setattr(hu.time, "monotonic", lambda: next(clock))
-        monkeypatch.setattr(hu, "_expired", lambda d: next(expiry))
-        assert read().reason == "deadline"
-        data = json.loads(cache.read_text())
-        assert set(data["files"]) == {"live"}
-        assert data["last_complete_ms"] == 300
-        assert data["last_deadline_allotted_ms"] == 5000
-        assert data["last_reason"] == "deadline"
-        assert data["last_reason_since"] != _OBSERVED
-        assert diag()["last_complete_at"] == data["last_complete_at"]
-        if _ == 0:
-            since = data["last_reason_since"]
-        else:
-            assert data["last_reason_since"] == since
-
-
-def test_timing_carries_on_partial_write_and_drops_allotment_when_clear(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    data = _seed_blocker(cache, reason="deadline")
-    data.update(last_complete_ms=197, last_complete_at=_OBSERVED, last_deadline_allotted_ms=250)
-    cache.write_text(json.dumps(data))
-    set_scan(hu._incomplete("partial"), {"new": {}}, True)
-    assert read().reason == "partial"
-    after = json.loads(cache.read_text())
-    assert after["last_complete_ms"] == 197
-    assert after["last_complete_at"] == _OBSERVED
-    assert "last_deadline_allotted_ms" not in after
-    set_scan(hu.HostUsageResult({}, True))
-    assert read().complete
-    assert diag()["last_reason"] is None
-    assert diag()["last_complete_ms"] is not None
-
-
-def test_unchanged_deadline_rewrites_when_allotted_budget_changes(reader_case, monkeypatch):
-    read, cache, diag, set_scan = reader_case
-    data = _seed_blocker(cache, reason="deadline")
-    data.update(last_complete_ms=197, last_complete_at=_OBSERVED, last_deadline_allotted_ms=250)
-    cache.write_text(json.dumps(data))
-    set_scan(hu._incomplete("deadline"), {}, False)
-    clock = [1000.0]
-    monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
-    if cache == hu.CACHE_PATH:
-        result = hu.read_codex_usage(deadline=1000.4)
-    else:
-        result = hu.read_muse_usage(consented=True, deadline=1000.4)
-    assert result.reason == "deadline"
-    after = json.loads(cache.read_text())
-    assert after["last_reason"] == "deadline"
-    assert after["last_reason_since"] == _OBSERVED
-    assert after["last_deadline_allotted_ms"] == 400
-    assert after["last_complete_ms"] == 197
-    assert diag()["last_deadline_allotted_ms"] == 400
-
-
-@pytest.mark.parametrize("reason", ["unsupported", "partial", None])
-def test_allotment_is_hidden_unless_reason_is_deadline(reader_case, reason):
-    _read, cache, diag, _set_scan = reader_case
-    data = _seed_blocker(cache, reason=reason or "unsupported")
-    if reason is None:
-        data["last_reason"] = None
-    data.update(last_deadline_allotted_ms=250, last_complete_ms=197)
-    cache.write_text(json.dumps(data))
-    assert diag()["last_deadline_allotted_ms"] is None
-
-
-@pytest.mark.parametrize("bad", [-1, 86_400_001, True, 1.5, "197", None])
-def test_invalid_timing_fields_are_unknown(reader_case, bad):
-    read, cache, diag, set_scan = reader_case
-    data = _seed_blocker(cache, reason="deadline")
-    data.update(last_complete_ms=bad, last_deadline_allotted_ms=bad, last_complete_at=bad)
-    cache.write_text(json.dumps(data))
-    view = diag()
-    assert view["last_complete_ms"] is None
-    assert view["last_deadline_allotted_ms"] is None
-    assert view["last_complete_at"] is None
-
-
 @pytest.mark.parametrize("compact", [False, True])
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_host_cache_accepts_both_encodings_and_writes_compact(
@@ -3136,21 +2851,21 @@ def test_host_cache_accepts_both_encodings_and_writes_compact(
     root = tmp_path / "sessions"
     if reader == "codex":
         _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
-        cache, full_reader = hu.CACHE_PATH, "_read_full_rollout"
+        cache, target_mod, full_reader = codex_host.CACHE_PATH, codex_host, "_read_full_rollout"
     else:
         _write_muse_session(root)
-        cache, full_reader = hu.MUSE_CACHE_PATH, "_read_full_muse_file"
+        cache, target_mod, full_reader = hu.MUSE_CACHE_PATH, hu, "_read_full_muse_file"
 
     def read():
         if reader == "codex":
-            return hu.read_codex_usage(root)
+            return codex_host.read_codex_usage(root)
         return hu.read_muse_usage(root, consented=True)
 
     first = read()
     data = json.loads(cache.read_text())
     indented = json.dumps(data, sort_keys=True, indent=2)
     cache.write_text(json.dumps(data, separators=(",", ":")) if compact else indented)
-    monkeypatch.setattr(hu, full_reader, Mock(side_effect=AssertionError("cache miss")))
+    monkeypatch.setattr(target_mod, full_reader, Mock(side_effect=AssertionError("cache miss")))
     assert read() == first
     raw = cache.read_text()
     assert raw == json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
@@ -3161,7 +2876,7 @@ def test_reduction_overrun_commits_pruning_timing_and_deadline(tmp_path, monkeyp
     root = tmp_path / "sessions"
     _write_rollout(root, "rollout-a.jsonl", [_context(), _token(100)])
     deleted = _write_rollout(root, "rollout-b.jsonl", [_context(), _token(200)])
-    assert hu.read_codex_usage(root).complete
+    assert codex_host.read_codex_usage(root).complete
     deleted.unlink()
     clock = [1000.0]
     original = hu._aggregate
@@ -3173,8 +2888,8 @@ def test_reduction_overrun_commits_pruning_timing_and_deadline(tmp_path, monkeyp
 
     monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(hu, "_aggregate", slow_reduction)
-    assert hu.read_codex_usage(root, deadline=1000.25).reason == "deadline"
-    data = json.loads(hu.CACHE_PATH.read_text())
+    assert codex_host.read_codex_usage(root, deadline=1000.25).reason == "deadline"
+    data = json.loads(codex_host.CACHE_PATH.read_text())
     assert len(data["files"]) == 1
     assert data["last_reason"] == "deadline"
     assert data["last_complete_ms"] == 300
@@ -3683,7 +3398,7 @@ class TestCursorUsage67A:
             return hu.HostUsageResult({}, complete=True)
 
         monkeypatch.setattr(hu, "read_cursor_usage", read)
-        assert hu.warm_host_cache_inline(reader="cursor").complete
+        assert host_registry.warm_host_cache_inline(reader="cursor").complete
         assert seen[0][2] is True
 
     def test_partially_learned_history_survives_store_pruning(self, cursor_store, monkeypatch):
@@ -4060,7 +3775,7 @@ def test_codex_rollout_vanishing_between_iterdir_and_lstat_is_skipped(
 
     monkeypatch.setattr(Path, "lstat", maybe_gone)
 
-    result = hu.read_codex_usage(root)
+    result = codex_host.read_codex_usage(root)
 
     assert result.complete is True
     assert result.hosts["codex"]["2026-08-15"]["input"] == 10
