@@ -1406,18 +1406,18 @@ def _stale_moved_references_or_patches(source: str) -> list[tuple[int, str]]:
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "mind_meld.host_usage":
-                    hu_aliases.add(alias.asname or "host_usage")
+                    hu_aliases.add(alias.asname or alias.name)
                 elif alias.name == "mind_meld.hosts.codex":
-                    codex_aliases.add(alias.asname or "codex")
+                    codex_aliases.add(alias.asname or alias.name)
 
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
             and node.attr in MOVED_HOST_DEFINITIONS
-            and isinstance(node.value, ast.Name)
-            and node.value.id in hu_aliases
+            and isinstance(node.value, (ast.Name, ast.Attribute))
+            and ast.unparse(node.value) in hu_aliases
         ):
-            hits.append((node.lineno, f"{node.value.id}.{node.attr}"))
+            hits.append((node.lineno, ast.unparse(node)))
         elif isinstance(node, ast.Call):
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
@@ -1426,8 +1426,8 @@ def _stale_moved_references_or_patches(source: str) -> list[tuple[int, str]]:
                             hits.append((node.lineno, arg.value))
             if (
                 len(node.args) >= 2
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in hu_aliases
+                and isinstance(node.args[0], (ast.Name, ast.Attribute))
+                and ast.unparse(node.args[0]) in hu_aliases
             ):
                 if (
                     isinstance(node.args[1], ast.Constant)
@@ -1436,7 +1436,7 @@ def _stale_moved_references_or_patches(source: str) -> list[tuple[int, str]]:
                     hits.append(
                         (
                             node.lineno,
-                            f"setattr/getattr({node.args[0].id}, {node.args[1].value!r})",
+                            f"setattr/getattr({ast.unparse(node.args[0])}, {node.args[1].value!r})",
                         )
                     )
                 elif isinstance(node.args[1], ast.JoinedStr):
@@ -1452,34 +1452,36 @@ def _stale_moved_references_or_patches(source: str) -> list[tuple[int, str]]:
                         hits.append(
                             (
                                 node.lineno,
-                                f"dynamic setattr/getattr({node.args[0].id}, f'...{pieces}...')",
+                                f"dynamic setattr/getattr({ast.unparse(node.args[0])}, "
+                                f"f'...{pieces}...')",
                             )
                         )
 
-    # Check function scopes for one-sided module-attribute clock patches (`setattr(hu, "time", ...)`
-    # without `setattr(codex_host, "time", ...)` when `read_codex_usage` is called in the function).
+    # Replacing a module's clock binding must reach both the adapter and shared kit.
+    # Patching an attribute on the shared time module already reaches both owners.
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         calls_codex = False
-        patched_hu_time = False
-        patched_codex_time = False
+        patched_hu_clocks: set[str] = set()
+        patched_codex_clocks: set[str] = set()
         for sub in ast.walk(fn):
             if isinstance(sub, ast.Attribute) and sub.attr == "read_codex_usage":
                 calls_codex = True
             elif (
                 isinstance(sub, ast.Call)
                 and len(sub.args) >= 2
-                and isinstance(sub.args[0], ast.Name)
+                and isinstance(sub.args[0], (ast.Name, ast.Attribute))
                 and isinstance(sub.args[1], ast.Constant)
-                and sub.args[1].value == "time"
+                and sub.args[1].value in {"time", "datetime"}
             ):
-                if sub.args[0].id in hu_aliases:
-                    patched_hu_time = True
-                elif sub.args[0].id in codex_aliases:
-                    patched_codex_time = True
-        if calls_codex and patched_hu_time and not patched_codex_time:
-            hits.append((fn.lineno, f"one-sided time patch in {fn.name}"))
+                if ast.unparse(sub.args[0]) in hu_aliases:
+                    patched_hu_clocks.add(sub.args[1].value)
+                elif ast.unparse(sub.args[0]) in codex_aliases:
+                    patched_codex_clocks.add(sub.args[1].value)
+        if calls_codex:
+            for clock in sorted(patched_hu_clocks ^ patched_codex_clocks):
+                hits.append((fn.lineno, f"one-sided {clock} patch in {fn.name}"))
     return hits
 
 
@@ -1549,6 +1551,37 @@ def test_unresolved_host_usage_attr_gate_is_not_vacuous(source: str, should_flag
             True,
         ),
         (
+            "import mind_meld.host_usage\nmind_meld.host_usage.read_codex_usage()\n",
+            True,
+        ),
+        (
+            "import mind_meld.host_usage\n"
+            "monkeypatch.setattr(mind_meld.host_usage, 'read_codex_usage', fn)\n",
+            True,
+        ),
+        (
+            "import mind_meld.host_usage\nimport mind_meld.hosts.codex\n"
+            "def test_qualified_shared_clock(monkeypatch):\n"
+            "    monkeypatch.setattr(mind_meld.host_usage, 'time', clock)\n"
+            "    mind_meld.hosts.codex.read_codex_usage()\n",
+            True,
+        ),
+        (
+            "import mind_meld.host_usage\nimport mind_meld.hosts.codex\n"
+            "def test_qualified_adapter_clock(monkeypatch):\n"
+            "    monkeypatch.setattr(mind_meld.hosts.codex, 'datetime', clock)\n"
+            "    mind_meld.hosts.codex.read_codex_usage()\n",
+            True,
+        ),
+        (
+            "import mind_meld.host_usage\nimport mind_meld.hosts.codex\n"
+            "def test_qualified_dual_clock(monkeypatch):\n"
+            "    monkeypatch.setattr(mind_meld.host_usage, 'time', clock)\n"
+            "    monkeypatch.setattr(mind_meld.hosts.codex, 'time', clock)\n"
+            "    mind_meld.hosts.codex.read_codex_usage()\n",
+            False,
+        ),
+        (
             "from mind_meld import host_usage as hu\n"
             "from mind_meld.hosts import codex as codex_host\n"
             "def test_one_sided(monkeypatch):\n"
@@ -1570,4 +1603,26 @@ def test_unresolved_host_usage_attr_gate_is_not_vacuous(source: str, should_flag
 def test_stale_reference_and_clock_patch_gate_is_not_vacuous(
     source: str, should_flag: bool
 ) -> None:
+    # Extended by the /ship test coverage audit.
+    # Value: protects=fully qualified owner references obey the same extraction boundary;
+    # fails_when=unaliased dotted imports evade stale-reference or one-sided clock checks;
+    # why_new=existing seeds exercise aliases and string targets but not qualified modules;
+    # seam=none; no_claim=runtime reader behavior; these are static gate counterexamples.
     assert bool(_stale_moved_references_or_patches(source)) is should_flag
+
+
+@pytest.mark.parametrize("clock", ["time", "datetime"])
+@pytest.mark.parametrize("owners", [("hu",), ("codex_host",), ("hu", "codex_host")])
+def test_clock_patch_gate_checks_both_owners(clock: str, owners: tuple[str, ...]) -> None:
+    # Value: protects=dual-owner clock replacement required by the adapter contract;
+    # fails_when=either clock or patch direction escapes the boundary gate;
+    # why_new=the original seeded rows covered only host_usage.time;
+    # seam=none; no_claim=static gate coverage, not live reader timing.
+    source = (
+        "from mind_meld import host_usage as hu\n"
+        "from mind_meld.hosts import codex as codex_host\n"
+        "def test_read(monkeypatch):\n"
+        + "".join(f"    monkeypatch.setattr({owner}, {clock!r}, clock)\n" for owner in owners)
+        + "    codex_host.read_codex_usage()\n"
+    )
+    assert bool(_stale_moved_references_or_patches(source)) is (len(owners) == 1)

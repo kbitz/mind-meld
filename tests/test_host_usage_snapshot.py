@@ -143,18 +143,31 @@ class TestReaderOrchestration:
         readers["muse"](deadline=1_000.0)
         assert seen == {"consented": True}
 
-    def test_source_authorized_agy_reader_contributes_to_sweep(self, monkeypatch):
+    @pytest.mark.parametrize("needs_warm", [False, True])
+    def test_source_authorized_agy_reader_contributes_to_sweep(self, monkeypatch, needs_warm):
+        # Extended by the /ship test coverage audit.
+        # Value: protects=consented Antigravity deadline retry publishes its completed snapshot;
+        # fails_when=moved registry warm dispatch targets the wrong reader or omits consent;
+        # why_new=this test covered only the first sweep and other warm tests stub the registry;
+        # seam=none; no_claim=live Antigravity data; the owner reader is a synthetic sentinel.
         seen = []
+        warmed = []
 
-        def read(*, deadline, consented=False):
+        def read(root=None, *, deadline, consented=False):
             seen.append(consented)
+            if needs_warm and len(seen) == 1:
+                return _incomplete("deadline")
             return _complete() if consented else _mm_host_usage._incomplete("no_metadata_ledger")
 
         monkeypatch.setattr(_mm_host_usage, "read_agy_usage", read)
         readers = events_tail._default_host_readers(self._enabled("agy"))
-        capture = events_tail._capture_host_usage(readers, deadline=1_000.0, now=lambda: 0.0)
-        assert seen == [True]
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=1000, warm_host_cache=warmed.append
+        )
+        assert seen == ([True, True] if needs_warm else [True])
+        assert warmed == (["agy"] if needs_warm else [])
         assert capture.token_sources == ("agy",)
+        assert rows[0]["token_sources"] == ["agy"]
 
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with

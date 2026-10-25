@@ -320,8 +320,10 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
 The tail publishes the local Codex / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
-`host-usage-snapshot` row. `host_usage` stays the sole reader and
-model-family authority; `events.make_host_usage_snapshot` is a pure
+`host-usage-snapshot` row. `hosts/codex.py` owns the Codex reader;
+`host_usage` owns the shared reader kit, other readers and model-family
+classification, and `host_registry` owns diagnostic and warm dispatch.
+`events.make_host_usage_snapshot` is a pure
 constructor; `events_tail._capture_host_usage` owns the timing and the
 publication decision. Additive `tokens_by_day` (Track 33A) is `{UTC-day:
 DayBucket}` — omit iff `hosts` is empty, otherwise always present, so its
@@ -365,7 +367,9 @@ Codex returns `unsupported` for a ledger it cannot attribute, which means
 that distinction backwards silently under-reports the fleet.
 
 **Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex,
-Cursor, Muse and Antigravity to the source name whose being enabled authorizes them. The live set is
+Muse and Antigravity to the source name whose being enabled authorizes them.
+Cursor's entry is `None`; its separate `cursor_consented` flag authorizes usage
+reading, as described below. The live set is
 `events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
 tuple (same names, same order). Unknown inbound names (retired `opencode`,
 retired `grok`, or a future reader) are retained by the aggregator, not listed here.
@@ -1162,7 +1166,7 @@ do not automatically discard a device or ledger based on equal totals.
 - **`claude` is a legal host family**, so a host ledger carrying `claude-*`
   models merges INTO the Claude row rather than being dropped. The row means
   "usage of this model family across the fleet". The two corpora cannot
-  overlap: `host_usage` reads Codex and Muse ledgers, Antigravity databases and Cursor
+  overlap: `hosts/codex.py` reads Codex ledgers; `host_usage` reads Muse ledgers, Antigravity databases and Cursor
   (Conductor runs plus enrolled standalone completions), never Claude Code's
   own session jsonls. Cursor offers Claude models;
   the initial Cursor census observed only Grok 4.7, not Claude usage.
@@ -3459,14 +3463,18 @@ owns the reader registry and dispatch (`HOST_READER_DIAGS`, `HostReaderDiag`,
 `_carry_read_timing`, `_cached_read_timing`, `_skip_failed_cache_write`,
 `_pause_gc`, `_normalize_inclusive_counters`, `PERMANENT_REASONS`,
 `PERSISTABLE_REASONS`, and the remaining in-place readers until their own moves).
-Every host usage reader adapter and its registry entry must satisfy nine runtime
-clauses, enforced by `tests/test_host_adapter_contract.py` and
-`tests/test_module_boundaries.py`:
+The nine clauses below record the existing reader obligations and named
+exceptions; they do not add a new reader API. `tests/test_host_adapter_contract.py`
+qualifies the detailed runtime rows for Codex and Muse in this extraction,
+while `tests/test_module_boundaries.py` enforces ownership and imports.
+Cursor and Antigravity remain in place until their own adapter work.
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
    Every reader in `events.ACTIVE_HOST_READERS` has an entry in
-   `HOST_READER_SOURCE_GATE`. When its gating source is absent from resolved
-   sources, `_default_host_readers(sources)` omits the reader; for readers that
+   `HOST_READER_SOURCE_GATE`. For source-gated readers, an absent gating source
+   in resolved sources makes `_default_host_readers(sources)` omit the reader.
+   Cursor's gate entry is `None`: it has no sync source and is selected only
+   when the separate `cursor_consented` flag is true. For readers that
    carry a `consented` parameter (`read_muse_usage`, `read_cursor_usage`,
    `read_agy_usage`), the default is `consented=False` and an unconsented call
    returns `_incomplete("no_metadata_ledger")` before any filesystem stat,
@@ -3479,23 +3487,29 @@ clauses, enforced by `tests/test_host_adapter_contract.py` and
    publication intact.
 3. **Bounded scan and deadline carry (`_expired`, `_carry_reason`, `_carry_read_timing`).**
    Pre-lock deadline expiry returns `_incomplete("deadline")` without touching or
-   creating the cache file. Post-lock expiry before or after scanning preserves
-   prior cached file entries, records `last_reason="deadline"` according to
-   standing-blocker precedence (`PERMANENT_REASONS` outrank transient reasons),
-   carries `last_complete_ms` / `last_complete_at`, and records
-   `last_deadline_allotted_ms` only while `last_reason == "deadline"`. A scan
-   that completes before the deadline is checked and only then overruns During
-   commit still preserves its completed result or commits its verified file
-   progress without losing cached entries.
+   creating the cache file. An incomplete Codex or Muse scan preserves prior
+   cached file entries and verified progress, carrying prior `last_complete_ms` /
+   `last_complete_at`. A complete scan replaces the file map and prunes deleted
+   entries even if the post-scan check finds it over budget; it records fresh
+   completion timing but returns `deadline`. `_carry_reason` preserves permanent
+   blockers across incomplete transient failures; a complete-but-late scan proves
+   the old blocker gone and records `deadline`. `last_deadline_allotted_ms` exists
+   only while `last_reason == "deadline"`. A scan complete within its final
+   deadline check keeps its successful result if only serialization overruns.
 4. **Private cache durability, permissions, and compact encoding (`lockedjson.locked_json_rmw`).**
    Reader caches live under `~/.config/mind-meld/` at mode `0600`, guarded by
    `locked_json_rmw(..., compact=True)` (or `locked_json_durable_rmw` for Cursor)
    and `fsutil.refuse_real_state_write_under_pytest`. Lock contention returns
-   `_incomplete("locked")` without mutating the cache. A cache write `OSError`
-   is routed through `_skip_failed_cache_write` (notice + diagnostic capture)
-   and preserves the scan's in-memory `HostUsageResult`. Unchanged failed sweeps
-   do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
+   `_incomplete("locked")` without mutating the cache. For Codex, Muse and
+   Antigravity, a cache write `OSError`
+   is routed through `_notice_cache_write_failure` (notice + diagnostic capture)
+   and preserves the scan's in-memory `HostUsageResult`. Codex and Muse's unchanged
+   failed sweeps do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
    pair, the deadline allotment, nor any learned file entry changed.
+   Cursor's cache is authoritative retained history: an `OSError` or
+   `StorageError` during durable persistence returns `_incomplete("io_error")`
+   and cannot preserve a successful observation. See the Cursor history
+   contract above and [durable-writer error policies](sync.md#atomic-write-publication-failures).
 5. **GC pause restoration (`_pause_gc`).**
    Full reader passes run inside `with host_usage._pause_gc():`, disabling
    cyclic garbage collection during the scan and restoring the caller's prior
@@ -3508,23 +3522,31 @@ clauses, enforced by `tests/test_host_adapter_contract.py` and
    on `tokens_by_day`. Inclusive host ledgers normalize through
    `host_usage._normalize_inclusive_counters` before aggregation so
    `cache_read + cache_create > input` fails closed with `reason="malformed"`.
+   Coverage is shared across `tests/test_host_usage.py:TestCounterSemantics`
+   (Codex inclusive rejection and Muse disjoint passthrough) and
+   `tests/test_muse_usage.py:test_fixture_totals_are_disjoint_and_attribution_is_not_counted`
+   (Muse fixture totals), rather than a new row in the adapter contract suite.
 7. **Registry and diagnostic completeness (`host_registry.HOST_READER_DIAGS`, `reader_usage_diag`, `reader_cache_cold`, `warm_host_cache_inline`).**
    `tuple(HOST_READER_DIAGS)` equals `events.ACTIVE_HOST_READERS` in order;
    `events_tail.WARMABLE_HOST_READERS` is a subset of `ACTIVE_HOST_READERS`.
    Each `HostReaderDiag` names its `owner` module, `function`, `ready_key`,
    `ready_value`, and `label`. Every `<reader>_usage_diag()` returns at least
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
-   `files_cached`, `files_on_disk`, and `spec.ready_key`. `warm_host_cache_inline`
+   and `spec.ready_key`. Codex, Muse and Antigravity also expose `files_cached`
+   and `files_on_disk`; Cursor instead exposes `runs_cached` and store counters
+   because its inventory is retained history. `warm_host_cache_inline`
    raises `ValueError` naming `host_registry.py` and this section anchor when
    given an unknown reader name.
 8. **Call-time owner resolution (monkeypatch contract).**
    `host_registry.reader_usage_diag`, `host_registry.warm_host_cache_inline`,
    and `events_tail._default_host_readers` resolve reader and diagnostic
    callables on their owner modules (`codex_host.read_codex_usage`,
-   `getattr(descriptor.owner, descriptor.function)`) at call time rather than
-   binding function references at import time, and `hosts/*.py` calls shared
+   `getattr(descriptor.owner, descriptor.function)`) at dispatch or selection
+   time rather than binding function references at import time. For Codex,
+   `_default_host_readers` binds the callable when selection runs, not when the
+   selected callable is later invoked. `hosts/*.py` calls shared
    `host_usage` helpers module-qualified (`host_usage._expired(...)`). Patching
-   the owner module in tests therefore intercepts every production dispatch site.
+   the owner before the relevant dispatch or selection intercepts that call.
 9. **Import boundaries and test-time path isolation.**
    `hosts/__init__.py` is empty. Every `hosts/*.py` module imports only stdlib
    and `mind_meld.{host_usage, token_usage, lockedjson, fsutil, errors}` — never
@@ -3535,3 +3557,19 @@ clauses, enforced by `tests/test_host_adapter_contract.py` and
    never loads `mind_meld.cli`. Under pytest, `tests/conftest.py:_isolate_host_usage`
    redirects every reader's session roots and cache paths on its owner module
    into `tmp_path`.
+
+**Adding or extracting an adapter:**
+
+- Put host-owned definitions in `hosts/<host>.py`; keep `hosts/__init__.py`
+  empty and call shared `host_usage` helpers module-qualified.
+- Register the owner and diagnostic descriptor in `host_registry.py`, wire
+  call-time dispatch and the source consent gate, and keep the active-reader
+  and warmable-reader inventories consistent with clause 7.
+- Retarget callers and patches to the owner. When replacing `time` or
+  `datetime` bindings, patch both the adapter and the shared kit.
+- Redirect every session root and cache path in `tests/conftest.py` before
+  enabling a contract row; test execution must not touch real host state.
+- Add the reader to the parametrized contract, including the consent boundary,
+  failure isolation, owner-lookup sentinel, and fresh-process import checks.
+- Update the ownership inventory, seeded boundary gates, and invariant routing;
+  verify fixture parity and cache compatibility before changing reader behavior.
