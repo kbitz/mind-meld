@@ -6515,14 +6515,14 @@ def status(
 
 def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
     """Cache-only bridge for operators who previously used git recapture."""
-    from mind_meld import host_usage
+    from mind_meld import host_registry
 
     for name, _ in events_tail._default_host_readers(
         sources,
         cursor_consented=_config_module.cursor_host_usage_enabled(config),
     ):
-        state = host_usage.reader_usage_diag(name)
-        cold = host_usage.reader_cache_cold(name, state)
+        state = host_registry.reader_usage_diag(name)
+        cold = host_registry.reader_cache_cold(name, state)
         if cold or state.get("last_reason"):
             console.print(
                 "Recapture covers Git history only. Refresh host usage on this Mac: "

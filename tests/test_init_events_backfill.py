@@ -24,6 +24,7 @@ from mind_meld import events as _mm_events
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld import identity as _mm_identity
 from mind_meld import token_usage as _mm_token_usage
+from mind_meld.hosts import codex as _mm_codex_host
 
 
 def _read_event_rows(events_file: Path) -> list[dict]:
@@ -283,7 +284,7 @@ class TestBackfillHostSnapshot:
             return read
 
         empty = _mm_host_usage.HostUsageResult({}, complete=True)
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex", codex or empty))
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", reader("codex", codex or empty))
         monkeypatch.setattr(
             _mm_host_usage, "read_muse_usage", reader("muse", muse or grok or empty)
         )

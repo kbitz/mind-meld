@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld import cli, events, events_tail, host_usage, token_usage
+from mind_meld import cli, events, events_tail, host_registry, host_usage, token_usage
 from mind_meld.skills.retro_fleet import aggregator
 
 NOW = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
@@ -102,7 +102,7 @@ def test_reader_days_trim_with_partial_days_and_count_zero_buckets():
 
 def test_production_capture_preserves_day_sets_through_warm_retry(monkeypatch):
     monkeypatch.setattr(
-        host_usage,
+        host_registry,
         "warm_host_cache_inline",
         lambda **kw: host_usage.HostUsageResult({}, complete=True),
     )

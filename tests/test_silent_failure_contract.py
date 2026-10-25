@@ -27,6 +27,7 @@ from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
+from mind_meld.hosts import codex as _mm_codex_host
 from mind_meld.storage.local import LocalBackend
 from tests.conftest import (  # noqa: E402
     MEMORY_KB,
@@ -125,7 +126,7 @@ def _enable_test_host_source(tmp_path, reader, *, disabled=False):
 def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch, reader, reason):
     _setup_real_config(tmp_path, monkeypatch)
     _enable_test_host_source(tmp_path, reader)
-    cache = _mm_host_usage.CACHE_PATH if reader == "codex" else _mm_host_usage.MUSE_CACHE_PATH
+    cache = _mm_codex_host.CACHE_PATH if reader == "codex" else _mm_host_usage.MUSE_CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
         json.dumps(
@@ -159,7 +160,7 @@ def test_status_prioritizes_every_standing_reader_blocker(tmp_path, monkeypatch,
 def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monkeypatch):
     _setup_real_config(tmp_path, monkeypatch)
     _enable_test_host_source(tmp_path, "codex")
-    cache = _mm_host_usage.CACHE_PATH
+    cache = _mm_codex_host.CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(
         json.dumps(
@@ -173,7 +174,7 @@ def test_status_ready_codex_with_deadline_names_interactive_warm(tmp_path, monke
             }
         )
     )
-    assert _mm_host_usage.codex_usage_diag()["state"] == "ready"
+    assert _mm_codex_host.codex_usage_diag()["state"] == "ready"
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     text = " ".join(result.output.split())
@@ -188,7 +189,7 @@ def test_status_codex_silence_for_disabled_unreadable_or_healthy_cache(
 ):
     _setup_real_config(tmp_path, monkeypatch)
     _enable_test_host_source(tmp_path, "codex", disabled=state == "disabled")
-    cache = _mm_host_usage.CACHE_PATH
+    cache = _mm_codex_host.CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     data = {"version": 1, "last_reason": "unsupported", "files": {"old": {}}}
     if state == "healthy":
@@ -196,7 +197,7 @@ def test_status_codex_silence_for_disabled_unreadable_or_healthy_cache(
     cache.write_text("{broken" if state == "unreadable" else json.dumps(data))
     if state == "disabled":
         monkeypatch.setattr(
-            _mm_host_usage, "codex_usage_diag", lambda: pytest.fail("disabled probe")
+            _mm_codex_host, "codex_usage_diag", lambda: pytest.fail("disabled probe")
         )
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
@@ -208,7 +209,7 @@ def test_status_and_diag_inventory_nags_when_no_blocker(tmp_path, monkeypatch):
 
     _setup_real_config(tmp_path, monkeypatch)
     _enable_test_host_source(tmp_path, "codex")
-    cache = _mm_host_usage.CACHE_PATH
+    cache = _mm_codex_host.CACHE_PATH
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"version": 1, "files": {"old": {"day": "2026-09-04"}}}))
     rebuilding = runner.invoke(app, ["status"])
@@ -231,9 +232,9 @@ def test_status_and_diag_inventory_nags_when_no_blocker(tmp_path, monkeypatch):
     assert blocked.exit_code == 0, blocked.output
     assert "codex awaiting re-walk" not in blocked.output
     cache.write_text(json.dumps({"version": 1, "files": {"warm": {"states": []}}}))
-    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(1)])
-    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-b.jsonl", [_context(), _token(2)])
-    assert _mm_host_usage.codex_usage_diag()["state"] == "migrating"
+    _write_rollout(_mm_codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(1)])
+    _write_rollout(_mm_codex_host.CODEX_SESSIONS_PATH, "rollout-b.jsonl", [_context(), _token(2)])
+    assert _mm_codex_host.codex_usage_diag()["state"] == "migrating"
     warming = runner.invoke(app, ["status"])
     assert warming.exit_code == 0, warming.output
     text = " ".join(warming.output.split())
@@ -255,7 +256,7 @@ def test_autopush_failed_codex_read_reaches_status_after_noop_success(tmp_path, 
     _enable_test_host_source(tmp_path, "muse")
     bad = _token(100)
     bad["payload"]["info"]["total_token_usage"]["input_tokens"] = "unreadable"
-    _write_rollout(_mm_host_usage.CODEX_SESSIONS_PATH, "rollout-failing.jsonl", [_context(), bad])
+    _write_rollout(_mm_codex_host.CODEX_SESSIONS_PATH, "rollout-failing.jsonl", [_context(), bad])
     _write_muse_session(_mm_host_usage.MUSE_SESSIONS_PATH)
 
     first = runner.invoke(app, ["autopush"])
@@ -279,7 +280,7 @@ def test_autopush_failed_codex_read_reaches_status_after_noop_success(tmp_path, 
         assert "(codex unsupported)" in " ".join(status.output.split())
         if attempt == 0:
             monkeypatch.setattr(
-                _mm_host_usage, "read_codex_usage", lambda **k: pytest.fail("no-op read")
+                _mm_codex_host, "read_codex_usage", lambda **k: pytest.fail("no-op read")
             )
             second = runner.invoke(app, ["autopush"])
             assert second.exit_code == 0, second.output

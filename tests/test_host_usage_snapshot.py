@@ -31,8 +31,10 @@ import pytest
 
 from mind_meld import events as _mm_events
 from mind_meld import events_tail
+from mind_meld import host_registry as _mm_host_registry
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld import identity as _mm_identity
+from mind_meld.hosts import codex as _mm_codex_host
 
 
 def _usage(input_tokens: int = 0, cache_create: int = 0, cache_read: int = 0, output: int = 0):
@@ -141,18 +143,31 @@ class TestReaderOrchestration:
         readers["muse"](deadline=1_000.0)
         assert seen == {"consented": True}
 
-    def test_source_authorized_agy_reader_contributes_to_sweep(self, monkeypatch):
+    @pytest.mark.parametrize("needs_warm", [False, True])
+    def test_source_authorized_agy_reader_contributes_to_sweep(self, monkeypatch, needs_warm):
+        # Extended by the /ship test coverage audit.
+        # Value: protects=consented Antigravity deadline retry publishes its completed snapshot;
+        # fails_when=moved registry warm dispatch targets the wrong reader or omits consent;
+        # why_new=this test covered only the first sweep and other warm tests stub the registry;
+        # seam=none; no_claim=live Antigravity data; the owner reader is a synthetic sentinel.
         seen = []
+        warmed = []
 
-        def read(*, deadline, consented=False):
+        def read(root=None, *, deadline, consented=False):
             seen.append(consented)
+            if needs_warm and len(seen) == 1:
+                return _incomplete("deadline")
             return _complete() if consented else _mm_host_usage._incomplete("no_metadata_ledger")
 
         monkeypatch.setattr(_mm_host_usage, "read_agy_usage", read)
         readers = events_tail._default_host_readers(self._enabled("agy"))
-        capture = events_tail._capture_host_usage(readers, deadline=1_000.0, now=lambda: 0.0)
-        assert seen == [True]
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a", readers, host_budget_ms=1000, warm_host_cache=warmed.append
+        )
+        assert seen == ([True, True] if needs_warm else [True])
+        assert warmed == (["agy"] if needs_warm else [])
         assert capture.token_sources == ("agy",)
+        assert rows[0]["token_sources"] == ["agy"]
 
     def test_gate_map_covers_every_built_in_reader(self):
         """A new reader added without a gate entry would read a host store with
@@ -189,11 +204,11 @@ class TestReaderOrchestration:
         assert "grok" not in _mm_events.ACTIVE_HOST_READERS
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):
-        """Module-qualified lookup, so patching ``host_usage.read_codex_usage``
+        """Module-qualified lookup, so patching ``codex.read_codex_usage``
         actually reaches the tail. A from-import would bind events_tail's own
         global and the patch would be dead."""
         sentinel = _complete({"codex": {"2026-08-15": _usage(1)}})
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **_kw: sentinel)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", lambda **_kw: sentinel)
 
         capture = events_tail._capture_host_usage(
             events_tail._default_host_readers(
@@ -677,7 +692,7 @@ class TestHostDeadline:
             seen.append(deadline)
             return _complete()
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", read)
         _stub_fast_walks(monkeypatch)
 
@@ -782,7 +797,7 @@ def _stub_hosts(
 
         return read
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", make("codex", codex or _complete()))
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", make("codex", codex or _complete()))
     monkeypatch.setattr(
         _mm_host_usage, "read_muse_usage", make("muse", muse or grok or _complete())
     )
@@ -824,8 +839,8 @@ def test_three_attended_callers_share_one_warm_sweep(tmp_path, monkeypatch, entr
         warmed = True
         return _complete({"codex": {"2026-08-15": _usage(7)}})
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
-    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
+    monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
     if entry == "tail":
         events_tail._run_events_tail(config, sources, "dev-a", dry_run=False, quiet=False)
     elif entry == "backfill":
@@ -1415,9 +1430,9 @@ class TestColdCacheWarmAndRetry:
             state["warm"] = True
             return _complete({"codex": {"2026-08-15": _usage(7)}})
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **_kw: _complete())
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
 
     @pytest.mark.parametrize("preinvoke", [False, True])
     @pytest.mark.parametrize("codex_warm", ["complete", "deadline", "raises"])
@@ -1469,9 +1484,9 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock[0])
         monkeypatch.setattr(events_tail, "_capture_host_usage", capture)
         monkeypatch.setattr(events_tail, "_merge_warm_retry_capture", merge)
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", reader("codex"))
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", reader("codex"))
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", reader("muse"))
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm_reader)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm_reader)
         root = tmp_path / "events_root"
         sources = _sources(root, hosts=("codex", "muse"))
         degradations = events_tail._run_events_tail(
@@ -1537,9 +1552,9 @@ class TestColdCacheWarmAndRetry:
             state["warm"] = True
             return _complete()
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", codex)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
         def with_synth(sources, *, cursor_consented=False):
@@ -1600,9 +1615,9 @@ class TestColdCacheWarmAndRetry:
             state["warm"] = True
             return _complete({"muse": {"2026-08-15": _usage(5)}})
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", codex)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
         def with_synth(sources, *, cursor_consented=False):
@@ -1645,9 +1660,9 @@ class TestColdCacheWarmAndRetry:
             calls.append(f"warm:{reader}")
             return _incomplete("deadline")
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", codex)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", codex)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", muse)
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
 
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
@@ -1750,7 +1765,7 @@ class TestColdCacheWarmAndRetry:
         calls: list[str] = []
         _stub_hosts(monkeypatch, calls=calls)
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_host_registry,
             "warm_host_cache_inline",
             lambda *_a, **_kw: calls.append("warm") or _complete(),
         )
@@ -1772,7 +1787,7 @@ class TestColdCacheWarmAndRetry:
         calls: list[str] = []
         _stub_hosts(monkeypatch, muse=_incomplete(reason), calls=calls)
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_host_registry,
             "warm_host_cache_inline",
             lambda *_a, **_kw: calls.append("warm") or _complete(),
         )
@@ -1801,11 +1816,11 @@ class TestColdCacheWarmAndRetry:
             reads.append("read")
             return _incomplete("deadline")
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **_kw: _complete())
         # The warm runs but cannot finish either.
         monkeypatch.setattr(
-            _mm_host_usage, "warm_host_cache_inline", lambda *_a, **_kw: _incomplete("deadline")
+            _mm_host_registry, "warm_host_cache_inline", lambda *_a, **_kw: _incomplete("deadline")
         )
 
         events_tail._run_events_tail(
@@ -1841,7 +1856,7 @@ class TestColdCacheWarmAndRetry:
         def boom(*_a, **_kw):
             raise RuntimeError("synthetic warm failure")
 
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", boom)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", boom)
 
         degradations = events_tail._run_events_tail(
             {"sync": {"sources": sources}}, sources, "dev-a", dry_run=False, quiet=False
@@ -1891,7 +1906,7 @@ class TestHostCaptureDoesNotDisturbTheWalkBudget:
             _time.sleep(0.05)
             return _complete()
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", slow_read)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", slow_read)
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", slow_read)
 
         degradations = events_tail._run_events_tail(
@@ -2170,7 +2185,7 @@ def test_attended_warm_outcome_is_published_without_third_read(outcome, mixed, m
             partial_days=frozenset({day}) if outcome == "partial" else frozenset(),
         )
 
-    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
     readers = (("codex", codex), ("muse", muse)) if mixed else (("codex", codex),)
     capture, rows = events_tail._capture_host_snapshot(
         "dev-a",
@@ -2273,7 +2288,7 @@ def test_deadline_wording_follows_whether_the_caller_could_warm(
         warms.append(reader)
         return _incomplete("deadline")
 
-    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
     if surface == "init":
         events_tail._run_events_backfill(config, sources, "dev-a")
         text = " ".join(capsys.readouterr().err.split())
@@ -2363,17 +2378,18 @@ def test_leaf_diagnostic_scopes_restore_default_after_failure(capsys):
 
 
 def test_sync78_host_and_token_contention_keep_skip_and_default_policy(tmp_path, capsys):
-    from mind_meld import host_usage, lockedjson, token_usage
+    from mind_meld import lockedjson, token_usage
+    from mind_meld.hosts import codex as codex_host
 
     notices = []
-    with lockedjson.locked_json_rmw(host_usage.CACHE_PATH):
+    with lockedjson.locked_json_rmw(codex_host.CACHE_PATH):
         with events_tail.diagnostic_scope(
             lambda message, degraded: notices.append((message, degraded))
         ):
-            result = host_usage.read_codex_usage(root=tmp_path / "no-sessions")
+            result = codex_host.read_codex_usage(root=tmp_path / "no-sessions")
         assert result.complete is False and result.reason == "locked"
         assert capsys.readouterr().err == ""
-        direct = host_usage.read_codex_usage(root=tmp_path / "no-sessions")
+        direct = codex_host.read_codex_usage(root=tmp_path / "no-sessions")
         assert direct.complete is False and direct.reason == "locked"
         assert "locked" in capsys.readouterr().err
     # The returned "locked" result already records the loss; the notice is not counted again.

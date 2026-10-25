@@ -421,7 +421,8 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
 
     _setup_events_tail_config(tmp_path, monkeypatch)
     if host_state is not None:
-        from mind_meld import config, host_usage
+        from mind_meld import config
+        from mind_meld.hosts import codex as codex_host
 
         cfg = config.load_config()
         codex = tmp_path / "codex"
@@ -429,7 +430,7 @@ def test_recapture_stages_snapshots_before_ordinary_push(tmp_path, monkeypatch, 
         cfg["sync"]["sources"].append({"name": "codex", "path": str(codex), "type": "generic"})
         config.save_config(cfg)
         monkeypatch.setattr(
-            host_usage,
+            codex_host,
             "codex_usage_diag",
             lambda: {
                 "state": "ready" if host_state == "blocked" else host_state,

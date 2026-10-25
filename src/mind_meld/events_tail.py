@@ -38,13 +38,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal, Sequence, get_args
 
-from mind_meld import __version__, events, host_usage, identity, token_usage, upgrade
+from mind_meld import (
+    __version__,
+    events,
+    host_registry,
+    host_usage,
+    identity,
+    token_usage,
+    upgrade,
+)
 from mind_meld import config as mm_config
 from mind_meld.config import (
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
 )
 from mind_meld.errors import HOST_USAGE_CAPTURE_URL
+from mind_meld.hosts import codex as codex_host
 from mind_meld.safety import safe_str, safe_terminal_str
 
 CacheLockMode = Literal["warn", "block"] | None
@@ -392,7 +401,7 @@ def _default_host_readers(
     enabled = {s.get("name") for s in sources if isinstance(s.get("name"), str)}
     chosen: list[tuple[str, HostReader]] = []
     if HOST_READER_SOURCE_GATE["codex"] in enabled:
-        chosen.append(("codex", host_usage.read_codex_usage))
+        chosen.append(("codex", codex_host.read_codex_usage))
     if cursor_consented:
 
         def _read_cursor(*, deadline: float) -> host_usage.HostUsageResult:
@@ -754,7 +763,7 @@ def _capture_host_snapshot(
             warm_host_cache(name)
 
             def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
-                return host_usage.warm_host_cache_inline(reader=name)
+                return host_registry.warm_host_cache_inline(reader=name)
 
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),

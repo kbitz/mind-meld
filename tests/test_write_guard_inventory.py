@@ -481,13 +481,13 @@ REVIEWED = {
             "value.replace('Z', '+00:00')",
         ],
     ),
-    "host_usage.py:_read_rollout": (
+    "hosts/codex.py:_read_rollout": (
         *_READ_ONLY,
         [
             "path.open('rb')",
         ],
     ),
-    "host_usage.py:_record_day": (
+    "hosts/codex.py:_record_day": (
         *_READ_ONLY,
         [
             "timestamp.replace('Z', '+00:00')",

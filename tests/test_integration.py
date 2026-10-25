@@ -27,6 +27,7 @@ from mind_meld import config as config_module
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
 from mind_meld import events_tail, fsutil, synclog
+from mind_meld import host_registry as _mm_host_registry
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld.cli import app
 from mind_meld.config import save_config
@@ -36,6 +37,7 @@ from mind_meld.crypto import (
     encrypt,
 )
 from mind_meld.devices import register_device
+from mind_meld.hosts import codex as _mm_codex_host
 from mind_meld.manifest import (
     deserialize_manifest,
     load_manifest,
@@ -5321,7 +5323,7 @@ def capture61(tmp_path, monkeypatch):
     helpers._activate(monkeypatch, path)
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     # Real empty reader: preserve the distinction between [] and ["codex"].
-    _mm_host_usage.CODEX_SESSIONS_PATH.mkdir(parents=True, exist_ok=True)
+    _mm_codex_host.CODEX_SESSIONS_PATH.mkdir(parents=True, exist_ok=True)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     dayfile = next(helpers._events_dir(tmp_path).glob("*.jsonl"))
@@ -5344,7 +5346,7 @@ def test_later_autopush_supersedes_attended_reader_coverage(capture61, tmp_path,
     first = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     assert first["readers"] == {"codex": "contributed", "muse": "contributed"}
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
     )
@@ -5461,7 +5463,7 @@ def test_partial_and_absent_capture_reports_own_outcome(capture61, monkeypatch, 
             {"codex": {day: usage}}, complete=True, partial_days=frozenset({day})
         )
     )
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: result)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", lambda **kw: result)
     invocation = runner.invoke(app, ["push", "--verbose"])
     assert invocation.exit_code == 0, invocation.output
     assert ("absent (no metadata ledger)" if absent else "partial") in invocation.output
@@ -5485,7 +5487,7 @@ def test_capture_outcome_labels_each_reader_independently(capture61, tmp_path, m
     day = datetime.now(timezone.utc).date().isoformat()
     usage = {"input": 9, "output": 3, "cache_read": 0, "cache_create": 0}
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({"other": {day: usage}}, complete=True),
     )
@@ -5512,7 +5514,7 @@ def test_capture_outcome_labels_each_reader_independently(capture61, tmp_path, m
 
 
 def test_requested_capture_holds_lock_against_push_and_autopush(capture61, monkeypatch):
-    real = _mm_host_usage.read_codex_usage
+    real = _mm_codex_host.read_codex_usage
     blocked = []
 
     def read(**kwargs):
@@ -5520,7 +5522,7 @@ def test_requested_capture_holds_lock_against_push_and_autopush(capture61, monke
         blocked.append(runner.invoke(app, ["autopush"]))
         return real(**kwargs)
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert len(blocked) == 2
@@ -5538,13 +5540,13 @@ def test_no_content_push_capture_usage_refreshes_once(capture61, monkeypatch):
     before = env["dayfile"].read_text().splitlines()
     cursor = _mm_events.resolve_push_cursor(env["dayfile"].parent, "dev-a")
     calls = []
-    real = _mm_host_usage.read_codex_usage
+    real = _mm_codex_host.read_codex_usage
 
     def read(**kwargs):
         calls.append(kwargs)
         return real(**kwargs)
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", read)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", read)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "Usage capture:" not in result.stdout
@@ -5942,7 +5944,7 @@ def test_torn_append_failed_rollback_continues_and_separates_next_append(
 
 def test_capture_failure_nudges_upgrade_after_unlock(capture61, monkeypatch):
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason="unsupported"),
     )
@@ -5982,7 +5984,7 @@ def test_capture_prerequisites_skip_and_push_content(capture61, monkeypatch, sta
     monkeypatch.setattr(
         cli_module.core, "_get_passphrase_or_exit", lambda: keychain.append(True) or PASSPHRASE
     )
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: pytest.fail("reader"))
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", lambda **kw: pytest.fail("reader"))
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert keychain == [True]
@@ -6000,12 +6002,12 @@ def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pendin
         (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
     prior = cli_module.sidecar.read("dev-a")
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason=reason),
     )
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_host_registry,
         "warm_host_cache_inline",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=False, reason=reason),
     )
@@ -6508,7 +6510,7 @@ class TestTrack7BEventsTail:
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         self._activate(monkeypatch, config_path)
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_codex_host,
             "read_codex_usage",
             lambda **_kw: _mm_host_usage.HostUsageResult(
                 {
@@ -6559,7 +6561,7 @@ class TestTrack7BEventsTail:
 
             return read
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", record("codex"))
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", record("codex"))
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", record("muse"))
 
         # Nothing changed since the first push → no-op.
@@ -9648,7 +9650,9 @@ def test_write_free_contract62(preview62, argv, tmp_path, monkeypatch):
             events_tail, "_capture_host_snapshot", lambda *a, **kw: pytest.fail("preview captured")
         )
         monkeypatch.setattr(
-            _mm_host_usage, "warm_host_cache_inline", lambda *a, **kw: pytest.fail("preview warmed")
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda *a, **kw: pytest.fail("preview warmed"),
         )
         monkeypatch.setattr(
             cli_module.upgrade, "record_nudge", lambda *a, **kw: pytest.fail("preview nudged")
@@ -11417,8 +11421,8 @@ def test_requested_capture_publishes_warm_read_with_two_invocations(capture61, m
             tokens_by_day={} if empty else {day: {**usage, "by_model": {"gpt-5": usage}}},
         )
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", bounded)
-    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", warm)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", bounded)
+    monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert calls == ["bounded", "warm"]
@@ -11440,7 +11444,7 @@ def test_all_failed_autopush_keeps_previous_snapshot_to_age(capture61, monkeypat
     prior_rows = [json.loads(line) for line in capture61["dayfile"].read_text().splitlines()]
     prior_hosts = [row for row in prior_rows if row["type"] == "host-usage-snapshot"]
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kwargs: _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline"),
     )
@@ -11470,7 +11474,7 @@ def test_attended_capture_exception_never_retries_or_blocks_content(capture61, m
     monkeypatch.setattr(events_tail, "_capture_host_snapshot", capture)
     if phase == "warm-notice":
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_codex_host,
             "read_codex_usage",
             lambda **kw: _mm_host_usage.HostUsageResult({}, False, "deadline"),
         )
@@ -11507,7 +11511,7 @@ def test_content_acceptance_survives_maintenance_independently(
     (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
     if capture_state == "failed":
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_codex_host,
             "read_codex_usage",
             lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
         )
@@ -11560,7 +11564,7 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
     (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
     if capture_state == "failed":
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_codex_host,
             "read_codex_usage",
             lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
         )
@@ -11627,7 +11631,7 @@ def test_attended_resolves_once_and_bootstraps_inside_lock(capture61, monkeypatc
 def test_failed_refresh_records_attempt_without_replacing_capture(capture61, monkeypatch):
     before = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_publication"]
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
     )
@@ -11885,7 +11889,7 @@ def test_attended_attempt_records_each_capture_outcome(
         monkeypatch.setattr(events_tail, "_default_host_readers", lambda *a, **kw: ())
     elif mode == "no-row":
         monkeypatch.setattr(
-            _mm_host_usage,
+            _mm_codex_host,
             "read_codex_usage",
             lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
         )
@@ -12032,7 +12036,7 @@ def test_verbose_capture_uses_the_trimmed_row_for_partial_and_empty_labels(
     today = datetime.now(timezone.utc).date().isoformat()
     usage = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0}
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult(
             {"other": {"2020-01-01": usage}}, True, partial_days=frozenset({"2020-01-01"})
@@ -12100,8 +12104,8 @@ def test_no_row_prerequisites_keep_activity_walk_and_cursor(capture61, monkeypat
 def test_attended_push_deadline_after_warm_gets_an_honest_diagnostic(capture61, monkeypatch):
     """The warm already spent the attended allowance; do not promise it again."""
     exhausted = _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", lambda **kw: exhausted)
-    monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", lambda **kw: exhausted)
+    monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", lambda **kw: exhausted)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     flat = " ".join(result.stderr.split())
@@ -12174,7 +12178,7 @@ def test_capture_warning_token_names_the_phase_or_the_partial_row(capture61, mon
         save_config(env["cfg"], env["path"])
         exhausted = _mm_host_usage.HostUsageResult({}, complete=False, reason="deadline")
         monkeypatch.setattr(_mm_host_usage, "read_muse_usage", lambda **kw: exhausted)
-        monkeypatch.setattr(_mm_host_usage, "warm_host_cache_inline", lambda **kw: exhausted)
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", lambda **kw: exhausted)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     sync = cli_module.attemptlog.read_runs()["runs"]["push"]
@@ -12224,14 +12228,14 @@ def test_capture_warning_names_the_exception_when_its_message_is_empty(capture61
 def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61, monkeypatch):
     """Capture now precedes content sync and can scan for seconds; Ctrl-C must be clean."""
     env = capture61
-    real = _mm_host_usage.read_codex_usage
+    real = _mm_codex_host.read_codex_usage
     before = env["dayfile"].read_bytes()
     (env["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
 
     def interrupt(**kwargs):
         raise KeyboardInterrupt()
 
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", interrupt)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", interrupt)
     aborted = runner.invoke(app, ["push"])
     assert aborted.exit_code != 0
     record, reason = cli_module.attemptlog.read()
@@ -12241,7 +12245,7 @@ def test_interrupt_during_capture_releases_the_lock_and_pushes_nothing(capture61
     assert env["dayfile"].read_bytes() == before
     rel = "projects/-Users-kb-myapp/memory/new.md"
     assert rel not in cli_module.sidecar.read("dev-a")["sources"]["claude"]["files"]
-    monkeypatch.setattr(_mm_host_usage, "read_codex_usage", real)
+    monkeypatch.setattr(_mm_codex_host, "read_codex_usage", real)
     retry = runner.invoke(app, ["push"])
     assert retry.exit_code == 0, retry.output
     assert "holds the lock" not in retry.output
@@ -13970,7 +13974,7 @@ def test_sync78_degraded_capture_default_is_quiet_and_status_actionable(
     capture61, monkeypatch, verbose
 ):
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, False, "unsupported"),
     )
@@ -14512,17 +14516,17 @@ def test_sync78_each_activity_loss_is_recorded_once(capture61, monkeypatch, faul
         def raising(**kwargs):
             raise RuntimeError("PRIVATE78 reader")
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", raising)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", raising)
     elif fault == "leaf-notice":
 
         def noisy(**kwargs):
             _mm_host_usage._notice_cache_write_failure(OSError(errno.EIO, "PRIVATE78"))
             return _mm_host_usage.HostUsageResult({}, complete=True)
 
-        monkeypatch.setattr(_mm_host_usage, "read_codex_usage", noisy)
+        monkeypatch.setattr(_mm_codex_host, "read_codex_usage", noisy)
     (memory / "loss78.md").write_text("changed")
     held = (
-        lockedjson.locked_json_rmw(_mm_host_usage.CACHE_PATH)
+        lockedjson.locked_json_rmw(_mm_codex_host.CACHE_PATH)
         if fault == "host-lock"
         else nullcontext()
     )
@@ -14713,7 +14717,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     (memory / "second.md").write_text("second file")
     monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
     )
@@ -15025,7 +15029,7 @@ def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
     codex_skill.write_text("codex skill")
     monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
     monkeypatch.setattr(
-        _mm_host_usage,
+        _mm_codex_host,
         "read_codex_usage",
         lambda **kw: _mm_host_usage.HostUsageResult({}, complete=True),
     )

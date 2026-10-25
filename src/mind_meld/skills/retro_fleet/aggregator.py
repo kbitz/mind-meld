@@ -76,7 +76,7 @@ from pathlib import Path
 from typing import Literal, get_args
 
 from mind_meld import events as mm_events
-from mind_meld import host_usage, identity, safety, token_usage
+from mind_meld import host_registry, host_usage, identity, safety, token_usage
 
 # ---------------------------------------------------------------------------
 # Constants — kept in lockstep with mm's source-of-truth values.
@@ -3610,8 +3610,8 @@ def _reader_display_labels(readers: Iterable[object]) -> tuple[str, ...]:
     live = mm_events.HOST_USAGE_TOKEN_SOURCES
     live_set = set(live)
     labels = [
-        host_usage.HOST_READER_DIAGS[reader].label
-        if reader in host_usage.HOST_READER_DIAGS
+        host_registry.HOST_READER_DIAGS[reader].label
+        if reader in host_registry.HOST_READER_DIAGS
         else reader
         for reader in live
         if reader in values
