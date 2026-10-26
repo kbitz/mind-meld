@@ -48,9 +48,15 @@ here by hand, use the H3 form.
 - **Why:** Track 85A's "Codex newest-first with settled days" task freezes settled days "the way the Muse reader does" and lists `src/mind_meld/host_usage.py`, but the Muse freeze code (`_freeze_muse_day`, `_cached_muse_frozen`, `_validated_muse_frozen`, `_MUSE_SETTLE_DAYS`) is Muse-owned and stays in `host_usage.py` after Track 84A. Under docs/SPEC.md "Core and extensions", 85A cannot generalize it there without a Muse move-only Track first.
 - **Effort:** S
 - **Priority:** P2
-- **Context:** Surfaced by the Track 84A /autoplan-lean CEO review (2026-10-24, decision d12). Options: 85A implements Codex freezing inside `hosts/codex.py` without editing Muse code (accepting duplication), or /roadmap adds a Muse move-only Track before 85A. Either way, correct 85A's touch list.
+- **Context:** Surfaced by the Track 84A /autoplan-lean CEO review (2026-10-24, decision d12). Options: 85A implements Codex freezing inside `hosts/codex.py` without editing Muse code (accepting duplication), or /roadmap adds a Muse move-only Track before 85A. Either way, correct 85A's touch list. Resolved by Track 85A /autoplan-lean (`d3`, `d8`): `hosts/codex.py` implements `files`-backed `settled_days` plus `>=24h` stat-only cache hits so `_aggregate` union-find `turn_id` deduplication across days and `archived_sessions/` stays intact, while `host_usage.py` keeps Muse freeze code untouched and exposes only a pure date/stat-digest helper.
 
 Codex day keying differs from Muse: `_record_day` assigns usage to each record's timestamp day, not the rollout's directory date, so a session spanning midnight or a later append adds tokens to later days; archived rollouts move to a flat directory under a new path and `_aggregate`'s lineage keys dedupe them. A Codex freeze therefore cannot key on directory date or path the way `_muse_dir_date` does; it needs per-file idle mtime plus lineage keys.
+
+### [plan-eng-review:track=85A] Mid-rollout line-offset checkpointing if a single cold Codex rollout ever exceeds capture_budget_ms
+- **Why:** `hosts/codex.py:_read_rollout` aborts with `_RolloutError("deadline")` if a single cold rollout file cannot finish within the remaining scan deadline; `_scan_codex_root` checkpoints completed files across pushes (`files`), which converges when individual rollouts fit within one push's allowance (~1 ms/file on the measured 3,459-rollout corpus), but a multi-hundred-MB single cold rollout could stall if its initial parse alone exceeds `capture_budget_ms`.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Surfaced by the Track 85A /autoplan-lean Eng outside review (2026-10-26). Revisit trigger: an observed `codex deadline` skip where a single rollout file's initial cold parse exceeds `[retro] capture_budget_ms`.
 
 ## Drain records
 
