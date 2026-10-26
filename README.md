@@ -1684,8 +1684,8 @@ over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
 its own small fixed shares regardless.
 
 Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **500 ms** (range **250–5,000**).
-All must be integers, and effective autopush must not exceed the effective
-attended ceiling (`capture_budget_ms` when set, else the interactive budget).
+All must be integers, and effective autopush must not exceed `capture_budget_ms`
+when set or an explicitly set interactive budget.
 Invalid values stop sync like any other `[retro]` error. Raising
 a budget trades more autopush latency for read headroom. This is per Mac and
 per mm version: remeasure after corpus or interpreter changes; do not copy a

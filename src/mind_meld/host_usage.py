@@ -2403,10 +2403,10 @@ def _muse_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-SETTLE_DAYS = 2
+SETTLE_DAYS = _MUSE_SETTLE_DAYS
 """Shared settled-day age: a ``YYYY/MM/DD`` directory may freeze once its
 date is this many UTC days old (Track 85A; same census basis as Muse)."""
-SETTLE_IDLE_NS = 24 * 60 * 60 * 1_000_000_000
+SETTLE_IDLE_NS = _MUSE_SETTLE_IDLE_NS
 """...and only when every file in it has been idle this long. The same idle
 window lets a per-file cache hit skip its content fingerprint."""
 

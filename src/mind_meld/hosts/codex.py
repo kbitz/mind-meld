@@ -415,8 +415,16 @@ def _scan_codex_root(
     staged: dict[str, _CacheEntry] = {}
     learned = False
     day_dirs = {rel: day for rel, day, _paths in days}
+    day_keys_expected = {
+        rel: {
+            host_usage._cache_key(path, root=root, canonical_root=canonical_roots[root])
+            for path in paths
+        }
+        for rel, _day, paths in days
+        if rel in prior_settled
+    }
     carried_days, settled_updates, seq_counter = _carry_settled_days(
-        prior_settled, day_dirs, cached_files, staged, deadline
+        prior_settled, day_dirs, day_keys_expected, cached_files, staged, deadline
     )
     key_day: dict[str, str | None] = {}
     for path, base, rel in rollouts:
@@ -470,7 +478,6 @@ def _scan_codex_root(
         key_day,
         carried_days=carried_days,
         settled_updates=settled_updates,
-        prior_settled=prior_settled,
         seq_counter=seq_counter,
     )
     return (
@@ -486,18 +493,22 @@ def _scan_codex_root(
 def _carry_settled_days(
     prior_settled: dict[str, dict[str, Any]],
     day_dirs: dict[str, Path],
+    day_keys_expected: dict[str, set[str]],
     cached_files: dict[str, Any],
     staged: dict[str, _CacheEntry],
     deadline: float,
 ) -> tuple[set[str], dict[str, dict[str, Any]], int]:
     """Stage settled days' ``files`` entries without per-file stat/open.
 
-    Stalest (lowest ``check_seq``) settled days are verified first by
-    directory stat digest while time remains — at least the stalest is
-    attempted on every scan; a mismatch evicts that day back to the per-file
-    loop. Unverified settled days are carried on trust, exactly like the
-    Muse freeze rotation. Returns ``(carried, updates, seq_counter)``;
-    callers commit ``updates`` only on a complete pass.
+    Every carried day first passes an exact key-set check against the live
+    enumeration, so additions and deletions evict immediately without any
+    stat. The stalest (lowest ``check_seq``) surviving day is additionally
+    verified by directory stat digest — exactly one digest verification per
+    scan, like the Muse freeze rotation, so verification never starves the
+    newest-first per-file loop; a failed or mismatched verification evicts
+    that day instead of trusting it. Remaining days carry on the key-set
+    check. Returns ``(carried, updates, seq_counter)``; callers commit
+    ``updates`` only on a complete pass.
     """
     carried: set[str] = set()
     updates: dict[str, dict[str, Any]] = {}
@@ -508,6 +519,8 @@ def _carry_settled_days(
         day = day_dirs.get(rel)
         if day is None:
             continue  # directory gone; a complete pass drops the record
+        if day_keys_expected.get(rel) != set(record["keys"]):
+            continue  # files added/removed; rescan the day per-file
         entries: dict[str, _CacheEntry] = {}
         for key in record["keys"]:
             entry = _validated_entry(cached_files.get(key))
@@ -517,17 +530,16 @@ def _carry_settled_days(
             entries[key] = entry
         if not entries:
             continue  # backing files lost; rescan the day per-file
-        if not verified_any or not host_usage._expired(deadline):
+        if not verified_any:
             try:
                 digest = _day_disk_digest(day, deadline)
             except host_usage._ReadFailure:
                 digest = None
-            if digest is not None and digest != _settled_record_digest(record):
-                continue  # changed on disk; evict to the per-file loop
-            if digest is not None:
-                verified_any = True
-                seq_counter += 1
-                record = {**record, "check_seq": seq_counter}
+            if digest != _settled_record_digest(record):
+                continue  # unverifiable or changed; evict to the per-file loop
+            verified_any = True
+            seq_counter += 1
+            record = {**record, "check_seq": seq_counter}
         staged.update(entries)
         carried.add(rel)
         updates[rel] = record
@@ -541,7 +553,6 @@ def _freeze_settled_days(
     *,
     carried_days: set[str],
     settled_updates: dict[str, dict[str, Any]],
-    prior_settled: dict[str, dict[str, Any]],
     seq_counter: int,
 ) -> dict[str, dict[str, Any]]:
     """Settled-day map for a COMPLETE pass (Track 85A d3/d7/d8).
@@ -1213,7 +1224,12 @@ def _validated_settled_days(value: Any) -> dict[str, dict[str, Any]]:
         if not isinstance(record, dict):
             continue
         keys = record.get("keys")
-        if not isinstance(keys, list) or not keys or not all(isinstance(k, str) for k in keys):
+        if (
+            not isinstance(keys, list)
+            or not keys
+            or not all(isinstance(k, str) for k in keys)
+            or len(set(keys)) != len(keys)
+        ):
             continue
         fields: dict[str, Any] = {}
         valid = True

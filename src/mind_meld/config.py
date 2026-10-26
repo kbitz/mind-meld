@@ -470,16 +470,24 @@ def _validate(config: dict[str, Any]) -> None:
                     f"Fix [retro] capture_budget_ms in ~/.config/mind-meld/config.toml."
                 )
         autopush = retro.get("host_usage_autopush_budget_ms", DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS)
-        # capture_budget_ms takes precedence over the legacy interactive key
-        # as the attended ceiling the autopush budget is checked against.
+        # capture_budget_ms takes precedence as the attended ceiling, and the
+        # legacy rule still applies when the legacy key is set explicitly: a
+        # user who pinned the attended sweep does not get a larger unattended
+        # one. Autopush otherwise keeps its fixed share (Track 85A d1).
+        ceilings: list[tuple[int, str]] = []
         if "capture_budget_ms" in retro:
-            interactive = retro["capture_budget_ms"]
-            interactive_key = "capture_budget_ms"
-        else:
-            interactive = retro.get(
-                "host_usage_interactive_budget_ms", DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
+            ceilings.append((retro["capture_budget_ms"], "capture_budget_ms"))
+        if "host_usage_interactive_budget_ms" in retro or not ceilings:
+            ceilings.append(
+                (
+                    retro.get(
+                        "host_usage_interactive_budget_ms",
+                        DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
+                    ),
+                    "host_usage_interactive_budget_ms",
+                )
             )
-            interactive_key = "host_usage_interactive_budget_ms"
+        interactive, interactive_key = min(ceilings)
         if autopush > interactive:
             raise ConfigError(
                 f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "

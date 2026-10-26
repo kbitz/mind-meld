@@ -1344,7 +1344,7 @@ class TestWalkSessionMetadata85A:
         assert entry["session_meta"]["complete"] is True
         assert entry["session_meta"]["has_tokens"] is False
         assert entry["session_meta"]["meta"]["sessions"] == 1
-        assert cache["session_resume_after"] is None
+        assert cache["session_resume_after"] == {}
 
     def test_no_persist_never_touches_cache(self, tmp_path):
         _make_project(tmp_path, "-tmp-a", "/tmp/a")
@@ -1466,7 +1466,7 @@ class TestWalkSessionMetadata85A:
         out1 = one_walk()
         assert len(out1[0]["projects"]) < 3, "first walk is budget-truncated"
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
-        assert cache["session_resume_after"] is not None
+        assert cache["session_resume_after"]
         first_scanned = visited_order[0]
 
         visited_order.clear()
@@ -1481,7 +1481,7 @@ class TestWalkSessionMetadata85A:
 
         one_walk()
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
-        assert cache["session_resume_after"] is None
+        assert cache["session_resume_after"] == {}
         assert len(cache["projects"]) == 3
         assert all(entry["session_meta"]["complete"] for entry in cache["projects"].values())
 
@@ -1508,6 +1508,82 @@ class TestWalkSessionMetadata85A:
         out = events.walk_session_metadata(tmp_path, since, persist=True)
         assert not scanned
         assert "tokens_by_day" not in out[0]["projects"][0]
+
+    def test_failed_token_read_is_not_staged_complete(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        # A token read that persists nothing (failed/drifted segment) must
+        # never be pinned as a complete session_meta record.
+        monkeypatch.setattr(events.token_usage, "get_or_compute", lambda *a, **k: ({}, {}))
+        events.walk_session_metadata(tmp_path, since, token_cache_files={}, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["projects"] == {}
+
+    def test_multi_root_cursors_are_independent(self, tmp_path, monkeypatch):
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        _make_project(root_a, "-tmp-a1", "/tmp/a1")
+        _make_project(root_a, "-tmp-a2", "/tmp/a2")
+        _make_project(root_b, "-tmp-b1", "/tmp/b1")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 0.6
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        # Root A truncates; root B completes in the same staged flush. B's
+        # completion must not erase A's resume cursor.
+        events.walk_session_metadata(
+            root_a, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.walk_session_metadata(root_b, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"].get(str(root_a))
+        assert str(root_b) not in cache["session_resume_after"]
+
+    def test_interrupted_project_does_not_advance_cursor(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 2.0  # first project alone blows the 1s budget
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        events.walk_session_metadata(
+            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        # Nothing completed, so no cursor may be recorded past project one.
+        assert cache["session_resume_after"].get(str(tmp_path)) is None
+        assert cache["projects"] == {}
 
 
 # ---------------------------------------------------------------------------

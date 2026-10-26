@@ -174,6 +174,10 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
     """
     global _pending_capture_budget_ms
     retro = config.get("retro")
+    if not interactive:
+        # An autopush resolve never feeds an attended snapshot; do not let a
+        # stale stash survive into an unrelated later capture.
+        _pending_capture_budget_ms = None
     if interactive and isinstance(retro, dict) and "capture_budget_ms" in retro:
         capture_ms = retro["capture_budget_ms"]
         _pending_capture_budget_ms = capture_ms
@@ -691,10 +695,7 @@ def _merge_warm_retry_capture(
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
     """Attended notice only; the capture core contains and publishes the read."""
-    _diagnostic(
-        f"mm: reading {reader} usage within [retro] capture_budget_ms "
-        f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
-    )
+    _diagnostic(f"mm: reading {reader} usage (bounded by the capture budget)...\n")
 
 
 @dataclass(frozen=True)
@@ -820,18 +821,16 @@ def _capture_host_snapshot(
 
     Track 85A: with a configured ``capture_budget_ms`` (stashed by
     ``resolve_host_read_budget``), sweep + inline warm share one phase
-    deadline of at most half the capture budget; without it the warm retries
-    keep the legacy allowance but share a single deadline instead of a fresh
-    one per reader. Elapsed attended time is recorded for the events tail.
+    deadline of at most half the capture budget; without it (legacy key
+    only) each warm retry keeps its legacy fresh allowance. Elapsed
+    attended time is recorded for the events tail.
     """
     global _attended_host_elapsed_s, _pending_capture_budget_ms
     started = time.monotonic()
+    _attended_host_elapsed_s = None
     capture_ms = _pending_capture_budget_ms
     _pending_capture_budget_ms = None
-    if capture_ms is not None:
-        phase_deadline = started + max(1, capture_ms // 2) / 1000.0
-    else:
-        phase_deadline = started + host_budget_ms / 1000.0 + host_usage.DEFAULT_READ_BUDGET_S
+    phase_deadline = started + max(1, capture_ms // 2) / 1000.0 if capture_ms is not None else None
     host_capture = _capture_host_usage(
         host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
@@ -863,7 +862,11 @@ def _capture_host_snapshot(
 
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
-                deadline=phase_deadline,
+                deadline=(
+                    phase_deadline
+                    if phase_deadline is not None
+                    else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
+                ),
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -907,6 +910,7 @@ def _capture_event_snapshots(
     origin: str | None = None,
     persist: bool = False,
     use_repo_cursors: bool = False,
+    session_deadline: float | None = None,
 ) -> CaptureResult:
     """Capture device-stamped snapshots; persist discovery only when requested.
 
@@ -952,7 +956,13 @@ def _capture_event_snapshots(
     _roots, discovery_errors = root_discovery
 
     token_cache_mode = prepare_token_cache()
-    deadline = time.monotonic() + budget_ms / 1000.0
+    # Track 85A: an attended tail passes ONE absolute deadline shared by
+    # git walk, token warm (in prepare) and this session walk, so the tail
+    # share is spent once, not once per phase. Legacy callers keep the
+    # fresh post-preparation deadline.
+    deadline = (
+        session_deadline if session_deadline is not None else time.monotonic() + budget_ms / 1000.0
+    )
     projects: list[dict] = []
     warn_lock_unavailable = False
 
@@ -970,19 +980,24 @@ def _capture_event_snapshots(
     # Track 85A d9: walk_done is bound in every branch BEFORE the token
     # cache context writes on exit, so cache serialization never masquerades
     # as walk time; staged session state flushes only after that exit.
-    if token_cache_mode is None:
-        walk_sessions(None)
-        walk_done = time.monotonic()
-    elif claude_paths:
-        with token_usage.lock_and_get_files(token_cache_mode) as files_dict:
-            # Only warn-mode contention is a caller-visible fact. A blocking
-            # lock normally cannot yield None, and init has no degradation
-            # breadcrumb to return even if a defensive implementation does.
-            warn_lock_unavailable = token_cache_mode == "warn" and files_dict is None
-            walk_sessions(files_dict)
+    try:
+        if token_cache_mode is None:
+            walk_sessions(None)
             walk_done = time.monotonic()
-    else:
-        walk_done = time.monotonic()
+        elif claude_paths:
+            with token_usage.lock_and_get_files(token_cache_mode) as files_dict:
+                # Only warn-mode contention is a caller-visible fact. A blocking
+                # lock normally cannot yield None, and init has no degradation
+                # breadcrumb to return even if a defensive implementation does.
+                warn_lock_unavailable = token_cache_mode == "warn" and files_dict is None
+                walk_sessions(files_dict)
+                walk_done = time.monotonic()
+        else:
+            walk_done = time.monotonic()
+    except BaseException:
+        # Staged session state must not leak into a later capture.
+        events.discard_pending_session_state()
+        raise
     if persist:
         events.flush_pending_session_state()
     session_rows: list[dict] = []
@@ -1128,9 +1143,11 @@ def _run_events_tail(
     global _attended_host_elapsed_s
     degradations: list[str] = Degradations()
     if dry_run or not capture_activity:
+        _attended_host_elapsed_s = None
         return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
+        _attended_host_elapsed_s = None
         return degradations
     try:
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
@@ -1145,33 +1162,56 @@ def _run_events_tail(
         # pre-scan host phase and this tail. The tail keeps at least half,
         # plus whatever the host phase left unused; autopush keeps its
         # fixed 250 ms walk / 50 ms discovery shares.
+        tail_deadline: float | None = None
         if quiet:
             budget_ms = events.WALK_TIME_BUDGET_AUTOPUSH_MS
             git_budget_ms = events.git_walk_budget_ms(quiet=True, since=since)
-        else:
-            capture_ms, _capture_source = resolve_capture_budget(config)
-            elapsed_ms = int((_attended_host_elapsed_s or 0.0) * 1000)
             _attended_host_elapsed_s = None
-            if suppress_host_capture:
-                budget_ms = max(capture_ms // 2, capture_ms - elapsed_ms)
+        else:
+            retro = config.get("retro")
+            legacy_only = (
+                isinstance(retro, dict)
+                and "host_usage_interactive_budget_ms" in retro
+                and "capture_budget_ms" not in retro
+            )
+            if legacy_only:
+                # Only the legacy key configured: legacy tail budgets and
+                # legacy warm allowance apply unchanged (Track 85A d6).
+                budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
+                git_budget_ms = events.git_walk_budget_ms(quiet=False, since=since)
+                _attended_host_elapsed_s = None
             else:
-                budget_ms = max(1, capture_ms // 2)
-            git_budget_ms = min(events.git_walk_budget_ms(quiet=False, since=since), budget_ms)
+                capture_ms, _capture_source = resolve_capture_budget(config)
+                elapsed_ms = int((_attended_host_elapsed_s or 0.0) * 1000)
+                _attended_host_elapsed_s = None
+                if suppress_host_capture:
+                    budget_ms = max(capture_ms // 2, capture_ms - elapsed_ms)
+                else:
+                    budget_ms = max(1, capture_ms // 2)
+                git_budget_ms = min(events.git_walk_budget_ms(quiet=False, since=since), budget_ms)
+                # One absolute deadline for git + warm + session walk.
+                tail_deadline = time.monotonic() + budget_ms / 1000.0
 
         claude_paths = _enabled_claude_paths(sources)
 
         def prepare_tail_token_cache() -> CacheLockMode:
             # Token cache wiring (v0.11.14+). This remains wrapper policy:
             # cold-cache warming and its notices must happen after the git
-            # walk, just as they did before extraction. Attended warming is
-            # bounded by this tail's capture share (Track 85A d4/d9).
+            # walk, just as they did before extraction. Partitioned attended
+            # warming gets only the time left before the tail deadline
+            # (Track 85A d4/d9); legacy/autopush keep their former behavior.
+            warm_kwargs = (
+                _accepted_kwargs(
+                    _decide_token_walk_policy,
+                    warm_deadline_s=max(0.0, tail_deadline - time.monotonic()),
+                )
+                if tail_deadline is not None
+                else {}
+            )
             do_token_walk = _decide_token_walk_policy(
                 claude_paths,
                 quiet=quiet,
-                **_accepted_kwargs(
-                    _decide_token_walk_policy,
-                    warm_deadline_s=budget_ms / 1000.0,
-                ),
+                **warm_kwargs,
             )
             if not do_token_walk:
                 return None
@@ -1191,7 +1231,12 @@ def _run_events_tail(
                 if quiet
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
-            host_budget_ms=resolve_host_read_budget(config, interactive=not quiet)[0],
+            host_budget_ms=(
+                0
+                if suppress_host_capture
+                else resolve_host_read_budget(config, interactive=not quiet)[0]
+            ),
+            session_deadline=tail_deadline,
             # Only the attended path may spend seconds warming each cold reader. On autopush a
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.

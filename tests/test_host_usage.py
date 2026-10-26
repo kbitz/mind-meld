@@ -2342,6 +2342,123 @@ class TestCodexSettledDays85A:
         assert codex_host.read_codex_usage(root).complete is True
         assert calls == [], "an idle >=24h cached rollout is a stat-only hit"
 
+    def test_settled_day_addition_and_deletion_evict_via_key_set(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        first = _write_rollout(root, "rollout-a.jsonl", [_context(turn="t-a"), _token(100)])
+        _age(first)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert json.loads(isolated_cache.read_text())["settled_days"]
+
+        # An addition inside the settled day must be seen on the next scan
+        # without waiting for its digest-verification turn.
+        second = _write_rollout(root, "rollout-b.jsonl", [_context(turn="t-b"), _token(150)])
+        _age(second)
+        result = codex_host.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 250
+
+        # Deleting every rollout drops the day and its tokens entirely.
+        first.unlink()
+        second.unlink()
+        result = codex_host.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts == {}
+        data = json.loads(isolated_cache.read_text())
+        assert data["settled_days"] == {}
+        assert data["files"] == {}
+
+    def test_only_stalest_settled_day_digest_verified_per_scan(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sessions"
+        for day_name, turn in (("14", "t-14"), ("15", "t-15")):
+            day = root / "2026" / "08" / day_name
+            day.mkdir(parents=True)
+            path = day / f"rollout-{day_name}.jsonl"
+            path.write_bytes(
+                b"".join(
+                    json.dumps(record).encode("utf-8") + b"\n"
+                    for record in [_context(turn=turn), _token(100)]
+                )
+            )
+            _age(path)
+        assert codex_host.read_codex_usage(root).complete is True
+        before = json.loads(isolated_cache.read_text())["settled_days"]
+        assert set(before) == {"2026/08/14", "2026/08/15"}
+
+        digests: list[str] = []
+        real_digest = codex_host._day_disk_digest
+
+        def counting(day, deadline):
+            digests.append(day.name)
+            return real_digest(day, deadline)
+
+        monkeypatch.setattr(codex_host, "_day_disk_digest", counting)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert len(digests) == 1, "exactly one digest verification per scan"
+        after = json.loads(isolated_cache.read_text())["settled_days"]
+        bumped = [rel for rel in before if after[rel]["check_seq"] != before[rel]["check_seq"]]
+        assert len(bumped) == 1
+        stalest = min(before, key=lambda rel: before[rel]["check_seq"])
+        assert bumped == [stalest]
+
+    def test_recent_idle_blocks_freeze(self, isolated_cache: Path, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-a.jsonl", [_context(turn="t"), _token(100)])
+        recent_ns = int((datetime.now(timezone.utc).timestamp() - 3600) * 1_000_000_000)
+        _age(rollout, recent_ns)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert json.loads(isolated_cache.read_text())["settled_days"] == {}
+
+    def test_malformed_settled_days_are_dropped(self, isolated_cache: Path, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-a.jsonl", [_context(turn="t"), _token(100)])
+        _age(rollout)
+        assert codex_host.read_codex_usage(root).complete is True
+        data = json.loads(isolated_cache.read_text())
+        record = data["settled_days"]["2026/08/14"]
+        record["keys"] = record["keys"] * 2  # duplicates
+        record["count"] = len(record["keys"])
+        data["settled_days"]["not-a-day"] = record
+        isolated_cache.write_text(json.dumps(data))
+        result = codex_host.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+
+    def test_budget_limited_scans_converge_newest_first(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _FakeTime:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+        monkeypatch.setattr(codex_host, "time", clock)
+        root = tmp_path / "sessions"
+        for i in range(6):
+            _write_rollout(root, f"rollout-{i:02d}.jsonl", [_context(), _token(10 + i)])
+        real_full = codex_host._read_full_rollout
+
+        def timed(path, before, deadline):
+            clock.now += 0.1
+            return real_full(path, before, deadline)
+
+        monkeypatch.setattr(codex_host, "_read_full_rollout", timed)
+        attempts, result = 0, None
+        while attempts < 10:
+            attempts += 1
+            result = codex_host.read_codex_usage(root, deadline=clock.now + 0.25)
+            if result.complete:
+                break
+        assert result is not None and result.complete is True
+        assert attempts > 1
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 75
+
 
 def _now_old_ns() -> int:
     return int((datetime.now(timezone.utc).timestamp() - 48 * 3600) * 1_000_000_000)

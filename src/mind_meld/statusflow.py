@@ -955,13 +955,24 @@ def _host_read_budgets(config: dict | None) -> dict:
         "autopush_source": None,
         "interactive_ms": None,
         "interactive_source": None,
+        "capture_ms": None,
+        "capture_source": None,
         "warm_ms": round(host_usage.DEFAULT_READ_BUDGET_S * 1000),
     }
     if config is not None:
-        for name in ("autopush", "interactive"):
-            budgets[f"{name}_ms"], budgets[f"{name}_source"] = events_tail.resolve_host_read_budget(
-                config, interactive=name == "interactive"
+        # Display-only: the resolver stashes the capture total for the next
+        # attended snapshot; a diag read must not plant or clear it.
+        saved_pending = events_tail._pending_capture_budget_ms
+        try:
+            for name in ("autopush", "interactive"):
+                budgets[f"{name}_ms"], budgets[f"{name}_source"] = (
+                    events_tail.resolve_host_read_budget(config, interactive=name == "interactive")
+                )
+            budgets["capture_ms"], budgets["capture_source"] = events_tail.resolve_capture_budget(
+                config
             )
+        finally:
+            events_tail._pending_capture_budget_ms = saved_pending
     return budgets
 
 
@@ -1393,7 +1404,8 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         SQLite or OS error name; never a path, a row or an identifier of a run);
         every reader also exposes last_complete_ms / last_complete_at /
         last_deadline_allotted_ms. Top-level host_read_budgets contains only
-        autopush_ms / autopush_source / interactive_ms / interactive_source / warm_ms
+        autopush_ms / autopush_source / interactive_ms / interactive_source /
+        capture_ms / capture_source / warm_ms
         (never a path, never a host store,
         never a token magnitude)
       * local_emails (this machine's author-email trust set, and peers'
@@ -1744,7 +1756,8 @@ def diag(
     else:
         budget_line = (
             f"autopush {budgets['autopush_ms']} ms ({budgets['autopush_source']}) · "
-            f"interactive {budgets['interactive_ms']} ms ({budgets['interactive_source']})"
+            f"interactive {budgets['interactive_ms']} ms ({budgets['interactive_source']}) · "
+            f"capture {budgets['capture_ms']} ms ({budgets['capture_source']})"
         )
     console.print("  host read budgets: " + safe_str(budget_line))
     console.print("  host read sweep estimate: " + safe_str(_host_read_sweep_line(state)))

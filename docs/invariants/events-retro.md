@@ -161,27 +161,35 @@ phase deadline; warmers receive the remaining `budget_s`/`deadline_s` only
 when `inspect.signature` shows they accept it, so one-arg test patches keep
 working. Elapsed attended host time is recorded in `events_tail` and the tail
 keeps at least half the capture budget plus whatever the host phase left
-unused. With only the legacy interactive key configured, host sweep/warm keep
-their legacy behavior; with neither key the 5000 ms default partitions both
-phases, so the attended session walk is no longer capped at the legacy
-500 ms; autopush always keeps its fixed 250 ms walk / 250 ms
-host / 50 ms discovery shares and never warms. Config validation checks
-`host_usage_autopush_budget_ms` against the effective attended ceiling
-(`capture_budget_ms` when set, else the legacy interactive value).
+unused. The tail's git walk, token warm and session walk share ONE absolute
+deadline minted from that share, so the share is spent once across phases,
+not once per phase. With only the legacy interactive key configured, host
+sweep/warm and tail budgets keep their legacy behavior unchanged; with
+neither key the 5000 ms default partitions both phases, so the attended
+session walk is no longer capped at the legacy 500 ms; autopush always keeps
+its fixed 250 ms walk / 250 ms host / 50 ms discovery shares and never warms.
+Config validation checks `host_usage_autopush_budget_ms` against
+`capture_budget_ms` when set and against an explicitly set legacy interactive
+value (the legacy rule).
 
 `walk_session_metadata(..., persist=False)` is the legacy read-only walk.
-With `persist=True` it rotates its starting project via `session_resume_after`
-in the same `GIT_CAPTURE_CACHE_PATH` cache, and reuses a project's complete
-`cache["projects"][key]["session_meta"]` only when the full-project JSONL stat
-digest (every parent `*.jsonl` and `<session>/subagents/*.jsonl` as
-`(rel, size, mtime_ns)`) is unchanged — never the Track 82A newest-jsonl
-stamps, which `_probe_claude` refreshes earlier and which miss non-newest and
-subagent appends. A record carries `complete` and `has_tokens`: a token walk
-never reuses a `has_tokens=False` record, a no-token walk strips token/skill
-keys from reused or retained metadata (preserving the absent-key signal), an
-interrupted project never overwrites a complete record, and unvisited
-projects retain their prior complete metadata so the v2 snapshot stays a full
-inventory. The walk only stages state; `flush_pending_session_state` writes it
+With `persist=True` it rotates its starting project via the per-Claude-root
+`session_resume_after` map in the same `GIT_CAPTURE_CACHE_PATH` cache, and
+reuses a project's complete `cache["projects"][key]["session_meta"]` only when
+the full-project JSONL stat digest (every parent `*.jsonl` and
+`<session>/subagents/*.jsonl` as `(rel, size, mtime_ns)`) is unchanged — never
+the Track 82A newest-jsonl stamps, which `_probe_claude` refreshes earlier and
+which miss non-newest and subagent appends. A record carries `v`
+(`SESSION_META_VERSION`), `tc` (token cache version), `complete` and
+`has_tokens`: a token walk never reuses a `has_tokens=False` record, a
+no-token walk strips token/skill keys from reused or retained metadata
+(preserving the absent-key signal), an interrupted project never overwrites a
+complete record and does not advance its root's rotation cursor, and
+unvisited projects retain their prior complete metadata so the v2 snapshot
+stays a full inventory. Staging requires a demonstrably complete scan:
+deadline unhit, file stats unchanged across the scan, and every file's token
+buckets persisted for token walks. `_probe_claude` prunes only its own root's
+entries and treats a `session_meta`-only entry as unindexed. The walk only stages state; `flush_pending_session_state` writes it
 after the token cache's `lock_and_get_files` exits, and stages nothing when
 zero projects were visited. `walk_done` is bound inside that lock context
 (and in the no-token and no-claude-paths branches) before its exit write.
@@ -196,10 +204,12 @@ stat/open loop is skipped — so `_aggregate` union-find deduplication and
 `codex_usage_diag` file counts stay exact. Day directories are enumerated
 before any settled skip, so a complete pass still prunes deleted files by
 REPLACE; settled mutations (additions, evictions, `check_seq` bumps) commit
-only on a complete pass and roll back otherwise. Each scan verifies settled
-days stalest-`check_seq`-first by directory stat digest
-(`dir_mtime_ns, count, sum_size, sum_mtime_ns`), at least the stalest per
-scan; a mismatch evicts the day to the per-file loop. Independently of
+only on a complete pass and roll back otherwise. Every carried day first
+passes an exact key-set check against the live enumeration, so additions and
+deletions evict immediately; exactly one settled day per scan — the stalest
+`check_seq` — is further verified by directory stat digest
+(`dir_mtime_ns, count, sum_size, sum_mtime_ns`), and a failed or mismatched
+verification evicts it to the per-file loop. Independently of
 settling, a cached rollout idle at least 24h is a stat-only cache hit (no
 8 KiB fingerprint read); younger files keep the fingerprint. Shared pure
 helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,

@@ -2327,6 +2327,17 @@ def test_valid_capture_budget(good):
 def test_capture_budget_is_autopush_ceiling_when_set():
     # Valid against capture (5000) even though it exceeds the legacy 500.
     _validate(_retro_config({"capture_budget_ms": 5000, "host_usage_autopush_budget_ms": 600}))
+    # An explicitly pinned legacy sweep still caps autopush (legacy rule).
+    with pytest.raises(ConfigError, match="host_usage_interactive_budget_ms"):
+        _validate(
+            _retro_config(
+                {
+                    "capture_budget_ms": 5000,
+                    "host_usage_interactive_budget_ms": 300,
+                    "host_usage_autopush_budget_ms": 400,
+                }
+            )
+        )
     with pytest.raises(ConfigError) as err:
         _validate(_retro_config({"capture_budget_ms": 300, "host_usage_autopush_budget_ms": 400}))
     assert "must not exceed retro.capture_budget_ms (300)" in str(err.value)
