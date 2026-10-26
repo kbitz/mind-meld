@@ -898,7 +898,7 @@ def _probe_claude(
     # Prune only this prober's own root: Track 85A session_meta entries for
     # OTHER Claude roots live in the same map and are not this probe's to drop.
     for name in projects.keys() - names:
-        if name.startswith(str(base)):
+        if name == str(base) or name.startswith(str(base) + os.sep):
             del projects[name]
     resume = cache.get("discovery_resume_after") or ""
 
@@ -1799,7 +1799,12 @@ def walk_session_metadata(
         }
         pending["projects"].update(staged)
         pending["visited"] += visited
-        pending["session_resume_after"][source_root] = None if break_index is None else last_done
+        if break_index is None:
+            pending["session_resume_after"][source_root] = None  # complete: pop
+        elif last_done is not None:
+            pending["session_resume_after"][source_root] = last_done
+        # Interrupted with nothing completed: omit the root so a prior
+        # valid cursor survives instead of being read as completion.
         _pending_session_state = pending
 
     snapshot["projects"] = out

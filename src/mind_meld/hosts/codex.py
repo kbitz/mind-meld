@@ -531,13 +531,15 @@ def _carry_settled_days(
         if not entries:
             continue  # backing files lost; rescan the day per-file
         if not verified_any:
+            # Exactly one digest ATTEMPT per scan: a failed attempt spends it,
+            # so a run of changed days cannot multiply stat sweeps.
+            verified_any = True
             try:
                 digest = _day_disk_digest(day, deadline)
             except host_usage._ReadFailure:
                 digest = None
             if digest != _settled_record_digest(record):
                 continue  # unverifiable or changed; evict to the per-file loop
-            verified_any = True
             seq_counter += 1
             record = {**record, "check_seq": seq_counter}
         staged.update(entries)

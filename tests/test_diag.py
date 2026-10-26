@@ -1511,6 +1511,8 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
         "autopush_source": "default",
         "interactive_ms": 500,
         "interactive_source": "config",
+        "capture_ms": 5000,
+        "capture_source": "default",
         "warm_ms": 5000,
     }
     assert tuple(payload["host_publication"]["readers"]) in selection
@@ -1527,7 +1529,10 @@ def test_diag_host_read_sweep_uses_only_resolved_consented_readers(
     result = runner.invoke(app, ["diag"])
     assert result.exit_code == 0, result.output
     plain = " ".join(result.output.split())
-    assert "host read budgets: autopush 250 ms (default) · interactive 500 ms (config)" in plain
+    assert (
+        "host read budgets: autopush 250 ms (default) · interactive 500 ms (config)"
+        " · capture 5000 ms (default)" in plain
+    )
     assert "host read sweep estimate: " + line in plain
     if case != "over":
         assert (
@@ -1556,6 +1561,8 @@ def test_diag_unknown_host_read_budget_without_usable_config(tmp_path, monkeypat
         "autopush_source": None,
         "interactive_ms": None,
         "interactive_source": None,
+        "capture_ms": None,
+        "capture_source": None,
         "warm_ms": 5000,
     }
     result = runner.invoke(app, ["diag"])

@@ -940,19 +940,38 @@ def _capture_event_snapshots(
             else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
         )
     if host_budget_ms is None:
-        host_budget_ms = resolve_host_read_budget(
-            config, interactive=budget_ms > events.WALK_TIME_BUDGET_AUTOPUSH_MS
-        )[0]
-    git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
-        config,
-        device_id,
-        since=since,
-        persist=persist,
-        use_repo_cursors=use_repo_cursors,
-        walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
-        root_discovery_budget_ms=root_discovery_budget_ms,
-        origin=origin,
-    )
+        # A suppressed snapshot never consumes the resolver's capture stash.
+        host_budget_ms = (
+            0
+            if suppress_host_capture
+            else resolve_host_read_budget(
+                config, interactive=budget_ms > events.WALK_TIME_BUDGET_AUTOPUSH_MS
+            )[0]
+        )
+    git_walk_budget_ms = git_budget_ms if git_budget_ms is not None else budget_ms
+    if session_deadline is not None:
+        # Discovery + git walk draw from the same absolute tail deadline.
+        remaining_ms = max(0, int((session_deadline - time.monotonic()) * 1000))
+        root_discovery_budget_ms = min(root_discovery_budget_ms, remaining_ms)
+        git_walk_budget_ms = min(
+            git_walk_budget_ms, max(0, remaining_ms - root_discovery_budget_ms)
+        )
+    # No staged state from an earlier in-process capture may ride along.
+    events.discard_pending_session_state()
+    try:
+        git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
+            config,
+            device_id,
+            since=since,
+            persist=persist,
+            use_repo_cursors=use_repo_cursors,
+            walk_budget_ms=git_walk_budget_ms,
+            root_discovery_budget_ms=root_discovery_budget_ms,
+            origin=origin,
+        )
+    except BaseException:
+        globals()["_pending_capture_budget_ms"] = None
+        raise
     _roots, discovery_errors = root_discovery
 
     token_cache_mode = prepare_token_cache()
@@ -995,8 +1014,10 @@ def _capture_event_snapshots(
         else:
             walk_done = time.monotonic()
     except BaseException:
-        # Staged session state must not leak into a later capture.
+        # Staged session state and an unconsumed capture stash must not
+        # leak into a later capture.
         events.discard_pending_session_state()
+        globals()["_pending_capture_budget_ms"] = None
         raise
     if persist:
         events.flush_pending_session_state()
@@ -1370,6 +1391,7 @@ def _run_events_tail(
             degradations.append(phrase)
             _diagnostic(f"mm: notice: {phrase}\n")
     except Exception as e:
+        _attended_host_elapsed_s = None
         degradations.append(f"events tail failed ({type(e).__name__})")
         _diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
     return degradations

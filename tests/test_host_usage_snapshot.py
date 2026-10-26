@@ -2601,6 +2601,18 @@ class TestCaptureBudget85A:
         assert seen["session_deadline"] is None
         assert seen["budget_ms"] == events_tail.events.WALK_TIME_BUDGET_INTERACTIVE_MS
 
+    def test_pending_stash_guards(self, monkeypatch):
+        import mind_meld.statusflow as statusflow
+
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 777)
+        budgets = statusflow._host_read_budgets({"retro": {"capture_budget_ms": 4000}})
+        assert budgets["capture_ms"] == 4000
+        assert events_tail._pending_capture_budget_ms == 777, "diag must not plant/wipe"
+        events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000}}, interactive=False
+        )
+        assert events_tail._pending_capture_budget_ms is None, "autopush resolve clears"
+
     def test_flush_runs_after_token_lock_exit(self, monkeypatch, tmp_path):
         from contextlib import contextmanager
 

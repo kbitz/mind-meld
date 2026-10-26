@@ -1520,6 +1520,31 @@ class TestWalkSessionMetadata85A:
         cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
         assert cache["projects"] == {}
 
+    def test_version_gates_reject_stale_records(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        (entry,) = cache["projects"].values()
+        assert events._validated_session_meta(entry) is not None
+        for mutate in ("v", "tc"):
+            bad = json.loads(json.dumps(entry))
+            bad["session_meta"][mutate] = 999
+            assert events._validated_session_meta(bad) is None
+        missing = json.loads(json.dumps(entry))
+        del missing["session_meta"]["v"]
+        assert events._validated_session_meta(missing) is None
+
+    def test_legacy_string_cursor_normalizes_to_map(self, tmp_path):
+        cache = events._default_git_capture_cache()
+        cache["session_resume_after"] = "/some/project"
+        events._normalize_git_capture_cache(cache)
+        assert cache["session_resume_after"] == {}
+        cache["session_resume_after"] = {"/root": "/proj", "/bad": 3}
+        events._normalize_git_capture_cache(cache)
+        assert cache["session_resume_after"] == {"/root": "/proj"}
+
     def test_multi_root_cursors_are_independent(self, tmp_path, monkeypatch):
         root_a = tmp_path / "a"
         root_b = tmp_path / "b"
