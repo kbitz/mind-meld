@@ -2305,6 +2305,33 @@ def test_host_read_budget_lower_bounds(key, value):
         _validate(config)
 
 
+def _retro_config(retro):
+    return {
+        "device": {"id": "dev", "name": "Mac"},
+        "storage": {"path": "/tmp/mm"},
+        "retro": retro,
+    }
+
+
+@pytest.mark.parametrize("bad", [True, 1.5, "5000", 249, 60001, None])
+def test_invalid_capture_budget(bad):
+    with pytest.raises(ConfigError, match="retro.capture_budget_ms must be an integer between"):
+        _validate(_retro_config({"capture_budget_ms": bad}))
+
+
+@pytest.mark.parametrize("good", [250, 5000, 60000])
+def test_valid_capture_budget(good):
+    _validate(_retro_config({"capture_budget_ms": good}))
+
+
+def test_capture_budget_is_autopush_ceiling_when_set():
+    # Valid against capture (5000) even though it exceeds the legacy 500.
+    _validate(_retro_config({"capture_budget_ms": 5000, "host_usage_autopush_budget_ms": 600}))
+    with pytest.raises(ConfigError) as err:
+        _validate(_retro_config({"capture_budget_ms": 300, "host_usage_autopush_budget_ms": 400}))
+    assert "must not exceed retro.capture_budget_ms (300)" in str(err.value)
+
+
 class TestCursorHostConsent67A:
     @pytest.mark.parametrize("value", ["true", 1, 0, None, [], {}])
     def test_non_boolean_rejected(self, value):

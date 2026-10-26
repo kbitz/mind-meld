@@ -422,6 +422,9 @@ DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS = 500
 HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS = 100
 HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS = 250
 HOST_USAGE_BUDGET_MAX_MS = 5000
+DEFAULT_CAPTURE_BUDGET_MS = 5000
+CAPTURE_BUDGET_MIN_MS = 250
+CAPTURE_BUDGET_MAX_MS = 60000
 
 
 def _validate(config: dict[str, Any]) -> None:
@@ -456,14 +459,31 @@ def _validate(config: dict[str, Any]) -> None:
                         f"config: retro.{key} must be an integer between {minimum} and "
                         f"{HOST_USAGE_BUDGET_MAX_MS}, got {value}."
                     )
+        if "capture_budget_ms" in retro:
+            value = retro["capture_budget_ms"]
+            if type(value) is not int or not (
+                CAPTURE_BUDGET_MIN_MS <= value <= CAPTURE_BUDGET_MAX_MS
+            ):
+                raise ConfigError(
+                    f"config: retro.capture_budget_ms must be an integer between "
+                    f"{CAPTURE_BUDGET_MIN_MS} and {CAPTURE_BUDGET_MAX_MS}, got {value}. "
+                    f"Fix [retro] capture_budget_ms in ~/.config/mind-meld/config.toml."
+                )
         autopush = retro.get("host_usage_autopush_budget_ms", DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS)
-        interactive = retro.get(
-            "host_usage_interactive_budget_ms", DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
-        )
+        # capture_budget_ms takes precedence over the legacy interactive key
+        # as the attended ceiling the autopush budget is checked against.
+        if "capture_budget_ms" in retro:
+            interactive = retro["capture_budget_ms"]
+            interactive_key = "capture_budget_ms"
+        else:
+            interactive = retro.get(
+                "host_usage_interactive_budget_ms", DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS
+            )
+            interactive_key = "host_usage_interactive_budget_ms"
         if autopush > interactive:
             raise ConfigError(
                 f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
-                f"retro.host_usage_interactive_budget_ms ({interactive})."
+                f"retro.{interactive_key} ({interactive})."
             )
         for key in ("cursor_host_usage",):
             if key in retro and not isinstance(retro[key], bool):

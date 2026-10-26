@@ -1503,7 +1503,7 @@ class TestColdCacheWarmAndRetry:
         assert row["tokens_by_day"][day]["by_model"]["muse-1"] == _usage(7)
         assert len(degradations) == (0 if codex_warm == "complete" else 1)
         err = capsys.readouterr().err
-        assert "reading muse usage beyond [retro] host_usage_interactive_budget_ms" in err
+        assert "reading muse usage within [retro] capture_budget_ms" in err
         assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
@@ -1523,7 +1523,7 @@ class TestColdCacheWarmAndRetry:
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
         err = capsys.readouterr().err
-        assert "reading codex usage beyond [retro] host_usage_interactive_budget_ms" in err
+        assert "reading codex usage within [retro] capture_budget_ms" in err
         assert "(about 5 s of scanning)..." in err
         assert "one-time" not in err
 
@@ -2436,3 +2436,119 @@ def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path
             assert "locked" in capsys.readouterr().err
         assert notices and not any(degraded for _, degraded in notices)
         assert all("adapter cache was locked" in message for message, _ in notices)
+
+
+# ---------------------------------------------------------------------------
+# Track 85A — one capture budget.
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureBudget85A:
+    def test_resolve_capture_budget_default_and_config(self):
+        assert events_tail.resolve_capture_budget({}) == (5000, "default")
+        assert events_tail.resolve_capture_budget({"retro": {}}) == (5000, "default")
+        assert events_tail.resolve_capture_budget({"retro": {"capture_budget_ms": 4000}}) == (
+            4000,
+            "config",
+        )
+
+    def test_capture_budget_takes_precedence_over_legacy_interactive(self):
+        # Sweep keeps the legacy value, capped inside the capture phase
+        # (half of capture_budget_ms, enforced in _capture_host_snapshot).
+        config = {"retro": {"capture_budget_ms": 4000, "host_usage_interactive_budget_ms": 300}}
+        assert events_tail.resolve_host_read_budget(config, interactive=True) == (
+            300,
+            "config",
+        )
+        assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 400}}, interactive=True
+        ) == (200, "config")
+        assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000}}, interactive=True
+        ) == (500, "config")
+
+    def test_legacy_budgets_preserved_without_capture_budget(self):
+        assert events_tail.resolve_host_read_budget({"retro": {}}, interactive=True) == (
+            500,
+            "default",
+        )
+        config = {"retro": {"host_usage_interactive_budget_ms": 900}}
+        assert events_tail.resolve_host_read_budget(config, interactive=True) == (
+            900,
+            "config",
+        )
+
+    def test_autopush_budget_unaffected_by_capture_budget(self):
+        config = {"retro": {"capture_budget_ms": 4000}}
+        assert events_tail.resolve_host_read_budget(config, interactive=False) == (
+            250,
+            "default",
+        )
+        config["retro"]["host_usage_autopush_budget_ms"] = 400
+        assert events_tail.resolve_host_read_budget(config, interactive=False) == (
+            400,
+            "config",
+        )
+
+    def test_warm_retry_bounded_by_capture_phase(self, monkeypatch):
+        """With capture configured, warm gets only the remaining phase budget."""
+        config = {"retro": {"capture_budget_ms": 1000}}
+        host_budget_ms, _ = events_tail.resolve_host_read_budget(config, interactive=True)
+        budgets: list[float] = []
+
+        def warm(*, reader="codex", budget_s=5.0):
+            budgets.append(budget_s)
+            return _incomplete("deadline")
+
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
+        readers = (("codex", lambda *, deadline: _incomplete("deadline")),)
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=host_budget_ms,
+            warm_host_cache=lambda _name: None,
+        )
+        assert budgets, "warm retry did not run"
+        # Phase is half of 1000 ms; the instant sweep leaves just under 0.5 s.
+        assert all(0.0 < budget <= 0.5 for budget in budgets)
+
+    def test_warm_retry_one_arg_monkeypatch_still_works(self, monkeypatch):
+        def warm(*, reader="codex"):
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
+        readers = (("codex", lambda *, deadline: _incomplete("deadline")),)
+        capture, _rows = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=500,
+            warm_host_cache=lambda _name: None,
+        )
+        assert capture.hosts is not None
+
+    def test_token_warm_receives_remaining_budget(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_warm(paths, *, deadline_s=99.0):
+            seen["deadline_s"] = deadline_s
+            return (0, 0)
+
+        monkeypatch.setattr(events_tail.token_usage, "is_cache_cold", lambda: True)
+        monkeypatch.setattr(events_tail.token_usage, "warm_token_cache_inline", fake_warm)
+        assert (
+            events_tail._decide_token_walk_policy([tmp_path], quiet=False, warm_deadline_s=1.25)
+            is True
+        )
+        assert seen["deadline_s"] == 1.25
+
+    def test_attended_elapsed_recorded_for_tail(self, monkeypatch):
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
+        readers = (("codex", lambda *, deadline: _complete()),)
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=500,
+            warm_host_cache=lambda _name: None,
+        )
+        assert events_tail._attended_host_elapsed_s is not None
+        assert events_tail._attended_host_elapsed_s >= 0.0

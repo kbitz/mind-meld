@@ -1426,7 +1426,8 @@ the Cursor row. The status clauses mean:
   Never delete `cursor-host-tokens.json` or the spool to clear it.
 - **`deadline`**: the read ran out of budget. After two attended pushes still at
   `deadline`, report `mm diag --json` `host_usage.cursor`. The budgets are
-  `[retro] host_usage_autopush_budget_ms` (100 to 5,000 ms) and
+  `[retro] capture_budget_ms` (250 to 60,000 ms, attended total),
+  `host_usage_autopush_budget_ms` (100 to 5,000 ms) and
   `host_usage_interactive_budget_ms` (250 to 5,000 ms).
 
 Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
@@ -1670,13 +1671,22 @@ Set budgets in this Mac's `~/.config/mind-meld/config.toml`:
 
 ```toml
 [retro]
+capture_budget_ms = 5000
 host_usage_autopush_budget_ms = 350
 host_usage_interactive_budget_ms = 500
 ```
 
+`capture_budget_ms` (range **250–60,000**, default **5,000**) is the one total
+budget for an attended push's usage and activity capture: host reads plus
+inline warming get at most half, and git/session capture keeps the rest plus
+whatever the host phase leaves unused. When it is set it takes precedence
+over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
+its own small fixed shares regardless.
+
 Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **500 ms** (range **250–5,000**).
-Both must be integers, and effective autopush must not exceed effective
-interactive. Invalid values stop sync like any other `[retro]` error. Raising
+All must be integers, and effective autopush must not exceed the effective
+attended ceiling (`capture_budget_ms` when set, else the interactive budget).
+Invalid values stop sync like any other `[retro]` error. Raising
 a budget trades more autopush latency for read headroom. This is per Mac and
 per mm version: remeasure after corpus or interpreter changes; do not copy a
 fleet-wide number. `mm diag` shows each effective value and its `default` or

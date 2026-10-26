@@ -43,6 +43,7 @@ see TypedDict definitions below.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -582,6 +583,7 @@ def _default_git_capture_cache() -> dict:
         "version": 1,
         "projects": {},
         "discovery_resume_after": None,
+        "session_resume_after": None,
         "pending_refresh_since": None,
         "repo_cursors": {},
         "incomplete_streak": 0,
@@ -605,7 +607,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         for root, ts in cache["repo_cursors"].items()
         if isinstance(root, str) and _parse_aware_ts(ts) is not None
     }
-    for key in ("discovery_resume_after", "pending_refresh_since"):
+    for key in ("discovery_resume_after", "session_resume_after", "pending_refresh_since"):
         if not isinstance(cache.get(key), str):
             cache[key] = None
     if _parse_aware_ts(cache.get("pending_refresh_since")) is None:
@@ -1438,12 +1440,119 @@ def _parse_git_log_numstat(out: str) -> list[GitCommit]:
 _CONDUCTOR_PATTERN = re.compile(r"/conductor/workspaces/")
 
 
+_pending_session_state: dict | None = None
+"""Session-walk cache updates staged by ``walk_session_metadata(persist=True)``.
+
+The tail walks sessions inside the token cache's ``lock_and_get_files``
+context; writing ``GIT_CAPTURE_CACHE_PATH`` there would nest flocks and
+charge the write to ``walk_done``. The walk stages, the caller flushes via
+``flush_pending_session_state`` after the token lock exits (Track 85A d9)."""
+
+
+def _project_jsonl_digest(proj_path: Path) -> str | None:
+    """Stat digest of every parent + subagent JSONL in one project dir.
+
+    Keyed on ``(rel_path, size, mtime_ns)`` for ``*.jsonl`` and
+    ``<session>/subagents/*.jsonl`` so an append to a non-newest parent or a
+    subagent file invalidates reuse even though directory mtimes and the
+    Track 82A newest-jsonl stamps do not move (Track 85A d7).
+    """
+    rows: list[tuple[str, int, int]] = []
+    try:
+        with os.scandir(proj_path) as entries:
+            for entry in entries:
+                if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
+                    st = entry.stat()
+                    rows.append((entry.name, st.st_size, st.st_mtime_ns))
+                elif entry.is_dir(follow_symlinks=False):
+                    sub = Path(entry.path) / "subagents"
+                    if not sub.is_dir():
+                        continue
+                    with os.scandir(sub) as sub_entries:
+                        for sub_entry in sub_entries:
+                            if sub_entry.name.endswith(".jsonl") and sub_entry.is_file(
+                                follow_symlinks=False
+                            ):
+                                st = sub_entry.stat()
+                                rows.append(
+                                    (
+                                        f"{entry.name}/subagents/{sub_entry.name}",
+                                        st.st_size,
+                                        st.st_mtime_ns,
+                                    )
+                                )
+    except OSError:
+        return None
+    digest = hashlib.sha256()
+    for rel, size, mtime_ns in sorted(rows):
+        digest.update(f"{rel}\0{size}\0{mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def _validated_session_meta(entry: object) -> dict | None:
+    """A complete ``session_meta`` sub-record from ``cache["projects"]``, or None."""
+    record = entry.get("session_meta") if isinstance(entry, dict) else None
+    if not isinstance(record, dict) or record.get("complete") is not True:
+        return None
+    if not isinstance(record.get("digest"), str) or not isinstance(record.get("meta"), dict):
+        return None
+    return record
+
+
+def _reuse_session_meta(
+    record: dict,
+    *,
+    token_cache_files: dict | None,
+    require_tokens: bool,
+) -> SessionMetadata | None:
+    """Wire copy of a cached complete ``session_meta`` (Track 85A d7).
+
+    Token/skill keys are stripped when this walk carries no token cache, so
+    the absent-key "walk skipped" signal survives; a token-carrying walk
+    reuses an unchanged project only when the record was captured with one.
+    """
+    if require_tokens and token_cache_files is not None and record.get("has_tokens") is not True:
+        return None
+    meta: SessionMetadata = copy.deepcopy(record["meta"])
+    if token_cache_files is None:
+        meta.pop("tokens_by_day", None)
+        meta.pop("skills_by_day", None)
+    return meta
+
+
+def flush_pending_session_state() -> None:
+    """Write staged session-walk state to ``GIT_CAPTURE_CACHE_PATH``.
+
+    No-op when nothing was staged or when the walk visited zero projects
+    (an already-expired deadline must not save state). Staged records are
+    complete-only by construction, so flushing never overwrites a complete
+    ``session_meta`` with a partial one.
+    """
+    global _pending_session_state
+    pending, _pending_session_state = _pending_session_state, None
+    if not pending or pending.get("visited", 0) <= 0:
+        return
+    try:
+        with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
+            cache = state.data
+            _normalize_git_capture_cache(cache)
+            projects = cache["projects"]
+            for key, record in pending["projects"].items():
+                entry = dict(projects.get(key) or {})
+                entry["session_meta"] = record
+                projects[key] = entry
+            cache["session_resume_after"] = pending["session_resume_after"]
+    except (OSError, lockedjson.LockContended):
+        return
+
+
 def walk_session_metadata(
     claude_dir: Path,
     since: datetime,  # noqa: ARG001 — kept for API stability; v=2 ignores it (see EVENTS_SCHEMA_VERSION docstring)
     *,
     deadline_monotonic: float | None = None,
     token_cache_files: dict | None = None,
+    persist: bool = False,
 ) -> list[SessionsSnapshot]:
     """Walk ``<claude_dir>/projects/<encoded>/*.jsonl`` aggregating per-project
     session metadata. Returns one SessionsSnapshot row aggregating all
@@ -1475,6 +1584,14 @@ def walk_session_metadata(
     jsonl token usage. When ``None``, no token data is added (used by tests
     that don't exercise the token path, and by autopush when the cache is
     cold).
+
+    Track 85A: ``persist=True`` rotates the starting project via
+    ``session_resume_after`` in ``GIT_CAPTURE_CACHE_PATH``, reuses complete
+    ``cache["projects"][key]["session_meta"]`` records whose full-JSONL
+    stat digest is unchanged, retains prior complete records for projects
+    the deadline leaves unvisited, and stages updates for
+    ``flush_pending_session_state`` (the caller writes after any token-cache
+    lock exits). ``persist=False`` neither reads nor stages cache state.
     """
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: SessionsSnapshot = {
@@ -1492,28 +1609,106 @@ def walk_session_metadata(
     out: list[SessionMetadata] = []
     try:
         with os.scandir(projects_root) as proj_iter:
-            for proj_entry in proj_iter:
-                if deadline_monotonic is not None and time.monotonic() > deadline_monotonic:
-                    break
-                if not proj_entry.is_dir(follow_symlinks=False):
-                    continue
-                meta = _scan_one_project(
-                    proj_entry,
-                    source_root=source_root,
-                    token_cache_files=token_cache_files,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                if meta is not None:
-                    out.append(meta)
+            proj_dirs = [
+                Path(proj_entry.path)
+                for proj_entry in proj_iter
+                if proj_entry.is_dir(follow_symlinks=False)
+            ]
     except OSError:
         return [snapshot]
+
+    # Track 85A: with persist, rotate the start past the last completed
+    # project (``session_resume_after`` in the Track 82A index) and reuse
+    # complete per-project ``session_meta`` whose full-JSONL stat digest is
+    # unchanged, so successive budget-limited walks converge instead of
+    # re-scanning a fixed scandir prefix. Without persist this is the legacy
+    # read-only walk: no cache read, no staging, no rotation state.
+    cache_projects: dict = {}
+    resume = ""
+    if persist:
+        cache = read_git_capture_cache()
+        cache_projects = cache["projects"]
+        resume = cache.get("session_resume_after") or ""
+        proj_dirs.sort(key=lambda p: (str(p) <= resume, str(p)))
+    staged: dict[str, dict] = {}
+    visited = 0
+    last_done: str | None = None
+    break_index: int | None = None
+    for index, proj_path in enumerate(proj_dirs):
+        if _deadline_expired(deadline_monotonic):
+            break_index = index
+            break
+        key = str(proj_path)
+        record = _validated_session_meta(cache_projects.get(key)) if persist else None
+        digest = _project_jsonl_digest(proj_path) if persist else None
+        meta: SessionMetadata | None = None
+        if record is not None and digest is not None and record["digest"] == digest:
+            meta = _reuse_session_meta(
+                record, token_cache_files=token_cache_files, require_tokens=True
+            )
+        if meta is None:
+            meta = _scan_one_project(
+                proj_path,
+                source_root=source_root,
+                token_cache_files=token_cache_files,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if meta is not None and persist and digest is not None:
+                if _deadline_expired(deadline_monotonic):
+                    # Interrupted mid-project: never stage over a complete
+                    # record; prefer the prior complete meta on the wire.
+                    prior = (
+                        _reuse_session_meta(
+                            record,
+                            token_cache_files=token_cache_files,
+                            require_tokens=False,
+                        )
+                        if record is not None
+                        else None
+                    )
+                    if prior is not None:
+                        meta = prior
+                else:
+                    staged[key] = {
+                        "digest": digest,
+                        "complete": True,
+                        "has_tokens": token_cache_files is not None,
+                        "meta": copy.deepcopy(meta),
+                    }
+        if meta is not None:
+            out.append(meta)
+        visited += 1
+        last_done = key
+    if persist and break_index is not None:
+        # Retain prior complete metadata for unvisited projects so the
+        # full-inventory snapshot does not silently drop their totals.
+        for proj_path in proj_dirs[break_index:]:
+            record = _validated_session_meta(cache_projects.get(str(proj_path)))
+            if record is None:
+                continue
+            retained = _reuse_session_meta(
+                record, token_cache_files=token_cache_files, require_tokens=False
+            )
+            if retained is not None:
+                out.append(retained)
+    if persist and visited > 0:
+        global _pending_session_state
+        pending = _pending_session_state or {
+            "projects": {},
+            "session_resume_after": None,
+            "visited": 0,
+        }
+        pending["projects"].update(staged)
+        pending["visited"] += visited
+        pending["session_resume_after"] = None if break_index is None else last_done
+        _pending_session_state = pending
 
     snapshot["projects"] = out
     return [snapshot]
 
 
 def _scan_one_project(
-    proj_entry: os.DirEntry,
+    proj_path: Path,
     *,
     source_root: str,
     token_cache_files: dict | None = None,
@@ -1555,7 +1750,7 @@ def _scan_one_project(
     parent_jsonls: list[Path] = []
     subagent_jsonls: list[Path] = []
     try:
-        with os.scandir(proj_entry.path) as f_iter:
+        with os.scandir(proj_path) as f_iter:
             for f_entry in f_iter:
                 if f_entry.name.endswith(".jsonl") and f_entry.is_file(follow_symlinks=False):
                     try:
@@ -1584,11 +1779,11 @@ def _scan_one_project(
     # the hoist: 20 jsonls -> 20 calls -> 400 file opens; 15ms at N=10,
     # 1.44s at N=100, 13.2s at N=300 for a SINGLE project, against a
     # 250ms autopush budget. Keep this call out of any per-file loop.
-    cwd, _completed = _read_cwd_from_latest_jsonl(Path(proj_entry.path))
-    decoded_path = cwd or proj_entry.name  # fallback to encoded name
+    cwd, _completed = _read_cwd_from_latest_jsonl(proj_path, deadline_monotonic=deadline_monotonic)
+    decoded_path = cwd or proj_path.name  # fallback to encoded name
     last_iso = datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat() if last_mtime else ""
     meta: SessionMetadata = {
-        "claude_dir": proj_entry.name,
+        "claude_dir": proj_path.name,
         "source_root": source_root,
         "sessions": sessions,
         "total_kb": total_bytes // 1024,

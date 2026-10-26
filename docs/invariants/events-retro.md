@@ -147,6 +147,65 @@ become a cached empty cwd or advance the resume marker. Deferred changes pin
 fully indexed project inventory incomplete. Newly discovered roots inherit that
 window. Session-metadata indexing remains outside this Track.
 
+**One capture budget and session indexing (Track 85A).** `[retro]
+capture_budget_ms` (integer, not bool, 250–60000; default 5000 via
+`events_tail.resolve_capture_budget`) bounds total attended capture across the
+pre-scan `_capture_host_snapshot` (sweep + inline warm) and `_run_events_tail`
+(discovery, git walk capped at the tail share, token warm, session walk),
+excluding `build_manifest_v2` scan time. When configured it takes precedence
+over legacy `host_usage_interactive_budget_ms`: `resolve_host_read_budget`
+returns the host sweep budget (legacy value or 500 ms default, capped at
+half the capture budget, `config` source) and stashes the
+total for `_capture_host_snapshot`, whose sweep and warm retries share that
+phase deadline; warmers receive the remaining `budget_s`/`deadline_s` only
+when `inspect.signature` shows they accept it, so one-arg test patches keep
+working. Elapsed attended host time is recorded in `events_tail` and the tail
+keeps at least half the capture budget plus whatever the host phase left
+unused. With only the legacy interactive key configured, host sweep/warm keep
+their legacy behavior; with neither key the 5000 ms default partitions both
+phases, so the attended session walk is no longer capped at the legacy
+500 ms; autopush always keeps its fixed 250 ms walk / 250 ms
+host / 50 ms discovery shares and never warms. Config validation checks
+`host_usage_autopush_budget_ms` against the effective attended ceiling
+(`capture_budget_ms` when set, else the legacy interactive value).
+
+`walk_session_metadata(..., persist=False)` is the legacy read-only walk.
+With `persist=True` it rotates its starting project via `session_resume_after`
+in the same `GIT_CAPTURE_CACHE_PATH` cache, and reuses a project's complete
+`cache["projects"][key]["session_meta"]` only when the full-project JSONL stat
+digest (every parent `*.jsonl` and `<session>/subagents/*.jsonl` as
+`(rel, size, mtime_ns)`) is unchanged — never the Track 82A newest-jsonl
+stamps, which `_probe_claude` refreshes earlier and which miss non-newest and
+subagent appends. A record carries `complete` and `has_tokens`: a token walk
+never reuses a `has_tokens=False` record, a no-token walk strips token/skill
+keys from reused or retained metadata (preserving the absent-key signal), an
+interrupted project never overwrites a complete record, and unvisited
+projects retain their prior complete metadata so the v2 snapshot stays a full
+inventory. The walk only stages state; `flush_pending_session_state` writes it
+after the token cache's `lock_and_get_files` exits, and stages nothing when
+zero projects were visited. `walk_done` is bound inside that lock context
+(and in the no-token and no-claude-paths branches) before its exit write.
+
+The Codex adapter scans the date tree and `archived_sessions/` newest-first.
+A `YYYY/MM/DD` day freezes into `host-tokens.json` `settled_days` (additive on
+cache version 1) when its date is at least 2 UTC days old, every rollout has
+been idle at least 24h, no entry carries `pending`, no entry has an empty
+`turn_id`, and no `turn_id` is shared with any `CacheEntry` outside the day.
+Settled records keep their backing `files` entries — only the per-file
+stat/open loop is skipped — so `_aggregate` union-find deduplication and
+`codex_usage_diag` file counts stay exact. Day directories are enumerated
+before any settled skip, so a complete pass still prunes deleted files by
+REPLACE; settled mutations (additions, evictions, `check_seq` bumps) commit
+only on a complete pass and roll back otherwise. Each scan verifies settled
+days stalest-`check_seq`-first by directory stat digest
+(`dir_mtime_ns, count, sum_size, sum_mtime_ns`), at least the stalest per
+scan; a mismatch evicts the day to the per-file loop. Independently of
+settling, a cached rollout idle at least 24h is a stat-only cache hit (no
+8 KiB fingerprint read); younger files keep the fingerprint. Shared pure
+helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
+`SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
+code is untouched.
+
 Push walks roots from their oldest effective per-root cursor, breaking ties by
 path. Budget aborts and errors keep the old lower bound; successful roots and
 benign `no_commits` advance only after the exact event append is observed on disk.
@@ -1562,10 +1621,12 @@ publishes its own result through the same reader failure boundary.
 `resolve_host_read_budget` owns effective budgets and their `default`/`config`
 source: `[retro] host_usage_autopush_budget_ms` defaults to 250 (100–5000),
 `host_usage_interactive_budget_ms` to 500 (250–5000). Both reject bools,
-non-integers and out-of-range values; effective autopush cannot exceed
-interactive. Capture defaults, tail, init and attended push all use this
+non-integers and out-of-range values; effective autopush cannot exceed the
+effective attended ceiling. Capture defaults, tail, init and attended push all use this
 resolver. The independent 5-second warm and 50 ms later-reader grace remain
-constants. Invalid config still stops ordinary sync.
+constants when no capture budget is configured; Track 85A's
+`[retro] capture_budget_ms` partition (see "One capture budget" above) takes
+precedence over the legacy interactive key when set. Invalid config still stops ordinary sync.
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
@@ -1774,7 +1835,8 @@ probe is unnecessary: every ready attended push captures, not just blocked ones.
 Budgets are cooperative, not hard timeouts. Content sync follows optional
 capture. Allow about five seconds of scanning per cold reader, and both readers
 can be cold. Lowering `host_usage_interactive_budget_ms` does not cap the separate
-warm allowance. Autopush is still change-gated, never warms, and retains its own
+warm allowance; a configured `[retro] capture_budget_ms` does (host sweep and
+warm share at most half of it — Track 85A). Autopush is still change-gated, never warms, and retains its own
 quiet error/lock behavior; it is not an equivalent attended no-capture command.
 
 **Publication and content acceptance are independent.** `_capture_attended_usage`

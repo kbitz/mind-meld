@@ -1249,16 +1249,18 @@ class TestCacheLifecycle:
         trusted, so keeping it cannot make a later total wrong.
         """
         root = tmp_path / "sessions"
-        rollout_a = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
+        # Track 85A scans newest-first (name descending within a day): the
+        # re-parsed rollout sorts first, the partial one last.
+        rollout_a = _write_rollout(root, "rollout-z.jsonl", [_context(), _token(200)])
         rollout_b = _write_rollout(root, "rollout-b.jsonl", [_context(), _token(100)])
         first = codex_host.read_codex_usage(root)
         assert first.hosts["codex"]["2026-08-15"]["input"] == 300
         keys_before = set(json.loads(isolated_cache.read_text(encoding="utf-8"))["files"])
         key_a, key_b = hu._cache_key(rollout_a), hu._cache_key(rollout_b)
 
-        _write_rollout(root, "rollout-a.jsonl", [_context(), _token(400)])
+        _write_rollout(root, "rollout-z.jsonl", [_context(), _token(400)])
         rollout_b.unlink()
-        _write_rollout(root, "rollout-c.jsonl", [_context()], partial=b'{"type":"event_msg"')
+        _write_rollout(root, "rollout-a.jsonl", [_context()], partial=b'{"type":"event_msg"')
 
         incomplete = codex_host.read_codex_usage(root)
 
@@ -1274,7 +1276,7 @@ class TestCacheLifecycle:
         # DISK, never the cache, so b cannot contribute to any total.
         assert incomplete.hosts == {}
 
-        (root / "2026" / "08" / "14" / "rollout-c.jsonl").unlink()
+        (root / "2026" / "08" / "14" / "rollout-a.jsonl").unlink()
         stable = codex_host.read_codex_usage(root)
         assert stable.complete is True
         assert stable.hosts["codex"]["2026-08-15"]["input"] == 400
@@ -1942,7 +1944,11 @@ class TestCodexArchivedRollouts:
     ) -> None:
         listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
         _write_archived(listed.name, [_context(), _token(100)])
-        monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
+        monkeypatch.setattr(
+            codex_host,
+            "_iter_rollout_days",
+            lambda root, deadline: [("2026/08/14", listed.parent, [listed])],
+        )
 
         result = codex_host.read_codex_usage()
 
@@ -1958,7 +1964,11 @@ class TestCodexArchivedRollouts:
         if case == "no-archive-match":
             listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-moved.jsonl"
             _write_archived("rollout-other.jsonl", [_context(), _token(100)])
-            monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
+            monkeypatch.setattr(
+                codex_host,
+                "_iter_rollout_days",
+                lambda root, deadline: [("2026/08/14", listed.parent, [listed])],
+            )
         elif case == "archived-path-vanished":
             listed = codex_host.CODEX_ARCHIVED_SESSIONS_PATH / "rollout-gone.jsonl"
             monkeypatch.setattr(
@@ -1967,7 +1977,11 @@ class TestCodexArchivedRollouts:
         else:
             listed = codex_host.CODEX_SESSIONS_PATH / "2026" / "08" / "14" / "rollout-denied.jsonl"
             _write_archived(listed.name, [_context(), _token(100)])
-            monkeypatch.setattr(codex_host, "_iter_rollouts", lambda root, deadline: iter([listed]))
+            monkeypatch.setattr(
+                codex_host,
+                "_iter_rollout_days",
+                lambda root, deadline: [("2026/08/14", listed.parent, [listed])],
+            )
             real_stat = hu._regular_stat
 
             def denied_live_stat(path):
@@ -2138,14 +2152,14 @@ class TestCodexArchivedRollouts:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _write_rollout(codex_host.CODEX_SESSIONS_PATH, "rollout-a.jsonl", [_context(), _token(100)])
-        real_live = codex_host._iter_rollouts
+        real_live = codex_host._iter_rollout_days
         calls: list[Path] = []
 
         def counted_live(root, deadline):
             calls.append(root)
             return real_live(root, deadline)
 
-        monkeypatch.setattr(codex_host, "_iter_rollouts", counted_live)
+        monkeypatch.setattr(codex_host, "_iter_rollout_days", counted_live)
 
         result = codex_host.read_codex_usage()
 
@@ -2179,6 +2193,158 @@ class TestCodexArchivedRollouts:
         assert diag["files_cached"] == 3
         assert diag["pending"] == 0
         assert diag["state"] == "ready"
+
+
+_OLD_NS = int(datetime(2026, 8, 20, tzinfo=timezone.utc).timestamp() * 1_000_000_000)
+
+
+def _age(path: Path, ns: int = _OLD_NS) -> None:
+    os.utime(path, ns=(ns, ns))
+
+
+class TestCodexSettledDays85A:
+    """Track 85A: newest-first scan, settled-day freeze, stat-only hits."""
+
+    def test_old_idle_day_freezes_and_warm_scan_carries_without_opening(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-old.jsonl", [_context(turn="turn-1"), _token(200)])
+        _age(rollout)
+        first = codex_host.read_codex_usage(root)
+        assert first.complete is True
+        assert first.hosts["codex"]["2026-08-15"]["input"] == 200
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        assert set(data["settled_days"]) == {"2026/08/14"}
+        record = data["settled_days"]["2026/08/14"]
+        assert record["count"] == 1
+        # Settled days stay backed by files CacheEntry records.
+        assert set(record["keys"]) == set(data["files"])
+        assert codex_host.codex_usage_diag()["files_cached"] == 1
+
+        def no_open(*args: object, **kwargs: object) -> object:
+            raise AssertionError("settled day must not reopen its rollouts")
+
+        monkeypatch.setattr(hu, "_fingerprint", no_open)
+        monkeypatch.setattr(codex_host, "_read_full_rollout", no_open)
+        monkeypatch.setattr(codex_host, "_resume_rollout", no_open)
+        second = codex_host.read_codex_usage(root)
+        assert second.complete is True
+        assert second.hosts["codex"]["2026-08-15"]["input"] == 200
+
+    def test_external_turn_id_blocks_freeze(self, isolated_cache: Path) -> None:
+        rollout = _write_rollout(
+            codex_host.CODEX_SESSIONS_PATH,
+            "rollout-old.jsonl",
+            [_context(turn="shared"), _token(200)],
+        )
+        _age(rollout)
+        # The same turn in the flat archive makes the day externally shared.
+        _write_archived("rollout-arch.jsonl", [_context(turn="shared"), _token(200)])
+        result = codex_host.read_codex_usage()
+        assert result.complete is True
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        assert data["settled_days"] == {}
+
+    def test_empty_turn_id_blocks_freeze(self, isolated_cache: Path, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-old.jsonl", [_context(), _token(200)])
+        _age(rollout)
+        assert codex_host.read_codex_usage(root).complete is True
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        assert data["settled_days"] == {}
+
+    def test_partial_scan_rolls_back_settled_mutations(
+        self, isolated_cache: Path, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-old.jsonl", [_context(turn="turn-1"), _token(200)])
+        _age(rollout)
+        assert codex_host.read_codex_usage(root).complete is True
+        before = json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"]
+        assert before
+
+        _write_rollout(root, "rollout-new.jsonl", [_context()], partial=b'{"type":"event_msg"')
+        incomplete = codex_host.read_codex_usage(root)
+        assert incomplete.complete is False
+        after = json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"]
+        assert after == before, "check_seq bumps and evictions must roll back"
+
+    def test_digest_mismatch_evicts_and_rescans(self, isolated_cache: Path, tmp_path: Path) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-old.jsonl", [_context(turn="turn-1"), _token(200)])
+        _age(rollout)
+        assert codex_host.read_codex_usage(root).complete is True
+
+        _write_rollout(
+            root,
+            "rollout-old.jsonl",
+            [_context(turn="turn-1"), _token(200), _token(350)],
+        )
+        _age(rollout, _OLD_NS + 1_000_000_000)
+        result = codex_host.read_codex_usage(root)
+        assert result.complete is True
+        assert result.hosts["codex"]["2026-08-15"]["input"] == 350
+
+    def test_newest_first_parse_order(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sessions"
+        old_day = root / "2026" / "08" / "14"
+        new_day = root / "2026" / "09" / "02"
+        for day, name in ((old_day, "rollout-a.jsonl"), (new_day, "rollout-b.jsonl")):
+            day.mkdir(parents=True)
+            (day / name).write_bytes(
+                b"".join(
+                    json.dumps(record).encode("utf-8") + b"\n"
+                    for record in [_context(turn=name), _token(100)]
+                )
+            )
+        order: list[str] = []
+        real_full = codex_host._read_full_rollout
+
+        def recording(path, before, deadline):
+            order.append(path.name)
+            return real_full(path, before, deadline)
+
+        monkeypatch.setattr(codex_host, "_read_full_rollout", recording)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert order == ["rollout-b.jsonl", "rollout-a.jsonl"]
+
+    def test_stat_only_hit_after_24h_idle_and_fingerprint_when_young(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-a.jsonl", [_context(), _token(200)])
+        assert codex_host.read_codex_usage(root).complete is True
+
+        calls: list[Path] = []
+        real_fingerprint = hu._fingerprint
+
+        def counting(path, source, deadline):
+            calls.append(path)
+            return real_fingerprint(path, source, deadline)
+
+        monkeypatch.setattr(hu, "_fingerprint", counting)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert calls, "a young cached rollout still gets its fingerprint checked"
+
+        calls.clear()
+        # Rewind the cached identity to match the aged stat: rewrite the
+        # entry's mtime so the hit is stat-identical but >= 24h idle.
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        (entry,) = data["files"].values()
+        old_ns = _now_old_ns()
+        os.utime(rollout, ns=(old_ns, old_ns))
+        entry["mtime_ns"] = old_ns
+        data["settled_days"] = {}
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        assert codex_host.read_codex_usage(root).complete is True
+        assert calls == [], "an idle >=24h cached rollout is a stat-only hit"
+
+
+def _now_old_ns() -> int:
+    return int((datetime.now(timezone.utc).timestamp() - 48 * 3600) * 1_000_000_000)
 
 
 class TestCodexPreContextBuffer:
