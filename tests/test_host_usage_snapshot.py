@@ -2613,6 +2613,49 @@ class TestCaptureBudget85A:
         )
         assert events_tail._pending_capture_budget_ms is None, "autopush resolve clears"
 
+    def test_prepare_raise_clears_stash_and_git_budgets_clamp(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", None)
+        monkeypatch.setattr(events_tail, "_capture_git_rows", lambda *a, **k: ([], ([], []), 0, 0))
+
+        def boom():
+            raise RuntimeError("prepare failed")
+
+        with pytest.raises(RuntimeError):
+            events_tail._capture_event_snapshots(
+                {"retro": {"capture_budget_ms": 4000}},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=boom,
+                host_readers=(),
+                suppress_host_capture=False,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+
+        seen = {}
+
+        def fake_git(*args, **kwargs):
+            seen.update(kwargs)
+            return [], ([], []), 0, 0
+
+        monkeypatch.setattr(events_tail, "_capture_git_rows", fake_git)
+        import time as _time
+
+        events_tail._capture_event_snapshots(
+            {},
+            [],
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            budget_ms=500,
+            git_budget_ms=500,
+            prepare_token_cache=lambda: None,
+            host_readers=(),
+            suppress_host_capture=True,
+            session_deadline=_time.monotonic() + 0.05,
+        )
+        assert seen["deadline_monotonic"] is not None
+
     def test_flush_runs_after_token_lock_exit(self, monkeypatch, tmp_path):
         from contextlib import contextmanager
 

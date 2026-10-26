@@ -962,8 +962,7 @@ def _host_read_budgets(config: dict | None) -> dict:
     if config is not None:
         # Display-only: the resolver stashes the capture total for the next
         # attended snapshot; a diag read must not plant or clear it.
-        saved_pending = events_tail._pending_capture_budget_ms
-        try:
+        with events_tail.preserve_pending_capture_budget():
             for name in ("autopush", "interactive"):
                 budgets[f"{name}_ms"], budgets[f"{name}_source"] = (
                     events_tail.resolve_host_read_budget(config, interactive=name == "interactive")
@@ -971,8 +970,6 @@ def _host_read_budgets(config: dict | None) -> dict:
             budgets["capture_ms"], budgets["capture_source"] = events_tail.resolve_capture_budget(
                 config
             )
-        finally:
-            events_tail._pending_capture_budget_ms = saved_pending
     return budgets
 
 

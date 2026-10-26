@@ -146,6 +146,17 @@ consumed by the attended tail in the same push process, so unused host
 budget flows to discovery/git/session capture (Track 85A d5)."""
 
 
+@contextmanager
+def preserve_pending_capture_budget():
+    """Keep a display-only resolve from planting/wiping the capture stash."""
+    global _pending_capture_budget_ms
+    saved = _pending_capture_budget_ms
+    try:
+        yield
+    finally:
+        _pending_capture_budget_ms = saved
+
+
 def resolve_capture_budget(config: dict) -> tuple[int, str]:
     """Total attended capture budget and its source (Track 85A).
 
@@ -949,13 +960,6 @@ def _capture_event_snapshots(
             )[0]
         )
     git_walk_budget_ms = git_budget_ms if git_budget_ms is not None else budget_ms
-    if session_deadline is not None:
-        # Discovery + git walk draw from the same absolute tail deadline.
-        remaining_ms = max(0, int((session_deadline - time.monotonic()) * 1000))
-        root_discovery_budget_ms = min(root_discovery_budget_ms, remaining_ms)
-        git_walk_budget_ms = min(
-            git_walk_budget_ms, max(0, remaining_ms - root_discovery_budget_ms)
-        )
     # No staged state from an earlier in-process capture may ride along.
     events.discard_pending_session_state()
     try:
@@ -968,13 +972,18 @@ def _capture_event_snapshots(
             walk_budget_ms=git_walk_budget_ms,
             root_discovery_budget_ms=root_discovery_budget_ms,
             origin=origin,
+            deadline_monotonic=session_deadline,
         )
     except BaseException:
         globals()["_pending_capture_budget_ms"] = None
         raise
     _roots, discovery_errors = root_discovery
 
-    token_cache_mode = prepare_token_cache()
+    try:
+        token_cache_mode = prepare_token_cache()
+    except BaseException:
+        globals()["_pending_capture_budget_ms"] = None
+        raise
     # Track 85A: an attended tail passes ONE absolute deadline shared by
     # git walk, token warm (in prepare) and this session walk, so the tail
     # share is spent once, not once per phase. Legacy callers keep the
@@ -1014,10 +1023,16 @@ def _capture_event_snapshots(
         else:
             walk_done = time.monotonic()
     except BaseException:
-        # Staged session state and an unconsumed capture stash must not
-        # leak into a later capture.
-        events.discard_pending_session_state()
+        # An unconsumed capture stash must not leak into a later capture.
+        # Staged session records are complete-only by construction, so
+        # flush them (the token lock has unwound by here) instead of
+        # discarding earlier roots' finished work.
         globals()["_pending_capture_budget_ms"] = None
+        if persist:
+            try:
+                events.flush_pending_session_state()
+            except Exception:
+                events.discard_pending_session_state()
         raise
     if persist:
         events.flush_pending_session_state()
@@ -1075,6 +1090,7 @@ def _capture_git_rows(
     origin: str | None = None,
     persist: bool = False,
     use_repo_cursors: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -1082,9 +1098,12 @@ def _capture_git_rows(
     non-push rows (init and recapture) so the aggregator can exclude them
     from push counts.
     """
+    discovery_deadline = time.monotonic() + root_discovery_budget_ms / 1000.0
+    if deadline_monotonic is not None:
+        discovery_deadline = min(discovery_deadline, deadline_monotonic)
     root_discovery = events.discover_git_roots(
         config,
-        deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+        deadline_monotonic=discovery_deadline,
         persist=persist,
         since=since,
     )
@@ -1094,11 +1113,21 @@ def _capture_git_rows(
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
-    git_rows = events.walk_git_projects(
-        roots,
-        since=since,
-        total_budget_ms=walk_budget_ms,
-        **walk_kwargs,
+    if deadline_monotonic is not None:
+        # The git walk gets what discovery actually left of the tail
+        # deadline; with nothing left it does not spawn at all.
+        walk_budget_ms = min(
+            walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
+        )
+    git_rows = (
+        events.walk_git_projects(
+            roots,
+            since=since,
+            total_budget_ms=walk_budget_ms,
+            **walk_kwargs,
+        )
+        if walk_budget_ms > 0
+        else []
     )
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)

@@ -1545,6 +1545,42 @@ class TestWalkSessionMetadata85A:
         events._normalize_git_capture_cache(cache)
         assert cache["session_resume_after"] == {"/root": "/proj"}
 
+    def test_interrupted_first_project_preserves_prior_cursor(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        cache["session_resume_after"] = {str(tmp_path): "seeded-cursor"}
+        mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 2.0
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        # Force rescan (digest change) so the first project interrupts.
+        proj = tmp_path / "projects" / "-tmp-a" / "session.jsonl"
+        proj.write_text(proj.read_text() + json.dumps({"cwd": "/tmp/a"}) + "\n")
+        events.walk_session_metadata(
+            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"].get(str(tmp_path)) == "seeded-cursor"
+
     def test_multi_root_cursors_are_independent(self, tmp_path, monkeypatch):
         root_a = tmp_path / "a"
         root_b = tmp_path / "b"

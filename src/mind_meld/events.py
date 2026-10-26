@@ -1524,11 +1524,6 @@ def _rows_digest(proj_path: Path, rows: list[tuple[Path, int, int, float]]) -> s
     return digest.hexdigest()
 
 
-def _project_jsonl_digest(proj_path: Path) -> str | None:
-    rows = _project_jsonl_rows(proj_path)
-    return None if rows is None else _rows_digest(proj_path, rows)
-
-
 def _token_rows_complete(rows: list[tuple[Path, int, int, float]], token_cache_files: dict) -> bool:
     """True when every row's token buckets were persisted for its current stat.
 
