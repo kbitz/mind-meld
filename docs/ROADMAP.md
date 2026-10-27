@@ -2,7 +2,7 @@
 
 State-organized execution plan: **In Progress** / **Current Plan** / **Future** / **Shipped**. Only shipped work has stable IDs; upcoming Groups and Tracks are regenerated whenever the roadmap is refreshed.
 
-**mm syncs agent context and reports fleet usage for Claude Code, Codex, Cursor, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support was removed in v1.11.8; Grok models used through Cursor stay in the Grok row. Memory capture, recall and sync parity remain deferred ([the memory continuity design](designs/memory-continuity.md)).
+**mm syncs agent context and reports fleet usage for Claude Code, Codex, Cursor, Muse and Antigravity.** [docs/SPEC.md](SPEC.md) is the product authority: its table says what each host gets, and the selected target is the owner's macOS and Linux fleet on Syncthing, reached by carrying the 1.x store onto a Syncthing folder. Standalone Grok Build support was removed in v1.11.8; Groups 82–85 (resumable capture, affected-test selection, the status and Codex module moves, one capture budget) shipped in v1.11.9–v1.11.13 and live in shipped history; Grok models used through Cursor stay in the Grok row. Memory capture, recall and sync parity remain deferred ([the memory continuity design](designs/memory-continuity.md)).
 
 Standing constraints are admission criteria for new Tracks. Apply the [planning rules](../AGENTS.md#planning) when drafting or draining work; the [constraint history](roadmap-shipped.md#planning-constraint-history) records their rationale.
 
@@ -21,119 +21,11 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-_Active: Track 82A, declared by the owner 2026-10-23, in the Paseo worktree `lethal-sheep` on branch `autoplan-track-82a-git-capture-catch-up` (no PR yet). Its card and ID are pinned._
-
-### Group 82: Git capture catch-up ∥ test selection
-
-_Depends on: none_
-
-**This group delivers:** Retro commit capture completes on its own across pushes, and work and review run only the tests a change reaches.
-
-#### Track 82A: Let git capture catch up across pushes
-_2 tasks . ~800 LOC . medium risk . 10 files_
-**Outcome:** Retro commit counts for every machine become complete again on their own within a few pushes, without the owner running `mm recapture`.
-**Supports:** MVP-1, docs/SPEC.md O7.2.
-**Done when:** a persistent project index (directory mtime, newest session-log stat, cwd, git root) lets discovery re-probe only new or changed project directories and resume where it stopped; a per-repository git cursor walks the stalest roots first and keeps a cut-off root's cursor for the next push; discovery counts as complete once every listed directory has an index entry, so the retro cursor advances and the identity cache is written; `mm status` says how many repositories are left instead of advising `mm recapture`, which stays for windows beyond retention; a test runs successive budget-limited pushes over more projects than one budget covers and reaches complete capture; `./bin/check` passes.
-_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/identity.py, src/mind_meld/config.py, src/mind_meld/cli.py, tests/test_events.py, tests/test_track_30a.py, tests/test_events_budget_scope.py, tests/test_identity.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md_
-_blocked-by: Track 81A, Track 80A_
-_out: 83A, 85A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: high · verify: ./bin/check tests/test_events.py tests/test_track_30a.py tests/test_events_budget_scope.py tests/test_identity.py tests/test_diag.py_
-
-_Source: observed 2026-10-19 on 889e42c0: `mm diag` "Git-root discovery … budget_ms 50 … status exceeded … roots 0" and git capture `discovery: partial`, `since 2026-10-09`, `advances_cursor: False`; `mm status` "Retro capture: incomplete since 2026-10-09". At 408766d `events.discover_git_roots` probes `~/.claude/projects/*` in the same order every push under `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS = 50` and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS = 100`, and keeps nothing between pushes._
-
-- **Project index and resumable discovery** -- _src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/identity.py, src/mind_meld/config.py, tests/test_events.py, tests/test_events_budget_scope.py, tests/test_identity.py, ~450 lines._ (L)
-- **Per-repository cursor and status** -- _src/mind_meld/events.py, src/mind_meld/cli.py, tests/test_track_30a.py, tests/test_diag.py, docs/invariants/events-retro.md, README.md, ~350 lines._ (M)
-
-#### Track 82B: Run only the tests a change reaches
-_2 tasks . ~300 LOC . medium risk . 5 files_
-**Outcome:** While working on and reviewing a change, the owner and agents run only the tests whose code the change reaches, CI stays the full run before merge, and `./bin/check` leaves no pytest workers running after it exits.
-**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions" (owner decision 2026-10-23): every later Track is tested and reviewed against what it touches.
-**Done when:** the PR records a probe of coverage-based selection (pytest-testmon or an equivalent) on this suite, including whether it runs under xdist; `./bin/check` gains a selection mode that runs the tests whose recorded coverage reaches the files changed since the merge base, plus new or changed test files, prints how many tests it selected, and runs the full suite when it has no usable coverage record, saying why; plain `./bin/check` and CI still run everything; AGENTS.md Testing, `./bin/check --help` and the card `verify:` rule say to use selection during work and review, with CI as the full run; `bin/check` runs pytest in its own process group and ends the whole group on normal exit, error and interrupt, and a test interrupts a run and finds no surviving workers; `./bin/check` passes.
-_touches: bin/_check.py, bin/check, pyproject.toml, .gitignore, tests/test_bin_check.py, AGENTS.md_
-_read-first: docs/SPEC.md, AGENTS.md_
-_session: fresh · effort: high · verify: ./bin/check tests/test_bin_check.py_
-
-_Source: owner decision 2026-10-23 (docs/SPEC.md Constraints, "Core and extensions"); owner report 2026-10-22: a review's `./bin/check` run left stray pytest workers that loaded the Mac (cause not traced). At 0e46556 `bin/_check.py` `xdist_args` passes `-n auto` (or `MM_PYTEST_WORKERS`) and `run_tool` runs pytest with a bare `subprocess.run`; 35 of 63 test files reference `mind_meld.cli`, so selecting by imports alone would still pick most of the suite._
-
-- **Coverage-based selection** -- probe the tool under xdist, add the selection mode and its full-suite fallback, update the testing guidance. _bin/_check.py, pyproject.toml, .gitignore, AGENTS.md, ~200 lines._ (M)
-- **Reap the worker tree** -- _bin/_check.py, bin/check, tests/test_bin_check.py, ~100 lines._ (M)
+No active branches, sessions or PRs were declared for this regeneration.
 
 ## Current Plan
 
 _tombstone: 27, 70, 71, 72, 73, 74_
-
-### Phase 4: Quiet sync and complete usage
-
-**End-state:** After Group 82's git capture, usage and activity capture complete within one budget across pushes, so docs/SPEC.md O7 holds on the owner's Macs, with status and the Codex reader in their own modules. (Groups 75-78 shipped the O8 half in v1.11.3-v1.11.5; Groups 79-81 shipped the 1.x compatibility retirement, Grok Build / OpenCode removal, Muse family and Antigravity parity in v1.11.8.)
-**Groups:** 83, 84, 85
-
-#### Group 83: Status module
-
-_Depends on: Group 82_
-
-**This group delivers:** `mm status` and `mm diag` move into their own module, with the shared command helpers in `core.py`.
-
-##### Track 83A: Move status and diag out of cli.py
-_2 tasks . ~250 LOC . medium risk . 9 files_
-**Outcome:** `mm status` and `mm diag` live in their own module behind a contract test, so Tracks 87A and 92A change and review that module instead of `cli.py`; nothing the owner sees changes.
-**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 87A (O3.1) and Track 92A (O2.2, O3.2).
-**Done when:** `status`, `diag` and the helpers only they call move to `statusflow.py`, and the helpers they share with other commands (including `_get_config`, `_init_crypto_session` and `_fetch_remote_manifest`) move to `core.py`; `cli.py` keeps the two `@app.command()` shells and calls both modules module-qualified; neither module imports `cli`, and `tests/test_module_boundaries.py` lists them; a contract test drives `statusflow` without importing `cli` and pins the verdict line, the `mm diag --json` top-level keys and the exit codes; tests that patched moved helpers patch them at their new owner, and no existing assertion changes; no output, flag or exit code changes; the routing README maps both modules; `./bin/check` passes.
-_touches: src/mind_meld/cli.py, src/mind_meld/core.py (new), src/mind_meld/statusflow.py (new), tests/test_statusflow.py (new), tests/test_module_boundaries.py, tests/test_diag.py, tests/test_safe_str.py, tests/test_cursor_sqlite.py, tests/test_crypto.py, docs/invariants/README.md_
-_blocked-by: Track 82A_
-_out: 84A_
-_read-first: docs/invariants/README.md, tests/test_module_boundaries.py_
-_session: fresh · effort: high · verify: ./bin/check tests/test_statusflow.py tests/test_diag.py tests/test_module_boundaries.py_
-
-_Source: owner decision 2026-10-23 (docs/SPEC.md Constraints, "Core and extensions"). Measured at 0e46556 from the direct-call graph of `cli.py`'s top-level definitions: `cli.py` is 12,754 lines; `status`, `diag` and the helpers only they call total about 1,760 lines, and they call 22 helpers shared with other commands (about 900 lines). Track 82A, already in progress, still changes status in `cli.py`; this move follows it._
-
-- **Shared command core** -- move the shared helpers into `core.py`, call them module-qualified from `cli.py`, retarget test patches. _src/mind_meld/cli.py, src/mind_meld/core.py, tests/test_safe_str.py, tests/test_crypto.py, tests/test_cursor_sqlite.py, ~900 lines moved._ (M)
-- **Status and diag module with a contract test** -- _src/mind_meld/cli.py, src/mind_meld/statusflow.py, tests/test_statusflow.py, tests/test_module_boundaries.py, tests/test_diag.py, docs/invariants/README.md, ~1,760 lines moved, ~250 new._ (L)
-
-#### Group 84: Codex adapter
-
-_Depends on: Group 83_
-
-**This group delivers:** The Codex usage reader becomes the first host adapter in its own module.
-
-##### Track 84A: Move the Codex usage reader into its own adapter module
-_2 tasks . ~250 LOC . medium risk . 6 files_
-**Outcome:** The Codex usage reader is a host adapter in its own module, checked by a contract test that later adapters reuse, so Track 85A changes and reviews the Codex reader alone; usage totals do not change.
-**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 85A (O7.2).
-**Done when:** `read_codex_usage`, `codex_usage_diag`, `_scan_codex_root` and the helpers only the Codex reader uses move from `host_usage.py` to `hosts/codex.py`; what every host reader provides (its consent gate, deadline, cache, result, failure isolation and diag record) is written down once and checked by a parametrized contract test that runs against the Codex adapter without importing `cli`; the shared reader machinery sits where `host_usage.py` and the adapter can both import it without a cycle; `hosts/` modules never import `cli` or each other, and `tests/test_module_boundaries.py` enforces it; Codex totals for the committed fixtures are identical before and after; the routing README and `events-retro.md` name the adapter; `./bin/check` passes.
-_touches: src/mind_meld/host_usage.py, src/mind_meld/hosts/__init__.py (new), src/mind_meld/hosts/codex.py (new), tests/test_host_usage.py, tests/test_host_adapter_contract.py (new), tests/test_module_boundaries.py, docs/invariants/README.md, docs/invariants/events-retro.md_
-_blocked-by: Track 83A_
-_out: 85A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/test_module_boundaries.py_
-_session: fresh · effort: high · verify: ./bin/check tests/test_host_usage.py tests/test_host_adapter_contract.py tests/test_module_boundaries.py_
-
-_Source: owner decision 2026-10-23 (docs/SPEC.md Constraints, "Core and extensions"). At 0e46556 `host_usage.py` is 5,462 lines holding the Codex, Cursor, Muse and Antigravity readers; definitions with `codex` in their names total about 300 lines._
-
-- **Host adapter contract** -- _src/mind_meld/host_usage.py, tests/test_host_adapter_contract.py, tests/test_module_boundaries.py, ~150 lines._ (M)
-- **Codex adapter module** -- _src/mind_meld/host_usage.py, src/mind_meld/hosts/__init__.py, src/mind_meld/hosts/codex.py, tests/test_host_usage.py, docs/invariants/README.md, docs/invariants/events-retro.md, ~300 lines moved, ~100 new._ (M)
-
-#### Group 85: One capture budget
-
-_Depends on: Group 82, Group 84_
-
-**This group delivers:** Usage and activity capture fits one budget and stays complete.
-
-##### Track 85A: Fit the session walk and Codex reads in one capture budget
-_3 tasks . ~650 LOC . medium risk . 9 files_
-**Outcome:** Each attended push spends at most one configured capture budget (default 5 s) on usage and activity, and Claude session and Codex usage totals stay complete as the logs grow.
-**Supports:** MVP-1, docs/SPEC.md O7.2 and O8.2.
-**Done when:** one `[retro] capture_budget_ms` (default 5000) replaces the separate discovery, walk and host-reader budgets for attended push, with autopush keeping a small fixed share; the Claude session walk rotates its start, reuses unchanged projects' metadata from Track 82A's index, and takes its end mark before the cache write; the Codex adapter reads newest rollouts first and freezes settled days the way the Muse reader does, so a warm push reads only recent days; tests show complete totals across successive budget-limited pushes; `events-retro.md` and README describe the budget; `./bin/check` passes.
-_touches: src/mind_meld/events.py, src/mind_meld/events_tail.py, src/mind_meld/host_usage.py, src/mind_meld/hosts/codex.py, src/mind_meld/config.py, tests/test_events.py, tests/test_host_usage.py, tests/test_token_usage.py, tests/test_host_usage_snapshot.py, docs/invariants/events-retro.md, README.md_
-_blocked-by: Track 82A, Track 84A_
-_out: 86A, 87A_
-_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
-_session: fresh · effort: high · verify: ./bin/check tests/test_events.py tests/test_host_usage.py tests/test_token_usage.py tests/test_host_usage_snapshot.py_
-
-_Source: observed 2026-10-19 on 889e42c0: "host-usage snapshot skipped (codex deadline) … Last read allowed 5000 ms; last complete read 2456 ms (4 d ago); 3075 of 3459 rollouts cached" and "events tail budget exceeded". At 408766d `host_usage._scan_codex_root` lists rollouts oldest-first and fingerprints every cached file each pass; `events.walk_session_metadata` stops in a fixed scandir order._
-
-- **One capture budget** -- _src/mind_meld/events_tail.py, src/mind_meld/config.py, tests/test_host_usage_snapshot.py, ~150 lines._ (M)
-- **Rotating session walk** -- _src/mind_meld/events.py, src/mind_meld/events_tail.py, tests/test_events.py, tests/test_token_usage.py, ~200 lines._ (M)
-- **Codex newest-first with settled days** -- _src/mind_meld/hosts/codex.py, src/mind_meld/host_usage.py, tests/test_host_usage.py, docs/invariants/events-retro.md, README.md, ~300 lines._ (M)
 
 ### Phase 5: mm 2.0 on Syncthing
 
@@ -142,7 +34,7 @@ _Source: observed 2026-10-19 on 889e42c0: "host-usage snapshot skipped (codex de
 
 #### Group 86: Pull module
 
-_Depends on: Group 85_
+_Depends on: none_
 
 **This group delivers:** `mm pull` and its apply path move into their own module.
 
@@ -164,7 +56,7 @@ _Source: owner decision 2026-10-23 (docs/SPEC.md Constraints, "Core and extensio
 
 #### Group 87: Syncthing-tolerant reads
 
-_Depends on: Group 85, Group 86_
+_Depends on: Group 86_
 
 **This group delivers:** Pull and status treat Syncthing's partial and foreign files as waiting or ignored.
 
@@ -324,12 +216,8 @@ document order; document order is priority, not gating.
 Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
-- Group 82 ← {}
-- Group 83 ← {82}
-- Group 84 ← {83}
-- Group 85 ← {82, 84}
-- Group 86 ← {85}
-- Group 87 ← {85, 86}
+- Group 86 ← {}
+- Group 87 ← {86}
 - Group 88 ← {87}
 - Group 89 ← {87, 88}
 - Group 90 ← {89}
@@ -341,15 +229,6 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 Track detail per group:
 
 ```
-Group 82: Git capture catch-up ∥ test selection    (in progress)
-  +-- Track 82A ........... ~L . 2 tasks
-  +-- Track 82B ........... ~L . 2 tasks
-Group 83: Status module
-  +-- Track 83A ........... ~L . 2 tasks
-Group 84: Codex adapter
-  +-- Track 84A ........... ~L . 2 tasks
-Group 85: One capture budget
-  +-- Track 85A ........... ~L . 3 tasks
 Group 86: Pull module
   +-- Track 86A ........... ~L . 2 tasks
 Group 87: Syncthing-tolerant reads
@@ -368,9 +247,9 @@ Group 93: Cutover runbook
   +-- Track 93A ........... ~L . 2 tasks
 ```
 
-**Total: 2 phases . 12 groups . 13 tracks remaining (1 in progress).**
+**Total: 8 groups . 8 tracks remaining.**
 
-Every Track edits README or a module another Track also edits, so the plan stays one serial chain apart from Group 82, where test selection runs beside the in-progress git capture; the explicit `_blocked-by` edges set its priority: usage capture first, then Syncthing. Each move-only Track (83A, 84A, 86A, 88A) sits just before the first Track that changes the code it moves, per docs/SPEC.md's core-and-extensions constraint; Track 82A started before that constraint, so the status move follows it.
+Every Track edits a module another Track also edits, and each move-only Track (86A, 88A) sits just before the first Track that changes the code it moves, per docs/SPEC.md's core-and-extensions constraint, so the packer emits one serial chain: pull module → Syncthing-tolerant reads → init module → fleet creation → portable paths → fast-forward pulls → Syncthing status → cutover runbook. Satisfied prerequisites on shipped Tracks (82A, 84A, 85A, 77A) stay written on the cards that named them.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 93's runbook. Deferred work, including Codex memory sync and per-path conflict policies, waits in Future with its triggers.
 
