@@ -32,6 +32,15 @@ date tree; Paseo archives on merge, and the Codex app and VS Code can too."""
 _ROLLOUT_NAME = re.compile(r"^rollout-.*\.jsonl$")
 
 
+def _now_ns() -> int:
+    """Wall-clock now in ns, for idle-age checks against ``st_mtime_ns``.
+
+    Via ``datetime`` rather than ``time.time_ns`` so tests that patch this
+    module's ``time`` with a monotonic-only fake keep working.
+    """
+    return int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+
+
 class _CacheEntry(TypedDict, total=False):
     """One rollout's cached parse. Two shapes share this map.
 
@@ -139,11 +148,21 @@ def read_codex_usage(
                 host_usage._cached_reason_since(locked.data),
             )
             cached_files = host_usage._cached_files(locked.data)
+            prior_settled = _validated_settled_days(locked.data.get("settled_days"))
             if host_usage._expired(read_deadline):
-                result, staged_files, learned = host_usage._incomplete("deadline"), {}, False
+                result, staged_files, learned, settled_days = (
+                    host_usage._incomplete("deadline"),
+                    {},
+                    False,
+                    prior_settled,
+                )
             else:
-                result, staged_files, learned = _scan_codex_root(
-                    source_root, cached_files, read_deadline, archived_root=archived_root
+                result, staged_files, learned, settled_days = _scan_codex_root(
+                    source_root,
+                    cached_files,
+                    read_deadline,
+                    archived_root=archived_root,
+                    settled_days=prior_settled,
                 )
             ready = time.monotonic()
             over_budget = result.complete and host_usage._expired(read_deadline)
@@ -190,6 +209,10 @@ def read_codex_usage(
                 # every entry is revalidated against dev/ino/size/mtime and a
                 # head+tail fingerprint before it is trusted.
                 "files": staged_files if result.complete else {**cached_files, **staged_files},
+                # Settled-day mutations commit only on a complete pass; the
+                # scan already returns the prior map for partial passes, and
+                # this gate keeps that true even if a future scan changes.
+                "settled_days": settled_days if result.complete else prior_settled,
             }
             if over_budget:
                 # The scan finished but overran its budget: refuse to publish
@@ -331,8 +354,9 @@ def _scan_codex_root(
     deadline: float,
     *,
     archived_root: Path | None = None,
-) -> tuple[host_usage.HostUsageResult, dict[str, _CacheEntry], bool]:
-    """Returns ``(result, staged, learned)``.
+    settled_days: dict[str, dict[str, Any]] | None = None,
+) -> tuple[host_usage.HostUsageResult, dict[str, _CacheEntry], bool, dict[str, dict[str, Any]]]:
+    """Returns ``(result, staged, learned, settled_days)``.
 
     ``learned`` is True only when at least one entry was NEWLY computed. Cache
     HITS are staged too, so a non-empty ``staged`` does not mean the scan
@@ -347,17 +371,31 @@ def _scan_codex_root(
     already collapse it. If the archive exists at scan start, validate after
     archive discovery that no new live path appeared; an unarchive between
     inventories must not silently shrink the complete snapshot.
+
+    Track 85A: the date tree is enumerated newest-day-first (day directories
+    are listed before any settled-day skip, so a complete pass still prunes
+    deleted files by REPLACE). A settled day's ``files`` entries are carried
+    into ``staged`` without per-file stat/open; stalest settled days are
+    re-verified by directory stat digest, at least one per complete scan.
+    The returned ``settled_days`` is the PRIOR map unchanged unless the pass
+    completed — additions, evictions and ``check_seq`` bumps from a partial
+    pass roll back.
     """
+    prior_settled = settled_days or {}
     try:
         if host_usage._expired(deadline):
             raise host_usage._ReadFailure("deadline")
         archive_was_present = archived_root is not None and _archive_root_exists(archived_root)
-        rollouts = [(path, root) for path in _iter_rollouts(root, deadline)]
+        days = _iter_rollout_days(root, deadline)
+        rollouts = [(path, root, rel) for rel, _day, paths in days for path in paths]
         if archived_root is not None:
-            live_paths = {path for path, _ in rollouts}
-            rollouts += [
-                (path, archived_root) for path in _iter_archived_rollouts(archived_root, deadline)
-            ]
+            live_paths = {path for path, _base, _rel in rollouts}
+            archived = sorted(
+                _iter_archived_rollouts(archived_root, deadline),
+                key=lambda path: path.name,
+                reverse=True,
+            )
+            rollouts += [(path, archived_root, None) for path in archived]
             # A reverse move before archive discovery can miss both listings.
             # Revalidate the live inventory under the same deadline; removals
             # are allowed for forward moves, but a new path requires a retry.
@@ -366,19 +404,34 @@ def _scan_codex_root(
             ):
                 raise host_usage._ReadFailure("io_error")
     except host_usage._ReadFailure as failure:
-        return host_usage._incomplete(failure.reason), {}, False
+        return host_usage._incomplete(failure.reason), {}, False, prior_settled
 
     canonical_roots = {root: root.resolve()}
     if archived_root is not None:
         canonical_roots[archived_root] = archived_root.resolve()
     # Listed live-first, so a rollout archived between the two listings has
     # its name here; see the vanished-live-path skip below.
-    archived_names = {path.name for path, base in rollouts if base is archived_root}
+    archived_names = {path.name for path, base, _rel in rollouts if base is archived_root}
     staged: dict[str, _CacheEntry] = {}
     learned = False
-    for path, base in rollouts:
+    day_dirs = {rel: day for rel, day, _paths in days}
+    day_keys_expected = {
+        rel: {
+            host_usage._cache_key(path, root=root, canonical_root=canonical_roots[root])
+            for path in paths
+        }
+        for rel, _day, paths in days
+        if rel in prior_settled
+    }
+    carried_days, settled_updates, seq_counter = _carry_settled_days(
+        prior_settled, day_dirs, day_keys_expected, cached_files, staged, deadline
+    )
+    key_day: dict[str, str | None] = {}
+    for path, base, rel in rollouts:
+        if rel is not None and rel in carried_days:
+            continue
         if host_usage._expired(deadline):
-            return host_usage._incomplete("deadline"), staged, learned
+            return host_usage._incomplete("deadline"), staged, learned, prior_settled
         key = host_usage._cache_key(path, root=base, canonical_root=canonical_roots[base])
         try:
             try:
@@ -406,54 +459,215 @@ def _scan_codex_root(
                 )
                 learned = True
             staged[key] = entry
+            key_day[key] = rel
         except host_usage._ReadFailure as failure:
             # Hand back what was staged BEFORE the failure. Each entry is a
             # complete, fingerprinted parse of one stable file, so it stays
             # valid regardless of what a later file did. The result is still
             # incomplete — the caller publishes nothing — but the work is not
             # thrown away. See `read_codex_usage` for why that matters.
-            return host_usage._incomplete(failure.reason), staged, learned
+            return host_usage._incomplete(failure.reason), staged, learned, prior_settled
 
     try:
         buckets = host_usage._aggregate(staged.values())
     except host_usage._ReadFailure as failure:
-        return host_usage._incomplete(failure.reason), staged, learned
+        return host_usage._incomplete(failure.reason), staged, learned, prior_settled
+    new_settled = _freeze_settled_days(
+        days,
+        staged,
+        key_day,
+        carried_days=carried_days,
+        settled_updates=settled_updates,
+        seq_counter=seq_counter,
+    )
     return (
         host_usage._result_from_buckets(
             buckets, partial_days=frozenset(buckets.unattributable_days)
         ),
         staged,
         learned,
+        new_settled,
     )
+
+
+def _carry_settled_days(
+    prior_settled: dict[str, dict[str, Any]],
+    day_dirs: dict[str, Path],
+    day_keys_expected: dict[str, set[str]],
+    cached_files: dict[str, Any],
+    staged: dict[str, _CacheEntry],
+    deadline: float,
+) -> tuple[set[str], dict[str, dict[str, Any]], int]:
+    """Stage settled days' ``files`` entries without per-file stat/open.
+
+    Every carried day first passes an exact key-set check against the live
+    enumeration, so additions and deletions evict immediately without any
+    stat. The stalest (lowest ``check_seq``) surviving day is additionally
+    verified by directory stat digest — exactly one digest verification per
+    scan, like the Muse freeze rotation, so verification never starves the
+    newest-first per-file loop; a failed or mismatched verification evicts
+    that day instead of trusting it. Remaining days carry on the key-set
+    check. Returns ``(carried, updates, seq_counter)``; callers commit
+    ``updates`` only on a complete pass.
+    """
+    carried: set[str] = set()
+    updates: dict[str, dict[str, Any]] = {}
+    seq_counter = max((record["check_seq"] for record in prior_settled.values()), default=0)
+    verified_any = False
+    for rel in sorted(prior_settled, key=lambda r: prior_settled[r]["check_seq"]):
+        record = prior_settled[rel]
+        day = day_dirs.get(rel)
+        if day is None:
+            continue  # directory gone; a complete pass drops the record
+        if day_keys_expected.get(rel) != set(record["keys"]):
+            continue  # files added/removed; rescan the day per-file
+        entries: dict[str, _CacheEntry] = {}
+        for key in record["keys"]:
+            entry = _validated_entry(cached_files.get(key))
+            if entry is None:
+                entries = {}
+                break
+            entries[key] = entry
+        if not entries:
+            continue  # backing files lost; rescan the day per-file
+        if not verified_any:
+            # Exactly one digest ATTEMPT per scan: a failed attempt spends it,
+            # so a run of changed days cannot multiply stat sweeps.
+            verified_any = True
+            try:
+                digest = _day_disk_digest(day, deadline)
+            except host_usage._ReadFailure:
+                digest = None
+            if digest != _settled_record_digest(record):
+                continue  # unverifiable or changed; evict to the per-file loop
+            seq_counter += 1
+            record = {**record, "check_seq": seq_counter}
+        staged.update(entries)
+        carried.add(rel)
+        updates[rel] = record
+    return carried, updates, seq_counter
+
+
+def _freeze_settled_days(
+    days: list[tuple[str, Path, list[Path]]],
+    staged: dict[str, _CacheEntry],
+    key_day: dict[str, str | None],
+    *,
+    carried_days: set[str],
+    settled_updates: dict[str, dict[str, Any]],
+    seq_counter: int,
+) -> dict[str, dict[str, Any]]:
+    """Settled-day map for a COMPLETE pass (Track 85A d3/d7/d8).
+
+    A day freezes when its directory date is >= 2 UTC days old, every
+    rollout has been idle >= 24h, no entry carries ``pending``, no entry has
+    an empty ``turn_id``, and no ``turn_id`` is shared with any entry outside
+    the day — so carrying its ``files`` entries can never change
+    ``_aggregate``'s union-find result, even across ``archived_sessions/``
+    moves. Carried days keep their (possibly re-verified) record.
+    """
+    turn_days: dict[str, set[str | None]] = {}
+    day_keys: dict[str, list[str]] = {}
+    for key, entry in staged.items():
+        rel = key_day.get(key)
+        if rel is not None:
+            day_keys.setdefault(rel, []).append(key)
+        for turn_id in entry.get("turn_ids") or ():
+            turn_days.setdefault(turn_id, set()).add(rel)
+    for rel in carried_days:
+        record = settled_updates[rel]
+        day_keys.setdefault(rel, list(record["keys"]))
+        for key in record["keys"]:
+            entry = staged.get(key)
+            if entry is None:
+                continue
+            for turn_id in entry.get("turn_ids") or ():
+                turn_days.setdefault(turn_id, set()).add(rel)
+
+    today = datetime.now(timezone.utc).date()
+    now_ns = _now_ns()
+    new_settled: dict[str, dict[str, Any]] = {}
+    for rel, day, paths in days:
+        if rel in carried_days:
+            new_settled[rel] = settled_updates[rel]
+            continue
+        keys = day_keys.get(rel) or []
+        if not paths or len(keys) != len(paths):
+            continue
+        if not host_usage._settle_date_eligible(host_usage._day_dir_date(rel), today=today):
+            continue
+        entries = [staged[key] for key in keys]
+        if any(now_ns - entry["mtime_ns"] < host_usage.SETTLE_IDLE_NS for entry in entries):
+            continue
+        if any(entry.get("pending") for entry in entries):
+            continue
+        turn_ids = [turn_id for entry in entries for turn_id in (entry.get("turn_ids") or ())]
+        if any(turn_id == "" for turn_id in turn_ids):
+            continue
+        if any(turn_days.get(turn_id) != {rel} for turn_id in turn_ids):
+            continue
+        try:
+            dir_mtime_ns: int | None = day.stat().st_mtime_ns
+        except OSError:
+            dir_mtime_ns = None
+        digest = host_usage._stat_digest(
+            dir_mtime_ns,
+            [(entry["size"], entry["mtime_ns"]) for entry in entries],
+        )
+        seq_counter += 1
+        new_settled[rel] = {
+            "dir_mtime_ns": digest[0],
+            "count": digest[1],
+            "sum_size": digest[2],
+            "sum_mtime_ns": digest[3],
+            "check_seq": seq_counter,
+            "keys": sorted(keys),
+        }
+    return new_settled
 
 
 def _iter_rollouts(root: Path, deadline: float):
     """Yield only regular non-symlink date-nested Codex rollout files."""
+    for _rel, _day, paths in _iter_rollout_days(root, deadline):
+        yield from paths
+
+
+def _iter_rollout_days(root: Path, deadline: float) -> list[tuple[str, Path, list[Path]]]:
+    """Date-tree rollouts grouped by ``YYYY/MM/DD``, newest day first.
+
+    Within a day, filenames sort descending (rollout names carry their
+    start timestamp), so a budget-limited pass reaches recent activity and
+    checkpoints it before older days (Track 85A).
+    """
     if host_usage._expired(deadline):
         raise host_usage._ReadFailure("deadline")
+    days: list[tuple[str, Path, list[Path]]] = []
     try:
         if not root.exists():
-            return
-        for year in host_usage._sorted_children(root, deadline):
+            return days
+        for year in reversed(host_usage._sorted_children(root, deadline)):
             if not host_usage._YEAR_PART.fullmatch(year.name) or not host_usage._is_directory(year):
                 continue
-            for month in host_usage._sorted_children(year, deadline):
+            for month in reversed(host_usage._sorted_children(year, deadline)):
                 if not host_usage._MONTH_OR_DAY_PART.fullmatch(
                     month.name
                 ) or not host_usage._is_directory(month):
                     continue
-                for day in host_usage._sorted_children(month, deadline):
+                for day in reversed(host_usage._sorted_children(month, deadline)):
                     if not host_usage._MONTH_OR_DAY_PART.fullmatch(
                         day.name
                     ) or not host_usage._is_directory(day):
                         continue
-                    for candidate in host_usage._sorted_children(day, deadline):
-                        if not _ROLLOUT_NAME.fullmatch(candidate.name):
-                            continue
-                        if host_usage._is_regular_non_symlink(candidate):
-                            yield candidate
+                    paths = [
+                        candidate
+                        for candidate in reversed(host_usage._sorted_children(day, deadline))
+                        if _ROLLOUT_NAME.fullmatch(candidate.name)
+                        and host_usage._is_regular_non_symlink(candidate)
+                    ]
+                    days.append((f"{year.name}/{month.name}/{day.name}", day, paths))
     except OSError as exc:
         raise host_usage._ReadFailure("io_error") from exc
+    return days
 
 
 def _archive_root_exists(root: Path) -> bool:
@@ -524,9 +738,15 @@ def _cache_hit(
         return None
     if not _same_cache_metadata(entry, before):
         return None
-    fingerprint = host_usage._fingerprint(path, before, deadline)
-    if not _same_fingerprint(entry, fingerprint):
-        return None
+    # Track 85A: a rollout idle >= 24h with identical stat identity is a
+    # stat-only hit — no 8 KiB fingerprint read. Same-mtime in-place rewrites
+    # on files that old are outside the observed Codex write pattern, and
+    # settled-day digest checks bound the stale window. Younger files keep
+    # the fingerprint, which is what catches an active writer's rewrite.
+    if _now_ns() - before.st_mtime_ns < host_usage.SETTLE_IDLE_NS:
+        fingerprint = host_usage._fingerprint(path, before, deadline)
+        if not _same_fingerprint(entry, fingerprint):
+            return None
     if not host_usage._same_source(before, host_usage._regular_stat(path)):
         raise host_usage._ReadFailure("stale")
     return entry
@@ -962,7 +1182,75 @@ def _empty_cache() -> dict[str, Any]:
         "last_reason": None,
         "last_reason_since": None,
         "files": {},
+        "settled_days": {},
     }
+
+
+def _validated_settled_days(value: Any) -> dict[str, dict[str, Any]]:
+    """Validate ``settled_days`` records (Track 85A); malformed days drop out.
+
+    Additive on cache ``version`` 1: an older mm ignores the key, and a
+    missing/malformed record simply means that day is scanned per-file.
+    Records only ever point INTO ``files`` (``keys``) — the ``CacheEntry``
+    rows stay the accounting source for ``_aggregate`` and diag counts.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for rel, record in value.items():
+        if not isinstance(rel, str) or host_usage._day_dir_date(rel) is None:
+            continue
+        if not isinstance(record, dict):
+            continue
+        keys = record.get("keys")
+        if (
+            not isinstance(keys, list)
+            or not keys
+            or not all(isinstance(k, str) for k in keys)
+            or len(set(keys)) != len(keys)
+        ):
+            continue
+        fields: dict[str, Any] = {}
+        valid = True
+        for name in ("count", "sum_size", "sum_mtime_ns", "check_seq"):
+            field_value = record.get(name)
+            if type(field_value) is not int or field_value < 0:
+                valid = False
+                break
+            fields[name] = field_value
+        dir_mtime_ns = record.get("dir_mtime_ns")
+        if dir_mtime_ns is not None and (type(dir_mtime_ns) is not int or dir_mtime_ns < 0):
+            valid = False
+        if not valid or fields["count"] != len(keys):
+            continue
+        out[rel] = {**fields, "dir_mtime_ns": dir_mtime_ns, "keys": list(keys)}
+    return out
+
+
+def _settled_record_digest(record: dict[str, Any]) -> tuple[int | None, int, int, int]:
+    return (
+        record["dir_mtime_ns"],
+        record["count"],
+        record["sum_size"],
+        record["sum_mtime_ns"],
+    )
+
+
+def _day_disk_digest(day: Path, deadline: float) -> tuple[int | None, int, int, int]:
+    """Stat digest of a live ``YYYY/MM/DD`` directory (no file opens)."""
+    try:
+        dir_mtime_ns: int | None = day.stat().st_mtime_ns
+    except OSError:
+        dir_mtime_ns = None
+    stats: list[tuple[int, int]] = []
+    for candidate in host_usage._sorted_children(day, deadline):
+        if not _ROLLOUT_NAME.fullmatch(candidate.name):
+            continue
+        if not host_usage._is_regular_non_symlink(candidate):
+            continue
+        st = host_usage._regular_stat(candidate)
+        stats.append((st.st_size, st.st_mtime_ns))
+    return host_usage._stat_digest(dir_mtime_ns, stats)
 
 
 def _validated_entry(value: Any) -> _CacheEntry | None:

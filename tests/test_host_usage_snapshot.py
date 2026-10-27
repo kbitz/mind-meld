@@ -1503,8 +1503,8 @@ class TestColdCacheWarmAndRetry:
         assert row["tokens_by_day"][day]["by_model"]["muse-1"] == _usage(7)
         assert len(degradations) == (0 if codex_warm == "complete" else 1)
         err = capsys.readouterr().err
-        assert "reading muse usage beyond [retro] host_usage_interactive_budget_ms" in err
-        assert "(about 5 s of scanning)..." in err
+        assert "reading muse usage (bounded by the capture budget)" in err
+        assert "...\n" in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_then_retries_and_publishes(self, tmp_path, monkeypatch, capsys):
@@ -1523,8 +1523,8 @@ class TestColdCacheWarmAndRetry:
         row = next(r for r in _rows(events_root) if r["type"] == "host-usage-snapshot")
         assert row["hosts"] == {"codex": {"2026-08-15": _usage(7)}}
         err = capsys.readouterr().err
-        assert "reading codex usage beyond [retro] host_usage_interactive_budget_ms" in err
-        assert "(about 5 s of scanning)..." in err
+        assert "reading codex usage (bounded by the capture budget)" in err
+        assert "...\n" in err
         assert "one-time" not in err
 
     def test_interactive_push_warms_a_dropped_muse_reader_then_retries(self, tmp_path, monkeypatch):
@@ -2436,3 +2436,353 @@ def test_sync78_adapter_readers_keep_locked_skip_under_diagnostic_scope(tmp_path
             assert "locked" in capsys.readouterr().err
         assert notices and not any(degraded for _, degraded in notices)
         assert all("adapter cache was locked" in message for message, _ in notices)
+
+
+# ---------------------------------------------------------------------------
+# Track 85A — one capture budget.
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureBudget85A:
+    def test_resolve_capture_budget_default_and_config(self):
+        assert events_tail.resolve_capture_budget({}) == (5000, "default")
+        assert events_tail.resolve_capture_budget({"retro": {}}) == (5000, "default")
+        assert events_tail.resolve_capture_budget({"retro": {"capture_budget_ms": 4000}}) == (
+            4000,
+            "config",
+        )
+
+    def test_capture_budget_takes_precedence_over_legacy_interactive(self):
+        # Sweep keeps the legacy value, capped inside the capture phase
+        # (half of capture_budget_ms, enforced in _capture_host_snapshot).
+        config = {"retro": {"capture_budget_ms": 4000, "host_usage_interactive_budget_ms": 300}}
+        assert events_tail.resolve_host_read_budget(config, interactive=True) == (
+            300,
+            "config",
+        )
+        assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 400}}, interactive=True
+        ) == (200, "config")
+        assert events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000}}, interactive=True
+        ) == (500, "config")
+
+    def test_legacy_budgets_preserved_without_capture_budget(self):
+        assert events_tail.resolve_host_read_budget({"retro": {}}, interactive=True) == (
+            500,
+            "default",
+        )
+        config = {"retro": {"host_usage_interactive_budget_ms": 900}}
+        assert events_tail.resolve_host_read_budget(config, interactive=True) == (
+            900,
+            "config",
+        )
+
+    def test_autopush_budget_unaffected_by_capture_budget(self):
+        config = {"retro": {"capture_budget_ms": 4000}}
+        assert events_tail.resolve_host_read_budget(config, interactive=False) == (
+            250,
+            "default",
+        )
+        config["retro"]["host_usage_autopush_budget_ms"] = 400
+        assert events_tail.resolve_host_read_budget(config, interactive=False) == (
+            400,
+            "config",
+        )
+
+    def test_warm_retry_bounded_by_capture_phase(self, monkeypatch):
+        """With capture configured, warm gets only the remaining phase budget."""
+        config = {"retro": {"capture_budget_ms": 1000}}
+        host_budget_ms, _ = events_tail.resolve_host_read_budget(config, interactive=True)
+        budgets: list[float] = []
+
+        def warm(*, reader="codex", budget_s=5.0):
+            budgets.append(budget_s)
+            return _incomplete("deadline")
+
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
+        readers = (("codex", lambda *, deadline: _incomplete("deadline")),)
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=host_budget_ms,
+            warm_host_cache=lambda _name: None,
+        )
+        assert budgets, "warm retry did not run"
+        # Phase is half of 1000 ms; the instant sweep leaves just under 0.5 s.
+        assert all(0.0 < budget <= 0.5 for budget in budgets)
+
+    def test_warm_retry_one_arg_monkeypatch_still_works(self, monkeypatch):
+        def warm(*, reader="codex"):
+            return _complete()
+
+        monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
+        readers = (("codex", lambda *, deadline: _incomplete("deadline")),)
+        capture, _rows = events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=500,
+            warm_host_cache=lambda _name: None,
+        )
+        assert capture.hosts is not None
+
+    def test_token_warm_receives_remaining_budget(self, tmp_path, monkeypatch):
+        seen = {}
+
+        def fake_warm(paths, *, deadline_s=99.0):
+            seen["deadline_s"] = deadline_s
+            return (0, 0)
+
+        monkeypatch.setattr(events_tail.token_usage, "is_cache_cold", lambda: True)
+        monkeypatch.setattr(events_tail.token_usage, "warm_token_cache_inline", fake_warm)
+        assert (
+            events_tail._decide_token_walk_policy([tmp_path], quiet=False, warm_deadline_s=1.25)
+            is True
+        )
+        assert seen["deadline_s"] == 1.25
+
+    def test_attended_elapsed_recorded_for_tail(self, monkeypatch):
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
+        readers = (("codex", lambda *, deadline: _complete()),)
+        events_tail._capture_host_snapshot(
+            "dev-a",
+            readers,
+            host_budget_ms=500,
+            warm_host_cache=lambda _name: None,
+        )
+        assert events_tail._attended_host_elapsed_s is not None
+        assert events_tail._attended_host_elapsed_s >= 0.0
+
+    def test_tail_passes_one_absolute_deadline(self, monkeypatch, tmp_path):
+        """Git, token warm and session walk share one tail deadline (d1/d4)."""
+        seen = {}
+        real_capture = events_tail._capture_event_snapshots
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real_capture(*args, **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 1.0)
+        events_root = tmp_path / "mm-events"
+        sources = [{"name": "mm-events", "path": str(events_root)}]
+        config = {"retro": {"capture_budget_ms": 4000}}
+        import time as _time
+
+        before = _time.monotonic()
+        events_tail._run_events_tail(
+            config,
+            sources,
+            "dev-a",
+            dry_run=False,
+            quiet=False,
+            suppress_host_capture=True,
+        )
+        # Elapsed 1s of 4s: tail share is max(2s, 3s) from tail start.
+        assert seen["budget_ms"] == 3000
+        assert seen["git_budget_ms"] <= 3000
+        assert before + 2.9 <= seen["session_deadline"] <= _time.monotonic() + 3.0
+        assert events_tail._attended_host_elapsed_s is None
+
+    def test_legacy_only_tail_keeps_legacy_budgets(self, monkeypatch, tmp_path):
+        seen = {}
+        real_capture = events_tail._capture_event_snapshots
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real_capture(*args, **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+        sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+        config = {"retro": {"host_usage_interactive_budget_ms": 900}}
+        events_tail._run_events_tail(
+            config, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert seen["session_deadline"] is None
+        assert seen["budget_ms"] == events_tail.events.WALK_TIME_BUDGET_INTERACTIVE_MS
+
+    def test_pending_stash_guards(self, monkeypatch):
+        import mind_meld.statusflow as statusflow
+
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 777)
+        budgets = statusflow._host_read_budgets({"retro": {"capture_budget_ms": 4000}})
+        assert budgets["capture_ms"] == 4000
+        assert events_tail._pending_capture_budget_ms == 777, "diag must not plant/wipe"
+        events_tail.resolve_host_read_budget(
+            {"retro": {"capture_budget_ms": 4000}}, interactive=False
+        )
+        assert events_tail._pending_capture_budget_ms is None, "autopush resolve clears"
+
+    def test_prepare_raise_clears_stash_and_git_budgets_clamp(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", None)
+        monkeypatch.setattr(events_tail, "_capture_git_rows", lambda *a, **k: ([], ([], []), 0, 0))
+
+        def boom():
+            raise RuntimeError("prepare failed")
+
+        with pytest.raises(RuntimeError):
+            events_tail._capture_event_snapshots(
+                {"retro": {"capture_budget_ms": 4000}},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=boom,
+                host_readers=(),
+                suppress_host_capture=False,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+
+        seen = {}
+
+        def fake_git(*args, **kwargs):
+            seen.update(kwargs)
+            return [], ([], []), 0, 0
+
+        monkeypatch.setattr(events_tail, "_capture_git_rows", fake_git)
+        import time as _time
+
+        events_tail._capture_event_snapshots(
+            {},
+            [],
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            budget_ms=500,
+            git_budget_ms=500,
+            prepare_token_cache=lambda: None,
+            host_readers=(),
+            suppress_host_capture=True,
+            session_deadline=_time.monotonic() + 0.05,
+        )
+        assert seen["deadline_monotonic"] is not None
+
+    def test_flush_runs_after_token_lock_exit(self, monkeypatch, tmp_path):
+        from contextlib import contextmanager
+
+        order = []
+
+        @contextmanager
+        def fake_lock(mode):
+            order.append("lock-enter")
+            yield {}
+            order.append("lock-exit")
+
+        monkeypatch.setattr(events_tail.token_usage, "lock_and_get_files", fake_lock)
+        monkeypatch.setattr(
+            events_tail.events,
+            "flush_pending_session_state",
+            lambda: order.append("flush"),
+        )
+        monkeypatch.setattr(events_tail, "_capture_git_rows", lambda *a, **k: ([], ([], []), 0, 0))
+        events_tail._capture_event_snapshots(
+            {},
+            [tmp_path],
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            budget_ms=500,
+            prepare_token_cache=lambda: "block",
+            host_readers=(),
+            persist=True,
+            suppress_host_capture=True,
+        )
+        assert order.index("lock-exit") < order.index("flush")
+
+    def test_git_and_walk_raise_clear_stash_and_production_warmers_accept_kwargs(
+        self, monkeypatch, tmp_path
+    ):
+        from contextlib import contextmanager
+
+        import mind_meld.host_registry as host_registry
+        import mind_meld.token_usage as token_usage
+
+        # Pin production warmer signatures so _accepted_kwargs never silently drops them.
+        assert events_tail._accepted_kwargs(
+            token_usage.warm_token_cache_inline, deadline_s=1.25
+        ) == {"deadline_s": 1.25}
+        assert events_tail._accepted_kwargs(
+            host_registry.warm_host_cache_inline, budget_s=1.25
+        ) == {"budget_s": 1.25}
+
+        # (1) _capture_git_rows raising clears _pending_capture_budget_ms.
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 4000)
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git boom")),
+        )
+        with pytest.raises(RuntimeError, match="git boom"):
+            events_tail._capture_event_snapshots(
+                {},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=lambda: None,
+                host_readers=(),
+                suppress_host_capture=True,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+
+        # (2) walk_session_metadata raising inside lock_and_get_files clears stash and flushes.
+        order = []
+
+        @contextmanager
+        def fake_lock(_mode):
+            order.append("lock-enter")
+            try:
+                yield {}
+            finally:
+                order.append("lock-exit")
+
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 4000)
+        monkeypatch.setattr(events_tail, "_capture_git_rows", lambda *a, **k: ([], ([], []), 0, 0))
+        monkeypatch.setattr(events_tail.token_usage, "lock_and_get_files", fake_lock)
+        monkeypatch.setattr(
+            events_tail.events,
+            "walk_session_metadata",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("walk boom")),
+        )
+        monkeypatch.setattr(
+            events_tail.events,
+            "flush_pending_session_state",
+            lambda: order.append("flush"),
+        )
+        with pytest.raises(RuntimeError, match="walk boom"):
+            events_tail._capture_event_snapshots(
+                {},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=lambda: "block",
+                host_readers=(),
+                persist=True,
+                suppress_host_capture=True,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+        assert order == ["lock-enter", "lock-exit", "flush"]
+
+    def test_zero_remaining_git_budget_records_budget_abort_skips(self, monkeypatch, tmp_path):
+        import time as _time
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.setattr(
+            events_tail.events,
+            "discover_git_roots",
+            lambda *a, **k: events_tail.events.GitRootDiscovery([repo], []),
+        )
+        rows, _disc, aborts, errs = events_tail._capture_git_rows(
+            {},
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            walk_budget_ms=500,
+            root_discovery_budget_ms=50,
+            deadline_monotonic=_time.monotonic() - 0.1,
+        )
+        assert len(rows) == 1
+        assert aborts == 1
+        assert errs == 0
+        assert rows[0]["skipped"] == [
+            {"path": str(repo), "reason": events_tail.events.WALK_SKIP_BUDGET_ABORT}
+        ]

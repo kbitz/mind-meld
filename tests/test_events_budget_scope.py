@@ -258,6 +258,9 @@ class TestEventsTailBudgetScope:
 
         _stub_fast_walks(monkeypatch)
         monkeypatch.setattr(_mm_events, "WALK_TIME_BUDGET_INTERACTIVE_MS", 10)
+        # Track 85A: the attended session budget comes from the capture
+        # partition (half of 20 ms here), not the legacy interactive walk ms.
+        monkeypatch.setattr(events_tail, "DEFAULT_CAPTURE_BUDGET_MS", 20)
         # else-branch (no flock); identity gather instant so only the walk is slow.
         monkeypatch.setattr(events_tail, "_decide_token_walk_policy", lambda paths, *, quiet: False)
         monkeypatch.setattr(

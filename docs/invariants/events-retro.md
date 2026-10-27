@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
@@ -121,9 +121,9 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 3. **`mm-events`-resolved gate, NOT `disabled_sources` (Codex C1).** The gate is `next((s for s in sources if s.get("name") == "mm-events"), None) is not None`. This covers fresh / migrated / un-migrated configs uniformly: a config that pre-dates v0.10.1 simply has no `mm-events` entry and the tail no-ops, no migration prompt required. Gating only on `disabled_sources` would let pre-v0.10.1 configs accumulate local cruft forever (the `~/.local/share/mind-meld/events/` tree never created, never written). Real push explicitly bootstraps the default root before reaching the tail; a missing custom root is excluded from the tail entirely.
 
-4. **Wall-clock budget (Codex C4 + C5; walk-scoped v0.12.9).** `WALK_TIME_BUDGET_AUTOPUSH_MS` (250) for `quiet=True` (autopush hook), `WALK_TIME_BUDGET_INTERACTIVE_MS` (500) for interactive `mm push`. The deadline is plumbed through to `walk_session_metadata` via the new keyword-only `deadline_monotonic` param — `_read_cwd_from_latest_jsonl` reads jsonl line-by-line until a `cwd` field appears, so a single pathological project can blow the budget without per-project deadline checks. The `mm: notice: events tail budget exceeded` notice reports specifically on the **session-metadata walk**: `deadline` is reset (events_tail.py) AFTER `walk_git_projects` runs, so the git walk is NOT in this comparison — it self-bounds via its own `total_budget_ms` arg. Git-walk repository loss is a separate degradation (`session_walk_exceeded_budget` is the session-walk flag; do not rename it back). The flag that used to be called `walk_exceeded_budget` measured the session walk and is why git-walk loss was invisible. The check compares a `walk_done = time.monotonic()` snapshot captured the moment the session walk finishes against `deadline`, NOT a post-write `time.monotonic()`. **Load-bearing (v0.12.9):** the snapshot MUST precede `identity.gather_local_identities(allow_refresh=True)` (events_tail.py), whose cold path runs a synchronous refresh bounded by its OWN timeouts (`identity._GIT_GLOBAL_TIMEOUT_S` + `_PER_REPO_BUDGET_S` + `_GH_TIMEOUT_S` ≈ up to 10s, 7d TTL). Pre-v0.12.9 the check sat after the gather + write, so a routine cold identity refresh tripped the walk-budget notice even though the walk itself finished in ~200ms — a misleading signal (the gather emits its own `refreshing identity cache (one-off)` line; the two concerns are now orthogonal). `_run_events_backfill` mirrors this exactly: its `walk_done` snapshot precedes the deliberate `refresh_identity_cache(force=True)` init warm, which ALWAYS runs. Do NOT move either snapshot back below the identity gather. The notice remains a visible-failure-contract signal (the push/init proceeds regardless).
+4. **Wall-clock budget (Codex C4 + C5; walk-scoped v0.12.9).** `WALK_TIME_BUDGET_AUTOPUSH_MS` (250) for `quiet=True` (autopush hook). `WALK_TIME_BUDGET_INTERACTIVE_MS` (500) remains the session-walk cap for init and for an attended push that sets `host_usage_interactive_budget_ms` without `capture_budget_ms`. With `capture_budget_ms` set, or with neither key set, the attended tail uses the capture partition's shared deadline, so that session walk is not capped at 500 ms (see **One capture budget** below). The deadline is plumbed through to `walk_session_metadata` via the new keyword-only `deadline_monotonic` param — `_read_cwd_from_latest_jsonl` reads jsonl line-by-line until a `cwd` field appears, so a single pathological project can blow the budget without per-project deadline checks. On autopush, init, and that legacy-only attended push, the `mm: notice: events tail budget exceeded` notice reports specifically on the **session-metadata walk**: `deadline` is reset (events_tail.py) AFTER `walk_git_projects` runs, so the git walk is NOT in this comparison — it self-bounds via its own `total_budget_ms` arg. A partitioned attended tail passes one `deadline_monotonic` through discovery, the git walk, token warm and the session walk, so earlier phases can exhaust that notice's deadline. Git-walk repository loss is a separate degradation (`session_walk_exceeded_budget` is the session-walk flag; do not rename it back). The flag that used to be called `walk_exceeded_budget` measured the session walk and is why git-walk loss was invisible. The check compares a `walk_done = time.monotonic()` snapshot captured the moment the session walk finishes against `deadline`, NOT a post-write `time.monotonic()`. **Load-bearing (v0.12.9):** the snapshot MUST precede `identity.gather_local_identities(allow_refresh=True)` (events_tail.py), whose cold path runs a synchronous refresh bounded by its OWN timeouts (`identity._GIT_GLOBAL_TIMEOUT_S` + `_PER_REPO_BUDGET_S` + `_GH_TIMEOUT_S` ≈ up to 10s, 7d TTL). Pre-v0.12.9 the check sat after the gather + write, so a routine cold identity refresh tripped the walk-budget notice even though the walk itself finished in ~200ms — a misleading signal (the gather emits its own `refreshing identity cache (one-off)` line; the two concerns are now orthogonal). `_run_events_backfill` mirrors this exactly: its `walk_done` snapshot precedes the deliberate `refresh_identity_cache(force=True)` init warm, which ALWAYS runs. Do NOT move either snapshot back below the identity gather. The notice remains a visible-failure-contract signal (the push/init proceeds regardless).
 
-**Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline before the independent git/session walks: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic Claude probes (the gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path). The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11-3.13 and return False on 3.14+ (see the Python 3.14 audit item in docs/TODOS.md); the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
+**Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. Autopush, init, and a legacy-only attended push still run the git and session walks on separate budgets after that. A partitioned attended tail also clamps this discovery deadline to the shared tail deadline. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic Claude probes (the gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path). The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11-3.13 and return False on 3.14+ (see the Python 3.14 audit item in docs/TODOS.md); the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
 
 **Resumable Git discovery and capture (Track 82A).** The private local
 `GIT_CAPTURE_CACHE_PATH` JSON cache contains `projects`, `discovery_resume_after`,
@@ -146,6 +146,82 @@ become a cached empty cwd or advance the resume marker. Deferred changes pin
 `pending_refresh_since` to the oldest required window without making an already
 fully indexed project inventory incomplete. Newly discovered roots inherit that
 window. Session-metadata indexing remains outside this Track.
+
+**One capture budget and session indexing (Track 85A).** `[retro]
+capture_budget_ms` (integer, not bool, 250–60000; default 5000 via
+`events_tail.resolve_capture_budget`) bounds total attended capture across the
+pre-scan `_capture_host_snapshot` (sweep + inline warm) and `_run_events_tail`
+(discovery, git walk capped at the tail share, token warm, session walk),
+excluding `build_manifest_v2` scan time. When configured it takes precedence
+over legacy `host_usage_interactive_budget_ms`: `resolve_host_read_budget`
+returns the host sweep budget (legacy value or 500 ms default, capped at
+half the capture budget, `config` source) and stashes the
+total for `_capture_host_snapshot`, whose sweep and warm retries share that
+phase deadline; warmers receive the remaining `budget_s`/`deadline_s` only
+when `inspect.signature` shows they accept it, so one-arg test patches keep
+working. Elapsed attended host time is recorded in `events_tail` and the tail
+keeps at least half the capture budget plus whatever the host phase left
+unused. The tail's git walk, token warm and session walk share ONE absolute
+deadline minted from that share, so the share is spent once across phases,
+not once per phase (if discovery exhausts the deadline, `walk_git_projects`
+records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
+threads). With only the legacy interactive key configured, host
+sweep/warm and tail budgets keep their legacy behavior unchanged; with
+neither key the 5000 ms default partitions both phases, so the attended
+session walk is no longer capped at the legacy 500 ms; autopush always keeps
+its fixed 250 ms walk / 250 ms host / 50 ms discovery shares and never warms.
+Config validation checks `host_usage_autopush_budget_ms` against
+`capture_budget_ms` when set and against an explicitly set legacy interactive
+value (the legacy rule). When neither key is set, autopush still must not
+exceed the 500 ms interactive default. When both ceilings apply, autopush
+must not exceed the smaller one.
+
+`walk_session_metadata(..., persist=False)` is the legacy read-only walk.
+With `persist=True` it rotates its starting project via the per-Claude-root
+`session_resume_after` map in the same `GIT_CAPTURE_CACHE_PATH` cache, and
+reuses a project's complete `cache["projects"][key]["session_meta"]` only when
+the full-project JSONL stat digest (every parent `*.jsonl` and
+`<session>/subagents/*.jsonl` as `(rel, size, mtime_ns)`) is unchanged — never
+the Track 82A newest-jsonl stamps, which `_probe_claude` refreshes earlier and
+which miss non-newest and subagent appends. A record carries `v`
+(`SESSION_META_VERSION`), `tc` (token cache version), `complete` and
+`has_tokens`: a token walk never reuses a `has_tokens=False` record, a
+no-token walk strips token/skill keys from reused or retained metadata
+(preserving the absent-key signal), an incomplete project never overwrites a
+complete record, a deadline-interrupted project stops the walk and does not
+advance its root's rotation cursor while non-deadline stat/token drift
+continues the walk and advances the cursor so an active project cannot livelock
+rotation, and
+unvisited projects retain their prior complete metadata so the v2 snapshot
+stays a full inventory. Staging requires a demonstrably complete scan:
+deadline unhit, file stats unchanged across the scan, and every file's token
+buckets persisted for token walks. `_probe_claude` prunes only its own root's
+entries and treats a `session_meta`-only entry as unindexed. The walk only stages state; `flush_pending_session_state` writes it
+after the token cache's `lock_and_get_files` exits, and stages nothing when
+zero projects were visited. `walk_done` is bound inside that lock context
+(and in the no-token and no-claude-paths branches) before its exit write.
+
+The Codex adapter scans the date tree and `archived_sessions/` newest-first.
+A `YYYY/MM/DD` day freezes into `host-tokens.json` `settled_days` (additive on
+cache version 1) when its date is at least 2 UTC days old, every rollout has
+been idle at least 24h, no entry carries `pending`, no entry has an empty
+`turn_id`, and no `turn_id` is shared with any `CacheEntry` outside the day.
+Settled records keep their backing `files` entries — only the per-file
+stat/open loop is skipped — so `_aggregate` union-find deduplication and
+`codex_usage_diag` file counts stay exact. Day directories are enumerated
+before any settled skip, so a complete pass still prunes deleted files by
+REPLACE; settled mutations (additions, evictions, `check_seq` bumps) commit
+only on a complete pass and roll back otherwise. Every carried day first
+passes an exact key-set check against the live enumeration, so additions and
+deletions evict immediately; exactly one settled day per scan — the stalest
+`check_seq` — is further verified by directory stat digest
+(`dir_mtime_ns, count, sum_size, sum_mtime_ns`), and a failed or mismatched
+verification evicts it to the per-file loop. Independently of
+settling, a cached rollout idle at least 24h is a stat-only cache hit (no
+8 KiB fingerprint read); younger files keep the fingerprint. Shared pure
+helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
+`SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
+code is untouched.
 
 Push walks roots from their oldest effective per-root cursor, breaking ties by
 path. Budget aborts and errors keep the old lower bound; successful roots and
@@ -862,7 +938,10 @@ warms. Warm every deadline-dropped warmable reader in reader order, including
 uninvoked readers. Pre-invoke sweep expiry declares every reader dropped and
 warms every warmable reader. The attended warm IS the retry (Track 63A):
 `warm_host_cache_inline(reader=name)` runs through `_capture_host_usage` on a
-singleton reader with an explicit `DEFAULT_READ_BUDGET_S` deadline. Merge its
+singleton reader. Only an explicit legacy interactive budget, with no
+`capture_budget_ms`, uses `DEFAULT_READ_BUDGET_S`. Otherwise the deadline is
+the shared host-phase cap: half of `capture_budget_ms`, or half of the 5,000 ms
+default when neither key is set. Merge its
 result, including failures, with the first pass's completed readers — a flaky
 second-pass read of an already-completed reader must never erase totals
 already captured. If
@@ -1562,10 +1641,13 @@ publishes its own result through the same reader failure boundary.
 `resolve_host_read_budget` owns effective budgets and their `default`/`config`
 source: `[retro] host_usage_autopush_budget_ms` defaults to 250 (100–5000),
 `host_usage_interactive_budget_ms` to 500 (250–5000). Both reject bools,
-non-integers and out-of-range values; effective autopush cannot exceed
-interactive. Capture defaults, tail, init and attended push all use this
+non-integers and out-of-range values; effective autopush cannot exceed the
+effective attended ceiling. Capture defaults, tail, init and attended push all use this
 resolver. The independent 5-second warm and 50 ms later-reader grace remain
-constants. Invalid config still stops ordinary sync.
+constants when only the legacy interactive key is configured; Track 85A's
+`[retro] capture_budget_ms` partition (see "One capture budget" above) takes
+precedence over the legacy interactive key when set (and applies the 5000 ms
+capture default when neither key is set). Invalid config still stops ordinary sync.
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
@@ -1772,9 +1854,12 @@ probe is unnecessary: every ready attended push captures, not just blocked ones.
 `/roadmap` must reconcile T3-B later; this Track does not edit its files.
 
 Budgets are cooperative, not hard timeouts. Content sync follows optional
-capture. Allow about five seconds of scanning per cold reader, and both readers
-can be cold. Lowering `host_usage_interactive_budget_ms` does not cap the separate
-warm allowance. Autopush is still change-gated, never warms, and retains its own
+capture. Both readers can be cold. Lowering `host_usage_interactive_budget_ms`
+does not cap the separate warm allowance: only that legacy key, with no
+`capture_budget_ms`, keeps about five seconds of warm scanning per cold reader.
+A set `[retro] capture_budget_ms`, and the 5,000 ms default when neither key is
+set, caps host sweep and warm together at half of that total (Track 85A).
+Autopush is still change-gated, never warms, and retains its own
 quiet error/lock behavior; it is not an equivalent attended no-capture command.
 
 **Publication and content acceptance are independent.** `_capture_attended_usage`
@@ -2186,10 +2271,13 @@ through partial commits; Cursor commits stable-file progress but reparses
 rewritten files, so repeated short passes need not converge.
 
 `warm_host_cache` is now the attended-notice hook only. After
-`mm: reading <reader> usage beyond the push budget (about 5 s of scanning)...`,
+`mm: reading <reader> usage (bounded by the capture budget)...`,
 `_capture_host_snapshot` wraps `warm_host_cache_inline(reader=name)` in a
-singleton `_capture_host_usage` call with an explicit 5-second deadline.
-Its result merges through `_merge_warm_retry_capture(retried_names={name})`.
+singleton `_capture_host_usage` call. The deadline is at most half of
+`capture_budget_ms` when that key is set, and half of the 5,000 ms default
+when neither key is set. Only an explicit legacy interactive budget, with no
+`capture_budget_ms`, keeps the 5-second warm deadline.
+The warm result merges through `_merge_warm_retry_capture(retried_names={name})`.
 There is no second bounded read: a completed warm contributes its totals,
 empty/partial state is preserved, `unsupported` replaces the first deadline,
 exceptions become `unavailable`, and `no_metadata_ledger` silently omits that

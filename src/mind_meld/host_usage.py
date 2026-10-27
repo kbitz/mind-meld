@@ -2403,6 +2403,41 @@ def _muse_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+SETTLE_DAYS = _MUSE_SETTLE_DAYS
+"""Shared settled-day age: a ``YYYY/MM/DD`` directory may freeze once its
+date is this many UTC days old (Track 85A; same census basis as Muse)."""
+SETTLE_IDLE_NS = _MUSE_SETTLE_IDLE_NS
+"""...and only when every file in it has been idle this long. The same idle
+window lets a per-file cache hit skip its content fingerprint."""
+
+
+def _day_dir_date(rel: str) -> date | None:
+    """Calendar date of a ``YYYY/MM/DD`` directory key, or None. Pure."""
+    return _muse_dir_date(rel)
+
+
+def _settle_date_eligible(dir_date: date | None, *, today: date) -> bool:
+    """True when ``dir_date`` is at least ``SETTLE_DAYS`` before ``today``."""
+    return dir_date is not None and (today - dir_date).days >= SETTLE_DAYS
+
+
+def _stat_digest(
+    dir_mtime_ns: int | None, stats: list[tuple[int, int]]
+) -> tuple[int | None, int, int, int]:
+    """Directory stat digest ``(dir_mtime_ns, count, sum_size, sum_mtime_ns)``.
+
+    Pure: callers supply ``(size, mtime_ns)`` pairs from either live stats or
+    cached entry identity fields; both must produce the same digest for an
+    unchanged directory.
+    """
+    return (
+        dir_mtime_ns,
+        len(stats),
+        sum(size for size, _mtime in stats),
+        sum(mtime for _size, mtime in stats),
+    )
+
+
 def _count_muse_ledgers(root: Path) -> int | None:
     """Count reader-visible session logs under ``root``.
 

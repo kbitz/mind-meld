@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.13] - 2026-10-26
+
+**Attended `mm push` shares one capture budget.** Host sweep and inline warm together take at most half of it, five seconds by default. The rest of the push keeps the remainder. Autopush keeps its own short limits and never warms.
+
+### Added
+
+- `[retro] capture_budget_ms` accepts 250 to 60000 milliseconds. Unset, the attended budget is 5000 ms. Host sweep and inline warm share at most half of that total. Only an explicit `host_usage_interactive_budget_ms`, with no capture budget, keeps about five seconds of warm scanning per cold reader.
+
+### Changed
+
+- `mm diag` reports the capture budget and whether it came from config or the default. The older warm field stays 5000 ms.
+- `mm push` help names the shared budget. Budgets stay cooperative, not hard timeouts. Exit 0 still means content sync succeeded.
+
 ## [1.11.12] - 2026-10-25
 
 **Codex usage in the fleet is unchanged.** The reader now sits behind the host adapter. Commands, output, and the cache stay the same.

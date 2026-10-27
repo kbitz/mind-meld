@@ -26,6 +26,7 @@ from unittest import mock
 
 import pytest
 
+from mind_meld import config as mm_config
 from mind_meld import events
 
 # ---------------------------------------------------------------------------
@@ -1173,7 +1174,7 @@ class TestWalkSessionMetadata:
         monkeypatch.setattr(
             events,
             "_read_cwd_from_latest_jsonl",
-            lambda d: (calls.append(d), real(d))[1],
+            lambda d, **_kw: (calls.append(d), real(d))[1],
         )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
@@ -1311,6 +1312,407 @@ class TestWalkSessionMetadata:
         )
         assert len(out[0]["projects"]) == 1
         assert out[0]["projects"][0]["source_root"] == str(tmp_path)
+
+
+def _make_project(root, name, cwd, files=("session.jsonl",)):
+    proj = root / "projects" / name
+    proj.mkdir(parents=True)
+    for fname in files:
+        (proj / fname).write_text(json.dumps({"cwd": cwd, "type": "user"}) + "\n")
+    return proj
+
+
+class TestWalkSessionMetadata85A:
+    """Track 85A: rotating start, session_meta reuse, retained inventory."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_pending_session_state(self, monkeypatch):
+        monkeypatch.setattr(events, "_pending_session_state", None)
+
+    def test_persist_stages_and_flush_writes_session_meta(self, tmp_path):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            persist=True,
+        )
+        assert len(out[0]["projects"]) == 1
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists(), "walk must only stage"
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        (entry,) = cache["projects"].values()
+        assert entry["session_meta"]["complete"] is True
+        assert entry["session_meta"]["has_tokens"] is False
+        assert entry["session_meta"]["meta"]["sessions"] == 1
+        assert cache["session_resume_after"] == {}
+
+    def test_no_persist_never_touches_cache(self, tmp_path):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        events.walk_session_metadata(tmp_path, datetime.now(timezone.utc) - timedelta(days=30))
+        events.flush_pending_session_state()
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+
+    def test_expired_deadline_stages_nothing(self, tmp_path):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        out = events.walk_session_metadata(
+            tmp_path,
+            datetime.now(timezone.utc) - timedelta(days=30),
+            deadline_monotonic=time.monotonic() - 1.0,
+            persist=True,
+        )
+        assert out[0]["projects"] == []
+        events.flush_pending_session_state()
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+
+    def test_unchanged_project_reused_without_rescan(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+
+        def forbidden_scan(*args, **kwargs):
+            raise AssertionError("unchanged project must come from session_meta")
+
+        monkeypatch.setattr(events, "_scan_one_project", forbidden_scan)
+        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        assert [p["claude_dir"] for p in out[0]["projects"]] == ["-tmp-a"]
+        assert out[0]["projects"][0]["sessions"] == 1
+
+    def test_append_to_non_newest_or_subagent_invalidates(self, tmp_path, monkeypatch):
+        proj = _make_project(tmp_path, "-tmp-a", "/tmp/a", files=("a.jsonl", "b.jsonl"))
+        sub = proj / "sess-1" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "s.jsonl").write_text(json.dumps({"type": "assistant"}) + "\n")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        scanned = []
+        real_scan = events._scan_one_project
+
+        def tracking_scan(*args, **kwargs):
+            scanned.append(args[0])
+            return real_scan(*args, **kwargs)
+
+        monkeypatch.setattr(events, "_scan_one_project", tracking_scan)
+        with (proj / "a.jsonl").open("a") as fh:
+            fh.write(json.dumps({"cwd": "/tmp/a", "type": "user"}) + "\n")
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        assert scanned, "append to a non-newest parent jsonl must invalidate"
+        scanned.clear()
+        with (sub / "s.jsonl").open("a") as fh:
+            fh.write(json.dumps({"type": "assistant"}) + "\n")
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        assert scanned, "append to a subagent jsonl must invalidate"
+
+    def test_retained_inventory_on_expired_walk(self, tmp_path):
+        """Once complete session_meta exists, an expired walk still
+        publishes the full inventory from retained records."""
+        for name in ("-tmp-a", "-tmp-b", "-tmp-c"):
+            _make_project(tmp_path, name, f"/tmp/{name}")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert len(cache["projects"]) == 3
+
+        out = events.walk_session_metadata(
+            tmp_path,
+            since,
+            deadline_monotonic=time.monotonic() - 1.0,
+            persist=True,
+        )
+        assert {p["claude_dir"] for p in out[0]["projects"]} == {
+            "-tmp-a",
+            "-tmp-b",
+            "-tmp-c",
+        }
+
+    def test_successive_budget_walks_converge_within_three(self, tmp_path, monkeypatch):
+        """O7.2: budget-limited walks rotate, retain, and complete ≤3 walks."""
+        for name in ("-tmp-a", "-tmp-b", "-tmp-c"):
+            _make_project(tmp_path, name, f"/tmp/{name}")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        visited_order = []
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            visited_order.append(proj_path.name)
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 0.6  # each fresh scan eats most of a 1s walk budget
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+
+        def one_walk():
+            out = events.walk_session_metadata(
+                tmp_path,
+                since,
+                deadline_monotonic=clock.now + 1.0,
+                persist=True,
+            )
+            events.flush_pending_session_state()
+            return out
+
+        out1 = one_walk()
+        assert len(out1[0]["projects"]) < 3, "first walk is budget-truncated"
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"]
+        first_scanned = visited_order[0]
+
+        visited_order.clear()
+        out2 = one_walk()
+        assert visited_order[0] != first_scanned, "start must rotate past resume cursor"
+        assert {p["claude_dir"] for p in out2[0]["projects"]} == {
+            "-tmp-a",
+            "-tmp-b",
+            "-tmp-c",
+        }
+        assert all(p["sessions"] == 1 for p in out2[0]["projects"])
+
+        one_walk()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"] == {}
+        assert len(cache["projects"]) == 3
+        assert all(entry["session_meta"]["complete"] for entry in cache["projects"].values())
+
+    def test_token_walk_reuse_requires_has_tokens(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        # Seed without tokens, then walk with a token cache: must rescan.
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        scanned = []
+        real_scan = events._scan_one_project
+
+        def tracking_scan(*args, **kwargs):
+            scanned.append(args[0])
+            return real_scan(*args, **kwargs)
+
+        monkeypatch.setattr(events, "_scan_one_project", tracking_scan)
+        out = events.walk_session_metadata(tmp_path, since, token_cache_files={}, persist=True)
+        assert scanned, "has_tokens=False record must not satisfy a token walk"
+        assert "tokens_by_day" in out[0]["projects"][0]
+        events.flush_pending_session_state()
+        # Now seeded with tokens: a no-token walk strips token keys on reuse.
+        scanned.clear()
+        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        assert not scanned
+        assert "tokens_by_day" not in out[0]["projects"][0]
+
+    def test_failed_token_read_is_not_staged_complete(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        # A token read that persists nothing (failed/drifted segment) must
+        # never be pinned as a complete session_meta record.
+        monkeypatch.setattr(events.token_usage, "get_or_compute", lambda *a, **k: ({}, {}))
+        events.walk_session_metadata(tmp_path, since, token_cache_files={}, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["projects"] == {}
+
+    def test_version_gates_reject_stale_records(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        (entry,) = cache["projects"].values()
+        assert events._validated_session_meta(entry) is not None
+        for mutate in ("v", "tc"):
+            bad = json.loads(json.dumps(entry))
+            bad["session_meta"][mutate] = 999
+            assert events._validated_session_meta(bad) is None
+        missing = json.loads(json.dumps(entry))
+        del missing["session_meta"]["v"]
+        assert events._validated_session_meta(missing) is None
+
+    def test_legacy_string_cursor_normalizes_to_map(self, tmp_path):
+        cache = events._default_git_capture_cache()
+        cache["session_resume_after"] = "/some/project"
+        events._normalize_git_capture_cache(cache)
+        assert cache["session_resume_after"] == {}
+        cache["session_resume_after"] = {"/root": "/proj", "/bad": 3}
+        events._normalize_git_capture_cache(cache)
+        assert cache["session_resume_after"] == {"/root": "/proj"}
+
+    def test_interrupted_first_project_preserves_prior_cursor(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        cache["session_resume_after"] = {str(tmp_path): "seeded-cursor"}
+        mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 2.0
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        # Force rescan (digest change) so the first project interrupts.
+        proj = tmp_path / "projects" / "-tmp-a" / "session.jsonl"
+        proj.write_text(proj.read_text() + json.dumps({"cwd": "/tmp/a"}) + "\n")
+        events.walk_session_metadata(
+            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"].get(str(tmp_path)) == "seeded-cursor"
+
+    def test_multi_root_cursors_are_independent(self, tmp_path, monkeypatch):
+        root_a = tmp_path / "a"
+        root_b = tmp_path / "b"
+        _make_project(root_a, "-tmp-a1", "/tmp/a1")
+        _make_project(root_a, "-tmp-a2", "/tmp/a2")
+        _make_project(root_b, "-tmp-b1", "/tmp/b1")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 0.6
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        # Root A truncates; root B completes in the same staged flush. B's
+        # completion must not erase A's resume cursor.
+        events.walk_session_metadata(
+            root_a, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.walk_session_metadata(root_b, since, persist=True)
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert cache["session_resume_after"].get(str(root_a))
+        assert str(root_b) not in cache["session_resume_after"]
+
+    def test_interrupted_project_does_not_advance_cursor(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+
+        class _FakeTime:
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = _FakeTime()
+        monkeypatch.setattr(events, "time", clock)
+        real_scan = events._scan_one_project
+
+        def slow_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            clock.now += 2.0  # first project alone blows the 1s budget
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", slow_scan)
+        events.walk_session_metadata(
+            tmp_path, since, deadline_monotonic=clock.now + 1.0, persist=True
+        )
+        events.flush_pending_session_state()
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        # Nothing completed, so no cursor may be recorded past project one.
+        assert cache["session_resume_after"].get(str(tmp_path)) is None
+        assert cache["projects"] == {}
+
+    def test_mid_scan_append_continues_rotation_without_staging(self, tmp_path, monkeypatch):
+        """An actively written project must not stage torn meta or livelock later projects."""
+        proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        real_scan = events._scan_one_project
+
+        def appending_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            if proj_path == proj_a:
+                with (proj_a / "session.jsonl").open("a") as fh:
+                    fh.write(json.dumps({"cwd": "/tmp/a", "type": "user"}) + "\n")
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", appending_scan)
+        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        # Both projects appear on the wire; only the stable project (-tmp-b) is staged complete.
+        assert {p["claude_dir"] for p in out[0]["projects"]} == {"-tmp-a", "-tmp-b"}
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert str(proj_a) not in cache["projects"]
+        assert str(tmp_path / "projects" / "-tmp-b") in cache["projects"]
+
+    def test_flush_swallows_lock_contended_and_oserror_rows_degrade(self, tmp_path, monkeypatch):
+        proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+
+        def contended(_path):
+            raise events.lockedjson.LockContended("busy")
+
+        monkeypatch.setattr(events.lockedjson, "locked_json_rmw", contended)
+        events.flush_pending_session_state()
+        assert events._pending_session_state is None
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+
+        assert events._project_jsonl_rows(tmp_path / "nonexistent-dir") is None
+        assert proj_a.exists()
+
+    def test_probe_keeps_other_roots_and_probes_session_only_entry(self, tmp_path, monkeypatch):
+        claude_home = tmp_path / ".claude"
+        root_b = tmp_path / "claude-b"
+        repo_a = tmp_path / "repo-a"
+        (repo_a / ".git").mkdir(parents=True)
+        (repo_a / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        proj_a = _make_project(claude_home, "-tmp-a", str(repo_a))
+        proj_b = _make_project(root_b, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        # Seed root A with session_meta only and root B with an indexed entry.
+        events.walk_session_metadata(claude_home, since, persist=True)
+        events.flush_pending_session_state()
+        cache = events.read_git_capture_cache()
+        cache["projects"][str(proj_b)] = {
+            "dir_mtime_ns": 1,
+            "newest_jsonl_name": "session.jsonl",
+            "newest_jsonl_mtime_ns": 1,
+            "newest_jsonl_size": 10,
+            "cwd": "/tmp/b",
+            "git_root": None,
+        }
+        roots = events._probe_claude(cache=cache, since=since)
+        assert repo_a.resolve() in roots
+        after = cache["projects"]
+        assert str(proj_b) in after, "other root's indexed entry must survive pruning"
+        assert after[str(proj_a)].get("dir_mtime_ns") is not None
+        assert after[str(proj_a)].get("session_meta", {}).get("complete") is True
 
 
 # ---------------------------------------------------------------------------

@@ -78,7 +78,8 @@ def reader_case(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pyt
             # Muse also returns its frozen days: (result, live, frozen, learned, saw).
             output = (result, staged or {}, {}, learned, True)
         else:
-            output = (result, staged or {}, learned)
+            # Codex also returns its settled days (Track 85A).
+            output = (result, staged or {}, learned, {})
         scan = Mock(return_value=output)
         monkeypatch.setattr(owner, f"_scan_{name}_root", scan)
         return scan
@@ -306,7 +307,7 @@ def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, er
             raise error()
         if cache == hu.MUSE_CACHE_PATH:
             return (hu.HostUsageResult({}, True), {}, {}, False, False)
-        return (hu.HostUsageResult({}, True), {}, False)
+        return (hu.HostUsageResult({}, True), {}, False, {})
 
     owner, name = {
         codex_host.CACHE_PATH: (codex_host, "_scan_codex_root"),

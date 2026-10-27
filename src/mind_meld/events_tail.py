@@ -29,6 +29,7 @@ Each reader stays all-or-nothing internally.
 
 from __future__ import annotations
 
+import inspect
 import sys
 import time
 from contextlib import contextmanager
@@ -49,6 +50,7 @@ from mind_meld import (
 )
 from mind_meld import config as mm_config
 from mind_meld.config import (
+    DEFAULT_CAPTURE_BUDGET_MS,
     DEFAULT_HOST_USAGE_AUTOPUSH_BUDGET_MS,
     DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS,
 )
@@ -127,12 +129,84 @@ explicitly to every reader — no unattended caller may fall through to ``host_u
 5-second default, which is ~20x an autopush's entire walk budget."""
 
 
-def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, str]:
-    """Effective per-Mac budget and its source, from an already validated config."""
-    key = "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
+_pending_capture_budget_ms: int | None = None
+"""Capture total resolved for the next attended host snapshot (Track 85A).
+
+``cli._capture_attended_usage`` passes only ``host_budget_ms`` into
+``_capture_host_snapshot``; the ``resolve_host_read_budget`` call that
+produced it stashes the configured capture total here so the snapshot can
+partition host+warm inside half of it. Consumed (read and cleared) by the
+next ``_capture_host_snapshot`` call; ``None`` keeps legacy warm allowance."""
+
+_attended_host_elapsed_s: float | None = None
+"""Elapsed attended host+warm time, handed to the next ``_run_events_tail``.
+
+Set by ``_capture_host_snapshot`` when an attended warm hook is present and
+consumed by the attended tail in the same push process, so unused host
+budget flows to discovery/git/session capture (Track 85A d5)."""
+
+
+@contextmanager
+def preserve_pending_capture_budget():
+    """Keep a display-only resolve from planting/wiping the capture stash."""
+    global _pending_capture_budget_ms
+    saved = _pending_capture_budget_ms
+    try:
+        yield
+    finally:
+        _pending_capture_budget_ms = saved
+
+
+def resolve_capture_budget(config: dict) -> tuple[int, str]:
+    """Total attended capture budget and its source (Track 85A).
+
+    ``[retro] capture_budget_ms`` bounds host capture + inline warm plus the
+    events-tail discovery/git/session capture of one attended push
+    (``build_manifest_v2`` scan time is outside it). Unset keeps the 5 s
+    default from docs/SPEC.md O8.2.
+    """
     retro = config.get("retro")
-    if isinstance(retro, dict) and key in retro:
-        return retro[key], "config"
+    if isinstance(retro, dict) and "capture_budget_ms" in retro:
+        return retro["capture_budget_ms"], "config"
+    return DEFAULT_CAPTURE_BUDGET_MS, "default"
+
+
+def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, str]:
+    """Effective per-Mac budget and its source, from an already validated config.
+
+    Attended: a configured ``capture_budget_ms`` takes precedence over the
+    legacy interactive key and the host phase (sweep + inline warm) gets at
+    most half of it; the tail keeps the rest plus whatever the host phase
+    leaves unused. The return value is the host SWEEP budget: the legacy
+    interactive value (or its 500 ms default) capped at that half. With only
+    the legacy key configured, legacy sweep/warm behavior applies unchanged;
+    with neither key, the 5000 ms capture default partitions the phase.
+    Autopush always keeps its own small fixed share.
+    """
+    global _pending_capture_budget_ms
+    retro = config.get("retro")
+    if not interactive:
+        # An autopush resolve never feeds an attended snapshot; do not let a
+        # stale stash survive into an unrelated later capture.
+        _pending_capture_budget_ms = None
+    if interactive and isinstance(retro, dict) and "capture_budget_ms" in retro:
+        capture_ms = retro["capture_budget_ms"]
+        _pending_capture_budget_ms = capture_ms
+        sweep_ms = retro.get(
+            "host_usage_interactive_budget_ms", HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
+        )
+        return max(1, min(sweep_ms, capture_ms // 2)), "config"
+    if interactive:
+        _pending_capture_budget_ms = (
+            None
+            if isinstance(retro, dict) and "host_usage_interactive_budget_ms" in retro
+            else DEFAULT_CAPTURE_BUDGET_MS
+        )
+    setting_name = (
+        "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
+    )
+    if isinstance(retro, dict) and setting_name in retro:
+        return retro[setting_name], "config"
     return (
         HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         if interactive
@@ -329,10 +403,26 @@ def _enabled_claude_paths(sources: list[dict]) -> list[Path]:
     return [Path(s["path"]).expanduser() for s in sources if s.get("type") == "claude"]
 
 
+def _accepted_kwargs(fn: Callable, **kwargs: object) -> dict[str, object]:
+    """Subset of ``kwargs`` the (possibly test-patched) ``fn`` accepts.
+
+    Warmer budget kwargs (Track 85A d9) must not break one-arg monkeypatches
+    of ``warm_host_cache_inline`` / ``warm_token_cache_inline``.
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in params}
+
+
 def _decide_token_walk_policy(
     claude_paths: list[Path],
     *,
     quiet: bool,
+    warm_deadline_s: float | None = None,
 ) -> bool:
     """Return True if the events tail should aggregate token data this push.
 
@@ -376,7 +466,12 @@ def _decide_token_walk_policy(
     if not quiet:
         _diagnostic("mm: warming token cache (one-time, ~3s)...\n")
     try:
-        token_usage.warm_token_cache_inline(claude_paths)
+        warm_kwargs = (
+            _accepted_kwargs(token_usage.warm_token_cache_inline, deadline_s=warm_deadline_s)
+            if warm_deadline_s is not None
+            else {}
+        )
+        token_usage.warm_token_cache_inline(claude_paths, **warm_kwargs)
     except Exception as e:
         _diagnostic(f"mm: notice: token cache warm failed: {_exception_detail(e)}\n")
         return False
@@ -613,10 +708,7 @@ def _merge_warm_retry_capture(
 
 def _warm_host_cache_with_notice(reader: str = "codex") -> None:
     """Attended notice only; the capture core contains and publishes the read."""
-    _diagnostic(
-        f"mm: reading {reader} usage beyond [retro] host_usage_interactive_budget_ms "
-        f"(about {host_usage.DEFAULT_READ_BUDGET_S:.0f} s of scanning)...\n"
-    )
+    _diagnostic(f"mm: reading {reader} usage (bounded by the capture budget)...\n")
 
 
 @dataclass(frozen=True)
@@ -739,7 +831,19 @@ def _capture_host_snapshot(
     attended push ────────────────────> this helper
 
     Wrappers own notices and persistence; autopush supplies no warm callback.
+
+    Track 85A: with a configured ``capture_budget_ms`` (stashed by
+    ``resolve_host_read_budget``), sweep + inline warm share one phase
+    deadline of at most half the capture budget; without it (legacy key
+    only) each warm retry keeps its legacy fresh allowance. Elapsed
+    attended time is recorded for the events tail.
     """
+    global _attended_host_elapsed_s, _pending_capture_budget_ms
+    started = time.monotonic()
+    _attended_host_elapsed_s = None
+    capture_ms = _pending_capture_budget_ms
+    _pending_capture_budget_ms = None
+    phase_deadline = started + max(1, capture_ms // 2) / 1000.0 if capture_ms is not None else None
     host_capture = _capture_host_usage(
         host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
     )
@@ -763,11 +867,19 @@ def _capture_host_snapshot(
             warm_host_cache(name)
 
             def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
-                return host_registry.warm_host_cache_inline(reader=name)
+                remaining = max(0.0, deadline - time.monotonic())
+                return host_registry.warm_host_cache_inline(
+                    reader=name,
+                    **_accepted_kwargs(host_registry.warm_host_cache_inline, budget_s=remaining),
+                )
 
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
-                deadline=time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S,
+                deadline=(
+                    phase_deadline
+                    if phase_deadline is not None
+                    else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
+                ),
             )
             host_capture = _merge_warm_retry_capture(
                 host_capture,
@@ -789,6 +901,8 @@ def _capture_host_snapshot(
             )
         )
 
+    if warm_host_cache is not None:
+        _attended_host_elapsed_s = time.monotonic() - started
     return host_capture, host_rows
 
 
@@ -809,6 +923,7 @@ def _capture_event_snapshots(
     origin: str | None = None,
     persist: bool = False,
     use_repo_cursors: bool = False,
+    session_deadline: float | None = None,
 ) -> CaptureResult:
     """Capture device-stamped snapshots; persist discovery only when requested.
 
@@ -820,7 +935,8 @@ def _capture_event_snapshots(
     deadline begins after caller-owned preparation.
 
     Host capture runs last, on its own ``host_budget_ms`` deadline started
-    after the session walk's ``walk_done`` snapshot, and yields at most one
+    after the session walk (``walk_done`` is taken before the token-cache
+    write, Track 85A), and yields at most one
     optional row. Its outcome is returned as data — the notice and the
     ``autopush`` breadcrumb are wrapper policy. ``warm_host_cache`` is the
     attended notice hook only: its presence gates the core warm, which always
@@ -830,6 +946,7 @@ def _capture_event_snapshots(
     Codex at 166.66–168.26 ms before serialization and an empty-cache parse
     at 2,949.68 ms; see events-retro.md for the full interpreter/phase split.
     """
+    global _pending_capture_budget_ms
     if root_discovery_budget_ms is None:
         root_discovery_budget_ms = (
             events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
@@ -837,23 +954,46 @@ def _capture_event_snapshots(
             else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
         )
     if host_budget_ms is None:
-        host_budget_ms = resolve_host_read_budget(
-            config, interactive=budget_ms > events.WALK_TIME_BUDGET_AUTOPUSH_MS
-        )[0]
-    git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
-        config,
-        device_id,
-        since=since,
-        persist=persist,
-        use_repo_cursors=use_repo_cursors,
-        walk_budget_ms=git_budget_ms if git_budget_ms is not None else budget_ms,
-        root_discovery_budget_ms=root_discovery_budget_ms,
-        origin=origin,
-    )
+        # A suppressed snapshot never consumes the resolver's capture stash.
+        host_budget_ms = (
+            0
+            if suppress_host_capture
+            else resolve_host_read_budget(
+                config, interactive=budget_ms > events.WALK_TIME_BUDGET_AUTOPUSH_MS
+            )[0]
+        )
+    git_walk_budget_ms = git_budget_ms if git_budget_ms is not None else budget_ms
+    # No staged state from an earlier in-process capture may ride along.
+    events.discard_pending_session_state()
+    try:
+        git_rows, root_discovery, walk_budget_aborts, walk_errors = _capture_git_rows(
+            config,
+            device_id,
+            since=since,
+            persist=persist,
+            use_repo_cursors=use_repo_cursors,
+            walk_budget_ms=git_walk_budget_ms,
+            root_discovery_budget_ms=root_discovery_budget_ms,
+            origin=origin,
+            deadline_monotonic=session_deadline,
+        )
+    except BaseException:
+        _pending_capture_budget_ms = None
+        raise
     _roots, discovery_errors = root_discovery
 
-    token_cache_mode = prepare_token_cache()
-    deadline = time.monotonic() + budget_ms / 1000.0
+    try:
+        token_cache_mode = prepare_token_cache()
+    except BaseException:
+        _pending_capture_budget_ms = None
+        raise
+    # Track 85A: an attended tail passes ONE absolute deadline shared by
+    # git walk, token warm (in prepare) and this session walk, so the tail
+    # share is spent once, not once per phase. Legacy callers keep the
+    # fresh post-preparation deadline.
+    deadline = (
+        session_deadline if session_deadline is not None else time.monotonic() + budget_ms / 1000.0
+    )
     projects: list[dict] = []
     warn_lock_unavailable = False
 
@@ -864,20 +1004,41 @@ def _capture_event_snapshots(
                 since=since,
                 deadline_monotonic=deadline,
                 token_cache_files=token_cache_files,
+                **_accepted_kwargs(events.walk_session_metadata, persist=persist),
             ):
                 projects.extend(row.get("projects", []))
 
-    if token_cache_mode is None:
-        walk_sessions(None)
-    elif claude_paths:
-        with token_usage.lock_and_get_files(token_cache_mode) as files_dict:
-            # Only warn-mode contention is a caller-visible fact. A blocking
-            # lock normally cannot yield None, and init has no degradation
-            # breadcrumb to return even if a defensive implementation does.
-            warn_lock_unavailable = token_cache_mode == "warn" and files_dict is None
-            walk_sessions(files_dict)
-
-    walk_done = time.monotonic()
+    # Track 85A d9: walk_done is bound in every branch BEFORE the token
+    # cache context writes on exit, so cache serialization never masquerades
+    # as walk time; staged session state flushes only after that exit.
+    try:
+        if token_cache_mode is None:
+            walk_sessions(None)
+            walk_done = time.monotonic()
+        elif claude_paths:
+            with token_usage.lock_and_get_files(token_cache_mode) as files_dict:
+                # Only warn-mode contention is a caller-visible fact. A blocking
+                # lock normally cannot yield None, and init has no degradation
+                # breadcrumb to return even if a defensive implementation does.
+                warn_lock_unavailable = token_cache_mode == "warn" and files_dict is None
+                walk_sessions(files_dict)
+                walk_done = time.monotonic()
+        else:
+            walk_done = time.monotonic()
+    except BaseException:
+        # An unconsumed capture stash must not leak into a later capture.
+        # Staged session records are complete-only by construction, so
+        # flush them (the token lock has unwound by here) instead of
+        # discarding earlier roots' finished work.
+        _pending_capture_budget_ms = None
+        if persist:
+            try:
+                events.flush_pending_session_state()
+            except Exception:
+                events.discard_pending_session_state()
+        raise
+    if persist:
+        events.flush_pending_session_state()
     session_rows: list[dict] = []
     if claude_paths:
         session_rows.append(
@@ -932,6 +1093,7 @@ def _capture_git_rows(
     origin: str | None = None,
     persist: bool = False,
     use_repo_cursors: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
@@ -939,9 +1101,12 @@ def _capture_git_rows(
     non-push rows (init and recapture) so the aggregator can exclude them
     from push counts.
     """
+    discovery_deadline = time.monotonic() + root_discovery_budget_ms / 1000.0
+    if deadline_monotonic is not None:
+        discovery_deadline = min(discovery_deadline, deadline_monotonic)
     root_discovery = events.discover_git_roots(
         config,
-        deadline_monotonic=time.monotonic() + root_discovery_budget_ms / 1000.0,
+        deadline_monotonic=discovery_deadline,
         persist=persist,
         since=since,
     )
@@ -951,6 +1116,13 @@ def _capture_git_rows(
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
+    if deadline_monotonic is not None:
+        # The git walk gets what discovery actually left of the tail
+        # deadline; at <=0 walk_git_projects records budget_abort skips
+        # without spawning worker threads.
+        walk_budget_ms = min(
+            walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
+        )
     git_rows = events.walk_git_projects(
         roots,
         since=since,
@@ -1002,8 +1174,9 @@ def _run_events_tail(
     — branch-fragility-free, one-push-lag-free), dry_run no-op (preview
     contract), mm-events-resolved gate (covers fresh / migrated / un-
     migrated configs uniformly, Codex C1), the independent 50ms autopush /
-    100ms interactive root-discovery budget, the 250ms / 500ms walk budgets,
-    and the separate 250ms / 500ms host-read budget. The "budget exceeded"
+    100ms interactive root-discovery budget, and (Track 85A) the one
+    ``[retro] capture_budget_ms`` partition for attended pushes with autopush
+    keeping its fixed 250ms walk/share budgets. The "budget exceeded"
     notice reports on the session-metadata walk (the git walk self-bounds via
     its own total_budget_ms); the snapshot is taken before the self-bounded
     identity gather AND before host capture, so neither a cold 7d-TTL identity
@@ -1017,11 +1190,14 @@ def _run_events_tail(
     content-carrying refresh records one push and can advance the Git cursor.
     Unattended no-op pushes still do zero host work.
     """
+    global _attended_host_elapsed_s
     degradations: list[str] = Degradations()
     if dry_run or not capture_activity:
+        _attended_host_elapsed_s = None
         return degradations
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
+        _attended_host_elapsed_s = None
         return degradations
     try:
         events_dir = Path(mm_events_src["path"]).expanduser() / "events"
@@ -1032,18 +1208,61 @@ def _run_events_tail(
         # budget escalates independently when the cursor is old — mixing
         # the two would make a first-run 30-day cursor silently raise the
         # session-walk notice threshold (and break the AUTOPUSH=0 pin).
-        budget_ms = (
-            events.WALK_TIME_BUDGET_AUTOPUSH_MS if quiet else events.WALK_TIME_BUDGET_INTERACTIVE_MS
-        )
-        git_budget_ms = events.git_walk_budget_ms(quiet=quiet, since=since)
+        # Attended (Track 85A): one capture budget partitions across the
+        # pre-scan host phase and this tail. The tail keeps at least half,
+        # plus whatever the host phase left unused; autopush keeps its
+        # fixed 250 ms walk / 50 ms discovery shares.
+        tail_deadline: float | None = None
+        if quiet:
+            budget_ms = events.WALK_TIME_BUDGET_AUTOPUSH_MS
+            git_budget_ms = events.git_walk_budget_ms(quiet=True, since=since)
+            _attended_host_elapsed_s = None
+        else:
+            retro = config.get("retro")
+            legacy_only = (
+                isinstance(retro, dict)
+                and "host_usage_interactive_budget_ms" in retro
+                and "capture_budget_ms" not in retro
+            )
+            if legacy_only:
+                # Only the legacy key configured: legacy tail budgets and
+                # legacy warm allowance apply unchanged (Track 85A d6).
+                budget_ms = events.WALK_TIME_BUDGET_INTERACTIVE_MS
+                git_budget_ms = events.git_walk_budget_ms(quiet=False, since=since)
+                _attended_host_elapsed_s = None
+            else:
+                capture_ms, _capture_source = resolve_capture_budget(config)
+                elapsed_ms = int((_attended_host_elapsed_s or 0.0) * 1000)
+                _attended_host_elapsed_s = None
+                if suppress_host_capture:
+                    budget_ms = max(capture_ms // 2, capture_ms - elapsed_ms)
+                else:
+                    budget_ms = max(1, capture_ms // 2)
+                git_budget_ms = min(events.git_walk_budget_ms(quiet=False, since=since), budget_ms)
+                # One absolute deadline for git + warm + session walk.
+                tail_deadline = time.monotonic() + budget_ms / 1000.0
 
         claude_paths = _enabled_claude_paths(sources)
 
         def prepare_tail_token_cache() -> CacheLockMode:
             # Token cache wiring (v0.11.14+). This remains wrapper policy:
             # cold-cache warming and its notices must happen after the git
-            # walk, just as they did before extraction.
-            do_token_walk = _decide_token_walk_policy(claude_paths, quiet=quiet)
+            # walk, just as they did before extraction. Partitioned attended
+            # warming gets only the time left before the tail deadline
+            # (Track 85A d4/d9); legacy/autopush keep their former behavior.
+            warm_kwargs = (
+                _accepted_kwargs(
+                    _decide_token_walk_policy,
+                    warm_deadline_s=max(0.0, tail_deadline - time.monotonic()),
+                )
+                if tail_deadline is not None
+                else {}
+            )
+            do_token_walk = _decide_token_walk_policy(
+                claude_paths,
+                quiet=quiet,
+                **warm_kwargs,
+            )
             if not do_token_walk:
                 return None
             return "warn" if quiet else "block"
@@ -1062,7 +1281,12 @@ def _run_events_tail(
                 if quiet
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
-            host_budget_ms=resolve_host_read_budget(config, interactive=not quiet)[0],
+            host_budget_ms=(
+                0
+                if suppress_host_capture
+                else resolve_host_read_budget(config, interactive=not quiet)[0]
+            ),
+            session_deadline=tail_deadline,
             # Only the attended path may spend seconds warming each cold reader. On autopush a
             # cold corpus instead converges across pushes, because an aborted
             # scan now keeps its per-file progress.
@@ -1196,6 +1420,7 @@ def _run_events_tail(
             degradations.append(phrase)
             _diagnostic(f"mm: notice: {phrase}\n")
     except Exception as e:
+        _attended_host_elapsed_s = None
         degradations.append(f"events tail failed ({type(e).__name__})")
         _diagnostic(f"mm: notice: events tail failed: {_exception_detail(e)}\n")
     return degradations
