@@ -163,7 +163,9 @@ working. Elapsed attended host time is recorded in `events_tail` and the tail
 keeps at least half the capture budget plus whatever the host phase left
 unused. The tail's git walk, token warm and session walk share ONE absolute
 deadline minted from that share, so the share is spent once across phases,
-not once per phase. With only the legacy interactive key configured, host
+not once per phase (if discovery exhausts the deadline, `walk_git_projects`
+records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
+threads). With only the legacy interactive key configured, host
 sweep/warm and tail budgets keep their legacy behavior unchanged; with
 neither key the 5000 ms default partitions both phases, so the attended
 session walk is no longer capped at the legacy 500 ms; autopush always keeps
@@ -183,8 +185,11 @@ which miss non-newest and subagent appends. A record carries `v`
 (`SESSION_META_VERSION`), `tc` (token cache version), `complete` and
 `has_tokens`: a token walk never reuses a `has_tokens=False` record, a
 no-token walk strips token/skill keys from reused or retained metadata
-(preserving the absent-key signal), an interrupted project never overwrites a
-complete record and does not advance its root's rotation cursor, and
+(preserving the absent-key signal), an incomplete project never overwrites a
+complete record, a deadline-interrupted project stops the walk and does not
+advance its root's rotation cursor while non-deadline stat/token drift
+continues the walk and advances the cursor so an active project cannot livelock
+rotation, and
 unvisited projects retain their prior complete metadata so the v2 snapshot
 stays a full inventory. Staging requires a demonstrably complete scan:
 deadline unhit, file stats unchanged across the scan, and every file's token
@@ -1634,9 +1639,10 @@ source: `[retro] host_usage_autopush_budget_ms` defaults to 250 (100–5000),
 non-integers and out-of-range values; effective autopush cannot exceed the
 effective attended ceiling. Capture defaults, tail, init and attended push all use this
 resolver. The independent 5-second warm and 50 ms later-reader grace remain
-constants when no capture budget is configured; Track 85A's
+constants when only the legacy interactive key is configured; Track 85A's
 `[retro] capture_budget_ms` partition (see "One capture budget" above) takes
-precedence over the legacy interactive key when set. Invalid config still stops ordinary sync.
+precedence over the legacy interactive key when set (and applies the 5000 ms
+capture default when neither key is set). Invalid config still stops ordinary sync.
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers

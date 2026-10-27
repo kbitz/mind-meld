@@ -2450,14 +2450,76 @@ class TestCodexSettledDays85A:
 
         monkeypatch.setattr(codex_host, "_read_full_rollout", timed)
         attempts, result = 0, None
-        while attempts < 10:
+        while attempts < 3:
             attempts += 1
             result = codex_host.read_codex_usage(root, deadline=clock.now + 0.25)
             if result.complete:
                 break
         assert result is not None and result.complete is True
-        assert attempts > 1
+        assert 1 < attempts <= 3
         assert result.hosts["codex"]["2026-08-15"]["input"] == 75
+
+    def test_settled_eviction_and_freeze_guard_branches(
+        self, isolated_cache: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import shutil
+
+        root = tmp_path / "sessions"
+        rollout = _write_rollout(root, "rollout-old.jsonl", [_context(turn="turn-1"), _token(200)])
+        _age(rollout)
+        assert codex_host.read_codex_usage(root).complete is True
+
+        # (a) Backing files entry missing from host-tokens.json -> evicts and rescans.
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        data["files"] = {}
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        res = codex_host.read_codex_usage(root)
+        assert res.complete is True
+        assert res.hosts["codex"]["2026-08-15"]["input"] == 200
+        assert json.loads(isolated_cache.read_text(encoding="utf-8"))["files"]
+
+        # (b) _day_disk_digest raising _ReadFailure -> evicts to per-file loop.
+        real_digest = codex_host._day_disk_digest
+        monkeypatch.setattr(
+            codex_host,
+            "_day_disk_digest",
+            lambda _day, _dl: (_ for _ in ()).throw(hu._ReadFailure("io_error")),
+        )
+        res = codex_host.read_codex_usage(root)
+        assert res.complete is True
+        assert res.hosts["codex"]["2026-08-15"]["input"] == 200
+        monkeypatch.setattr(codex_host, "_day_disk_digest", real_digest)
+
+        # (c) Settled day directory deleted entirely -> dropped on complete pass.
+        shutil.rmtree(root / "2026" / "08" / "14")
+        res = codex_host.read_codex_usage(root)
+        assert res.complete is True
+        assert json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"] == {}
+
+        # (d) Cached entry carrying pending and recent day dir never freeze.
+        pending_file = _write_rollout(
+            root, "rollout-pend.jsonl", [_context(turn="t-pend"), _token(90)]
+        )
+        _age(pending_file)
+        assert codex_host.read_codex_usage(root).complete is True
+        data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        for entry in data["files"].values():
+            entry["pending"] = [[[90, 0, 0, 0], "2026-08-15", None]]
+        data["settled_days"] = {}
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        today = datetime.now(timezone.utc).date()
+        recent_dir = root / f"{today.year:04d}" / f"{today.month:02d}" / f"{today.day:02d}"
+        recent_dir.mkdir(parents=True, exist_ok=True)
+        recent_file = recent_dir / "rollout-today.jsonl"
+        recent_file.write_bytes(
+            b"".join(
+                json.dumps(r).encode("utf-8") + b"\n"
+                for r in [_context(turn="t-today"), _token(50)]
+            )
+        )
+        _age(recent_file)
+        assert codex_host.read_codex_usage(root).complete is True
+        assert json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"] == {}
 
 
 def _now_old_ns() -> int:

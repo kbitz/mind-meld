@@ -2686,3 +2686,103 @@ class TestCaptureBudget85A:
             suppress_host_capture=True,
         )
         assert order.index("lock-exit") < order.index("flush")
+
+    def test_git_and_walk_raise_clear_stash_and_production_warmers_accept_kwargs(
+        self, monkeypatch, tmp_path
+    ):
+        from contextlib import contextmanager
+
+        import mind_meld.host_registry as host_registry
+        import mind_meld.token_usage as token_usage
+
+        # Pin production warmer signatures so _accepted_kwargs never silently drops them.
+        assert events_tail._accepted_kwargs(
+            token_usage.warm_token_cache_inline, deadline_s=1.25
+        ) == {"deadline_s": 1.25}
+        assert events_tail._accepted_kwargs(
+            host_registry.warm_host_cache_inline, budget_s=1.25
+        ) == {"budget_s": 1.25}
+
+        # (1) _capture_git_rows raising clears _pending_capture_budget_ms.
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 4000)
+        monkeypatch.setattr(
+            events_tail,
+            "_capture_git_rows",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("git boom")),
+        )
+        with pytest.raises(RuntimeError, match="git boom"):
+            events_tail._capture_event_snapshots(
+                {},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=lambda: None,
+                host_readers=(),
+                suppress_host_capture=True,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+
+        # (2) walk_session_metadata raising inside lock_and_get_files clears stash and flushes.
+        order = []
+
+        @contextmanager
+        def fake_lock(_mode):
+            order.append("lock-enter")
+            try:
+                yield {}
+            finally:
+                order.append("lock-exit")
+
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 4000)
+        monkeypatch.setattr(events_tail, "_capture_git_rows", lambda *a, **k: ([], ([], []), 0, 0))
+        monkeypatch.setattr(events_tail.token_usage, "lock_and_get_files", fake_lock)
+        monkeypatch.setattr(
+            events_tail.events,
+            "walk_session_metadata",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("walk boom")),
+        )
+        monkeypatch.setattr(
+            events_tail.events,
+            "flush_pending_session_state",
+            lambda: order.append("flush"),
+        )
+        with pytest.raises(RuntimeError, match="walk boom"):
+            events_tail._capture_event_snapshots(
+                {},
+                [tmp_path],
+                "dev-a",
+                since=datetime.now(timezone.utc),
+                budget_ms=500,
+                prepare_token_cache=lambda: "block",
+                host_readers=(),
+                persist=True,
+                suppress_host_capture=True,
+            )
+        assert events_tail._pending_capture_budget_ms is None
+        assert order == ["lock-enter", "lock-exit", "flush"]
+
+    def test_zero_remaining_git_budget_records_budget_abort_skips(self, monkeypatch, tmp_path):
+        import time as _time
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.setattr(
+            events_tail.events,
+            "discover_git_roots",
+            lambda *a, **k: events_tail.events.GitRootDiscovery([repo], []),
+        )
+        rows, _disc, aborts, errs = events_tail._capture_git_rows(
+            {},
+            "dev-a",
+            since=datetime.now(timezone.utc),
+            walk_budget_ms=500,
+            root_discovery_budget_ms=50,
+            deadline_monotonic=_time.monotonic() - 0.1,
+        )
+        assert len(rows) == 1
+        assert aborts == 1
+        assert errs == 0
+        assert rows[0]["skipped"] == [
+            {"path": str(repo), "reason": events_tail.events.WALK_SKIP_BUDGET_ABORT}
+        ]

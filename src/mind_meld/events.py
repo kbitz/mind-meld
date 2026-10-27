@@ -1221,6 +1221,12 @@ def walk_git_projects(
         snapshot["projects"] = projects
         snapshot["skipped"] = skipped
         return [snapshot]
+    if total_budget_ms <= 0:
+        snapshot["projects"] = projects
+        snapshot["skipped"] = [
+            {"path": str(root), "reason": WALK_SKIP_BUDGET_ABORT} for root in dict.fromkeys(roots)
+        ]
+        return [snapshot]
 
     n_repos = len(roots)
     per_repo_timeout_ms = min(
@@ -1731,27 +1737,35 @@ def walk_session_metadata(
             if meta is not None and persist:
                 # Stage only a demonstrably complete scan: deadline not
                 # hit, file stats unchanged across the scan, and (token
-                # walks) every file's buckets persisted. Anything else is
-                # interrupted: prefer the prior complete meta on the wire
-                # and keep the rotation cursor before this project.
+                # walks) every file's buckets persisted. A deadline hit
+                # stops the walk and keeps the rotation cursor before this
+                # project; non-deadline drift (e.g. an active session
+                # appending mid-scan) skips staging and prefers any prior
+                # complete record, but continues the walk and advances the
+                # cursor so one active project cannot livelock rotation.
                 rows_after = _project_jsonl_rows(proj_path, deadline_monotonic=deadline_monotonic)
+                digest_after = (
+                    _rows_digest(proj_path, rows_after) if rows_after is not None else None
+                )
+                deadline_hit = _deadline_expired(deadline_monotonic)
                 complete = (
-                    not _deadline_expired(deadline_monotonic)
+                    not deadline_hit
                     and rows is not None
-                    and rows_after == rows
+                    and digest is not None
+                    and digest_after == digest
                     and (token_cache_files is None or _token_rows_complete(rows, token_cache_files))
                 )
                 if complete:
                     staged[key] = {
                         "v": SESSION_META_VERSION,
                         "tc": token_usage.CACHE_VERSION,
-                        "digest": _rows_digest(proj_path, rows),
+                        "digest": digest,
                         "complete": True,
                         "has_tokens": token_cache_files is not None,
                         "meta": copy.deepcopy(meta),
                     }
                 else:
-                    interrupted = True
+                    interrupted = deadline_hit
                     prior = (
                         _reuse_session_meta(
                             record,

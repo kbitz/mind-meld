@@ -202,9 +202,11 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
             if isinstance(retro, dict) and "host_usage_interactive_budget_ms" in retro
             else DEFAULT_CAPTURE_BUDGET_MS
         )
-    key = "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
-    if isinstance(retro, dict) and key in retro:
-        return retro[key], "config"
+    setting_name = (
+        "host_usage_interactive_budget_ms" if interactive else "host_usage_autopush_budget_ms"
+    )
+    if isinstance(retro, dict) and setting_name in retro:
+        return retro[setting_name], "config"
     return (
         HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         if interactive
@@ -944,6 +946,7 @@ def _capture_event_snapshots(
     Codex at 166.66–168.26 ms before serialization and an empty-cache parse
     at 2,949.68 ms; see events-retro.md for the full interpreter/phase split.
     """
+    global _pending_capture_budget_ms
     if root_discovery_budget_ms is None:
         root_discovery_budget_ms = (
             events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
@@ -975,14 +978,14 @@ def _capture_event_snapshots(
             deadline_monotonic=session_deadline,
         )
     except BaseException:
-        globals()["_pending_capture_budget_ms"] = None
+        _pending_capture_budget_ms = None
         raise
     _roots, discovery_errors = root_discovery
 
     try:
         token_cache_mode = prepare_token_cache()
     except BaseException:
-        globals()["_pending_capture_budget_ms"] = None
+        _pending_capture_budget_ms = None
         raise
     # Track 85A: an attended tail passes ONE absolute deadline shared by
     # git walk, token warm (in prepare) and this session walk, so the tail
@@ -1027,7 +1030,7 @@ def _capture_event_snapshots(
         # Staged session records are complete-only by construction, so
         # flush them (the token lock has unwound by here) instead of
         # discarding earlier roots' finished work.
-        globals()["_pending_capture_budget_ms"] = None
+        _pending_capture_budget_ms = None
         if persist:
             try:
                 events.flush_pending_session_state()
@@ -1115,19 +1118,16 @@ def _capture_git_rows(
         walk_kwargs["use_repo_cursors"] = True
     if deadline_monotonic is not None:
         # The git walk gets what discovery actually left of the tail
-        # deadline; with nothing left it does not spawn at all.
+        # deadline; at <=0 walk_git_projects records budget_abort skips
+        # without spawning worker threads.
         walk_budget_ms = min(
             walk_budget_ms, max(0, int((deadline_monotonic - time.monotonic()) * 1000))
         )
-    git_rows = (
-        events.walk_git_projects(
-            roots,
-            since=since,
-            total_budget_ms=walk_budget_ms,
-            **walk_kwargs,
-        )
-        if walk_budget_ms > 0
-        else []
+    git_rows = events.walk_git_projects(
+        roots,
+        since=since,
+        total_budget_ms=walk_budget_ms,
+        **walk_kwargs,
     )
     skipped = git_rows[0].get("skipped") or [] if git_rows else []
     aborts, errs = events.walk_skip_counts(skipped)

@@ -628,31 +628,8 @@ def _freeze_settled_days(
 
 def _iter_rollouts(root: Path, deadline: float):
     """Yield only regular non-symlink date-nested Codex rollout files."""
-    if host_usage._expired(deadline):
-        raise host_usage._ReadFailure("deadline")
-    try:
-        if not root.exists():
-            return
-        for year in host_usage._sorted_children(root, deadline):
-            if not host_usage._YEAR_PART.fullmatch(year.name) or not host_usage._is_directory(year):
-                continue
-            for month in host_usage._sorted_children(year, deadline):
-                if not host_usage._MONTH_OR_DAY_PART.fullmatch(
-                    month.name
-                ) or not host_usage._is_directory(month):
-                    continue
-                for day in host_usage._sorted_children(month, deadline):
-                    if not host_usage._MONTH_OR_DAY_PART.fullmatch(
-                        day.name
-                    ) or not host_usage._is_directory(day):
-                        continue
-                    for candidate in host_usage._sorted_children(day, deadline):
-                        if not _ROLLOUT_NAME.fullmatch(candidate.name):
-                            continue
-                        if host_usage._is_regular_non_symlink(candidate):
-                            yield candidate
-    except OSError as exc:
-        raise host_usage._ReadFailure("io_error") from exc
+    for _rel, _day, paths in _iter_rollout_days(root, deadline):
+        yield from paths
 
 
 def _iter_rollout_days(root: Path, deadline: float) -> list[tuple[str, Path, list[Path]]]:

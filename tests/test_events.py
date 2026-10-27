@@ -1646,6 +1646,74 @@ class TestWalkSessionMetadata85A:
         assert cache["session_resume_after"].get(str(tmp_path)) is None
         assert cache["projects"] == {}
 
+    def test_mid_scan_append_continues_rotation_without_staging(self, tmp_path, monkeypatch):
+        """An actively written project must not stage torn meta or livelock later projects."""
+        proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        _make_project(tmp_path, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        real_scan = events._scan_one_project
+
+        def appending_scan(proj_path, **kwargs):
+            result = real_scan(proj_path, **kwargs)
+            if proj_path == proj_a:
+                with (proj_a / "session.jsonl").open("a") as fh:
+                    fh.write(json.dumps({"cwd": "/tmp/a", "type": "user"}) + "\n")
+            return result
+
+        monkeypatch.setattr(events, "_scan_one_project", appending_scan)
+        out = events.walk_session_metadata(tmp_path, since, persist=True)
+        events.flush_pending_session_state()
+        # Both projects appear on the wire; only the stable project (-tmp-b) is staged complete.
+        assert {p["claude_dir"] for p in out[0]["projects"]} == {"-tmp-a", "-tmp-b"}
+        cache = json.loads(mm_config.GIT_CAPTURE_CACHE_PATH.read_text())
+        assert str(proj_a) not in cache["projects"]
+        assert str(tmp_path / "projects" / "-tmp-b") in cache["projects"]
+
+    def test_flush_swallows_lock_contended_and_oserror_rows_degrade(self, tmp_path, monkeypatch):
+        proj_a = _make_project(tmp_path, "-tmp-a", "/tmp/a")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        events.walk_session_metadata(tmp_path, since, persist=True)
+
+        def contended(_path):
+            raise events.lockedjson.LockContended("busy")
+
+        monkeypatch.setattr(events.lockedjson, "locked_json_rmw", contended)
+        events.flush_pending_session_state()
+        assert events._pending_session_state is None
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+
+        assert events._project_jsonl_rows(tmp_path / "nonexistent-dir") is None
+        assert proj_a.exists()
+
+    def test_probe_keeps_other_roots_and_probes_session_only_entry(self, tmp_path, monkeypatch):
+        claude_home = tmp_path / ".claude"
+        root_b = tmp_path / "claude-b"
+        repo_a = tmp_path / "repo-a"
+        (repo_a / ".git").mkdir(parents=True)
+        (repo_a / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        proj_a = _make_project(claude_home, "-tmp-a", str(repo_a))
+        proj_b = _make_project(root_b, "-tmp-b", "/tmp/b")
+        since = datetime.now(timezone.utc) - timedelta(days=30)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        # Seed root A with session_meta only and root B with an indexed entry.
+        events.walk_session_metadata(claude_home, since, persist=True)
+        events.flush_pending_session_state()
+        cache = events.read_git_capture_cache()
+        cache["projects"][str(proj_b)] = {
+            "dir_mtime_ns": 1,
+            "newest_jsonl_name": "session.jsonl",
+            "newest_jsonl_mtime_ns": 1,
+            "newest_jsonl_size": 10,
+            "cwd": "/tmp/b",
+            "git_root": None,
+        }
+        roots = events._probe_claude(cache=cache, since=since)
+        assert repo_a.resolve() in roots
+        after = cache["projects"]
+        assert str(proj_b) in after, "other root's indexed entry must survive pruning"
+        assert after[str(proj_a)].get("dir_mtime_ns") is not None
+        assert after[str(proj_a)].get("session_meta", {}).get("complete") is True
+
 
 # ---------------------------------------------------------------------------
 # T1 — last_push_ts (cursor derivation)
