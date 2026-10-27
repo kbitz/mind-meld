@@ -249,7 +249,7 @@ Group 93: Cutover runbook
 
 **Total: 8 groups . 8 tracks remaining.**
 
-Every Track edits a module another Track also edits, and each move-only Track (86A, 88A) sits just before the first Track that changes the code it moves, per docs/SPEC.md's core-and-extensions constraint, so the packer emits one serial chain: pull module → Syncthing-tolerant reads → init module → fleet creation → portable paths → fast-forward pulls → Syncthing status → cutover runbook. Satisfied prerequisites on shipped Tracks (82A, 84A, 85A, 77A) stay written on the cards that named them.
+Every Track edits a module another Track also edits, and each move-only Track (86A, 88A) sits just before the first Track that changes the code it moves, per docs/SPEC.md's core-and-extensions constraint, so the packer emits one serial chain: pull module → Syncthing-tolerant reads → init module → fleet creation → portable paths → fast-forward pulls → Syncthing status → cutover runbook. Track 85A stays on Tracks 86A and 87A, and Track 77A stays on Track 92A. Track 82A was named by Tracks 83A and 85A, and Track 84A by Track 85A; those cards shipped with the edges.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 93's runbook. Deferred work, including Codex memory sync and per-path conflict policies, waits in Future with its triggers.
 
