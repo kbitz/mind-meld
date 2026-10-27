@@ -2618,7 +2618,6 @@ class TestInversion5E:
     def test_pull_refuses_when_peer_pre_inversion(self, tmp_path, monkeypatch):
         """Mixed-version refusal: peer's last_seen_version < INVERSION_MIN_VERSION
         => mm pull exits non-zero before any I/O with peer name in message."""
-        pass
         from mind_meld.devices import register_device as _register
         from mind_meld.storage.keys import device_key
 
@@ -2895,7 +2894,6 @@ class TestShipFixes5E:
         next pull's migration sweep. Without the mtime gate,
         `_resolve_interactive_loop`'s prefix-based dispatch would
         silently flip the (l)/(r) ops and destroy local edits."""
-        pass
         from mind_meld.manifest import is_pre_inversion_conflict_filename
         from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
@@ -2932,7 +2930,6 @@ class TestShipFixes5E:
 
     def test_backdated_peer_mtime_does_not_migrate_v1_sidecar(self, tmp_path, monkeypatch):
         """B6: a fresh sidecar carrying a 90-day peer mtime is NOT migrated."""
-        pass
         from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
         from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
@@ -7074,7 +7071,6 @@ class TestConflictOwnershipEncryptedPull:
     ) -> None:
         import hashlib
 
-        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7150,7 +7146,6 @@ class TestMixedTimestampEncryptedPull:
     def test_jsonl_then_ordinary_file_both_succeed(self, tmp_path: Path, quiet: bool):
         import hashlib
 
-        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7205,7 +7200,6 @@ class TestMixedTimestampEncryptedPull:
     def test_merge_noop_retry_keeps_bytes_and_mtime(self, tmp_path: Path, monkeypatch):
         import hashlib
 
-        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7264,7 +7258,6 @@ class TestMixedTimestampEncryptedPull:
         """
         import hashlib
 
-        pass
         from mind_meld.storage.keys import blob_key
 
         two = b'{"ts":2,"k":"same"}\n'
@@ -9335,7 +9328,7 @@ def _check_read_only_policy62(source):
 
 
 def test_read_only_policy62():
-    for module in (cli_module, cli_module.core, cli_module.statusflow):
+    for module in (cli_module, cli_module.core, cli_module.statusflow, cli_module.pullflow):
         _check_read_only_policy62(Path(module.__file__).read_text())
     for function in (cli_module.core._get_config, core._maybe_prompt_migration):
         parameter = inspect.signature(function).parameters["read_only"]
@@ -9345,6 +9338,7 @@ def test_read_only_policy62():
         "def wrong(): _get_config()",
         "def wrong(): _maybe_prompt_migration({})",
         "def wrong(): core._get_config()",
+        "def wrong(): core._maybe_prompt_migration({})",
         "def wrong(): upgrade.run_transition_hook({})",
     ):
         with pytest.raises(AssertionError):

@@ -1141,7 +1141,6 @@ def _seed_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_conflict_path_build_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    pass
 
     local, _old = _seed_conflict_pair(tmp_path)
     monkeypatch.setattr(
@@ -1158,7 +1157,6 @@ def test_conflict_path_build_error_is_sanitized_stderr(tmp_path, monkeypatch, ca
 
 
 def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    pass
 
     local, _old = _seed_conflict_pair(tmp_path)
     monkeypatch.setattr(
@@ -1174,7 +1172,6 @@ def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys)
 
 
 def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    pass
 
     local, old = _seed_conflict_pair(tmp_path)
     real_unlink = Path.unlink
@@ -1195,7 +1192,6 @@ def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsy
 
 def test_autopull_cleanup_only_conflict_keeps_success_breadcrumb(tmp_path, monkeypatch):
     """Cleanup leftovers are conflicted extras, not a failed/degraded pull."""
-    pass
 
     _setup_real_config(tmp_path, monkeypatch)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -1577,7 +1573,6 @@ def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):
     total_failed. Per-file failures (decrypt, write, ValueError on corrupted
     device_id) incremented the count without ever reaching the user.
     """
-    pass
 
     _setup_real_config(tmp_path, monkeypatch)
 

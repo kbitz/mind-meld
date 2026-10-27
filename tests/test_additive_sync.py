@@ -541,7 +541,6 @@ class TestConflictManifestMerge:
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
         """_cleanup_conflict_copies deletes only validator-approved conflicts."""
-        pass
 
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"original")

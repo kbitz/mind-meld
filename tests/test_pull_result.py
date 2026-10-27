@@ -240,7 +240,6 @@ class TestAutopullDegradedBreadcrumb:
         Uses a synthetic PullResult so the test doesn't depend on the corrupt-
         peer short-circuit ordering inside _pull_core.
         """
-        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -258,7 +257,6 @@ class TestAutopullDegradedBreadcrumb:
 
     def test_degraded_on_per_file_failure(self, tmp_path, monkeypatch):
         """Deterministic stub: PullResult with total_failed > 0 → degraded."""
-        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
@@ -281,7 +279,6 @@ class TestAutopullDegradedBreadcrumb:
         The prior integration-style test depended on corrupt-peer short-
         circuit ordering and could only assert one signal in practice.
         """
-        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)

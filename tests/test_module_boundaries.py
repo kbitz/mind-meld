@@ -805,6 +805,7 @@ def test_no_consumer_owned_agent_name_lists() -> None:
         SRC / "cli.py",
         SRC / "core.py",
         SRC / "statusflow.py",
+        SRC / "pullflow.py",
         Path(__file__).resolve().parent / "conftest.py",
         Path(__file__).resolve().parent / "test_skill_link.py",
         Path(__file__),

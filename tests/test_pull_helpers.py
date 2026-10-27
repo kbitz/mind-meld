@@ -1167,7 +1167,6 @@ class TestPrintPullSummaryStderrRouting:
     """
 
     def test_corrupt_peer_stderr_in_quiet(self, capsys) -> None:
-        pass
 
         pullflow._print_pull_summary(
             pullflow.PullResult(),
@@ -1183,7 +1182,6 @@ class TestPrintPullSummaryStderrRouting:
         assert "corrupt" in captured.err
 
     def test_unknown_source_stderr_in_quiet(self, capsys) -> None:
-        pass
 
         pullflow._print_pull_summary(
             pullflow.PullResult(),
@@ -1199,7 +1197,6 @@ class TestPrintPullSummaryStderrRouting:
         assert "not configured" in captured.err
 
     def test_fsync_warning_stderr_in_quiet(self, tmp_path: Path, capsys) -> None:
-        pass
 
         pullflow._print_pull_summary(
             pullflow.PullResult(),
@@ -1215,7 +1212,6 @@ class TestPrintPullSummaryStderrRouting:
         assert "disk full" in captured.err
 
     def test_quiet_suppresses_cosmetic_summary(self, capsys) -> None:
-        pass
 
         pullflow._print_pull_summary(
             pullflow.PullResult(total_written=5, elapsed=1.0),
@@ -1232,7 +1228,6 @@ class TestPrintPullSummaryStderrRouting:
         assert "Pull complete" not in captured.err
 
     def test_nonquiet_shows_cosmetic_summary(self, capsys) -> None:
-        pass
 
         pullflow._print_pull_summary(
             pullflow.PullResult(total_written=5, elapsed=1.0),
@@ -1287,7 +1282,6 @@ class TestPullSummaryInlinePaths:
     """
 
     def test_conflicted_paths_listed_under_per_source_line(self, capsys) -> None:
-        pass
 
         per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
         pullflow._print_pull_summary(
@@ -1305,7 +1299,6 @@ class TestPullSummaryInlinePaths:
             assert path in out
 
     def test_failed_paths_listed_separately(self, capsys) -> None:
-        pass
 
         per_source = _make_per_source(
             "claude", "machine-a", failed=["bad-blob.md", "bad-decrypt.md"]
@@ -1324,7 +1317,6 @@ class TestPullSummaryInlinePaths:
         assert "bad-decrypt.md" in out
 
     def test_cap_at_20_shows_overflow(self, capsys) -> None:
-        pass
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
@@ -1347,7 +1339,6 @@ class TestPullSummaryInlinePaths:
 
     def test_verbose_unlocks_cap(self, capsys) -> None:
         """D5: --verbose lifts the 20-path cap on inline path display."""
-        pass
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
@@ -1368,7 +1359,6 @@ class TestPullSummaryInlinePaths:
 
     def test_zero_conflicts_no_inline_list(self, capsys) -> None:
         """No conflicted/failed paths => no inline list (no false positives)."""
-        pass
 
         per_source = _make_per_source("claude", "machine-a", written=["new.md"])
         pullflow._print_pull_summary(
@@ -1395,7 +1385,6 @@ class TestPullSummaryQuietContract:
     """
 
     def test_quiet_routes_per_source_conflicts_to_stderr(self, capsys) -> None:
-        pass
 
         per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
         pullflow._print_pull_summary(
@@ -1417,7 +1406,6 @@ class TestPullSummaryQuietContract:
         assert "Pull complete" not in captured.out
 
     def test_quiet_routes_per_source_failed_to_stderr(self, capsys) -> None:
-        pass
 
         per_source = _make_per_source("claude", "machine-a", failed=["bad.md"])
         pullflow._print_pull_summary(
@@ -1440,7 +1428,6 @@ class TestPullSummaryQuietContract:
         cli.py:2422 is suppressed in quiet mode, so the stderr line is
         the only context the user gets).
         """
-        pass
 
         ps_a = _make_per_source("claude", "machine-a", conflicted=["x.md"])
         ps_b = _make_per_source("claude", "machine-b", conflicted=["y.md"])
@@ -1461,7 +1448,6 @@ class TestPullSummaryQuietContract:
 
     def test_quiet_zero_conflicts_no_stderr(self, capsys) -> None:
         """No conflicts/failures => no stderr noise (no false positives)."""
-        pass
 
         per_source = _make_per_source("claude", "machine-a", written=["new.md"])
         pullflow._print_pull_summary(
@@ -1478,7 +1464,6 @@ class TestPullSummaryQuietContract:
 
     def test_quiet_cap_with_overflow_marker(self, capsys) -> None:
         """quiet stderr also caps at 20 (with --verbose unlock per D5)."""
-        pass
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
@@ -1530,7 +1515,6 @@ class TestDownloadAndApplyQuietAndProgress:
         """REGRESSION: D11/Task 4 quiet contract — no widget, no banner,
         no per-file lines reach stdout/stderr in quiet mode.
         """
-        pass
 
         backend = self._force_get_failure(monkeypatch)
         bt, outcomes = pullflow._download_and_apply(
@@ -1554,7 +1538,6 @@ class TestDownloadAndApplyQuietAndProgress:
         Rich Progress with total=0 renders an empty bar; div-by-zero risk
         on percentage display in some Rich versions. Gate it out entirely.
         """
-        pass
 
         backend = MagicMock()
         bt, outcomes = pullflow._download_and_apply(
@@ -2623,7 +2606,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         return backend
 
     def test_rejects_parent_dir_escape(self, tmp_path, monkeypatch) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
         # Construct a base inside tmp_path with a known sibling we can
@@ -2654,7 +2636,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         apply_spy.assert_not_called()
 
     def test_rejects_absolute_path_override(self, tmp_path, monkeypatch) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
         base = tmp_path / "src" / "claude"
@@ -2683,7 +2664,6 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_accepts_legitimate_nested_path(self, tmp_path, monkeypatch) -> None:
         """Sanity: the guard does NOT false-positive on legitimate
         nested paths inside the source root."""
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"good-bytes")
         base = tmp_path / "src" / "claude"
@@ -2709,7 +2689,6 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_preserves_local_symlink_destination(
         self, tmp_path, monkeypatch, dangling: bool
     ) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2736,7 +2715,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert not target.exists() if dangling else target.read_text() == "managed"
 
     def test_preserves_symlinked_parent_below_source_root(self, tmp_path, monkeypatch) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2760,7 +2738,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert outcomes["skipped"] == ["skills/tool/SKILL.md"]
 
     def test_allows_a_symlinked_source_root(self, tmp_path, monkeypatch) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         actual_base = tmp_path / "actual-src"
@@ -2782,7 +2759,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert outcomes["written"] == ["skills/tool/SKILL.md"]
 
     def test_direct_apply_preserves_leaf_symlink(self, tmp_path) -> None:
-        pass
 
         target = tmp_path / "managed-agents.md"
         target.write_text("managed")
@@ -2804,7 +2780,6 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_non_quiet_symlink_skip_emits_one_breadcrumb(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
-        pass
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2832,7 +2807,6 @@ class TestIncomingDigestCheck:
     def test_mismatch_fails_before_apply_and_preserves_bytes(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
-        pass
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque-ciphertext")
@@ -2864,7 +2838,6 @@ class TestIncomingDigestCheck:
         assert "content check failed" in capsys.readouterr().out
 
     def test_mismatch_then_later_valid_file_applies(self, tmp_path, monkeypatch) -> None:
-        pass
 
         payloads = {"bad.md": b"wrong", "good.md": b"good-bytes"}
 
@@ -2890,7 +2863,6 @@ class TestIncomingDigestCheck:
         assert not (base / "bad.md").exists()
 
     def test_quiet_mismatch_has_no_per_file_stdout(self, tmp_path, monkeypatch, capsys) -> None:
-        pass
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque")
@@ -2911,7 +2883,6 @@ class TestIncomingDigestCheck:
         assert outcomes["failed"] == ["a.md"]
 
     def test_mismatch_does_not_enter_conflict_replacement(self, tmp_path, monkeypatch) -> None:
-        pass
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque")

@@ -19,8 +19,6 @@ import pytest
 
 from mind_meld import pullflow
 
-pass
-
 
 class TestDetectCaseInsensitiveFs:
     def test_missing_path_probes_existing_ancestor(self, tmp_path, monkeypatch):

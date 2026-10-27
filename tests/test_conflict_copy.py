@@ -2148,7 +2148,6 @@ class TestResolveLocalMtimeBump:
         """`_drain_inline_bumps` stamps each recorded canonical with an mtime
         strictly greater than the recorded peer mtime, and future-clamps at
         now+60s (inherited from `_bump_canonical_mtime_post_resolve`)."""
-        pass
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"local content")
@@ -2686,8 +2685,6 @@ class TestResolveLocalMtimeBump:
         MagicMock backend + monkeypatched decrypt + monkeypatched
         _apply_incoming_file so the gate is exercised, not mocked."""
         from unittest.mock import MagicMock
-
-        pass
 
         rel = "f.md"
         canonical = tmp_path / rel

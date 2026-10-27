@@ -333,16 +333,45 @@ _ROW = re.compile(r"^\|(?P<cell>[^|]*)\|", re.M)
 # Any `path/to/file.py:symbol` occurrence anywhere in the routing cell.
 _CITATION = re.compile(r"`(?P<file>[\w/]+\.py):")
 _SYMBOL = re.compile(r"`?([A-Za-z_][\w.]*\*?)`?")
-_OBSOLETE_ROUTING_CITATIONS = frozenset(
-    {("cli.py", "status"), ("cli.py", "diag")}
-    | {
-        ("cli.py", symbol)
+_OBSOLETE_ROUTING_CITATIONS: dict[tuple[str, str], str] = {
+    ("cli.py", "status"): "statusflow.py",
+    ("cli.py", "diag"): "statusflow.py",
+    **{
+        ("cli.py", symbol): "core.py"
         for symbol in [
-            "ApplyOutcome",
-            "ConflictMode",
             "DRY_RUN_COMPLETE",
             "DRY_RUN_COMPLETE_LOCK_FREE",
             "DRY_RUN_REFUSAL",
+            "_SyncProgress",
+            "_UPDATE_SPINNER_JOIN_SECONDS",
+            "_UPDATE_SPINNER_TICK_SECONDS",
+            "_cleanup_conflict_copies",
+            "_collect_peer_tombstones",
+            "_current_sync_progress",
+            "_explicit_retired_sources",
+            "_incoming_nested_roots",
+            "_make_manifest_validator",
+            "_maybe_prompt_migration",
+            "_migrate_config_core",
+            "_migration_state_path",
+            "_print_apply_warning",
+            "_recover_prior_manifest",
+            "_release_sync_lock",
+            "_start_sync_progress",
+            "_stop_sync_progress",
+            "_sync_diagnostic",
+            "_sync_progress_advance",
+            "_sync_progress_ensure_batch",
+            "_sync_progress_phase",
+            "_sync_progress_start_batch",
+            "_sync_warning",
+        ]
+    },
+    **{
+        ("cli.py", symbol): "pullflow.py"
+        for symbol in [
+            "ApplyOutcome",
+            "ConflictMode",
             "INVERSION_MIN_VERSION",
             "PULL_NOT_PREVIEWED",
             "PullResult",
@@ -354,20 +383,14 @@ _OBSOLETE_ROUTING_CITATIONS = frozenset(
             "_FsyncWarning",
             "_INLINE_PATH_CAP",
             "_PerSourceResult",
-            "_SyncProgress",
-            "_UPDATE_SPINNER_JOIN_SECONDS",
-            "_UPDATE_SPINNER_TICK_SECONDS",
             "_UnknownSourceWarning",
             "_apply_conflict",
             "_apply_incoming_file",
             "_apply_merge",
             "_apply_write",
             "_check_fleet_version_or_refuse",
-            "_cleanup_conflict_copies",
-            "_collect_peer_tombstones",
             "_conflict_name_is_free",
             "_conflict_review_notice",
-            "_current_sync_progress",
             "_detect_case_insensitive_fs",
             "_detect_pull_case_collisions",
             "_download_and_apply",
@@ -375,21 +398,14 @@ _OBSOLETE_ROUTING_CITATIONS = frozenset(
             "_drop_case_collisions_from_manifests",
             "_empty_outcomes",
             "_existing_post_inversion_sidecars_from_peer",
-            "_explicit_retired_sources",
             "_fail_mode_refusals",
             "_first_existing_ancestor",
             "_format_inline_paths",
             "_fsync_touched_parents",
-            "_incoming_nested_roots",
             "_invalidate_inline_bump",
-            "_make_manifest_validator",
-            "_maybe_prompt_migration",
-            "_migrate_config_core",
-            "_migration_state_path",
             "_plan_pull",
             "_prefetch_manifests",
             "_preflight_conflicts",
-            "_print_apply_warning",
             "_print_inline_paths",
             "_print_preflight_conflicts",
             "_print_pull_prediction",
@@ -399,22 +415,12 @@ _OBSOLETE_ROUTING_CITATIONS = frozenset(
             "_pull_one_source",
             "_record_inline_bump",
             "_record_source_bookkeeping",
-            "_recover_prior_manifest",
-            "_release_sync_lock",
             "_select_devices",
-            "_start_sync_progress",
-            "_stop_sync_progress",
-            "_sync_diagnostic",
-            "_sync_progress_advance",
-            "_sync_progress_ensure_batch",
-            "_sync_progress_phase",
-            "_sync_progress_start_batch",
-            "_sync_warning",
             "_warn_apply_failure",
             "conflict_filename",
         ]
-    }
-)
+    },
+}
 
 
 def _defined_names(path: Path) -> set[str]:
@@ -613,7 +619,8 @@ def test_every_routing_row_resolves_at_least_one_symbol() -> None:
 def test_routing_citation_resolves(fname: str, symbol: str) -> None:
     """Every `<file>.py:<symbol>` in the table names a real definition."""
     assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
-        f"{ROUTING_MD_REL} routes to the cli.py:{symbol} command shell; cite statusflow.py"
+        f"{ROUTING_MD_REL} routes to {fname}:{symbol}; "
+        f"cite {_OBSOLETE_ROUTING_CITATIONS[(fname, symbol)]}"
     )
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
@@ -1050,7 +1057,7 @@ def test_invariant_doc_citation_resolves(doc: str, fname: str, symbol: str) -> N
     routed correctly and then sent straight back to the wrong file.
     """
     assert (fname, symbol) not in _OBSOLETE_ROUTING_CITATIONS, (
-        f"{doc} routes to the cli.py:{symbol} command shell; cite statusflow.py"
+        f"{doc} routes to {fname}:{symbol}; cite {_OBSOLETE_ROUTING_CITATIONS[(fname, symbol)]}"
     )
     candidates = [SRC / fname, SRC / "skills" / "retro_fleet" / Path(fname).name]
     path = next((c for c in candidates if c.exists()), None)
