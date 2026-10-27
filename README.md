@@ -304,7 +304,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs; discovery and walks retain their existing independent budgets. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
+- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
@@ -1449,10 +1449,13 @@ double counting.
 
 Capture and source bootstrap run under the mm lock before the manifest scan.
 There is one bounded sweep and at most one warm read per cold reader; that warm
-read supplies the result. Allow **about five seconds of scanning per cold reader,
-and multiple readers can be cold**. Budgets are cooperative, not hard timeouts;
-content sync follows capture. A smaller interactive budget does not cap the
-separate warm allowance. Autopush stays gated on substantive changes and never
+read supplies the result. Multiple readers can be cold. Budgets are
+cooperative, not hard timeouts; content sync follows capture. Lowering
+`host_usage_interactive_budget_ms` does not cap the separate warm allowance. A
+set `capture_budget_ms`, and the 5,000 ms default when neither key is set, caps
+host sweep and inline warm together at half of that total. Only the legacy
+interactive key, with no `capture_budget_ms`, keeps about five seconds of warm
+scanning per cold reader. Autopush stays gated on substantive changes and never
 warms; it is not an attended substitute with the same failure reporting.
 
 A successful append writes one host row. With no pending Git catch-up and no
@@ -1657,8 +1660,8 @@ Older undated blockers gain a date when this version first observes them.
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
 | `partial` | A final record is unfinished. | Let the host finish the record, then `mm push`; `mm diag` shows the reader's state. |
-| `deadline`, last complete read over the autopush budget | The warm read costs more than this Mac allows. | Raise `[retro] host_usage_autopush_budget_ms` using the last complete read and sweep estimate in `mm diag`; keep it at or below the interactive budget. |
-| `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` for attended warming (about 5 s of scanning per cold reader, not a hard ceiling), then compare the last complete read and counts in `mm diag`. |
+| `deadline`, last complete read over the autopush budget | The warm read costs more than this Mac allows. | Raise `[retro] host_usage_autopush_budget_ms` using the last complete read and sweep estimate in `mm diag`. Stay at or below `capture_budget_ms` when that key is set, and at or below an explicitly set interactive budget. When neither is set, stay at or below the 500 ms interactive default. When both apply, stay at or below the smaller one. |
+| `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` again. Host sweep and inline warm share at most half of `capture_budget_ms` (default 5,000 ms). Only an explicit `host_usage_interactive_budget_ms`, with no `capture_budget_ms`, keeps about 5 s of warm scanning per cold reader. Then compare the last complete read and counts in `mm diag`. |
 
 Every attended push attempts a fresh capture. If every consented reader later
 fails, no host row is written and this snapshot ages. If another reader
@@ -1684,8 +1687,10 @@ over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
 its own small fixed shares regardless.
 
 Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **500 ms** (range **250–5,000**).
-All must be integers, and effective autopush must not exceed `capture_budget_ms`
-when set or an explicitly set interactive budget.
+All must be integers. Effective autopush must not exceed `capture_budget_ms`
+when that key is set, and must not exceed an explicitly set interactive budget.
+When neither is set, it must not exceed the 500 ms interactive default. When
+both ceilings apply, it must not exceed the smaller one.
 Invalid values stop sync like any other `[retro]` error. Raising
 a budget trades more autopush latency for read headroom. This is per Mac and
 per mm version: remeasure after corpus or interpreter changes; do not copy a
@@ -1693,8 +1698,10 @@ fleet-wide number. `mm diag` shows each effective value and its `default` or
 `config` source, each reader's **last complete read**, and the combined sweep
 estimate. The estimate excludes cache writes and later-reader grace and is
 not a publication check. Missing measurements say `unknown`; future dates
-say `in the future`. The attended warm remains about 5 s of cooperative
-scanning, independent of these settings.
+say `in the future`. Lowering `host_usage_interactive_budget_ms` does not cap
+the separate warm allowance. A set `capture_budget_ms`, and the 5,000 ms
+default when neither key is set, caps host sweep and inline warm together at
+half of that total.
 
 An attended `mm push` re-reads usage even when nothing else needs uploading. A
 no-op `mm autopush` still does not: autopush stays change-gated and never warms,
@@ -1731,8 +1738,12 @@ The text line is `agy conversation DBs cached: N of M`;
 missing, malformed, version-mismatched or locked caches show `unknown`, not 0.
 Both reader dictionaries also expose `last_complete_ms`, `last_complete_at`,
 and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
-`autopush_ms`, `autopush_source`, `interactive_ms`, `interactive_source`, and
-`warm_ms` (5000). Timings exclude cache serialization. Dates are normalized
+`autopush_ms`, `autopush_source`, `interactive_ms`, `interactive_source`,
+`capture_ms`, `capture_source`, and
+`warm_ms` (always 5000, the legacy warm constant). `capture_ms` is the
+attended total. `warm_ms` is not that cap: host sweep and inline warm share
+at most half of `capture_ms` unless only the legacy interactive key is set.
+Timings exclude cache serialization. Dates are normalized
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without
 opening host logs or needing a passphrase; Codex counts rollout paths under both

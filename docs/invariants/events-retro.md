@@ -172,7 +172,9 @@ session walk is no longer capped at the legacy 500 ms; autopush always keeps
 its fixed 250 ms walk / 250 ms host / 50 ms discovery shares and never warms.
 Config validation checks `host_usage_autopush_budget_ms` against
 `capture_budget_ms` when set and against an explicitly set legacy interactive
-value (the legacy rule).
+value (the legacy rule). When neither key is set, autopush still must not
+exceed the 500 ms interactive default. When both ceilings apply, autopush
+must not exceed the smaller one.
 
 `walk_session_metadata(..., persist=False)` is the legacy read-only walk.
 With `persist=True` it rotates its starting project via the per-Claude-root
@@ -1849,10 +1851,12 @@ probe is unnecessary: every ready attended push captures, not just blocked ones.
 `/roadmap` must reconcile T3-B later; this Track does not edit its files.
 
 Budgets are cooperative, not hard timeouts. Content sync follows optional
-capture. Allow about five seconds of scanning per cold reader, and both readers
-can be cold. Lowering `host_usage_interactive_budget_ms` does not cap the separate
-warm allowance; a configured `[retro] capture_budget_ms` does (host sweep and
-warm share at most half of it — Track 85A). Autopush is still change-gated, never warms, and retains its own
+capture. Both readers can be cold. Lowering `host_usage_interactive_budget_ms`
+does not cap the separate warm allowance: only that legacy key, with no
+`capture_budget_ms`, keeps about five seconds of warm scanning per cold reader.
+A set `[retro] capture_budget_ms`, and the 5,000 ms default when neither key is
+set, caps host sweep and warm together at half of that total (Track 85A).
+Autopush is still change-gated, never warms, and retains its own
 quiet error/lock behavior; it is not an equivalent attended no-capture command.
 
 **Publication and content acceptance are independent.** `_capture_attended_usage`
@@ -2264,10 +2268,13 @@ through partial commits; Cursor commits stable-file progress but reparses
 rewritten files, so repeated short passes need not converge.
 
 `warm_host_cache` is now the attended-notice hook only. After
-`mm: reading <reader> usage beyond the push budget (about 5 s of scanning)...`,
+`mm: reading <reader> usage (bounded by the capture budget)...`,
 `_capture_host_snapshot` wraps `warm_host_cache_inline(reader=name)` in a
-singleton `_capture_host_usage` call with an explicit 5-second deadline.
-Its result merges through `_merge_warm_retry_capture(retried_names={name})`.
+singleton `_capture_host_usage` call. The deadline is at most half of
+`capture_budget_ms` when that key is set, and half of the 5,000 ms default
+when neither key is set. Only an explicit legacy interactive budget, with no
+`capture_budget_ms`, keeps the 5-second warm deadline.
+The warm result merges through `_merge_warm_retry_capture(retried_names={name})`.
 There is no second bounded read: a completed warm contributes its totals,
 empty/partial state is preserved, `unsupported` replaces the first deadline,
 exceptions become `unavailable`, and `no_metadata_ledger` silently omits that

@@ -370,7 +370,10 @@ capture and publication evidence (`host_publication`). The latter includes
 `state`, `publication`, `readers`, and `readiness` (ready / disabled / unavailable /
 no-reader / unknown); unreadable config means unknown, without bootstrapping paths.
 `host_read_budgets` contains `autopush_ms`, `autopush_source`, `interactive_ms`,
-`interactive_source`, and `warm_ms`. These are local diagnostics, not an attempt
+`interactive_source`, `capture_ms`, `capture_source`, and `warm_ms` (always
+5000, the legacy warm constant). `capture_ms` is the attended total; `warm_ms`
+is not the effective cap when the capture budget partitions the host phase.
+These are local diagnostics, not an attempt
 receipt or proof that another Mac has received a row. See
 [host capture invariants](docs/invariants/events-retro.md#host-usage-snapshot-capture-load-bearing-track-19a).
 
