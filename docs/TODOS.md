@@ -44,6 +44,30 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [plan-eng-review:track=86A] Give corrupt-peer, fsync and missing-blob pull warnings a named remedy
+- **Why:** The attended pull error surface is close to agent-ready, but the corrupt-peer, fsync-durability and missing/corrupt-blob warning lines name no fix command or doc anchor (unlike `_warn_apply_failure`'s errno remedy + URL), the missing-blob cause prints only when verbose-and-not-quiet while the summary says "Fix the warning above", and those lines carry no stable cause code. Found by the DX native review of Track 86A (2026-10-27, scored at origin/main 892de54); deliberately not fixed inside 86A's verbatim move.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit trigger: Track 87A's waiting outcome, which rewrites exactly these lines' semantics (missing blob = waiting, not failed). Fix then: one remedy/doc anchor per warning line and a stable `[cause]` code, keeping SPEC O8. Evidence: dx-review.md in the track-86a-move-pull-apply review record (Pass 3 table).
+
+### [plan-eng-review:track=86A] Measure developer time-to-first-green-pull-test once
+- **Why:** Both DX voices for 86A left five-minute setup and two-minute doc discovery unmeasured; the extraction series (86A, 88A) optimizes contributor/agent orientation on an unmeasured clock.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Deferred from the 2026-10-27 autoplan-lean of 86A (DX Pass 8, scored 4/10). Do it in the 87A session: time routing-README → green `./bin/check tests/test_pullflow.py` from a cold session and note the number in the 87A PR. No instrumentation; one honest stopwatch reading beats a dashboard.
+
+### [plan-eng-review:track=86A] Parallelize 87A's storage-side half if 86A slips
+- **Why:** The roadmap's serial chain puts all Syncthing-visible behavior (87A onward) behind 86A's invisible refactor; roughly half of 87A (storage/local.py, devices.py, statusflow foreign-file handling) does not depend on where pull code lives. The CEO native review (2026-10-27) priced this as accepted serial cost under SPEC's move-first rule, with the parallelization question explicitly left to the roadmap.
+- **Effort:** S (decision) / M (rebase cost if taken)
+- **Priority:** P3
+- **Context:** Revisit only if 86A has not landed while 87A is otherwise ready to start; then run 87A's storage-side task in a parallel workspace and rebase over the move. Otherwise the serial order in docs/ROADMAP.md stands.
+
+### [plan-eng-review:track=86A] Reuse changer-tagged inventories for the 88A init extraction
+- **Why:** 86A's CEO review found untagged shared residue is how core.py (1,284 lines at 892de54) becomes the next cli.py; 86A tags every inventory member with its downstream changer (87A/90A/91A or closure-only + reason) and stops if closure-only+core lines exceed half. 88A (move init out of cli.py) faces the identical risk and should inherit the discipline rather than rediscover it.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** From the 2026-10-27 autoplan-lean of 86A (CEO F2/d8). Apply when carding/planning 88A: same tagging + stop-and-surface trigger in its task 1.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-27

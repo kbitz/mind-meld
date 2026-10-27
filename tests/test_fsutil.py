@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mind_meld import fsutil
+from mind_meld import fsutil, pullflow
 from mind_meld.errors import StorageError
 
 
@@ -1632,7 +1632,7 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         if writer.startswith("migration_"):
             return cli._write_migration_breadcrumb(["custom"] if writer.endswith("write") else [])
         if writer == "pull_apply":
-            return cli._apply_incoming_file(path, "note.md", b"new", {}, "peer")
+            return pullflow._apply_incoming_file(path, "note.md", b"new", {}, "peer")
         if writer == "init_storage":
             # CliRunner catches Exception only; the guard's BaseException escapes.
             result = CliRunner().invoke(cli.app, ["init"], input=f"{path}\nTest Mac\npw\npw\n")

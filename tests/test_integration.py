@@ -24,9 +24,9 @@ from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
 from mind_meld import config as config_module
+from mind_meld import core, events_tail, fsutil, pullflow, synclog
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
-from mind_meld import events_tail, fsutil, synclog
 from mind_meld import host_registry as _mm_host_registry
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld.cli import app
@@ -354,7 +354,7 @@ class TestPushPullRoundTrip:
         save_config(config, config_path)
         self._activate(monkeypatch, config_path)
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
+        monkeypatch.setattr(core, "_maybe_prompt_migration", lambda _config, **_kw: None)
 
         for _ in range(2):
             pushed = runner.invoke(app, ["push"])
@@ -1863,7 +1863,7 @@ class TestDisabledSourcesTombstoneSuppression:
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
         # The test drives the post-retirement config itself; do not let
         # the interactive migration prompt rewrite it mid-setup.
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
+        monkeypatch.setattr(core, "_maybe_prompt_migration", lambda _config, **_kw: None)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
         enc = backend.get("manifests/dev-a/manifest.json.enc")
@@ -1968,7 +1968,7 @@ class TestDisabledSourcesTombstoneSuppression:
         save_config(config_a, config_path_a)
 
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda _config, **_kw: None)
+        monkeypatch.setattr(core, "_maybe_prompt_migration", lambda _config, **_kw: None)
         self._activate(monkeypatch, config_path_b)
         assert runner.invoke(app, ["push"]).exit_code == 0
 
@@ -2191,6 +2191,7 @@ class TestMigrateConfigCommand:
                 raise OSError("simulated config write failure")
 
             monkeypatch.setattr(cli_module, "patch_config_on_disk", fail_write)
+            monkeypatch.setattr(core, "patch_config_on_disk", fail_write)
         if outcome == "locked":
             cli_module.acquire_lock()
         try:
@@ -2227,14 +2228,14 @@ class TestMigrateConfigCommand:
         monkeypatch.setattr(config_module, "CONFIG_PATH", config_path)
         self._redirect_lock(monkeypatch, tmp_path)
         before = config_path.read_bytes()
-        original = cli_module._maybe_prompt_migration
+        original = core._maybe_prompt_migration
 
         def prompt(config, **kwargs):
             monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
             monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
             return original(config, **kwargs)
 
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", prompt)
+        monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
         monkeypatch.setattr(typer, "confirm", lambda *a, **kw: True)
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 0, result.output
@@ -2366,7 +2367,7 @@ class TestMigrateConfigCommand:
 
         before = config_path.read_bytes()
         config = config_module.load_config(config_path)
-        cli_module._maybe_prompt_migration(config, read_only=False)
+        core._maybe_prompt_migration(config, read_only=False)
         assert config_path.read_bytes() == before
         joined = " ".join(captured)
         assert "retired" in joined.lower() or "opencode" in joined
@@ -2617,7 +2618,7 @@ class TestInversion5E:
     def test_pull_refuses_when_peer_pre_inversion(self, tmp_path, monkeypatch):
         """Mixed-version refusal: peer's last_seen_version < INVERSION_MIN_VERSION
         => mm pull exits non-zero before any I/O with peer name in message."""
-        from mind_meld.cli import INVERSION_MIN_VERSION
+        pass
         from mind_meld.devices import register_device as _register
         from mind_meld.storage.keys import device_key
 
@@ -2652,7 +2653,7 @@ class TestInversion5E:
         assert "OldPeer" in combined
         assert "Mixed-version" in combined or "0.9.1" in combined
         # Threshold appears in the message.
-        assert INVERSION_MIN_VERSION in combined
+        assert pullflow.INVERSION_MIN_VERSION in combined
 
     def test_pull_refuses_when_peer_last_seen_version_missing(self, tmp_path, monkeypatch):
         """Peer last_seen present (active), last_seen_version missing — REFUSE."""
@@ -2894,9 +2895,7 @@ class TestShipFixes5E:
         next pull's migration sweep. Without the mtime gate,
         `_resolve_interactive_loop`'s prefix-based dispatch would
         silently flip the (l)/(r) ops and destroy local edits."""
-        from mind_meld.cli import (
-            conflict_filename,
-        )
+        pass
         from mind_meld.manifest import is_pre_inversion_conflict_filename
         from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
@@ -2912,7 +2911,7 @@ class TestShipFixes5E:
         # path-builder. Mtime will be NOW (i.e. >= marker_ts).
         canonical = tmp_path / "doc.md"
         canonical.write_bytes(b"local content")
-        sidecar_path = conflict_filename(canonical, "devAAAA1234")
+        sidecar_path = pullflow.conflict_filename(canonical, "devAAAA1234")
         sidecar_path.write_bytes(b"remote bytes from peer")
         # Migration sweep must NOT rename this file.
         result = _migrate_pre_inversion_conflict(sidecar_path)
@@ -2933,7 +2932,7 @@ class TestShipFixes5E:
 
     def test_backdated_peer_mtime_does_not_migrate_v1_sidecar(self, tmp_path, monkeypatch):
         """B6: a fresh sidecar carrying a 90-day peer mtime is NOT migrated."""
-        from mind_meld.cli import conflict_filename
+        pass
         from mind_meld.manifest import is_pre_inversion_conflict_filename, is_v1_conflict_filename
         from mind_meld.resolveflow import _ensure_inversion_marker, _migrate_pre_inversion_conflict
 
@@ -2943,7 +2942,7 @@ class TestShipFixes5E:
         assert marker_ts is not None
         canonical = tmp_path / "doc.md"
         canonical.write_bytes(b"local")
-        sidecar_path = conflict_filename(canonical, "devAAAA1234")
+        sidecar_path = pullflow.conflict_filename(canonical, "devAAAA1234")
         sidecar_path.write_bytes(b"remote")
         ancient = time.time() - 90 * 86400
         os.utime(sidecar_path, (ancient, ancient))
@@ -3414,7 +3413,7 @@ class TestGCSafety:
         assert old_event.exists() == dry_run
         assert own_tmp.exists() == dry_run
         if dry_run:
-            assert cli_module.DRY_RUN_COMPLETE in " ".join(result.output.split())
+            assert core.DRY_RUN_COMPLETE in " ".join(result.output.split())
             assert _preview_tree(env["claude"].parent) == before
 
     @pytest.mark.parametrize("dry_run", [False, True])
@@ -5593,12 +5592,12 @@ def test_usage_only_refresh_twice_preserves_retro_and_skips_all_activity(capture
     real_core = cli_module._push_core
     results = []
 
-    def core(*a, **kw):
+    def fake_core(*a, **kw):
         result = real_core(*a, **kw)
         results.append(result)
         return result
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     for verbose in (False, True):
         result = runner.invoke(app, ["push", *(["--verbose"] if verbose else [])])
         assert result.exit_code == 0, result.output
@@ -6014,11 +6013,11 @@ def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pendin
     calls = []
     real_core = cli_module._push_core
 
-    def core(*a, **kw):
+    def fake_core(*a, **kw):
         calls.append(True)
         return real_core(*a, **kw)
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     assert reason in result.output
@@ -7075,7 +7074,7 @@ class TestConflictOwnershipEncryptedPull:
     ) -> None:
         import hashlib
 
-        from mind_meld.cli import _download_and_apply
+        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7116,7 +7115,7 @@ class TestConflictOwnershipEncryptedPull:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", selective_write)
         pending = {first.resolve(): 1.0}
-        _bt, outcomes = _download_and_apply(
+        _bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             to_download,
@@ -7151,7 +7150,7 @@ class TestMixedTimestampEncryptedPull:
     def test_jsonl_then_ordinary_file_both_succeed(self, tmp_path: Path, quiet: bool):
         import hashlib
 
-        from mind_meld.cli import _download_and_apply
+        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7186,7 +7185,7 @@ class TestMixedTimestampEncryptedPull:
         assert list(to_download) == ["events.jsonl", "later.txt"]
         assert not ordinary_path.exists()
 
-        bt, outcomes = _download_and_apply(
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             to_download,
@@ -7206,7 +7205,7 @@ class TestMixedTimestampEncryptedPull:
     def test_merge_noop_retry_keeps_bytes_and_mtime(self, tmp_path: Path, monkeypatch):
         import hashlib
 
-        from mind_meld.cli import _download_and_apply
+        pass
         from mind_meld.storage.keys import blob_key
 
         storage_dir = tmp_path / "storage"
@@ -7238,7 +7237,7 @@ class TestMixedTimestampEncryptedPull:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", spy_write)
         before = jsonl_path.stat().st_mtime_ns
-        _bt, outcomes = _download_and_apply(
+        _bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             to_download,
@@ -7265,7 +7264,7 @@ class TestMixedTimestampEncryptedPull:
         """
         import hashlib
 
-        from mind_meld.cli import _download_and_apply
+        pass
         from mind_meld.storage.keys import blob_key
 
         two = b'{"ts":2,"k":"same"}\n'
@@ -7298,7 +7297,7 @@ class TestMixedTimestampEncryptedPull:
             }
         }
 
-        _bt, first = _download_and_apply(
+        _bt, first = pullflow._download_and_apply(
             backend,
             base,
             to_download,
@@ -7320,7 +7319,7 @@ class TestMixedTimestampEncryptedPull:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", spy_write)
         before = jsonl_path.stat().st_mtime_ns
-        _bt, second = _download_and_apply(
+        _bt, second = pullflow._download_and_apply(
             backend,
             base,
             to_download,
@@ -8498,14 +8497,14 @@ def apply_failure_fleet(tmp_path, monkeypatch):
     def ordered(names):
         # Pin the apply sequence explicitly for interruption assertions. The
         # real diff/filter/download stack runs; this only orders its batch.
-        original = cli_module._download_and_apply
+        original = pullflow._download_and_apply
 
         def apply(backend, base_path, to_download, *args, **kwargs):
             order = [prefix + name for name in names]
             assert set(to_download) == set(order)
             return original(backend, base_path, {p: to_download[p] for p in order}, *args, **kwargs)
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", apply)
+        monkeypatch.setattr(pullflow, "_download_and_apply", apply)
 
     return SimpleNamespace(
         base=base,
@@ -8574,7 +8573,7 @@ class TestApplyRecovery53A:
         fleet = apply_failure_fleet
         calls = []
         monkeypatch.setattr(
-            cli_module,
+            core,
             "_cleanup_conflict_copies",
             lambda *a, **k: calls.append(1) or 0,
         )
@@ -8647,13 +8646,13 @@ class TestApplyRecovery53A:
 
             monkeypatch.setattr(LocalBackend, "get", get)
         else:
-            original_apply = cli_module._apply_incoming_file
+            original_apply = pullflow._apply_incoming_file
             if failure in ("post-sidecar", "post-lcs"):
                 (fleet.memory / "bbb.txt").write_bytes(b"local")
                 os.utime(fleet.memory / "bbb.txt", (1, 1))
             if failure == "post-lcs":
                 monkeypatch.setattr(
-                    cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("merge", b"local\nb\n")
+                    pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("merge", b"local\nb\n")
                 )
 
             def apply(**kwargs):
@@ -8665,18 +8664,18 @@ class TestApplyRecovery53A:
                     raise exc
                 return original_apply(**kwargs)
 
-            monkeypatch.setattr(cli_module, "_apply_incoming_file", apply)
-        original_core = cli_module._pull_core
+            monkeypatch.setattr(pullflow, "_apply_incoming_file", apply)
+        original_core = pullflow._pull_core
         propagated = []
 
-        def core(*args, **kwargs):
+        def observed_pull(*args, **kwargs):
             try:
                 return original_core(*args, **kwargs)
             except BaseException as error:
                 propagated.append(error)
                 raise
 
-        monkeypatch.setattr(cli_module, "_pull_core", core)
+        monkeypatch.setattr(pullflow, "_pull_core", observed_pull)
         result = runner.invoke(app, [command])
         assert propagated == [exc]
         if command == "autopull" and failure != "keyboard":
@@ -8730,7 +8729,7 @@ class TestApplyRecovery53A:
         fleet.ordered(["new.txt", "aaa.txt", "bbb.txt"])
         drain = []
         monkeypatch.setattr(
-            cli_module, "_drain_inline_bumps", lambda pending: drain.append(dict(pending))
+            pullflow, "_drain_inline_bumps", lambda pending: drain.append(dict(pending))
         )
         result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\na\n")
         assert result.exit_code != 0
@@ -8770,27 +8769,27 @@ class TestApplyRecovery53A:
                 original_append(**kwargs)
 
         monkeypatch.setattr(cli_module.pullhistory, "append", append)
-        original_core = cli_module._pull_core
+        original_core = pullflow._pull_core
         propagated = []
 
-        def core(*args, **kwargs):
+        def observed_pull(*args, **kwargs):
             try:
                 return original_core(*args, **kwargs)
             except BaseException as error:
                 propagated.append(error)
                 raise
 
-        monkeypatch.setattr(cli_module, "_pull_core", core)
-        original_summary = cli_module._print_pull_summary
+        monkeypatch.setattr(pullflow, "_pull_core", observed_pull)
+        original_summary = pullflow._print_pull_summary
         summaries = []
 
         def summary(result, **kwargs):
             summaries.append((result.total_written, kwargs["interruption"]))
             original_summary(result, **kwargs)
 
-        monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+        monkeypatch.setattr(pullflow, "_print_pull_summary", summary)
         drains = []
-        monkeypatch.setattr(cli_module, "_drain_inline_bumps", lambda pending: drains.append(1))
+        monkeypatch.setattr(pullflow, "_drain_inline_bumps", lambda pending: drains.append(1))
         result = runner.invoke(app, [command])
         assert result.exit_code != 0
         assert propagated == [exc]
@@ -8821,14 +8820,14 @@ class TestApplyRecovery53A:
         fleet.publish({"aaa.txt": b"a", "bbb.txt": b"b"})
         fleet.ordered(["aaa.txt", "bbb.txt"])
         exc = RuntimeError("original recovery probe")
-        original_apply = cli_module._apply_incoming_file
+        original_apply = pullflow._apply_incoming_file
 
         def apply(**kwargs):
             if kwargs["rel_path"] == fleet.prefix + "bbb.txt":
                 raise exc
             return original_apply(**kwargs)
 
-        monkeypatch.setattr(cli_module, "_apply_incoming_file", apply)
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", apply)
 
         def boom(*args, **kwargs):
             raise exc
@@ -8839,7 +8838,7 @@ class TestApplyRecovery53A:
                 assert fleet.memory in fleet.fsync_calls
                 raise SystemExit(44)
 
-            monkeypatch.setattr(cli_module, "write_sync_log", log)
+            monkeypatch.setattr(pullflow, "write_sync_log", log)
         elif recovery_failure == "fsync":
             original_fsync = fsutil.fsync_dir
 
@@ -8874,19 +8873,19 @@ class TestApplyRecovery53A:
             def summary(*args, **kwargs):
                 raise SystemExit(45)
 
-            monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+            monkeypatch.setattr(pullflow, "_print_pull_summary", summary)
         elif recovery_failure == "cleanup":
-            monkeypatch.setattr(cli_module, "_apply_incoming_file", original_apply)
-            monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", boom)
+            monkeypatch.setattr(pullflow, "_apply_incoming_file", original_apply)
+            monkeypatch.setattr(core, "_cleanup_conflict_copies", boom)
         elif recovery_failure == "bookkeeping":
-            monkeypatch.setattr(cli_module, "_apply_incoming_file", original_apply)
-            original_log = cli_module.write_sync_log
+            monkeypatch.setattr(pullflow, "_apply_incoming_file", original_apply)
+            original_log = pullflow.write_sync_log
 
             def log(**kwargs):
                 original_log(**kwargs)
                 raise exc
 
-            monkeypatch.setattr(cli_module, "write_sync_log", log)
+            monkeypatch.setattr(pullflow, "write_sync_log", log)
         elif recovery_failure == "before-source":
             original_print = cli_module.console.print
 
@@ -8902,26 +8901,26 @@ class TestApplyRecovery53A:
                     def __getitem__(self, key):
                         raise exc
 
-                original_select = cli_module._select_devices
+                original_select = pullflow._select_devices
 
                 def select(*args):
                     all_devices, _ = original_select(*args)
                     return all_devices, [BadDevice()]
 
-                monkeypatch.setattr(cli_module, "_select_devices", select)
+                monkeypatch.setattr(pullflow, "_select_devices", select)
             else:
                 monkeypatch.setattr(cli_module.console, "print", output)
-        original_core = cli_module._pull_core
+        original_core = pullflow._pull_core
         propagated = []
 
-        def core(*args, **kwargs):
+        def observed_pull(*args, **kwargs):
             try:
                 return original_core(*args, **kwargs)
             except BaseException as error:
                 propagated.append(error)
                 raise
 
-        monkeypatch.setattr(cli_module, "_pull_core", core)
+        monkeypatch.setattr(pullflow, "_pull_core", observed_pull)
         result = runner.invoke(app, [command, *(["--verbose"] if command == "pull" else [])])
         assert propagated == [exc]
         if command == "pull":
@@ -8962,7 +8961,7 @@ class TestApplyRecovery53A:
         def forbidden(*args, **kwargs):
             pytest.fail("preview reached the apply boundary")
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", forbidden)
+        monkeypatch.setattr(pullflow, "_download_and_apply", forbidden)
         result = runner.invoke(app, command)
         assert result.exit_code == 0, result.output
         assert (fleet.memory / "notes.md").read_bytes() == b"local"
@@ -8977,7 +8976,7 @@ def test_53a_normal_summary_systemexit_propagates(apply_failure_fleet, monkeypat
     def summary(*args, **kwargs):
         raise SystemExit(45)
 
-    monkeypatch.setattr(cli_module, "_print_pull_summary", summary)
+    monkeypatch.setattr(pullflow, "_print_pull_summary", summary)
     result = runner.invoke(app, [command])
     assert result.exit_code == (1 if command == "pull" else 45)
     assert isinstance(result.exception, SystemExit)
@@ -9338,7 +9337,7 @@ def _check_read_only_policy62(source):
 def test_read_only_policy62():
     for module in (cli_module, cli_module.core, cli_module.statusflow):
         _check_read_only_policy62(Path(module.__file__).read_text())
-    for function in (cli_module.core._get_config, cli_module._maybe_prompt_migration):
+    for function in (cli_module.core._get_config, core._maybe_prompt_migration):
         parameter = inspect.signature(function).parameters["read_only"]
         assert parameter.kind == inspect.Parameter.KEYWORD_ONLY
         assert parameter.default is inspect.Parameter.empty
@@ -9505,7 +9504,7 @@ def preview62(push_preview56, tmp_path, monkeypatch):
     )
     env["cache"].update(last_seen_self_version="0.0.1", checked_at="2000-01-01T00:00:00+00:00")
     env["upgrade"].CACHE_PATH.write_text(json.dumps(env["cache"]))
-    breadcrumb = cli_module._migration_state_path()
+    breadcrumb = core._migration_state_path()
     breadcrumb.parent.mkdir(parents=True, exist_ok=True)
     breadcrumb.write_text('{"missing": ["gstack"]}')
     (env["events"] / "events").mkdir()
@@ -9767,7 +9766,7 @@ def test_preview_storage_refusal62(preview62, monkeypatch, command):
         raise StorageError("injected storage refusal")
 
     if command == "pull":
-        monkeypatch.setattr(cli_module, "list_devices_with_drops", fail)
+        monkeypatch.setattr(pullflow, "list_devices_with_drops", fail)
     elif command == "recapture":
         monkeypatch.setattr(events_tail, "_prepare_recapture", fail)
     else:
@@ -9859,7 +9858,7 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
             },
         )
     predictions, actual = [], {}
-    original = cli_module._pull_one_source
+    original = pullflow._pull_one_source
 
     def capture(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -9871,7 +9870,7 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
                 )
         return result
 
-    monkeypatch.setattr(cli_module, "_pull_one_source", capture)
+    monkeypatch.setattr(pullflow, "_pull_one_source", capture)
     hashes = []
     original_hash = pullplan.hash_file
 
@@ -9995,7 +9994,7 @@ def test_pull_planner_future_clamp62(tmp_path):
 
 @pytest.mark.parametrize("command", ["push", "pull", "recapture"])
 def test_preview_tty_notice62(preview62, monkeypatch, command):
-    original = cli_module._maybe_prompt_migration
+    original = core._maybe_prompt_migration
     confirms = []
 
     def prompt(config, **kwargs):
@@ -10003,7 +10002,7 @@ def test_preview_tty_notice62(preview62, monkeypatch, command):
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
         return original(config, **kwargs)
 
-    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", prompt)
+    monkeypatch.setattr(core, "_maybe_prompt_migration", prompt)
     monkeypatch.setattr(typer, "confirm", lambda *a, **kw: confirms.append(True) or True)
     result = preview62["audit"]([command, "--dry-run", *(["1d"] if command == "recapture" else [])])
     assert result.exit_code == 0, result.output
@@ -10064,6 +10063,7 @@ def test_refusal_paths62(preview62, monkeypatch, case):
             raise LockError("held lock")
 
         monkeypatch.setattr(cli_module, "acquire_lock", held)
+        monkeypatch.setattr(core, "acquire_lock", held)
     result = env["audit"](argv)
     if case == "held-lock":
         assert result.exit_code == 1
@@ -10205,7 +10205,7 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
         def interrupt(*a, **kw):
             raise KeyboardInterrupt()
 
-        monkeypatch.setattr(cli_module, "_pull_one_source", interrupt)
+        monkeypatch.setattr(pullflow, "_pull_one_source", interrupt)
     monkeypatch.setattr(typer, "prompt", lambda *a, **kw: pytest.fail("preview prompted"))
     argv = ["pull", "--dry-run"] + (["--conflict-mode", "prompt"] if state == "prompt" else [])
     result = env["audit"](argv)
@@ -10224,7 +10224,7 @@ def test_pull_preview_output62(preview62, monkeypatch, state):
         assert "Dry run complete." not in text
     else:
         assert result.exit_code == 0, result.output
-        assert text.endswith(cli_module.PULL_NOT_PREVIEWED)
+        assert text.endswith(pullflow.PULL_NOT_PREVIEWED)
         assert ("Preview incomplete:" in text) == (state == "corrupt")
     if state in {"empty", "unknown", "converged"}:
         assert "No changes predicted." in text
@@ -10295,7 +10295,7 @@ def test_gc_conflict_label62(preview62, conflicts):
     result = preview62["audit"](["gc", "--dry-run"] + (["--conflicts"] if conflicts else []))
     assert result.exit_code == 0, result.output
     assert ("deletion requires --conflicts" in _preview_text(result)) == (not conflicts)
-    assert _preview_text(result).endswith(cli_module.DRY_RUN_COMPLETE)
+    assert _preview_text(result).endswith(core.DRY_RUN_COMPLETE)
 
 
 class TestPushPreviewNoMutation56A:
@@ -10408,14 +10408,14 @@ class TestPushPreviewNoMutation56A:
             }
         )
         save_config(env["config"], env["config_path"])
-        original = cli_module._maybe_prompt_migration
+        original = core._maybe_prompt_migration
 
         def migration(config, **kwargs):
             monkeypatch.setattr(sys.stdin, "isatty", lambda: tty)
             monkeypatch.setattr(sys.stdout, "isatty", lambda: tty)
             return original(config, **kwargs)
 
-        monkeypatch.setattr(cli_module, "_maybe_prompt_migration", migration)
+        monkeypatch.setattr(core, "_maybe_prompt_migration", migration)
         monkeypatch.setattr(typer, "confirm", lambda *a, **kw: pytest.fail("preview prompted"))
         result = env["invoke"]()
         _assert_preview_complete(result)
@@ -10837,7 +10837,9 @@ def test_bootstrap_calls_stay_in_explicit_writers59a():
             ):
                 owner = parents.get(owner)
             found.add((path.name, owner.name if owner else None))
-    assert found == {("cli.py", n) for n in ("init", "_push_core", "recapture", "_pull_one_source")}
+    assert found == {("cli.py", n) for n in ("init", "_push_core", "recapture")} | {
+        ("pullflow.py", "_pull_one_source")
+    }
 
 
 def _seed_crypto_lineages60(env):
@@ -11522,7 +11524,7 @@ def test_content_acceptance_survives_maintenance_independently(
         raise OSError("maintenance unavailable")
 
     monkeypatch.setattr(
-        cli_module,
+        cli_module if maintenance == "last-seen" else core,
         "update_last_seen" if maintenance == "last-seen" else "_cleanup_conflict_copies",
         fail,
     )
@@ -11623,6 +11625,7 @@ def test_attended_resolves_once_and_bootstraps_inside_lock(capture61, monkeypatc
         return real(*a, **kw)
 
     monkeypatch.setattr(cli_module, "resolve_sources", resolve)
+    monkeypatch.setattr(pullflow, "resolve_sources", resolve)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert calls == [{"strict": True, "bootstrap": True}]
@@ -12135,11 +12138,11 @@ def test_push_receipt_counts_only_user_content_and_reports_verbose_publication(
     receipts = []
     real_core = cli_module._push_core
 
-    def core(*a, **kw):
+    def fake_core(*a, **kw):
         receipts.append(real_core(*a, **kw))
         return receipts[-1]
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 0, result.output
     [receipt] = receipts
@@ -12912,7 +12915,7 @@ def test_unattended_push_still_fails_loudly_when_post_acceptance_maintenance_fai
         raise OSError("maintenance unavailable")
 
     monkeypatch.setattr(
-        cli_module,
+        cli_module if maintenance == "last-seen" else core,
         "update_last_seen" if maintenance == "last-seen" else "_cleanup_conflict_copies",
         fail,
     )
@@ -13832,6 +13835,28 @@ def test_status77_typed_fatal_keeps_message_and_remedy(
             width=width,
         ),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "stderr_console",
+        Console(
+            stderr=True,
+            force_terminal=color,
+            color_system="standard" if color else None,
+            no_color=False,
+            width=width,
+        ),
+    )
+    monkeypatch.setattr(
+        core,
+        "stderr_console",
+        Console(
+            stderr=True,
+            force_terminal=color,
+            color_system="standard" if color else None,
+            no_color=False,
+            width=width,
+        ),
+    )
 
     def refuse(*args, **kwargs):
         if ancillary:
@@ -14010,6 +14035,7 @@ def test_sync78_finalizer_notice_precedes_outcome_and_primary_wins(capture61, mo
             raise OSError("PRIVATE78 unlock")
 
         monkeypatch.setattr(cli_module, "release_lock", unlock)
+        monkeypatch.setattr(core, "release_lock", unlock)
     elif fault == "history":
         original = cli_module._push_core
 
@@ -14066,14 +14092,14 @@ def test_sync78_push_unexpected_receipt_survives_cleanup(status77, monkeypatch, 
             cli_module, "_upload_changed_blobs", lambda *a, **k: (_ for _ in ()).throw(exc)
         )
 
-    def core(*args, **kwargs):
+    def fake_core(*args, **kwargs):
         try:
             return original(*args, **kwargs)
         except BaseException as error:
             propagated.append(error)
             raise
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     result = runner.invoke(app, ["push", "--verbose"])
     assert result.exit_code == 1
     assert propagated == [exc]
@@ -14188,12 +14214,12 @@ def test_sync78_diagnostics_survive_refusal_are_bounded_and_reset(status77, monk
 
     original = cli_module._push_core
 
-    def core(*args, **kwargs):
+    def fake_core(*args, **kwargs):
         for _ in range(10000):
-            cli_module._sync_diagnostic("unsafe /private/path\n", True)
+            core._sync_diagnostic("unsafe /private/path\n", True)
         raise SnapshotError("Cannot publish: unreadable source. Previous snapshot kept.")
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 1
     assert "unsafe" not in result.output
@@ -14234,11 +14260,11 @@ def test_sync78_broken_stream_preserves_effects_and_never_retries(status77, monk
     )
     monkeypatch.setattr(cli_module, "_emit_sync_outcome", emit)
 
-    def core(*args, **kwargs):
+    def fake_core(*args, **kwargs):
         calls.append(True)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(cli_module, "_push_core", core)
+    monkeypatch.setattr(cli_module, "_push_core", fake_core)
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0
     assert calls == [True]
@@ -14275,7 +14301,7 @@ def test_sync78_pull_update_eligibility_and_partial_exit(
     monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", update)
     if interrupt:
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_pull_one_source",
             lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
@@ -14405,25 +14431,25 @@ def test_sync78_failure_line_keeps_curated_remedy_and_known_effects(state, error
 
 
 def test_sync78_outcome_counts_are_singular_at_one():
-    pull = cli_module.PullResult(total_written=1)
+    pull = pullflow.PullResult(total_written=1)
     assert cli_module._sync_success("pull", pull) == "Pull: 1 file applied."
     push = cli_module.PushResult(published_content_files=1)
     assert cli_module._sync_success("push", push) == "Push: 1 content change published."
-    partial = cli_module.PullResult(total_written=1, total_failed=1)
+    partial = pullflow.PullResult(total_written=1, total_failed=1)
     line = cli_module._sync_failure("pull", {"run": {"result": partial}}, None)
     assert line.startswith("Pull incomplete [result-degraded]: 1 file applied, 1 failed;")
     # Value: protects=conflict copies, skips and no-source state stay on the one pull line;
     # fails_when=the conflict/skip suffix or no_sources precedence is dropped;
     # why_new=no test reached these _sync_success branches; seam=none;
     # no_claim=which pull paths set these counts (pure renderer)
-    one = cli_module.PullResult(total_written=1, total_conflicted=1)
+    one = pullflow.PullResult(total_written=1, total_conflicted=1)
     assert cli_module._sync_success("pull", one) == "Pull: 2 files applied (1 conflict copy)."
-    many = cli_module.PullResult(total_conflicted=2, total_skipped=1)
+    many = pullflow.PullResult(total_conflicted=2, total_skipped=1)
     assert (
         cli_module._sync_success("pull", many)
         == "Pull: 2 files applied (2 conflict copies); 1 skipped."
     )
-    empty = cli_module.PullResult(no_peers=True, no_sources=True)
+    empty = pullflow.PullResult(no_peers=True, no_sources=True)
     assert cli_module._sync_success("pull", empty) == "Pull: no enabled sources."
 
 
@@ -14434,6 +14460,7 @@ def test_sync78_lock_held_is_one_refusal_without_update(status77, monkeypatch, v
 
     updates = []
     monkeypatch.setattr(cli_module, "acquire_lock", held)
+    monkeypatch.setattr(core, "acquire_lock", held)
     monkeypatch.setattr(cli_module.upgrade, "update_or_nudge", lambda *a, **k: updates.append(1))
     result = runner.invoke(app, [verb])
     assert result.exit_code == 1
@@ -14469,9 +14496,9 @@ def test_sync78_no_source_push_records_no_changes(status77):
 
 
 def test_sync78_pull_plain_warnings_strip_control_characters(capsys):
-    peer = cli_module._CorruptPeer(device_id="id\r\x1b[2Jx", device_name="Mac\rFAKE OK\n")
-    cli_module._print_pull_summary(
-        cli_module.PullResult(), [peer], [], [], [], quiet=True, verbose=False
+    peer = pullflow._CorruptPeer(device_id="id\r\x1b[2Jx", device_name="Mac\rFAKE OK\n")
+    pullflow._print_pull_summary(
+        pullflow.PullResult(), [peer], [], [], [], quiet=True, verbose=False
     )
     err = capsys.readouterr().err
     assert err.count("\n") == 1 and "\r" not in err and "\x1b" not in err
@@ -14650,8 +14677,8 @@ def test_sync78_lock_failure_keeps_its_own_text_and_conflicts_name_review(capsys
         {"verbose": False, "diagnostics": events_tail.Degradations()}
     )
     try:
-        cli_module._print_pull_summary(
-            cli_module.PullResult(total_written=1, total_conflicted=1),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_written=1, total_conflicted=1),
             [],
             [],
             [],
@@ -14690,6 +14717,7 @@ def test_resolve_abort_exit(tmp_path, monkeypatch, interrupt):
     remote.write_bytes(b"peer\n")
     monkeypatch.setattr(cli_module.core, "_get_config", lambda **kw: {})
     monkeypatch.setattr(cli_module, "get_backend", lambda cfg: LocalBackend(tmp_path / "storage"))
+    monkeypatch.setattr(pullflow, "get_backend", lambda cfg: LocalBackend(tmp_path / "storage"))
     monkeypatch.setattr(cli_module, "get_sources", lambda cfg: [])
     monkeypatch.setattr(
         cli_module.resolveflow, "_find_conflict_files", lambda *a, **kw: [("notes", remote, local)]
@@ -14715,7 +14743,7 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     memory = capture61["claude"] / "projects/-Users-kb-myapp/memory"
     (memory / "user_role.md").write_text("updated content")
     (memory / "second.md").write_text("second file")
-    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
     monkeypatch.setattr(
         _mm_codex_host,
         "read_codex_usage",
@@ -14730,6 +14758,16 @@ def test_sync_progress_push_renders_spinner_phases_and_counters_on_terminal(capt
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
@@ -14767,6 +14805,16 @@ def test_sync_progress_pull_renders_spinner_phases_and_counters_on_terminal(
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
@@ -14812,6 +14860,16 @@ def test_sync_progress_disabled_for_non_tty_verbose_dry_run_and_auto_commands(
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
     assert "Unlocking storage" not in terminal.getvalue()
@@ -14826,6 +14884,16 @@ def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monke
         "console",
         Console(file=piped, force_terminal=True, color_system=None, width=80),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=piped, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=piped, force_terminal=True, color_system=None, width=80),
+    )
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert result.stdout == "Push: no content changes.\n"
@@ -14833,7 +14901,7 @@ def test_sync_progress_forced_color_on_pipe_runs_without_spinner(status77, monke
 
 
 def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status77, monkeypatch):
-    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
     failed = threading.Event()
 
     class DyingTerminal(_SyncTerminalBuffer):
@@ -14853,6 +14921,16 @@ def test_sync_progress_timer_animates_silent_step_and_stops_on_draw_error(status
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
@@ -14908,15 +14986,35 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
         "console",
         Console(file=flaky, force_terminal=True, color_system=None, width=80),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=flaky, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=flaky, force_terminal=True, color_system=None, width=80),
+    )
     res = runner.invoke(app, ["push"])
     assert res.exit_code == 0, res.output
     assert res.stdout == "Push: no content changes.\n"
 
     # Blocked ticker does not hang stop()
-    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
-    monkeypatch.setattr(cli_module, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(core, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=_SyncTerminalBuffer(), force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=_SyncTerminalBuffer(), force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=_SyncTerminalBuffer(), force_terminal=True, color_system=None, width=80),
     )
@@ -14941,7 +15039,7 @@ def test_sync_progress_resilient_to_start_failure_and_blocked_ticker_shutdown(
 
     monkeypatch.setattr(cli_module.Progress, "refresh", refresh)
     monkeypatch.setattr(cli_module.Progress, "stop", stop)
-    sp = cli_module._SyncProgress(enabled=True)
+    sp = core._SyncProgress(enabled=True)
     sp.start("Unlocking storage")
     try:
         assert drawing.wait(5), "ticker never entered blocked draw"
@@ -14977,6 +15075,16 @@ def test_sync_progress_pauses_around_conflict_prompt_and_warnings(apply_failure_
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
     result = runner.invoke(app, ["pull", "--conflict-mode", "prompt"], input="l\n")
     assert result.exit_code == 1, result.output
     assert (fleet.memory / "other.md").read_bytes() == b"other\n"
@@ -14998,6 +15106,16 @@ def test_sync_progress_clears_on_interrupt_and_error(status77, monkeypatch):
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
@@ -15027,7 +15145,7 @@ def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
     codex_skill = Path(codex_path) / "skills" / "skill.md"
     codex_skill.parent.mkdir(parents=True, exist_ok=True)
     codex_skill.write_text("codex skill")
-    monkeypatch.setattr(cli_module, "_maybe_prompt_migration", lambda *a, **k: None)
+    monkeypatch.setattr(core, "_maybe_prompt_migration", lambda *a, **k: None)
     monkeypatch.setattr(
         _mm_codex_host,
         "read_codex_usage",
@@ -15042,6 +15160,16 @@ def test_sync_progress_upload_counter_spans_sources(capture61, monkeypatch):
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setattr(
         cli_module,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
@@ -15069,6 +15197,16 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
     triggered = []
 
     def fail(*args, **kwargs):
@@ -15093,7 +15231,7 @@ def test_sync_progress_display_faults_preserve_success(status77, monkeypatch, fa
         original_build = cli_module.build_manifest_v2
 
         def build(*args, **kwargs):
-            cli_module._print_apply_warning("synthetic apply warning")
+            core._print_apply_warning("synthetic apply warning")
             return original_build(*args, **kwargs)
 
         monkeypatch.setattr(cli_module, "build_manifest_v2", build)
@@ -15129,7 +15267,17 @@ def test_sync_progress_nested_pause_and_interrupt_do_not_restart_display(monkeyp
         "console",
         Console(file=terminal, force_terminal=True, color_system=None, width=80),
     )
-    progress = cli_module._SyncProgress(enabled=True)
+    monkeypatch.setattr(
+        pullflow,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    monkeypatch.setattr(
+        core,
+        "console",
+        Console(file=terminal, force_terminal=True, color_system=None, width=80),
+    )
+    progress = core._SyncProgress(enabled=True)
     progress.start("Working")
     try:
         with progress.paused():

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from mind_meld import core
 from mind_meld.crypto import encrypt
 from mind_meld.manifest import (
     TOMBSTONE_TTL_DAYS,
@@ -540,7 +541,7 @@ class TestConflictManifestMerge:
 
     def test_cleanup_only_from_mutating_ops(self, tmp_path):
         """_cleanup_conflict_copies deletes only validator-approved conflicts."""
-        from mind_meld.cli import _cleanup_conflict_copies
+        pass
 
         backend = LocalBackend(tmp_path / "storage")
         backend.put("manifests/abc/manifest.json.enc", b"original")
@@ -559,7 +560,7 @@ class TestConflictManifestMerge:
         bogus = tmp_path / "storage" / "manifests" / "abc" / "manifest.json 3.enc"
         bogus.write_bytes(b"not a real manifest")
 
-        count = _cleanup_conflict_copies(backend, "abc", PASSPHRASE, MEMORY_KB)
+        count = core._cleanup_conflict_copies(backend, "abc", PASSPHRASE, MEMORY_KB)
         assert count == 1
         assert not real_conflict.exists(), "Real conflict copy must be deleted"
         assert bogus.exists(), "Bogus sibling must be left alone"

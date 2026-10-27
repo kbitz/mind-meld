@@ -17,11 +17,9 @@ import sys
 
 import pytest
 
-from mind_meld.cli import (
-    _detect_case_insensitive_fs,
-    _detect_pull_case_collisions,
-    _drop_case_collisions_from_manifests,
-)
+from mind_meld import pullflow
+
+pass
 
 
 class TestDetectCaseInsensitiveFs:
@@ -35,7 +33,7 @@ class TestDetectCaseInsensitiveFs:
             return True
 
         monkeypatch.setattr(Path, "samefile", samefile)
-        assert _detect_case_insensitive_fs(tmp_path / "nope" / "missing") is True
+        assert pullflow._detect_case_insensitive_fs(tmp_path / "nope" / "missing") is True
         assert calls == [tmp_path]
 
     def test_oserror_on_probe_assumes_case_insensitive(self, tmp_path, monkeypatch):
@@ -48,7 +46,7 @@ class TestDetectCaseInsensitiveFs:
             raise PermissionError("denied")
 
         monkeypatch.setattr(Path, "samefile", boom)
-        assert _detect_case_insensitive_fs(d) is True
+        assert pullflow._detect_case_insensitive_fs(d) is True
 
     def test_alt_case_missing_returns_false(self, tmp_path, monkeypatch):
         """samefile() raising FileNotFoundError (alt-case name genuinely
@@ -63,20 +61,20 @@ class TestDetectCaseInsensitiveFs:
             raise FileNotFoundError("no such file")
 
         monkeypatch.setattr(Path, "samefile", missing)
-        assert _detect_case_insensitive_fs(d) is False
+        assert pullflow._detect_case_insensitive_fs(d) is False
 
     def test_returns_false_on_alpha_free_basename(self, tmp_path):
         """A path whose basename has no alphabetic chars can't be case-mangled."""
         d = tmp_path / "12345"
         d.mkdir()
-        assert _detect_case_insensitive_fs(d) is True
+        assert pullflow._detect_case_insensitive_fs(d) is True
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="APFS-default needed")
     def test_apfs_default_is_case_insensitive(self, tmp_path):
         """tmp_path on macOS APFS default = case-insensitive."""
         d = tmp_path / "Projects"
         d.mkdir()
-        assert _detect_case_insensitive_fs(d) is True
+        assert pullflow._detect_case_insensitive_fs(d) is True
 
     def test_truly_case_sensitive_returns_false(self, tmp_path):
         """If the swapcase variant doesn't exist (case-sensitive FS), False."""
@@ -84,7 +82,7 @@ class TestDetectCaseInsensitiveFs:
         # On case-insensitive FS, both resolve to the same inode.
         d = tmp_path / "Projects"
         d.mkdir()
-        result = _detect_case_insensitive_fs(d)
+        result = pullflow._detect_case_insensitive_fs(d)
         # Result depends on the test environment's FS; we can't assert
         # a fixed value cross-platform. What we CAN assert: if the alt-
         # case variant doesn't exist on disk, the function returns False.
@@ -122,7 +120,7 @@ class TestDetectPullCaseCollisions:
             },
         }
         local_sources = self._make_local_sources_map(base)
-        collisions = _detect_pull_case_collisions(manifest_cache, local_sources)
+        collisions = pullflow._detect_pull_case_collisions(manifest_cache, local_sources)
         assert "src1" in collisions
         clusters = collisions["src1"]
         # One collision cluster keyed by casefold('Projects/notes.md').
@@ -139,18 +137,17 @@ class TestDetectPullCaseCollisions:
             },
         }
         local_sources = self._make_local_sources_map(base)
-        collisions = _detect_pull_case_collisions(manifest_cache, local_sources)
+        collisions = pullflow._detect_pull_case_collisions(manifest_cache, local_sources)
         assert collisions == {}
 
     def test_no_collisions_on_case_sensitive_fs(self, tmp_path, monkeypatch):
         """On case-sensitive FS, _detect_case_insensitive_fs returns False
         and the collision detector skips the source entirely. This is
         forced via monkeypatch so the test runs deterministically."""
-        from mind_meld import cli as cli_module
 
         base = tmp_path / "src1"
         base.mkdir()
-        monkeypatch.setattr(cli_module, "_detect_case_insensitive_fs", lambda _p: False)
+        monkeypatch.setattr(pullflow, "_detect_case_insensitive_fs", lambda _p: False)
 
         manifest_cache = {
             "deviceA": {
@@ -165,7 +162,7 @@ class TestDetectPullCaseCollisions:
             },
         }
         local_sources = self._make_local_sources_map(base)
-        collisions = _detect_pull_case_collisions(manifest_cache, local_sources)
+        collisions = pullflow._detect_pull_case_collisions(manifest_cache, local_sources)
         assert collisions == {}, "Linux peers can legitimately have both casings"
 
     def test_symlinked_source_probes_resolved_target(self, tmp_path, monkeypatch):
@@ -176,7 +173,6 @@ class TestDetectPullCaseCollisions:
         custom roots keep their unresolved path in local_sources_map (so
         ownership checks stay symlink-aware), which previously leaked into
         this probe too."""
-        from mind_meld import cli as cli_module
 
         target = tmp_path / "real_target"
         target.mkdir()
@@ -189,17 +185,16 @@ class TestDetectPullCaseCollisions:
             probed.append(path)
             return False
 
-        monkeypatch.setattr(cli_module, "_detect_case_insensitive_fs", record_probe)
+        monkeypatch.setattr(pullflow, "_detect_case_insensitive_fs", record_probe)
         local_sources = self._make_local_sources_map(link)
-        _detect_pull_case_collisions({}, local_sources)
+        pullflow._detect_pull_case_collisions({}, local_sources)
         assert probed == [link.resolve()]
 
     def test_skips_source_not_in_local_map(self, tmp_path, monkeypatch):
         """Manifests with sources not configured locally don't produce
         collisions — the local FS detection wouldn't apply."""
-        from mind_meld import cli as cli_module
 
-        monkeypatch.setattr(cli_module, "_detect_case_insensitive_fs", lambda _p: True)
+        monkeypatch.setattr(pullflow, "_detect_case_insensitive_fs", lambda _p: True)
 
         manifest_cache = {
             "deviceA": {
@@ -215,7 +210,7 @@ class TestDetectPullCaseCollisions:
         }
         # Local source map has nothing matching "unknown-src".
         local_sources = {"src1": {"path": tmp_path, "type": "generic"}}
-        collisions = _detect_pull_case_collisions(manifest_cache, local_sources)
+        collisions = pullflow._detect_pull_case_collisions(manifest_cache, local_sources)
         assert collisions == {}
 
 
@@ -244,7 +239,7 @@ class TestDropCaseCollisionsFromManifests:
         }
         # Lex-sort puts "Projects/notes.md" first (uppercase P < lowercase p).
         collisions = {"src1": {"projects/notes.md": ["Projects/notes.md", "projects/notes.md"]}}
-        new_cache = _drop_case_collisions_from_manifests(manifest_cache, collisions)
+        new_cache = pullflow._drop_case_collisions_from_manifests(manifest_cache, collisions)
         # Lex-first kept on deviceA; deviceB's colliding entry dropped.
         assert "Projects/notes.md" in new_cache["deviceA"]["sources"]["src1"]["files"]
         assert "config.yaml" in new_cache["deviceA"]["sources"]["src1"]["files"]
@@ -252,7 +247,7 @@ class TestDropCaseCollisionsFromManifests:
 
     def test_no_collisions_returns_input_unchanged(self):
         manifest_cache = {"d1": {"sources": {"s": {"files": {"a": {}}}}}}
-        result = _drop_case_collisions_from_manifests(manifest_cache, {})
+        result = pullflow._drop_case_collisions_from_manifests(manifest_cache, {})
         assert result is manifest_cache
 
     def test_does_not_mutate_input(self):
@@ -260,7 +255,7 @@ class TestDropCaseCollisionsFromManifests:
             "d1": {"sources": {"src1": {"files": {"X": {"sha256": "a"}, "x": {"sha256": "b"}}}}}
         }
         collisions = {"src1": {"x": ["X", "x"]}}
-        _drop_case_collisions_from_manifests(original, collisions)
+        pullflow._drop_case_collisions_from_manifests(original, collisions)
         # Original still has both entries — the function returns a deep copy.
         assert "X" in original["d1"]["sources"]["src1"]["files"]
         assert "x" in original["d1"]["sources"]["src1"]["files"]
@@ -271,6 +266,6 @@ class TestDropCaseCollisionsFromManifests:
             "d2": {"sources": {"src1": {"files": {"X": {}, "x": {}}}}},
         }
         collisions = {"src1": {"x": ["X", "x"]}}
-        result = _drop_case_collisions_from_manifests(manifest_cache, collisions)
+        result = pullflow._drop_case_collisions_from_manifests(manifest_cache, collisions)
         assert result["d1"] is None
         assert "x" not in result["d2"]["sources"]["src1"]["files"]

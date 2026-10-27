@@ -333,7 +333,88 @@ _ROW = re.compile(r"^\|(?P<cell>[^|]*)\|", re.M)
 # Any `path/to/file.py:symbol` occurrence anywhere in the routing cell.
 _CITATION = re.compile(r"`(?P<file>[\w/]+\.py):")
 _SYMBOL = re.compile(r"`?([A-Za-z_][\w.]*\*?)`?")
-_OBSOLETE_ROUTING_CITATIONS = frozenset({("cli.py", "status"), ("cli.py", "diag")})
+_OBSOLETE_ROUTING_CITATIONS = frozenset(
+    {("cli.py", "status"), ("cli.py", "diag")}
+    | {
+        ("cli.py", symbol)
+        for symbol in [
+            "ApplyOutcome",
+            "ConflictMode",
+            "DRY_RUN_COMPLETE",
+            "DRY_RUN_COMPLETE_LOCK_FREE",
+            "DRY_RUN_REFUSAL",
+            "INVERSION_MIN_VERSION",
+            "PULL_NOT_PREVIEWED",
+            "PullResult",
+            "_ApplyReporter",
+            "_CANONICAL_WRITE_OUTCOMES",
+            "_CONFLICT_NAME_RANDOM_ATTEMPTS",
+            "_CorruptPeer",
+            "_FAIL_MODE_REFUSALS",
+            "_FsyncWarning",
+            "_INLINE_PATH_CAP",
+            "_PerSourceResult",
+            "_SyncProgress",
+            "_UPDATE_SPINNER_JOIN_SECONDS",
+            "_UPDATE_SPINNER_TICK_SECONDS",
+            "_UnknownSourceWarning",
+            "_apply_conflict",
+            "_apply_incoming_file",
+            "_apply_merge",
+            "_apply_write",
+            "_check_fleet_version_or_refuse",
+            "_cleanup_conflict_copies",
+            "_collect_peer_tombstones",
+            "_conflict_name_is_free",
+            "_conflict_review_notice",
+            "_current_sync_progress",
+            "_detect_case_insensitive_fs",
+            "_detect_pull_case_collisions",
+            "_download_and_apply",
+            "_drain_inline_bumps",
+            "_drop_case_collisions_from_manifests",
+            "_empty_outcomes",
+            "_existing_post_inversion_sidecars_from_peer",
+            "_explicit_retired_sources",
+            "_fail_mode_refusals",
+            "_first_existing_ancestor",
+            "_format_inline_paths",
+            "_fsync_touched_parents",
+            "_incoming_nested_roots",
+            "_invalidate_inline_bump",
+            "_make_manifest_validator",
+            "_maybe_prompt_migration",
+            "_migrate_config_core",
+            "_migration_state_path",
+            "_plan_pull",
+            "_prefetch_manifests",
+            "_preflight_conflicts",
+            "_print_apply_warning",
+            "_print_inline_paths",
+            "_print_preflight_conflicts",
+            "_print_pull_prediction",
+            "_print_pull_summary",
+            "_prompt_conflict_choice",
+            "_pull_core",
+            "_pull_one_source",
+            "_record_inline_bump",
+            "_record_source_bookkeeping",
+            "_recover_prior_manifest",
+            "_release_sync_lock",
+            "_select_devices",
+            "_start_sync_progress",
+            "_stop_sync_progress",
+            "_sync_diagnostic",
+            "_sync_progress_advance",
+            "_sync_progress_ensure_batch",
+            "_sync_progress_phase",
+            "_sync_progress_start_batch",
+            "_sync_warning",
+            "_warn_apply_failure",
+            "conflict_filename",
+        ]
+    }
+)
 
 
 def _defined_names(path: Path) -> set[str]:
@@ -879,6 +960,7 @@ def test_every_extracted_module_has_a_routing_row() -> None:
     table = ROUTING_MD.read_text(encoding="utf-8")
     for mod in (
         "core.py",
+        "pullflow.py",
         "statusflow.py",
         "resolveflow.py",
         "events_tail.py",

@@ -37,7 +37,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from mind_meld import cli, lockedjson, lockfile, upgrade
+from mind_meld import cli, core, lockedjson, lockfile, upgrade
 from mind_meld import config as config_module
 from mind_meld.cli import app
 from tests.conftest import _setup_real_config
@@ -2435,8 +2435,8 @@ class TestUpdateCommand:
     def test_spinner_shutdown_leaves_a_blocked_ticker_as_a_daemon(self, pipx_install, monkeypatch):
         pipx_install()
         monkeypatch.setattr(cli, "console", Console(file=_TerminalBuffer(), force_terminal=True))
-        monkeypatch.setattr(cli, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
-        monkeypatch.setattr(cli, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
+        monkeypatch.setattr(core, "_UPDATE_SPINNER_TICK_SECONDS", 0.01)
+        monkeypatch.setattr(core, "_UPDATE_SPINNER_JOIN_SECONDS", 0.02)
         drawing = threading.Event()
         release_draw = threading.Event()
         finished = threading.Event()

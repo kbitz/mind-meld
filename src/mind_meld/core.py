@@ -8,6 +8,8 @@ import hashlib
 import json
 import stat
 import sys
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -16,12 +18,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 import typer
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from mind_meld import (
     __version__,
     crypto,
+    manifest,
     pullplan,
+    safety,
     sidecar,
+    updateprogress,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -32,7 +38,7 @@ from mind_meld.config import (
     load_config,
     patch_config_on_disk,
 )
-from mind_meld.consoles import stderr_console
+from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import (
     FORMAT_VERSION,
     CryptoInitFetch,
@@ -52,6 +58,7 @@ from mind_meld.errors import (
     NEWER_STORAGE_URL,
     ConfigError,
     CryptoError,
+    LockError,
     ManifestError,
     MindMeldError,
     NewerFormatError,
@@ -59,12 +66,14 @@ from mind_meld.errors import (
     os_error_cause,
     snapshot_refusal,
 )
+from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     MARKER_SKIP_NAME,
     MUSE_EXCLUDE_PATTERNS,
     DiffResult,
     _under_skip_prefix,
     _validate_rel_path,
+    collect_tombstones,
     deserialize_manifest,
     diff_files,
     is_conflict_filename,
@@ -78,9 +87,7 @@ from mind_meld.manifest import (
     _is_excluded as _manifest_is_excluded,
 )
 from mind_meld.safety import safe_str
-from mind_meld.storage.keys import (
-    manifest_key,
-)
+from mind_meld.storage.keys import manifest_key
 from mind_meld.storage.local import LocalBackend
 
 FetchStatus = Literal["ok", "missing", "corrupt"]
@@ -1282,3 +1289,775 @@ def _normalize_autorun_breadcrumbs(payload: object) -> dict[str, dict]:
         entry = {k: v for k, v in payload.items() if k != "verb"}
         return {verb: entry}
     return {}
+
+
+DRY_RUN_COMPLETE = "Dry run complete. Nothing was changed except the local lock file."
+
+
+DRY_RUN_COMPLETE_LOCK_FREE = "Dry run complete. Nothing was changed."
+
+
+DRY_RUN_REFUSAL = " Nothing was changed except the local lock file (dry run)."
+
+
+def _make_manifest_validator(passphrase: str, memory_kb: int) -> Callable[[Path], bool]:
+    """Return a predicate that accepts `path` only if it decrypts AND
+    deserializes as a Mind Meld manifest.
+
+    Used by find_conflict_copies / delete_conflict_copies in storage/local.py
+    to reject bogus siblings (random files whose name happens to match the
+    iCloud or Dropbox rename pattern). Without this, `_fetch_remote_manifest`
+    can spuriously flip status=missing → status=corrupt when the user drops
+    a stray file into manifests/<device>/.
+
+    Catches the same exception set as _fetch_remote_manifest's inline
+    decrypt/deserialize (see cli.py:197) so the definitions of "valid" agree.
+    OSError is included to cover TOCTOU (the file disappears mid-read because
+    iCloud sync removed it) — the candidate is simply treated as "not a real
+    conflict" rather than crashing the caller.
+    """
+
+    def is_valid(path: Path) -> bool:
+        try:
+            enc_data = path.read_bytes()
+        except OSError:
+            # File vanished mid-scan (iCloud sync race). Treat as "not a
+            # conflict" — caller skips it, next fetch will re-evaluate.
+            return False
+        # Cheap magic-byte shortcut before paying Argon2. Non-Mind-Meld
+        # files (stray backups, user scratch files) bail out in ~1ms
+        # instead of ~200-500ms per candidate.
+        if not enc_data or enc_data[0] != FORMAT_VERSION:
+            return False
+        try:
+            plain = decrypt(enc_data, passphrase, memory_kb)
+            deserialize_manifest(plain)
+            return True
+        except Exception:
+            # Defense in depth: a single malformed candidate (e.g., stale
+            # passphrase after `mm init`, corrupt ciphertext, unexpected
+            # argon2 error) must never crash the whole recovery sweep.
+            return False
+
+    return is_valid
+
+
+def _incoming_nested_roots(
+    sources: list[dict[str, Any]], manifests: Iterable[dict | None]
+) -> dict[str, list[str]]:
+    """Map source name -> local checkout roots above incoming peer files and tombstones."""
+    incoming: dict[str, set[str]] = {}
+    for peer in manifests:
+        if peer is None:
+            continue
+        for name, data in peer.get("sources", {}).items():
+            incoming.setdefault(name, set()).update(data.get("files", {}))
+        for key in peer.get("tombstones", {}):
+            if not isinstance(key, str):
+                continue
+            name, rel = key.split(":", 1) if ":" in key else ("claude", key)
+            incoming.setdefault(name, set()).add(rel)
+    out: dict[str, list[str]] = {}
+    for src in sources:
+        if roots := manifest.nested_repo_roots_for_paths(src, incoming.get(src["name"], ())):
+            out[src["name"]] = roots
+    return out
+
+
+def _recover_prior_manifest(
+    fetch: ManifestFetch,
+    backend: LocalBackend,
+    device_id: str,
+    passphrase: str,
+    memory_kb: int,
+    *,
+    quiet: bool = False,
+    dry_run: bool = False,
+) -> dict | None:
+    """Resolve a prior-state manifest for tombstone generation.
+
+    Called by _push_core after fetching THIS device's remote manifest.
+    Returns the manifest to pass to `generate_tombstones` as `remote_manifest`.
+
+    Recovery chain:
+      1. status == "ok"       → return the fetched manifest (normal path).
+      2. status == "missing"  → return None (first push; no prior state is
+                                 the correct answer, tombstones will be empty).
+      3. status == "corrupt"  → try sidecar (fresh-deletion-preserving);
+                                 then peer fallback (propagated tombstones
+                                 only); then _error with recovery steps.
+
+    An "ok" built only from conflict copies may predate this device's latest
+    deletions, so it is merged with the sidecar to keep their tombstones.
+
+    Raises typer.Exit(1) via _error() when corrupt + no sidecar + no peers.
+    """
+    if fetch.is_ok and not fetch.conflict_copies_only:
+        return fetch.manifest
+    if fetch.is_ok:
+        # The returned prior (tombstones, source retention, nested-checkout
+        # freeze) gains the last accepted push's records; blob diffs still
+        # compare against fetch.manifest alone.
+        sidecar_manifest = sidecar.read(device_id)
+        rewrite = "mm push would rewrite it" if dry_run else "rewriting it"
+        if sidecar_manifest is None:
+            msg = (
+                "this device's manifest is held only by conflict copies and no usable "
+                f"local sidecar exists; {rewrite} from local files with those copies "
+                "as the deletion baseline. Recent local deletions may be lost — verify "
+                "no files have resurrected."
+            )
+        else:
+            msg = (
+                "this device's manifest is held only by conflict copies; "
+                f"{rewrite} from local files, keeping deletion records from the "
+                "local sidecar."
+            )
+        with _pause_sync_progress():
+            if quiet:
+                # Rewriting a manifest from conflict copies is data-at-risk work;
+                # autopush must still surface it.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        if sidecar_manifest is None:
+            return fetch.manifest
+        return _merge_manifests([fetch.manifest, sidecar_manifest])
+    if fetch.status == "missing":
+        return None
+
+    # status == "corrupt" — recovery chain
+    sidecar_manifest = sidecar.read(device_id)
+    if sidecar_manifest is not None:
+        msg = (
+            "remote manifest corrupt; recovered prior state from local "
+            f"sidecar ({sidecar.sidecar_path()})."
+        )
+        with _pause_sync_progress():
+            if quiet:
+                # Load-bearing: silently swallowing a corrupt-manifest recovery
+                # in autopush leaves the user with no signal that storage is
+                # degrading. Always surface to stderr.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        return sidecar_manifest
+
+    # No sidecar — try peer fallback
+    peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)
+    if peer_tombstones:
+        msg = (
+            "remote manifest corrupt and no local sidecar; recovered "
+            f"{len(peer_tombstones)} tombstone(s) from peer device(s). "
+            "Recent local deletions may be lost — verify no files have "
+            "resurrected."
+        )
+        with _pause_sync_progress():
+            if quiet:
+                # Load-bearing: peer-fallback recovery is the riskiest branch
+                # (recent deletions can be lost). Must reach the user even in
+                # autopush.
+                print(f"mm: warning: {msg}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {msg}")
+        # Synthetic prior manifest: no prior file list (so fresh-deletion
+        # detection is disabled — we have no basis for it), but the
+        # carry-forward loop in generate_tombstones() preserves these.
+        return {"sources": {}, "tombstones": peer_tombstones}
+
+    # Nothing to recover from — refuse rather than silently drop tombstones.
+    suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+    _error(
+        "remote manifest corrupt, no local sidecar, and no peer manifests "
+        "available for recovery. Run 'mm status' to inspect storage state, "
+        "then 'mm init' if storage is unrecoverable. Pushing now would "
+        "erase this device's deletion records across your fleet." + suffix
+    )
+    return None  # unreachable; _error raises
+
+
+def _collect_peer_tombstones(
+    backend: LocalBackend, my_device_id: str, passphrase: str, memory_kb: int
+) -> dict[str, dict[str, str]]:
+    """Aggregate tombstones from all peer devices. Returns {} if none.
+
+    `list_devices` can fail if the storage layer raises (permissions, I/O) or
+    if the devices-directory read itself errors. We swallow those specifically
+    so recovery can fall through to "refuse" rather than crashing mid-recovery.
+    Unexpected exceptions propagate — we don't want to mask bugs here.
+    """
+    try:
+        devices = _list_devices_warn(backend)
+    except (OSError, MindMeldError):
+        return {}
+
+    peer_manifests: dict[str, dict | None] = {}
+    for d in devices:
+        did = d["device_id"]
+        if did == my_device_id:
+            continue
+        # Per-peer try/except — one flaky peer must not abort recovery.
+        try:
+            peer_fetch = _fetch_remote_manifest(backend, did, passphrase, memory_kb)
+            peer_manifests[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+        except (OSError, MindMeldError):
+            peer_manifests[did] = None
+
+    if not peer_manifests:
+        return {}
+
+    return collect_tombstones(
+        list(peer_manifests.keys()),
+        lambda did: peer_manifests.get(did),
+    )
+
+
+def _cleanup_conflict_copies(
+    backend: LocalBackend, device_id: str, passphrase: str, memory_kb: int
+) -> int:
+    """Delete conflict copies for a device's manifest.
+
+    Call ONLY from mutating operations (push, pull) after the manifest
+    has been successfully used. Never from status, diff, gc, or dry-run.
+
+    A validator predicate (decrypt + deserialize_manifest) gates deletion:
+    candidates whose name matches the iCloud/Dropbox rename patterns but
+    which don't deserialize as Mind Meld manifests are left on disk with
+    a stderr warning. Only real manifest conflict copies are removed.
+    """
+    mkey = manifest_key(device_id)
+    is_valid = _make_manifest_validator(passphrase, memory_kb)
+    return backend.delete_conflict_copies(mkey, is_valid)
+
+
+def _print_apply_warning(message: str) -> None:
+    """A dead stderr must not turn a contained failure into a batch failure."""
+    with _pause_sync_progress():
+        try:
+            print(message, file=sys.stderr)
+        except OSError:
+            pass
+
+
+# ── push ──────────────────────────────────────────────────────────────
+
+
+class _SyncProgress:
+    """Transient terminal spinner and counter display for attended push/pull.
+
+    Uses the same Rich columns, 100ms ticker thread, and display-failure
+    isolation as `_run_update_with_progress`, with `transient=True` so the
+    working line clears before warnings, prompts, or the final outcome line.
+    """
+
+    def __init__(self, *, enabled: bool) -> None:
+        self._enabled = enabled
+        self._lock = threading.RLock()
+        self._progress: Progress | None = None
+        self._task: Any = None
+        self._stop_ticking: threading.Event | None = None
+        self._ticker: threading.Thread | None = None
+        self._state = updateprogress.UpdateProgress("")
+        self._batch_phase = ""
+        self._batch_unit = ""
+        self._batch_completed = 0
+        self._batch_total = 0
+        self._pause_depth = 0
+        self._stopped = False
+        self._last_render_at = 0.0
+
+    def _can_draw(self) -> bool:
+        # A closed/replaced stdout makes isatty() raise; that is a display
+        # failure, never a sync failure.
+        try:
+            return (
+                self._enabled
+                and not self._stopped
+                and console.is_terminal
+                and console.file.isatty()
+            )
+        except (Exception, SystemExit):
+            return False
+
+    def _render_locked(self, state: updateprogress.UpdateProgress, *, force: bool = False) -> None:
+        self._state = state
+        if (
+            not self._enabled
+            or self._progress is None
+            or self._task is None
+            or self._pause_depth > 0
+        ):
+            return
+        measured = state.total is not None and state.completed is not None
+        detail = f"{100 * state.completed / state.total:.1f}% {state.detail}" if measured else ""
+        # Per-file advances only update the task fields; the ticker paints
+        # them at 10 Hz. A synchronous redraw per file would let a stalled
+        # terminal block the sync mid-run, lock held. Forced renders (phase
+        # changes, first/final file) paint immediately.
+        now = time.monotonic()
+        do_refresh = force or now - self._last_render_at >= _UPDATE_SPINNER_TICK_SECONDS
+        try:
+            self._progress.update(
+                self._task,
+                completed=0,
+                description=state.phase,
+                detail=detail.rstrip(),
+                refresh=do_refresh,
+            )
+        except (Exception, SystemExit):
+            # Dead terminal: stop retrying the draw on every remaining file.
+            self._enabled = False
+            return
+        if do_refresh:
+            self._last_render_at = now
+
+    def start(self, phase: str) -> None:
+        with self._lock:
+            self._state = updateprogress.UpdateProgress(phase)
+            self._batch_total = 0
+            if self._progress is not None:
+                self._render_locked(self._state, force=True)
+                return
+            if not self._can_draw():
+                return
+            progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}", markup=False),
+                TextColumn("{task.fields[detail]}", markup=False),
+                console=console,
+                transient=True,
+                auto_refresh=False,
+                redirect_stdout=False,
+                redirect_stderr=False,
+            )
+            task = progress.add_task(phase, total=1, detail="")
+            stop_ticking = threading.Event()
+
+            def tick() -> None:
+                while not stop_ticking.wait(_UPDATE_SPINNER_TICK_SECONDS):
+                    if self._stopped or self._pause_depth > 0 or self._progress is not progress:
+                        continue
+                    try:
+                        progress.refresh()
+                    except (Exception, SystemExit):  # First failed draw: timer off.
+                        return
+
+            ticker = threading.Thread(target=tick, name="mm-sync-spinner", daemon=True)
+            try:
+                progress.start()
+            except (Exception, SystemExit):
+                with suppress(Exception, SystemExit):
+                    progress.stop()
+                with suppress(Exception, SystemExit):
+                    console.show_cursor(True)  # A failed start can skip Rich's own restore.
+                self._enabled = False
+                return
+            self._progress = progress
+            self._last_render_at = time.monotonic()
+            self._task = task
+            self._stop_ticking = stop_ticking
+            self._ticker = ticker
+            try:
+                with suppress(Exception):  # No ticker thread: state changes still redraw.
+                    ticker.start()
+            except BaseException:
+                self.stop()
+                raise
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            self._batch_total = 0
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
+
+    def start_batch(self, phase: str, total: int, unit: str) -> None:
+        with self._lock:
+            self._batch_phase = phase
+            self._batch_unit = unit
+            self._batch_completed = 0
+            self._batch_total = max(total, 0)
+            self._render_locked(updateprogress.UpdateProgress(phase), force=True)
+
+    def ensure_batch(self, phase: str, total: int, unit: str) -> None:
+        with self._lock:
+            if (
+                self._batch_total > 0
+                and self._batch_completed < self._batch_total
+                and self._batch_phase == phase
+            ):
+                return
+            self.start_batch(phase, total, unit)
+
+    def advance(self, step: int = 1) -> None:
+        with self._lock:
+            if self._batch_total <= 0:
+                return
+            self._batch_completed = min(self._batch_total, self._batch_completed + step)
+            detail = f"{self._batch_completed}/{self._batch_total} {self._batch_unit}".rstrip()
+            self._render_locked(
+                updateprogress.UpdateProgress(
+                    self._batch_phase,
+                    completed=self._batch_completed,
+                    total=self._batch_total,
+                    detail=detail,
+                ),
+                force=self._batch_completed in (1, self._batch_total),
+            )
+
+    @contextmanager
+    def paused(self):
+        with self._lock:
+            self._pause_depth += 1
+            progress = self._progress if self._pause_depth == 1 else None
+        if progress is not None:
+            with suppress(Exception, SystemExit):
+                progress.stop()
+        propagating = False
+        try:
+            yield
+        except BaseException:
+            # Unwinding (e.g. Ctrl-C at a prompt): do not resurrect the
+            # spinner on the way out. A pause inside a handled `except:`
+            # block is not propagation and still resumes.
+            propagating = True
+            raise
+        finally:
+            with self._lock:
+                self._pause_depth = max(0, self._pause_depth - 1)
+                if (
+                    self._pause_depth == 0
+                    and self._progress is not None
+                    and not self._stopped
+                    and not propagating
+                    and self._can_draw()
+                ):
+                    try:
+                        self._progress.start()
+                        self._render_locked(self._state, force=True)
+                    except (Exception, SystemExit):
+                        with suppress(Exception, SystemExit):
+                            self._progress.stop()
+                        with suppress(Exception, SystemExit):
+                            console.show_cursor(True)
+                        # Match start() failure: drop the dead display so no
+                        # later render targets it. Ticker refs stay for stop().
+                        self._progress = None
+                        self._task = None
+                        self._enabled = False
+
+    def stop(self) -> None:
+        self._stopped = True
+        progress = self._progress
+        stop_ticking = self._stop_ticking
+        ticker = self._ticker
+        self._progress = None
+        self._task = None
+        self._stop_ticking = None
+        self._ticker = None
+        if stop_ticking is not None:
+            stop_ticking.set()
+        if ticker is not None:
+            with suppress(Exception, SystemExit):
+                if ticker.ident is not None:
+                    ticker.join(timeout=_UPDATE_SPINNER_JOIN_SECONDS)
+        if progress is not None and (ticker is None or not ticker.is_alive()):
+            with suppress(Exception, SystemExit):
+                progress.stop()
+
+
+def _current_sync_progress() -> _SyncProgress | None:
+    state = _SYNC_OUTPUT.get()
+    if state is None:
+        return None
+    progress = state.get("progress")
+    return progress if isinstance(progress, _SyncProgress) else None
+
+
+def _start_sync_progress(phase: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.start(phase)
+
+
+def _sync_progress_phase(phase: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.set_phase(phase)
+
+
+def _sync_progress_start_batch(phase: str, total: int, unit: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.start_batch(phase, total, unit)
+
+
+def _sync_progress_ensure_batch(phase: str, total: int, unit: str) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.ensure_batch(phase, total, unit)
+
+
+def _sync_progress_advance(step: int = 1) -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.advance(step)
+
+
+def _stop_sync_progress() -> None:
+    progress = _current_sync_progress()
+    if progress is not None:
+        progress.stop()
+
+
+def _sync_diagnostic(message: str, degraded: bool = False) -> None:
+    """Retain facts before best-effort rendering; never change execution policy."""
+    state = _SYNC_OUTPUT.get()
+    if state is not None and degraded:
+        state["diagnostics"].append(message.removeprefix("mm: notice: ").strip())
+    if state is None or state["verbose"]:
+        with suppress(Exception, SystemExit):
+            print(safety.safe_terminal_str(message.rstrip()), file=sys.stderr)
+
+
+def _sync_warning(message: str) -> None:
+    with suppress(Exception, SystemExit):
+        _print_apply_warning(message)
+
+
+def _release_sync_lock() -> None:
+    if _SYNC_OUTPUT.get() is None:
+        release_lock()
+        return
+    try:
+        release_lock()
+    except (Exception, SystemExit) as exc:
+        _sync_diagnostic("lock release could not be confirmed", True)
+        _sync_warning(
+            f"mm: warning: lock release could not be confirmed ({type(exc).__name__}); run mm diag"
+        )
+
+
+# ── migrate-config ────────────────────────────────────────────────────
+
+
+def _explicit_retired_sources(sources: list[dict] | None) -> list[str]:
+    """Return explicit [[sync.sources]] names that belong to RETIRED_SOURCE_NAMES.
+
+    Retired names are already ignored during source resolution and at manifest
+    consumer boundaries, without deletion tombstones. ``mm migrate-config``
+    removes their inert blocks and records their names in ``disabled_sources``.
+    """
+    if not sources:
+        return []
+    return [
+        s["name"]
+        for s in sources
+        if isinstance(s.get("name"), str) and s["name"] in _config_module.RETIRED_SOURCE_NAMES
+    ]
+
+
+def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
+    """Body of `mm migrate-config`. Extracted so the interactive
+    `_maybe_prompt_migration` can call it directly without going through
+    typer's option-parsing machinery. Returns True only after writing exclusions.
+    """
+    config = _get_config(read_only=dry_run)
+
+    sources = config.get("sync", {}).get("sources")
+    if not sources:
+        console.print(
+            "[dim]Config has no explicit [[sync.sources]] entries — "
+            "nothing to migrate. DEFAULT_SOURCES already include the "
+            "recommended excludes.[/dim]"
+        )
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
+        return False
+
+    diffs = _compute_recommended_excludes_diff(sources)
+    include_diffs = _compute_recommended_includes_diff(sources)
+    retired = _explicit_retired_sources(sources)
+    if not diffs and not include_diffs and not retired:
+        console.print("[green]Config is already up to date.[/green]")
+        if dry_run:
+            console.print(DRY_RUN_COMPLETE_LOCK_FREE)
+        return False
+
+    if diffs:
+        explanation = "These globs stop per-machine caches and generated output from syncing"
+        if any(name == "gstack" for name, _missing, _current in diffs):
+            explanation += (
+                " (for gstack: virtualenvs, app bundles, archives and binaries, QA evidence)"
+            )
+        console.print(
+            f"\n{explanation}. Pushing publishes the smaller set: that push counts these files "
+            "as deleted from this Mac's manifest, writes no tombstones, and every Mac keeps "
+            "its copy. Removing a recommended glob later brings this prompt back."
+        )
+        console.print("\n[bold]Recommended exclude_patterns updates:[/bold]")
+        for name, missing, current in diffs:
+            console.print(f"\n  [bold]{name}[/bold]  (current: {current!r})")
+            for p in missing:
+                console.print(f"    [green]+ {p}[/green]")
+    if include_diffs:
+        console.print(
+            "\nThe include_patterns allowlist syncs only context with a cross-machine "
+            "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
+            "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
+            "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
+            "its local files. Deleting the key later brings this prompt back; editing "
+            "the list (even to empty) is respected as your choice."
+        )
+        console.print("\n[bold]Recommended include_patterns updates:[/bold]")
+        for name, patterns in include_diffs:
+            console.print(f"\n  [bold]{name}[/bold]  (no include_patterns today)")
+            for p in patterns:
+                console.print(f"    [green]+ {p}[/green]")
+    if retired:
+        console.print("\n[bold]Retired sources:[/bold]")
+        for rname in retired:
+            console.print(
+                f"  [bold]{rname}[/bold] — already stopped syncing; remove the leftover "
+                "[[sync.sources]] block and record the name in disabled_sources. "
+                "Local files are preserved."
+            )
+
+    if dry_run:
+        console.print(DRY_RUN_COMPLETE_LOCK_FREE)
+        return False
+
+    if not yes and not typer.confirm("\nApply these updates?", default=True):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return False
+
+    try:
+        acquire_lock()
+    except LockError as e:
+        _error(str(e))
+
+    try:
+        diff_map = {name: missing for name, missing, _current in diffs}
+        include_map_new = {name: patterns for name, patterns in include_diffs}
+        new_sources: list[dict] = []
+        for src in sources:
+            if src.get("name") in _config_module.RETIRED_SOURCE_NAMES:
+                continue
+            if src.get("name") in diff_map or src.get("name") in include_map_new:
+                merged = dict(src)
+                if src.get("name") in diff_map:
+                    current = list(src.get("exclude_patterns") or [])
+                    merged["exclude_patterns"] = current + diff_map[src["name"]]
+                if src.get("name") in include_map_new:
+                    merged["include_patterns"] = include_map_new[src["name"]]
+                new_sources.append(merged)
+            else:
+                new_sources.append(src)
+
+        # One patch for both halves. patch_config_on_disk is section-level
+        # shallow and REPLACES sync.sources wholesale; disabled_sources is
+        # a sibling field in the same section. Record the retirement in config;
+        # consumer filters already suppress retired sources without tombstones.
+        sync_updates: dict[str, Any] = {"sources": new_sources}
+        if retired:
+            disabled = list(config.get("sync", {}).get("disabled_sources", []) or [])
+            for rname in retired:
+                if rname not in disabled:
+                    disabled.append(rname)
+            sync_updates["disabled_sources"] = sorted(disabled)
+        patch_config_on_disk({"sync": sync_updates})
+        # Clear any prior migration breadcrumb — config now matches.
+        breadcrumb = _migration_state_path()
+        try:
+            breadcrumb.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        parts: list[str] = []
+        if diffs or include_diffs:
+            updated = {name for name, _m, _c in diffs} | {name for name, _p in include_diffs}
+            parts.append(f"Updated {len(updated)} source(s)")
+        if retired:
+            parts.append(f"removed retired source block(s): {', '.join(retired)}")
+        console.print(
+            f"[green]{'; '.join(parts)}.[/green] Config written to {_config_module.CONFIG_PATH}."
+        )
+    finally:
+        release_lock()
+    return bool(diffs or include_diffs)
+
+
+# Rich's Progress default refresh rate; the dots spinner advances by clock,
+# so redrawing at this interval animates smoothly. The timer only redraws
+# the current state: phases and counters still change solely on installer
+# output, never on elapsed time.
+_UPDATE_SPINNER_TICK_SECONDS = 0.1
+
+
+_UPDATE_SPINNER_JOIN_SECONDS = 1.0
+
+
+def _migration_state_path() -> Path:
+    """`migration-state.json` next to the recovery sidecar.
+
+    Records that an auto-command observed missing recommended excludes but
+    refused to mutate config (visible-failure contract — auto-commands MUST
+    NEVER silently change user config). `mm status` and the interactive
+    prompts read this so the signal stays visible until the user runs
+    `mm migrate-config`.
+    """
+    return sidecar.SIDECAR_DIR / "migration-state.json"
+
+
+def _maybe_prompt_migration(config: dict, *, read_only: bool) -> None:
+    """Once-per-invocation interactive prompt for pending config migrations.
+
+    Called from the top of `mm push` / `mm pull` / `mm recapture` ONLY
+    (interactive verbs). Auto-commands (autopull/autopush) NEVER prompt and
+    NEVER mutate config — they write a `migration-state.json` breadcrumb
+    instead and let `mm status` surface the signal. Visible-failure
+    contract: silent config mutation in a hook would be exactly the class
+    of "wedged sync I never noticed" failure the contract exists to prevent.
+    """
+    missing = _config_missing_recommended_excludes(config)
+    retired_sources = _explicit_retired_sources(config.get("sync", {}).get("sources"))
+    if not missing and not retired_sources:
+        return
+    is_tty = sys.stdin.isatty() and sys.stdout.isatty()
+    if read_only or not is_tty:
+        # Skip the confirm prompt for a read-only preview, or when either
+        # stream is not a TTY (CI, piped invocation).
+        bits: list[str] = []
+        if missing:
+            bits.append(f"config missing recommended excludes for source(s) {', '.join(missing)}")
+        if retired_sources:
+            joined_retired = ", ".join(retired_sources)
+            bits.append(f"config still has retired [[sync.sources]] block(s): {joined_retired}")
+        stderr_console.print(
+            f"[yellow]warning:[/yellow] {'; '.join(bits)}. Run "
+            f"[bold]mm migrate-config[/bold] to update."
+        )
+        if read_only and is_tty:
+            stderr_console.print(
+                "This preview uses your current config. Without --dry-run, this command "
+                "first offers to run mm migrate-config (default: yes)."
+            )
+        return
+    if missing:
+        console.print(
+            f"\n[yellow]Config is missing recommended exclude_patterns for "
+            f"source(s):[/yellow] {', '.join(missing)}"
+        )
+    if retired_sources:
+        console.print(
+            f"\n[yellow]Retired sync source(s) detected:[/yellow] {', '.join(retired_sources)}"
+        )
+        console.print(
+            "  These sources have already stopped syncing. mm migrate-config removes "
+            "their inert blocks and records their names in disabled_sources. "
+            "Local files are preserved."
+        )
+    if typer.confirm("Run 'mm migrate-config' now?", default=True):
+        # Call the core directly so typer's option machinery isn't in the
+        # way; the inner "Apply these updates?" prompt still confirms
+        # before writing.
+        _migrate_config_core(yes=False, dry_run=False)

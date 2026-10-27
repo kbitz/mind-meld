@@ -16,14 +16,8 @@ from datetime import datetime, timezone
 import pytest
 import typer
 
-from mind_meld import sidecar
-from mind_meld.cli import (
-    ManifestFetch,
-    _collect_peer_tombstones,
-    _fetch_remote_manifest,
-    _push_core,
-    _recover_prior_manifest,
-)
+from mind_meld import core, sidecar
+from mind_meld.cli import ManifestFetch, _fetch_remote_manifest, _push_core
 from mind_meld.crypto import encrypt
 from mind_meld.devices import register_device
 from mind_meld.manifest import serialize_manifest
@@ -69,7 +63,7 @@ class TestRecoverPriorManifest:
         manifest = _make_manifest("abc", {"a.md": {"sha256": "aaa"}})
         fetch = ManifestFetch(status="ok", manifest=manifest)
 
-        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is manifest
 
     @pytest.mark.parametrize("dry_run", [False, True])
@@ -90,7 +84,7 @@ class TestRecoverPriorManifest:
             )
         fetch = ManifestFetch(status="ok", manifest=copies, conflict_copies_only=True)
 
-        out = _recover_prior_manifest(
+        out = core._recover_prior_manifest(
             fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=quiet, dry_run=dry_run
         )
         captured = capsys.readouterr()
@@ -111,7 +105,7 @@ class TestRecoverPriorManifest:
         backend = LocalBackend(tmp_path / "storage")
         fetch = ManifestFetch(status="missing")
 
-        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is None
 
     def test_corrupt_recovers_from_sidecar(self, tmp_path, monkeypatch):
@@ -128,7 +122,7 @@ class TestRecoverPriorManifest:
         sidecar.write(prior)
 
         fetch = ManifestFetch(status="corrupt")
-        out = _recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is not None
         assert out["tombstones"] == prior["tombstones"]
         assert out["sources"] == prior["sources"]
@@ -153,7 +147,7 @@ class TestRecoverPriorManifest:
         _put_manifest(backend, "peer1", peer_manifest)
 
         fetch = ManifestFetch(status="corrupt")
-        out = _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
         assert out is not None
         # Synthetic prior: empty sources, peer tombstones carried forward
         assert out["sources"] == {}
@@ -167,7 +161,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
 
     def test_corrupt_peers_all_corrupt_refuses(self, tmp_path, monkeypatch):
         """Corrupt + no sidecar + peers exist but all corrupt → refuse."""
@@ -179,7 +173,7 @@ class TestRecoverPriorManifest:
 
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
-            _recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
 
 
 # ── sidecar ──────────────────────────────────────────────────────────
@@ -335,7 +329,7 @@ class TestCollectPeerTombstones:
         _put_manifest(backend, "me", my_manifest)
         _put_manifest(backend, "peer1", peer_manifest)
 
-        out = _collect_peer_tombstones(backend, "me", PASSPHRASE, MEMORY_KB)
+        out = core._collect_peer_tombstones(backend, "me", PASSPHRASE, MEMORY_KB)
         # mine.md must not appear — we skip self
         assert "claude:mine.md" not in out
         assert "claude:theirs.md" in out
@@ -343,7 +337,7 @@ class TestCollectPeerTombstones:
     def test_empty_when_no_peers(self, tmp_path):
         backend = LocalBackend(tmp_path / "storage")
         register_device(backend, "me", "me-host")
-        out = _collect_peer_tombstones(backend, "me", PASSPHRASE, MEMORY_KB)
+        out = core._collect_peer_tombstones(backend, "me", PASSPHRASE, MEMORY_KB)
         assert out == {}
 
 

@@ -27,17 +27,11 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from mind_meld import pullplan, resolveflow
-from mind_meld.cli import (
-    CONFLICT_INFIX,
-    _apply_conflict,
-    _apply_incoming_file,
-    _prompt_conflict_choice,
-    app,
-    conflict_filename,
-)
+from mind_meld import core, pullflow, pullplan, resolveflow
+from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.manifest import (
+    CONFLICT_INFIX,
     _canonical_for_conflict,
     hash_file,
     is_v1_conflict_filename,
@@ -101,7 +95,7 @@ class TestApplyIncomingFile:
         remote_data = b"remote content"
         info = _remote_info("deadbeef", datetime.now(timezone.utc))
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=remote_data,
@@ -125,7 +119,7 @@ class TestApplyIncomingFile:
         sha = hash_file(local)
         info = _remote_info(sha, datetime.now(timezone.utc))
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"same content",
@@ -154,7 +148,7 @@ class TestApplyIncomingFile:
         remote_data = b'{"ts":"2026-01-02","key":"shared"}\n{"ts":"2026-02-01","key":"b"}\n'
         info = _remote_info("bbb", datetime(2026, 1, 1, tzinfo=timezone.utc))
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=remote_data,
@@ -177,7 +171,7 @@ class TestApplyIncomingFile:
         remote_data = b"- [beta](b.md)\n"
         info = _remote_info("bbb", datetime.now(timezone.utc))
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=remote_data,
@@ -202,7 +196,7 @@ class TestApplyIncomingFile:
         remote_mtime = datetime(2026, 4, 21, 11, 0, tzinfo=timezone.utc)
         info = _remote_info("remotehash", remote_mtime)
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -229,7 +223,7 @@ class TestApplyIncomingFile:
         remote_mtime = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
         info = _remote_info("remotehash", remote_mtime)
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -265,7 +259,7 @@ class TestApplyIncomingFile:
         remote_mtime = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
         info = _remote_info("remotehash", remote_mtime)
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -304,7 +298,7 @@ class TestApplyIncomingFile:
         remote_sha = hashlib.sha256(b"remote content").hexdigest()
         info = _remote_info(remote_sha, datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
-        first = _apply_incoming_file(
+        first = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -313,7 +307,7 @@ class TestApplyIncomingFile:
         )
         assert first == "conflicted"
 
-        second = _apply_incoming_file(
+        second = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -351,14 +345,14 @@ class TestApplyIncomingFile:
             datetime(2026, 4, 21, 13, 0, tzinfo=timezone.utc),
         )
 
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"peer R1",
             remote_info=info_old,
             remote_device_id="devA1234",
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"peer R2",
@@ -382,14 +376,14 @@ class TestApplyIncomingFile:
 
         info = _remote_info("remotehash", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
 
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"peer A bytes",
             remote_info=info,
             remote_device_id="devA1234",
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"peer B bytes",
@@ -420,7 +414,7 @@ class TestApplyIncomingFile:
         v0_sidecar.write_bytes(b"local-bytes-from-pre-inversion-era")
 
         info = _remote_info("remotehash", datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc))
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"current peer bytes",
@@ -445,23 +439,23 @@ class TestConflictFilename:
         """Format: <stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device_short>.<ext>"""
         canonical = Path("/tmp/fake/user_role.md")
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        path = conflict_filename(canonical, "a1b2c3d4-e5f6-7890", now=now)
+        path = pullflow.conflict_filename(canonical, "a1b2c3d4-e5f6-7890", now=now)
         assert path.name == "user_role.sync-conflict-20260421-143055-v1-a1b2c3d4.md"
 
     def test_short_device_id_padded(self, tmp_path: Path) -> None:
         """Device id shorter than 8 chars is used as-is (no padding)."""
         canonical = tmp_path / "f.md"
-        path = conflict_filename(canonical, "dev")
+        path = pullflow.conflict_filename(canonical, "dev")
         assert "-dev." in path.name
 
     def test_collision_suffix_when_same_second(self, tmp_path: Path) -> None:
         """Same-second double conflict on same device gets 4-char random suffix."""
         canonical = tmp_path / "x.md"
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        first = conflict_filename(canonical, "devA1234", now=now)
+        first = pullflow.conflict_filename(canonical, "devA1234", now=now)
         first.parent.mkdir(parents=True, exist_ok=True)
         first.write_bytes(b"seed")
-        second = conflict_filename(canonical, "devA1234", now=now)
+        second = pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert second != first
         # Suffix pattern: <base>-<4hex>.<ext>
         assert second.stem.endswith(tuple("0123456789abcdef"))
@@ -471,7 +465,7 @@ class TestConflictFilename:
         """file.config.yaml keeps its middle dot in the stem portion."""
         canonical = tmp_path / "config.local.yaml"
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        path = conflict_filename(canonical, "devA1234", now=now)
+        path = pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert path.name.startswith("config.local")
         assert path.suffix == ".yaml"
 
@@ -482,13 +476,13 @@ class TestConflictFilename:
         """
         canonical = tmp_path / "f.md"
         with pytest.raises(ValueError, match="device_id must be non-empty"):
-            conflict_filename(canonical, "")
+            pullflow.conflict_filename(canonical, "")
 
     def test_none_device_id_raises(self, tmp_path: Path) -> None:
         """None falls into the same trap as empty string under the old fallback."""
         canonical = tmp_path / "f.md"
         with pytest.raises(ValueError, match="device_id must be non-empty"):
-            conflict_filename(canonical, None)  # type: ignore[arg-type]
+            pullflow.conflict_filename(canonical, None)  # type: ignore[arg-type]
 
     def test_occupied_random_fallback_picks_a_free_name(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -496,13 +490,13 @@ class TestConflictFilename:
         """Base plus the first random candidate occupied -> return the free one."""
         canonical = tmp_path / "x.md"
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        base = conflict_filename(canonical, "devA1234", now=now)
+        base = pullflow.conflict_filename(canonical, "devA1234", now=now)
         base.write_bytes(b"occupied-base")
         tokens = iter(["aaaa", "bbbb"])
         monkeypatch.setattr("mind_meld.cli.secrets.token_hex", lambda n: next(tokens))
         occupied = canonical.with_name(f"{base.stem}-aaaa{base.suffix}")
         occupied.write_bytes(b"occupied-random")
-        chosen = conflict_filename(canonical, "devA1234", now=now)
+        chosen = pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert chosen.name.endswith("-bbbb.md")
         assert not chosen.exists()
         assert occupied.read_bytes() == b"occupied-random"
@@ -514,7 +508,7 @@ class TestConflictFilename:
     ) -> None:
         canonical = tmp_path / "x.md"
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        base = conflict_filename(canonical, "devA1234", now=now)
+        base = pullflow.conflict_filename(canonical, "devA1234", now=now)
         base.write_bytes(b"base")
         tokens = ["aa11", "bb22", "cc33", "dd44", "ee55"]
         for tok in tokens:
@@ -528,23 +522,23 @@ class TestConflictFilename:
 
         monkeypatch.setattr("mind_meld.cli.secrets.token_hex", take)
         with pytest.raises(ValueError, match="no unused name"):
-            conflict_filename(canonical, "devA1234", now=now)
+            pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert calls == tokens
         assert base.read_bytes() == b"base"
 
     def test_dangling_symlink_and_directory_are_occupied(self, tmp_path: Path) -> None:
         canonical = tmp_path / "x.md"
         now = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        base = conflict_filename(canonical, "devA1234", now=now)
+        base = pullflow.conflict_filename(canonical, "devA1234", now=now)
         outside = tmp_path / "outside-target"
         outside.write_bytes(b"do-not-touch")
         base.symlink_to(tmp_path / "missing-target")
-        chosen = conflict_filename(canonical, "devA1234", now=now)
+        chosen = pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert chosen != base
         assert base.is_symlink()
         assert outside.read_bytes() == b"do-not-touch"
         chosen.mkdir()
-        third = conflict_filename(canonical, "devA1234", now=now)
+        third = pullflow.conflict_filename(canonical, "devA1234", now=now)
         assert third != chosen
         assert chosen.is_dir()
 
@@ -1276,7 +1270,7 @@ class TestWalkerExcludesConflictRegression:
         canonical = memory / "notes.md"
         canonical.write_text("remote-resolved content")
         # Use the same helper the CLI uses to ensure naming alignment.
-        conflict = conflict_filename(
+        conflict = pullflow.conflict_filename(
             canonical, device_id="abc12345dead", now=datetime(2026, 4, 22, 12, tzinfo=timezone.utc)
         )
         conflict.write_text("local divergent content")
@@ -1990,7 +1984,7 @@ class TestResolveLocalMtimeBump:
         # Peer pushes again with same bytes + same manifest mtime.
         remote_sha = hashlib.sha256(b"remote content").hexdigest()
         info = _remote_info(remote_sha, peer_mtime_dt)
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=canonical,
             rel_path=rel,
             plain_data=b"remote content",
@@ -2018,15 +2012,13 @@ class TestResolveLocalMtimeBump:
         peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
         info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_mtime_dt)
 
-        from mind_meld import cli as cli_module
-
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("keep-canonical", None),
         )
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -2055,16 +2047,14 @@ class TestResolveLocalMtimeBump:
         peer_mtime_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
         info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_mtime_dt)
 
-        from mind_meld import cli as cli_module
-
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("keep-canonical", None),
         )
 
         bumps: dict[Path, float] = {}
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -2098,16 +2088,14 @@ class TestResolveLocalMtimeBump:
         # Manifest entry with NO mtime key.
         info = {"sha256": hashlib.sha256(b"remote content").hexdigest(), "size": 0}
 
-        from mind_meld import cli as cli_module
-
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("keep-canonical", None),
         )
 
         bumps: dict[Path, float] = {}
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -2134,10 +2122,8 @@ class TestResolveLocalMtimeBump:
         older = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
         newer = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
 
-        from mind_meld import cli as cli_module
-
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("keep-canonical", None),
         )
@@ -2146,7 +2132,7 @@ class TestResolveLocalMtimeBump:
         # Walk order: NEWER peer first, then OLDER — max() must still win.
         for peer_dt, dev in ((newer, "devA1234"), (older, "devB5678")):
             info = _remote_info(hashlib.sha256(b"remote content").hexdigest(), peer_dt)
-            _apply_incoming_file(
+            pullflow._apply_incoming_file(
                 local_path=local,
                 rel_path=rel,
                 plain_data=b"remote content",
@@ -2162,7 +2148,7 @@ class TestResolveLocalMtimeBump:
         """`_drain_inline_bumps` stamps each recorded canonical with an mtime
         strictly greater than the recorded peer mtime, and future-clamps at
         now+60s (inherited from `_bump_canonical_mtime_post_resolve`)."""
-        from mind_meld.cli import _drain_inline_bumps
+        pass
 
         canonical = tmp_path / "f.md"
         canonical.write_bytes(b"local content")
@@ -2176,7 +2162,7 @@ class TestResolveLocalMtimeBump:
         far_future = time.time() + 3600.0
 
         before = time.time()
-        _drain_inline_bumps({canonical: peer_mtime, future_file: far_future})
+        pullflow._drain_inline_bumps({canonical: peer_mtime, future_file: far_future})
         after = time.time()
 
         assert canonical.stat().st_mtime > peer_mtime
@@ -2184,8 +2170,8 @@ class TestResolveLocalMtimeBump:
         assert before <= future_file.stat().st_mtime <= after + 60.0
 
         # None / empty are no-ops (non-interactive pull).
-        _drain_inline_bumps(None)
-        _drain_inline_bumps({})
+        pullflow._drain_inline_bumps(None)
+        pullflow._drain_inline_bumps({})
 
     def test_inline_keep_remote_after_keep_local_pops_pending_bump(
         self, tmp_path: Path, monkeypatch
@@ -2208,15 +2194,13 @@ class TestResolveLocalMtimeBump:
         _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
         peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
 
-        from mind_meld import cli as cli_module
-
         bumps: dict[Path, float] = {}
 
         # Peer A: keep-canonical -> records.
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote A",
@@ -2230,9 +2214,9 @@ class TestResolveLocalMtimeBump:
 
         # Peer B: keep-remote -> writes canonical, pops the pending bump.
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2246,8 +2230,8 @@ class TestResolveLocalMtimeBump:
         assert local.read_bytes() == b"remote B"
         # The contract: "written" is a canonical-mutating outcome; the gate
         # in _download_and_apply pops on it.
-        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
-        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
+        pullflow._invalidate_inline_bump(bumps, local.resolve())
         assert bumps == {}
 
     def test_inline_merge_after_keep_local_pops_pending_bump(
@@ -2262,14 +2246,12 @@ class TestResolveLocalMtimeBump:
         _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
         peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
 
-        from mind_meld import cli as cli_module
-
         bumps: dict[Path, float] = {}
 
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote A",
@@ -2283,11 +2265,11 @@ class TestResolveLocalMtimeBump:
 
         # Peer B: merge -> writes merged bytes to canonical, pops the bump.
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("merge", b"merged content"),
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2299,8 +2281,8 @@ class TestResolveLocalMtimeBump:
         )
         assert outcome == "merged-via-lcs"
         assert local.read_bytes() == b"merged content"
-        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
-        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
+        pullflow._invalidate_inline_bump(bumps, local.resolve())
         assert bumps == {}
 
     def test_inline_keep_both_after_keep_local_pops_pending_bump(
@@ -2317,14 +2299,12 @@ class TestResolveLocalMtimeBump:
         _set_mtime(local, datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc))
         peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
 
-        from mind_meld import cli as cli_module
-
         bumps: dict[Path, float] = {}
 
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote A",
@@ -2338,9 +2318,9 @@ class TestResolveLocalMtimeBump:
 
         # Peer B: keep-both -> falls through to _apply_conflict, pops the bump.
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-both", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-both", None)
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2351,8 +2331,8 @@ class TestResolveLocalMtimeBump:
             resolved_local=local.resolve(),
         )
         assert outcome == "conflicted"
-        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
-        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
+        pullflow._invalidate_inline_bump(bumps, local.resolve())
         assert bumps == {}
 
     def test_inline_failed_keep_remote_write_does_not_pop_pending_bump(
@@ -2373,9 +2353,9 @@ class TestResolveLocalMtimeBump:
         bumps: dict[Path, float] = {}
 
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote A",
@@ -2393,9 +2373,9 @@ class TestResolveLocalMtimeBump:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-remote", None)
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2409,7 +2389,7 @@ class TestResolveLocalMtimeBump:
         assert local.read_bytes() == b"local content"  # write failed, local kept
         # "failed" is intentionally absent from the gate set; the gate would
         # not pop on this outcome, so the prior keep-canonical decision stands.
-        assert outcome not in cli_module._CANONICAL_WRITE_OUTCOMES
+        assert outcome not in pullflow._CANONICAL_WRITE_OUTCOMES
         assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}  # NOT popped
 
     def test_inline_failed_merge_write_does_not_pop_pending_bump(
@@ -2434,9 +2414,9 @@ class TestResolveLocalMtimeBump:
         bumps: dict[Path, float] = {}
 
         monkeypatch.setattr(
-            cli_module, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
+            pullflow, "_prompt_conflict_choice", lambda *a, **kw: ("keep-canonical", None)
         )
-        _apply_incoming_file(
+        pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote A",
@@ -2453,11 +2433,11 @@ class TestResolveLocalMtimeBump:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("merge", b"merged content"),
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2469,7 +2449,7 @@ class TestResolveLocalMtimeBump:
         )
         assert outcome == "failed"
         assert local.read_bytes() == b"local content"
-        assert outcome not in cli_module._CANONICAL_WRITE_OUTCOMES
+        assert outcome not in pullflow._CANONICAL_WRITE_OUTCOMES
         assert bumps == {local.resolve(): pytest.approx(peer_dt.timestamp())}
 
     def test_apply_write_after_keep_local_pops_pending_bump(self, tmp_path: Path) -> None:
@@ -2490,13 +2470,11 @@ class TestResolveLocalMtimeBump:
         peer_dt = datetime(2026, 5, 9, 8, 48, tzinfo=timezone.utc)
         info = _remote_info(hashlib.sha256(b"remote B").hexdigest(), peer_dt)
 
-        from mind_meld import cli as cli_module
-
         bumps: dict[Path, float] = {local.resolve(): peer_dt.timestamp()}
         # File vanishes between peer A's prompt and peer B's apply.
         local.unlink()
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote B",
@@ -2509,8 +2487,8 @@ class TestResolveLocalMtimeBump:
         assert outcome == "written"
         assert local.read_bytes() == b"remote B"
         # "written" is in the gate set regardless of which branch produced it.
-        assert outcome in cli_module._CANONICAL_WRITE_OUTCOMES
-        cli_module._invalidate_inline_bump(bumps, local.resolve())
+        assert outcome in pullflow._CANONICAL_WRITE_OUTCOMES
+        pullflow._invalidate_inline_bump(bumps, local.resolve())
         assert bumps == {}
 
     def test_pull_core_abort_skips_end_of_batch_drain(self, tmp_path: Path, monkeypatch) -> None:
@@ -2520,7 +2498,7 @@ class TestResolveLocalMtimeBump:
         are NOT applied — abort means the user does not trust this pull, so
         half-made decisions are not broadcast to the fleet."""
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch, _pull_core
+        from mind_meld.cli import ManifestFetch
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -2584,14 +2562,15 @@ class TestResolveLocalMtimeBump:
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
-        monkeypatch.setattr(cli_module, "_download_and_apply", aborting_download_and_apply)
+        monkeypatch.setattr(pullflow, "_download_and_apply", aborting_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
-        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(pullflow, "get_backend", lambda c: None)
+        monkeypatch.setattr(pullflow, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
         monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
-        monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
+        monkeypatch.setattr(pullflow, "collect_tombstones", lambda *a, **kw: {})
 
         with pytest.raises(typer.Abort):
-            _pull_core(
+            pullflow._pull_core(
                 config=config,
                 passphrase="pp",
                 memory_kb=1024,
@@ -2608,7 +2587,7 @@ class TestResolveLocalMtimeBump:
         device loop — canonical's mtime ends up bumped past the recorded peer
         mtime."""
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch, _pull_core
+        from mind_meld.cli import ManifestFetch
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -2677,14 +2656,15 @@ class TestResolveLocalMtimeBump:
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
-        monkeypatch.setattr(cli_module, "_download_and_apply", keep_local_download_and_apply)
+        monkeypatch.setattr(pullflow, "_download_and_apply", keep_local_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
-        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(pullflow, "get_backend", lambda c: None)
+        monkeypatch.setattr(pullflow, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
         monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
-        monkeypatch.setattr(cli_module, "collect_tombstones", lambda *a, **kw: {})
-        monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: None)
+        monkeypatch.setattr(pullflow, "collect_tombstones", lambda *a, **kw: {})
+        monkeypatch.setattr(core, "_cleanup_conflict_copies", lambda *a, **kw: None)
 
-        _pull_core(
+        pullflow._pull_core(
             config=config,
             passphrase="pp",
             memory_kb=1024,
@@ -2707,8 +2687,7 @@ class TestResolveLocalMtimeBump:
         _apply_incoming_file so the gate is exercised, not mocked."""
         from unittest.mock import MagicMock
 
-        from mind_meld import cli as cli_module
-        from mind_meld.cli import _download_and_apply
+        pass
 
         rel = "f.md"
         canonical = tmp_path / rel
@@ -2723,12 +2702,12 @@ class TestResolveLocalMtimeBump:
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"encrypted-blob-bytes")
-        monkeypatch.setattr(cli_module, "decrypt", lambda enc, pp, mk: b"remote")
+        monkeypatch.setattr(pullflow, "decrypt", lambda enc, pp, mk: b"remote")
 
         # Outcome "written" -> in the gate set -> pops.
         bumps = {resolved: peer_mtime}
-        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "written")
-        _download_and_apply(
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", lambda **kw: "written")
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {rel: info},
@@ -2742,8 +2721,8 @@ class TestResolveLocalMtimeBump:
 
         # Outcome "failed" -> NOT in the gate set -> entry retained.
         bumps = {resolved: peer_mtime}
-        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "failed")
-        _download_and_apply(
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", lambda **kw: "failed")
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {rel: info},
@@ -2758,8 +2737,8 @@ class TestResolveLocalMtimeBump:
         # Outcome "skipped" -> NOT in the gate set -> entry retained
         # (also the keep-canonical RECORD outcome — must not self-invalidate).
         bumps = {resolved: peer_mtime}
-        monkeypatch.setattr(cli_module, "_apply_incoming_file", lambda **kw: "skipped")
-        _download_and_apply(
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", lambda **kw: "skipped")
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {rel: info},
@@ -2879,7 +2858,7 @@ class TestInlinePromptUnknownInput:
     def test_unknown_input_keeps_both_silently(self, tmp_path, monkeypatch, capsys, choice):
         local = self._local_file(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
-        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+        outcome, merged = pullflow._prompt_conflict_choice("notes.md", local, b"remote content\n")
         assert (outcome, merged) == ("keep-both", None)
         assert local.read_bytes() == b"local content\n"
         assert "mm: notice:" not in capsys.readouterr().err
@@ -2891,7 +2870,7 @@ class TestInlinePromptUnknownInput:
         local = self._local_file(tmp_path)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
 
-        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+        outcome, merged = pullflow._prompt_conflict_choice("notes.md", local, b"remote content\n")
 
         assert (outcome, merged) == ("keep-both", None)
         captured = capsys.readouterr()
@@ -2913,7 +2892,7 @@ class TestInlinePromptUnknownInput:
         monkeypatch.setattr(conflictdiff, "render_capped_diff", fake_renderer)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
 
-        outcome, merged = _prompt_conflict_choice("notes.md", local, b"remote content\n")
+        outcome, merged = pullflow._prompt_conflict_choice("notes.md", local, b"remote content\n")
 
         assert (outcome, merged) == ("keep-both", None)
         assert caps == [60]
@@ -2962,7 +2941,7 @@ class TestNeverDefaultToMerge:
             return "s"
 
         monkeypatch.setattr(typer, "prompt", fake_prompt)
-        _prompt_conflict_choice("notes.md", local, b"line one\nline two\nline three\n")
+        pullflow._prompt_conflict_choice("notes.md", local, b"line one\nline two\nline three\n")
         assert captured["default"] == "s", (
             "inline pull-time prompt default must be (s)kip even on a clean merge"
         )
@@ -3022,14 +3001,14 @@ class TestSuppressMergeWithoutLineStructure:
         local = tmp_path / "decisions.active.json"
         local.write_bytes(self._MINIFIED_LOCAL)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
-        _prompt_conflict_choice("decisions.active.json", local, self._MINIFIED_REMOTE)
+        pullflow._prompt_conflict_choice("decisions.active.json", local, self._MINIFIED_REMOTE)
         assert "(m)erge" not in capsys.readouterr().out
 
     def test_inline_prompt_typed_m_returns_keep_both(self, tmp_path: Path, monkeypatch) -> None:
         local = tmp_path / "decisions.active.json"
         local.write_bytes(self._MINIFIED_LOCAL)
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
-        choice, merged = _prompt_conflict_choice(
+        choice, merged = pullflow._prompt_conflict_choice(
             "decisions.active.json", local, self._MINIFIED_REMOTE
         )
         assert choice == "keep-both"
@@ -3051,7 +3030,7 @@ class TestSuppressMergeWithoutLineStructure:
         local = tmp_path / "notes.md"
         local.write_bytes(b"line one\nline two\n")
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "m")
-        choice, merged = _prompt_conflict_choice(
+        choice, merged = pullflow._prompt_conflict_choice(
             "notes.md", local, b"line one\nline two\nline three\n"
         )
         assert "(m)erge" in capsys.readouterr().out
@@ -3440,7 +3419,7 @@ class TestInlinePromptTimestamps:
         os.utime(local, (100.0, 100.0))
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "s")
         remote_mtime = datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc)
-        choice, merged = _prompt_conflict_choice(
+        choice, merged = pullflow._prompt_conflict_choice(
             "user.md", local, b"remote content", remote_mtime=remote_mtime
         )
         out = capsys.readouterr().out
@@ -3455,7 +3434,7 @@ class TestInlinePromptTimestamps:
         local = tmp_path / "user.md"
         local.write_bytes(b"local content")
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "n")
-        choice, merged = _prompt_conflict_choice(
+        choice, merged = pullflow._prompt_conflict_choice(
             "user.md",
             local,
             b"remote content",
@@ -3792,7 +3771,7 @@ class TestPostInversionLocalLeavesCanonical:
         _set_mtime(local, datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc))
         remote_mtime = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
         info = _remote_info("remotehash", remote_mtime)
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path=rel,
             plain_data=b"remote content",
@@ -3826,7 +3805,7 @@ class TestConflictOwnershipApply:
             hashlib.sha256(remote).hexdigest(),
             datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
         )
-        return _apply_incoming_file(
+        return pullflow._apply_incoming_file(
             local_path=local,
             rel_path=local.name,
             plain_data=remote,
@@ -4250,7 +4229,6 @@ class TestConflictPublishThenCleanup:
     def test_cleanup_unlinks_only_after_new_bytes_exist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from mind_meld import cli as cli_module
         from mind_meld import fsutil as fsutil_mod
 
         local = tmp_path / "doc.md"
@@ -4259,12 +4237,12 @@ class TestConflictPublishThenCleanup:
         occupied_base = local.with_name("doc.sync-conflict-20260421-143055-v1-devA1234.md")
         occupied_base.mkdir()
         frozen = datetime(2026, 4, 21, 14, 30, 55, tzinfo=timezone.utc)
-        real_cf = cli_module.conflict_filename
+        real_cf = pullflow.conflict_filename
 
         def frozen_cf(canonical: Path, device_id: str, now: datetime | None = None) -> Path:
             return real_cf(canonical, device_id, now=frozen)
 
-        monkeypatch.setattr(cli_module, "conflict_filename", frozen_cf)
+        monkeypatch.setattr(pullflow, "conflict_filename", frozen_cf)
         events: list[str] = []
         real_write = fsutil_mod.atomic_write_bytes
 
@@ -4295,7 +4273,7 @@ class TestConflictPublishThenCleanup:
             hashlib.sha256(b"peer R2").hexdigest(),
             datetime(2026, 4, 21, 13, 0, tzinfo=timezone.utc),
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=local,
             rel_path="doc.md",
             plain_data=b"peer R2",
@@ -4331,7 +4309,7 @@ class TestConflictPublishThenCleanup:
             real_unlink(self, missing_ok=missing_ok)
 
         monkeypatch.setattr(Path, "unlink", fail_old)
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert outcome == "conflicted"
         assert local.read_bytes() == b"local content"
         assert local.stat().st_mtime_ns == local_mtime
@@ -4364,7 +4342,7 @@ class TestConflictPublishThenCleanup:
             real_unlink(self, missing_ok=missing_ok)
 
         monkeypatch.setattr(Path, "unlink", fail_old)
-        first = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        first = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert first == "conflicted"
         writes: list[Path] = []
         unlinks: list[Path] = []
@@ -4382,7 +4360,7 @@ class TestConflictPublishThenCleanup:
 
         monkeypatch.setattr(fsutil_mod, "atomic_write_bytes", spy_write)
         monkeypatch.setattr(Path, "unlink", spy_unlink)
-        second = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        second = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert second == "conflicted"
         assert writes == []
         assert unlinks == []
@@ -4433,7 +4411,7 @@ class TestConflictOwnerBeforeStat:
             hashlib.sha256(b"A remote").hexdigest(),
             datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc),
         )
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_path=notes,
             rel_path="notes.md",
             plain_data=b"A remote",
@@ -4465,7 +4443,7 @@ class TestConflictOwnerBeforeStat:
             "atomic_write_bytes",
             lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
         )
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert outcome == "failed"
         assert old.exists()
         assert old.read_bytes() == b"peer R1"
@@ -4525,7 +4503,7 @@ class TestUnreadableCandidateNotCleaned:
             return orig_read(self)
 
         monkeypatch.setattr(Path, "read_bytes", selective_read)
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert outcome == "conflicted"
         assert unreadable.exists()
         monkeypatch.setattr(Path, "read_bytes", orig_read)
@@ -4566,7 +4544,7 @@ class TestUnreadableCandidateNotCleaned:
             "atomic_write_bytes",
             lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")),
         )
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
         assert outcome == "failed"
         monkeypatch.setattr(Path, "read_bytes", orig_read)
         assert old.exists()

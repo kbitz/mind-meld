@@ -14,11 +14,8 @@ import json
 
 from typer.testing import CliRunner
 
-from mind_meld.cli import (
-    PullResult,
-    app,
-    iter_source_diffs,
-)
+from mind_meld import pullflow
+from mind_meld.cli import app, iter_source_diffs
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.storage.local import LocalBackend
@@ -139,12 +136,12 @@ class TestIterSourceDiffs:
 
 class TestPullResultDegradationFields:
     def test_defaults_are_zero(self):
-        r = PullResult()
+        r = pullflow.PullResult()
         assert r.durability_fsync_failures == 0
         assert r.corrupt_peer_count == 0
 
     def test_fields_are_independent(self):
-        r = PullResult(durability_fsync_failures=2, corrupt_peer_count=0)
+        r = pullflow.PullResult(durability_fsync_failures=2, corrupt_peer_count=0)
         assert r.durability_fsync_failures == 2
         assert r.corrupt_peer_count == 0
 
@@ -243,16 +240,15 @@ class TestAutopullDegradedBreadcrumb:
         Uses a synthetic PullResult so the test doesn't depend on the corrupt-
         peer short-circuit ordering inside _pull_core.
         """
-        import mind_meld.cli as cli_module
-        from mind_meld.cli import PullResult
+        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
 
         def fake_pull_core(*args, **kwargs):
-            return PullResult(total_skipped_unknown_source=2, elapsed=0.1)
+            return pullflow.PullResult(total_skipped_unknown_source=2, elapsed=0.1)
 
-        monkeypatch.setattr(cli_module, "_pull_core", fake_pull_core)
+        monkeypatch.setattr(pullflow, "_pull_core", fake_pull_core)
 
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -262,16 +258,15 @@ class TestAutopullDegradedBreadcrumb:
 
     def test_degraded_on_per_file_failure(self, tmp_path, monkeypatch):
         """Deterministic stub: PullResult with total_failed > 0 → degraded."""
-        import mind_meld.cli as cli_module
-        from mind_meld.cli import PullResult
+        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
 
         def fake_pull_core(*args, **kwargs):
-            return PullResult(total_failed=3, elapsed=0.1)
+            return pullflow.PullResult(total_failed=3, elapsed=0.1)
 
-        monkeypatch.setattr(cli_module, "_pull_core", fake_pull_core)
+        monkeypatch.setattr(pullflow, "_pull_core", fake_pull_core)
 
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -286,14 +281,13 @@ class TestAutopullDegradedBreadcrumb:
         The prior integration-style test depended on corrupt-peer short-
         circuit ordering and could only assert one signal in practice.
         """
-        import mind_meld.cli as cli_module
-        from mind_meld.cli import PullResult
+        pass
 
         _setup_real_config(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)
 
         def fake_pull_core(*args, **kwargs):
-            return PullResult(
+            return pullflow.PullResult(
                 durability_fsync_failures=1,
                 corrupt_peer_count=2,
                 total_skipped_unknown_source=3,
@@ -301,7 +295,7 @@ class TestAutopullDegradedBreadcrumb:
                 elapsed=0.1,
             )
 
-        monkeypatch.setattr(cli_module, "_pull_core", fake_pull_core)
+        monkeypatch.setattr(pullflow, "_pull_core", fake_pull_core)
 
         r = runner.invoke(app, ["autopull"])
         assert r.exit_code == 0, (r.stdout, r.stderr)

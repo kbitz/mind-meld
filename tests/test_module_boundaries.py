@@ -39,6 +39,7 @@ EXTRACTED = [
     "retention",
     "core",
     "statusflow",
+    "pullflow",
     "host_registry",
     *HOST_ADAPTER_MODULES,
 ]
@@ -312,21 +313,21 @@ def test_only_consoles_module_constructs_a_console() -> None:
 
 
 def test_mtime_primitives_are_shared_not_copied() -> None:
-    """cli and the conflict resolver use one implementation, not two.
+    """pullflow and the conflict resolver use one implementation, not two.
 
     `docs/invariants/conflicts.md` makes the post-(l)ocal canonical bump
     load-bearing: without it the user loops resolve -> pull -> resolve forever.
-    The Track 16A cut puts the bump's two callers (`cli._drain_inline_bumps`
+    The Track 16A cut puts the bump's two callers (`pullflow._drain_inline_bumps`
     and the resolver's (l)ocal / (p)romote branches) in different modules, so
     pin that they still share one function object.
     """
-    from mind_meld import cli, conflictmtime
+    from mind_meld import conflictmtime, pullflow
 
-    assert cli._stat_mtime_btime is conflictmtime._stat_mtime_btime
-    assert cli._bump_canonical_mtime_post_resolve is (
+    assert pullflow._stat_mtime_btime is conflictmtime._stat_mtime_btime
+    assert pullflow._bump_canonical_mtime_post_resolve is (
         conflictmtime._bump_canonical_mtime_post_resolve
     )
-    assert cli._restore_mtime_best_effort is conflictmtime._restore_mtime_best_effort
+    assert pullflow._restore_mtime_best_effort is conflictmtime._restore_mtime_best_effort
 
 
 def test_future_clamp_constant_has_one_owner() -> None:
@@ -352,22 +353,22 @@ def test_future_clamp_constant_has_one_owner() -> None:
 def test_canonical_for_conflict_has_one_owner() -> None:
     """Track 48A: the final-infix owner lives in manifest, not a third copy.
 
-    Prefix globbing is not ownership. A second reconstruction in cli or
+    Prefix globbing is not ownership. A second reconstruction in pullflow or
     resolveflow is how notes.md would again delete notes.sync-conflict-log.md.
     """
-    from mind_meld import cli, manifest, resolveflow
+    from mind_meld import manifest, pullflow, resolveflow
 
     assert hasattr(manifest, "_canonical_for_conflict")
-    assert cli.manifest._canonical_for_conflict is manifest._canonical_for_conflict
+    assert pullflow.manifest._canonical_for_conflict is manifest._canonical_for_conflict
     assert resolveflow.manifest._canonical_for_conflict is manifest._canonical_for_conflict
     assert "def _canonical_for_conflict" not in (SRC / "resolveflow.py").read_text(encoding="utf-8")
-    assert "def _canonical_for_conflict" not in (SRC / "cli.py").read_text(encoding="utf-8")
+    assert "def _canonical_for_conflict" not in (SRC / "pullflow.py").read_text(encoding="utf-8")
     assert "_canonical_for_conflict" not in resolveflow.__all__
-    cli_src = (SRC / "cli.py").read_text(encoding="utf-8")
+    pullflow_src = (SRC / "pullflow.py").read_text(encoding="utf-8")
     resolveflow_src = (SRC / "resolveflow.py").read_text(encoding="utf-8")
-    assert "manifest._canonical_for_conflict" in cli_src
+    assert "manifest._canonical_for_conflict" in pullflow_src
     assert "manifest._canonical_for_conflict" in resolveflow_src
-    assert "from mind_meld.resolveflow import _canonical_for_conflict" not in cli_src
+    assert "from mind_meld.resolveflow import _canonical_for_conflict" not in pullflow_src
 
 
 # ---------------------------------------------------------------------------
@@ -971,6 +972,181 @@ CORE_DEFINITIONS = frozenset(
     """.split()
 )
 
+# Track 86A ownership procedure (AC1): add a new definition at its owner and
+# inventory together; a new non-shell/non-pull consumer promotes it and its
+# dependencies to core to a fixed point. Tests/shells follow the owner.
+# Exemptions need an explicit scope reason here, never a compatibility re-export.
+# Symbol -> owner: PULL_CORE_DEFINITIONS -> core; PULLFLOW_DEFINITIONS -> pullflow.
+# Patch example: monkeypatch.setattr(pullflow, "_apply_incoming_file", spy).
+PULL_CORE_DEFINITIONS = frozenset(
+    """
+    DRY_RUN_COMPLETE
+    DRY_RUN_COMPLETE_LOCK_FREE
+    DRY_RUN_REFUSAL
+    _SyncProgress
+    _UPDATE_SPINNER_JOIN_SECONDS
+    _UPDATE_SPINNER_TICK_SECONDS
+    _cleanup_conflict_copies
+    _collect_peer_tombstones
+    _current_sync_progress
+    _explicit_retired_sources
+    _incoming_nested_roots
+    _make_manifest_validator
+    _maybe_prompt_migration
+    _migrate_config_core
+    _migration_state_path
+    _print_apply_warning
+    _recover_prior_manifest
+    _release_sync_lock
+    _start_sync_progress
+    _stop_sync_progress
+    _sync_diagnostic
+    _sync_progress_advance
+    _sync_progress_ensure_batch
+    _sync_progress_phase
+    _sync_progress_start_batch
+    _sync_warning
+    """.split()
+)
+
+CORE_DEFINITIONS |= PULL_CORE_DEFINITIONS
+
+PULLFLOW_DEFINITIONS = frozenset(
+    """
+    ApplyOutcome
+    ConflictMode
+    INVERSION_MIN_VERSION
+    PULL_NOT_PREVIEWED
+    PullResult
+    _ApplyReporter
+    _CANONICAL_WRITE_OUTCOMES
+    _CONFLICT_NAME_RANDOM_ATTEMPTS
+    _CorruptPeer
+    _FAIL_MODE_REFUSALS
+    _FsyncWarning
+    _INLINE_PATH_CAP
+    _PerSourceResult
+    _UnknownSourceWarning
+    _apply_conflict
+    _apply_incoming_file
+    _apply_merge
+    _apply_write
+    _check_fleet_version_or_refuse
+    _conflict_name_is_free
+    _conflict_review_notice
+    _detect_case_insensitive_fs
+    _detect_pull_case_collisions
+    _download_and_apply
+    _drain_inline_bumps
+    _drop_case_collisions_from_manifests
+    _empty_outcomes
+    _existing_post_inversion_sidecars_from_peer
+    _fail_mode_refusals
+    _first_existing_ancestor
+    _format_inline_paths
+    _fsync_touched_parents
+    _invalidate_inline_bump
+    _plan_pull
+    _prefetch_manifests
+    _preflight_conflicts
+    _print_inline_paths
+    _print_preflight_conflicts
+    _print_pull_prediction
+    _print_pull_summary
+    _prompt_conflict_choice
+    _pull_core
+    _pull_one_source
+    _record_inline_bump
+    _record_source_bookkeeping
+    _select_devices
+    _warn_apply_failure
+    conflict_filename
+    """.split()
+)
+
+# Imported CLI bindings removed by this extraction: a patch on the old binding
+# either raises or silently misses its new consumer. Shared console/stderr/get_backend
+# bindings remain legal in CLI; tests exercising both bindings must patch both.
+REMOVED_PULL_IMPORT_BINDINGS = frozenset(
+    """
+    BarColumn
+    CONFLICT_INFIX
+    CONFLICT_V1_MARKER
+    FORMAT_VERSION
+    InvalidVersion
+    MofNCompleteColumn
+    NewerFormatError
+    PULL_FAILURES_URL
+    SNAPSHOT_FAILURES_URL
+    TimeElapsedColumn
+    _bump_canonical_mtime_post_resolve
+    _restore_mtime_best_effort
+    _stat_mtime_btime
+    collect_tombstones
+    copy
+    count_divergent_lines
+    decrypt
+    deserialize_manifest
+    diff_files
+    errno
+    hash_file
+    is_conflict_filename
+    lcs_merge
+    list_devices_with_drops
+    lookup_device_by_short_id
+    merge_file
+    mtime_from_path
+    parse_conflict_device_short
+    render_banner
+    render_prompt
+    render_time_line
+    render_verdict
+    should_merge
+    write_sync_log
+    """.split()
+)
+
+STALE_PULL_CLI_BINDINGS = (
+    PULL_CORE_DEFINITIONS | PULLFLOW_DEFINITIONS | REMOVED_PULL_IMPORT_BINDINGS
+)
+PULL_IMPORTED_BINDING_OWNERS = {
+    "BarColumn": ("pullflow",),
+    "CONFLICT_INFIX": ("pullflow",),
+    "CONFLICT_V1_MARKER": ("pullflow",),
+    "FORMAT_VERSION": ("core",),
+    "InvalidVersion": ("pullflow",),
+    "MofNCompleteColumn": ("pullflow",),
+    "NewerFormatError": ("pullflow",),
+    "PULL_FAILURES_URL": ("pullflow",),
+    "SNAPSHOT_FAILURES_URL": ("pullflow",),
+    "TimeElapsedColumn": ("pullflow",),
+    "_bump_canonical_mtime_post_resolve": ("pullflow",),
+    "_restore_mtime_best_effort": ("pullflow",),
+    "_stat_mtime_btime": ("pullflow",),
+    "collect_tombstones": ("core", "pullflow"),
+    "copy": ("pullflow",),
+    "count_divergent_lines": ("pullflow",),
+    "decrypt": ("core", "pullflow"),
+    "deserialize_manifest": ("core",),
+    "diff_files": ("pullflow",),
+    "errno": ("pullflow",),
+    "hash_file": ("pullflow",),
+    "is_conflict_filename": ("pullflow",),
+    "lcs_merge": ("pullflow",),
+    "list_devices_with_drops": ("pullflow",),
+    "lookup_device_by_short_id": ("pullflow",),
+    "merge_file": ("pullflow",),
+    "mtime_from_path": ("pullflow",),
+    "parse_conflict_device_short": ("pullflow",),
+    "render_banner": ("pullflow",),
+    "render_prompt": ("pullflow",),
+    "render_time_line": ("pullflow",),
+    "render_verdict": ("pullflow",),
+    "should_merge": ("pullflow",),
+    "write_sync_log": ("pullflow",),
+}
+
+
 STATUSFLOW_DEFINITIONS = frozenset(
     """
     _BREADCRUMB_STALE_AFTER_HOURS
@@ -1031,12 +1207,17 @@ def _top_level_definitions(source: str) -> set[str]:
     return names
 
 
-def _unqualified_owner_calls(source: str, consumer: str) -> list[tuple[int, str]]:
-    """Reject dead aliases while allowing names bound inside a local scope."""
+def _unqualified_owner_calls(
+    source: str, consumer: str, *, extraction_only: bool = False
+) -> list[tuple[int, str]]:
+    """Reject global loads of another owner's names, respecting lexical scopes.
+
+    Includes annotations, isinstance arguments and callback loads, not just call
+    targets. Defaults/decorators/annotations execute in their enclosing scope;
+    local bindings, nested helpers and comprehension targets are exempt.
+    """
     import symtable
 
-    # The compiler's scope table distinguishes statusflow's nested _count
-    # from the shared core helper, unlike a textual name search.
     scopes = symtable.symtable(source, "consumer.py", "exec")
     scope_by_location = {}
 
@@ -1046,50 +1227,155 @@ def _unqualified_owner_calls(source: str, consumer: str) -> list[tuple[int, str]
             index(child)
 
     index(scopes)
-    owners = dict.fromkeys(CORE_DEFINITIONS, "core")
-    owners.update(dict.fromkeys(STATUSFLOW_DEFINITIONS, "statusflow"))
-    for node in ast.walk(ast.parse(source)):
+    core_names = PULL_CORE_DEFINITIONS if extraction_only else CORE_DEFINITIONS
+    owners = dict.fromkeys(core_names, "core")
+    if not extraction_only:
+        owners.update(dict.fromkeys(STATUSFLOW_DEFINITIONS, "statusflow"))
+    owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
+    tree = ast.parse(source)
+    module_aliases = {name: name for name in ("core", "statusflow", "pullflow")}
+    for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = (node.module or "").split(".")[-1]
-            if module in {"core", "statusflow"}:
+            if node.module == "mind_meld":
                 for alias in node.names:
-                    if owners.get(alias.name) == module:
-                        owners[alias.asname or alias.name] = module
+                    if alias.name in module_aliases:
+                        module_aliases[alias.asname or alias.name] = alias.name
+            for alias in node.names:
+                if owners.get(alias.name) == module:
+                    owners[alias.asname or alias.name] = module
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                module = alias.name.removeprefix("mind_meld.")
+                if module in module_aliases:
+                    module_aliases[alias.asname or alias.name] = module
     hits = []
 
-    class Calls(ast.NodeVisitor):
+    class Loads(ast.NodeVisitor):
         scope = scopes
+        comprehension_locals = frozenset()
 
-        def visit_FunctionDef(self, node):
+        def scoped(self, node, name, body):
             previous = self.scope
-            self.scope = scope_by_location[(node.name, node.lineno)]
-            for statement in node.body:
+            self.scope = scope_by_location[(name, node.lineno)]
+            for statement in body:
                 self.visit(statement)
             self.scope = previous
 
-        def visit_Call(self, node):
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-                if name in owners and owners[name] != consumer:
-                    binding = self.scope.lookup(name)
-                    if binding.is_global():
-                        hits.append((node.lineno, name))
+        def visit_FunctionDef(self, node):
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            self.visit(node.args)
+            if node.returns:
+                self.visit(node.returns)
+            self.scoped(node, node.name, node.body)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ClassDef(self, node):
+            for expression in [*node.decorator_list, *node.bases, *node.keywords]:
+                self.visit(expression)
+            self.scoped(node, node.name, node.body)
+
+        def visit_Lambda(self, node):
+            self.visit(node.args)
+            self.scoped(node, "lambda", [node.body])
+
+        def comprehension(self, node, name, values):
+            # The outermost iterator is evaluated by the containing scope.
+            self.visit(node.generators[0].iter)
+            previous = self.scope
+            self.scope = scope_by_location.get((name, node.lineno), previous)
+            old_locals = self.comprehension_locals
+            self.comprehension_locals |= {
+                n.id
+                for generator in node.generators
+                for n in ast.walk(generator.target)
+                if isinstance(n, ast.Name)
+            }
+            for i, generator in enumerate(node.generators):
+                if i:
+                    self.visit(generator.iter)
+                for condition in generator.ifs:
+                    self.visit(condition)
+            for value in values:
+                self.visit(value)
+            self.scope = previous
+            self.comprehension_locals = old_locals
+
+        def visit_ListComp(self, node):
+            self.comprehension(node, "listcomp", [node.elt])
+
+        def visit_SetComp(self, node):
+            self.comprehension(node, "setcomp", [node.elt])
+
+        def visit_DictComp(self, node):
+            self.comprehension(node, "dictcomp", [node.key, node.value])
+
+        def visit_GeneratorExp(self, node):
+            self.comprehension(node, "genexpr", [node.elt])
+
+        def visit_Attribute(self, node):
+            if node.attr in owners:
+                receiver = ast.unparse(node.value)
+                receiver_owner = module_aliases.get(receiver)
+                if receiver_owner is not None and receiver_owner != owners[node.attr]:
+                    hits.append(
+                        (
+                            node.lineno,
+                            f"{ast.unparse(node)}: expected {owners[node.attr]}.{node.attr}",
+                        )
+                    )
             self.generic_visit(node)
 
-    Calls().visit(ast.parse(source))
+        def visit_Name(self, node):
+            name = node.id
+            if (
+                not isinstance(node.ctx, ast.Load)
+                or name not in owners
+                or owners[name] == consumer
+                or name in self.comprehension_locals
+            ):
+                return
+            try:
+                binding = self.scope.lookup(name)
+            except KeyError:  # Deferred annotations may be absent from symtable.
+                binding = None
+            if binding is None or binding.is_global() or binding.is_imported():
+                hits.append((node.lineno, f"{name}: expected {owners[name]}.{name}"))
+
+    Loads().visit(tree)
     return hits
 
 
 def test_status_core_single_ownership_and_qualified_calls():
-    inventories = {"core": CORE_DEFINITIONS, "statusflow": STATUSFLOW_DEFINITIONS}
-    moved = CORE_DEFINITIONS | STATUSFLOW_DEFINITIONS
-    for module in ("cli", "core", "statusflow"):
+    inventories = {
+        "core": CORE_DEFINITIONS,
+        "statusflow": STATUSFLOW_DEFINITIONS,
+        "pullflow": PULLFLOW_DEFINITIONS,
+    }
+    moved = CORE_DEFINITIONS | STATUSFLOW_DEFINITIONS | PULLFLOW_DEFINITIONS
+    for module in ("cli", "core", "statusflow", "pullflow"):
         source = (SRC / f"{module}.py").read_text()
         expected = {"status", "diag"} if module == "cli" else inventories[module]
-        assert _top_level_definitions(source) & moved == expected
+        assert _top_level_definitions(source) & moved == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(CORE_DEFINITIONS) == 35
+    assert len(CORE_DEFINITIONS) == 35 + len(PULL_CORE_DEFINITIONS)
     assert len(STATUSFLOW_DEFINITIONS) == 38
+    assert len(PULLFLOW_DEFINITIONS) == 48
+
+
+def test_pull_test_consumers_use_qualified_owner_names():
+    offenders = {}
+    for path in Path(__file__).resolve().parent.rglob("*.py"):
+        if path == Path(__file__).resolve():
+            continue
+        hits = _unqualified_owner_calls(path.read_text(), "tests", extraction_only=True)
+        if hits:
+            offenders[path.name] = hits
+    assert offenders == {}, f"test consumers must use expected owner: {offenders}"
 
 
 @pytest.mark.parametrize(
@@ -1113,15 +1399,16 @@ def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
     assert bool(_unqualified_owner_calls(source, consumer)) is flags
 
 
-def test_core_does_not_import_statusflow():
+@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow"])
+def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            assert all(a.name != "mind_meld.statusflow" for a in node.names)
+            assert all(a.name != f"mind_meld.{forbidden}" for a in node.names)
         elif isinstance(node, ast.ImportFrom):
-            assert node.module not in {"mind_meld.statusflow", "statusflow"}
+            assert node.module not in {f"mind_meld.{forbidden}", forbidden}
             if node.module == "mind_meld" or (node.level and not node.module):
-                assert all(a.name != "statusflow" for a in node.names)
+                assert all(a.name != forbidden for a in node.names)
 
 
 def test_statusflow_import_does_not_register_cli():
@@ -1633,3 +1920,336 @@ def test_clock_patch_gate_checks_both_owners(clock: str, owners: tuple[str, ...]
         + "    codex_host.read_codex_usage()\n"
     )
     assert bool(_stale_moved_references_or_patches(source)) is (len(owners) == 1)
+
+
+# Track 86A structural checks. Keep the ban inventories above in step with the
+# owner inventories when moving a symbol; imports retained for shell consumers
+# stay explicitly outside REMOVED_PULL_IMPORT_BINDINGS.
+def _pull_owner_hint(name: str) -> str:
+    owners = (
+        ("core",)
+        if name in PULL_CORE_DEFINITIONS
+        else ("pullflow",)
+        if name in PULLFLOW_DEFINITIONS
+        else PULL_IMPORTED_BINDING_OWNERS[name]
+    )
+    return "expected " + " / ".join(f"{owner}.{name}" for owner in owners)
+
+
+def _conditional_pull_patch_names(receiver, name, aliases, assignments):
+    """Resolve finite patch-target expressions without evaluating test code.
+
+    Parametrized push/pull tests share dynamic target names. Their conditional
+    module binding must follow the same branch as the name. Unknown values take
+    an additional fallback branch; no expression outside this small grammar runs.
+    """
+    from itertools import product
+
+    expressions = [receiver, name]
+    seen = set()
+    for expression in expressions:
+        for node in ast.walk(expression):
+            if isinstance(node, ast.Name) and node.id in assignments and node.id not in seen:
+                seen.add(node.id)
+                expressions.append(assignments[node.id])
+    domains = {}
+    for expression in expressions:
+        for node in ast.walk(expression):
+            if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name):
+                values = {
+                    n.value
+                    for n in ast.walk(node)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                }
+                domains.setdefault(node.left.id, set()).update(values)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Dict)
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+            ):
+                values = {
+                    key.value
+                    for key in node.func.value.keys
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                }
+                domains.setdefault(node.args[0].id, set()).update(values)
+            elif isinstance(node, ast.JoinedStr):
+                for part in node.values:
+                    if isinstance(part, ast.FormattedValue) and isinstance(part.value, ast.Name):
+                        domains.setdefault(part.value.id, set()).update({"push", "pull"})
+    for values in domains.values():
+        values.add("<other>")
+    if len(domains) > 3:  # Keep discovery bounded; do not interpret arbitrary code.
+        return []
+
+    unknown = object()
+
+    def value(node, env, trail=frozenset()):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            if node.id in aliases:
+                return "<cli>"
+            if node.id in env:
+                return env[node.id]
+            if node.id in assignments and node.id not in trail:
+                return value(assignments[node.id], env, trail | {node.id})
+            return unknown
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return tuple(value(item, env, trail) for item in node.elts)
+        if isinstance(node, ast.Dict):
+            return {
+                value(k, env, trail): value(v, env, trail)
+                for k, v in zip(node.keys, node.values, strict=True)
+            }
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            left, right = value(node.left, env, trail), value(node.comparators[0], env, trail)
+            if isinstance(node.ops[0], ast.Eq):
+                return left == right
+            if isinstance(node.ops[0], ast.NotEq):
+                return left != right
+            if isinstance(node.ops[0], (ast.In, ast.NotIn)) and isinstance(right, tuple):
+                return (left in right) != isinstance(node.ops[0], ast.NotIn)
+        if isinstance(node, ast.BoolOp):
+            values = [value(item, env, trail) for item in node.values]
+            return all(values) if isinstance(node.op, ast.And) else any(values)
+        if isinstance(node, ast.IfExp):
+            return value(
+                node.body if value(node.test, env, trail) is True else node.orelse, env, trail
+            )
+        if isinstance(node, ast.JoinedStr):
+            parts = [
+                value(part.value if isinstance(part, ast.FormattedValue) else part, env, trail)
+                for part in node.values
+            ]
+            return "".join(parts) if all(isinstance(part, str) for part in parts) else unknown
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+        ):
+            mapping = value(node.func.value, env, trail)
+            if isinstance(mapping, dict) and node.args:
+                default = value(node.args[1], env, trail) if len(node.args) > 1 else None
+                return mapping.get(value(node.args[0], env, trail), default)
+        return unknown
+
+    names = sorted(domains)
+    hits = set()
+    for values in product(*(sorted(domains[name]) for name in names)):
+        env = dict(zip(names, values, strict=True))
+        target = value(receiver, env)
+        symbol = value(name, env)
+        if target == "<cli>" and isinstance(symbol, str) and symbol in STALE_PULL_CLI_BINDINGS:
+            hits.add(symbol)
+    return sorted(hits)
+
+
+def _stale_pull_references_or_patches(source: str) -> list[tuple[int, str]]:
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    aliases = {"mind_meld.cli"}
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "mind_meld":
+                aliases.update(a.asname or a.name for a in node.names if a.name == "cli")
+            elif node.module == "mind_meld.cli":
+                for alias in node.names:
+                    if alias.name in STALE_PULL_CLI_BINDINGS:
+                        hits.append((node.lineno, f"{alias.name}: {_pull_owner_hint(alias.name)}"))
+        elif isinstance(node, ast.Import):
+            aliases.update(a.asname or a.name for a in node.names if a.name == "mind_meld.cli")
+        elif (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "import_module"
+            and node.value.args
+            and isinstance(node.value.args[0], ast.Constant)
+            and node.value.args[0].value == "mind_meld.cli"
+        ):
+            aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr in STALE_PULL_CLI_BINDINGS
+            and ast.unparse(node.value) in aliases
+        ):
+            hits.append((node.lineno, f"{ast.unparse(node)}: {_pull_owner_hint(node.attr)}"))
+        elif isinstance(node, ast.Call):
+            if len(node.args) >= 2 and any(
+                isinstance(part, (ast.Name, ast.Attribute)) and ast.unparse(part) in aliases
+                for part in ast.walk(node.args[0])
+            ):
+                scope = node
+                while scope in parents and not isinstance(
+                    scope, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    scope = parents[scope]
+                assignments = {
+                    target.id: assignment.value
+                    for assignment in ast.walk(scope)
+                    if isinstance(assignment, ast.Assign)
+                    for target in assignment.targets
+                    if isinstance(target, ast.Name)
+                }
+                for name in _conditional_pull_patch_names(
+                    node.args[0], node.args[1], aliases, assignments
+                ):
+                    hits.append(
+                        (node.lineno, f"conditional patch {name}: {_pull_owner_hint(name)}")
+                    )
+            for arg in node.args:
+                if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
+                    continue
+                if any(arg.value == f"mind_meld.cli.{name}" for name in STALE_PULL_CLI_BINDINGS):
+                    hits.append(
+                        (
+                            node.lineno,
+                            f"{arg.value}: {_pull_owner_hint(arg.value.rsplit('.', 1)[-1])}",
+                        )
+                    )
+            if (
+                len(node.args) >= 2
+                and isinstance(node.args[0], (ast.Name, ast.Attribute))
+                and ast.unparse(node.args[0]) in aliases
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in STALE_PULL_CLI_BINDINGS
+            ):
+                hits.append(
+                    (node.lineno, f"{ast.unparse(node)}: {_pull_owner_hint(node.args[1].value)}")
+                )
+    return hits
+
+
+def test_no_stale_pull_references_or_patches_across_repo():
+    offenders = {}
+    for root in (SRC, Path(__file__).resolve().parent):
+        for path in root.rglob("*.py"):
+            if path == Path(__file__).resolve():
+                continue
+            hits = _stale_pull_references_or_patches(path.read_text())
+            if hits:
+                offenders[str(path.relative_to(SRC.parents[1]))] = hits
+    assert offenders == {}, f"stale pull binding; expected owner in inventories above: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "source,flags",
+    [
+        ("from mind_meld.cli import _pull_core", True),
+        ("from mind_meld import cli as c\nc._pull_core()", True),
+        ("import mind_meld.cli as c\nmonkeypatch.setattr(c, '_download_and_apply', spy)", True),
+        ("monkeypatch.setattr('mind_meld.cli._pull_core', spy)", True),
+        ("patch('mind_meld.cli.decrypt', spy)", True),
+        ("from mind_meld import cli\nmonkeypatch.setattr(cli, 'decrypt', spy)", True),
+        ("from mind_meld import pullflow\npullflow._pull_core()", False),
+        ("from mind_meld import cli\nmonkeypatch.setattr(cli, 'get_backend', spy)", False),
+        ("from mind_meld import cli\nmonkeypatch.setattr(cli, f'_{verb}_core', spy)", True),
+        (
+            "from mind_meld import cli\nmonkeypatch.setattr(cli, 'update_l"
+            "ast_seen' if maintenance == 'last-seen' else '_cleanup_confl"
+            "ict_copies', spy)",
+            True,
+        ),
+        (
+            "from mind_meld import cli, core\nmonkeypatch.setattr(cli if m"
+            "aintenance == 'last-seen' else core, 'update_last_seen' if m"
+            "aintenance == 'last-seen' else '_cleanup_conflict_copies', s"
+            "py)",
+            False,
+        ),
+        (
+            "from mind_meld import cli, pullflow\nmonkeypatch.setattr(cli "
+            "if verb == 'push' else pullflow, f'_{verb}_core', spy)",
+            False,
+        ),
+        (
+            "from mind_meld import cli\ntarget = {'lock': 'acquire_lock'}."
+            "get(stage, f'_{verb}_core')\nmonkeypatch.setattr(cli, target,"
+            " spy)",
+            True,
+        ),
+        (
+            "from mind_meld import cli, pullflow\ntarget = {'lock': 'acqui"
+            "re_lock'}.get(stage, f'_{verb}_core')\nmonkeypatch.setattr(pu"
+            "llflow if verb == 'pull' and stage != 'lock' else cli, targe"
+            "t, spy)",
+            False,
+        ),
+    ],
+)
+def test_stale_pull_patch_gate_is_not_vacuous(source, flags):
+    assert bool(_stale_pull_references_or_patches(source)) is flags
+
+
+@pytest.mark.parametrize(
+    "source,consumer,flags",
+    [
+        ("def f(x): return isinstance(x, PullResult)", "cli", True),
+        ("def f(x: PullResult) -> PullResult: pass", "cli", True),
+        ("callback = _apply_incoming_file", "cli", True),
+        ("from mind_meld.pullflow import PullResult as R\ndef f(x: R): pass", "tests", True),
+        ("def f(PullResult): return PullResult", "cli", False),
+        ("def f():\n PullResult = object()\n return PullResult", "cli", False),
+        ("def f(): return [PullResult for PullResult in ()]", "cli", False),
+        ("def f(): return pullflow.PullResult()", "cli", False),
+        ("def f(): return PullResult()", "pullflow", False),
+        ("def f(): return _sync_progress_phase", "pullflow", True),
+        ("from mind_meld import core as c\ndef f(): return c.PullResult", "tests", True),
+    ],
+)
+def test_owner_global_load_gate_is_not_vacuous(source, consumer, flags):
+    assert bool(_unqualified_owner_calls(source, consumer)) is flags
+
+
+def test_pullflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import pullflow; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_pullflow_scope_has_only_definitions_and_leaf_imports():
+    tree = ast.parse((SRC / "pullflow.py").read_text())
+    for node in tree.body:
+        assert isinstance(
+            node,
+            (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign),
+        ) or (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ), f"pullflow module registration/execution at line {node.lineno}"
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for call in (n for n in ast.walk(node.value) if isinstance(n, ast.Call)):
+                assert isinstance(call.func, ast.Name) and call.func.id in {"frozenset"}, (
+                    f"pullflow module-scope side effect at {call.lineno}: {ast.unparse(call)}"
+                )
+
+
+def test_pull_shared_bindings_keep_singleton_identity():
+    from mind_meld import cli, consoles, core, pullflow, safety
+
+    assert cli.console is core.console is pullflow.console is consoles.console
+    assert (
+        cli.stderr_console
+        is core.stderr_console
+        is pullflow.stderr_console
+        is consoles.stderr_console
+    )
+    assert cli.safe_str is core.safe_str is pullflow.safe_str is safety.safe_str
+    assert cli.core._SyncProgress is pullflow.core._SyncProgress is core._SyncProgress
+    assert cli.core._SYNC_OUTPUT is pullflow.core._SYNC_OUTPUT is core._SYNC_OUTPUT
+    for name in PULL_CORE_DEFINITIONS | PULLFLOW_DEFINITIONS:
+        assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"

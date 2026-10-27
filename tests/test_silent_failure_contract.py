@@ -20,6 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
+from mind_meld import core, pullflow
 from mind_meld import events as _mm_events
 from mind_meld import host_usage as _mm_host_usage
 from mind_meld import token_usage as _mm_token_usage
@@ -417,7 +418,7 @@ def test_autopull_logs_traceback_on_unexpected_exception(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise AttributeError("NoneType has no attribute 'bogus'")
 
-    monkeypatch.setattr("mind_meld.cli._pull_core", boom)
+    monkeypatch.setattr("mind_meld.pullflow._pull_core", boom)
 
     result = runner.invoke(app, ["autopull"])
 
@@ -773,7 +774,7 @@ def test_autopull_mindmelderror_stderr_no_log(tmp_path, monkeypatch):
     def typed_boom(*a, **kw):
         raise CryptoError("decrypt failed on peer blob")
 
-    monkeypatch.setattr("mind_meld.cli._pull_core", typed_boom)
+    monkeypatch.setattr("mind_meld.pullflow._pull_core", typed_boom)
 
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0
@@ -1084,7 +1085,7 @@ def test_pull_conflict_mode_prompt_threads_interactive_flag(tmp_path, monkeypatc
             k: [] for k in ("written", "merged", "skipped", "conflicted", "unchanged", "failed")
         }
 
-    monkeypatch.setattr("mind_meld.cli._download_and_apply", spy_download)
+    monkeypatch.setattr("mind_meld.pullflow._download_and_apply", spy_download)
 
     # Push something so there's work for pull to do on a second device.
     r = runner.invoke(app, ["push"])
@@ -1140,15 +1141,15 @@ def _seed_conflict_pair(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_conflict_path_build_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    from mind_meld.cli import _apply_conflict
+    pass
 
     local, _old = _seed_conflict_pair(tmp_path)
     monkeypatch.setattr(
-        cli_module,
+        pullflow,
         "conflict_filename",
         lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad id \x1b[31mRED")),
     )
-    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
+    assert pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "conflict path build failed" in captured.err
@@ -1157,7 +1158,7 @@ def test_conflict_path_build_error_is_sanitized_stderr(tmp_path, monkeypatch, ca
 
 
 def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    from mind_meld.cli import _apply_conflict
+    pass
 
     local, _old = _seed_conflict_pair(tmp_path)
     monkeypatch.setattr(
@@ -1165,7 +1166,7 @@ def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys)
         "atomic_write_bytes",
         lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full \x1b[31mRED")),
     )
-    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
+    assert pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "failed"
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "sidecar write failed" in captured.err
@@ -1173,7 +1174,7 @@ def test_conflict_write_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys)
 
 
 def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsys):
-    from mind_meld.cli import _apply_conflict
+    pass
 
     local, old = _seed_conflict_pair(tmp_path)
     real_unlink = Path.unlink
@@ -1184,7 +1185,7 @@ def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsy
         real_unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", fail_old)
-    assert _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "conflicted"
+    assert pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234") == "conflicted"
     captured = capsys.readouterr()
     assert captured.out == "" or "conflict:" not in captured.out
     assert "replacement saved" in captured.err
@@ -1194,18 +1195,18 @@ def test_conflict_cleanup_error_is_sanitized_stderr(tmp_path, monkeypatch, capsy
 
 def test_autopull_cleanup_only_conflict_keeps_success_breadcrumb(tmp_path, monkeypatch):
     """Cleanup leftovers are conflicted extras, not a failed/degraded pull."""
-    from mind_meld.cli import PullResult
+    pass
 
     _setup_real_config(tmp_path, monkeypatch)
     iso = _redirect_sidecar(monkeypatch, tmp_path)
-    fake_result = PullResult(
+    fake_result = pullflow.PullResult(
         total_written=1,
         total_conflicted=1,
         total_failed=0,
         device_names=["Mac B"],
         elapsed=0.1,
     )
-    monkeypatch.setattr("mind_meld.cli._pull_core", lambda *a, **kw: fake_result)
+    monkeypatch.setattr("mind_meld.pullflow._pull_core", lambda *a, **kw: fake_result)
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
     assert "conflicts" in (r.stderr or "")
@@ -1245,6 +1246,7 @@ def test_auto_command_writes_breadcrumb_on_lock_held(tmp_path, monkeypatch, comm
         raise LockError("already held by PID 12345")
 
     monkeypatch.setattr("mind_meld.cli.acquire_lock", boom)
+    monkeypatch.setattr("mind_meld.core.acquire_lock", boom)
 
     r = runner.invoke(app, [command])
     assert r.exit_code == 0
@@ -1575,18 +1577,18 @@ def test_autopull_surfaces_total_failed_count_on_stderr(tmp_path, monkeypatch):
     total_failed. Per-file failures (decrypt, write, ValueError on corrupted
     device_id) incremented the count without ever reaching the user.
     """
-    from mind_meld.cli import PullResult
+    pass
 
     _setup_real_config(tmp_path, monkeypatch)
 
     # Stub _pull_core to return a PullResult that simulates per-file failures.
-    fake_result = PullResult(
+    fake_result = pullflow.PullResult(
         total_written=2,
         total_failed=3,
         device_names=["Mac B"],
         elapsed=0.1,
     )
-    monkeypatch.setattr("mind_meld.cli._pull_core", lambda *a, **kw: fake_result)
+    monkeypatch.setattr("mind_meld.pullflow._pull_core", lambda *a, **kw: fake_result)
 
     r = runner.invoke(app, ["autopull"])
     assert r.exit_code == 0, (r.stdout, r.stderr)
@@ -1604,7 +1606,7 @@ def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, m
     mode. Unit-tested at the helper boundary because reproducing the full
     multi-device, multi-tombstone push-side scenario via CliRunner is heavy.
     """
-    from mind_meld.cli import ManifestFetch, _recover_prior_manifest
+    from mind_meld.cli import ManifestFetch
 
     fetch = ManifestFetch(status="corrupt", manifest=None)
     monkeypatch.setattr("mind_meld.sidecar.read", lambda *a, **kw: None)
@@ -1612,11 +1614,11 @@ def test_recover_prior_manifest_surfaces_peer_fallback_in_quiet_mode(tmp_path, m
         "claude:projects/x/memory/foo.md": {"deleted_at": "2026-04-23T00:00:00+00:00"}
     }
     monkeypatch.setattr(
-        "mind_meld.cli._collect_peer_tombstones",
+        "mind_meld.core._collect_peer_tombstones",
         lambda *a, **kw: fake_tombstones,
     )
 
-    result = _recover_prior_manifest(
+    result = core._recover_prior_manifest(
         fetch,
         backend=None,
         device_id="dev-a",
@@ -2687,6 +2689,7 @@ def test_attended77_callback_failure_matrix(tmp_path, monkeypatch, verb, stage, 
     monkeypatch.setattr(
         cli_module, "release_lock", lambda: (released.append(True), real_release())[1]
     )
+    monkeypatch.setattr(core, "release_lock", lambda: (released.append(True), real_release())[1])
     failures = {
         "setup": typer.Exit(1),
         "authentication": typer.Exit(1),
@@ -2709,7 +2712,13 @@ def test_attended77_callback_failure_matrix(tmp_path, monkeypatch, verb, stage, 
         raise failures[stage]
 
     monkeypatch.setattr(
-        cli_module.core if stage in ("setup", "authentication") else cli_module, target, fail
+        core
+        if stage in ("setup", "authentication")
+        else pullflow
+        if verb == "pull" and stage != "lock"
+        else cli_module,
+        target,
+        fail,
     )
     result = runner.invoke(app, [verb])
     assert result.exit_code == {"exit": 3}.get(stage, 1)
@@ -2775,12 +2784,12 @@ def test_attended77_evidence_failure_preserves_result_and_unlocks(
 
     _setup_events_tail_config(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        cli_module,
+        cli_module if verb == "push" else pullflow,
         f"_{verb}_core",
         lambda *a, **k: (
             cli_module.PushResult(content_accepted=True)
             if verb == "push"
-            else cli_module.PullResult(total_written=2)
+            else pullflow.PullResult(total_written=2)
         ),
     )
 
@@ -2823,13 +2832,13 @@ def test_attended77_evidence_failure_preserves_result_and_unlocks(
         ),
         (
             "pull",
-            cli_module.PullResult(total_written=2, total_failed=1),
+            pullflow.PullResult(total_written=2, total_failed=1),
             {"total_failed": 1, "total_written": 2},
             "degraded",
         ),
         (
             "pull",
-            cli_module.PullResult(
+            pullflow.PullResult(
                 corrupt_peer_count=2, durability_fsync_failures=3, total_skipped_unknown_source=4
             ),
             {
@@ -2839,16 +2848,18 @@ def test_attended77_evidence_failure_preserves_result_and_unlocks(
             },
             "degraded",
         ),
-        ("pull", cli_module.PullResult(), {"total_written": 0}, "success"),
+        ("pull", pullflow.PullResult(), {"total_written": 0}, "success"),
     ],
 )
 def test_attended77_result_counts(tmp_path, monkeypatch, verb, result, counts, outcome):
     from mind_meld import attemptlog
 
     _setup_events_tail_config(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module, f"_{verb}_core", lambda *a, **k: result)
+    monkeypatch.setattr(
+        cli_module if verb == "push" else pullflow, f"_{verb}_core", lambda *a, **k: result
+    )
     finished = runner.invoke(app, [verb])
-    expected_exit = 1 if isinstance(result, cli_module.PullResult) and result.total_failed else 0
+    expected_exit = 1 if isinstance(result, pullflow.PullResult) and result.total_failed else 0
     assert finished.exit_code == expected_exit, finished.output
     record = attemptlog.read_runs()["runs"][verb]
     assert record["outcome"] == outcome
