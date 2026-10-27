@@ -12,7 +12,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Changed
 
-- `mm status` reports the capture budget and whether it came from config or the default. The older warm field stays 5000 ms.
+- `mm diag` reports the capture budget and whether it came from config or the default. The older warm field stays 5000 ms.
 - `mm push` help names the shared budget. Budgets stay cooperative, not hard timeouts. Exit 0 still means content sync succeeded.
 
 ## [1.11.12] - 2026-10-25
