@@ -44,21 +44,18 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [plan-eng-review:track=84A] Settle Track 85A's Codex settled-day approach under core-and-extensions
-- **Why:** Track 85A's "Codex newest-first with settled days" task freezes settled days "the way the Muse reader does" and lists `src/mind_meld/host_usage.py`, but the Muse freeze code (`_freeze_muse_day`, `_cached_muse_frozen`, `_validated_muse_frozen`, `_MUSE_SETTLE_DAYS`) is Muse-owned and stays in `host_usage.py` after Track 84A. Under docs/SPEC.md "Core and extensions", 85A cannot generalize it there without a Muse move-only Track first.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Surfaced by the Track 84A /autoplan-lean CEO review (2026-10-24, decision d12). Options: 85A implements Codex freezing inside `hosts/codex.py` without editing Muse code (accepting duplication), or /roadmap adds a Muse move-only Track before 85A. Either way, correct 85A's touch list. Resolved by Track 85A /autoplan-lean (`d3`, `d8`): `hosts/codex.py` implements `files`-backed `settled_days` plus `>=24h` stat-only cache hits so `_aggregate` union-find `turn_id` deduplication across days and `archived_sessions/` stays intact, while `host_usage.py` keeps Muse freeze code untouched and exposes only a pure date/stat-digest helper.
-
-Codex day keying differs from Muse: `_record_day` assigns usage to each record's timestamp day, not the rollout's directory date, so a session spanning midnight or a later append adds tokens to later days; archived rollouts move to a flat directory under a new path and `_aggregate`'s lineage keys dedupe them. A Codex freeze therefore cannot key on directory date or path the way `_muse_dir_date` does; it needs per-file idle mtime plus lineage keys.
-
-### [plan-eng-review:track=85A] Mid-rollout line-offset checkpointing if a single cold Codex rollout ever exceeds capture_budget_ms
-- **Why:** `hosts/codex.py:_read_rollout` aborts with `_RolloutError("deadline")` if a single cold rollout file cannot finish within the remaining scan deadline; `_scan_codex_root` checkpoints completed files across pushes (`files`), which converges when individual rollouts fit within one push's allowance (~1 ms/file on the measured 3,459-rollout corpus), but a multi-hundred-MB single cold rollout could stall if its initial parse alone exceeds `capture_budget_ms`.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Surfaced by the Track 85A /autoplan-lean Eng outside review (2026-10-26). Revisit trigger: an observed `codex deadline` skip where a single rollout file's initial cold parse exceeds `[retro] capture_budget_ms`.
-
 ## Drain records
+
+### Roadmap drain — 2026-10-27
+
+2 inbox items: **0 placed, 0 deferred, 1 killed, 1 discharged**. Authored-false rate: 1 / (0 + 1) = 100%. Verification baseline: `beb4cb0` (v1.11.13). Tracks 82A (v1.11.9, PR #229), 82B (v1.11.10, PR #230), 83A (v1.11.11, PR #231), 84A (v1.11.12, PR #232) and 85A (v1.11.13, PR #233) were recorded independently in shipped history against their verified plan matrices (23/23, AC1–AC6, 10/10, 35/35, M1–M14); Groups 82–85 are tombstoned and Phase 4 is complete. The eight leftover Tracks keep their numbers (86A–93A): the first free Group integer after shipped history is 86, and the packer emits the eight serial singleton bins `86A | 87A | 88A | 89A | 90A | 91A | 92A | 93A`. Group-level dependencies were regenerated from those bins (86 now depends on none; 87 on 86 only); satisfied `_blocked-by:` edges keep their canonical shipped IDs. Premises for all eight remaining Tracks were re-verified against `beb4cb0` (`_pull_core`/`_download_and_apply`/`_apply_incoming_file`/`init` still in `cli.py`; no `pullflow.py`, `initflow.py` or `syncthing.py`; no per-peer base table in `statedb.py`; the iCloud default still in `config.py`). Future stays at 17 items (byte-identical); 7 entries still lack an inline revisit trigger and the trigger migration was offered, not run. No active pins were declared; Track 82A's pin is released by its shipment.
+
+| Inbox item | Disposition |
+|---|---|
+| [plan-eng-review:track=84A] Settle Track 85A's Codex settled-day approach under core-and-extensions | discharge — discharged@`beb4cb0`: Track 85A (PR #233) implements `files`-backed `settled_days` plus ≥24h stat-only cache hits in `hosts/codex.py` exactly as the item's own resolution note (autoplan-lean `d3`, `d8`) prescribed, leaving Muse's freeze code in `host_usage.py` untouched; `settled_days` is live in `src/mind_meld/hosts/codex.py` at HEAD |
+| [plan-eng-review:track=85A] Mid-rollout line-offset checkpointing if a single cold Codex rollout ever exceeds capture_budget_ms | kill: unobserved; reversible (a deadline-skipped read leaves totals stale but recomputable and visible in `mm status`/`mm diag`, and later pushes resume per-file); reopen if it manifests — an observed `codex deadline` skip where one rollout's cold parse alone exceeds `[retro] capture_budget_ms` |
+
+**Version:** documentation-only regeneration; no bump. Quiet output (O8) and complete usage (O7) checkpoints remain unaccepted — neither v1.11.9–v1.11.13 claims one — so the next code release stays PATCH under the spec's release policy unless the owner accepts the complete-usage checkpoint on fleet evidence.
 
 ### Roadmap drain — 2026-10-23
 
