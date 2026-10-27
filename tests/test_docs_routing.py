@@ -834,7 +834,10 @@ def test_usage_capture_help_names_prerequisites_and_exits() -> None:
 
     result = CliRunner().invoke(app, ["push", "--help"])
     assert result.exit_code == 0
-    flat = " ".join(result.stdout.replace("│", " ").split())
+    # CI colors and wraps the help. Codes sit on the wrapped words, so a
+    # whitespace join alone no longer sees "readers can".
+    raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.stdout)
+    flat = " ".join(raw.replace("│", " ").split())
     assert "mm-events" in flat and "consented" in flat
     assert "capture budget" in flat and "default five seconds" in flat
     assert "both readers can be cold" in flat
