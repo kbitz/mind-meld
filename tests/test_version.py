@@ -81,9 +81,10 @@ def test_mm_version_cli_flag(tmp_path, monkeypatch):
 
 
 def test_no_source_file_reads_a_version_file():
-    """Regression guard: the VERSION file was deleted. No source file may
-    read it (grep-style sweep). Catches a future contributor re-adding a
-    `open('VERSION')` or `Path('VERSION').read_text()` pattern."""
+    """Regression guard: the root VERSION file only mirrors pyproject.toml for
+    release tooling. No source file may read it (grep-style sweep). Catches a
+    future contributor adding a `open('VERSION')` or
+    `Path('VERSION').read_text()` pattern."""
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -101,6 +102,6 @@ def test_no_source_file_reads_a_version_file():
         text = py_file.read_text()
         for pat in forbidden_patterns:
             assert pat not in text, (
-                f"{py_file} reads a VERSION file ({pat!r}); the file was "
-                f"deleted. Use `mind_meld.__version__` instead."
+                f"{py_file} reads a VERSION file ({pat!r}); it only "
+                f"mirrors pyproject.toml. Use `mind_meld.__version__` instead."
             )

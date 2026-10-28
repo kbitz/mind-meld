@@ -411,5 +411,6 @@ See `docs/ROADMAP.md` for the structured Groups > Tracks > Tasks plan.
 `pyproject.toml` is the single source of truth for the release number.
 `src/mind_meld/__init__.py` reads it at import time via
 `importlib.metadata.version("mind-meld")` and falls back to `"0.0.0+dev"`
-when the package is not installed (source-tree runs). There is no
-separate `VERSION` file.
+when the package is not installed (source-tree runs). Since 2026-10-28 a
+root `VERSION` file mirrors the same number for release tooling; no source
+file reads it.

@@ -64,7 +64,7 @@ Before editing anything under `src/`, read [docs/invariants/README.md](docs/inva
 - Sanitize peer-controlled display strings through `safety`; use `safe_terminal_str` for single-line plain stderr. Display text is not a filesystem identity or shell argument.
 - Output follows docs/SPEC.md O8: one outcome line, or what broke plus the one fixing command as the last thing printed. Never quiet-gate data-at-risk warnings. Record other degradations (every events-tail degradation in `PushResult.events_degradations`) for `mm status` and `mm diag`, and print them only when the owner must act. Normalize config failures at `load_config`.
 - Do not reintroduce the conflict collector or its cancelled auto-resolver; see [conflict invariants](docs/invariants/conflicts.md#collector-removal-and-auto-resolver-cancellation).
-- Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml` and `CHANGELOG.md` bump. Never restore workflow pushes to protected main. Row format and release rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade).
+- Release PRs include the `docs/PROGRESS.md` row with the `pyproject.toml`, `VERSION` and `CHANGELOG.md` bump. Never restore workflow pushes to protected main. Row format and release rules: [auto-upgrade invariants](docs/invariants/auto-upgrade.md#release-discipline-enforced-by-mm-auto-upgrade).
 - Every `_get_config` and `_maybe_prompt_migration` call requires `read_only=`. Update integration tests' `COMMAND_INTENTS62` for every new command; previews and inspection must preserve their write boundaries.
 
 ## Testing
@@ -83,7 +83,7 @@ Use `--affected` during work and review. It runs the tests whose recorded covera
 
 ## CI
 
-`.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`; no `VERSION` file.
+`.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`, mirrored by the root `VERSION` file (same `x.y.z`; bump both).
 
 ## Commands
 
