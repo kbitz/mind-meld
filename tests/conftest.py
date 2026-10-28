@@ -437,6 +437,10 @@ def _isolate_token_cache(monkeypatch, tmp_path) -> None:
     from mind_meld import token_usage as _token_usage
 
     monkeypatch.setattr(_token_usage, "CACHE_PATH", tmp_path / "session-tokens.json")
+    pricing_path = tmp_path / "pricing-cache.json"
+    monkeypatch.setattr(_token_usage, "PRICING_CACHE_PATH", pricing_path)
+    monkeypatch.setattr(_token_usage, "_PRICING_CACHE_MEMO", None)
+    monkeypatch.setenv("MM_PRICING_CACHE_PATH", str(pricing_path))
     monkeypatch.setattr(_token_usage, "_WARNED_UNKNOWN_MODELS", set())
     monkeypatch.setattr(_token_usage, "_WARNED_OVERSIZE_PATHS", set())
 

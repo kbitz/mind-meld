@@ -3303,7 +3303,8 @@ def _extrapolation_notes(by_model: dict, *, scope: str) -> list[str]:
         for m, bucket in by_model.items()
         if token_usage.sum_bucket(bucket) > 0
         and token_usage.resolve_prices(m) is not None
-        and m not in token_usage.VERIFIED_MODEL_IDS
+        and m not in token_usage.COST_EXCLUDED_MODELS
+        and not token_usage.is_verified_model(m)
     ]
     notes: list[str] = []
     if models:
@@ -3657,6 +3658,33 @@ def _windowed_host_by_model(
     return merged, residual
 
 
+def _legacy_codex_prefixes(snap: HostDeviceSnapshot) -> bool:
+    """Older classifiers kept codex-* in other, even alongside GPT Codex usage.
+
+    Prefer the current classifier unless its Codex detail exceeds recorded
+    day/counter totals. The caller still validates the combined historical
+    other bucket, so this never licenses moving or exceeding wire volume.
+    """
+    for day, bucket in (snap.tokens_by_day or {}).items():
+        if not isinstance(bucket, dict):
+            continue
+        models = bucket.get("by_model", {})
+        if not isinstance(models, dict):
+            continue
+        codex = token_usage.zero_model_bucket()
+        has_prefix = False
+        for model, usage in models.items():
+            if not isinstance(model, str) or not isinstance(usage, dict):
+                continue
+            if host_usage.host_family(model) == "codex":
+                token_usage.merge_usage_bucket(codex, usage)
+                has_prefix |= model.casefold().startswith("codex-")
+        reported = snap.lifetime_by_family.get("codex", {}).get(day, {})
+        if has_prefix and any(codex[k] > reported.get(k, 0) for k in token_usage.TOKEN_FIELDS):
+            return True
+    return False
+
+
 def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
     """Preserve the recorded family for models promoted out of ``other``.
 
@@ -3665,6 +3693,8 @@ def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
     the ordinary day/counter reconciliation still bounds their combined sum.
     """
     family = host_usage.host_family(model)
+    if model.casefold().startswith("codex-") and _legacy_codex_prefixes(snap):
+        return "other"
     if family in {"muse", "agy"} and family not in snap.lifetime_by_family:
         return "other"
     return family
@@ -4097,9 +4127,12 @@ def _agent_row_cost(row: FleetAgentRow) -> tuple[float | None, bool]:
 
 def _agent_top_model(row: FleetAgentRow) -> str:
     """Largest priced-basis model in the row, with its volume. ``—`` if none."""
-    if not row.by_model:
+    candidates = {
+        m: b for m, b in row.by_model.items() if m not in token_usage.COST_EXCLUDED_MODELS
+    }
+    if not candidates:
         return "—"
-    model, bucket = max(row.by_model.items(), key=lambda kv: (token_usage.sum_bucket(kv[1]), kv[0]))
+    model, bucket = max(candidates.items(), key=lambda kv: (token_usage.sum_bucket(kv[1]), kv[0]))
     total = token_usage.sum_bucket(bucket)
     if total <= 0:
         return "—"
@@ -4346,7 +4379,7 @@ def _render_themes_prompt(data: RetroData) -> list[str]:
     ]
 
 
-def _render_health_block(health: list[dict]) -> list[str]:
+def _render_health_block(health: list[dict], data: RetroData) -> list[str]:
     """Machine-readable data-quality payload, tagged for the skill to find.
 
     **Why the caveats moved off the page.** The pre-1.1 body rendered every
@@ -4362,6 +4395,29 @@ def _render_health_block(health: list[dict]) -> list[str]:
     section used to print, so a stale skill copy that ignores this block loses
     presentation, never information.
     """
+    rows = aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
+    models = {
+        m
+        for row in rows
+        for m, usage in row.by_model.items()
+        if token_usage.sum_bucket(usage) > 0 and m not in token_usage.COST_EXCLUDED_MODELS
+    }
+    unverified = sorted({_safe_short(m) for m in models if not token_usage.is_verified_model(m)})
+    unpriced = sorted({_safe_short(m) for m in models if token_usage.resolve_prices(m) is None})
+    builtin_date = min(
+        token_usage.PRICING_LAST_UPDATED,
+        token_usage.PRICING_OPENAI_LAST_UPDATED,
+        token_usage.PRICING_CURSOR_LAST_UPDATED,
+        token_usage.PRICING_XAI_LAST_UPDATED,
+        token_usage.PRICING_GOOGLE_LAST_UPDATED,
+        token_usage.PRICING_MUSE_LAST_UPDATED,
+    )
+    effective_date = max(builtin_date, token_usage.pricing_cache().get("verified_date", ""))
+    refresh_due = (
+        bool(unverified)
+        or (data.until.astimezone(timezone.utc).date() - date.fromisoformat(effective_date)).days
+        > 7
+    )
     payload = {
         # Rate provenance moved here in 1.1 from a six-line rendered header.
         # It is real information — a dollar column is uninterpretable without
@@ -4379,8 +4435,15 @@ def _render_health_block(health: list[dict]) -> list[str]:
             "xai_url": "https://docs.x.ai/developers/models/grok-4.6",
             "google_verified": token_usage.PRICING_GOOGLE_LAST_UPDATED,
             "google_url": "https://ai.google.dev/gemini-api/docs/pricing",
+            "muse_verified": token_usage.PRICING_MUSE_LAST_UPDATED,
+            "muse_url": token_usage.PRICING_MUSE_SOURCE_URL,
+            "effective_verified_date": effective_date,
+            "unpriced_model_ids": unpriced,
+            "unverified_model_ids": unverified,
+            "cached_model_ids": token_usage.active_cached_model_ids(),
+            "refresh_due": refresh_due,
             "basis": (
-                "Historical usage is repriced at the rates bundled with this mm release. "
+                "Historical usage is repriced at bundled rates plus active local cache overrides. "
                 "Not subscription spend. `~` is an estimate, `≥` a floor, `—` unavailable "
                 "(never zero). Anthropic cache writes use the 1-hour rate for estimates and "
                 "the 5-minute rate for floors. Fast-mode turns on Opus 5 / 4.8 bill at 2x "
@@ -4731,7 +4794,7 @@ def format_retro(
         lines.append("")
         lines.extend(_render_themes_prompt(data))
         lines.append("")
-        lines.extend(_render_health_block(health))
+        lines.extend(_render_health_block(health, data))
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -4888,7 +4951,44 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--set-model-price",
+        action="append",
+        default=[],
+        metavar="MODEL=IN,READ,CREATE,OUT",
+        help="Set a local USD/MTok card (input, cache read, cache create, output). Repeatable.",
+    )
+    parser.add_argument(
+        "--mark-pricing-verified",
+        action="store_true",
+        help="Record that vendor pricing docs were checked today (UTC).",
+    )
     args = parser.parse_args(argv)
+    model_prices = {}
+    for spec in args.set_model_price:
+        try:
+            model, rates = token_usage.parse_model_price(spec)
+        except ValueError:
+            sys.stderr.write(
+                "mm: invalid --set-model-price "
+                + safety.safe_terminal_str(spec)
+                + "; expected a model id and four finite rates in [0, 1000]. "
+                "Fix: mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2,0.1,2.5,10'\n"
+            )
+            return 2
+        model_prices[model] = rates
+    if model_prices or args.mark_pricing_verified:
+        try:
+            token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
+        except OSError as exc:
+            sys.stderr.write(
+                "mm: could not write pricing cache: "
+                + safety.safe_terminal_str(exc)
+                + ". Fix: mm retro-fleet "
+                + str(args.window)
+                + "d\n"
+            )
+            return 1
 
     if args.no_save:
         # stderr, not stdout: the documented recipe redirects stdout

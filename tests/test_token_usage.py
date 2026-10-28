@@ -2701,3 +2701,258 @@ def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch
     err = capsys.readouterr().err
     assert "unknown model in pricing: claude-sync78-direct" in err
     assert "skipping oversize line" in err
+
+
+@pytest.mark.parametrize(
+    "model,rates",
+    [
+        ("gpt-6.1-sol", (2, 0.1, 2.5, 10)),
+        ("gpt-6-sol", (2, 0.2, 2.5, 10)),
+        ("gpt-6-luna", (0.1, 0.01, 0.125, 0.5)),
+        ("muse-wonder-1.0", (4, 0.2, 0, 20)),
+        ("muse-wonder-full-1.0", (4, 0.2, 0, 20)),
+        ("muse-spark-1.3", (1.25, 0.15, 0, 4.25)),
+    ],
+)
+def test_october_verified_cards(model, rates):
+    assert tu.resolve_prices(model) == dict(zip(tu._PRICING_RATE_FIELDS, rates, strict=True))
+    assert model in tu.VERIFIED_MODEL_IDS
+    assert tu.is_verified_model(model)
+    assert tu.PRICING_OPENAI_LAST_UPDATED == tu.PRICING_MUSE_LAST_UPDATED == "2026-10-27"
+
+
+@pytest.mark.parametrize(
+    "model,family",
+    [
+        ("gpt-6.2-sol", "gpt-6.1-sol"),
+        ("gpt-7-astra", "gpt-6-astra"),
+        ("gpt-7.1-terra", "gpt-5.6-terra"),
+        ("gpt-8-luna", "gpt-6-luna"),
+        ("gemini-4.1-argon", "gemini-4-argon"),
+        ("gemini-4-flash", "gemini-3.8-flash"),
+        ("muse-wonder-1.1", "muse-wonder-1.0"),
+        ("muse-spark-full-1.4", "muse-spark-1.3"),
+    ],
+)
+def test_vendor_positional_fallback_is_unverified(model, family):
+    assert tu.vendor_model_family(model) == family
+    assert tu.resolve_prices(model) == tu.VENDOR_FAMILY_TIERS[family]
+    assert not tu.is_verified_model(model)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "x-gpt-6.1-sol",
+        "gpt-6.1-sol-extra",
+        "GPT-6.1-sol",
+        "muse-full-wonder-1.1",
+        "muse-wonder-full-1.1-tail",
+        "gemini-4-argon-flash",
+        "gpt--sol",
+    ],
+)
+def test_vendor_fallback_rejects_nonpositional_ids(model):
+    assert tu.vendor_model_family(model) is None
+    assert tu.resolve_prices(model) is None
+
+
+def _write_pricing_cache(models, verified_date=None):
+    payload = {"version": 1, "models": models}
+    if verified_date is not None:
+        payload["verified_date"] = verified_date
+    tu.PRICING_CACHE_PATH.write_text(json.dumps(payload))
+
+
+def _pricing_card(verified_date="2026-10-27", **overrides):
+    return {
+        "input": 1.0,
+        "cache_read": 0.1,
+        "cache_create": 0.0,
+        "output": 2.0,
+        "verified_date": verified_date,
+        **overrides,
+    }
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-opus-5",
+        "gpt-6.1-sol",
+        "grok-4.7",
+        "grok-4.6-build",
+        "gemini-4-argon",
+        "muse-wonder-1.0",
+    ],
+)
+def test_cache_override_date_gate_all_six_vendors(model):
+    builtin = tu.resolve_prices(model)
+    date = tu._builtin_verified_date(model)
+    previous = (datetime.fromisoformat(date) - timedelta(days=1)).date().isoformat()
+    _write_pricing_cache({model: _pricing_card(previous)})
+    assert tu.resolve_prices(model) == builtin
+    assert tu.active_cached_model_ids() == []
+    _write_pricing_cache({model: _pricing_card(date)})
+    assert tu.resolve_prices(model) == {
+        key: value for key, value in _pricing_card().items() if key != "verified_date"
+    }
+    assert tu.active_cached_model_ids() == [model]
+    assert tu.resolve_long_context_prices(model) is None
+
+
+def test_cached_unknown_precedes_family_and_is_verified():
+    model = "muse-wonder-1.9"
+    _write_pricing_cache({model: _pricing_card("2020-01-01"), "new-vendor-model": _pricing_card()})
+    assert tu.resolve_prices(model)["input"] == 1.0
+    assert tu.is_verified_model(model)
+    assert tu.is_verified_model("new-vendor-model")
+    card = tu.resolve_prices(model)
+    card["input"] = 999
+    assert tu.resolve_prices(model)["input"] == 1.0
+
+
+@pytest.mark.parametrize("bad", [True, False, float("nan"), float("inf"), -1, 1000.01, "2", None])
+def test_cache_rejects_invalid_numeric_rates(bad):
+    _write_pricing_cache({"custom-model": _pricing_card(input=bad)})
+    assert tu.resolve_prices("custom-model") is None
+    assert not tu.is_verified_model("custom-model")
+
+
+@pytest.mark.parametrize("bad_date", ["20261027", "2026-02-30", "today", True, "2026-1-01"])
+def test_cache_rejects_invalid_iso_dates(bad_date):
+    _write_pricing_cache({"custom-model": _pricing_card(bad_date)}, verified_date=bad_date)
+    assert tu.pricing_cache() == {"version": 1, "models": {}}
+
+
+def test_passive_cache_reads_create_no_files_or_repairs(tmp_path, monkeypatch):
+    missing = tmp_path / "missing" / "pricing-cache.json"
+    monkeypatch.setattr(tu, "PRICING_CACHE_PATH", missing)
+    assert tu.pricing_cache() == {"version": 1, "models": {}}
+    assert not missing.parent.exists()
+    monkeypatch.setattr(tu, "PRICING_CACHE_PATH", tmp_path / "bad.json")
+    tu.PRICING_CACHE_PATH.write_bytes(b"broken")
+    before = tu.PRICING_CACHE_PATH.stat()
+    assert tu.pricing_cache() == {"version": 1, "models": {}}
+    assert tu.PRICING_CACHE_PATH.read_bytes() == b"broken"
+    assert tu.PRICING_CACHE_PATH.stat().st_mtime_ns == before.st_mtime_ns
+    assert not list(tmp_path.glob("*.lock"))
+
+
+def test_pricing_memo_uses_path_mtime_and_size(monkeypatch, tmp_path):
+    import os
+    from contextlib import contextmanager
+
+    _write_pricing_cache({"custom-model": _pricing_card()})
+    real = tu.locked_json_snapshot
+    reads = []
+
+    @contextmanager
+    def spy(path):
+        reads.append(path)
+        with real(path) as snapshot:
+            yield snapshot
+
+    monkeypatch.setattr(tu, "locked_json_snapshot", spy)
+    assert tu.resolve_prices("custom-model")["input"] == 1
+    cached = tu.pricing_cache()
+    cached["models"].clear()
+    assert tu.resolve_prices("custom-model")["input"] == 1
+    assert len(reads) == 1
+    old = tu.PRICING_CACHE_PATH.stat()
+    _write_pricing_cache({"custom-model": _pricing_card(input=2)})
+    os.utime(tu.PRICING_CACHE_PATH, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000))
+    assert tu.resolve_prices("custom-model")["input"] == 2
+    assert len(reads) == 2
+    other = tmp_path / "other.json"
+    other.write_text(tu.PRICING_CACHE_PATH.read_text())
+    monkeypatch.setattr(tu, "PRICING_CACHE_PATH", other)
+    assert tu.resolve_prices("custom-model")["input"] == 2
+    assert len(reads) == 3
+    old = other.stat()
+    other.write_text(other.read_text() + " ")
+    os.utime(other, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert tu.resolve_prices("custom-model")["input"] == 2
+    assert len(reads) == 4
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "bad=1,2,3",
+        "A=1,2,3,4",
+        "bad/model=1,2,3,4",
+        "bad=nan,1,2,3",
+        "bad=inf,1,2,3",
+        "bad=-1,1,2,3",
+        "bad=1001,1,2,3",
+        "bad=true,1,2,3",
+        "a" * 129 + "=1,2,3,4",
+    ],
+)
+def test_parse_model_price_rejects_bad_specs(spec):
+    with pytest.raises(ValueError):
+        tu.parse_model_price(spec)
+
+
+def test_explicit_pricing_updates_stamp_separately_and_preserve_models():
+    today = datetime.now(timezone.utc).date().isoformat()
+    model, rates = tu.parse_model_price("custom-model=0,0.25,1000,4")
+    tu.update_pricing_cache({model: rates})
+    cache = tu.pricing_cache()
+    assert "verified_date" not in cache
+    assert cache["models"][model] == _pricing_card(
+        today, input=0, cache_read=0.25, cache_create=1000, output=4
+    )
+    tu.update_pricing_cache({}, mark_verified=True)
+    assert tu.pricing_cache()["verified_date"] == today
+    assert tu.resolve_prices(model)["output"] == 4
+    tu.update_pricing_cache({"new-model": (1, 2, 3, 4)})
+    assert tu.pricing_cache()["verified_date"] == today
+    assert set(tu.pricing_cache()["models"]) == {model, "new-model"}
+
+
+def test_pricing_cache_evicts_oldest_date_then_model_id():
+    models = {f"model-{i:03d}": _pricing_card("2026-01-01") for i in range(128)}
+    models["model-127"]["verified_date"] = "2025-01-01"
+    _write_pricing_cache(models)
+    tu.update_pricing_cache({"new-model": (1, 2, 3, 4)})
+    assert len(tu.pricing_cache()["models"]) == 128
+    assert "model-127" not in tu.pricing_cache()["models"]
+    tu.update_pricing_cache({"newer-model": (1, 2, 3, 4)})
+    assert "model-000" not in tu.pricing_cache()["models"]
+
+
+def test_pricing_write_failures_propagate(monkeypatch):
+    failure = OSError("disk full")
+    monkeypatch.setattr(lockedjson, "_write_json", lambda *a, **kw: failure)
+    with pytest.raises(OSError, match="disk full"):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    monkeypatch.setattr(lockedjson, "_acquire_lock", lambda *a, **kw: False)
+    with pytest.raises(OSError, match="lock pricing cache"):
+        tu.update_pricing_cache({}, mark_verified=True)
+
+
+def test_codex_auto_review_counts_activity_without_cost(capsys):
+    assert "codex-auto-review" in tu.COST_EXCLUDED_MODELS
+    assert tu.estimate_cost({"codex-auto-review": {"input": 1000}}) == (0.0, {})
+    assert capsys.readouterr().err == ""
+
+
+def test_pricing_writer_refuses_protected_root(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations
+):
+    from mind_meld import fsutil
+
+    destination = synthetic_account_home / ".config/mind-meld/pricing-cache.json"
+    monkeypatch.setattr(tu, "PRICING_CACHE_PATH", destination)
+    calls = forbid_fs_mutations()
+    with pytest.raises(fsutil.PytestRealStateWriteError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert calls == []
+
+
+def test_pricing_writer_tmp_control():
+    tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert tu.PRICING_CACHE_PATH.exists()
+    assert tu.resolve_prices("custom-model")["output"] == 4

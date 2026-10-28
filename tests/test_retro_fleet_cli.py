@@ -11,8 +11,13 @@ typer wrapper".
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import sys
 
+import pytest
 from typer.testing import CliRunner
 
 
@@ -179,3 +184,98 @@ class TestRetroFleetCommand:
         options = plain_help.rsplit("Options", 1)[-1]
         assert "--theme" in options
         assert "--no-save" not in options
+
+
+class TestPricingFlags:
+    def test_prices_and_mark_forwarded(self, monkeypatch):
+        from mind_meld.cli import app
+
+        captured = []
+        monkeypatch.setattr(
+            "mind_meld.skills.retro_fleet.aggregator.main", lambda argv: captured.extend(argv) or 0
+        )
+        result = CliRunner().invoke(
+            app,
+            [
+                "retro-fleet",
+                "30d",
+                "--set-model-price",
+                "new-model=1,0,0,2",
+                "--set-model-price",
+                "another=2,0,0,3",
+                "--mark-pricing-verified",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert captured == [
+            "30d",
+            "--set-model-price=new-model=1,0,0,2",
+            "--set-model-price=another=2,0,0,3",
+            "--mark-pricing-verified",
+        ]
+
+    @pytest.mark.parametrize(
+        "spec",
+        ["bad\n\x1b[31m=1,0,0,2", "new=nan,0,0,2", "new=1,2,3", "new=1001,0,0,2", "-bad=1,0,0,2"],
+    )
+    def test_bad_spec_exits_two_sanitized_and_never_writes(self, spec):
+        from mind_meld import token_usage as tu
+        from mind_meld.cli import app
+
+        result = CliRunner().invoke(app, ["retro-fleet", "--set-model-price=" + spec])
+        assert result.exit_code == 2, result.output
+        assert "invalid --set-model-price" in result.output
+        assert "Fix: mm retro-fleet" in result.output
+        assert "\x1b" not in result.output
+        assert not tu.PRICING_CACHE_PATH.exists()
+
+    def test_write_failure_exits_one_and_sanitizes(self, monkeypatch):
+        from mind_meld import token_usage as tu
+        from mind_meld.cli import app
+
+        def fail(*args, **kwargs):
+            raise OSError("read-only\n\x1b[31mcache")
+
+        monkeypatch.setattr(tu, "update_pricing_cache", fail)
+        result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])
+        assert result.exit_code == 1, result.output
+        assert "could not write pricing cache" in result.output
+        assert "Fix: mm retro-fleet 7d" in result.output
+        assert "\x1b" not in result.output
+        assert "# Retro" not in result.output
+
+    def test_subprocess_pricing_override_is_hermetic(self, tmp_path):
+        from mind_meld import token_usage as tu
+
+        cache = tmp_path / "subprocess-prices.json"
+        events = tmp_path / "events"
+        events.mkdir()
+        env = {
+            **os.environ,
+            "MM_PRICING_CACHE_PATH": str(cache),
+            "MM_EVENTS_DIR": str(events),
+            "HOME": str(tmp_path),
+            "XDG_CONFIG_HOME": str(tmp_path / "config"),
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "mind_meld.cli",
+                "retro-fleet",
+                "7d",
+                "--no-author-filter",
+                "--set-model-price",
+                "new-model=1,.2,0,3",
+                "--mark-pricing-verified",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        saved = json.loads(cache.read_text())
+        assert saved["models"]["new-model"]["input"] == 1
+        assert saved["models"]["new-model"]["verified_date"] == saved["verified_date"]
+        assert not tu.PRICING_CACHE_PATH.exists()

@@ -139,11 +139,109 @@ def test_counter_drift_refuses_the_reader(muse_cache, tmp_path, usage):
     assert result.reason == "unsupported"
 
 
-def test_unknown_event_key_refuses_the_reader(muse_cache, tmp_path):
-    _write_session(tmp_path, [_record("e1", _usage(), extra={"new_field": 1})])
+@pytest.mark.parametrize(
+    "omitted",
+    [
+        (),
+        ("cache_read_tokens",),
+        ("cache_write_tokens",),
+        ("cache_read_tokens", "cache_write_tokens"),
+    ],
+)
+def test_additive_event_metadata_and_optional_cache_counters(muse_cache, tmp_path, omitted):
+    usage = _usage()
+    for key in omitted:
+        del usage[key]
+    _write_session(tmp_path, [_record("e1", usage, extra={"estimated_prompt_tokens": 120})])
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    assert result.hosts["muse"]["2026-10-13"] == {
+        "input": 60,
+        "cache_read": 40,
+        "cache_create": 0,
+        "output": 10,
+    }
+
+
+def _zero_record():
+    return _record(
+        "zero",
+        dict.fromkeys(("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"), 0),
+        model=None,
+    )
+
+
+@pytest.mark.parametrize("model", [None, "", 17, "omitted"])
+def test_zero_token_model_less_completion_is_skipped(muse_cache, tmp_path, model):
+    record = _zero_record()
+    if model == "omitted":
+        del record["payload"]["event"]["model"]
+    else:
+        record["payload"]["event"]["model"] = model
+    _write_session(tmp_path, [record, _record("real", _usage())])
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    assert result.hosts["muse"]["2026-10-13"]["output"] == 10
+    assert set(result.tokens_by_day["2026-10-13"]["by_model"]) == {"muse-wonder-1.0"}
+
+
+@pytest.mark.parametrize("model", [None, "", 17, "omitted"])
+def test_nonzero_tokens_require_a_nonempty_string_model(muse_cache, tmp_path, model):
+    record = _record("e1", _usage())
+    if model == "omitted":
+        del record["payload"]["event"]["model"]
+    else:
+        record["payload"]["event"]["model"] = model
+    _write_session(tmp_path, [record])
     result = hu.read_muse_usage(tmp_path, consented=True)
     assert not result.complete
     assert result.reason == "unsupported"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing-id", "unsupported"),
+        ("oversize-id", "unsupported"),
+        ("invalid-time", "malformed"),
+        ("old-step", "unsupported"),
+        ("unknown-counter", "unsupported"),
+        ("missing-counter", "unsupported"),
+        ("bool-counter", "unsupported"),
+        ("negative-counter", "unsupported"),
+        ("reasoning-drift", "unsupported"),
+        ("cache-drift", "unsupported"),
+    ],
+)
+def test_model_less_zero_steps_validate_before_skipping(muse_cache, tmp_path, mutation, reason):
+    record = _zero_record()
+    usage = record["payload"]["event"]["usage"]
+    if mutation == "missing-id":
+        del record["id"]
+    elif mutation == "oversize-id":
+        record["id"] = "x" * 257
+    elif mutation == "invalid-time":
+        record["recorded_at"] = "1"
+    elif mutation == "old-step":
+        record["recorded_at"] = str(
+            int(datetime(2026, 10, 10, tzinfo=timezone.utc).timestamp() * 1_000_000)
+        )
+    elif mutation == "unknown-counter":
+        usage["surprise_tokens"] = 0
+    elif mutation == "missing-counter":
+        del usage["reasoning_tokens"]
+    elif mutation == "bool-counter":
+        usage["input_tokens"] = False
+    elif mutation == "negative-counter":
+        usage["input_tokens"] = -1
+    elif mutation == "reasoning-drift":
+        usage["reasoning_tokens"] = 1
+    elif mutation == "cache-drift":
+        usage["cache_read_tokens"] = 1
+    _write_session(tmp_path, [record])
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert not result.complete
+    assert result.reason == reason
 
 
 def test_equal_duplicate_counts_once_and_conflict_refuses(muse_cache, tmp_path):

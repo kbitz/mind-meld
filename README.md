@@ -346,7 +346,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Muse
 
-`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
+`mm enable-source muse` does two things for Muse: it syncs `~/.local/share/muse/memory/` only (personal and per-project memory notes; session files, the session index, and bundled skills stay local), and it opts this Mac into reading completed model-step token totals from local Muse session logs. Prompts never leave the Mac. Muse is never enabled automatically, even when `~/.local/share/muse/memory/` exists (Muse creates it on first run); `mm init` asks with a default of N. Muse's own `.muse-memory.lock` file never syncs. `~/.config/muse` (credentials, settings, trust) is never a sync source. Muse 1.4.14 usage accepts additive model-step metadata, four required usage counters with optional cache-read/write counters, and validated zero-token steps without a model; a nonzero step still requires a model. In the fleet retro, Muse models appear under the `Muse` row. Muse already discovers skills from `~/.claude/skills`, so mm maintains no separate skill link for it.
 
 ### Antigravity (agy)
 
@@ -849,7 +849,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 **Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...` at init and with `mm push --verbose`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-Cost is not subscription spend: historical tokens are repriced at the rates bundled with this mm release, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
+Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
 Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
@@ -866,7 +866,23 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); the rate table is bundled with mm and is not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-09-10 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)). mm has no network, so a rate change is a code change.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-09-23 ([pricing](https://cursor.com/docs/models-and-pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+
+**Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all six bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
+
+After checking official vendor docs, supply repeatable overrides in **USD per million tokens**, ordered **input, cache read, cache create, output**:
+
+```bash
+mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'
+```
+
+`--set-model-price` dates that model's card today (UTC). Add `--mark-pricing-verified` only after checking the vendor pricing docs for the refresh; it dates the whole-table verification today. Setting a model alone never marks the table verified. If offline or the docs do not establish a rate, keep the bundled/family fallback, retain unpriced or extrapolated caveats, and do not pass `--mark-pricing-verified`.
+
+Overrides live only on this machine in `~/.config/mind-meld/pricing-cache.json` (override the location with `MM_PRICING_CACHE_PATH`); they never sync. The version-1 JSON cache holds a `models` map of four rates and a `verified_date` per model, plus the optional whole-table `verified_date`. Built-in verified IDs accept an override dated on or after their vendor's bundled date; other valid cached cards take precedence over family fallback and count as verified. Reads create no cache or lock. Explicit writes use a flock and retain at most 128 models, evicting oldest `(verified_date, model_id)` first. Model IDs must match `^[a-z0-9][a-z0-9._:-]{0,127}$`; each rate must be finite and between 0 and 1000 inclusive. Invalid input exits 2; cache write failures exit 1 with a fixing command.
+
+To reset local pricing, remove `~/.config/mind-meld/pricing-cache.json` (or the file selected by `MM_PRICING_CACHE_PATH`) while no pricing update is running, then rerun the retro. This restores bundled rates and clears the whole-table verification date.
+
+OpenAI `gpt-6.1-sol`, `gpt-6-sol`, and `gpt-6-luna`, plus Muse `muse-wonder-1.0`, `muse-wonder-full-1.0`, and `muse-spark-1.3`, have verified cards. Future positional OpenAI, Gemini, and Muse family IDs use their current family tier and remain labelled extrapolated until verified. `codex-*` belongs to Codex; `codex-auto-review` counts token/day activity but is excluded from cost, top-model selection, and pricing-refresh requests.
 
 Sonnet 5 now uses the standard $2/$10 input/output rates; Sonnet 4.x
 stays at $3/$15. Fable/Mythos 5.1 cache reads are $0.25 per MTok; 5.0 stays

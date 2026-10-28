@@ -277,7 +277,10 @@ _MAX_MODEL_ID_BYTES = 256
 _MAX_PROMPT_ID_BYTES = 256
 _MAX_REASON_SINCE_CHARS = 40
 _MAX_COUNTER = 2**53
-_MUSE_USAGE_KEYS = frozenset(
+_MUSE_REQUIRED_USAGE_KEYS = frozenset(
+    {"input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"}
+)
+_MUSE_ALLOWED_USAGE_KEYS = frozenset(
     {
         "input_tokens",
         "output_tokens",
@@ -287,11 +290,10 @@ _MUSE_USAGE_KEYS = frozenset(
         "reasoning_tokens",
     }
 )
-_MUSE_EVENT_KEYS = frozenset({"kind", "model", "usage", "duration_ms", "finish_reason"})
-_MUSE_EVENT_REQUIRED_KEYS = frozenset({"kind", "model", "usage"})
+_MUSE_EVENT_REQUIRED_KEYS = frozenset({"kind", "usage"})
 _MUSE_RECORDED_AT_MAX_DIGITS = 20
-MUSE_USAGE_CENSUS_HOST_VERSION = "1.4.7"
-"""Host version of the last Muse usage-reader census.
+MUSE_USAGE_CENSUS_HOST_VERSION = "1.4.14"
+"""Host version of the current Muse usage-reader record contract.
 
 Bound to ``tests/fixtures/host_sessions/muse/CONTRACT.md`` by
 ``test_muse_contract_census_pin_matches_src_constant``."""
@@ -482,7 +484,11 @@ def host_family(model: str) -> HostFamily:
     normalized = model.casefold() if isinstance(model, str) else ""
     if normalized.startswith("claude-"):
         return "claude"
-    if normalized.startswith("gpt-") or normalized in {"o1", "o3"} or normalized.startswith("o4-"):
+    if (
+        normalized.startswith(("gpt-", "codex-"))
+        or normalized in {"o1", "o3"}
+        or normalized.startswith("o4-")
+    ):
         return "codex"
     if normalized.startswith("grok-"):
         return "grok"
@@ -3037,8 +3043,8 @@ def _read_muse_file(
 def _muse_turn_from_record(record: Any, dir_date: date) -> tuple[str, dict[str, Any], bool] | None:
     """Project one terminal ``model_completed`` event, or skip the record.
 
-    Strict like the Grok terminal ledger: a recognized carrier with an
-    unexpected key set or counter shape refuses the whole reader
+    Additive event metadata is ignored, but a recognized carrier with an
+    unexpected usage key set or counter shape refuses the whole reader
     (``unsupported``) instead of guessing. Everything that is not the
     carrier — other event kinds, retained frames, attribution records —
     is skipped without being interpreted.
@@ -3055,21 +3061,15 @@ def _muse_turn_from_record(record: Any, dir_date: date) -> tuple[str, dict[str, 
         return None
     if event.get("kind") != "model_completed":
         return None
-    keys = set(event)
-    if not _MUSE_EVENT_REQUIRED_KEYS <= keys <= _MUSE_EVENT_KEYS:
+    if not _MUSE_EVENT_REQUIRED_KEYS <= set(event):
         raise _ReadFailure("unsupported")
     envelope_id = record.get("id")
     if not isinstance(envelope_id, str) or not envelope_id:
         raise _ReadFailure("unsupported")
     if len(envelope_id.encode("utf-8")) > _MAX_PROMPT_ID_BYTES:
         raise _ReadFailure("unsupported")
-    model = event.get("model")
-    if not isinstance(model, str) or not model:
-        raise _ReadFailure("unsupported")
-    if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
-        raise _ReadFailure("unsupported")
     usage = event.get("usage")
-    if not isinstance(usage, dict) or set(usage) != _MUSE_USAGE_KEYS:
+    if not isinstance(usage, dict):
         raise _ReadFailure("unsupported")
     counters, partial = _validate_muse_counters(usage)
     day = _muse_recorded_day(record.get("recorded_at"))
@@ -3078,6 +3078,15 @@ def _muse_turn_from_record(record: Any, dir_date: date) -> tuple[str, dict[str, 
     # UTC day). Counting it would double spend already counted, possibly in
     # a frozen day whose keys are gone, so refuse rather than guess.
     if date.fromisoformat(day) < dir_date - timedelta(days=_MUSE_STEP_LEAD_DAYS):
+        raise _ReadFailure("unsupported")
+    model = event.get("model")
+    if not isinstance(model, str) or not model:
+        # Muse emits usage-less completion steps without a model. Validate
+        # the envelope and counters first so zeroes cannot conceal drift.
+        if not any(counters.values()):
+            return None
+        raise _ReadFailure("unsupported")
+    if len(model.encode("utf-8")) > _MAX_MODEL_ID_BYTES:
         raise _ReadFailure("unsupported")
     # One envelope is one step, so the model stays OUT of the key: a repeated
     # id with a different model must reach the ``existing == turn`` check and
@@ -3092,27 +3101,32 @@ def _validate_muse_counters(usage: dict[str, Any]) -> tuple[Usage, bool]:
     ``input_tokens`` already contains ``cache_read_tokens`` (and, under
     the same three-term rule as Codex/Grok, ``cache_write_tokens``).
     ``cached_tokens`` duplicates ``cache_read_tokens`` in every censused
-    record, so a disagreement is format drift, not a second bucket.
+    record, so a disagreement is format drift, not a second bucket. Muse
+    1.4.14 may omit cache reads/writes; default them to cached/zero.
     ``reasoning_tokens`` is a subset of ``output_tokens`` and is never
     added twice. A nonzero cache write marks the day partial, matching
     the shared ``unattributable_days`` rule.
     """
-    for name in _MUSE_USAGE_KEYS:
-        if not _is_valid_counter(usage.get(name)):
+    if not _MUSE_REQUIRED_USAGE_KEYS <= set(usage) <= _MUSE_ALLOWED_USAGE_KEYS:
+        raise _ReadFailure("unsupported")
+    for value in usage.values():
+        if not _is_valid_counter(value):
             raise _ReadFailure("unsupported")
-    if usage["cached_tokens"] != usage["cache_read_tokens"]:
+    cache_read = usage.get("cache_read_tokens", usage["cached_tokens"])
+    cache_write = usage.get("cache_write_tokens", 0)
+    if usage["cached_tokens"] != cache_read:
         raise _ReadFailure("unsupported")
     if usage["reasoning_tokens"] > usage["output_tokens"]:
         raise _ReadFailure("unsupported")
     normalized = _normalize_inclusive_usage(
         {
             "input": usage["input_tokens"],
-            "cache_create": usage["cache_write_tokens"],
-            "cache_read": usage["cache_read_tokens"],
+            "cache_create": cache_write,
+            "cache_read": cache_read,
             "output": usage["output_tokens"],
         }
     )
-    return normalized, usage["cache_write_tokens"] > 0
+    return normalized, cache_write > 0
 
 
 _MUSE_RECORDED_AT_MIN_US = 1_577_836_800_000_000

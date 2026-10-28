@@ -486,12 +486,19 @@ is in `token_usage.py` (`PRICING_GOOGLE_LAST_UPDATED = "2026-10-22"`).
 is enabled, `read_muse_usage` walks
 `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` plus literal
 `subagent/` descendants, regular non-symlink files only, and accepts only
-`model_completed` events under a `runtime.session` envelope: the event key
-set within `{kind, model, usage, duration_ms, finish_reason}`, the usage
-key set exactly the six `*_tokens` counters, `cached_tokens` equal to
-`cache_read_tokens`, `reasoning_tokens` a bounded subset of
-`output_tokens`, counters disjoint-normalized by the shared three-term
-rule, a nonzero cache write marking the day partial. The dedup key is the
+`model_completed` events under a `runtime.session` envelope. The Muse 1.4.14
+contract tolerates additive top-level event keys such as
+`estimated_prompt_tokens`; nested usage stays closed to
+`{input_tokens, output_tokens, cached_tokens, reasoning_tokens,
+cache_read_tokens, cache_write_tokens}`, with the first four required.
+Missing `cache_read_tokens` defaults to `cached_tokens`; missing
+`cache_write_tokens` defaults to zero. `cached_tokens` must equal
+`cache_read_tokens`, `reasoning_tokens` is a bounded subset of
+`output_tokens`, and counters are disjoint-normalized by the shared
+three-term rule, with a nonzero cache write marking the day partial.
+Validate the envelope id, recorded timestamp, usage keys and counters before
+skipping a zero-token step without a non-empty model. Nonzero steps without
+a non-empty string model remain unsupported. The dedup key is the
 hashed envelope `id` alone, corpus-wide: not the model (one envelope is one
 step, so a repeated id under another model refuses) and not the session dir
 (a step restated in a second log counts once). An equal duplicate counts
@@ -1237,7 +1244,13 @@ do not automatically discard a device or ledger based on equal totals.
   a host snapshot, compare locally classified per-model sums with its wire
   family totals for each day and counter. Older snapshots without a `muse`
   or `agy` family retain that family's models under their historical `other`
-  bucket for both validation and pricing; accepted wire totals stay unchanged.
+  bucket for both validation and pricing. Legacy `codex-*` models may share a
+  snapshot with `gpt-*` already under `codex`: when the current assignment
+  exceeds the wire Codex day/counter totals, keep `codex-*` in historical
+  `other`, still checking the combined Other bounds. Accepted wire totals
+  stay unchanged. New `codex-*` usage classifies as `codex`;
+  `codex-auto-review` retains token/day activity but is cost-excluded and
+  omitted from top-model and pricing-extrapolation selection.
   If a local model sum exceeds the
   corresponding wire total, suppress that snapshot's pricing detail rather
   than moving accepted tokens between families or pricing an inconsistent
@@ -3228,7 +3241,15 @@ error direction for a future unverified id.
 
 Host model ids (Track 35A) do not go through `model_family`. They resolve
 via the curated alias registry `PRICING_FAMILY_BY_MODEL` (exact-key,
-never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards.
+never substring) onto `VENDOR_FAMILY_TIERS` literal four-field cards, then
+through `vendor_model_family` positional fallback when no alias exists.
+The fallback accepts only `^gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)$`,
+`^gemini-\d+(?:\.\d+)?-(argon|flash)$`, and
+`^muse-(wonder|spark)(?:-full)?-\d+(?:\.\d+)?$`. The tiers are
+`gpt-6-astra`, `gpt-5.6-terra`, `gpt-6.1-sol`, `gpt-6-luna`,
+`gemini-4-argon`, `gemini-3.8-flash`, `muse-wonder-1.0` and
+`muse-spark-1.3`. Unknown versions price by that tier and remain unverified.
+Muse's `muse-wonder-full-1.0` aliases the verified `muse-wonder-1.0` card.
 Do not reach for `_tier` for non-Anthropic rates: its cache multipliers
 are Anthropic-specific. `resolve_prices` stays the single priced-predicate.
 Track 57A lifts the Grok hold WITH delivery: the 46A reader repair had never
@@ -3312,16 +3333,63 @@ Anthropic rate refresh landed in Track 58A, verified 2026-09-14; 57A's
 host delivery and model-scoped at-most contract remain in force, with the
 details carried by `cost_floor` in `MM_HEALTH`.
 
-Provenance is per vendor, because one date over two vendors' tables is
-a lie of composition. Anthropic: `PRICING_LAST_UPDATED` (verified
-against Anthropic's public pricing page). OpenAI:
-`PRICING_OPENAI_LAST_UPDATED` (verified against
-https://developers.openai.com/api/docs/pricing, short-context Standard).
-xAI: `PRICING_XAI_LAST_UPDATED` (2026-09-10, model page and Build overview
-above). OpenAI's five cards, including `gpt-6-astra` ($10 / $1 / $12.50 / $50),
-were all re-read 2026-09-10. Each vendor's date and source URL are carried in
-`MM_HEALTH.pricing`, alongside the marker definitions. "Current rates" means rates
-bundled with this mm release, verified on those dates. mm does not fetch rates.
+Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
+(2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), Cursor
+`PRICING_CURSOR_LAST_UPDATED` (2026-09-23), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-09-10), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
+`PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
+`PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
+Each vendor's date and source URL ride in `MM_HEALTH.pricing`, including
+`muse_verified` and `muse_url`. Literal four-field cards are ordered
+**input, cache read, cache create, output**, in **USD per million tokens**:
+`gpt-6.1-sol` `(2.00, 0.10, 2.50, 10.00)`, `gpt-6-sol`
+`(2.00, 0.20, 2.50, 10.00)`, `gpt-6-luna` `(0.10, 0.01, 0.125, 0.50)`,
+Muse Wonder/Wonder Full `(4.00, 0.20, 0.00, 20.00)`, and Muse Spark 1.3
+`(1.25, 0.15, 0.00, 4.25)`. The CLI fetches no rates; the skill can check
+official vendor docs before Pass 2 and pass local verified cards.
+
+**Local pricing overlay.** `PRICING_CACHE_PATH` defaults to
+`~/.config/mind-meld/pricing-cache.json`, with `MM_PRICING_CACHE_PATH` as the
+hermetic override. This is local account state, never synced. Its version-1
+schema has a `models` map keyed by model id; each card has `input`,
+`cache_read`, `cache_create`, `output` and `verified_date`. Only an explicit
+`--mark-pricing-verified` adds or updates the top-level `verified_date`.
+Both dates are ISO `YYYY-MM-DD`. IDs match
+`^[a-z0-9][a-z0-9._:-]{0,127}$`; rates must be finite non-bool numbers in
+`[0.0, 1000.0]`. Passive reads ignore invalid data, memoize by
+`(resolved_path, st_mtime_ns, st_size)`, and never create files or locks.
+
+Active cached cards precede `PRICING`, curated vendor aliases, Claude family
+fallback and positional vendor fallback. A `VERIFIED_MODEL_IDS` member's
+cached card is active only when its date is **on or after**
+`_builtin_verified_date(model)`, mapped across all six vendors. Other valid
+cached cards are active without that gate. `is_verified_model` accepts
+built-in verified IDs and active cached IDs; `resolve_prices` remains the
+sole priced-predicate. `resolve_long_context_prices` returns `None` for an
+active override rather than pairing a new base price with an old ceiling.
+
+`--set-model-price MODEL=IN,CACHE_READ,CACHE_CREATE,OUT` is repeatable and
+dates each supplied card today UTC. `--mark-pricing-verified` independently
+dates the whole-table check today UTC; setting cards alone cannot do that.
+Writes use `locked_json_rmw(..., on_contention="block")`, the fsutil pytest
+real-state guard, and oldest `(verified_date, model_id)` eviction above
+128 models. Invalid specifications exit 2 with sanitized input and a fixing
+example; explicit lock/read/write failures exit 1 with sanitized stderr and
+one fixing command. Tests isolate the cache, including CLI subprocesses.
+To reset the overlay, remove the selected cache file while no pricing update
+is running, then rerun: bundled rates and verification dates apply again.
+
+`MM_HEALTH.pricing.effective_verified_date` is
+`max(min(all six bundled vendor dates), cache.verified_date)`.
+`unpriced_model_ids` and `unverified_model_ids` are sorted, sanitized active
+in-window model IDs; excluded cost models are omitted. Unverified includes
+both unpriced models and family extrapolations. `cached_model_ids` lists
+active overrides. `refresh_due` is true when effective verification is more
+than seven days before `data.until`'s UTC date or any unverified in-window
+model exists. A refresh request does not itself assert that a bundled price
+is wrong. Pass 2 checks official vendor docs before changing rates or marking
+the table verified. Offline or inconclusive checks preserve available
+fallback rates and caveats; never mark verification on a failed check.
 
 **Publication-proof release evidence.** After merge and upgrade on the
 Grok-producing Mac, use the attended recapture bridge or a substantive push;
@@ -3336,7 +3404,8 @@ the agent with `mm install-skills` plus restart for the decoder.
 **Track 58A presentation and floor arithmetic.** `VERIFIED_MODEL_IDS` is a
 separate explicit set covering every override and currently verified family
 id, plus the curated vendor ids at their respective dates. It does not gate
-pricing. A priced id outside it gets a bounded, sanitized "Models priced by
+pricing. `is_verified_model` also recognizes active local cache cards.
+A priced id outside both gets a bounded, sanitized "Models priced by
 family extrapolation" detail under `pricing_extrapolated` in `MM_HEALTH`,
 never an unpriced label.
 
@@ -3402,16 +3471,12 @@ own: it fired for four unpriced models across the whole v0.12.x line and
 nobody saw it. The load-bearing signals are the rendered ones — the `≥`
 marker and its `MM_HEALTH` issue.
 
-**Invariant 5 — `PRICING_LAST_UPDATED` is provenance, not a
-threshold.** mm fetches no pricing data (AGENTS.md: "No API server"), so
-this table can never self-update and **stale is the steady state, not the
-exception**. The old docstring said "refresh if more than ~6 months old";
-nothing read it, and it would not have helped — the table was three
-months into that window while wrong about four models. The date is now
-carried in `MM_HEALTH.pricing` so the skill can cite it when relevant.
-Do NOT reintroduce a "warn after N months" rule: it is a verdict the code cannot earn, and it
-is the count-based-threshold anti-pattern this project has rejected
-before.
+**Invariant 5 — bundled dates are provenance; refresh is a skill action.**
+`PRICING_LAST_UPDATED` and the five other vendor dates describe checked
+bundled cards. The CLI makes no network request. The seven-day/new-model
+`refresh_due` signal asks the skill to consult official docs; it is neither
+a billing guarantee nor a warning that age alone proves a wrong price.
+Only a successful documented check authorizes `--mark-pricing-verified`.
 
 **Invariant 6 — `_short_model_name` handles BOTH id shapes, gated on the
 family allowlist.** The pre-v0.12.13 version required 4 dash-segments, so
