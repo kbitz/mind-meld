@@ -32,7 +32,7 @@ proving the file is still the same file), and ``tail_msg_ids``
 ``_resume_plan`` gates their use and falls back to a full walk on any
 doubt. A warm walk is now O(bytes appended since the last push).
 
-Pricing is module-level and resolved through ``resolve_prices`` — the
+Pricing is bundled with a local overlay and resolved through ``resolve_prices`` — the
 single predicate for "is this model priced, and at what rates." Exact
 model IDs win; anything else falls back to its FAMILY tier so a model
 released after this table was written still prices in the right
@@ -40,8 +40,7 @@ ballpark instead of silently costing $0. Only genuinely unparseable IDs
 stay unpriced; they count toward token totals but are excluded from cost
 (the renderer surfaces this fact). ``PRICING_LAST_UPDATED`` is rendered
 onto the retro card so a human can judge staleness — mm has no network
-by design, so the table can never self-update and stale is the steady
-state, not the exception.
+by design, so only explicit owner/skill verification refreshes the local overlay.
 
 Subagent attribution: tokens contributed to the parent session's
 ``claude_dir``. Subagent walks do NOT bump ``sessions``, ``total_kb``, or
@@ -72,6 +71,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -79,10 +79,11 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
+from mind_meld import fsutil
 from mind_meld.lockedjson import (
     LockContended,
     LockedJsonSnapshot,
@@ -248,7 +249,7 @@ This is the Anthropic date only. OpenAI rates have
 ``PRICING_OPENAI_LAST_UPDATED``. One date over two vendors' tables would
 be a lie of composition."""
 
-PRICING_OPENAI_LAST_UPDATED = "2026-09-10"
+PRICING_OPENAI_LAST_UPDATED = "2026-10-27"
 """Date the OpenAI short-context list rates in ``VENDOR_FAMILY_TIERS``
 were last verified against https://developers.openai.com/api/docs/pricing
 (also published at https://platform.openai.com/docs/pricing). Standard
@@ -273,6 +274,9 @@ gemini-4-argon: $2.00 input, $0.10 cache_read, $0.00 cache_create, $10.00 output
 (promotional rate through Nov 30, 2026).
 gemini-3.8-flash: $0.75 input, $0.075 cache_read, $0.00 cache_create, $3.75 output
 (promotional rate through Dec 31, 2026)."""
+
+PRICING_MUSE_LAST_UPDATED = "2026-10-27"
+PRICING_MUSE_SOURCE_URL = "https://dev.meta.ai/docs/pricing-rate-limits"
 
 PRICING_XAI_LAST_UPDATED = "2026-09-10"
 """xAI rates: https://docs.x.ai/developers/models/grok-4.6, accessed on
@@ -389,9 +393,8 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 }
 
 # Curated alias registry (Track 35A): exact observed host model id →
-# pricing-family key. NOT a versioned grammar and NOT a substring match.
-# Maps today's identity to today's rate and reprices history. An unknown
-# id matches nothing and degrades to unpriced — the safe direction.
+# pricing-family key. Exact aliases precede positional vendor-tier fallback.
+# Maps today's identity to today's rate and reprices history.
 #
 # Do NOT reach for ``_tier`` here. Its multipliers are Anthropic
 # (cache_read = 0.1x input, cache_create = 2.0x). OpenAI cache-read is
@@ -404,6 +407,12 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # repaired the reader, but no Grok tokens had reached the wire. The base
 # card is always a floor: aggregate counters cannot recover request tiers.
 PRICING_FAMILY_BY_MODEL: dict[str, str] = {
+    "gpt-6.1-sol": "gpt-6.1-sol",
+    "gpt-6-sol": "gpt-6-sol",
+    "gpt-6-luna": "gpt-6-luna",
+    "muse-wonder-1.0": "muse-wonder-1.0",
+    "muse-spark-1.3": "muse-spark-1.3",
+    "muse-wonder-full-1.0": "muse-wonder-1.0",
     "gemini-4-argon": "gemini-4-argon",
     "gemini-3.8-flash": "gemini-3.8-flash",
     "grok-4.6-build": "grok-4.6",
@@ -419,6 +428,12 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
 # a new override cannot silently claim verification. Dates remain per vendor.
 VERIFIED_MODEL_IDS = frozenset(
     {
+        "gpt-6.1-sol",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "muse-wonder-1.0",
+        "muse-spark-1.3",
+        "muse-wonder-full-1.0",
         "gemini-4-argon",
         "gemini-3.8-flash",
         "claude-opus-4",
@@ -456,6 +471,11 @@ VERIFIED_MODEL_IDS = frozenset(
 # xAI's source and alias evidence are documented at PRICING_XAI_LAST_UPDATED.
 # Do not derive these from ``_tier``.
 VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
+    "gpt-6.1-sol": {"input": 2, "cache_read": 0.1, "cache_create": 2.5, "output": 10},
+    "gpt-6-sol": {"input": 2, "cache_read": 0.2, "cache_create": 2.5, "output": 10},
+    "gpt-6-luna": {"input": 0.1, "cache_read": 0.01, "cache_create": 0.125, "output": 0.5},
+    "muse-wonder-1.0": {"input": 4, "cache_read": 0.2, "cache_create": 0, "output": 20},
+    "muse-spark-1.3": {"input": 1.25, "cache_read": 0.15, "cache_create": 0, "output": 4.25},
     "gemini-4-argon": {
         "input": 2.00,
         "cache_read": 0.10,
@@ -530,10 +550,9 @@ VENDOR_LONG_CONTEXT_TIERS: dict[str, dict[str, float]] = {
     },
 }
 
-# Models we deliberately count tokens for but exclude from cost. Today
-# only the synthetic placeholder Claude Code uses for internal /
-# tool-execution turns.
-COST_EXCLUDED_MODELS: frozenset[str] = frozenset({"<synthetic>"})
+# Models counted for activity but excluded from billing: Claude internal
+# tool-execution placeholders and Codex's non-billed background auto-review.
+COST_EXCLUDED_MODELS: frozenset[str] = frozenset({"<synthetic>", "codex-auto-review"})
 
 # Models we've already warned about as "unknown" — meaning unresolvable
 # by ``resolve_prices``, i.e. absent from BOTH ``PRICING`` and
@@ -795,6 +814,267 @@ def model_family(s: str) -> str | None:
     return family if family in MODEL_FAMILY_TIERS else None
 
 
+# Local-only overlay; never included in sync manifests. Passive readers open
+# existing files through lockedjson's shared-lock snapshot and never repair them.
+
+
+class PricingCacheUnreadableError(OSError):
+    """The existing pricing cache cannot be trusted; removing it is the fix."""
+
+
+PRICING_CACHE_PATH = Path(
+    os.environ.get("MM_PRICING_CACHE_PATH") or Path.home() / ".config/mind-meld/pricing-cache.json"
+).expanduser()
+_PRICING_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
+_PRICING_RATE_FIELDS = ("input", "cache_read", "cache_create", "output")
+PRICING_CACHE_MAX_MODELS = 128
+_PRICING_CACHE_MAX_MODELS = PRICING_CACHE_MAX_MODELS
+_PRICING_CACHE_MEMO: tuple[tuple[str, int, int], dict[str, Any]] | None = None
+
+
+def vendor_model_family(model: str) -> str | None:
+    """Resolve only positional vendor/version/tier grammars, never substrings."""
+    grammars = (
+        (
+            r"gpt-\d+(?:\.\d+)?-(astra|terra|sol|luna)",
+            {
+                "astra": "gpt-6-astra",
+                "terra": "gpt-5.6-terra",
+                "sol": "gpt-6.1-sol",
+                "luna": "gpt-6-luna",
+            },
+        ),
+        (
+            r"gemini-\d+(?:\.\d+)?-(argon|flash)",
+            {
+                "argon": "gemini-4-argon",
+                "flash": "gemini-3.8-flash",
+            },
+        ),
+        (
+            r"muse-(wonder|spark)(?:-full)?-\d+(?:\.\d+)?",
+            {
+                "wonder": "muse-wonder-1.0",
+                "spark": "muse-spark-1.3",
+            },
+        ),
+    )
+    for pattern, tiers in grammars:
+        match = re.fullmatch(pattern, model)
+        if match:
+            return tiers[match[1]]
+    return None
+
+
+def _builtin_verified_date(model: str) -> str:
+    """Per-card provenance, including Cursor's distinct Grok verification."""
+    if model.startswith("claude-"):
+        return PRICING_LAST_UPDATED
+    if model.startswith("gpt-"):
+        return PRICING_OPENAI_LAST_UPDATED
+    if model == "grok-4.7":
+        return PRICING_CURSOR_LAST_UPDATED
+    if model.startswith("grok-"):
+        return PRICING_XAI_LAST_UPDATED
+    if model.startswith("gemini-"):
+        return PRICING_GOOGLE_LAST_UPDATED
+    if model.startswith("muse-"):
+        return PRICING_MUSE_LAST_UPDATED
+    return ""
+
+
+def _valid_pricing_date(value: Any) -> bool:
+    if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+        return False
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return False
+    # A future date (clock skew on the writing machine) would otherwise
+    # override bundled cards and suppress refresh indefinitely.
+    return parsed.isoformat() == value and parsed <= datetime.now(timezone.utc).date() + timedelta(
+        days=1
+    )
+
+
+def _valid_price(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 1000
+        and math.isfinite(value)
+    )
+
+
+def _validated_pricing_cache(raw: Any) -> dict[str, Any]:
+    cache: dict[str, Any] = {"version": 1, "models": {}}
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+        return cache
+    if _valid_pricing_date(raw.get("verified_date")):
+        cache["verified_date"] = raw["verified_date"]
+    models = raw.get("models")
+    if not isinstance(models, dict):
+        return cache
+    for model, card in models.items():
+        if (
+            not isinstance(model, str)
+            or _PRICING_MODEL_ID.fullmatch(model) is None
+            or not isinstance(card, dict)
+            or not _valid_pricing_date(card.get("verified_date"))
+            or not all(_valid_price(card.get(field)) for field in _PRICING_RATE_FIELDS)
+        ):
+            continue
+        cache["models"][model] = {
+            **{field: float(card[field]) for field in _PRICING_RATE_FIELDS},
+            "verified_date": card["verified_date"],
+        }
+    _trim_pricing_models(cache["models"])
+    return cache
+
+
+def _trim_pricing_models(
+    models: dict[str, Any], *, protected: frozenset[str] = frozenset()
+) -> None:
+    over = max(0, len(models) - _PRICING_CACHE_MAX_MODELS)
+    if not over:
+        return
+    oldest = sorted(models, key=lambda model: (models[model]["verified_date"], model))
+    # Cards written by this update are evicted last, after pre-existing ones.
+    for model in [m for m in oldest if m not in protected] + [m for m in oldest if m in protected]:
+        if not over:
+            return
+        del models[model]
+        over -= 1
+
+
+def _pricing_cache_memoized() -> dict[str, Any]:
+    """Memoized validated cache for read-only internal lookups (no copy)."""
+    global _PRICING_CACHE_MEMO
+    try:
+        path = PRICING_CACHE_PATH.expanduser().resolve()
+        stamp = path.stat()
+        file_stamp = (str(path), stamp.st_mtime_ns, stamp.st_size)
+        if _PRICING_CACHE_MEMO is not None and _PRICING_CACHE_MEMO[0] == file_stamp:
+            return _PRICING_CACHE_MEMO[1]
+        with locked_json_snapshot(path) as snapshot:
+            cache = _validated_pricing_cache(snapshot.data)
+        _PRICING_CACHE_MEMO = (file_stamp, cache)
+        return cache
+    except (OSError, RuntimeError, ValueError):
+        return {"version": 1, "models": {}}
+
+
+def pricing_cache() -> dict[str, Any]:
+    """Validated read-only snapshot, memoized by resolved path, mtime and size."""
+    return copy.deepcopy(_pricing_cache_memoized())
+
+
+def active_cached_model_ids() -> list[str]:
+    return sorted(
+        model for model in _pricing_cache_memoized()["models"] if _cached_prices(model) is not None
+    )
+
+
+def _cached_prices(model: str) -> dict[str, float] | None:
+    card = _pricing_cache_memoized()["models"].get(model)
+    if card is None or (
+        model in VERIFIED_MODEL_IDS and card["verified_date"] < _builtin_verified_date(model)
+    ):
+        return None
+    return {field: card[field] for field in _PRICING_RATE_FIELDS}
+
+
+def is_verified_model(model: str) -> bool:
+    return model in VERIFIED_MODEL_IDS or _cached_prices(model) is not None
+
+
+def parse_model_price(spec: str) -> tuple[str, tuple[float, ...]]:
+    """Parse MODEL=IN,CACHE_READ,CACHE_CREATE,OUT in USD per million tokens."""
+    model, sep, raw_rates = spec.partition("=")
+    if not sep or _PRICING_MODEL_ID.fullmatch(model) is None:
+        raise ValueError("invalid model id or missing '='")
+    fields = raw_rates.split(",")
+    if len(fields) != 4:
+        raise ValueError("expected four USD/MTok rates")
+    try:
+        rates = tuple(float(value) for value in fields)
+    except ValueError as exc:
+        raise ValueError("rates must be finite numbers from 0 to 1000") from exc
+    if not all(_valid_price(value) for value in rates):
+        raise ValueError("rates must be finite numbers from 0 to 1000")
+    return model, rates
+
+
+def update_pricing_cache(
+    model_prices: dict[str, tuple[float, ...]], mark_verified: bool = False
+) -> None:
+    """Persist explicit updates under exclusive flock; every failed write raises."""
+    global _PRICING_CACHE_MEMO
+    for model, rates in model_prices.items():
+        if (
+            not isinstance(model, str)
+            or _PRICING_MODEL_ID.fullmatch(model) is None
+            or len(rates) != 4
+            or not all(_valid_price(rate) for rate in rates)
+        ):
+            raise ValueError("invalid model id or four finite USD/MTok rates")
+    if not model_prices and not mark_verified:
+        return
+    today = datetime.now(timezone.utc).date().isoformat()
+    fsutil.refuse_real_state_write_under_pytest(PRICING_CACHE_PATH)
+    with locked_json_rmw(PRICING_CACHE_PATH, on_contention="block") as locked:
+        if not locked.is_locked:
+            raise OSError("could not lock pricing cache")
+        if locked.read_state in {"malformed", "non_dict"}:
+            # lockedjson would degrade these to an empty dict; an explicit
+            # pricing write must not silently discard the existing cards.
+            # "unreadable" stays a plain OSError: the cards may be intact,
+            # so the fixing command is a retry, not removal.
+            raise PricingCacheUnreadableError(
+                f"existing pricing cache is {locked.read_state}"
+            ) from locked.read_error
+        if locked.read_error is not None:
+            raise locked.read_error
+        cache = _validated_pricing_cache(locked.data)
+        raw_models = locked.data.get("models") if isinstance(locked.data, dict) else None
+        kept = (
+            {m: c for m, c in raw_models.items() if m not in model_prices}
+            if isinstance(raw_models, dict)
+            else {}
+        )
+        if isinstance(locked.data, dict) and (
+            ("version" in locked.data and type(locked.data["version"]) is not int)
+            or locked.data.get("version", 1) != 1
+            or (
+                "verified_date" in locked.data
+                and cache.get("verified_date") != locked.data["verified_date"]
+            )
+            or ("models" in locked.data and not isinstance(raw_models, dict))
+            or (isinstance(raw_models, dict) and set(kept) != set(cache["models"]) & set(kept))
+            or any(
+                not isinstance(kept[m], dict) or set(kept[m]) != set(cache["models"].get(m, {}))
+                for m in kept
+            )
+        ):
+            # A syntactically valid cache whose version or cards fail
+            # validation (or carry fields this writer would strip) would
+            # silently lose data on this write.
+            raise PricingCacheUnreadableError("existing pricing cache fails validation")
+        for model, rates in model_prices.items():
+            cache["models"][model] = {
+                **dict(zip(_PRICING_RATE_FIELDS, rates, strict=True)),
+                "verified_date": today,
+            }
+        _trim_pricing_models(cache["models"], protected=frozenset(model_prices))
+        if mark_verified:
+            cache["verified_date"] = today
+        locked.data.clear()
+        locked.data.update(cache)
+    _PRICING_CACHE_MEMO = None
+    if locked.write_error is not None:
+        raise locked.write_error
+
+
 def resolve_prices(model: str) -> dict[str, float] | None:
     """Return the per-MTok rate card for ``model``, or ``None`` if unpriced.
 
@@ -805,24 +1085,26 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     Two independent ``model in PRICING`` tests are what made that
     contradiction possible before v0.12.13; do NOT reintroduce one.
 
-    Resolution order: ``COST_EXCLUDED_MODELS`` (``<synthetic>``) is not
-    this function's concern and is filtered by the caller; exact
-    ``PRICING`` entry wins; else the Claude family tier via
+    Resolution order: ``COST_EXCLUDED_MODELS`` is filtered by the caller.
+    An active local overlay wins; else exact ``PRICING`` entry; else the Claude family tier via
     ``model_family``; else the curated host alias
     ``PRICING_FAMILY_BY_MODEL`` → ``VENDOR_FAMILY_TIERS``; else ``None``.
-    The host-alias branch is exact-key, never substring.
+    Host aliases are exact-key; vendor fallback uses positional grammars.
 
     Returns a COPY. The rate cards are module-level and shared; handing
     out the live dict lets one careless caller mutate pricing for the
     whole process.
     """
+    cached = _cached_prices(model)
+    if cached is not None:
+        return cached
     prices = PRICING.get(model)
     if prices is not None:
         return dict(prices)
     family = model_family(model)
     if family is not None:
         return dict(MODEL_FAMILY_TIERS[family])
-    vendor_family = PRICING_FAMILY_BY_MODEL.get(model)
+    vendor_family = PRICING_FAMILY_BY_MODEL.get(model) or vendor_model_family(model)
     if vendor_family is None:
         return None
     vendor_prices = VENDOR_FAMILY_TIERS.get(vendor_family)
@@ -845,6 +1127,8 @@ def floor_prices(model: str) -> dict[str, float] | None:
 
 def resolve_long_context_prices(model: str) -> dict[str, float] | None:
     """Copy the exact alias's long card, if known. Not a priced-predicate."""
+    if _cached_prices(model) is not None:
+        return None
     family = PRICING_FAMILY_BY_MODEL.get(model)
     card = VENDOR_LONG_CONTEXT_TIERS.get(family) if family is not None else None
     return dict(card) if card is not None else None
@@ -1632,10 +1916,10 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
     """Compute total cost + per-model split from a ``by_model`` dict.
 
     Returns ``(total_usd, per_model_usd)``. Rates come from
-    ``resolve_prices`` (exact id, else family tier). Models that resolve
-    to neither contribute to raw token counts elsewhere but DO NOT
-    contribute here. Same for ``COST_EXCLUDED_MODELS`` (today only
-    ``<synthetic>``).
+    ``resolve_prices`` (active local cache overlay, exact id, Claude
+    family tier, then vendor alias/positional fallback). Models that
+    resolve to none contribute to raw token counts elsewhere but DO NOT
+    contribute here. Same for ``COST_EXCLUDED_MODELS``.
 
     Unknown-model breadcrumb: emit one ``mm: notice:`` per process per
     unknown model. Caller-facing text mirrors the existing
@@ -2099,6 +2383,17 @@ __all__ = [
     "PRICING_GOOGLE_LAST_UPDATED",
     "PRICING_XAI_LAST_UPDATED",
     "PRICING_CURSOR_LAST_UPDATED",
+    "PRICING_MUSE_LAST_UPDATED",
+    "PRICING_MUSE_SOURCE_URL",
+    "PRICING_CACHE_MAX_MODELS",
+    "PRICING_CACHE_PATH",
+    "PricingCacheUnreadableError",
+    "active_cached_model_ids",
+    "is_verified_model",
+    "parse_model_price",
+    "pricing_cache",
+    "update_pricing_cache",
+    "vendor_model_family",
     "VENDOR_FAMILY_TIERS",
     "VENDOR_LONG_CONTEXT_TIERS",
     "SUBSCRIPTION_CAVEAT",

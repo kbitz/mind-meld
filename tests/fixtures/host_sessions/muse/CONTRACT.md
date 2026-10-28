@@ -1,6 +1,6 @@
-# Muse usage-source contract (census 2026-10-14)
+# Muse usage-source contract (updated 2026-10-27)
 
-**Host version: Muse 1.4.7** — the installed host at the census, not a
+**Host version: Muse 1.4.14** — the host version for the current record shapes, not a
 compatibility proof across releases. Bound to
 `host_usage.MUSE_USAGE_CENSUS_HOST_VERSION` by
 `test_muse_contract_census_pin_matches_src_constant`. Re-census on any
@@ -17,12 +17,28 @@ record_type == "event", payload_type == "runtime.session"
 id                      (envelope id; globally unique in the corpus)
 recorded_at             (microsecond epoch, decimal text)
 payload.event.kind == "model_completed"
-payload.event.model
-payload.event.usage.{input,output,cached,cache_write,cache_read,reasoning}_tokens
+payload.event.model      (optional for validated zero-token completions)
+payload.event.usage.{input,output,cached,reasoning}_tokens
+payload.event.usage.{cache_write,cache_read}_tokens  (optional)
 payload.event.duration_ms, payload.event.finish_reason  (finish_reason optional)
 ```
 
-## Census (2026-10-14, one Mac, Muse 1.4.7)
+## Muse 1.4.14 record shapes (2026-10-27)
+
+The reader ignores additive event metadata, including
+`estimated_prompt_tokens`. The four usage keys `input_tokens`, `output_tokens`,
+`cached_tokens` and `reasoning_tokens` are required; only `cache_read_tokens`
+and `cache_write_tokens` may be added. An omitted cache-read counter defaults
+to `cached_tokens`; an omitted cache-write counter defaults to zero. An
+explicit cache-read counter must still equal `cached_tokens`.
+
+Zero-token completions without a non-empty string model are skipped, after
+validating the envelope id, timestamp, usage keys, counter values and relations,
+and the session-directory step-lead rule. A nonzero completion requires a
+non-empty bounded string model. These shapes are covered by synthetic tests;
+the historical corpus counts below describe Muse v1.4.7 only.
+
+## Census (2026-10-14, one Mac, Muse v1.4.7)
 
 179 `session.jsonl` files (37 root sessions, 142 subagent logs),
 62,593 event envelopes, 1,462 `model_completed` events, corpus span
@@ -30,8 +46,8 @@ payload.event.duration_ms, payload.event.finish_reason  (finish_reason optional)
 
 - Event key sets on `model_completed`: `{duration_ms, finish_reason,
   kind, model, usage}` (1,356) and `{duration_ms, kind, model, usage}`
-  (106). The reader accepts any superset of `{kind, model, usage}`
-  inside that five-key universe; anything else is `unsupported`.
+  (106). These are the historical key sets; the current reader also accepts
+  additive metadata and the model-less zero-token shape described above.
 - `usage` key set is exactly the six counters in all 1,462 records.
 - Counter relations held in every record: `cached_tokens ==
   cache_read_tokens`; `cache_read + cache_write <= input`;
@@ -47,7 +63,7 @@ payload.event.duration_ms, payload.event.finish_reason  (finish_reason optional)
   sequence), so the reader never keys on it; the dedup key is the
   envelope `id` alone, corpus-wide.
 
-Re-census at review (2026-10-14, same Mac, Muse 1.4.7, 212 files,
+Re-census at review (2026-10-14, same Mac, Muse v1.4.7, 212 files,
 87,539 envelopes, 2,020 `model_completed`): zero duplicate envelope
 ids, none shared across files; 0 of 462 subagent steps reappear in
 the parent log as an identical (model, six counters) tuple; every
@@ -77,11 +93,14 @@ record (other event kinds, `status` records, retained frames).
 
 ## Fatal checks that stay fatal
 
-Unknown event/usage key, `cached != cache_read`, `reasoning >
-output`, a missing/oversize envelope id or model, and a conflicting
+Unknown usage key, `cached != cache_read`, `reasoning >
+output`, a missing/oversize envelope id, an oversize model or missing model on
+a nonzero completion, and a conflicting
 duplicate envelope id (in one log or across logs, including the same
 id under another model) refuse the whole reader as `unsupported`
-(Track 31A isolates the drop to this reader). A `recorded_at` before
+(Track 31A isolates the drop to this reader). A validated zero-token
+model-less step is skipped before dedup, so it never conflicts with a
+counted turn carrying the same envelope id. A `recorded_at` before
 2020-01-01 UTC, more than a day in the future, or longer than 20
 digits is `malformed`. A step recorded more than one UTC day before its
 session directory's date (history copied into a later session) is

@@ -8125,3 +8125,173 @@ def test_non_push_origins_and_mixed_version_counting(origin, count):
     # A pre-64A renderer knows only recapture, so it keeps counting init rows as
     # pushes until it upgrades; new init rows stay readable to it.
     assert result.zero_repo_captures == ({"dev-a": (1, 1)} if count else {})
+
+
+class TestPricingRefreshHealth:
+    def _pricing(self, data):
+        block = (
+            "\n".join(aggregator._render_health_block([], data))
+            .split("```json\n", 1)[1]
+            .split("\n```", 1)[0]
+        )
+        return json.loads(block)["pricing"]
+
+    @pytest.mark.parametrize("age,due", [(7, False), (8, True)])
+    def test_refresh_age_uses_oldest_vendor_and_window_utc_date(self, monkeypatch, age, due):
+        from mind_meld import token_usage as tu
+
+        for vendor in ("", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"):
+            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
+        monkeypatch.setattr(tu, "PRICING_CURSOR_LAST_UPDATED", "2026-10-20")
+        until = datetime(2026, 10, 20, tzinfo=timezone.utc) + timedelta(days=age)
+        data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
+        pricing = self._pricing(data)
+        assert pricing["effective_verified_date"] == "2026-10-20"
+        assert pricing["refresh_due"] is due
+        assert pricing["muse_verified"] == tu.PRICING_MUSE_LAST_UPDATED
+        assert pricing["muse_url"] == tu.PRICING_MUSE_SOURCE_URL
+
+    @pytest.mark.parametrize("oldest", ["", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"])
+    def test_effective_date_is_min_over_all_six_vendors(self, monkeypatch, oldest):
+        from mind_meld import token_usage as tu
+
+        for vendor in ("", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"):
+            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
+        monkeypatch.setattr(tu, "PRICING_" + oldest + "LAST_UPDATED", "2026-10-20")
+        until = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
+        assert self._pricing(data)["effective_verified_date"] == "2026-10-20"
+
+    def test_cache_mark_and_active_model_verification_are_independent(self):
+        from mind_meld import token_usage as tu
+
+        until = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
+        day = "2026-10-26"
+        models = {
+            "gpt-6.2-sol": _usage(4),
+            "mystery-model": _usage(5),
+            "codex-auto-review": _usage(20),
+            "vendor:model": _usage(1),
+            "vendor_model": _usage(1),
+            "zero-model": _usage(0),
+        }
+        snap = _snap(
+            "dev-a",
+            until,
+            since=data.since,
+            until=data.until,
+            families={"codex": {day: _usage(24)}, "other": {day: _usage(7)}},
+            tokens_by_day={day: {**_usage(31), "by_model": models}},
+        )
+        data.host_inventory = aggregator.HostUsageInventory(by_device={"dev-a": snap})
+        tu.update_pricing_cache({}, mark_verified=True)
+        pricing = self._pricing(data)
+        assert pricing["unverified_model_ids"] == [
+            "gpt-6.2-sol",
+            "mystery-model",
+            "vendor:model",
+            "vendor_model",
+        ]
+        assert pricing["unpriced_model_ids"] == ["mystery-model", "vendor:model", "vendor_model"]
+        assert pricing["refresh_due"] is True
+        tu.update_pricing_cache(
+            {
+                "gpt-6.2-sol": (2, 0.1, 2.5, 10),
+                "mystery-model": (1, 0, 0, 2),
+                "vendor:model": (1, 0, 0, 1),
+                "vendor_model": (2, 0, 0, 2),
+            }
+        )
+        pricing = self._pricing(data)
+        assert pricing["unverified_model_ids"] == pricing["unpriced_model_ids"] == []
+        assert pricing["cached_model_ids"] == [
+            "gpt-6.2-sol",
+            "mystery-model",
+            "vendor:model",
+            "vendor_model",
+        ]
+        assert pricing["refresh_due"] is False
+        assert not aggregator._extrapolation_notes(models, scope="Codex")
+
+    def test_unknown_models_are_sanitized_and_stale_host_models_ignored(self):
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.sessions.tokens_by_model = {"bad\x1b[31m-model": _usage(1)}
+        snap = _snap(
+            "old",
+            NOW - timedelta(days=30),
+            families={"codex": {"2026-04-22": _usage(2)}},
+            tokens_by_day={"2026-04-22": {**_usage(2), "by_model": {"gpt-7-sol": _usage(2)}}},
+        )
+        data.host_inventory = aggregator.HostUsageInventory(by_device={"old": snap})
+        pricing = self._pricing(data)
+        assert pricing["unverified_model_ids"] == [aggregator._safe_short("bad\x1b[31m-model")]
+        assert "\x1b" not in json.dumps(pricing)
+
+    @pytest.mark.parametrize(
+        "model", ["gpt-6.2-sol", "gemini-4.1-argon", "muse-wonder-1.1", "muse-spark-full-1.4"]
+    )
+    def test_vendor_future_releases_report_extrapolation(self, model):
+        notes = aggregator._extrapolation_notes({model: _usage(1)}, scope="agent")
+        assert len(notes) == 1 and model in notes[0]
+
+
+class TestCodexPrefixLegacyPricing:
+    @pytest.mark.parametrize("historical", [True, False])
+    @pytest.mark.parametrize("prefix_model", ["codex-auto-review", "codex-future"])
+    def test_mixed_gpt_and_codex_prefixes_keep_wire_families(self, historical, prefix_model):
+        day = "2026-04-22"
+        models = {"gpt-6-astra": _usage(5), prefix_model: _usage(10)}
+        families = {"codex": {day: _usage(5 if historical else 15)}}
+        if historical:
+            families["other"] = {day: _usage(10)}
+        snap = _snap(
+            "dev-a", NOW, families=families, tokens_by_day={day: {**_usage(15), "by_model": models}}
+        )
+        assert aggregator._host_model_families_match(snap, "2026-04-21", "2026-04-28")
+        assert aggregator._windowed_host_by_model(snap, "2026-04-21", "2026-04-28") == (
+            models,
+            False,
+        )
+        assert snap.lifetime_by_family == families
+        data = aggregator.RetroData(window_days=7, since=NOW - timedelta(days=7), until=NOW)
+        data.host_inventory = aggregator.HostUsageInventory(by_device={"dev-a": snap})
+        rows = {r.key: r for r in aggregator.aggregate_agent_usage(data, machines_known=1).rows}
+        assert rows["codex"].tokens == (5 if historical else 15)
+        assert rows["other" if historical else "codex"].by_model[prefix_model] == _usage(10)
+        if prefix_model == "codex-auto-review":
+            assert (
+                aggregator._agent_top_model(rows["other" if historical else "codex"])
+                != "codex-auto-review"
+            )
+            assert not aggregator._extrapolation_notes(models, scope="Codex")
+
+    @pytest.mark.parametrize("field", ["input", "output", "cache_read", "cache_create"])
+    def test_legacy_other_bounds_still_reject_overattribution(self, field):
+        day = "2026-04-22"
+        snap = _snap(
+            "dev-a",
+            NOW,
+            families={"codex": {day: _usage(1)}, "other": {day: {**_usage(0), field: 10}}},
+            tokens_by_day={
+                day: {
+                    **_usage(1),
+                    "by_model": {
+                        "gpt-6-astra": _usage(1),
+                        "codex-auto-review": {**_usage(0), field: 6},
+                        "unknown": {**_usage(0), field: 5},
+                    },
+                }
+            },
+        )
+        assert not aggregator._host_model_families_match(snap, "2026-04-21", "2026-04-28")
+
+    def test_auto_review_never_wins_top_model(self):
+        row = aggregator.FleetAgentRow(
+            key="codex",
+            label="Codex",
+            by_model={"codex-auto-review": _usage(100), "gpt-6.1-sol": _usage(1)},
+        )
+        assert "codex-auto-review" not in aggregator._agent_top_model(row)
+        row.by_model.pop("gpt-6.1-sol")
+        assert aggregator._agent_top_model(row) == "—"

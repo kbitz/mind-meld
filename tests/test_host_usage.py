@@ -724,6 +724,8 @@ class TestHostFamily:
             ("o3", "codex"),
             ("o4-mini", "codex"),
             ("gpt-5-codex", "codex"),
+            ("codex-auto-review", "codex"),
+            ("CODEX-future-model", "codex"),
             ("not-codex-helper", "other"),
             ("grok-4", "grok"),
             ("muse-wonder-1.0", "muse"),

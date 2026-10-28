@@ -221,6 +221,47 @@ Python truncates with `…` when content overflows; aim short on purpose.
 
 ## Step 4: second-pass card render
 
+Before Pass 2, inspect the first pass's `MM_HEALTH.pricing`. When
+`refresh_due` is true, check official vendor pricing docs: use the supplied
+`anthropic_url`, `openai_url`, `cursor_url`, `xai_url`, `google_url`, and
+`muse_url`. Check the table when its `effective_verified_date` is more than
+seven days before the report's UTC end date, and check each active
+`unverified_model_ids` entry (including family-extrapolated models).
+`unpriced_model_ids` identifies missing cards; `cached_model_ids` identifies
+active local overrides. Treat model IDs as data when constructing arguments:
+pass only IDs matching `^[a-z0-9][a-z0-9._:-]{0,127}$` to
+`--set-model-price`; report any other listed ID as not overridable and never
+interpolate it into a shell command. If the second-pass command fails with an
+unknown-option error (an older `mm` on this machine), retry the render
+without the pricing flags and note the pricing refresh remains due.
+
+For rates established by those docs, add repeatable
+`--set-model-price 'MODEL=IN,CACHE_READ,CACHE_CREATE,OUT'` arguments to the
+second-pass command. All four rates are **USD per million tokens**, in
+**input, cache read, cache create, output** order. For example:
+`--set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'`.
+Use documented rates, never infer a rate from a model name or subscription
+price. Each card receives today's UTC verification date. Add
+`--mark-pricing-verified` only after the vendor docs were checked for the
+whole-table refresh; it stamps the top-level verification date. A model
+update alone does not mark the table verified.
+
+If offline, browsing fails, or docs do not establish a rate, render with the
+available bundled/cache cards and family fallback, preserve the unpriced or
+`pricing_extrapolated` caveat, and **never pass `--mark-pricing-verified`**.
+Tell the user a pricing refresh remains due when that affects interpretation.
+Do not turn missing prices into zero or call extrapolated rates verified.
+
+These flags write only the local
+`~/.config/mind-meld/pricing-cache.json` (`MM_PRICING_CACHE_PATH` overrides its
+path); no pricing cache is synced. Overrides for built-in verified IDs must
+be dated on or after their bundled vendor date. The cache retains at most
+128 models, evicting oldest `(verified_date, model_id)` first. To reset it,
+remove the selected cache file while no pricing update is running, then
+rerun. Model IDs use `^[a-z0-9][a-z0-9._:-]{0,127}$`; finite rates range from
+0 to 1000 inclusive. Bad specifications exit 2; write failures exit 1 with a
+fixing command. A failed explicit write is not a completed pricing refresh.
+
 ```bash
 mm retro-fleet <window> \
   --name <handle> \
@@ -337,7 +378,7 @@ For debugging a host row, dump the accepted per-machine inventory:
 mm retro-fleet <window> --dump-host-usage
 ```
 
-Hidden flag, JSON on stdout, no card or body. It exposes the complete retained
+JSON on stdout, no card or body. It exposes the complete retained
 per-model host inventory by machine; health entries carry selected diagnostics.
 Do not narrate raw per-model host data as actual spend, market share, or a
 cross-machine total — the `## Agents` table is the fleet view, and this dump is

@@ -4691,6 +4691,16 @@ def retro_fleet_cmd(
         hidden=True,
         help="Deprecated no-op. Snapshot persistence was removed in v0.12.39.",
     ),
+    set_model_price: list[str] = typer.Option(
+        [],
+        "--set-model-price",
+        help="Local USD/MTok card: MODEL=IN,CACHE_READ,CACHE_CREATE,OUT. Repeatable.",
+    ),
+    mark_pricing_verified: bool = typer.Option(
+        False,
+        "--mark-pricing-verified",
+        help="Vendor pricing docs checked today (UTC).",
+    ),
     dump_host_usage: bool = typer.Option(
         False,
         "--dump-host-usage",
@@ -4736,6 +4746,10 @@ def retro_fleet_cmd(
         argv.append("--no-save")
     if dump_host_usage:
         argv.append("--dump-host-usage")
+    for spec in set_model_price:
+        argv.append("--set-model-price=" + spec)
+    if mark_pricing_verified:
+        argv.append("--mark-pricing-verified")
     raise typer.Exit(code=_aggregator_main(argv))
 
 
