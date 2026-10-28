@@ -1025,20 +1025,32 @@ def update_pricing_cache(
     with locked_json_rmw(PRICING_CACHE_PATH, on_contention="block") as locked:
         if not locked.is_locked:
             raise OSError("could not lock pricing cache")
-        if locked.read_error is not None:
-            raise locked.read_error
         if locked.read_state in {"malformed", "non_dict", "unreadable"}:
             # lockedjson would degrade these to an empty dict; an explicit
             # pricing write must not silently discard the existing cards.
-            raise PricingCacheUnreadableError(f"existing pricing cache is {locked.read_state}")
+            raise PricingCacheUnreadableError(
+                f"existing pricing cache is {locked.read_state}"
+            ) from locked.read_error
+        if locked.read_error is not None:
+            raise locked.read_error
         cache = _validated_pricing_cache(locked.data)
         raw_models = locked.data.get("models") if isinstance(locked.data, dict) else None
         if isinstance(locked.data, dict) and (
-            ("models" in locked.data and not isinstance(raw_models, dict))
+            locked.data.get("version", 1) != 1
+            or ("models" in locked.data and not isinstance(raw_models, dict))
             or (isinstance(raw_models, dict) and set(raw_models) != set(cache["models"]))
+            or (
+                isinstance(raw_models, dict)
+                and any(
+                    not isinstance(raw_models[m], dict)
+                    or set(raw_models[m]) != set(cache["models"].get(m, {}))
+                    for m in raw_models
+                )
+            )
         ):
             # A syntactically valid cache whose version or cards fail
-            # validation would silently lose those cards on this write.
+            # validation (or carry fields this writer would strip) would
+            # silently lose data on this write.
             raise PricingCacheUnreadableError("existing pricing cache fails validation")
         for model, rates in model_prices.items():
             cache["models"][model] = {

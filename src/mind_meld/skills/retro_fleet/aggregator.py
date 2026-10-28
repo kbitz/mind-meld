@@ -5003,7 +5003,18 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(exc, token_usage.PricingCacheUnreadableError):
                 fix = "rm -- " + shlex.quote(str(token_usage.PRICING_CACHE_PATH))
             else:
-                fix = "mm retro-fleet " + str(args.window) + "d"
+                # Reconstruct the requested write so the retry records it;
+                # specs were charset-validated before parsing.
+                fix = (
+                    "mm retro-fleet "
+                    + str(args.window)
+                    + "d"
+                    + "".join(
+                        " --set-model-price " + shlex.quote(spec) for spec in args.set_model_price
+                    )
+                )
+                if args.mark_pricing_verified:
+                    fix += " --mark-pricing-verified"
             sys.stderr.write(
                 "mm: could not write pricing cache at "
                 + safety.safe_terminal_str(token_usage.PRICING_CACHE_PATH)

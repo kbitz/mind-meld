@@ -2974,6 +2974,39 @@ def test_explicit_write_refuses_semantically_invalid_cache():
     assert tu.PRICING_CACHE_PATH.read_text() == raw
 
 
+def test_explicit_write_refuses_deeply_nested_cache():
+    tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": ' + "[" * 5000 + "]" * 5000 + "}")
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+
+
+def test_explicit_write_refuses_wrong_version_even_without_models():
+    raw = json.dumps({"version": 2, "verified_date": "2026-06-01", "models": {}})
+    tu.PRICING_CACHE_PATH.write_text(raw)
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({}, mark_verified=True)
+    assert tu.PRICING_CACHE_PATH.read_text() == raw
+
+
+def test_unreadable_cache_raises_pricing_unreadable(monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    @contextmanager
+    def fake_rmw(*args, **kwargs):
+        yield SimpleNamespace(
+            is_locked=True,
+            read_state="unreadable",
+            read_error=OSError("cannot read"),
+            data={},
+            write_error=None,
+        )
+
+    monkeypatch.setattr(tu, "locked_json_rmw", fake_rmw)
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+
+
 def test_explicit_write_refuses_oversize_int_literal_cache():
     tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": {}, "n": ' + "9" * 5000 + "}")
     with pytest.raises(tu.PricingCacheUnreadableError):

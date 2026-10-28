@@ -240,17 +240,19 @@ class TestPricingFlags:
         result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])
         assert result.exit_code == 1, result.output
         assert "could not write pricing cache" in result.output
-        assert "Fix: mm retro-fleet 7d" in result.output
+        assert "Fix: mm retro-fleet 7d --mark-pricing-verified" in result.output
         assert "\x1b" not in result.output
         assert "# Retro" not in result.output
 
-    def test_corrupt_cache_write_failure_names_rm_fix_with_quoted_path(self):
+    def test_corrupt_cache_write_failure_names_rm_fix_with_quoted_path(self, monkeypatch, tmp_path):
         import shlex
 
         from mind_meld import token_usage as tu
         from mind_meld.cli import app
 
-        tu.PRICING_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        hostile = tmp_path / "a b'c" / "pricing-cache.json"
+        hostile.parent.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(tu, "PRICING_CACHE_PATH", hostile)
         tu.PRICING_CACHE_PATH.write_text("{broken json")
         tu._PRICING_CACHE_MEMO = None
         result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])

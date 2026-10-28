@@ -341,9 +341,9 @@ def _read_json_snapshot(fd: int) -> LockedJsonSnapshot:
         return LockedJsonSnapshot(data=None, state="empty")
     try:
         parsed = json.loads(raw.decode("utf-8"))
-    except ValueError:
-        # JSONDecodeError/UnicodeDecodeError, plus plain ValueError from
-        # oversize int literals: all are malformed file content.
+    except (ValueError, RecursionError):
+        # JSONDecodeError/UnicodeDecodeError, plain ValueError from oversize
+        # int literals, RecursionError from pathological nesting: malformed.
         return LockedJsonSnapshot(data=None, state="malformed")
     if not isinstance(parsed, dict):
         return LockedJsonSnapshot(data=None, state="non_dict")

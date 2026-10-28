@@ -3376,11 +3376,15 @@ real-state guard, and oldest `(verified_date, model_id)` eviction above
 128 models (cards written by the update are evicted last). An existing
 malformed, non-dict or unreadable cache refuses the explicit write instead
 of discarding its cards (`PricingCacheUnreadableError`, exit 1 with an `rm`
-fix naming the quoted path); the same refusal covers a syntactically valid
-cache whose version or cards would fail validation and be dropped.
-`lockedjson` classifies any `ValueError` from `json.loads` (including
-oversize int literals) as `malformed`, so neither the passive reader nor the
-explicit writer can crash on one. Invalid specifications exit 2 with sanitized input and a fixing
+fix naming the quoted path); the same refusal covers a present
+`version != 1`, a non-dict `models`, and cards that would fail validation
+or carry fields this writer would strip. Other top-level keys are dropped
+on write (forward compatibility is one-directional). `lockedjson`
+classifies any `ValueError` or `RecursionError` from `json.loads`
+(oversize int literals, pathological nesting) as `malformed`, so neither
+the passive reader nor the explicit writer can crash on one. A generic
+write-failure retry fix reconstructs the requested `--set-model-price` and
+`--mark-pricing-verified` arguments. Invalid specifications exit 2 with sanitized input and a fixing
 example; explicit lock/read/write failures exit 1 with sanitized stderr and
 one fixing command. Tests isolate the cache, including CLI subprocesses.
 To reset the overlay, remove the selected cache file while no pricing update
