@@ -378,7 +378,7 @@ For debugging a host row, dump the accepted per-machine inventory:
 mm retro-fleet <window> --dump-host-usage
 ```
 
-Hidden flag, JSON on stdout, no card or body. It exposes the complete retained
+JSON on stdout, no card or body. It exposes the complete retained
 per-model host inventory by machine; health entries carry selected diagnostics.
 Do not narrate raw per-model host data as actual spend, market share, or a
 cross-machine total — the `## Agents` table is the fleet view, and this dump is
