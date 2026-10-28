@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -66,7 +67,7 @@ from typing import Callable, Mapping, Sequence, TypedDict
 from urllib.parse import urlsplit
 
 from mind_meld import config as mm_config
-from mind_meld import fsutil, gitenv, lockedjson, token_usage
+from mind_meld import fsutil, gitenv, identity, lockedjson, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import safe_terminal_str
 
@@ -784,6 +785,7 @@ def discover_git_roots(
 
     if deadline_expired() and "claude" not in probers_ran:
         mark_exceeded()
+    roots, attribution = _dedup_discovered_roots(roots, attribution, cache=cache)
     if not exceeded and not errors:
         # Complete discovery is authoritative for source removal as well as
         # additions. Historical cursors must not keep a deselected repo pending.
@@ -792,9 +794,29 @@ def discover_git_roots(
             cache["discovery_resume_after"] = None
             cache["pending_refresh_since"] = None
         active_roots = {str(root) for root in roots}
-        cache["repo_cursors"] = {
-            root: ts for root, ts in cache["repo_cursors"].items() if root in active_roots
+        # Retire cursors of undiscovered roots, but fold a sibling worktree's
+        # older cursor into the retained representative of the same object
+        # store instead of deleting its uncaptured interval.
+        active_by_common_dir: dict[Path, str] = {}
+        for root in roots:
+            common_dir = _git_common_dir(root)
+            if common_dir is not None:
+                active_by_common_dir.setdefault(common_dir, str(root))
+        retained: dict[str, str] = {
+            key: ts for key, ts in cache["repo_cursors"].items() if key in active_roots
         }
+        for key, ts in cache["repo_cursors"].items():
+            if key in active_roots:
+                continue
+            common_dir = _git_common_dir(Path(key))
+            elected = active_by_common_dir.get(common_dir) if common_dir is not None else None
+            parsed = _parse_aware_ts(ts)
+            if elected is None or parsed is None:
+                continue
+            current = _parse_aware_ts(retained.get(elected))
+            if current is None or parsed < current:
+                retained[elected] = ts
+        cache["repo_cursors"] = retained
     if persist:
         try:
             with lockedjson.locked_json_rmw(
@@ -1127,6 +1149,33 @@ def _classify_git_root(path: Path) -> bool:
         return False
 
 
+def _gitfile_target_dir(gitfile: Path) -> Path | None:
+    """Resolve the ``gitdir:`` target of a ``.git`` file if it has a ``HEAD`` file."""
+    try:
+        raw = gitfile.read_bytes()
+    except OSError:
+        return None
+    line = raw.split(b"\n", 1)[0]
+    try:
+        text = line.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.startswith("gitdir: "):
+        return None
+    target = text[len("gitdir: ") :].strip()
+    if not target:
+        return None
+    gitdir = Path(target)
+    if not gitdir.is_absolute():
+        gitdir = gitfile.parent / gitdir
+    try:
+        if gitdir.is_dir() and (gitdir / "HEAD").is_file():
+            return gitdir
+        return None
+    except OSError:
+        return None
+
+
 def _gitfile_points_at_gitdir(gitfile: Path) -> bool:
     """True when a ``.git`` file is a plausible gitdir pointer, not garbage.
 
@@ -1136,29 +1185,350 @@ def _gitfile_points_at_gitdir(gitfile: Path) -> bool:
     ``skipped[].reason``, and inflate ``n_repos`` so every real repo's
     subprocess timeout shrinks.
     """
+    return _gitfile_target_dir(gitfile) is not None
+
+
+def _resolve_git_dirs(path: Path) -> tuple[Path, Path] | None:
+    """Return ``(gitdir, common_dir)`` for a git root, or ``None`` if not a valid root.
+
+    Mirrors ``git rev-parse --git-dir --git-common-dir`` on the filesystem
+    without spawning a subprocess:
+    * For a normal clone, ``.git`` is a directory containing ``HEAD``; both
+      ``gitdir`` and ``common_dir`` are ``(path / ".git").resolve()`` (unless
+      a ``commondir`` file inside ``.git`` redirects ``common_dir``).
+    * For a linked worktree or submodule, ``.git`` is a file whose first line
+      is ``gitdir: <target>``. If ``<gitdir>/commondir`` exists (linked
+      worktree), ``common_dir`` resolves ``commondir`` relative to ``gitdir``;
+      otherwise (submodule) ``common_dir`` is ``gitdir``.
+    """
     try:
-        raw = gitfile.read_bytes()
+        dot_git = path / ".git"
+        if dot_git.is_dir():
+            if not (dot_git / "HEAD").is_file():
+                return None
+            gitdir = dot_git.resolve()
+        elif dot_git.is_file():
+            gitdir_raw = _gitfile_target_dir(dot_git)
+            if gitdir_raw is None:
+                return None
+            gitdir = gitdir_raw.resolve()
+        else:
+            return None
+        commondir_file = gitdir / "commondir"
+        if commondir_file.is_file():
+            raw = commondir_file.read_bytes()
+            rel = raw.split(b"\n", 1)[0].decode("utf-8").strip()
+            if not rel:
+                return None
+            cd = Path(rel)
+            if not cd.is_absolute():
+                cd = gitdir / cd
+            if not cd.is_dir() or not (cd / "HEAD").is_file():
+                return None
+            common_dir = cd.resolve()
+        else:
+            common_dir = gitdir
+        return gitdir, common_dir
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _git_common_dir(path: Path) -> Path | None:
+    """Return the resolved ``--git-common-dir`` for ``path``, or ``None``."""
+    dirs = _resolve_git_dirs(path)
+    return dirs[1] if dirs is not None else None
+
+
+def _git_common_dir_key(path: Path) -> tuple[str, Path]:
+    """Group key for deduplicating roots that share one Git object store."""
+    common_dir = _git_common_dir(path)
+    if common_dir is not None:
+        return ("common", common_dir)
+    return ("path", path)
+
+
+def _is_main_checkout(path: Path) -> bool:
+    """True when ``path`` is not a linked worktree ``.git``-file checkout."""
+    try:
+        dot_git = path / ".git"
+        if dot_git.is_dir():
+            return True
+        if dot_git.is_file():
+            return False
+        return True
     except OSError:
+        return True
+
+
+def _group_git_roots(roots: Sequence[Path]) -> list[tuple[Path, list[Path]]]:
+    """Group roots by common Git directory, electing each group's main checkout first."""
+    groups: dict[tuple[str, Path], list[Path]] = {}
+    for root in dict.fromkeys(roots):
+        groups.setdefault(_git_common_dir_key(root), []).append(root)
+    out: list[tuple[Path, list[Path]]] = []
+    for members in groups.values():
+        ordered = sorted(members, key=lambda r: (not _is_main_checkout(r), str(r)))
+        out.append((ordered[0], ordered))
+    return out
+
+
+def _dedup_discovered_roots(
+    roots: Sequence[Path],
+    attribution: Sequence[tuple[str, Path]],
+    *,
+    cache: dict | None = None,
+) -> tuple[list[Path], list[tuple[str, Path]]]:
+    """Deduplicate discovered roots by common Git directory, electing the main checkout.
+
+    Manual roots keep their configured precedence ahead of automatic probers;
+    automatic groups are ordered deterministically with main checkouts first
+    so repeated scans never drift with directory-probe resume order.
+    """
+    source_by_path: dict[Path, str] = {}
+    for src, path in attribution:
+        if path not in source_by_path or src == "manual":
+            source_by_path[path] = src
+    groups: dict[tuple[str, Path], list[tuple[int, str, Path]]] = {}
+    for idx, root in enumerate(dict.fromkeys(roots)):
+        src = source_by_path.get(root, "")
+        groups.setdefault(_git_common_dir_key(root), []).append((idx, src, root))
+
+    cursors = cache.get("repo_cursors") if isinstance(cache, dict) else None
+    manual_groups: list[tuple[int, Path, str]] = []
+    auto_groups: list[tuple[Path, str]] = []
+    for items in groups.values():
+        ordered_paths = sorted(
+            (path for _, _, path in items),
+            key=lambda r: (not _is_main_checkout(r), str(r)),
+        )
+        elected_root = ordered_paths[0]
+        has_manual = any(src == "manual" for _, src, _ in items)
+        elected_source = "manual" if has_manual else source_by_path.get(elected_root, items[0][1])
+        first_idx = min(idx for idx, _, _ in items)
+        if isinstance(cursors, dict):
+            member_ts = [
+                ts
+                for _, _, m in items
+                if isinstance((ts := cursors.get(str(m))), str) and _parse_aware_ts(ts) is not None
+            ]
+            if member_ts:
+                cursors[str(elected_root)] = min(
+                    member_ts,
+                    key=lambda s: (
+                        _parse_aware_ts(s)
+                        or datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+                    ),
+                )
+            for _, _, m in items:
+                if m != elected_root:
+                    cursors.pop(str(m), None)
+        if has_manual:
+            manual_groups.append((first_idx, elected_root, elected_source))
+        else:
+            auto_groups.append((elected_root, elected_source))
+
+    manual_groups.sort(key=lambda item: item[0])
+    auto_groups.sort(key=lambda item: (not _is_main_checkout(item[0]), str(item[0])))
+
+    deduped_roots: list[Path] = []
+    deduped_attr: list[tuple[str, Path]] = []
+    for _, root, src in manual_groups:
+        deduped_roots.append(root)
+        if attribution:
+            deduped_attr.append((src, root))
+    for root, src in auto_groups:
+        deduped_roots.append(root)
+        if attribution:
+            deduped_attr.append((src, root))
+    return deduped_roots, deduped_attr
+
+
+def dedup_git_root_discovery(discovery: GitRootDiscovery) -> GitRootDiscovery:
+    """Normalize a ``GitRootDiscovery`` so worktrees sharing a common Git dir appear once."""
+    roots, attribution = _dedup_discovered_roots(discovery.roots, discovery.attribution)
+    if tuple(roots) == discovery.roots and tuple(attribution) == discovery.attribution:
+        return discovery
+    return GitRootDiscovery(
+        tuple(roots),
+        discovery.errors,
+        discovery.exceeded,
+        tuple(attribution),
+        discovery.rejects,
+        discovery.reject_counts,
+        discovery.probers_ran,
+    )
+
+
+def _has_no_commits_yet(path: Path) -> bool:
+    """True when ``path`` is an initialized Git repository with an unborn HEAD and no refs."""
+    dirs = _resolve_git_dirs(path)
+    if dirs is None:
         return False
-    line = raw.split(b"\n", 1)[0]
+    gitdir, common_dir = dirs
     try:
-        text = line.decode("utf-8")
-    except UnicodeDecodeError:
+        head = (gitdir / "HEAD").read_bytes().split(b"\n", 1)[0].decode("utf-8").strip()
+        if not head.startswith("ref: "):
+            return False
+        ref = head[len("ref: ") :].strip()
+        if not ref:
+            return False
+        if (common_dir / ref).is_file() or (gitdir / ref).is_file():
+            return False
+        packed = common_dir / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_bytes().splitlines():
+                s = line.strip()
+                if s and not s.startswith((b"#", b"^")):
+                    return False
+        refs_dir = common_dir / "refs"
+        if refs_dir.is_dir():
+            for candidate in refs_dir.rglob("*"):
+                if candidate.is_file():
+                    return False
+        return True
+    except (OSError, UnicodeDecodeError, ValueError):
         return False
-    if not text.startswith("gitdir: "):
-        return False
-    target = text[len("gitdir: ") :].strip()
-    if not target:
-        return False
-    gitdir = Path(target)
-    if not gitdir.is_absolute():
-        gitdir = gitfile.parent / gitdir
+
+
+def _read_gitconfig_user_email(config_path: Path) -> str | None:
+    """Read ``[user] email`` from one gitconfig file without spawning git.
+
+    Last value wins, matching git. Inline ``;``/``#`` comments are stripped
+    from unquoted values; a value still containing whitespace is not a
+    plausible email and is ignored rather than becoming a never-matching
+    ``--author`` pattern.
+    """
     try:
-        if gitdir.is_dir():
-            return (gitdir / "HEAD").is_file()
-        return False
+        raw = config_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        return None
+    in_user = False
+    found: str | None = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("["):
+            end = stripped.find("]")
+            if end == -1:
+                continue
+            in_user = stripped[1:end].strip().lower() == "user"
+            continue
+        if in_user and "=" in stripped:
+            key, _, val = stripped.partition("=")
+            if key.strip().lower() != "email":
+                continue
+            val = val.strip()
+            if val.startswith('"'):
+                closing = val.find('"', 1)
+                cleaned = val[1:closing] if closing != -1 else val.strip('"')
+            else:
+                for marker in (";", "#"):
+                    cut = val.find(marker)
+                    if cut != -1:
+                        val = val[:cut]
+                cleaned = val.strip()
+            cleaned = cleaned.strip().lower()
+            if cleaned and not any(ch.isspace() for ch in cleaned):
+                found = cleaned
+    return found
+
+
+def _read_repo_config_emails(path: Path) -> list[str]:
+    """Every ``[user] email`` a commit in this object store may carry.
+
+    The common ``.git/config`` plus each linked worktree's
+    ``config.worktree`` (``extensions.worktreeConfig``), so a worktree-only
+    identity still reaches the representative's single ``--all`` walk.
+    """
+    dirs = _resolve_git_dirs(path)
+    if dirs is None:
+        return []
+    _gitdir, common_dir = dirs
+    emails: list[str] = []
+    primary = _read_gitconfig_user_email(common_dir / "config")
+    if primary:
+        emails.append(primary)
+    try:
+        worktree_dirs = sorted((common_dir / "worktrees").iterdir())
+    except OSError:
+        worktree_dirs = []
+    for worktree_dir in worktree_dirs:
+        email = _read_gitconfig_user_email(worktree_dir / "config.worktree")
+        if email and email not in emails:
+            emails.append(email)
+    return emails
+
+
+def _read_global_config_emails() -> list[str]:
+    """Read ``[user] email`` from the global gitconfig files git itself reads.
+
+    Repos without a local ``[user]`` section commit under this email; reading
+    it directly keeps the walk filter correct even when the identity cache
+    predates a global-email change.
+    """
+    xdg_home = os.environ.get("XDG_CONFIG_HOME")
+    xdg_config = (Path(xdg_home) if xdg_home else Path.home() / ".config") / "git" / "config"
+    emails: list[str] = []
+    for candidate in (xdg_config, Path.home() / ".gitconfig"):
+        email = _read_gitconfig_user_email(candidate)
+        if email:
+            emails.append(email)
+    return emails
+
+
+def resolve_walk_author_emails(
+    config: Mapping[str, object] | None = None,
+    roots: Sequence[Path] = (),
+) -> tuple[str, ...]:
+    """Return deduplicated, lowercased author emails for ``git log --author`` filtering.
+
+    Purely read-only and non-blocking: unions ``[retro].author_emails`` from
+    ``config``, ``identity.read_cached_identities()``, the global gitconfig
+    ``[user] email``, and per-repository ``[user] email`` from each
+    discovered root's common ``.git/config``. Never spawns subprocesses or
+    mutates ``identity-cache.json``.
+
+    Fails open with ``()`` (no filtering) when the identity cache has no
+    known baseline: capture runs before the tail's identity refresh, so a
+    partial set built from one repo's local email would drop commits made
+    under not-yet-known identities and cursors would advance past them.
+    """
+    cached = identity.read_cached_identities()
+    if cached is None:
+        return ()
+    emails: set[str] = set()
+    if isinstance(config, Mapping):
+        retro = config.get("retro")
+        if isinstance(retro, Mapping):
+            raw_aliases = retro.get("author_emails")
+            if isinstance(raw_aliases, list):
+                for item in raw_aliases:
+                    if isinstance(item, str) and item.strip():
+                        emails.add(item.strip().lower())
+    for item in cached:
+        if isinstance(item, str) and item.strip():
+            emails.add(item.strip().lower())
+    emails.update(_read_global_config_emails())
+    for root in roots:
+        emails.update(_read_repo_config_emails(root))
+    return tuple(sorted(emails))
+
+
+def _accepts_fourth_arg(fn: object) -> bool:
+    """True when ``fn`` accepts at least 4 positional arguments (or ``*args``)."""
+    try:
+        params = list(inspect.signature(fn).parameters.values())  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return False
+    if any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    positional = [
+        p
+        for p in params
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 4
 
 
 def _reject_reason(path: Path) -> str:
@@ -1183,6 +1553,7 @@ def walk_git_projects(
     *,
     diagnostic=None,
     use_repo_cursors: bool = False,
+    author_emails: Sequence[str] | None = None,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -1204,9 +1575,47 @@ def walk_git_projects(
     """
     cache = read_git_capture_cache() if use_repo_cursors else {}
     root_cursors = cache.get("repo_cursors", {})
-    root_since = {root: _parse_aware_ts(root_cursors.get(str(root))) or since for root in roots}
+    grouped = _group_git_roots(roots)
+    root_since: dict[Path, datetime] = {}
+    for rep, members in grouped:
+        if use_repo_cursors:
+            member_cutoffs = [
+                ts
+                for member in members
+                if (ts := _parse_aware_ts(root_cursors.get(str(member)))) is not None
+            ]
+            # A sibling worktree this run did not discover can still hold an
+            # older cursor for the same object store; its interval belongs
+            # to this group's walk or it is abandoned when the key retires.
+            common_dir = _git_common_dir(rep)
+            if common_dir is not None:
+                member_keys = {str(member) for member in members}
+                for key, raw_ts in root_cursors.items():
+                    if key in member_keys:
+                        continue
+                    if _git_common_dir(Path(key)) != common_dir:
+                        continue
+                    if (ts := _parse_aware_ts(raw_ts)) is not None:
+                        member_cutoffs.append(ts)
+            root_since[rep] = min(member_cutoffs) if member_cutoffs else since
+        else:
+            root_since[rep] = since
     if use_repo_cursors:
-        roots = sorted(dict.fromkeys(roots), key=lambda root: (root_since[root], str(root)))
+        roots = sorted(
+            (rep for rep, _ in grouped),
+            key=lambda root: (root_since[root], not _is_main_checkout(root), str(root)),
+        )
+    else:
+        roots = sorted(
+            (rep for rep, _ in grouped),
+            key=lambda root: (not _is_main_checkout(root), str(root)),
+        )
+    if author_emails is None:
+        effective_emails = resolve_walk_author_emails(None, roots)
+    else:
+        effective_emails = tuple(
+            sorted({e.strip().lower() for e in author_emails if isinstance(e, str) and e.strip()})
+        )
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: GitSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
@@ -1238,6 +1647,7 @@ def walk_git_projects(
     )
 
     deadline = time.monotonic() + (total_budget_ms / 1000.0)
+    pass_emails = bool(effective_emails) and _accepts_fourth_arg(_walk_one_repo)
 
     executor = None
     futures: dict[Future, Path] = {}
@@ -1246,11 +1656,12 @@ def walk_git_projects(
     try:
         executor = ThreadPoolExecutor(max_workers=MAX_GIT_WORKERS)
         for root in roots:
-            futures[
-                executor.submit(
-                    _walk_one_repo, root, root_since[root].isoformat(), per_repo_timeout_ms
-                )
-            ] = root
+            submit_args = (
+                (root, root_since[root].isoformat(), per_repo_timeout_ms, effective_emails)
+                if pass_emails
+                else (root, root_since[root].isoformat(), per_repo_timeout_ms)
+            )
+            futures[executor.submit(_walk_one_repo, *submit_args)] = root
         # Futures already drained by the pump below. The budget-abort handler
         # MUST skip these (v0.12.16): it iterates all of `futures.items()`,
         # so without this set every repo that finished before the timeout was
@@ -1326,6 +1737,14 @@ def walk_git_projects(
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
+    projects.sort(
+        key=lambda p: str(p.get("local_path") or p.get("path") or "") if isinstance(p, dict) else ""
+    )
+    skipped.sort(
+        key=lambda s: (
+            (str(s.get("path", "")), str(s.get("reason", ""))) if isinstance(s, dict) else ("", "")
+        )
+    )
     snapshot["projects"] = projects
     snapshot["skipped"] = skipped
     return [snapshot]
@@ -1335,9 +1754,23 @@ def _walk_one_repo(
     root: Path,
     since_iso: str,
     timeout_ms: int,
+    author_emails: Sequence[str] | None = None,
 ) -> tuple[GitSnapshotProject | None, str | None]:
-    """Run `git log --since --numstat -M -C` and parse output. Returns
+    """Run `git log --all --since --numstat -M -C` and parse output. Returns
     (project, error). On any failure, project is None and error is set."""
+    author_args: list[str] = []
+    if author_emails:
+        cleaned = [
+            e.strip().lower()
+            for e in author_emails
+            if isinstance(e, str) and e.strip() and "\x00" not in e and "\n" not in e
+        ]
+        if cleaned:
+            author_args = [
+                "--regexp-ignore-case",
+                "--fixed-strings",
+                *[f"--author=<{email}>" for email in cleaned],
+            ]
     try:
         result = subprocess.run(
             [
@@ -1345,7 +1778,10 @@ def _walk_one_repo(
                 "-C",
                 str(root),
                 "log",
+                "--exclude=refs/stash",
+                "--all",
                 f"--since={since_iso}",
+                *author_args,
                 "--numstat",
                 "-M",
                 "-C",
@@ -1370,6 +1806,8 @@ def _walk_one_repo(
             # `mm status` at `degraded` permanently.
             return None, WALK_SKIP_NO_COMMITS
         return None, WALK_SKIP_GIT_ERROR
+    if not result.stdout and _has_no_commits_yet(root):
+        return None, WALK_SKIP_NO_COMMITS
 
     remote = _origin_remote_url(root)
     commits = _parse_git_log_numstat(result.stdout)
@@ -2094,7 +2532,16 @@ def window_syntax_error(s: str) -> str:
 def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> datetime:
     """Oldest retained repository interval, also used for budget escalation."""
     cursors = read_git_capture_cache()["repo_cursors"]
-    names = [str(root) for root in roots] if roots else list(cursors)
+    if roots:
+        names_set = {str(root) for root in roots}
+        common_dirs = {cdir for root in roots if (cdir := _git_common_dir(Path(root))) is not None}
+        if common_dirs:
+            for key in cursors:
+                if _git_common_dir(Path(key)) in common_dirs:
+                    names_set.add(key)
+        names = list(names_set)
+    else:
+        names = list(cursors)
     return min([since, *[ts for name in names if (ts := _parse_aware_ts(cursors.get(name)))]])
 
 
@@ -2108,12 +2555,17 @@ def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> 
         for entry in cache["projects"].values()
         if isinstance(entry.get("git_root"), str)
     )
-    return sum(
-        1
-        for name in names
-        if _classify_git_root(Path(name))
-        and ((cursor := _parse_aware_ts(cursors.get(name))) is None or cursor < since)
-    )
+    live_paths = [Path(name) for name in sorted(names) if _classify_git_root(Path(name))]
+    pending = 0
+    for _rep, members in _group_git_roots(live_paths):
+        present = [
+            ts
+            for member in members
+            if (ts := _parse_aware_ts(cursors.get(str(member)))) is not None
+        ]
+        if not present or min(present) < since:
+            pending += 1
+    return pending
 
 
 def _prune_invalid_repo_cursors(cursors: dict) -> None:
@@ -2151,11 +2603,24 @@ def _apply_repo_cursors_to_cache(
             else:
                 failed.add(skipped["path"])
     cursors = cache["repo_cursors"]
-    for root in completed - failed:
-        old = _parse_aware_ts(cursors.get(root))
+    for root in sorted(completed - failed):
+        common_dir = _git_common_dir(Path(root))
+        sibling_keys = (
+            [k for k in list(cursors) if k != root and _git_common_dir(Path(k)) == common_dir]
+            if common_dir is not None
+            else []
+        )
+        group_olds = [
+            ts
+            for key in [root, *sibling_keys]
+            if (ts := _parse_aware_ts(cursors.get(key))) is not None
+        ]
+        old = min(group_olds) if group_olds else None
         if recorded is None and old is not None and since > old:
             continue
-        cursors[root] = max(old, stamp).isoformat() if old is not None else stamp.isoformat()
+        cursors[root] = max([stamp, *group_olds]).isoformat()
+        for sibling in sibling_keys:
+            cursors.pop(sibling, None)
     if recorded is not None:
         for root in failed:
             old = _parse_aware_ts(cursors.get(root))

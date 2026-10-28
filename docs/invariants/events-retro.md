@@ -223,9 +223,21 @@ helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
 `SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
 code is untouched.
 
-Push walks roots from their oldest effective per-root cursor, breaking ties by
-path. Budget aborts and errors keep the old lower bound; successful roots and
-benign `no_commits` advance only after the exact event append is observed on disk.
+Push and recapture deduplicate discovered roots by common Git directory
+(`_git_common_dir`, matching `git rev-parse --git-common-dir`), electing each
+group's main checkout ahead of linked worktrees and walking each object store
+once with `git log --exclude=refs/stash --all` (plus `--regexp-ignore-case
+--fixed-strings --author=<email>` when read-only author emails are available
+from `[retro].author_emails`, `identity-cache.json`, the global gitconfig, or
+per-repo `.git/config`). Author filtering fails open (no `--author`) when the
+identity cache has no known baseline, because capture runs before the tail's
+identity refresh and a partial set would drop commits the cursor then passes.
+Push walks group representatives from their oldest effective per-group cursor
+— including an older cursor left by a sibling worktree this run did not
+discover, which discovery retirement folds into the retained representative
+instead of deleting — breaking ties by main-checkout status and path. Budget
+aborts and errors keep the old lower bound; successful roots and benign
+`no_commits` advance only after the exact event append is observed on disk.
 `write_push_event` keeps its existing non-strict return contract: a `None` return
 alone never proves persistence. Push confirms its terminal `mm-push` row before
 committing cursor state and stamps completion no earlier than that row's timestamp.

@@ -1110,12 +1110,16 @@ def _capture_git_rows(
         persist=persist,
         since=since,
     )
+    root_discovery = events.dedup_git_root_discovery(root_discovery)
     roots, _discovery_errors = root_discovery
     if use_repo_cursors:
         since = events.effective_capture_since(roots, since)
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
+    if roots:
+        author_emails = events.resolve_walk_author_emails(config, roots)
+        walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, author_emails=author_emails))
     if deadline_monotonic is not None:
         # The git walk gets what discovery actually left of the tail
         # deadline; at <=0 walk_git_projects records budget_abort skips

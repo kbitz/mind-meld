@@ -3489,3 +3489,437 @@ def test_warm_refresh_resumes_across_pushes_and_scandir_respects_deadline(tmp_pa
     assert expired.exceeded
     assert set(expired.roots) == {roots[0], other}
     assert len(events.read_git_capture_cache()["projects"]) == 2
+
+
+def _git_rev_parse_common_dir(path: Path) -> Path | None:
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    out = res.stdout.strip()
+    return Path(out).resolve() if out else None
+
+
+def test_git_common_dir_agrees_with_git_rev_parse(tmp_path):
+    """_git_common_dir matches `git rev-parse --git-common-dir` across worktrees and submodules."""
+    clone = tmp_path / "clone"
+    _init_git_repo(clone)
+    (clone / "f.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(clone), "add", "f.txt"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "-q", "-m", "init"], check=True)
+
+    wt_branch = tmp_path / "wt-branch"
+    _make_git_worktree(clone, wt_branch)
+
+    wt_detached = tmp_path / "wt-detached"
+    subprocess.run(
+        ["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(wt_detached)],
+        check=True,
+    )
+
+    sub = _make_submodule(tmp_path / "sub")
+    not_repo = tmp_path / "plain"
+    not_repo.mkdir()
+
+    for candidate in (clone, wt_branch, wt_detached, sub):
+        assert events._git_common_dir(candidate) == _git_rev_parse_common_dir(candidate)
+    assert events._git_common_dir(clone) == events._git_common_dir(wt_branch)
+    assert events._git_common_dir(clone) == events._git_common_dir(wt_detached)
+    assert events._git_common_dir(not_repo) is None
+
+
+def test_worktree_dedup_and_author_filtered_recapture_fixture(tmp_path, monkeypatch):
+    """One repo with 8+ worktrees (7 on main HEAD, 1 with a worktree-only commit)
+    plus an unrelated upstream repo with its own worktrees and zero matching
+    authors: recapture walks each object store once, captures the worktree-only
+    commit, skips nothing under the default budget, and two back-to-back
+    `mm recapture --dry-run` runs report identical results."""
+    from typer.testing import CliRunner
+
+    from mind_meld import events_tail, identity
+    from mind_meld.cli import app
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    # Cache the user's primary identity and configure an alias in [retro].author_emails.
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "emails": ["kb@example.com"],
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+
+    # 1. User's main checkout + 8 Paseo worktrees (9 checkouts sharing 1 object store).
+    user_repo = tmp_path / "mmm-factory"
+    _init_git_repo(user_repo)
+    subprocess.run(
+        ["git", "-C", str(user_repo), "config", "user.email", "kb@example.com"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(user_repo), "remote", "add", "origin", "https://github.com/kb/mmm.git"],
+        check=True,
+    )
+    (user_repo / "main.txt").write_text("main line\n")
+    subprocess.run(["git", "-C", str(user_repo), "add", "main.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(user_repo), "commit", "-q", "-m", "feat: main commit"], check=True
+    )
+
+    paseo_user_root = tmp_path / ".paseo" / "worktrees" / "0x6citec"
+    paseo_user_root.mkdir(parents=True)
+    user_worktrees: list[Path] = []
+    for i in range(8):
+        wt = paseo_user_root / f"wt-{i}"
+        if i < 7:
+            # 7 worktrees detached on the exact same commit as main HEAD.
+            subprocess.run(
+                ["git", "-C", str(user_repo), "worktree", "add", "-q", "--detach", str(wt)],
+                check=True,
+            )
+        else:
+            # 8th worktree on its own branch with a worktree-only commit by alias email.
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(user_repo),
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "wt-only-feature",
+                    str(wt),
+                ],
+                check=True,
+            )
+            (wt / "feature.txt").write_text("worktree branch work\n")
+            subprocess.run(["git", "-C", str(wt), "add", "feature.txt"], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(wt),
+                    "-c",
+                    "user.email=kb+alias@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "feat: worktree-only commit",
+                ],
+                check=True,
+            )
+        user_worktrees.append(wt)
+
+    # 2. Large unrelated upstream repo + 4 Paseo worktrees with zero matching authors.
+    upstream_repo = tmp_path / "paseo-upstream"
+    _init_git_repo(upstream_repo)
+    subprocess.run(
+        ["git", "-C", str(upstream_repo), "config", "--unset-all", "user.email"],
+        check=False,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(upstream_repo),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/getpaseo/paseo.git",
+        ],
+        check=True,
+    )
+    for n in range(25):
+        (upstream_repo / f"up_{n}.txt").write_text(f"upstream {n}\n" * 20)
+        subprocess.run(["git", "-C", str(upstream_repo), "add", f"up_{n}.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(upstream_repo),
+                "-c",
+                "user.email=maintainer@upstream.org",
+                "commit",
+                "-q",
+                "-m",
+                f"chore: upstream {n}",
+            ],
+            check=True,
+        )
+
+    paseo_upstream_root = tmp_path / ".paseo" / "worktrees" / "39qco17u"
+    paseo_upstream_root.mkdir(parents=True)
+    upstream_worktrees: list[Path] = []
+    for i in range(4):
+        wt = paseo_upstream_root / f"up-wt-{i}"
+        subprocess.run(
+            ["git", "-C", str(upstream_repo), "worktree", "add", "-q", "--detach", str(wt)],
+            check=True,
+        )
+        upstream_worktrees.append(wt)
+
+    # Register all 14 checkouts across manual repo_roots and Paseo worktree prober.
+    from mind_meld.config import load_config, save_config
+
+    cfg = load_config()
+    cfg["retro"] = {
+        "author_emails": ["kb+alias@example.com"],
+        "repo_roots": [
+            str(wt)
+            for wt in [*user_worktrees[:4], user_repo, *upstream_worktrees[:2], upstream_repo]
+        ],
+    }
+    save_config(cfg)
+
+    # Spy on git log invocations during recapture.
+    real_run = subprocess.run
+    git_log_calls: list[list[str]] = []
+
+    def spy_run(argv, *args, **kwargs):
+        if isinstance(argv, list) and len(argv) >= 4 and argv[0] == "git" and argv[3] == "log":
+            git_log_calls.append(list(argv))
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy_run)
+
+    runner = CliRunner()
+    run1 = runner.invoke(app, ["recapture", "--dry-run", "30d"])
+    assert run1.exit_code == 0, (run1.stdout, run1.stderr)
+    calls_first_run = list(git_log_calls)
+    git_log_calls.clear()
+
+    run2 = runner.invoke(app, ["recapture", "--dry-run", "30d"])
+    assert run2.exit_code == 0, (run2.stdout, run2.stderr)
+    calls_second_run = list(git_log_calls)
+
+    # Two back-to-back `mm recapture --dry-run` runs report identical results.
+    assert run1.stdout == run2.stdout
+    assert run1.stderr == run2.stderr
+    assert "0 skipped" in run1.stdout
+
+    # Each object store was walked ONCE per recapture (2 object stores, not 14 checkouts),
+    # and the main checkout of each group was walked in deterministic order.
+    walked_roots_1 = [Path(argv[2]) for argv in calls_first_run]
+    walked_roots_2 = [Path(argv[2]) for argv in calls_second_run]
+    assert walked_roots_1 == walked_roots_2
+    assert set(walked_roots_1) == {user_repo.resolve(), upstream_repo.resolve()}
+    assert len(walked_roots_1) == 2
+
+    # Every git log call used --all and --author= for both primary and alias emails.
+    for argv in calls_first_run:
+        assert "--all" in argv
+        assert "--regexp-ignore-case" in argv
+        assert "--fixed-strings" in argv
+        assert "--author=<kb@example.com>" in argv
+        assert "--author=<kb+alias@example.com>" in argv
+
+    # Verify the captured snapshot contents directly: both the main commit and the
+    # worktree-only commit are present on user_repo, upstream_repo has 0 commits,
+    # and nothing was skipped.
+    prepared = events_tail._prepare_recapture(
+        load_config(),
+        load_config()["sync"]["sources"],
+        "dev-deg",
+        since=datetime.now(timezone.utc) - timedelta(days=30),
+    )
+    assert prepared is not None
+    assert prepared.walk_budget_aborts == 0
+    assert prepared.walk_errors == 0
+    row = prepared.git_rows[0]
+    assert row["skipped"] == []
+    by_path = {Path(p["local_path"]): p["commits"] for p in row["projects"]}
+    assert set(by_path) == {user_repo.resolve(), upstream_repo.resolve()}
+    subjects = {c["subject"] for c in by_path[user_repo.resolve()]}
+    assert subjects == {"feat: main commit", "feat: worktree-only commit"}
+    assert by_path[upstream_repo.resolve()] == []
+
+
+def test_back_to_back_recapture_dry_run_reports_identical_skipped_set(tmp_path, monkeypatch):
+    """When repositories still skip (e.g. timeout), repeated `mm recapture --dry-run`
+    runs report identical output and identical skipped sets."""
+    from typer.testing import CliRunner
+
+    from mind_meld.cli import app
+    from mind_meld.config import load_config, save_config
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    repo_ok = tmp_path / "repo-ok"
+    repo_slow = tmp_path / "repo-slow"
+    _init_git_repo(repo_ok)
+    _init_git_repo(repo_slow)
+    for r in (repo_ok, repo_slow):
+        (r / "a.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(r), "add", "a.txt"], check=True)
+        subprocess.run(["git", "-C", str(r), "commit", "-q", "-m", "c"], check=True)
+
+    cfg = load_config()
+    cfg["retro"] = {"repo_roots": [str(repo_slow), str(repo_ok)]}
+    save_config(cfg)
+
+    real_walk_one = events._walk_one_repo
+
+    def deterministic_timeout_on_slow(root, since_iso, timeout_ms, author_emails=None):
+        if Path(root).resolve() == repo_slow.resolve():
+            return None, events.WALK_SKIP_TIMEOUT
+        return real_walk_one(root, since_iso, timeout_ms, author_emails)
+
+    monkeypatch.setattr(events, "_walk_one_repo", deterministic_timeout_on_slow)
+
+    runner = CliRunner()
+    r1 = runner.invoke(app, ["recapture", "--dry-run", "30d"])
+    r2 = runner.invoke(app, ["recapture", "--dry-run", "30d"])
+    assert r1.exit_code == 0
+    assert r2.exit_code == 0
+    assert r1.stdout == r2.stdout
+    assert r1.stderr == r2.stderr
+    assert str(repo_slow.resolve()) in r1.stdout.replace("\n", "")
+    assert "timeout" in r1.stdout
+
+
+def test_resolve_walk_author_emails_fails_open_without_identity_cache(tmp_path, monkeypatch):
+    """No identity-cache baseline means the author set is unknown, so the walk
+    must not filter at all; a known baseline unions config aliases, the cache,
+    the global gitconfig and per-repo emails."""
+    from mind_meld import identity
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    (tmp_path / ".gitconfig").write_text("[user]\n\temail = global@example.com ; home\n")
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "local@example.com"], check=True
+    )
+    config = {"retro": {"author_emails": ["alias@example.com"]}}
+
+    monkeypatch.setattr(identity, "read_cached_identities", lambda: None)
+    assert events.resolve_walk_author_emails(config, [repo]) == ()
+
+    monkeypatch.setattr(identity, "read_cached_identities", lambda: ["primary@example.com"])
+    assert events.resolve_walk_author_emails(config, [repo]) == (
+        "alias@example.com",
+        "global@example.com",
+        "local@example.com",
+        "primary@example.com",
+    )
+
+    # A linked worktree's config.worktree identity reaches the representative.
+    worktree = tmp_path / "wt-linked"
+    _make_git_worktree(repo, worktree)
+    (repo / ".git" / "worktrees" / "wt-linked" / "config.worktree").write_text(
+        "[user]\n\temail = worktree@example.com\n"
+    )
+    assert "worktree@example.com" in events.resolve_walk_author_emails(config, [repo])
+
+
+def _seed_cursor_cache(repo_cursors):
+    from mind_meld import config as mm_config
+    from mind_meld import lockedjson
+
+    with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
+        state.data.update(events._default_git_capture_cache())
+        state.data["repo_cursors"] = repo_cursors
+
+
+def test_walk_cutoff_folds_undiscovered_sibling_worktree_cursor(tmp_path, monkeypatch):
+    """Walking only the main checkout still starts from an older cursor left
+    by a sibling worktree of the same object store that this run did not
+    discover, so its interval is not abandoned."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    worktree = tmp_path / "wt-sibling"
+    _make_git_worktree(repo, worktree)
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    older = since - timedelta(days=5)
+    _seed_cursor_cache({str(repo.resolve()): since.isoformat(), str(worktree): older.isoformat()})
+
+    calls = []
+
+    def fake_walk(root, cutoff, timeout, author_emails=None):
+        calls.append((root, cutoff))
+        return {"local_path": str(root), "commits": []}, None
+
+    monkeypatch.setattr(events, "MAX_GIT_WORKERS", 1)
+    monkeypatch.setattr(events, "_walk_one_repo", fake_walk)
+    events.walk_git_projects([repo], since, 1000, use_repo_cursors=True, author_emails=())
+    assert calls == [(repo, older.isoformat())]
+
+
+def test_discovery_retirement_folds_undiscovered_sibling_cursor(tmp_path, monkeypatch):
+    """Complete-discovery cursor retirement folds an undiscovered sibling
+    worktree's older cursor into the retained main checkout instead of
+    deleting the interval."""
+    from mind_meld.config import load_config, save_config
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    worktree = tmp_path / "wt-sibling"
+    _make_git_worktree(repo, worktree)
+
+    recent = datetime.now(timezone.utc) - timedelta(days=1)
+    older = recent - timedelta(days=5)
+    _seed_cursor_cache({str(repo): recent.isoformat(), str(worktree): older.isoformat()})
+
+    cfg = load_config()
+    cfg["retro"] = {"repo_roots": [str(repo)]}
+    save_config(cfg)
+
+    discovery = events.discover_git_roots(load_config(), persist=True)
+    assert not discovery.errors
+    cursors = events.read_git_capture_cache()["repo_cursors"]
+    assert str(worktree) not in cursors
+    assert cursors[str(repo)] == older.isoformat()
+
+
+def test_walk_captures_detached_worktree_commit_and_ignores_stash(tmp_path):
+    """A commit reachable only from a linked worktree's detached HEAD is
+    captured by the main checkout's single walk; stash commits are not."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    _seed_commit(repo)
+
+    detached = tmp_path / "wt-detached"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(detached)],
+        check=True,
+    )
+    (detached / "detached.txt").write_text("detached work\n")
+    subprocess.run(["git", "-C", str(detached), "add", "detached.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(detached), "commit", "-q", "-m", "feat: detached-only commit"],
+        check=True,
+    )
+
+    (repo / "seed.txt").write_text("dirty\n")
+    subprocess.run(["git", "-C", str(repo), "stash", "-q"], check=True)
+
+    row = events.walk_git_projects(
+        [repo],
+        datetime.now(timezone.utc) - timedelta(days=30),
+        10_000,
+        author_emails=(),
+    )[0]
+    assert row["skipped"] == []
+    subjects = {c["subject"] for p in row["projects"] for c in p["commits"]}
+    assert subjects == {"seed", "feat: detached-only commit"}
