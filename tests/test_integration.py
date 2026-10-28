@@ -9545,17 +9545,26 @@ def preview62(push_preview56, tmp_path, monkeypatch):
 
     resolved = str(repo.resolve())
 
-    def already_recorded(argv: list[str]) -> bool:
-        key = tuple(arg for arg in argv if not arg.startswith("--since="))
-        return any(
-            key == tuple(arg for arg in seen if not arg.startswith("--since=")) for seen in replay
+    def _replay_key(argv: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(
+            arg
+            for arg in argv
+            if not arg.startswith(("--since=", "--author="))
+            and arg not in ("--regexp-ignore-case", "--fixed-strings", "--no-mailmap")
         )
+
+    def already_recorded(argv: list[str]) -> bool:
+        key = _replay_key(argv)
+        return any(key == _replay_key(seen) for seen in replay)
 
     log_argv = [
         "git",
         "-C",
         resolved,
         "log",
+        "--no-mailmap",
+        "--exclude=refs/stash",
+        "--all",
         "--since=1970-01-01T00:00:00+00:00",
         "--numstat",
         "-M",
@@ -9576,9 +9585,9 @@ def preview62(push_preview56, tmp_path, monkeypatch):
         record(remote_argv, errors="strict", **git_kwargs)
 
     def run(argv, **kwargs):
-        key = tuple(arg for arg in argv if not arg.startswith("--since="))
+        key = _replay_key(argv)
         for recorded, result in replay.items():
-            if key == tuple(arg for arg in recorded if not arg.startswith("--since=")):
+            if key == _replay_key(recorded):
                 return result
         if argv == ["gh", "api", "user"]:
             return subprocess.CompletedProcess(argv, 0, '{"id": 1, "login": "test"}', "")
@@ -9586,6 +9595,10 @@ def preview62(push_preview56, tmp_path, monkeypatch):
             argv[:2] == ["git", "-C"] and argv[3:] == ["config", "user.email"]
         ):
             return subprocess.CompletedProcess(argv, 0, "test@example.com\n", "")
+        if argv[:2] == ["git", "-C"] and argv[3:] == ["worktree", "list", "--porcelain"]:
+            # Identity gathering expands the elected checkout to its linked
+            # worktrees; this fixture's repo has only the one checkout.
+            return subprocess.CompletedProcess(argv, 0, f"worktree {argv[2]}\n", "")
         pytest.fail(f"Unexpected subprocess: {argv}")
 
     monkeypatch.setattr(subprocess, "run", run)

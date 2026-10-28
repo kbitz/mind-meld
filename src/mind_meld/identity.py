@@ -62,8 +62,10 @@ yields an empty contribution; the cache still rebuilds with what was reachable.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +87,9 @@ _GH_TIMEOUT_S = 3.0
 _GIT_GLOBAL_TIMEOUT_S = 2.0
 _PER_REPO_TIMEOUT_S = 2.0
 _PER_REPO_BUDGET_S = 5.0
+# Completeness is per thread. Two gathers run outside the flock, and a shared
+# flag would let a finished gather mark a truncated one safe to persist.
+_gather_tls = threading.local()
 
 
 def gather_local_identities(
@@ -138,13 +143,14 @@ def gather_local_identities(
         return []
 
     # Phase 2: slow subprocess gather, no flock held.
+    _note_gather_complete(True)
     emails = (
         _do_full_gather()
         if root_discovery is None
         else _do_full_gather(root_discovery=root_discovery)
     )
 
-    if root_discovery is not None and root_discovery.exceeded:
+    if _identity_gather_incomplete(root_discovery):
         return _return_incomplete_union(emails)
 
     # Phase 3: brief write under lock. A concurrent caller may have written
@@ -190,13 +196,14 @@ def refresh_identity_cache(
         return []
 
     # Phase 2: slow subprocess gather, no flock held.
+    _note_gather_complete(True)
     emails = (
         _do_full_gather()
         if root_discovery is None
         else _do_full_gather(root_discovery=root_discovery)
     )
 
-    if root_discovery is not None and root_discovery.exceeded:
+    if _identity_gather_incomplete(root_discovery):
         return _return_incomplete_union(emails)
 
     # Phase 3: write — but on ``force=False``, defer to a concurrent fresh
@@ -204,6 +211,22 @@ def refresh_identity_cache(
     if force:
         return _persist_force(emails)
     return _persist_or_yield_concurrent(emails)
+
+
+def _note_gather_complete(complete: bool) -> None:
+    """Remember this thread's per-repo observation. Other gathers cannot see it."""
+    _gather_tls.per_repo_complete = complete
+
+
+def _gather_was_complete() -> bool:
+    return getattr(_gather_tls, "per_repo_complete", True)
+
+
+def _identity_gather_incomplete(root_discovery: GitRootDiscovery | None) -> bool:
+    """True when this observation must not become a fresh identity cache."""
+    if root_discovery is not None and root_discovery.exceeded:
+        return True
+    return not _gather_was_complete()
 
 
 def _return_incomplete_union(emails: list[str]) -> list[str]:
@@ -221,6 +244,7 @@ def _return_incomplete_union(emails: list[str]) -> list[str]:
             default_factory=_default_cache,
             on_contention="block",
         ) as ljson:
+            ljson.write_on_exit = False
             cache = ljson.data
             cached = cache.get("emails") if _is_valid_cache(cache) else []
             return sorted({*emails, *(cached or [])})
@@ -302,10 +326,20 @@ def _is_valid_cache(cache: dict) -> bool:
     return _has_email_list(cache) and cache.get("version") == CACHE_VERSION
 
 
-def read_cached_identities() -> list[str] | None:
-    """Read the previous identities without mutation; None means unknown."""
+def read_cached_identities(*, require_refresh: bool = False) -> list[str] | None:
+    """Read the previous identities without mutation; None means unknown.
+
+    ``require_refresh=True`` is the capture filter's baseline: a default
+    cache with ``emails: []`` and no ``refreshed_at`` is not a completed
+    observation, and filtering on it would drop identities the following
+    refresh is about to learn.
+    """
     with lockedjson.locked_json_snapshot(CACHE_PATH) as snapshot:
         if snapshot.state == "valid" and _has_email_list(snapshot.data):
+            if require_refresh:
+                refreshed_at = snapshot.data.get("refreshed_at")
+                if not isinstance(refreshed_at, str) or not refreshed_at:
+                    return None
             return sorted(snapshot.data["emails"])
     return None
 
@@ -367,6 +401,57 @@ def _gather_global_email() -> str | None:
     return email or None
 
 
+def _worktree_checkouts(root: Path) -> list[Path]:
+    """Every checkout of ``root``'s object store, ``[root]`` on any failure.
+
+    Discovery elects one representative per object store, but a linked
+    worktree may carry its own ``config.worktree`` email that
+    ``git -C <representative> config user.email`` cannot see. Asking git
+    itself keeps includeIf/worktree-config resolution effective per checkout.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=gitenv.scrubbed_git_env(),
+            timeout=_PER_REPO_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
+        return [root]
+    if result.returncode != 0:
+        return [root]
+    checkouts: list[Path] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            checkout = Path(line[len("worktree ") :].strip())
+            if checkout not in checkouts:
+                checkouts.append(checkout)
+    return checkouts or [root]
+
+
+def _read_checkout_email(checkout: Path) -> str | None:
+    """``git config user.email`` for one checkout, or None on any failure."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(checkout), "config", "user.email"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=gitenv.scrubbed_git_env(),
+            timeout=_PER_REPO_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    email = result.stdout.strip().lower()
+    return email or None
+
+
 def _gather_per_repo_emails(
     *,
     root_discovery: GitRootDiscovery | None = None,
@@ -374,13 +459,20 @@ def _gather_per_repo_emails(
     """For each discovered git root, read per-repo ``git config user.email``.
 
     Bounded by ``_PER_REPO_BUDGET_S`` total wall-clock and per-repo
-    ``_PER_REPO_TIMEOUT_S``. Budget exhaustion returns whatever was
-    collected so far.
+    ``_PER_REPO_TIMEOUT_S``. The representative's email is read before the
+    next root's worktree list, so a slow listing cannot erase identities
+    already collected. Budget exhaustion returns that partial set and marks
+    this thread's gather incomplete; callers must not refresh the cache from it.
 
     Crucially does NOT walk ``git log`` — only reads configured identity.
     Walking commits would pull in collaborator emails from shared repos and
     silently inflate the trust set.
     """
+
+    def finish(found: set[str], complete: bool) -> set[str]:
+        _note_gather_complete(complete)
+        return found
+
     if root_discovery is not None:
         roots, _errors = root_discovery
     else:
@@ -388,44 +480,52 @@ def _gather_per_repo_emails(
             from mind_meld.config import CONFIG_PATH, load_config
             from mind_meld.events import discover_git_roots
         except Exception:
-            return set()
+            return finish(set(), False)
 
         try:
             cfg = load_config(CONFIG_PATH)
         except Exception:
-            return set()
+            return finish(set(), False)
 
         try:
             roots, _errors = discover_git_roots(cfg if isinstance(cfg, dict) else {})
         except Exception:
-            return set()
+            return finish(set(), False)
 
     if not roots:
-        return set()
+        return finish(set(), True)
 
     deadline = time.monotonic() + _PER_REPO_BUDGET_S
     out: set[str] = set()
-    for root in roots:
+    seen_checkouts: set[str] = set()
+
+    def take(checkout: Path) -> bool:
         if time.monotonic() > deadline:
-            break
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(root), "config", "user.email"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                env=gitenv.scrubbed_git_env(),
-                timeout=_PER_REPO_TIMEOUT_S,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
-            continue
-        if result.returncode != 0:
-            continue
-        email = result.stdout.strip().lower()
+            return False
+        key = str(checkout)
+        if key in seen_checkouts:
+            return True
+        seen_checkouts.add(key)
+        email = _read_checkout_email(checkout)
         if email:
             out.add(email)
-    return out
+        return time.monotonic() <= deadline
+
+    complete = True
+    for root in roots:
+        if not take(Path(root)):
+            complete = False
+            break
+        if time.monotonic() > deadline:
+            complete = False
+            break
+        for checkout in _worktree_checkouts(Path(root)):
+            if not take(checkout):
+                complete = False
+                break
+        if not complete:
+            break
+    return finish(out, complete)
 
 
 def _gather_config_author_emails() -> list[str]:
@@ -503,6 +603,73 @@ def _coerce_gh_uid(raw: object) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _github_noreply_checked() -> bool:
+    """True when a completed cache already recorded a noreply lookup."""
+    with lockedjson.locked_json_snapshot(CACHE_PATH) as snapshot:
+        if snapshot.state != "valid" or not isinstance(snapshot.data, dict):
+            return False
+        checked = snapshot.data.get("github_noreply_checked_at")
+        if not isinstance(checked, str) or not checked:
+            return False
+        try:
+            dt = datetime.fromisoformat(checked)
+        except ValueError:
+            return False
+        if dt.tzinfo is None:
+            return False
+        return (datetime.now(timezone.utc) - dt).total_seconds() < TTL_SECONDS
+
+
+def _record_github_noreply(email: str | None) -> None:
+    """Remember one noreply lookup without pretending a full refresh ran."""
+    try:
+        with locked_json_rmw(
+            CACHE_PATH,
+            default_factory=_default_cache,
+            on_contention="block",
+        ) as ljson:
+            cache = ljson.data
+            refreshed_at = cache.get("refreshed_at")
+            # A missing file becomes the default cache under the lock. Writing
+            # that would invent a baseline. An old completed cache can remember
+            # the check; otherwise every push retries ``gh`` until refresh lands.
+            if not _is_valid_cache(cache) or not isinstance(refreshed_at, str) or not refreshed_at:
+                ljson.write_on_exit = False
+                return
+            cache["github_noreply_checked_at"] = datetime.now(timezone.utc).isoformat()
+            if email:
+                current = cache.get("emails")
+                emails = list(current) if isinstance(current, list) else []
+                if email not in emails:
+                    cache["emails"] = sorted({*emails, email})
+    except Exception:
+        return
+
+
+def union_checked_github_noreply(emails: tuple[str, ...]) -> tuple[str, ...]:
+    """Add this machine's GitHub noreply address when the walk would otherwise drop it.
+
+    The capture filter runs before identity refresh. A completed cache that
+    predates ``gh`` auth has no noreply entry, and ``git log --author`` then
+    skips web-merge commits while the cursor advances. One bounded lookup
+    fills that hole; a failure is remembered for the cache TTL, including
+    when ``refreshed_at`` is already old, so autopush does not pay for
+    ``gh`` on every push. A never-refreshed cache is left untouched. Tests
+    skip the lookup: the suite isolates identity and must not call the network.
+    """
+    if not emails or any(email.endswith("@users.noreply.github.com") for email in emails):
+        return emails
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return emails
+    if _github_noreply_checked():
+        return emails
+    found = _gather_gh_noreply_email()
+    _record_github_noreply(found)
+    if not found:
+        return emails
+    return tuple(sorted({*emails, found}))
 
 
 __all__ = [
