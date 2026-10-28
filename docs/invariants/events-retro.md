@@ -3354,7 +3354,8 @@ hermetic override. This is local account state, never synced. Its version-1
 schema has a `models` map keyed by model id; each card has `input`,
 `cache_read`, `cache_create`, `output` and `verified_date`. Only an explicit
 `--mark-pricing-verified` adds or updates the top-level `verified_date`.
-Both dates are ISO `YYYY-MM-DD`. IDs match
+Both dates are ISO `YYYY-MM-DD` and at most one day in the future (a
+skewed writing clock must not pin an override or suppress refresh). IDs match
 `^[a-z0-9][a-z0-9._:-]{0,127}$`; rates must be finite non-bool numbers in
 `[0.0, 1000.0]`. Passive reads ignore invalid data, memoize by
 `(resolved_path, st_mtime_ns, st_size)`, and never create files or locks.
