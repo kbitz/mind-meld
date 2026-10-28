@@ -242,9 +242,10 @@ manual step.
   unknown storage formats with an upgrade remedy. A change that needs every
   machine upgraded before it syncs is at least a MINOR and says so in the
   README Upgrading notes.
-- Version format: three components in `pyproject.toml`; there is no `VERSION`
-  file, so the release baseline is the last commit that changed
-  `pyproject.toml` on the base branch.
+- Version format: three components in `pyproject.toml`, mirrored by a
+  root `VERSION` file holding the same `x.y.z`; a release bump changes both.
+  The release baseline is the last commit that changed `VERSION` on the base
+  branch.
 - Breaking changes: allowed in any release, disclosed in the README Upgrading
   notes and CHANGELOG.
 - Evidence and records: PROGRESS.md `## Acceptance` for stages and
