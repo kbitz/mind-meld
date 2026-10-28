@@ -817,7 +817,7 @@ def model_family(s: str) -> str | None:
 # Local-only overlay; never included in sync manifests. Passive readers open
 # existing files through lockedjson's shared-lock snapshot and never repair them.
 PRICING_CACHE_PATH = Path(
-    os.environ.get("MM_PRICING_CACHE_PATH", Path.home() / ".config/mind-meld/pricing-cache.json")
+    os.environ.get("MM_PRICING_CACHE_PATH") or Path.home() / ".config/mind-meld/pricing-cache.json"
 ).expanduser()
 _PRICING_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
 _PRICING_RATE_FIELDS = ("input", "cache_read", "cache_create", "output")
@@ -920,33 +920,47 @@ def _validated_pricing_cache(raw: Any) -> dict[str, Any]:
     return cache
 
 
-def _trim_pricing_models(models: dict[str, Any]) -> None:
+def _trim_pricing_models(
+    models: dict[str, Any], *, protected: frozenset[str] = frozenset()
+) -> None:
+    over = max(0, len(models) - _PRICING_CACHE_MAX_MODELS)
+    if not over:
+        return
     oldest = sorted(models, key=lambda model: (models[model]["verified_date"], model))
-    for model in oldest[: max(0, len(models) - _PRICING_CACHE_MAX_MODELS)]:
+    # A card written by this update is never evicted by its own trim.
+    for model in [m for m in oldest if m not in protected] + [m for m in oldest if m in protected]:
+        if not over:
+            return
         del models[model]
+        over -= 1
 
 
-def pricing_cache() -> dict[str, Any]:
-    """Validated read-only snapshot, memoized by resolved path, mtime and size."""
+def _pricing_cache_memoized() -> dict[str, Any]:
+    """Memoized validated cache for read-only internal lookups (no copy)."""
     global _PRICING_CACHE_MEMO
     try:
         path = PRICING_CACHE_PATH.expanduser().resolve()
         stamp = path.stat()
         key = (str(path), stamp.st_mtime_ns, stamp.st_size)
         if _PRICING_CACHE_MEMO is not None and _PRICING_CACHE_MEMO[0] == key:
-            return copy.deepcopy(_PRICING_CACHE_MEMO[1])
+            return _PRICING_CACHE_MEMO[1]
         with locked_json_snapshot(path) as snapshot:
             cache = _validated_pricing_cache(snapshot.data)
         _PRICING_CACHE_MEMO = (key, cache)
-        return copy.deepcopy(cache)
-    except (OSError, RuntimeError):
+        return cache
+    except (OSError, RuntimeError, ValueError):
         return {"version": 1, "models": {}}
+
+
+def pricing_cache() -> dict[str, Any]:
+    """Validated read-only snapshot, memoized by resolved path, mtime and size."""
+    return copy.deepcopy(_pricing_cache_memoized())
 
 
 def _active_cached_cards() -> dict[str, dict[str, Any]]:
     return {
         model: card
-        for model, card in pricing_cache()["models"].items()
+        for model, card in _pricing_cache_memoized()["models"].items()
         if model not in VERIFIED_MODEL_IDS or card["verified_date"] >= _builtin_verified_date(model)
     }
 
@@ -1003,13 +1017,17 @@ def update_pricing_cache(
             raise OSError("could not lock pricing cache")
         if locked.read_error is not None:
             raise locked.read_error
+        if locked.read_state in {"malformed", "non_dict", "unreadable"}:
+            # lockedjson would degrade these to an empty dict; an explicit
+            # pricing write must not silently discard the existing cards.
+            raise OSError(f"existing pricing cache is {locked.read_state}")
         cache = _validated_pricing_cache(locked.data)
         for model, rates in model_prices.items():
             cache["models"][model] = {
                 **dict(zip(_PRICING_RATE_FIELDS, rates, strict=True)),
                 "verified_date": today,
             }
-        _trim_pricing_models(cache["models"])
+        _trim_pricing_models(cache["models"], protected=frozenset(model_prices))
         if mark_verified:
             cache["verified_date"] = today
         locked.data.clear()
@@ -1860,10 +1878,10 @@ def estimate_cost(tokens_by_model: dict[str, Usage]) -> tuple[float, dict[str, f
     """Compute total cost + per-model split from a ``by_model`` dict.
 
     Returns ``(total_usd, per_model_usd)``. Rates come from
-    ``resolve_prices`` (exact id, else family tier). Models that resolve
-    to neither contribute to raw token counts elsewhere but DO NOT
-    contribute here. Same for ``COST_EXCLUDED_MODELS`` (today only
-    ``<synthetic>``).
+    ``resolve_prices`` (active local cache overlay, exact id, Claude
+    family tier, then vendor alias/positional fallback). Models that
+    resolve to none contribute to raw token counts elsewhere but DO NOT
+    contribute here. Same for ``COST_EXCLUDED_MODELS``.
 
     Unknown-model breadcrumb: emit one ``mm: notice:`` per process per
     unknown model. Caller-facing text mirrors the existing

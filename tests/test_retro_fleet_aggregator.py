@@ -8151,6 +8151,17 @@ class TestPricingRefreshHealth:
         assert pricing["muse_verified"] == tu.PRICING_MUSE_LAST_UPDATED
         assert pricing["muse_url"] == tu.PRICING_MUSE_SOURCE_URL
 
+    @pytest.mark.parametrize("oldest", ["", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"])
+    def test_effective_date_is_min_over_all_six_vendors(self, monkeypatch, oldest):
+        from mind_meld import token_usage as tu
+
+        for vendor in ("", "OPENAI_", "CURSOR_", "XAI_", "GOOGLE_", "MUSE_"):
+            monkeypatch.setattr(tu, "PRICING_" + vendor + "LAST_UPDATED", "2026-10-27")
+        monkeypatch.setattr(tu, "PRICING_" + oldest + "LAST_UPDATED", "2026-10-20")
+        until = datetime(2026, 10, 27, tzinfo=timezone.utc)
+        data = aggregator.RetroData(window_days=7, since=until - timedelta(days=7), until=until)
+        assert self._pricing(data)["effective_verified_date"] == "2026-10-20"
+
     def test_cache_mark_and_active_model_verification_are_independent(self):
         from mind_meld import token_usage as tu
 

@@ -68,6 +68,12 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** From the 2026-10-27 autoplan-lean of 86A (CEO F2/d8). Apply when carding/planning 88A: same tagging + stop-and-surface trigger in its task 1.
 
+### [review] Pricing refresh_due cannot clear for model IDs outside the override grammar
+- **Description:** Outside review of the pricing-refresh change (2026-10-28): an in-window model ID that fails `^[a-z0-9][a-z0-9._:-]{0,127}$` (uppercase, `/`, longer than 128 chars) stays in `unverified_model_ids` forever, so `refresh_due` is permanently true and `--set-model-price` for it always exits 2. The AC5 formula as approved takes no account of overridability. `_safe_short` also buckets or truncates such IDs, so the listed form may not be the raw key.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit trigger: a real in-window fleet model ID outside the override grammar is observed (none known; host readers emit lowercase ASCII IDs). Fix then: exclude un-overridable IDs from `refresh_due` and report them separately, as an approved AC5 amendment. Deferred by auto-choice in /review-and-prep on fix/retro-fleet-muse-agy-parity; veto by replying on that PR.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-27

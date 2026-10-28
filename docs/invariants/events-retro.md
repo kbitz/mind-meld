@@ -3373,7 +3373,9 @@ dates each supplied card today UTC. `--mark-pricing-verified` independently
 dates the whole-table check today UTC; setting cards alone cannot do that.
 Writes use `locked_json_rmw(..., on_contention="block")`, the fsutil pytest
 real-state guard, and oldest `(verified_date, model_id)` eviction above
-128 models. Invalid specifications exit 2 with sanitized input and a fixing
+128 models (a card written by the update is never evicted by its own trim).
+An existing malformed, non-dict or unreadable cache refuses the explicit
+write instead of discarding its cards; the remedy is removing the file. Invalid specifications exit 2 with sanitized input and a fixing
 example; explicit lock/read/write failures exit 1 with sanitized stderr and
 one fixing command. Tests isolate the cache, including CLI subprocesses.
 To reset the overlay, remove the selected cache file while no pricing update

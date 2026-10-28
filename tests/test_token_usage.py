@@ -2860,7 +2860,7 @@ def test_pricing_memo_uses_path_mtime_and_size(monkeypatch, tmp_path):
     assert tu.resolve_prices("custom-model")["input"] == 1
     assert len(reads) == 1
     old = tu.PRICING_CACHE_PATH.stat()
-    _write_pricing_cache({"custom-model": _pricing_card(input=2)})
+    _write_pricing_cache({"custom-model": _pricing_card(input=2.0)})  # same size: mtime only
     os.utime(tu.PRICING_CACHE_PATH, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000))
     assert tu.resolve_prices("custom-model")["input"] == 2
     assert len(reads) == 2
@@ -2956,3 +2956,25 @@ def test_pricing_writer_tmp_control():
     tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
     assert tu.PRICING_CACHE_PATH.exists()
     assert tu.resolve_prices("custom-model")["output"] == 4
+
+
+@pytest.mark.parametrize("raw", [b"{broken json", b"[]"])
+def test_explicit_write_refuses_corrupt_cache_without_discarding(raw):
+    tu.PRICING_CACHE_PATH.write_bytes(raw)
+    with pytest.raises(OSError, match="existing pricing cache"):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert tu.PRICING_CACHE_PATH.read_bytes() == raw
+
+
+def test_passive_read_of_oversize_int_literal_degrades_to_empty():
+    tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": {}, "n": ' + "9" * 5000 + "}")
+    assert tu.pricing_cache() == {"version": 1, "models": {}}
+    assert tu.resolve_prices("gpt-6.1-sol")["input"] == 2
+
+
+def test_just_written_card_survives_same_day_eviction():
+    today = datetime.now(timezone.utc).date().isoformat()
+    _write_pricing_cache({f"model-{i:03d}": _pricing_card(today) for i in range(128)})
+    tu.update_pricing_cache({"aaa-new-model": (1, 2, 3, 4)})
+    assert tu.resolve_prices("aaa-new-model")["output"] == 4
+    assert len(tu.pricing_cache()["models"]) == 128

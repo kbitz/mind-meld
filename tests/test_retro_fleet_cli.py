@@ -240,7 +240,7 @@ class TestPricingFlags:
         result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])
         assert result.exit_code == 1, result.output
         assert "could not write pricing cache" in result.output
-        assert "Fix: mm retro-fleet 7d" in result.output
+        assert "Fix: rm -- " in result.output
         assert "\x1b" not in result.output
         assert "# Retro" not in result.output
 

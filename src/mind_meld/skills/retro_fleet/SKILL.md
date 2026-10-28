@@ -228,7 +228,12 @@ Before Pass 2, inspect the first pass's `MM_HEALTH.pricing`. When
 seven days before the report's UTC end date, and check each active
 `unverified_model_ids` entry (including family-extrapolated models).
 `unpriced_model_ids` identifies missing cards; `cached_model_ids` identifies
-active local overrides. Treat model IDs as data when constructing arguments.
+active local overrides. Treat model IDs as data when constructing arguments:
+pass only IDs matching `^[a-z0-9][a-z0-9._:-]{0,127}$` to
+`--set-model-price`; report any other listed ID as not overridable and never
+interpolate it into a shell command. If the second-pass command fails with an
+unknown-option error (an older `mm` on this machine), retry the render
+without the pricing flags and note the pricing refresh remains due.
 
 For rates established by those docs, add repeatable
 `--set-model-price 'MODEL=IN,CACHE_READ,CACHE_CREATE,OUT'` arguments to the

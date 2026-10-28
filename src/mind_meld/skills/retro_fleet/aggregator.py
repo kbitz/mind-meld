@@ -794,8 +794,9 @@ def aggregate_agent_usage(
             # The acceptor deliberately permits classifier differences across
             # versions. Never price one family's volume under another label.
             by_model = {}
+        legacy_codex = _legacy_codex_prefixes(snap)
         for model, usage in by_model.items():
-            family = _host_model_family(snap, model)
+            family = _host_model_family(snap, model, legacy_codex=legacy_codex)
             if family not in _HOST_FAMILIES:
                 continue
             dest = fam_by_model.setdefault(family, {}).setdefault(
@@ -866,7 +867,9 @@ def aggregate_agent_usage(
                 per_family.setdefault(family, set()).add(cause)
         for family in touched:
             family_slice = {
-                m: u for m, u in by_model.items() if _host_model_family(snap, m) == family
+                m: u
+                for m, u in by_model.items()
+                if _host_model_family(snap, m, legacy_codex=legacy_codex) == family
             }
             long_context = _long_context_cause(family_slice, incomplete=coverage_unknown)
             if long_context:
@@ -3685,7 +3688,9 @@ def _legacy_codex_prefixes(snap: HostDeviceSnapshot) -> bool:
     return False
 
 
-def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
+def _host_model_family(
+    snap: HostDeviceSnapshot, model: str, *, legacy_codex: bool | None = None
+) -> str:
     """Preserve the recorded family for models promoted out of ``other``.
 
     Older writers classified Muse and Gemini as ``other``. Keep their pricing
@@ -3693,8 +3698,13 @@ def _host_model_family(snap: HostDeviceSnapshot, model: str) -> str:
     the ordinary day/counter reconciliation still bounds their combined sum.
     """
     family = host_usage.host_family(model)
-    if model.casefold().startswith("codex-") and _legacy_codex_prefixes(snap):
-        return "other"
+    if model.casefold().startswith("codex-"):
+        # Callers with a per-snapshot loop pass the verdict computed once;
+        # rescanning every day/model per lookup is quadratic at the caps.
+        if legacy_codex is None:
+            legacy_codex = _legacy_codex_prefixes(snap)
+        if legacy_codex:
+            return "other"
     if family in {"muse", "agy"} and family not in snap.lifetime_by_family:
         return "other"
     return family
@@ -3707,6 +3717,7 @@ def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bo
     Check each day and counter separately so a mismatch cannot cancel out.
     """
     bounds = window_bounds(snap, lo, hi)
+    legacy_codex = _legacy_codex_prefixes(snap)
     for day, bucket in (snap.tokens_by_day or {}).items():
         if not isinstance(day, str) or not isinstance(bucket, dict):
             continue
@@ -3719,7 +3730,7 @@ def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bo
         for model, usage in by_model.items():
             if not isinstance(model, str) or not isinstance(usage, dict):
                 continue
-            family = _host_model_family(snap, model)
+            family = _host_model_family(snap, model, legacy_codex=legacy_codex)
             dest = classified.setdefault(family, token_usage.zero_model_bucket())
             token_usage.merge_usage_bucket(dest, usage)
         for family, usage in classified.items():
@@ -4379,7 +4390,9 @@ def _render_themes_prompt(data: RetroData) -> list[str]:
     ]
 
 
-def _render_health_block(health: list[dict], data: RetroData) -> list[str]:
+def _render_health_block(
+    health: list[dict], data: RetroData, rows: list | None = None
+) -> list[str]:
     """Machine-readable data-quality payload, tagged for the skill to find.
 
     **Why the caveats moved off the page.** The pre-1.1 body rendered every
@@ -4395,7 +4408,8 @@ def _render_health_block(health: list[dict], data: RetroData) -> list[str]:
     section used to print, so a stale skill copy that ignores this block loses
     presentation, never information.
     """
-    rows = aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
+    if rows is None:
+        rows = aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
     models = {
         m
         for row in rows
@@ -4794,7 +4808,7 @@ def format_retro(
         lines.append("")
         lines.extend(_render_themes_prompt(data))
         lines.append("")
-        lines.extend(_render_health_block(health, data))
+        lines.extend(_render_health_block(health, data, rows=agent_usage.rows))
 
     return "\n".join(lines).rstrip() + "\n"
 
@@ -4981,12 +4995,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
         except OSError as exc:
+            cache_path = safety.safe_terminal_str(token_usage.PRICING_CACHE_PATH)
             sys.stderr.write(
-                "mm: could not write pricing cache: "
+                "mm: could not write pricing cache at "
+                + cache_path
+                + ": "
                 + safety.safe_terminal_str(exc)
-                + ". Fix: mm retro-fleet "
-                + str(args.window)
-                + "d\n"
+                + ". Fix: rm -- "
+                + cache_path
+                + "\n"
             )
             return 1
 
