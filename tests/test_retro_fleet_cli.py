@@ -240,9 +240,53 @@ class TestPricingFlags:
         result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])
         assert result.exit_code == 1, result.output
         assert "could not write pricing cache" in result.output
-        assert "Fix: rm -- " in result.output
+        assert "Fix: mm retro-fleet 7d" in result.output
         assert "\x1b" not in result.output
         assert "# Retro" not in result.output
+
+    def test_corrupt_cache_write_failure_names_rm_fix_with_quoted_path(self):
+        import shlex
+
+        from mind_meld import token_usage as tu
+        from mind_meld.cli import app
+
+        tu.PRICING_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tu.PRICING_CACHE_PATH.write_text("{broken json")
+        tu._PRICING_CACHE_MEMO = None
+        result = CliRunner().invoke(app, ["retro-fleet", "--mark-pricing-verified"])
+        assert result.exit_code == 1, result.output
+        assert f"Fix: rm -- {shlex.quote(str(tu.PRICING_CACHE_PATH))}" in result.output
+        assert "\x1b" not in result.output
+        assert "# Retro" not in result.output
+
+    def test_subprocess_empty_pricing_cache_path_env_uses_home_default(self, tmp_path):
+        events = tmp_path / "events"
+        events.mkdir()
+        env = {
+            **os.environ,
+            "MM_PRICING_CACHE_PATH": "",
+            "MM_EVENTS_DIR": str(events),
+            "HOME": str(tmp_path),
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "mind_meld.cli",
+                "retro-fleet",
+                "7d",
+                "--no-author-filter",
+                "--set-model-price",
+                "new-model=1,.2,0,3",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        saved = json.loads((tmp_path / ".config/mind-meld/pricing-cache.json").read_text())
+        assert saved["models"]["new-model"]["input"] == 1
 
     def test_subprocess_pricing_override_is_hermetic(self, tmp_path):
         from mind_meld import token_usage as tu

@@ -816,6 +816,12 @@ def model_family(s: str) -> str | None:
 
 # Local-only overlay; never included in sync manifests. Passive readers open
 # existing files through lockedjson's shared-lock snapshot and never repair them.
+
+
+class PricingCacheUnreadableError(OSError):
+    """The existing pricing cache cannot be trusted; removing it is the fix."""
+
+
 PRICING_CACHE_PATH = Path(
     os.environ.get("MM_PRICING_CACHE_PATH") or Path.home() / ".config/mind-meld/pricing-cache.json"
 ).expanduser()
@@ -927,7 +933,7 @@ def _trim_pricing_models(
     if not over:
         return
     oldest = sorted(models, key=lambda model: (models[model]["verified_date"], model))
-    # A card written by this update is never evicted by its own trim.
+    # Cards written by this update are evicted last, after pre-existing ones.
     for model in [m for m in oldest if m not in protected] + [m for m in oldest if m in protected]:
         if not over:
             return
@@ -959,7 +965,7 @@ def pricing_cache() -> dict[str, Any]:
 
 def _active_cached_cards() -> dict[str, dict[str, Any]]:
     return {
-        model: card
+        model: dict(card)
         for model, card in _pricing_cache_memoized()["models"].items()
         if model not in VERIFIED_MODEL_IDS or card["verified_date"] >= _builtin_verified_date(model)
     }
@@ -970,8 +976,12 @@ def active_cached_model_ids() -> list[str]:
 
 
 def _cached_prices(model: str) -> dict[str, float] | None:
-    card = _active_cached_cards().get(model)
-    return {field: card[field] for field in _PRICING_RATE_FIELDS} if card is not None else None
+    card = _pricing_cache_memoized()["models"].get(model)
+    if card is None or (
+        model in VERIFIED_MODEL_IDS and card["verified_date"] < _builtin_verified_date(model)
+    ):
+        return None
+    return {field: card[field] for field in _PRICING_RATE_FIELDS}
 
 
 def is_verified_model(model: str) -> bool:
@@ -1020,8 +1030,16 @@ def update_pricing_cache(
         if locked.read_state in {"malformed", "non_dict", "unreadable"}:
             # lockedjson would degrade these to an empty dict; an explicit
             # pricing write must not silently discard the existing cards.
-            raise OSError(f"existing pricing cache is {locked.read_state}")
+            raise PricingCacheUnreadableError(f"existing pricing cache is {locked.read_state}")
         cache = _validated_pricing_cache(locked.data)
+        raw_models = locked.data.get("models") if isinstance(locked.data, dict) else None
+        if isinstance(locked.data, dict) and (
+            ("models" in locked.data and not isinstance(raw_models, dict))
+            or (isinstance(raw_models, dict) and set(raw_models) != set(cache["models"]))
+        ):
+            # A syntactically valid cache whose version or cards fail
+            # validation would silently lose those cards on this write.
+            raise PricingCacheUnreadableError("existing pricing cache fails validation")
         for model, rates in model_prices.items():
             cache["models"][model] = {
                 **dict(zip(_PRICING_RATE_FIELDS, rates, strict=True)),

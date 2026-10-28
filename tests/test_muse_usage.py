@@ -185,6 +185,25 @@ def test_zero_token_model_less_completion_is_skipped(muse_cache, tmp_path, model
     assert set(result.tokens_by_day["2026-10-13"]["by_model"]) == {"muse-wonder-1.0"}
 
 
+@pytest.mark.parametrize("zero_first", [True, False])
+@pytest.mark.parametrize("two_logs", [False, True])
+def test_zero_model_less_step_never_conflicts_with_same_id_counted_turn(
+    muse_cache, tmp_path, zero_first, two_logs
+):
+    zero = _zero_record()
+    zero["id"] = "e1"
+    counted = _record("e1", _usage())
+    records = [zero, counted] if zero_first else [counted, zero]
+    if two_logs:
+        _write_session(tmp_path, records[:1], session="s1")
+        _write_session(tmp_path, records[1:], session="s2")
+    else:
+        _write_session(tmp_path, records)
+    result = hu.read_muse_usage(tmp_path, consented=True)
+    assert result.complete
+    assert result.hosts["muse"]["2026-10-13"]["output"] == 10
+
+
 @pytest.mark.parametrize("model", [None, "", 17, "omitted"])
 def test_nonzero_tokens_require_a_nonempty_string_model(muse_cache, tmp_path, model):
     record = _record("e1", _usage())

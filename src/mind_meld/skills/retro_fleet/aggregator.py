@@ -65,6 +65,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
@@ -4310,7 +4311,7 @@ def _render_period_comparison(data: RetroData) -> list[str]:
     return lines
 
 
-def _render_themes_prompt(data: RetroData) -> list[str]:
+def _render_themes_prompt(data: RetroData, rows: list | None = None) -> list[str]:
     """Emit a fenced JSON block with the raw material the LLM needs to
     synthesize themes + noteworthy line for the second-pass card.
     Includes commit subjects keyed by repo and a few aggregate stats.
@@ -4378,7 +4379,11 @@ def _render_themes_prompt(data: RetroData) -> list[str]:
                 "active_days": r.active_days,
                 "machines": r.machines,
             }
-            for r in aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
+            for r in (
+                rows
+                if rows is not None
+                else aggregate_agent_usage(data, machines_known=data.fleet.devices_known).rows
+            )
             if r.has_volume
         ],
     }
@@ -4806,7 +4811,7 @@ def format_retro(
 
     if not has_card_input:
         lines.append("")
-        lines.extend(_render_themes_prompt(data))
+        lines.extend(_render_themes_prompt(data, rows=agent_usage.rows))
         lines.append("")
         lines.extend(_render_health_block(health, data, rows=agent_usage.rows))
 
@@ -4995,14 +5000,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
         except OSError as exc:
-            cache_path = safety.safe_terminal_str(token_usage.PRICING_CACHE_PATH)
+            if isinstance(exc, token_usage.PricingCacheUnreadableError):
+                fix = "rm -- " + shlex.quote(str(token_usage.PRICING_CACHE_PATH))
+            else:
+                fix = "mm retro-fleet " + str(args.window) + "d"
             sys.stderr.write(
                 "mm: could not write pricing cache at "
-                + cache_path
+                + safety.safe_terminal_str(token_usage.PRICING_CACHE_PATH)
                 + ": "
                 + safety.safe_terminal_str(exc)
-                + ". Fix: rm -- "
-                + cache_path
+                + ". Fix: "
+                + fix
                 + "\n"
             )
             return 1

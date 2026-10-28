@@ -2966,6 +2966,20 @@ def test_explicit_write_refuses_corrupt_cache_without_discarding(raw):
     assert tu.PRICING_CACHE_PATH.read_bytes() == raw
 
 
+def test_explicit_write_refuses_semantically_invalid_cache():
+    raw = json.dumps({"version": 2, "models": {"old-model": _pricing_card()}})
+    tu.PRICING_CACHE_PATH.write_text(raw)
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert tu.PRICING_CACHE_PATH.read_text() == raw
+
+
+def test_explicit_write_refuses_oversize_int_literal_cache():
+    tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": {}, "n": ' + "9" * 5000 + "}")
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+
+
 def test_passive_read_of_oversize_int_literal_degrades_to_empty():
     tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": {}, "n": ' + "9" * 5000 + "}")
     assert tu.pricing_cache() == {"version": 1, "models": {}}
