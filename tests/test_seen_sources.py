@@ -93,9 +93,20 @@ class TestRead:
     def test_fstat_oserror_degrades_without_crash(self, monkeypatch, capsys):
         seen_sources.SEEN_DIR.mkdir(parents=True, exist_ok=True)
         seen_sources.seen_path().write_text('["claude"]\n')
-        monkeypatch.setattr(
-            os, "fstat", lambda fd: (_ for _ in ()).throw(OSError("injected fstat failure"))
-        )
+        # Fail fstat only for this tracker inode. Replacing os.fstat outright
+        # also breaks pytest 9.2 capture (it fstats its own temp fd while the
+        # patch is still installed) and the write guard's config read on a
+        # cold xdist worker.
+        real_fstat = os.fstat
+        target = os.stat(seen_sources.seen_path())
+
+        def fstat(fd):
+            info = real_fstat(fd)
+            if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                raise OSError("injected fstat failure")
+            return info
+
+        monkeypatch.setattr(os, "fstat", fstat)
         assert seen_sources.read(initial=["gstack"]) == {"gstack"}
         captured = capsys.readouterr()
         assert "seen-sources.json corrupt" in captured.err
