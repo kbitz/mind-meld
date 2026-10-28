@@ -953,12 +953,12 @@ def _pricing_cache_memoized() -> dict[str, Any]:
     try:
         path = PRICING_CACHE_PATH.expanduser().resolve()
         stamp = path.stat()
-        key = (str(path), stamp.st_mtime_ns, stamp.st_size)
-        if _PRICING_CACHE_MEMO is not None and _PRICING_CACHE_MEMO[0] == key:
+        file_stamp = (str(path), stamp.st_mtime_ns, stamp.st_size)
+        if _PRICING_CACHE_MEMO is not None and _PRICING_CACHE_MEMO[0] == file_stamp:
             return _PRICING_CACHE_MEMO[1]
         with locked_json_snapshot(path) as snapshot:
             cache = _validated_pricing_cache(snapshot.data)
-        _PRICING_CACHE_MEMO = (key, cache)
+        _PRICING_CACHE_MEMO = (file_stamp, cache)
         return cache
     except (OSError, RuntimeError, ValueError):
         return {"version": 1, "models": {}}

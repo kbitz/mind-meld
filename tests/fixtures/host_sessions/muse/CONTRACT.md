@@ -36,9 +36,9 @@ Zero-token completions without a non-empty string model are skipped, after
 validating the envelope id, timestamp, usage keys, counter values and relations,
 and the session-directory step-lead rule. A nonzero completion requires a
 non-empty bounded string model. These shapes are covered by synthetic tests;
-the historical corpus counts below describe Muse 1.4.7 only.
+the historical corpus counts below describe Muse v1.4.7 only.
 
-## Census (2026-10-14, one Mac, Muse 1.4.7)
+## Census (2026-10-14, one Mac, Muse v1.4.7)
 
 179 `session.jsonl` files (37 root sessions, 142 subagent logs),
 62,593 event envelopes, 1,462 `model_completed` events, corpus span
@@ -63,7 +63,7 @@ the historical corpus counts below describe Muse 1.4.7 only.
   sequence), so the reader never keys on it; the dedup key is the
   envelope `id` alone, corpus-wide.
 
-Re-census at review (2026-10-14, same Mac, Muse 1.4.7, 212 files,
+Re-census at review (2026-10-14, same Mac, Muse v1.4.7, 212 files,
 87,539 envelopes, 2,020 `model_completed`): zero duplicate envelope
 ids, none shared across files; 0 of 462 subagent steps reappear in
 the parent log as an identical (model, six counters) tuple; every

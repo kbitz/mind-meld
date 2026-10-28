@@ -19,7 +19,7 @@ import io
 import json
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -2657,7 +2657,7 @@ def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
     assert "grok-4.7-fast" not in tu.VERIFIED_MODEL_IDS
     assert "grok-4.7-fast" not in tu.PRICING_FAMILY_BY_MODEL
     assert tu.PRICING_CURSOR_LAST_UPDATED == "2026-09-23"
-    assert tu.PRICING_XAI_LAST_UPDATED == "2026-09-10"
+    assert tu.PRICING_XAI_LAST_UPDATED == date(2026, 9, 10).isoformat()  # retained xAI date
 
 
 def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch, capsys):
