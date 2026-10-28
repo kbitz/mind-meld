@@ -9550,7 +9550,7 @@ def preview62(push_preview56, tmp_path, monkeypatch):
             arg
             for arg in argv
             if not arg.startswith(("--since=", "--author="))
-            and arg not in ("--regexp-ignore-case", "--fixed-strings")
+            and arg not in ("--regexp-ignore-case", "--fixed-strings", "--no-mailmap")
         )
 
     def already_recorded(argv: list[str]) -> bool:
@@ -9562,6 +9562,7 @@ def preview62(push_preview56, tmp_path, monkeypatch):
         "-C",
         resolved,
         "log",
+        "--no-mailmap",
         "--exclude=refs/stash",
         "--all",
         "--since=1970-01-01T00:00:00+00:00",

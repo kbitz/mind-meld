@@ -588,6 +588,8 @@ def _default_git_capture_cache() -> dict:
         "session_resume_after": {},
         "pending_refresh_since": None,
         "repo_cursors": {},
+        # path -> common git dir, so a removed checkout still maps to its store.
+        "repo_cursor_stores": {},
         "incomplete_streak": 0,
     }
 
@@ -608,6 +610,15 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         root: ts
         for root, ts in cache["repo_cursors"].items()
         if isinstance(root, str) and _parse_aware_ts(ts) is not None
+    }
+    stores = cache.get("repo_cursor_stores")
+    cache["repo_cursor_stores"] = {
+        root: common
+        for root, common in (stores.items() if isinstance(stores, dict) else [])
+        if isinstance(root, str)
+        and isinstance(common, str)
+        and common
+        and root in cache["repo_cursors"]
     }
     for key in ("discovery_resume_after", "pending_refresh_since"):
         if not isinstance(cache.get(key), str):
@@ -786,6 +797,7 @@ def discover_git_roots(
     if deadline_expired() and "claude" not in probers_ran:
         mark_exceeded()
     roots, attribution = _dedup_discovered_roots(roots, attribution, cache=cache)
+    _remember_cursor_stores(cache)
     if not exceeded and not errors:
         # Complete discovery is authoritative for source removal as well as
         # additions. Historical cursors must not keep a deselected repo pending.
@@ -805,10 +817,13 @@ def discover_git_roots(
         retained: dict[str, str] = {
             key: ts for key, ts in cache["repo_cursors"].items() if key in active_roots
         }
+        stores = cache.get("repo_cursor_stores")
+        if not isinstance(stores, dict):
+            stores = {}
         for key, ts in cache["repo_cursors"].items():
             if key in active_roots:
                 continue
-            common_dir = _git_common_dir(Path(key))
+            common_dir = _known_common_dir(Path(key), stores, key)
             elected = active_by_common_dir.get(common_dir) if common_dir is not None else None
             parsed = _parse_aware_ts(ts)
             if elected is None or parsed is None:
@@ -816,7 +831,14 @@ def discover_git_roots(
             current = _parse_aware_ts(retained.get(elected))
             if current is None or parsed < current:
                 retained[elected] = ts
+            if elected not in stores:
+                stores[elected] = str(common_dir)
         cache["repo_cursors"] = retained
+        cache["repo_cursor_stores"] = {
+            key: value
+            for key, value in stores.items()
+            if key in retained and isinstance(value, str) and value
+        }
     if persist:
         try:
             with lockedjson.locked_json_rmw(
@@ -834,6 +856,18 @@ def discover_git_roots(
                         locked.data["repo_cursors"][root] = min(previous, ts) if previous else ts
                 for root in original_cache["repo_cursors"].keys() - cache["repo_cursors"].keys():
                     locked.data["repo_cursors"].pop(root, None)
+                locked_stores = locked.data.get("repo_cursor_stores")
+                if not isinstance(locked_stores, dict):
+                    locked_stores = {}
+                    locked.data["repo_cursor_stores"] = locked_stores
+                for key in list(locked_stores):
+                    if key not in locked.data["repo_cursors"]:
+                        locked_stores.pop(key, None)
+                remembered = cache.get("repo_cursor_stores")
+                if isinstance(remembered, dict):
+                    for key, value in remembered.items():
+                        if key in locked.data["repo_cursors"] and isinstance(value, str) and value:
+                            locked_stores.setdefault(key, value)
         except OSError:
             pass
     if exceeded:
@@ -1239,6 +1273,40 @@ def _git_common_dir(path: Path) -> Path | None:
     return dirs[1] if dirs is not None else None
 
 
+def _known_common_dir(path: Path, stores: Mapping[str, object], key: str) -> Path | None:
+    """Common dir for a cursor key, including one whose checkout is gone.
+
+    A removed worktree no longer has a ``.git`` file to read. The common dir
+    recorded when its cursor was written still identifies the object store.
+    """
+    live = _git_common_dir(path)
+    if live is not None:
+        return live
+    stored = stores.get(key) if isinstance(stores, Mapping) else None
+    if isinstance(stored, str) and stored:
+        return Path(stored)
+    return None
+
+
+def _remember_cursor_stores(cache: dict) -> dict:
+    """Record a resolvable checkout's common dir without overwriting a saved one."""
+    stores = cache.get("repo_cursor_stores")
+    if not isinstance(stores, dict):
+        stores = {}
+        cache["repo_cursor_stores"] = stores
+    cursors = cache.get("repo_cursors")
+    if isinstance(cursors, dict):
+        for key in cursors:
+            if not isinstance(key, str):
+                continue
+            if isinstance(stores.get(key), str) and stores[key]:
+                continue
+            common = _git_common_dir(Path(key))
+            if common is not None:
+                stores[key] = str(common)
+    return stores
+
+
 def _git_common_dir_key(path: Path) -> tuple[str, Path]:
     """Group key for deduplicating roots that share one Git object store."""
     common_dir = _git_common_dir(path)
@@ -1415,7 +1483,10 @@ def _read_gitconfig_user_emails(
     would drop that author's commits. Inline ``;``/``#`` comments are
     stripped from unquoted values; a value still containing whitespace is
     not a plausible email and is ignored rather than becoming a
-    never-matching ``--author`` pattern.
+    never-matching ``--author`` pattern. A ``[user] email = ...`` header
+    and a backslash-continued value are read the way git reads them.
+    Spelling is preserved so a later ``--author`` pattern can match a
+    non-ASCII address under ``LC_ALL=C``.
     """
     if _depth > 10:
         return []
@@ -1427,10 +1498,24 @@ def _read_gitconfig_user_emails(
         raw = config_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    logical: list[str] = []
+    pending: str | None = None
+    for line in raw.splitlines():
+        current = line.lstrip() if pending is not None else line
+        if pending is not None:
+            current = pending + current
+        stripped_end = current.rstrip()
+        if stripped_end.endswith("\\") and not stripped_end.endswith("\\\\"):
+            pending = stripped_end[:-1]
+            continue
+        logical.append(current)
+        pending = None
+    if pending is not None:
+        logical.append(pending)
     in_user = False
     in_include = False
     emails: list[str] = []
-    for line in raw.splitlines():
+    for line in logical:
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", ";")):
             continue
@@ -1442,13 +1527,17 @@ def _read_gitconfig_user_emails(
             in_user = header.lower() == "user"
             base = header.split(None, 1)[0].strip('"').lower() if header else ""
             in_include = base in {"include", "includeif"}
-            continue
+            # Git accepts `[user] email = ...` on one line. The value is
+            # the only identity; dropping the rest of the line hides it.
+            stripped = stripped[end + 1 :].strip()
+            if not stripped:
+                continue
         if "=" not in stripped:
             continue
         key_name, _, val = stripped.partition("=")
         key_name = key_name.strip().lower()
         if in_user and key_name == "email":
-            cleaned = _clean_gitconfig_value(val).lower()
+            cleaned = _clean_gitconfig_value(val)
             if cleaned and not any(ch.isspace() for ch in cleaned):
                 emails.append(cleaned)
         elif in_include and key_name == "path":
@@ -1527,42 +1616,72 @@ def _read_global_config_emails() -> list[str]:
     return emails
 
 
+def _author_spellings(raw_items: object) -> dict[str, str]:
+    """Map each lowercased address to the first spelling that produced it."""
+    found: dict[str, str] = {}
+    items = raw_items if isinstance(raw_items, (list, tuple, set)) else ()
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if not cleaned or any(ch.isspace() or ch in "\x00\n" for ch in cleaned):
+            continue
+        found.setdefault(cleaned.lower(), cleaned)
+    return found
+
+
+def _spelling_patterns(found: Mapping[str, str]) -> tuple[str, ...]:
+    """Original spelling plus its lowercase form.
+
+    ``git log --regexp-ignore-case`` under ``LC_ALL=C`` folds ASCII only.
+    Passing the configured spelling matches a non-ASCII address as stored;
+    the lowercase form still matches ASCII case variants.
+    """
+    patterns: set[str] = set()
+    for lowered, original in found.items():
+        patterns.add(original)
+        patterns.add(lowered)
+    return tuple(sorted(patterns))
+
+
 def resolve_walk_author_emails(
     config: Mapping[str, object] | None = None,
     roots: Sequence[Path] = (),
 ) -> tuple[str, ...]:
-    """Return deduplicated, lowercased author emails for ``git log --author`` filtering.
+    """Return author emails for ``git log --author`` filtering.
 
     Purely read-only and non-blocking: unions ``[retro].author_emails`` from
-    ``config``, ``identity.read_cached_identities()``, the global gitconfig
-    ``[user] email``, and per-repository ``[user] email`` from each
+    ``config``, a completed ``identity.read_cached_identities()``, the global
+    gitconfig ``[user] email``, and per-repository ``[user] email`` from each
     discovered root's common ``.git/config``. Never spawns subprocesses or
     mutates ``identity-cache.json``.
 
     Fails open with ``()`` (no filtering) when the identity cache has no
-    known baseline: capture runs before the tail's identity refresh, so a
-    partial set built from one repo's local email would drop commits made
-    under not-yet-known identities and cursors would advance past them.
+    completed refresh. Capture runs before the tail's identity refresh, so
+    a partial set — including a default cache that has never been refreshed —
+    would drop commits made under not-yet-known identities and cursors would
+    advance past them.
     """
-    cached = identity.read_cached_identities()
+    cached = identity.read_cached_identities(require_refresh=True)
     if cached is None:
         return ()
-    emails: set[str] = set()
+    found = _author_spellings(cached)
     if isinstance(config, Mapping):
         retro = config.get("retro")
         if isinstance(retro, Mapping):
-            raw_aliases = retro.get("author_emails")
-            if isinstance(raw_aliases, list):
-                for item in raw_aliases:
-                    if isinstance(item, str) and item.strip():
-                        emails.add(item.strip().lower())
-    for item in cached:
-        if isinstance(item, str) and item.strip():
-            emails.add(item.strip().lower())
-    emails.update(_read_global_config_emails())
+            found.update(
+                {
+                    key: value
+                    for key, value in _author_spellings(retro.get("author_emails")).items()
+                    if key not in found
+                }
+            )
+    for email in _read_global_config_emails():
+        found.setdefault(email.lower(), email)
     for root in roots:
-        emails.update(_read_repo_config_emails(root))
-    return tuple(sorted(emails))
+        for email in _read_repo_config_emails(root):
+            found.setdefault(email.lower(), email)
+    return _spelling_patterns(found)
 
 
 def _accepts_fourth_arg(fn: object) -> bool:
@@ -1625,28 +1744,28 @@ def walk_git_projects(
     """
     cache = read_git_capture_cache() if use_repo_cursors else {}
     root_cursors = cache.get("repo_cursors", {})
+    stores = cache.get("repo_cursor_stores", {})
+    if not isinstance(stores, Mapping):
+        stores = {}
+    # One common-dir resolution per cursor, not one per cursor per group.
+    # A removed checkout still matches through the common dir saved with its cursor.
+    cursors_by_common: dict[Path, list[datetime]] = {}
+    if use_repo_cursors and isinstance(root_cursors, Mapping):
+        for key, raw_ts in root_cursors.items():
+            if not isinstance(key, str):
+                continue
+            ts = _parse_aware_ts(raw_ts)
+            if ts is None:
+                continue
+            common_dir = _known_common_dir(Path(key), stores, key)
+            if common_dir is not None:
+                cursors_by_common.setdefault(common_dir, []).append(ts)
     grouped = _group_git_roots(roots)
     root_since: dict[Path, datetime] = {}
-    for rep, members in grouped:
+    for rep, _members in grouped:
         if use_repo_cursors:
-            member_cutoffs = [
-                ts
-                for member in members
-                if (ts := _parse_aware_ts(root_cursors.get(str(member)))) is not None
-            ]
-            # A sibling worktree this run did not discover can still hold an
-            # older cursor for the same object store; its interval belongs
-            # to this group's walk or it is abandoned when the key retires.
             common_dir = _git_common_dir(rep)
-            if common_dir is not None:
-                member_keys = {str(member) for member in members}
-                for key, raw_ts in root_cursors.items():
-                    if key in member_keys:
-                        continue
-                    if _git_common_dir(Path(key)) != common_dir:
-                        continue
-                    if (ts := _parse_aware_ts(raw_ts)) is not None:
-                        member_cutoffs.append(ts)
+            member_cutoffs = cursors_by_common.get(common_dir, []) if common_dir is not None else []
             root_since[rep] = min(member_cutoffs) if member_cutoffs else since
         else:
             root_since[rep] = since
@@ -1663,9 +1782,7 @@ def walk_git_projects(
     if author_emails is None:
         effective_emails = resolve_walk_author_emails(None, roots)
     else:
-        effective_emails = tuple(
-            sorted({e.strip().lower() for e in author_emails if isinstance(e, str) and e.strip()})
-        )
+        effective_emails = _spelling_patterns(_author_spellings(author_emails))
     ts_now = datetime.now(timezone.utc).isoformat()
     snapshot: GitSnapshot = {
         "v": EVENTS_SCHEMA_VERSION,
@@ -1810,11 +1927,16 @@ def _walk_one_repo(
     (project, error). On any failure, project is None and error is set."""
     author_args: list[str] = []
     if author_emails:
-        cleaned = [
-            e.strip().lower()
-            for e in author_emails
-            if isinstance(e, str) and e.strip() and "\x00" not in e and "\n" not in e
-        ]
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in author_emails:
+            if not isinstance(item, str):
+                continue
+            email = item.strip()
+            if not email or "\x00" in email or "\n" in email or email in seen:
+                continue
+            seen.add(email)
+            cleaned.append(email)
         if cleaned:
             author_args = [
                 "--regexp-ignore-case",
@@ -1828,6 +1950,7 @@ def _walk_one_repo(
                 "-C",
                 str(root),
                 "log",
+                "--no-mailmap",
                 "--exclude=refs/stash",
                 "--all",
                 f"--since={since_iso}",
@@ -2581,24 +2704,36 @@ def window_syntax_error(s: str) -> str:
 
 def effective_capture_since(roots: Sequence[Path | str], since: datetime) -> datetime:
     """Oldest retained repository interval, also used for budget escalation."""
-    cursors = read_git_capture_cache()["repo_cursors"]
+    cache = read_git_capture_cache()
+    cursors = cache["repo_cursors"]
+    stores = cache.get("repo_cursor_stores", {})
+    if not isinstance(stores, Mapping):
+        stores = {}
     if roots:
-        names_set = {str(root) for root in roots}
+        wanted = {str(root) for root in roots}
         common_dirs = {cdir for root in roots if (cdir := _git_common_dir(Path(root))) is not None}
-        if common_dirs:
-            for key in cursors:
-                if _git_common_dir(Path(key)) in common_dirs:
-                    names_set.add(key)
-        names = list(names_set)
-    else:
-        names = list(cursors)
-    return min([since, *[ts for name in names if (ts := _parse_aware_ts(cursors.get(name)))]])
+        timestamps = []
+        for key, raw in cursors.items():
+            if not isinstance(key, str):
+                continue
+            common = _known_common_dir(Path(key), stores, key)
+            if key not in wanted and (common is None or common not in common_dirs):
+                continue
+            ts = _parse_aware_ts(raw)
+            if ts is not None:
+                timestamps.append(ts)
+        return min([since, *timestamps])
+    parsed = [ts for raw in cursors.values() if (ts := _parse_aware_ts(raw)) is not None]
+    return min([since, *parsed])
 
 
 def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> int:
     """Count live roots behind the requested capture, without repairing state."""
     cache = read_git_capture_cache()
     cursors = cache["repo_cursors"]
+    stores = cache.get("repo_cursor_stores", {})
+    if not isinstance(stores, Mapping):
+        stores = {}
     names = {str(root) for root in roots} | set(cursors)
     names.update(
         entry["git_root"]
@@ -2606,22 +2741,55 @@ def count_pending_repositories(roots: Sequence[Path | str], since: datetime) -> 
         if isinstance(entry.get("git_root"), str)
     )
     live_paths = [Path(name) for name in sorted(names) if _classify_git_root(Path(name))]
+    by_common: dict[Path, list[datetime]] = {}
+    for key, raw in cursors.items():
+        if not isinstance(key, str):
+            continue
+        ts = _parse_aware_ts(raw)
+        if ts is None:
+            continue
+        common = _known_common_dir(Path(key), stores, key)
+        if common is not None:
+            by_common.setdefault(common, []).append(ts)
     pending = 0
-    for _rep, members in _group_git_roots(live_paths):
-        present = [
-            ts
-            for member in members
-            if (ts := _parse_aware_ts(cursors.get(str(member)))) is not None
-        ]
+    for rep, members in _group_git_roots(live_paths):
+        common = _git_common_dir(rep)
+        present = list(by_common.get(common, [])) if common is not None else []
+        if not present:
+            present = [
+                ts
+                for member in members
+                if (ts := _parse_aware_ts(cursors.get(str(member)))) is not None
+            ]
         if not present or min(present) < since:
             pending += 1
     return pending
 
 
-def _prune_invalid_repo_cursors(cursors: dict) -> None:
+def _prune_invalid_repo_cursors(cursors: dict, stores: Mapping[str, object] | None = None) -> None:
+    """Drop cursors whose checkout is gone and whose object store is gone too.
+
+    A removed worktree keeps its cursor while the saved common dir still
+    belongs to a live checkout. That cursor is the group's capture floor
+    until a successful walk folds it.
+    """
+    remembered = stores if isinstance(stores, Mapping) else {}
+    live_commons: set[Path] = set()
+    for root in cursors:
+        if not isinstance(root, str) or not _classify_git_root(Path(root)):
+            continue
+        common = _known_common_dir(Path(root), remembered, root)
+        if common is not None:
+            live_commons.add(common)
     for root in list(cursors):
-        if not _classify_git_root(Path(root)):
-            del cursors[root]
+        if _classify_git_root(Path(root)):
+            continue
+        common = _known_common_dir(Path(root), remembered, root) if isinstance(root, str) else None
+        if common is not None and common in live_commons:
+            continue
+        del cursors[root]
+        if isinstance(stores, dict):
+            stores.pop(root, None)
 
 
 def _apply_repo_cursors_to_cache(
@@ -2653,10 +2821,16 @@ def _apply_repo_cursors_to_cache(
             else:
                 failed.add(skipped["path"])
     cursors = cache["repo_cursors"]
+    stores = _remember_cursor_stores(cache)
+    now = datetime.now(timezone.utc)
     for root in sorted(completed - failed):
-        common_dir = _git_common_dir(Path(root))
+        common_dir = _known_common_dir(Path(root), stores, root)
         sibling_keys = (
-            [k for k in list(cursors) if k != root and _git_common_dir(Path(k)) == common_dir]
+            [
+                key
+                for key in list(cursors)
+                if key != root and _known_common_dir(Path(key), stores, key) == common_dir
+            ]
             if common_dir is not None
             else []
         )
@@ -2668,16 +2842,25 @@ def _apply_repo_cursors_to_cache(
         old = min(group_olds) if group_olds else None
         if recorded is None and old is not None and since > old:
             continue
-        cursors[root] = max([stamp, *group_olds]).isoformat()
+        # A sibling timestamp after now is a stepped clock, not a covered
+        # interval. Adopting it would make the next walk start in the future.
+        eligible = [ts for ts in group_olds if ts <= now]
+        chosen = max([stamp, *eligible])
+        if chosen > now:
+            chosen = now
+        cursors[root] = chosen.isoformat()
+        if common_dir is not None:
+            stores[root] = str(common_dir)
         for sibling in sibling_keys:
             cursors.pop(sibling, None)
+            stores.pop(sibling, None)
     if recorded is not None:
         for root in failed:
             old = _parse_aware_ts(cursors.get(root))
             if old is None or (reconciling and since < old):
                 cursors[root] = since.isoformat()
     if prune_invalid_roots:
-        _prune_invalid_repo_cursors(cursors)
+        _prune_invalid_repo_cursors(cursors, stores)
     caught_up = complete and not failed and cache.get("pending_refresh_since") is None
     if caught_up:
         cache["incomplete_streak"] = 0
@@ -2779,7 +2962,7 @@ def reconcile_uncommitted_push_cursors(events_dir: Path, device_id: str) -> None
                 ):
                     mutated = True
             if mutated:
-                _prune_invalid_repo_cursors(cache["repo_cursors"])
+                _prune_invalid_repo_cursors(cache["repo_cursors"], cache.get("repo_cursor_stores"))
             else:
                 state.write_on_exit = False
     except OSError:

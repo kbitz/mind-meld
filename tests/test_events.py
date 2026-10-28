@@ -3808,10 +3808,12 @@ def test_resolve_walk_author_emails_fails_open_without_identity_cache(tmp_path, 
     )
     config = {"retro": {"author_emails": ["alias@example.com"]}}
 
-    monkeypatch.setattr(identity, "read_cached_identities", lambda: None)
+    monkeypatch.setattr(identity, "read_cached_identities", lambda **_kwargs: None)
     assert events.resolve_walk_author_emails(config, [repo]) == ()
 
-    monkeypatch.setattr(identity, "read_cached_identities", lambda: ["primary@example.com"])
+    monkeypatch.setattr(
+        identity, "read_cached_identities", lambda **_kwargs: ["primary@example.com"]
+    )
     assert events.resolve_walk_author_emails(config, [repo]) == (
         "alias@example.com",
         "global@example.com",
@@ -3849,13 +3851,15 @@ def test_resolve_walk_author_emails_fails_open_without_identity_cache(tmp_path, 
     assert "global@example.com" not in resolved
 
 
-def _seed_cursor_cache(repo_cursors):
+def _seed_cursor_cache(repo_cursors, stores=None):
     from mind_meld import config as mm_config
     from mind_meld import lockedjson
 
     with lockedjson.locked_json_rmw(mm_config.GIT_CAPTURE_CACHE_PATH) as state:
         state.data.update(events._default_git_capture_cache())
         state.data["repo_cursors"] = repo_cursors
+        if stores is not None:
+            state.data["repo_cursor_stores"] = stores
 
 
 def test_walk_cutoff_folds_undiscovered_sibling_worktree_cursor(tmp_path, monkeypatch):
@@ -3906,6 +3910,140 @@ def test_discovery_retirement_folds_undiscovered_sibling_cursor(tmp_path, monkey
     cfg["retro"] = {"repo_roots": [str(repo)]}
     save_config(cfg)
 
+    discovery = events.discover_git_roots(load_config(), persist=True)
+    assert not discovery.errors
+    cursors = events.read_git_capture_cache()["repo_cursors"]
+    assert str(worktree) not in cursors
+    assert cursors[str(repo)] == older.isoformat()
+
+
+def test_inline_and_continued_gitconfig_email(tmp_path):
+    """Git accepts an email on the section header line and a continued value."""
+    cfg = tmp_path / "gitconfig"
+    cfg.write_text("[user] email = inline@example.com\n")
+    assert events._read_gitconfig_user_emails(cfg) == ["inline@example.com"]
+    cfg.write_text("[user]\n\temail = continued@\\\n\texample.com\n")
+    assert events._read_gitconfig_user_emails(cfg) == ["continued@example.com"]
+
+
+def test_unrefreshed_identity_cache_does_not_filter(tmp_path):
+    """A default cache with no refresh is not a baseline the walk may filter on."""
+    from mind_meld import identity
+
+    identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    identity.CACHE_PATH.write_text(
+        json.dumps({"version": 2, "emails": ["a@example.com"], "refreshed_at": None})
+    )
+    assert events.resolve_walk_author_emails({}, []) == ()
+
+
+def test_non_ascii_author_keeps_configured_spelling(tmp_path, monkeypatch):
+    """LC_ALL=C does not fold non-ASCII letters, so the configured spelling is passed through."""
+    from mind_meld import identity
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    (tmp_path / ".gitconfig").write_text("[user]\n\temail = É@example.com\n")
+    identity.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "emails": ["other@example.com"],
+            }
+        )
+    )
+    resolved = events.resolve_walk_author_emails({}, [])
+    assert "É@example.com" in resolved
+    assert "é@example.com" in resolved
+
+
+def test_mailmap_does_not_hide_configured_author(tmp_path):
+    """A tracked .mailmap must not make the raw configured address miss, then advance the cursor."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "old@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Old"], check=True)
+    _seed_commit(repo)
+    (repo / ".mailmap").write_text("New <new@example.com> <old@example.com>\n")
+    subprocess.run(["git", "-C", str(repo), "add", ".mailmap"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "add mailmap"], check=True)
+    hidden = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "log",
+            "--fixed-strings",
+            "--author=<old@example.com>",
+            "--format=%ae",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert hidden.stdout.strip() == ""
+    row = events.walk_git_projects(
+        [repo],
+        datetime.now(timezone.utc) - timedelta(days=30),
+        10_000,
+        author_emails=("old@example.com",),
+    )[0]
+    assert row["skipped"] == []
+    subjects = {commit["subject"] for project in row["projects"] for commit in project["commits"]}
+    assert "seed" in subjects
+
+
+def test_future_sibling_cursor_does_not_raise_the_floor(tmp_path):
+    """A sibling timestamp after now is a stepped clock, not a covered interval."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    worktree = tmp_path / "wt-future"
+    _make_git_worktree(repo, worktree)
+    stamp = datetime.now(timezone.utc) - timedelta(hours=1)
+    future = datetime.now(timezone.utc) + timedelta(days=2)
+    cache = events._default_git_capture_cache()
+    cache["repo_cursors"] = {
+        str(repo): stamp.isoformat(),
+        str(worktree): future.isoformat(),
+    }
+    assert events._apply_repo_cursors_to_cache(
+        cache,
+        [{"projects": [{"local_path": str(repo)}], "skipped": []}],
+        since=stamp - timedelta(days=1),
+        cursor_ts=stamp,
+        recorded=stamp,
+        complete=True,
+    )
+    assert cache["repo_cursors"][str(repo)] == stamp.isoformat()
+    assert str(worktree) not in cache["repo_cursors"]
+
+
+def test_removed_worktree_cursor_still_folds(tmp_path, monkeypatch):
+    """A deleted worktree keeps its older cursor via the common dir saved at write time."""
+    from mind_meld.config import load_config, save_config
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    worktree = tmp_path / "wt-removed"
+    _make_git_worktree(repo, worktree)
+    recent = datetime.now(timezone.utc) - timedelta(days=1)
+    older = recent - timedelta(days=5)
+    common = str(events._git_common_dir(repo))
+    _seed_cursor_cache(
+        {str(repo): recent.isoformat(), str(worktree): older.isoformat()},
+        {str(repo): common, str(worktree): common},
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
+        check=True,
+    )
+    cfg = load_config()
+    cfg["retro"] = {"repo_roots": [str(repo)]}
+    save_config(cfg)
     discovery = events.discover_git_roots(load_config(), persist=True)
     assert not discovery.errors
     cursors = events.read_git_capture_cache()["repo_cursors"]

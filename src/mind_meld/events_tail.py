@@ -1119,6 +1119,7 @@ def _capture_git_rows(
         walk_kwargs["use_repo_cursors"] = True
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
+        author_emails = identity.union_checked_github_noreply(author_emails)
         walk_kwargs.update(_accepted_kwargs(events.walk_git_projects, author_emails=author_emails))
     if deadline_monotonic is not None:
         # The git walk gets what discovery actually left of the tail
