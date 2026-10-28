@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.14] - 2026-10-28
+
+**`mm pull` and `mm autopull` behave the same.** Pull planning, download, and apply now live outside the command shell. Flags, exit codes, conflict copies, and the files `mm` writes are unchanged.
+
+### Changed
+
+- `mm pull` and `mm autopull` keep the same flags, exit codes, previews, conflict copies, and apply results.
+
 ## [1.11.13] - 2026-10-26
 
 **Attended `mm push` shares one capture budget.** Host sweep and inline warm together take at most half of it, five seconds by default. The rest of the push keeps the remainder. Autopush keeps its own short limits and never warms.

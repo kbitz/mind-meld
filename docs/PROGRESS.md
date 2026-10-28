@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.14 | 2026-10-28 | **`mm pull` and `mm autopull` behave the same.** Pull planning, download, and apply now live outside the command shell. Flags, exit codes, conflict copies, and the files `mm` writes are unchanged. |
 | 1.11.13 | 2026-10-26 | **Attended `mm push` shares one capture budget.** Host sweep and inline warm together take at most half of it, five seconds by default. The rest of the push keeps the remainder. Autopush keeps its own short limits and never warms. |
 | 1.11.12 | 2026-10-25 | **Codex usage in the fleet is unchanged.** The reader now sits behind the host adapter. Commands, output, and the cache stay the same. |
 | 1.11.11 | 2026-10-24 | **`mm status` and `mm diag` behave the same.** Output, flags, exit codes, encryption, and read-only checks are unchanged. |
