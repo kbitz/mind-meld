@@ -367,6 +367,37 @@ def _gather_global_email() -> str | None:
     return email or None
 
 
+def _worktree_checkouts(root: Path) -> list[Path]:
+    """Every checkout of ``root``'s object store, ``[root]`` on any failure.
+
+    Discovery elects one representative per object store, but a linked
+    worktree may carry its own ``config.worktree`` email that
+    ``git -C <representative> config user.email`` cannot see. Asking git
+    itself keeps includeIf/worktree-config resolution effective per checkout.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=gitenv.scrubbed_git_env(),
+            timeout=_PER_REPO_TIMEOUT_S,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError, ValueError):
+        return [root]
+    if result.returncode != 0:
+        return [root]
+    checkouts: list[Path] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            checkout = Path(line[len("worktree ") :].strip())
+            if checkout not in checkouts:
+                checkouts.append(checkout)
+    return checkouts or [root]
+
+
 def _gather_per_repo_emails(
     *,
     root_discovery: GitRootDiscovery | None = None,
@@ -405,7 +436,16 @@ def _gather_per_repo_emails(
 
     deadline = time.monotonic() + _PER_REPO_BUDGET_S
     out: set[str] = set()
+    seen_checkouts: set[str] = set()
+    checkouts: list[Path] = []
     for root in roots:
+        if time.monotonic() > deadline:
+            break
+        for checkout in _worktree_checkouts(Path(root)):
+            if str(checkout) not in seen_checkouts:
+                seen_checkouts.add(str(checkout))
+                checkouts.append(checkout)
+    for root in checkouts:
         if time.monotonic() > deadline:
             break
         try:

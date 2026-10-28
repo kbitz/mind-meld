@@ -228,8 +228,10 @@ Push and recapture deduplicate discovered roots by common Git directory
 group's main checkout ahead of linked worktrees and walking each object store
 once with `git log --exclude=refs/stash --all` (plus `--regexp-ignore-case
 --fixed-strings --author=<email>` when read-only author emails are available
-from `[retro].author_emails`, `identity-cache.json`, the global gitconfig, or
-per-repo `.git/config`). Author filtering fails open (no `--author`) when the
+from `[retro].author_emails`, `identity-cache.json`, the global gitconfig
+(honoring `GIT_CONFIG_GLOBAL` and following `include`/`includeIf` files), or
+per-repo `.git/config`/`config.worktree` for the main and every linked
+checkout). Author filtering fails open (no `--author`) when the
 identity cache has no known baseline, because capture runs before the tail's
 identity refresh and a partial set would drop commits the cursor then passes.
 Push walks group representatives from their oldest effective per-group cursor
@@ -2849,8 +2851,12 @@ yields nothing for that source; cache still rebuilds with what was
 reachable):
 
 1. `git config --global user.email`
-2. Per-repo `git config user.email` for every discovered git root,
-   bounded by `_PER_REPO_BUDGET_S` total wall-clock (5s)
+2. Per-repo `git config user.email` for every discovered git root and
+   every linked worktree checkout of its object store (discovery elects
+   one representative for the walk; identity gathering expands it via
+   `git worktree list` so a sibling's `config.worktree` email still
+   reaches the trust set), bounded by `_PER_REPO_BUDGET_S` total
+   wall-clock (5s)
 3. `[retro].author_emails` from mm `config.toml` — additive (D4 from
    /plan-eng-review: backwards compat with existing configs)
 4. `<id>+<login>@users.noreply.github.com` derived from `gh api user`

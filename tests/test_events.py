@@ -3827,6 +3827,27 @@ def test_resolve_walk_author_emails_fails_open_without_identity_cache(tmp_path, 
     )
     assert "worktree@example.com" in events.resolve_walk_author_emails(config, [repo])
 
+    # The main checkout's own config.worktree (extensions.worktreeConfig)
+    # reaches the representative too.
+    (repo / ".git" / "config.worktree").write_text("[user]\n\temail = main-worktree@example.com\n")
+    assert "main-worktree@example.com" in events.resolve_walk_author_emails(config, [repo])
+
+    # Emails pulled in through include/includeIf files are followed, so an
+    # identity configured only in an included file is not filtered out.
+    included = tmp_path / "included.gitconfig"
+    included.write_text("[user]\n\temail = included@example.com\n")
+    with (repo / ".git" / "config").open("a") as fh:
+        fh.write(f'[includeIf "gitdir:**"]\n\tpath = {included}\n')
+    assert "included@example.com" in events.resolve_walk_author_emails(config, [repo])
+
+    # GIT_CONFIG_GLOBAL replaces the default global files, matching git.
+    alt_global = tmp_path / "alt-global.gitconfig"
+    alt_global.write_text("[user]\n\temail = env-global@example.com\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(alt_global))
+    resolved = events.resolve_walk_author_emails(config, [repo])
+    assert "env-global@example.com" in resolved
+    assert "global@example.com" not in resolved
+
 
 def _seed_cursor_cache(repo_cursors):
     from mind_meld import config as mm_config

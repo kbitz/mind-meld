@@ -9594,6 +9594,10 @@ def preview62(push_preview56, tmp_path, monkeypatch):
             argv[:2] == ["git", "-C"] and argv[3:] == ["config", "user.email"]
         ):
             return subprocess.CompletedProcess(argv, 0, "test@example.com\n", "")
+        if argv[:2] == ["git", "-C"] and argv[3:] == ["worktree", "list", "--porcelain"]:
+            # Identity gathering expands the elected checkout to its linked
+            # worktrees; this fixture's repo has only the one checkout.
+            return subprocess.CompletedProcess(argv, 0, f"worktree {argv[2]}\n", "")
         pytest.fail(f"Unexpected subprocess: {argv}")
 
     monkeypatch.setattr(subprocess, "run", run)

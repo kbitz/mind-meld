@@ -694,6 +694,38 @@ class TestIncompleteDiscoveryIdentityCache:
 
 
 class TestGitEnvironment:
+    def test_per_repo_gather_expands_linked_worktrees_of_elected_root(self, tmp_path, monkeypatch):
+        """Discovery dedup elects one checkout per object store; identity
+        gathering must still see a sibling worktree's own config.worktree
+        email or the retro trust set drops that worktree's commits."""
+        target, _, _ = _git_env_repos(tmp_path, monkeypatch)
+        subprocess.run(
+            ["git", "-C", str(target), "config", "extensions.worktreeConfig", "true"],
+            check=True,
+        )
+        sibling = tmp_path / "sibling"
+        subprocess.run(
+            ["git", "-C", str(target), "worktree", "add", "-b", "sib", str(sibling)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling),
+                "config",
+                "--worktree",
+                "user.email",
+                "sibling@example.com",
+            ],
+            check=True,
+        )
+        assert identity._gather_per_repo_emails(root_discovery=([target], [])) == {
+            "target@example.com",
+            "sibling@example.com",
+        }
+
     @pytest.mark.parametrize("override", ["dir", "parameters"])
     def test_repo_identity_ignores_inherited_overrides(self, tmp_path, monkeypatch, override):
         target, decoy, _ = _git_env_repos(tmp_path, monkeypatch)

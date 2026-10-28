@@ -1390,20 +1390,46 @@ def _has_no_commits_yet(path: Path) -> bool:
         return False
 
 
-def _read_gitconfig_user_email(config_path: Path) -> str | None:
-    """Read ``[user] email`` from one gitconfig file without spawning git.
+def _clean_gitconfig_value(val: str) -> str:
+    """Strip quotes/inline comments from one raw gitconfig value."""
+    val = val.strip()
+    if val.startswith('"'):
+        closing = val.find('"', 1)
+        return (val[1:closing] if closing != -1 else val.strip('"')).strip()
+    for marker in (";", "#"):
+        cut = val.find(marker)
+        if cut != -1:
+            val = val[:cut]
+    return val.strip()
 
-    Last value wins, matching git. Inline ``;``/``#`` comments are stripped
-    from unquoted values; a value still containing whitespace is not a
-    plausible email and is ignored rather than becoming a never-matching
-    ``--author`` pattern.
+
+def _read_gitconfig_user_emails(
+    config_path: Path, _depth: int = 0, _seen: frozenset[str] = frozenset()
+) -> list[str]:
+    """Every ``[user] email`` in one gitconfig file and its includes.
+
+    ``include``/``includeIf`` files are followed unconditionally (relative
+    to the including file, cycle-safe, git's depth cap): the walk filter is
+    a union, so collecting an email whose condition would not match this
+    repo only weakens filtering, while missing a conditional identity
+    would drop that author's commits. Inline ``;``/``#`` comments are
+    stripped from unquoted values; a value still containing whitespace is
+    not a plausible email and is ignored rather than becoming a
+    never-matching ``--author`` pattern.
     """
+    if _depth > 10:
+        return []
+    key = str(config_path)
+    if key in _seen:
+        return []
+    _seen = _seen | {key}
     try:
         raw = config_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
+        return []
     in_user = False
-    found: str | None = None
+    in_include = False
+    emails: list[str] = []
     for line in raw.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(("#", ";")):
@@ -1412,26 +1438,34 @@ def _read_gitconfig_user_email(config_path: Path) -> str | None:
             end = stripped.find("]")
             if end == -1:
                 continue
-            in_user = stripped[1:end].strip().lower() == "user"
+            header = stripped[1:end].strip()
+            in_user = header.lower() == "user"
+            base = header.split(None, 1)[0].strip('"').lower() if header else ""
+            in_include = base in {"include", "includeif"}
             continue
-        if in_user and "=" in stripped:
-            key, _, val = stripped.partition("=")
-            if key.strip().lower() != "email":
-                continue
-            val = val.strip()
-            if val.startswith('"'):
-                closing = val.find('"', 1)
-                cleaned = val[1:closing] if closing != -1 else val.strip('"')
-            else:
-                for marker in (";", "#"):
-                    cut = val.find(marker)
-                    if cut != -1:
-                        val = val[:cut]
-                cleaned = val.strip()
-            cleaned = cleaned.strip().lower()
+        if "=" not in stripped:
+            continue
+        key_name, _, val = stripped.partition("=")
+        key_name = key_name.strip().lower()
+        if in_user and key_name == "email":
+            cleaned = _clean_gitconfig_value(val).lower()
             if cleaned and not any(ch.isspace() for ch in cleaned):
-                found = cleaned
-    return found
+                emails.append(cleaned)
+        elif in_include and key_name == "path":
+            include_path = Path(_clean_gitconfig_value(val)).expanduser()
+            if not include_path.is_absolute():
+                include_path = config_path.parent / include_path
+            emails.extend(_read_gitconfig_user_emails(include_path, _depth + 1, _seen))
+    return emails
+
+
+def _read_gitconfig_user_email(config_path: Path) -> str | None:
+    """Read ``[user] email`` from one gitconfig file without spawning git.
+
+    Last value wins, matching git.
+    """
+    emails = _read_gitconfig_user_emails(config_path)
+    return emails[-1] if emails else None
 
 
 def _read_repo_config_emails(path: Path) -> list[str]:
@@ -1446,17 +1480,22 @@ def _read_repo_config_emails(path: Path) -> list[str]:
         return []
     _gitdir, common_dir = dirs
     emails: list[str] = []
-    primary = _read_gitconfig_user_email(common_dir / "config")
-    if primary:
-        emails.append(primary)
     try:
         worktree_dirs = sorted((common_dir / "worktrees").iterdir())
     except OSError:
         worktree_dirs = []
-    for worktree_dir in worktree_dirs:
-        email = _read_gitconfig_user_email(worktree_dir / "config.worktree")
-        if email and email not in emails:
-            emails.append(email)
+    # The main checkout's per-worktree config sits beside the common config;
+    # a linked worktree's sits in its gitdir under worktrees/<name>/.
+    candidates = [
+        common_dir / "config",
+        common_dir / "config.worktree",
+        _gitdir / "config.worktree",
+        *(worktree_dir / "config.worktree" for worktree_dir in worktree_dirs),
+    ]
+    for candidate in dict.fromkeys(candidates):
+        for email in _read_gitconfig_user_emails(candidate):
+            if email not in emails:
+                emails.append(email)
     return emails
 
 
@@ -1467,13 +1506,24 @@ def _read_global_config_emails() -> list[str]:
     it directly keeps the walk filter correct even when the identity cache
     predates a global-email change.
     """
-    xdg_home = os.environ.get("XDG_CONFIG_HOME")
-    xdg_config = (Path(xdg_home) if xdg_home else Path.home() / ".config") / "git" / "config"
+    if "GIT_CONFIG_GLOBAL" in os.environ:
+        # Git semantics: this file replaces both default global files, and
+        # an empty value (or /dev/null) skips global config entirely. The
+        # scrubbed env identity gathering uses preserves this variable, so
+        # the walk must honor the same file or it loses that identity.
+        raw_global = os.environ["GIT_CONFIG_GLOBAL"].strip()
+        if not raw_global or raw_global == os.devnull:
+            return []
+        candidates = [Path(raw_global).expanduser()]
+    else:
+        xdg_home = os.environ.get("XDG_CONFIG_HOME")
+        xdg_config = (Path(xdg_home) if xdg_home else Path.home() / ".config") / "git" / "config"
+        candidates = [xdg_config, Path.home() / ".gitconfig"]
     emails: list[str] = []
-    for candidate in (xdg_config, Path.home() / ".gitconfig"):
-        email = _read_gitconfig_user_email(candidate)
-        if email:
-            emails.append(email)
+    for candidate in candidates:
+        for email in _read_gitconfig_user_emails(candidate):
+            if email not in emails:
+                emails.append(email)
     return emails
 
 
