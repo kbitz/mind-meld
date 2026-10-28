@@ -8172,6 +8172,8 @@ class TestPricingRefreshHealth:
             "gpt-6.2-sol": _usage(4),
             "mystery-model": _usage(5),
             "codex-auto-review": _usage(20),
+            "vendor:model": _usage(1),
+            "vendor_model": _usage(1),
             "zero-model": _usage(0),
         }
         snap = _snap(
@@ -8179,19 +8181,36 @@ class TestPricingRefreshHealth:
             until,
             since=data.since,
             until=data.until,
-            families={"codex": {day: _usage(24)}, "other": {day: _usage(5)}},
-            tokens_by_day={day: {**_usage(29), "by_model": models}},
+            families={"codex": {day: _usage(24)}, "other": {day: _usage(7)}},
+            tokens_by_day={day: {**_usage(31), "by_model": models}},
         )
         data.host_inventory = aggregator.HostUsageInventory(by_device={"dev-a": snap})
         tu.update_pricing_cache({}, mark_verified=True)
         pricing = self._pricing(data)
-        assert pricing["unverified_model_ids"] == ["gpt-6.2-sol", "mystery-model"]
-        assert pricing["unpriced_model_ids"] == ["mystery-model"]
+        assert pricing["unverified_model_ids"] == [
+            "gpt-6.2-sol",
+            "mystery-model",
+            "vendor:model",
+            "vendor_model",
+        ]
+        assert pricing["unpriced_model_ids"] == ["mystery-model", "vendor:model", "vendor_model"]
         assert pricing["refresh_due"] is True
-        tu.update_pricing_cache({"gpt-6.2-sol": (2, 0.1, 2.5, 10), "mystery-model": (1, 0, 0, 2)})
+        tu.update_pricing_cache(
+            {
+                "gpt-6.2-sol": (2, 0.1, 2.5, 10),
+                "mystery-model": (1, 0, 0, 2),
+                "vendor:model": (1, 0, 0, 1),
+                "vendor_model": (2, 0, 0, 2),
+            }
+        )
         pricing = self._pricing(data)
         assert pricing["unverified_model_ids"] == pricing["unpriced_model_ids"] == []
-        assert pricing["cached_model_ids"] == ["gpt-6.2-sol", "mystery-model"]
+        assert pricing["cached_model_ids"] == [
+            "gpt-6.2-sol",
+            "mystery-model",
+            "vendor:model",
+            "vendor_model",
+        ]
         assert pricing["refresh_due"] is False
         assert not aggregator._extrapolation_notes(models, scope="Codex")
 

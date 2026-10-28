@@ -3432,8 +3432,10 @@ is running, then rerun: bundled rates and verification dates apply again.
 
 `MM_HEALTH.pricing.effective_verified_date` is
 `max(min(all six bundled vendor dates), cache.verified_date)`.
-`unpriced_model_ids` and `unverified_model_ids` are sorted, sanitized active
-in-window model IDs; excluded cost models are omitted. Unverified includes
+`unpriced_model_ids` and `unverified_model_ids` are sorted active in-window
+model IDs; override-grammar IDs are emitted as exact pricing-cache keys, and
+IDs outside that grammar are sanitized diagnostic strings. Excluded cost
+models are omitted. Unverified includes
 both unpriced models and family extrapolations. `cached_model_ids` lists
 active overrides. `refresh_due` is true when effective verification is more
 than seven days before `data.until`'s UTC date or any unverified in-window

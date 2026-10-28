@@ -3387,6 +3387,17 @@ def _safe_short(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._\-() ]", "_", cleaned)[:_SHORT_LEN_CAP]
 
 
+def _health_pricing_model_id(model: str) -> str:
+    """Return the exact pricing-cache key for overridable model IDs.
+
+    Pricing-health lists are machine-readable inputs to the refresh flow, so
+    a grammar-valid ID such as ``vendor:model`` must not be display-sanitized
+    into a different key. IDs outside the override grammar remain sanitized
+    diagnostic strings.
+    """
+    return model if token_usage._PRICING_MODEL_ID.fullmatch(model) else _safe_short(model)
+
+
 _PROSE_CTRL_RE = re.compile(
     # C0 controls + DEL.
     r"[\x00-\x1f\x7f]"
@@ -4424,8 +4435,12 @@ def _render_health_block(
         for m, usage in row.by_model.items()
         if token_usage.sum_bucket(usage) > 0 and m not in token_usage.COST_EXCLUDED_MODELS
     }
-    unverified = sorted({_safe_short(m) for m in models if not token_usage.is_verified_model(m)})
-    unpriced = sorted({_safe_short(m) for m in models if token_usage.resolve_prices(m) is None})
+    unverified = sorted(
+        {_health_pricing_model_id(m) for m in models if not token_usage.is_verified_model(m)}
+    )
+    unpriced = sorted(
+        {_health_pricing_model_id(m) for m in models if token_usage.resolve_prices(m) is None}
+    )
     builtin_date = min(
         token_usage.PRICING_LAST_UPDATED,
         token_usage.PRICING_OPENAI_LAST_UPDATED,
