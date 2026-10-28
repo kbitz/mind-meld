@@ -2,11 +2,13 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_pull_core` / `_push_core` / `_SyncProgress` / `_start_sync_progress`
+- `src/mind_meld/pullflow.py` — `_pull_core`
+- `src/mind_meld/cli.py` — `_push_core`
+- `src/mind_meld/core.py` — `_SyncProgress` / `_start_sync_progress`
 - `src/mind_meld/core.py` — `_pause_sync_progress` / `_fetch_remote_manifest`
-- `src/mind_meld/cli.py` — `_recover_prior_manifest`
+- `src/mind_meld/core.py` — `_recover_prior_manifest`
 - `src/mind_meld/core.py` — `_filter_excluded_paths` / `_filter_disabled_sources`
-- `src/mind_meld/cli.py` — `_drop_case_collisions_from_manifests`
+- `src/mind_meld/pullflow.py` — `_drop_case_collisions_from_manifests`
 - `src/mind_meld/fsutil.py` — `atomic_write_bytes` / `_fsync_fd` / `fsync_dir` / (see "Atomic write publication failures" below)
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
@@ -22,7 +24,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
 - `src/mind_meld/core.py` — `_freeze_nested_checkout_entries`
-- `src/mind_meld/cli.py` — `_drop_unfrozen_checkout_files` / `_incoming_nested_roots`
+- `src/mind_meld/cli.py` — `_drop_unfrozen_checkout_files`
+- `src/mind_meld/core.py` — `_incoming_nested_roots`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
 - `src/mind_meld/config.py` — `save_config` / `patch_config_on_disk` / `load_config` / the config.toml keys `exclude_patterns`, `disabled_sources`, `seen_sources` (TOML keys, not module symbols) and their consumer paths
 - `src/mind_meld/seen_sources.py`
@@ -269,7 +272,7 @@ fault-free re-run completed and left that copy. The same roadmap card (Track
 71A, drained from the TODOS entry "Two handlers catch OSError for helper writes
 that raise StorageError") owns repair.
 
-**Exclusions.** Explicit False calls are `cli.py:_apply_write`, `_apply_merge`,
+**Exclusions.** Explicit False calls are `pullflow.py:_apply_write`, `_apply_merge`,
 `_apply_conflict`, both writes in `_apply_incoming_file`,
 `resolveflow.py:_resolve_interactive_loop`, `seen_sources.py:write` and
 `synclog.py:write_sync_log`. Omitted/default-False calls are the two sentinel
@@ -959,11 +962,11 @@ pullhistory.maintain_best_effort()
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).
 
 ## Pull-time mtime preservation (load-bearing, v0.12.3)
-`_apply_write` and `_apply_conflict` (cli.py) MUST call `_restore_mtime_best_effort(path, remote_info.get("mtime"))` after a successful `atomic_write_bytes`. Without it, every pulled file lands with `st_mtime = now-of-pull`, and any downstream consumer that orders by mtime (e.g. gstack skill preambles' `ls -t` recency scan over `~/.gstack/projects/*/checkpoints/`) sees freshly-pulled-old files as "newer" than locally-authored newer ones. The keep-remote interactive branch in `_apply_incoming_file` does the same restore inline.
+`_apply_write` and `_apply_conflict` (pullflow.py) MUST call `_restore_mtime_best_effort(path, remote_info.get("mtime"))` after a successful `atomic_write_bytes`. Without it, every pulled file lands with `st_mtime = now-of-pull`, and any downstream consumer that orders by mtime (e.g. gstack skill preambles' `ls -t` recency scan over `~/.gstack/projects/*/checkpoints/`) sees freshly-pulled-old files as "newer" than locally-authored newer ones. The keep-remote interactive branch in `_apply_incoming_file` does the same restore inline.
 
 `_apply_merge` and the merge-via-LCS interactive branch deliberately do NOT restore — line-union merges produce locally-authored content, and backdating to the remote mtime would cause peers' next pull to see `local_mtime <= their remote_mtime` and skip the merged result, losing the union content fleet-wide.
 
-**Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` skip at the `cli.py:_apply_incoming_file` mtime gate — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
+**Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` skip at the `pullflow.py:_apply_incoming_file` mtime gate — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
 
 **Defensive parsing.** `_restore_mtime_best_effort`, the apply mtime gate, and `pullplan._predict_pull_outcome` catch `TypeError | ValueError | OverflowError | OSError`, including comparison of a timezone-less remote timestamp with the timezone-aware local mtime. `mtime_from_manifest` rejects timezone-less strings. `load_manifest` rejects non-dict file values and missing/non-string `sha256` with `ManifestError` before coercing any non-string `mtime` to `None`. A malformed entry degrades to the existing corrupt-peer warning; other peers continue. An existing divergent file with `mtime=None` takes the conflict path. Consumer guards also protect direct callers and local-clock overflow. `_upload_changed_blobs` takes freshly scanned local revisions, never loaded peer metadata.
 
@@ -989,7 +992,7 @@ Tests: `tests/test_pull_helpers.py::TestApplyExceptionBoundary53A`, publication/
 ## rel_path traversal defense (load-bearing, v0.11.21, security)
 `manifest._validate_rel_path` rejects any `sources[*].files` key (and any tombstone path part) that could escape its source root when concatenated to `base_path`. Rejection criteria: empty string, null bytes, leading `/` or `\` (absolute path — Python's `Path('/base') / '/abs'` returns `Path('/abs')` so the right-hand side wins), Windows drive letters (`C:foo`), or any segment equal to `..` after splitting on either separator. **Do NOT pre-`posixpath.normpath`**: `normpath` collapses `a/..` to `.` and would silently drop the suspicious segment before the check fires.
 
-Threat model: a peer with the storage passphrase can mint an authenticated manifest with arbitrary UTF-8 keys — the GCM authenticator only proves "the bytes came from someone with the passphrase," not "the bytes describe a confined path." Without this guard, `_download_and_apply` (cli.py) would build `local_path = base_path / rel_path` and `mkdir(parents=True, exist_ok=True) + atomic_write_bytes(local_path, ...)` decrypted blob bytes anywhere the user can write — `~/.ssh/authorized_keys`, `~/.zshrc`, `/etc/cron.d/*`, etc. — escalating passphrase + storage-write into RCE on every fleet device that pulls.
+Threat model: a peer with the storage passphrase can mint an authenticated manifest with arbitrary UTF-8 keys — the GCM authenticator only proves "the bytes came from someone with the passphrase," not "the bytes describe a confined path." Without this guard, `_download_and_apply` (pullflow.py) would build `local_path = base_path / rel_path` and `mkdir(parents=True, exist_ok=True) + atomic_write_bytes(local_path, ...)` decrypted blob bytes anywhere the user can write — `~/.ssh/authorized_keys`, `~/.zshrc`, `/etc/cron.d/*`, etc. — escalating passphrase + storage-write into RCE on every fleet device that pulls.
 
 Defense-in-depth: `_download_and_apply` ALSO checks `local_path.resolve(strict=False).is_relative_to(base_path.resolve(strict=False))` before calling `_apply_incoming_file`. The dual check exists because `manifest.load_manifest` is the canonical load boundary, but legacy on-disk caches and test fixtures could in principle reach the apply path through a different route; the resolve+is_relative_to assertion catches anything that slips past the load-boundary validator.
 

@@ -17,36 +17,23 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mind_meld import pullplan, resolveflow
+from mind_meld import core, pullflow, pullplan, resolveflow
 from mind_meld.cli import (
-    _apply_conflict,
-    _apply_merge,
-    _apply_write,
     _bootstrap_or_verify_crypto,
-    _CorruptPeer,
-    _fsync_touched_parents,
-    _FsyncWarning,
     _held_breadcrumb_detail,
     _held_count_phrase,
     _include_prior_host_if_needed,
     _inject_held_entries,
     _load_prior_device_metadata,
-    _PerSourceResult,
-    _prefetch_manifests,
-    _preflight_conflicts,
-    _print_pull_prediction,
     _prompt_passphrase,
     _prompt_sources,
     _prove_omitted_paths_absent,
-    _pull_one_source,
     _register_and_save,
-    _restore_mtime_best_effort,
     _retain_prior_default_sources,
-    _select_devices,
-    _UnknownSourceWarning,
     _upload_changed_blobs,
 )
 from mind_meld.config import DEFAULT_SOURCES, SourceResolution
+from mind_meld.conflictmtime import _restore_mtime_best_effort
 from mind_meld.errors import SnapshotChanged, SnapshotError, StorageError
 from mind_meld.manifest import _FileTooLarge, read_file_revision
 
@@ -72,7 +59,7 @@ class TestApplyWrite:
     def test_happy_path(self, tmp_path: Path) -> None:
         local = tmp_path / "sub" / "file.md"
         local.parent.mkdir(parents=True, exist_ok=True)
-        outcome = _apply_write(local, "sub/file.md", b"data")
+        outcome = pullflow._apply_write(local, "sub/file.md", b"data")
         assert outcome == "written"
         assert local.read_bytes() == b"data"
 
@@ -85,7 +72,7 @@ class TestApplyWrite:
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
         local = tmp_path / "x.md"
-        outcome = _apply_write(local, "x.md", b"data")
+        outcome = pullflow._apply_write(local, "x.md", b"data")
         assert outcome == "failed"
 
     def test_restores_remote_mtime(self, tmp_path: Path) -> None:
@@ -99,7 +86,7 @@ class TestApplyWrite:
         # An mtime well in the past so we can tell it apart from "now".
         remote_mtime = datetime(2026, 1, 15, 12, 30, 45, tzinfo=timezone.utc)
 
-        outcome = _apply_write(
+        outcome = pullflow._apply_write(
             local,
             "doc.md",
             b"data",
@@ -118,7 +105,7 @@ class TestApplyWrite:
         local = tmp_path / "doc.md"
         before = datetime.now(timezone.utc)
 
-        outcome = _apply_write(local, "doc.md", b"data", remote_mtime_iso=None)
+        outcome = pullflow._apply_write(local, "doc.md", b"data", remote_mtime_iso=None)
 
         assert outcome == "written"
         actual = datetime.fromtimestamp(local.stat().st_mtime, tz=timezone.utc)
@@ -131,7 +118,7 @@ class TestApplyWrite:
         metadata and falls back to NOW."""
         local = tmp_path / "doc.md"
 
-        outcome = _apply_write(local, "doc.md", b"data", remote_mtime_iso="not-a-date")
+        outcome = pullflow._apply_write(local, "doc.md", b"data", remote_mtime_iso="not-a-date")
 
         assert outcome == "written"
         assert local.read_bytes() == b"data"
@@ -145,7 +132,7 @@ class TestApplyMerge:
         local = tmp_path / "notes.jsonl"
         local.write_bytes(b'{"a":1}\n{"b":2}\n')
         remote = b'{"b":2}\n{"c":3}\n'
-        outcome = _apply_merge(local, "notes.jsonl", remote)
+        outcome = pullflow._apply_merge(local, "notes.jsonl", remote)
         assert outcome == "merged"
         lines = set(local.read_bytes().splitlines())
         assert b'{"a":1}' in lines
@@ -162,7 +149,7 @@ class TestApplyMerge:
             raise OSError("disk full")
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
-        outcome = _apply_merge(local, "notes.jsonl", b'{"b":2}\n')
+        outcome = pullflow._apply_merge(local, "notes.jsonl", b'{"b":2}\n')
         assert outcome == "failed"
 
     def test_noop_merge_returns_unchanged_jsonl(self, tmp_path: Path, monkeypatch) -> None:
@@ -188,7 +175,7 @@ class TestApplyMerge:
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", must_not_write)
 
         # Remote is a subset of local — line-union merge produces local's bytes.
-        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n')
+        outcome = pullflow._apply_merge(local, "notes.jsonl", b'{"a":1}\n')
 
         assert outcome == "unchanged"
         assert local.read_bytes() == original_bytes
@@ -200,7 +187,7 @@ class TestApplyMerge:
         local.write_bytes(b"- entry one\n- entry two\n")
         original_bytes = local.read_bytes()
 
-        outcome = _apply_merge(local, "MEMORY.md", b"- entry one\n")
+        outcome = pullflow._apply_merge(local, "MEMORY.md", b"- entry one\n")
 
         assert outcome == "unchanged"
         # _join_lines sorts lexicographically; "- entry one" < "- entry two".
@@ -214,7 +201,7 @@ class TestApplyMerge:
         local = tmp_path / "notes.jsonl"
         local.write_bytes(b'{"a":1}\n')
 
-        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
+        outcome = pullflow._apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
 
         assert outcome == "merged"
         lines = set(local.read_bytes().splitlines())
@@ -239,7 +226,7 @@ class TestApplyConflict:
             raise OSError("disk full")
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
-        outcome = _apply_conflict(local, "doc.md", b"remote", "devAAAA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"remote", "devAAAA1234")
         assert outcome == "failed"
         assert local.exists()
         assert local.read_bytes() == b"local"
@@ -262,7 +249,7 @@ class TestApplyConflict:
             raise OSError("disk full")
 
         monkeypatch.setattr(cli_module.fsutil, "atomic_write_bytes", boom)
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
         assert outcome == "failed"
         assert local.read_bytes() == b"local"
         assert local.stat().st_mtime_ns == local_mtime
@@ -290,7 +277,7 @@ class TestApplyConflict:
             raise OSError("cross-device link")
 
         monkeypatch.setattr(fsutil_mod.os, "replace", bad_replace)
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
         assert outcome == "failed"
         assert local.read_bytes() == b"local"
         assert local.stat().st_mtime_ns == local_mtime
@@ -306,7 +293,6 @@ class TestApplyConflict:
     def test_path_build_valueerror_after_selection_preserves_old(
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
-        from mind_meld import cli as cli_module
 
         local = tmp_path / "doc.md"
         local.write_bytes(b"local")
@@ -317,8 +303,8 @@ class TestApplyConflict:
         def boom(canonical, device_id, now=None):
             raise ValueError("injected after selection")
 
-        monkeypatch.setattr(cli_module, "conflict_filename", boom)
-        outcome = _apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
+        monkeypatch.setattr(pullflow, "conflict_filename", boom)
+        outcome = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devAAAA1234")
         assert outcome == "failed"
         assert old.exists()
         assert old.read_bytes() == b"peer R1"
@@ -346,8 +332,8 @@ class TestApplyConflict:
             return orig_lstat(self)
 
         monkeypatch.setattr(Path, "lstat", selective_lstat)
-        first_outcome = _apply_conflict(first, "first.md", b"peer R2", "devA1234")
-        second_outcome = _apply_conflict(second, "second.md", b"peer R2", "devA1234")
+        first_outcome = pullflow._apply_conflict(first, "first.md", b"peer R2", "devA1234")
+        second_outcome = pullflow._apply_conflict(second, "second.md", b"peer R2", "devA1234")
         assert first_outcome == "failed"
         assert second_outcome == "conflicted"
         assert old.exists()
@@ -373,7 +359,7 @@ class TestApplyConflict:
         local.write_bytes(b"local")
         remote_mtime = datetime(2026, 1, 15, 12, 30, 45, tzinfo=timezone.utc)
 
-        outcome = _apply_conflict(
+        outcome = pullflow._apply_conflict(
             local,
             "doc.md",
             b"remote",
@@ -399,7 +385,7 @@ class TestApplyMergeKeepsNowMtime:
         local.write_bytes(b'{"a":1}\n')
         before = datetime.now(timezone.utc)
 
-        outcome = _apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
+        outcome = pullflow._apply_merge(local, "notes.jsonl", b'{"a":1}\n{"b":2}\n')
 
         assert outcome == "merged"
         actual = datetime.fromtimestamp(local.stat().st_mtime, tz=timezone.utc)
@@ -493,7 +479,9 @@ class TestSelectDevices:
                 {"device_id": "peerB", "device_name": "B"},
             ],
         )
-        all_devs, targets = _select_devices(backend=None, my_device_id="self1", from_device="peerA")
+        all_devs, targets = pullflow._select_devices(
+            backend=None, my_device_id="self1", from_device="peerA"
+        )
         assert len(all_devs) == 3
         assert [d["device_id"] for d in targets] == ["peerA"]
 
@@ -508,7 +496,7 @@ class TestSelectDevices:
                 {"device_id": "peerA", "device_name": "A"},
             ],
         )
-        all_devs, targets = _select_devices(
+        all_devs, targets = pullflow._select_devices(
             backend=None, my_device_id="self1", from_device="nonexistent"
         )
         assert len(all_devs) == 2
@@ -526,7 +514,9 @@ class TestSelectDevices:
                 {"device_id": "peerB", "device_name": "B"},
             ],
         )
-        all_devs, targets = _select_devices(backend=None, my_device_id="self1", from_device=None)
+        all_devs, targets = pullflow._select_devices(
+            backend=None, my_device_id="self1", from_device=None
+        )
         assert {d["device_id"] for d in targets} == {"peerA", "peerB"}
 
     def test_dedup_single_call(self, monkeypatch) -> None:
@@ -540,7 +530,7 @@ class TestSelectDevices:
             return [{"device_id": "peerA", "device_name": "A"}]
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", counting_list)
-        _select_devices(backend=None, my_device_id="self1", from_device=None)
+        pullflow._select_devices(backend=None, my_device_id="self1", from_device=None)
         assert len(calls) == 1
 
 
@@ -563,7 +553,7 @@ class TestPrefetchManifests:
             {"device_id": "A", "device_name": "A"},
             {"device_id": "B", "device_name": "B"},
         ]
-        cache, corrupt = _prefetch_manifests(None, devices, "pp", 1024)
+        cache, corrupt = pullflow._prefetch_manifests(None, devices, "pp", 1024)
         assert set(cache.keys()) == {"A", "B"}
         assert corrupt == []
 
@@ -581,7 +571,7 @@ class TestPrefetchManifests:
             {"device_id": "good", "device_name": "GoodMac"},
             {"device_id": "bad", "device_name": "BadMac"},
         ]
-        cache, corrupt = _prefetch_manifests(None, devices, "pp", 1024)
+        cache, corrupt = pullflow._prefetch_manifests(None, devices, "pp", 1024)
         assert cache["good"] is not None
         assert cache["bad"] is None  # corrupt mapped to None
         assert len(corrupt) == 1
@@ -598,7 +588,7 @@ class TestPrefetchManifests:
             lambda *a, **kw: ManifestFetch(status="missing"),
         )
         devices = [{"device_id": "A", "device_name": "A"}]
-        cache, corrupt = _prefetch_manifests(None, devices, "pp", 1024)
+        cache, corrupt = pullflow._prefetch_manifests(None, devices, "pp", 1024)
         assert cache["A"] is None
         assert corrupt == []  # missing is not corrupt
 
@@ -621,7 +611,7 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             pull_targets,
             manifest_cache,
             local_sources,
@@ -652,7 +642,7 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             pull_targets,
             manifest_cache,
             local_sources,
@@ -685,7 +675,7 @@ class TestPreflightConflicts:
             },
         }
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             pull_targets,
             manifest_cache,
             local_sources,
@@ -708,7 +698,7 @@ class TestPreflightConflicts:
         }
         # no gstack mapping — only claude source configured locally
         local_sources = {"claude": {"path": tmp_path, "type": "claude"}}
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             pull_targets,
             manifest_cache,
             local_sources,
@@ -722,7 +712,7 @@ class TestPreflightConflicts:
         blocked.write_bytes(b"local")
         blocked.chmod(0)
         try:
-            predicted = _preflight_conflicts(
+            predicted = pullflow._preflight_conflicts(
                 [{"device_id": "peerA", "device_name": "A"}],
                 {
                     "peerA": {
@@ -744,7 +734,7 @@ class TestPreflightConflicts:
     def test_fifo_is_may_fail_without_hanging(self, tmp_path: Path) -> None:
         fifo = tmp_path / "pipe.md"
         os.mkfifo(fifo)
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             [{"device_id": "peerA", "device_name": "A"}],
             {
                 "peerA": {
@@ -763,7 +753,7 @@ class TestPreflightConflicts:
 
     def test_directory_collision_is_may_fail(self, tmp_path: Path) -> None:
         (tmp_path / "as-dir").mkdir()
-        predicted = _preflight_conflicts(
+        predicted = pullflow._preflight_conflicts(
             [{"device_id": "peerA", "device_name": "A"}],
             {
                 "peerA": {
@@ -786,7 +776,7 @@ class TestPreflightConflicts:
 
 class TestPullOneSource:
     def test_empty_remote_files(self, tmp_path: Path) -> None:
-        result = _pull_one_source(
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="claude",
             src_type="claude",
@@ -816,7 +806,7 @@ class TestPullOneSource:
             raise error_class("Cannot publish: mm-events folder is not ready.")
 
         monkeypatch.setattr(cli_module._config_module, "_bootstrap_mm_events_path", refuse)
-        result = _pull_one_source(
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="mm-events",
             src_type="generic",
@@ -835,7 +825,7 @@ class TestPullOneSource:
         assert "mm-events folder is not ready" in capsys.readouterr().err
 
     def test_dry_run_returns_diff(self, tmp_path: Path) -> None:
-        result = _pull_one_source(
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="claude",
             src_type="claude",
@@ -854,7 +844,6 @@ class TestPullOneSource:
 
     def test_claude_sync_base_set_for_claude(self, tmp_path: Path, monkeypatch) -> None:
         """Non-dry-run with changes — claude_sync_base is set for type=='claude'."""
-        from mind_meld import cli as cli_module
 
         # Stub _download_and_apply to pretend one file was written.
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
@@ -869,8 +858,8 @@ class TestPullOneSource:
             }
             return 42, outcomes
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
-        result = _pull_one_source(
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="claude",
             src_type="claude",
@@ -901,7 +890,6 @@ class TestPullOneSource:
         a bigger design change (cross-device source identity) tracked as
         a known limitation, not fixed here.
         """
-        from mind_meld import cli as cli_module
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
             return 1, {
@@ -914,8 +902,8 @@ class TestPullOneSource:
                 "failed": [],
             }
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
-        result = _pull_one_source(
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="my-claude",  # user renamed
             src_type="claude",  # but type is still claude
@@ -936,7 +924,6 @@ class TestPullOneSource:
         )
 
     def test_non_claude_sync_base_none(self, tmp_path: Path, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
             return 0, {
@@ -952,8 +939,8 @@ class TestPullOneSource:
                 ]
             }
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
-        result = _pull_one_source(
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="gstack",
             src_type="generic",
@@ -973,7 +960,6 @@ class TestPullOneSource:
     def test_claude_named_generic_does_not_log(self, tmp_path: Path, monkeypatch) -> None:
         """Symmetric pin: a source named 'claude' but typed 'generic' must
         NOT write a sync log. Name is cosmetic; type drives behavior."""
-        from mind_meld import cli as cli_module
 
         def fake_dl(backend, base_path, to_download, did, pp, mk, **kw):
             return 1, {
@@ -986,8 +972,8 @@ class TestPullOneSource:
                 "failed": [],
             }
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
-        result = _pull_one_source(
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
+        result = pullflow._pull_one_source(
             backend=None,
             src_name="claude",  # name-only
             src_type="generic",  # but NOT a claude-typed source
@@ -1005,7 +991,6 @@ class TestPullOneSource:
         assert result.claude_sync_base is None
 
     def test_tombstoned_files_filtered(self, tmp_path: Path, monkeypatch) -> None:
-        from mind_meld import cli as cli_module
 
         downloaded_keys: list[str] = []
 
@@ -1024,10 +1009,10 @@ class TestPullOneSource:
                 ]
             }
 
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_dl)
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_dl)
         # is_tombstoned uses f"{source}:{rel_path}" as the flat key.
         tombstones = {"claude:old.md": {"deleted_at": "2026-01-01T00:00:00Z"}}
-        _pull_one_source(
+        pullflow._pull_one_source(
             backend=None,
             src_name="claude",
             src_type="claude",
@@ -1073,7 +1058,7 @@ class TestPrintPullPrediction:
             ),
             pullplan.PullPrediction("peerA", "A", "claude", "same-unchanged.md", "unchanged"),
         ]
-        _print_pull_prediction(predictions, tmp_path, "claude")
+        pullflow._print_pull_prediction(predictions, tmp_path, "claude")
         out = capsys.readouterr().out
         assert "source 'claude'" in out
         assert "write" in out
@@ -1092,7 +1077,7 @@ class TestPrintPullPrediction:
         predictions = [
             pullplan.PullPrediction("peerA", "A", "claude", "same.md", "unchanged"),
         ]
-        _print_pull_prediction(predictions, short_base, "claude")
+        pullflow._print_pull_prediction(predictions, short_base, "claude")
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert len(lines) == 1
         assert "source 'claude'" in lines[0]
@@ -1100,7 +1085,7 @@ class TestPrintPullPrediction:
 
     def test_empty_predictions_prints_only_the_header(self, tmp_path: Path, capsys) -> None:
         short_base = Path("/tmp/mm-test")
-        _print_pull_prediction([], short_base, "claude")
+        pullflow._print_pull_prediction([], short_base, "claude")
         lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
         assert len(lines) == 1
 
@@ -1150,10 +1135,10 @@ class TestPullPlanTotals:
 
 class TestFsyncTouchedParents:
     def test_empty_set_no_warnings(self) -> None:
-        assert _fsync_touched_parents(set()) == []
+        assert pullflow._fsync_touched_parents(set()) == []
 
     def test_success_no_warnings(self, tmp_path: Path) -> None:
-        warnings = _fsync_touched_parents({tmp_path})
+        warnings = pullflow._fsync_touched_parents({tmp_path})
         assert warnings == []
 
     def test_failure_returns_warning(self, tmp_path: Path, monkeypatch) -> None:
@@ -1163,7 +1148,7 @@ class TestFsyncTouchedParents:
             raise StorageError("fsync failed")
 
         monkeypatch.setattr(cli_module.fsutil, "fsync_dir", boom)
-        warnings = _fsync_touched_parents({tmp_path})
+        warnings = pullflow._fsync_touched_parents({tmp_path})
         assert len(warnings) == 1
         assert warnings[0].parent_dir == tmp_path
         assert "fsync failed" in warnings[0].error
@@ -1182,11 +1167,10 @@ class TestPrintPullSummaryStderrRouting:
     """
 
     def test_corrupt_peer_stderr_in_quiet(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
-        _print_pull_summary(
-            PullResult(),
-            corrupt_peers=[_CorruptPeer(device_id="bad", device_name="BadMac")],
+        pullflow._print_pull_summary(
+            pullflow.PullResult(),
+            corrupt_peers=[pullflow._CorruptPeer(device_id="bad", device_name="BadMac")],
             unknown_sources=[],
             fsync_warnings=[],
             per_source_results=[],
@@ -1198,12 +1182,11 @@ class TestPrintPullSummaryStderrRouting:
         assert "corrupt" in captured.err
 
     def test_unknown_source_stderr_in_quiet(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
-        _print_pull_summary(
-            PullResult(),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(),
             corrupt_peers=[],
-            unknown_sources=[_UnknownSourceWarning(src_name="gstack", device_name="A")],
+            unknown_sources=[pullflow._UnknownSourceWarning(src_name="gstack", device_name="A")],
             fsync_warnings=[],
             per_source_results=[],
             quiet=True,
@@ -1214,13 +1197,12 @@ class TestPrintPullSummaryStderrRouting:
         assert "not configured" in captured.err
 
     def test_fsync_warning_stderr_in_quiet(self, tmp_path: Path, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
-        _print_pull_summary(
-            PullResult(),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(),
             corrupt_peers=[],
             unknown_sources=[],
-            fsync_warnings=[_FsyncWarning(parent_dir=tmp_path, error="disk full")],
+            fsync_warnings=[pullflow._FsyncWarning(parent_dir=tmp_path, error="disk full")],
             per_source_results=[],
             quiet=True,
             verbose=False,
@@ -1230,10 +1212,9 @@ class TestPrintPullSummaryStderrRouting:
         assert "disk full" in captured.err
 
     def test_quiet_suppresses_cosmetic_summary(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
-        _print_pull_summary(
-            PullResult(total_written=5, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_written=5, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1247,10 +1228,9 @@ class TestPrintPullSummaryStderrRouting:
         assert "Pull complete" not in captured.err
 
     def test_nonquiet_shows_cosmetic_summary(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
-        _print_pull_summary(
-            PullResult(total_written=5, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_written=5, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1273,9 +1253,9 @@ def _make_per_source(
     conflicted: list[str] | None = None,
     failed: list[str] | None = None,
     written: list[str] | None = None,
-) -> _PerSourceResult:
+) -> pullflow._PerSourceResult:
     """Build a _PerSourceResult fixture for summary tests."""
-    return _PerSourceResult(
+    return pullflow._PerSourceResult(
         src_name=src_name,
         device_name=device_name,
         device_id=device_name + "-id",
@@ -1302,11 +1282,10 @@ class TestPullSummaryInlinePaths:
     """
 
     def test_conflicted_paths_listed_under_per_source_line(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
-        _print_pull_summary(
-            PullResult(total_conflicted=3, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=3, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1320,13 +1299,12 @@ class TestPullSummaryInlinePaths:
             assert path in out
 
     def test_failed_paths_listed_separately(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source(
             "claude", "machine-a", failed=["bad-blob.md", "bad-decrypt.md"]
         )
-        _print_pull_summary(
-            PullResult(total_failed=2, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_failed=2, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1339,12 +1317,11 @@ class TestPullSummaryInlinePaths:
         assert "bad-decrypt.md" in out
 
     def test_cap_at_20_shows_overflow(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
-        _print_pull_summary(
-            PullResult(total_conflicted=25, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1362,12 +1339,11 @@ class TestPullSummaryInlinePaths:
 
     def test_verbose_unlocks_cap(self, capsys) -> None:
         """D5: --verbose lifts the 20-path cap on inline path display."""
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
-        _print_pull_summary(
-            PullResult(total_conflicted=25, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1383,11 +1359,10 @@ class TestPullSummaryInlinePaths:
 
     def test_zero_conflicts_no_inline_list(self, capsys) -> None:
         """No conflicted/failed paths => no inline list (no false positives)."""
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source("claude", "machine-a", written=["new.md"])
-        _print_pull_summary(
-            PullResult(total_written=1, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_written=1, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1410,11 +1385,10 @@ class TestPullSummaryQuietContract:
     """
 
     def test_quiet_routes_per_source_conflicts_to_stderr(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source("claude", "machine-a", conflicted=["a.md", "b.md", "c.md"])
-        _print_pull_summary(
-            PullResult(total_conflicted=3, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=3, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1432,11 +1406,10 @@ class TestPullSummaryQuietContract:
         assert "Pull complete" not in captured.out
 
     def test_quiet_routes_per_source_failed_to_stderr(self, capsys) -> None:
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source("claude", "machine-a", failed=["bad.md"])
-        _print_pull_summary(
-            PullResult(total_failed=1, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_failed=1, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1455,12 +1428,11 @@ class TestPullSummaryQuietContract:
         cli.py:2422 is suppressed in quiet mode, so the stderr line is
         the only context the user gets).
         """
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         ps_a = _make_per_source("claude", "machine-a", conflicted=["x.md"])
         ps_b = _make_per_source("claude", "machine-b", conflicted=["y.md"])
-        _print_pull_summary(
-            PullResult(total_conflicted=2, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=2, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1476,11 +1448,10 @@ class TestPullSummaryQuietContract:
 
     def test_quiet_zero_conflicts_no_stderr(self, capsys) -> None:
         """No conflicts/failures => no stderr noise (no false positives)."""
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         per_source = _make_per_source("claude", "machine-a", written=["new.md"])
-        _print_pull_summary(
-            PullResult(total_written=1, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_written=1, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1493,12 +1464,11 @@ class TestPullSummaryQuietContract:
 
     def test_quiet_cap_with_overflow_marker(self, capsys) -> None:
         """quiet stderr also caps at 20 (with --verbose unlock per D5)."""
-        from mind_meld.cli import PullResult, _print_pull_summary
 
         paths = [f"f{i}.md" for i in range(25)]
         per_source = _make_per_source("claude", "machine-a", conflicted=paths)
-        _print_pull_summary(
-            PullResult(total_conflicted=25, elapsed=1.0),
+        pullflow._print_pull_summary(
+            pullflow.PullResult(total_conflicted=25, elapsed=1.0),
             corrupt_peers=[],
             unknown_sources=[],
             fsync_warnings=[],
@@ -1545,10 +1515,9 @@ class TestDownloadAndApplyQuietAndProgress:
         """REGRESSION: D11/Task 4 quiet contract — no widget, no banner,
         no per-file lines reach stdout/stderr in quiet mode.
         """
-        from mind_meld.cli import _download_and_apply
 
         backend = self._force_get_failure(monkeypatch)
-        bt, outcomes = _download_and_apply(
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             tmp_path,
             {"a.md": _info("abc")},
@@ -1569,10 +1538,9 @@ class TestDownloadAndApplyQuietAndProgress:
         Rich Progress with total=0 renders an empty bar; div-by-zero risk
         on percentage display in some Rich versions. Gate it out entirely.
         """
-        from mind_meld.cli import _download_and_apply
 
         backend = MagicMock()
-        bt, outcomes = _download_and_apply(
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             tmp_path,
             {},
@@ -1605,18 +1573,19 @@ class TestDownloadAndApplyQuietAndProgress:
 
         non_tty = _Console(file=_io.StringIO(), force_terminal=False)
         monkeypatch.setattr(cli_module, "console", non_tty)
+        monkeypatch.setattr(pullflow, "console", non_tty)
+        monkeypatch.setattr(core, "console", non_tty)
         return non_tty
 
     def test_non_tty_emits_start_banner(self, tmp_path, monkeypatch) -> None:
         """Non-TTY non-quiet => single start banner; no rewriting widget
         (widget would garble piped output / log capture).
         """
-        from mind_meld import cli as cli_module
 
         backend = self._force_get_failure(monkeypatch)
         non_tty = self._force_non_tty_console(monkeypatch)
 
-        cli_module._download_and_apply(
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {"a.md": _info("abc"), "b.md": _info("def")},
@@ -1631,12 +1600,11 @@ class TestDownloadAndApplyQuietAndProgress:
 
     def test_non_tty_quiet_silent(self, tmp_path, monkeypatch) -> None:
         """Non-TTY + quiet => still silent (quiet wins over banner)."""
-        from mind_meld import cli as cli_module
 
         backend = self._force_get_failure(monkeypatch)
         non_tty = self._force_non_tty_console(monkeypatch)
 
-        cli_module._download_and_apply(
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {"a.md": _info("abc")},
@@ -1657,7 +1625,6 @@ class TestDownloadAndApplyQuietAndProgress:
         _print_pull_summary; per-file decoration must be suppressed in
         quiet mode.
         """
-        from mind_meld import cli as cli_module
 
         non_tty = self._force_non_tty_console(monkeypatch)
 
@@ -1665,7 +1632,7 @@ class TestDownloadAndApplyQuietAndProgress:
         backend = MagicMock()
 
         # info has empty sha256 → blob_key raises ValueError → bad blob key path
-        cli_module._download_and_apply(
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {"a.md": {"sha256": "", "size": 0}},
@@ -1685,12 +1652,11 @@ class TestDownloadAndApplyQuietAndProgress:
         With verbose AND quiet, the verbose-gated blob-missing line must
         still suppress (quiet wins).
         """
-        from mind_meld import cli as cli_module
 
         non_tty = self._force_non_tty_console(monkeypatch)
         backend = self._force_get_failure(monkeypatch)
 
-        cli_module._download_and_apply(
+        pullflow._download_and_apply(
             backend,
             tmp_path,
             {"a.md": _info("abc")},
@@ -1719,7 +1685,7 @@ class TestHadChangesExcludesUnchanged:
     """
 
     def test_unchanged_only_is_not_changes(self) -> None:
-        result = _PerSourceResult(
+        result = pullflow._PerSourceResult(
             src_name="claude",
             device_name="A",
             device_id="peerA",
@@ -1739,7 +1705,7 @@ class TestHadChangesExcludesUnchanged:
 
     def test_skipped_only_is_changes(self) -> None:
         """One-way-sync (always local-newer) must still trigger cleanup."""
-        result = _PerSourceResult(
+        result = pullflow._PerSourceResult(
             src_name="claude",
             device_name="A",
             device_id="peerA",
@@ -1758,7 +1724,7 @@ class TestHadChangesExcludesUnchanged:
         assert result.had_changes is True
 
     def test_failed_only_is_changes(self) -> None:
-        result = _PerSourceResult(
+        result = pullflow._PerSourceResult(
             src_name="claude",
             device_name="A",
             device_id="peerA",
@@ -1777,7 +1743,7 @@ class TestHadChangesExcludesUnchanged:
         assert result.had_changes is True
 
     def test_empty_outcomes_is_not_changes(self) -> None:
-        result = _PerSourceResult(
+        result = pullflow._PerSourceResult(
             src_name="claude",
             device_name="A",
             device_id="peerA",
@@ -1826,7 +1792,7 @@ class TestWarningsSurvivePartialPull:
         prefetch phase must still reach stderr via _print_pull_summary.
         """
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch, _pull_core
+        from mind_meld.cli import ManifestFetch
         from mind_meld.errors import StorageError
 
         # Build a config
@@ -1884,21 +1850,22 @@ class TestWarningsSurvivePartialPull:
         # monkeypatch the deeper operations).
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_download_and_apply)
-        monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", raising_cleanup)
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_download_and_apply)
+        monkeypatch.setattr(core, "_cleanup_conflict_copies", raising_cleanup)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        monkeypatch.setattr(pullflow, "get_backend", lambda c: None)
         # Track 5E: bypass the fleet-version check + migration sweep so
         # the test stays scoped to corrupt-peer warning routing.
-        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(pullflow, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
         monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "collect_tombstones",
             lambda *a, **kw: {},
         )
 
         # Run in quiet mode to assert stderr routing survives.
-        _pull_core(
+        pullflow._pull_core(
             config=config,
             passphrase="pp",
             memory_kb=1024,
@@ -1921,7 +1888,7 @@ class TestWriteSyncLogBestEffort:
         self, tmp_path: Path, monkeypatch, capsys
     ) -> None:
         from mind_meld import cli as cli_module
-        from mind_meld.cli import ManifestFetch, _pull_core
+        from mind_meld.cli import ManifestFetch
 
         (tmp_path / "storage").mkdir()
         (tmp_path / "claude").mkdir()
@@ -1984,24 +1951,25 @@ class TestWriteSyncLogBestEffort:
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
-        monkeypatch.setattr(cli_module, "_download_and_apply", fake_download_and_apply)
-        monkeypatch.setattr(cli_module, "_cleanup_conflict_copies", lambda *a, **kw: 0)
-        monkeypatch.setattr(cli_module, "write_sync_log", boom_write_sync_log)
+        monkeypatch.setattr(pullflow, "_download_and_apply", fake_download_and_apply)
+        monkeypatch.setattr(core, "_cleanup_conflict_copies", lambda *a, **kw: 0)
+        monkeypatch.setattr(pullflow, "write_sync_log", boom_write_sync_log)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
+        monkeypatch.setattr(pullflow, "get_backend", lambda c: None)
         # Track 5E: _pull_core's fleet-version check fires before any
         # other I/O. This unit test stubs get_backend → None to isolate
         # sync-log behavior, so the fleet check has no real backend to
         # query — bypass it.
-        monkeypatch.setattr(cli_module, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
+        monkeypatch.setattr(pullflow, "_check_fleet_version_or_refuse", lambda *a, **kw: None)
         monkeypatch.setattr(resolveflow, "_find_conflict_files", lambda *a, **kw: [])
         monkeypatch.setattr(
-            cli_module,
+            pullflow,
             "collect_tombstones",
             lambda *a, **kw: {},
         )
 
         # Should NOT raise; returns a partial PullResult.
-        result = _pull_core(
+        result = pullflow._pull_core(
             config=config,
             passphrase="pp",
             memory_kb=1024,
@@ -2213,6 +2181,8 @@ class TestPromptSources:
             return False
 
         monkeypatch.setattr(cli_module, "Path", CountingPath)
+        monkeypatch.setattr(pullflow, "Path", CountingPath)
+        monkeypatch.setattr(core, "Path", CountingPath)
         monkeypatch.setattr(cli_module.typer, "confirm", confirm)
 
         _prompt_sources()
@@ -2629,15 +2599,13 @@ class TestDownloadAndApplyPathTraversalGuard:
         """Patch backend.get/decrypt so any rel_path that survives the
         guard reaches `_apply_incoming_file` with `payload`. We assert
         on outcome + filesystem state to detect escapes."""
-        from mind_meld import cli as cli_module
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque-ciphertext")
-        monkeypatch.setattr(cli_module, "decrypt", lambda *a, **kw: payload)
+        monkeypatch.setattr(pullflow, "decrypt", lambda *a, **kw: payload)
         return backend
 
     def test_rejects_parent_dir_escape(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
         # Construct a base inside tmp_path with a known sibling we can
@@ -2650,8 +2618,8 @@ class TestDownloadAndApplyPathTraversalGuard:
         bad_rel = "../../should_not_exist"
 
         apply_spy = MagicMock()
-        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
-        bt, outcomes = _download_and_apply(
+        monkeypatch.setattr("mind_meld.pullflow._apply_incoming_file", apply_spy)
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {bad_rel: _info(_sha(b"attacker-bytes"))},
@@ -2668,7 +2636,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         apply_spy.assert_not_called()
 
     def test_rejects_absolute_path_override(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"attacker-bytes")
         base = tmp_path / "src" / "claude"
@@ -2679,8 +2646,8 @@ class TestDownloadAndApplyPathTraversalGuard:
         bad_rel = str(abs_target)
 
         apply_spy = MagicMock()
-        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
-        bt, outcomes = _download_and_apply(
+        monkeypatch.setattr("mind_meld.pullflow._apply_incoming_file", apply_spy)
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {bad_rel: _info(_sha(b"attacker-bytes"))},
@@ -2697,14 +2664,13 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_accepts_legitimate_nested_path(self, tmp_path, monkeypatch) -> None:
         """Sanity: the guard does NOT false-positive on legitimate
         nested paths inside the source root."""
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"good-bytes")
         base = tmp_path / "src" / "claude"
         base.mkdir(parents=True)
         good_rel = "memory/deeply/nested/file.md"
 
-        bt, outcomes = _download_and_apply(
+        bt, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {good_rel: _info(_sha(b"good-bytes"))},
@@ -2723,7 +2689,6 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_preserves_local_symlink_destination(
         self, tmp_path, monkeypatch, dangling: bool
     ) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2734,7 +2699,7 @@ class TestDownloadAndApplyPathTraversalGuard:
         local_link = base / "AGENTS.md"
         local_link.symlink_to(target)
 
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {"AGENTS.md": _info(_sha(b"peer-bytes"))},
@@ -2750,7 +2715,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert not target.exists() if dangling else target.read_text() == "managed"
 
     def test_preserves_symlinked_parent_below_source_root(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2759,7 +2723,7 @@ class TestDownloadAndApplyPathTraversalGuard:
         managed.mkdir()
         (base / "skills").symlink_to(managed, target_is_directory=True)
 
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {"skills/tool/SKILL.md": _info(_sha(b"peer-bytes"))},
@@ -2774,7 +2738,6 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert outcomes["skipped"] == ["skills/tool/SKILL.md"]
 
     def test_allows_a_symlinked_source_root(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         actual_base = tmp_path / "actual-src"
@@ -2782,7 +2745,7 @@ class TestDownloadAndApplyPathTraversalGuard:
         base_link = tmp_path / "source-link"
         base_link.symlink_to(actual_base, target_is_directory=True)
 
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base_link,
             {"skills/tool/SKILL.md": _info(_sha(b"peer-bytes"))},
@@ -2796,14 +2759,13 @@ class TestDownloadAndApplyPathTraversalGuard:
         assert outcomes["written"] == ["skills/tool/SKILL.md"]
 
     def test_direct_apply_preserves_leaf_symlink(self, tmp_path) -> None:
-        from mind_meld.cli import _apply_incoming_file
 
         target = tmp_path / "managed-agents.md"
         target.write_text("managed")
         local_link = tmp_path / "AGENTS.md"
         local_link.symlink_to(target)
 
-        outcome = _apply_incoming_file(
+        outcome = pullflow._apply_incoming_file(
             local_link,
             "AGENTS.md",
             b"peer-bytes",
@@ -2818,7 +2780,6 @@ class TestDownloadAndApplyPathTraversalGuard:
     def test_non_quiet_symlink_skip_emits_one_breadcrumb(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = self._patch_decrypt_chain(monkeypatch, b"peer-bytes")
         base = tmp_path / "src"
@@ -2827,7 +2788,7 @@ class TestDownloadAndApplyPathTraversalGuard:
         target.write_text("managed")
         (base / "AGENTS.md").symlink_to(target)
 
-        _download_and_apply(
+        pullflow._download_and_apply(
             backend,
             base,
             {"AGENTS.md": _info(_sha(b"peer-bytes"))},
@@ -2846,13 +2807,12 @@ class TestIncomingDigestCheck:
     def test_mismatch_fails_before_apply_and_preserves_bytes(
         self, tmp_path, monkeypatch, capsys
     ) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque-ciphertext")
-        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"wrong-bytes")
+        monkeypatch.setattr("mind_meld.pullflow.decrypt", lambda *a, **kw: b"wrong-bytes")
         apply_spy = MagicMock()
-        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
+        monkeypatch.setattr("mind_meld.pullflow._apply_incoming_file", apply_spy)
 
         base = tmp_path / "src"
         base.mkdir()
@@ -2861,7 +2821,7 @@ class TestIncomingDigestCheck:
         sidecar = base / "notes.sync-conflict-20260101-000000-v1-abcd1234.md"
         sidecar.write_text("peer copy")
 
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {"notes.md": _info(_sha(b"expected-bytes"))},
@@ -2878,7 +2838,6 @@ class TestIncomingDigestCheck:
         assert "content check failed" in capsys.readouterr().out
 
     def test_mismatch_then_later_valid_file_applies(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         payloads = {"bad.md": b"wrong", "good.md": b"good-bytes"}
 
@@ -2887,7 +2846,7 @@ class TestIncomingDigestCheck:
 
         backend = MagicMock()
         backend.get = MagicMock(side_effect=[b"bad.md", b"good.md"])
-        monkeypatch.setattr("mind_meld.cli.decrypt", decrypt_payload)
+        monkeypatch.setattr("mind_meld.pullflow.decrypt", decrypt_payload)
 
         base = tmp_path / "src"
         base.mkdir()
@@ -2895,7 +2854,7 @@ class TestIncomingDigestCheck:
             "bad.md": _info(_sha(b"expected")),
             "good.md": _info(_sha(b"good-bytes")),
         }
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend, base, to_download, "peerA", "pp", 1024, quiet=True
         )
         assert outcomes["failed"] == ["bad.md"]
@@ -2904,14 +2863,13 @@ class TestIncomingDigestCheck:
         assert not (base / "bad.md").exists()
 
     def test_quiet_mismatch_has_no_per_file_stdout(self, tmp_path, monkeypatch, capsys) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque")
-        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"wrong")
+        monkeypatch.setattr("mind_meld.pullflow.decrypt", lambda *a, **kw: b"wrong")
         base = tmp_path / "src"
         base.mkdir()
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {"a.md": _info(_sha(b"expected"))},
@@ -2925,17 +2883,16 @@ class TestIncomingDigestCheck:
         assert outcomes["failed"] == ["a.md"]
 
     def test_mismatch_does_not_enter_conflict_replacement(self, tmp_path, monkeypatch) -> None:
-        from mind_meld.cli import _download_and_apply
 
         backend = MagicMock()
         backend.get = MagicMock(return_value=b"opaque")
-        monkeypatch.setattr("mind_meld.cli.decrypt", lambda *a, **kw: b"remote-wrong")
+        monkeypatch.setattr("mind_meld.pullflow.decrypt", lambda *a, **kw: b"remote-wrong")
         apply_spy = MagicMock()
-        monkeypatch.setattr("mind_meld.cli._apply_incoming_file", apply_spy)
+        monkeypatch.setattr("mind_meld.pullflow._apply_incoming_file", apply_spy)
         base = tmp_path / "src"
         base.mkdir()
         (base / "notes.md").write_text("local divergent")
-        _, outcomes = _download_and_apply(
+        _, outcomes = pullflow._download_and_apply(
             backend,
             base,
             {"notes.md": _info(_sha(b"remote-right"))},
@@ -3318,7 +3275,6 @@ class TestSnapshotPublicationHelpers:
 @pytest.fixture
 def ordered_apply(tmp_path, monkeypatch):
     """Explicit apply order; full pull's new-before-modified scheduler is separate."""
-    from mind_meld import cli
     from mind_meld.crypto import encrypt
     from mind_meld.storage.keys import blob_key
 
@@ -3332,16 +3288,16 @@ def ordered_apply(tmp_path, monkeypatch):
         backend = MagicMock()
         backend.get.side_effect = payloads.__getitem__
         pending = {(base / rel).resolve(): 1.0 for rel, _, _ in files}
-        ledger = cli._ApplyReporter(
+        ledger = pullflow._ApplyReporter(
             device_name="Mac A",
             src_name="claude",
-            outcomes=cli._empty_outcomes(),
+            outcomes=pullflow._empty_outcomes(),
             pending_inline_bumps=pending,
         )
         entries = {rel: {"sha256": _sha(data), "mtime": mtime} for rel, data, mtime in files}
 
         def run():
-            return cli._download_and_apply(
+            return pullflow._download_and_apply(
                 backend,
                 base,
                 entries,
@@ -3395,7 +3351,7 @@ class TestApplyExceptionBoundary53A:
         def boom(*args):
             raise error("bad clock")
 
-        monkeypatch.setattr(cli, "mtime_from_path", boom)
+        monkeypatch.setattr(pullflow, "mtime_from_path", boom)
         monkeypatch.setattr(cli.pullplan, "mtime_from_path", boom)
         assert (
             cli.pullplan._predict_pull_outcome("notes.md", {"sha256": _sha(b"peer")}, base)
@@ -3529,6 +3485,8 @@ class TestApplyExceptionBoundary53A:
             return progress
 
         monkeypatch.setattr(cli, "Progress", capture)
+        monkeypatch.setattr(pullflow, "Progress", capture)
+        monkeypatch.setattr(core, "Progress", capture)
         monkeypatch.setattr(cli.console, "_force_terminal", True)
         _, prepare = ordered_apply
         run, _, _, _ = prepare([("file.txt", b"a", None)], verbose=True)
@@ -3553,7 +3511,7 @@ class TestApplyExceptionBoundary53A:
         from mind_meld import cli
 
         base, prepare = ordered_apply
-        original = cli._apply_incoming_file
+        original = pullflow._apply_incoming_file
         exc = error("apply boom")
 
         def apply(**kwargs):
@@ -3561,7 +3519,7 @@ class TestApplyExceptionBoundary53A:
                 raise exc
             return original(**kwargs)
 
-        monkeypatch.setattr(cli, "_apply_incoming_file", apply)
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", apply)
         run, ledger, _, _ = prepare(
             [("earlier.txt", b"a", None), ("broken.txt", b"b", None), ("later.txt", b"c", None)]
         )
@@ -3588,11 +3546,13 @@ class TestApplyExceptionBoundary53A:
         def abort(**kwargs):
             raise exc
 
-        monkeypatch.setattr(cli, "_apply_incoming_file", abort)
+        monkeypatch.setattr(pullflow, "_apply_incoming_file", abort)
         monkeypatch.setattr(cli.console, "_force_terminal", True)
         progress = MagicMock()
         progress.stop.side_effect = SystemExit(17)
         monkeypatch.setattr(cli, "Progress", lambda *a, **kw: progress)
+        monkeypatch.setattr(pullflow, "Progress", lambda *a, **kw: progress)
+        monkeypatch.setattr(core, "Progress", lambda *a, **kw: progress)
         run, _, _, _ = prepare([("file.txt", b"a", None)], verbose=True)
         with pytest.raises(typer.Abort) as raised:
             run()
@@ -3600,16 +3560,15 @@ class TestApplyExceptionBoundary53A:
         progress.stop.assert_called_once()
 
     def test_mismatched_publication_is_a_bug(self, ordered_apply, monkeypatch):
-        from mind_meld import cli
 
         _, prepare = ordered_apply
-        original = cli._apply_write
+        original = pullflow._apply_write
 
         def mismatch(*args, **kwargs):
             assert original(*args, **kwargs) == "written"
             return "merged"
 
-        monkeypatch.setattr(cli, "_apply_write", mismatch)
+        monkeypatch.setattr(pullflow, "_apply_write", mismatch)
         run, ledger, _, _ = prepare([("file.txt", b"a", None)])
         with pytest.raises(RuntimeError, match="apply outcome changed"):
             run()
@@ -3641,7 +3600,6 @@ class TestApplyExceptionBoundary53A:
         [(errno.ENOSPC, "free disk space"), (errno.EROFS, "check write permission")],
     )
     def test_wrapped_errno_and_hostile_fields_are_one_line(self, tmp_path, capsys, number, remedy):
-        from mind_meld import cli
 
         try:
             raise OSError(number, "cause\r\n\t\x1b[2J")
@@ -3649,7 +3607,7 @@ class TestApplyExceptionBoundary53A:
             try:
                 raise StorageError("wrapper\r\n\t\x1b[2J") from cause
             except StorageError as exc:
-                cli._warn_apply_failure(
+                pullflow._warn_apply_failure(
                     "Mac\nA",
                     "src\tname",
                     "file\r\n\t\x1b[2J",
@@ -3663,12 +3621,11 @@ class TestApplyExceptionBoundary53A:
         assert len(out.err.splitlines()) == 1
         assert all(ch.isprintable() for ch in out.err.rstrip("\n"))
         assert remedy in out.err
-        assert cli.PULL_FAILURES_URL in out.err
+        assert pullflow.PULL_FAILURES_URL in out.err
 
     def test_follow_up_notice_hostile_fields_are_one_line(self, tmp_path, capsys):
-        from mind_meld import cli
 
-        reporter = cli._ApplyReporter(
+        reporter = pullflow._ApplyReporter(
             rel_path="x",
             local_path=tmp_path / "file\r\n\t\x1b[2J",
         )
@@ -3706,7 +3663,7 @@ def test_53a_all_publications_precede_fallible_tail(
         os.utime(base / rel, (1, 1))
     if site in ("keep-remote", "lcs"):
         monkeypatch.setattr(
-            cli,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("merge" if site == "lcs" else "keep-remote", b"local\nremote\n"),
         )
@@ -3723,7 +3680,7 @@ def test_53a_all_publications_precede_fallible_tail(
         original_published(outcome)
 
     ledger.published = published
-    original_restore = cli._restore_mtime_best_effort
+    original_restore = pullflow._restore_mtime_best_effort
     original_print = cli.console.print
     tail_calls = []
     exc = tail_error("tail boom") if tail_error else None
@@ -3747,7 +3704,7 @@ def test_53a_all_publications_precede_fallible_tail(
         return original_print(*args, **kwargs)
 
     if site in ("write", "keep-remote", "conflict"):
-        monkeypatch.setattr(cli, "_restore_mtime_best_effort", restore)
+        monkeypatch.setattr(pullflow, "_restore_mtime_best_effort", restore)
     else:
         monkeypatch.setattr(cli.console, "print", output)
     if tail_error and tail_error is not OSError:
@@ -3796,7 +3753,7 @@ def test_53a_every_helper_failure_uses_attributed_stderr(
         os.utime(base / rel, (1, 1))
     if site in ("keep-remote", "lcs"):
         monkeypatch.setattr(
-            cli,
+            pullflow,
             "_prompt_conflict_choice",
             lambda *a, **kw: ("merge" if site == "lcs" else "keep-remote", b"merged\n"),
         )
@@ -3809,13 +3766,13 @@ def test_53a_every_helper_failure_uses_attributed_stderr(
         def read_boom(*args):
             raise PermissionError(errno.EACCES, "read denied")
 
-        monkeypatch.setattr(cli, "hash_file", read_boom)
+        monkeypatch.setattr(pullflow, "hash_file", read_boom)
     elif site == "path":
 
         def path_boom(*args):
             raise ValueError("bad device")
 
-        monkeypatch.setattr(cli, "conflict_filename", path_boom)
+        monkeypatch.setattr(pullflow, "conflict_filename", path_boom)
     else:
         monkeypatch.setattr(cli.fsutil, "atomic_write_bytes", boom)
     run, _, _, pending = prepare(
@@ -3840,7 +3797,6 @@ def test_53a_default_download_reporter_preserves_direct_calls(ordered_apply):
 
 
 def test_53a_prescan_exists_permission_error_reaches_apply(tmp_path, monkeypatch, capsys):
-    from mind_meld import cli
     from mind_meld.crypto import encrypt
 
     base = tmp_path / "source"
@@ -3859,7 +3815,7 @@ def test_53a_prescan_exists_permission_error_reaches_apply(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "exists", exists)
     backend = MagicMock()
     backend.get.return_value = encrypt(b"peer", "pw", 1024)
-    result = cli._pull_one_source(
+    result = pullflow._pull_one_source(
         backend,
         src_name="claude",
         src_type="claude",
@@ -3894,7 +3850,7 @@ def test_mm_events_bootstrap_tracks_all_created_ancestors(tmp_path, monkeypatch,
         assert base.stat().st_mode & 0o777 == 0o700
         return 0, reporter.outcomes
 
-    monkeypatch.setattr(cli, "_download_and_apply", download)
+    monkeypatch.setattr(pullflow, "_download_and_apply", download)
     if failure:
         original = Path.mkdir
 
@@ -3904,7 +3860,7 @@ def test_mm_events_bootstrap_tracks_all_created_ancestors(tmp_path, monkeypatch,
             return original(path, *a, **kw)
 
         monkeypatch.setattr(Path, "mkdir", mkdir)
-    result = cli._pull_one_source(
+    result = pullflow._pull_one_source(
         None,
         src_name="mm-events",
         src_type="generic",
@@ -3923,7 +3879,7 @@ def test_mm_events_bootstrap_tracks_all_created_ancestors(tmp_path, monkeypatch,
     assert tmp_path / ".local" in result.touched_parents
     synced = []
     monkeypatch.setattr(cli.fsutil, "fsync_dir", lambda path: synced.append(path))
-    cli._fsync_touched_parents(result.touched_parents)
+    pullflow._fsync_touched_parents(result.touched_parents)
     assert tmp_path in synced
     if failure:
         assert result.outcomes["failed"] == list(files)
@@ -3935,7 +3891,7 @@ def test_mm_events_bootstrap_tracks_all_created_ancestors(tmp_path, monkeypatch,
 
 
 def test_pull_missing_custom_mm_events_root_is_skipped(tmp_path, capsys):
-    result = _pull_one_source(
+    result = pullflow._pull_one_source(
         None,
         src_name="mm-events",
         src_type="generic",

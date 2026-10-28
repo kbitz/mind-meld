@@ -202,14 +202,14 @@ REVIEWED = {
             "replace(resolution, selected=selected, available=list(resolution.available))",
         ],
     ),
-    "cli.py:_apply_conflict": (
+    "pullflow.py:_apply_conflict": (
         "residual",
         "stale sidecar cleanup; creation guarded, raw unlink outside frozen inventory",
         [
             "sidecar.unlink()",
         ],
     ),
-    "cli.py:_apply_incoming_file": (
+    "pullflow.py:_apply_incoming_file": (
         *_GUARDED,
         [
             "directory.mkdir(exist_ok=True)",
@@ -237,7 +237,7 @@ REVIEWED = {
             "os.open(os.devnull, os.O_WRONLY)",
         ],
     ),
-    "cli.py:_migrate_config_core": (
+    "core.py:_migrate_config_core": (
         "residual",
         "migration breadcrumb cleanup; raw unlink outside frozen inventory",
         [
