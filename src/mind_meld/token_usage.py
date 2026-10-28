@@ -79,7 +79,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, NamedTuple, TypedDict
 
@@ -827,7 +827,8 @@ PRICING_CACHE_PATH = Path(
 ).expanduser()
 _PRICING_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
 _PRICING_RATE_FIELDS = ("input", "cache_read", "cache_create", "output")
-_PRICING_CACHE_MAX_MODELS = 128
+PRICING_CACHE_MAX_MODELS = 128
+_PRICING_CACHE_MAX_MODELS = PRICING_CACHE_MAX_MODELS
 _PRICING_CACHE_MEMO: tuple[tuple[str, int, int], dict[str, Any]] | None = None
 
 
@@ -886,9 +887,14 @@ def _valid_pricing_date(value: Any) -> bool:
     if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
         return False
     try:
-        return date.fromisoformat(value).isoformat() == value
+        parsed = date.fromisoformat(value)
     except ValueError:
         return False
+    # A future date (clock skew on the writing machine) would otherwise
+    # override bundled cards and suppress refresh indefinitely.
+    return parsed.isoformat() == value and parsed <= datetime.now(timezone.utc).date() + timedelta(
+        days=1
+    )
 
 
 def _valid_price(value: Any) -> bool:
@@ -963,16 +969,10 @@ def pricing_cache() -> dict[str, Any]:
     return copy.deepcopy(_pricing_cache_memoized())
 
 
-def _active_cached_cards() -> dict[str, dict[str, Any]]:
-    return {
-        model: dict(card)
-        for model, card in _pricing_cache_memoized()["models"].items()
-        if model not in VERIFIED_MODEL_IDS or card["verified_date"] >= _builtin_verified_date(model)
-    }
-
-
 def active_cached_model_ids() -> list[str]:
-    return sorted(_active_cached_cards())
+    return sorted(
+        model for model in _pricing_cache_memoized()["models"] if _cached_prices(model) is not None
+    )
 
 
 def _cached_prices(model: str) -> dict[str, float] | None:
@@ -2383,6 +2383,17 @@ __all__ = [
     "PRICING_GOOGLE_LAST_UPDATED",
     "PRICING_XAI_LAST_UPDATED",
     "PRICING_CURSOR_LAST_UPDATED",
+    "PRICING_MUSE_LAST_UPDATED",
+    "PRICING_MUSE_SOURCE_URL",
+    "PRICING_CACHE_MAX_MODELS",
+    "PRICING_CACHE_PATH",
+    "PricingCacheUnreadableError",
+    "active_cached_model_ids",
+    "is_verified_model",
+    "parse_model_price",
+    "pricing_cache",
+    "update_pricing_cache",
+    "vendor_model_family",
     "VENDOR_FAMILY_TIERS",
     "VENDOR_LONG_CONTEXT_TIERS",
     "SUBSCRIPTION_CAVEAT",

@@ -3048,6 +3048,22 @@ def test_passive_read_of_oversize_int_literal_degrades_to_empty():
     assert tu.resolve_prices("gpt-6.1-sol")["input"] == 2
 
 
+def test_every_verified_model_maps_to_a_builtin_verified_date():
+    assert all(tu._builtin_verified_date(model) for model in tu.VERIFIED_MODEL_IDS)
+
+
+def test_future_dated_cards_and_stamps_are_invalid():
+    card = _pricing_card("2999-01-01")
+    _write_pricing_cache({"gpt-6.1-sol": card})
+    assert tu.resolve_prices("gpt-6.1-sol")["input"] == 2  # bundled, not the future card
+    raw = json.dumps({"version": 1, "verified_date": "2999-01-01", "models": {}})
+    tu.PRICING_CACHE_PATH.write_text(raw)
+    tu._PRICING_CACHE_MEMO = None
+    assert "verified_date" not in tu.pricing_cache()
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+
+
 def test_just_written_card_survives_same_day_eviction():
     today = datetime.now(timezone.utc).date().isoformat()
     _write_pricing_cache({f"model-{i:03d}": _pricing_card(today) for i in range(128)})

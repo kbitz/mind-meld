@@ -4999,37 +4999,35 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         model_prices[model] = rates
-    if len(model_prices) > 128:
+    if len(model_prices) > token_usage.PRICING_CACHE_MAX_MODELS:
         sys.stderr.write(
-            "mm: too many --set-model-price values: the pricing cache holds at most 128 models. "
-            "Fix: mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2,0.1,2.5,10'\n"
+            "mm: too many --set-model-price values: the pricing cache holds at most "
+            + str(token_usage.PRICING_CACHE_MAX_MODELS)
+            + " models. Fix: mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2,0.1,2.5,10'\n"
         )
         return 2
     if model_prices or args.mark_pricing_verified:
         try:
             token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
         except OSError as exc:
-            if isinstance(exc, token_usage.PricingCacheUnreadableError):
+            if isinstance(exc, token_usage.PricingCacheUnreadableError) or isinstance(
+                exc, (IsADirectoryError, NotADirectoryError)
+            ):
                 fix = safety.safe_terminal_str(
                     "rm -- " + shlex.quote(str(token_usage.PRICING_CACHE_PATH))
                 )
             else:
                 # Reconstruct the requested write canonically from the
                 # deduped prices so the retry records exactly this write.
-                fix = (
-                    "mm retro-fleet "
-                    + str(args.window)
-                    + "d"
-                    + "".join(
-                        " --set-model-price "
-                        + shlex.quote(
-                            model + "=" + ",".join(repr(rate) for rate in model_prices[model])
-                        )
-                        for model in sorted(model_prices)
-                    )
-                )
+                argv = ["mm", "retro-fleet", f"{args.window}d"]
+                for model in sorted(model_prices):
+                    argv += [
+                        "--set-model-price",
+                        model + "=" + ",".join(repr(rate) for rate in model_prices[model]),
+                    ]
                 if args.mark_pricing_verified:
-                    fix += " --mark-pricing-verified"
+                    argv.append("--mark-pricing-verified")
+                fix = shlex.join(argv)
             sys.stderr.write(
                 "mm: could not write pricing cache at "
                 + safety.safe_terminal_str(token_usage.PRICING_CACHE_PATH)
