@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.16] - 2026-10-28
+
+**`mm retro-fleet` shows Muse usage and keeps Codex review traffic out of the cost.** You can record a local model rate with `--set-model-price` and mark the table checked with `--mark-pricing-verified`. Overrides stay on this Mac.
+
+### Added
+
+- `mm retro-fleet --set-model-price MODEL=IN,CACHE_READ,CACHE_CREATE,OUT` stores a local USD per million tokens card in `~/.config/mind-meld/pricing-cache.json`, or in the file named by `MM_PRICING_CACHE_PATH`. `--mark-pricing-verified` dates the whole table only after you have checked the vendor pricing docs. Invalid input exits 2. A cache write failure exits 1 and prints the fixing command. Removing that cache file restores the bundled rates.
+
+### Changed
+
+- Muse 1.4.14 session logs contribute completed model-step totals. Additive metadata, optional cache counters, and a validated zero-token step without a model are accepted. A nonzero step still needs a model. Muse models appear on the Muse row.
+- `codex-*` stays in the Codex family. `codex-auto-review` counts token and day activity and is left out of cost, top-model selection, and pricing-refresh requests.
+- `MM_HEALTH.pricing` names the model ids that need a rate or a verification date. It asks for a refresh when verification is more than seven days behind the report, or when an in-window model is unverified.
+
+### Fixed
+
+- Pricing health keeps a grammar-valid model id intact, including an id that contains `:`.
+
 ## [1.11.15] - 2026-10-28
 
 **`mm recapture` and `mm push` walk each Git object store once across worktrees and filter commits by configured authors during `git log`.** Linked worktrees no longer multiply the git walk or time out the capture budget, commits on worktree-only branches still count, and repeated `mm recapture --dry-run` runs report identical results.
