@@ -2974,6 +2974,34 @@ def test_explicit_write_refuses_semantically_invalid_cache():
     assert tu.PRICING_CACHE_PATH.read_text() == raw
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": 1, "models": ["not-a-dict"]},
+        {"version": 1, "models": {"bad-model": _pricing_card(input=5000)}},
+        {"version": 1, "models": {"ok-model": {**_pricing_card(), "surprise": 1}}},
+        {"version": True, "verified_date": "2026-01-15", "models": {}},
+        {"version": 1.0, "verified_date": "2026-01-15", "models": {}},
+        {"version": 1, "verified_date": "not-a-date", "models": {}},
+        {"verified_date": "2026-01-15", "models": {"ok-model": _pricing_card()}},
+    ],
+)
+def test_explicit_write_refuses_each_semantic_drop(payload):
+    raw = json.dumps(payload)
+    tu.PRICING_CACHE_PATH.write_text(raw)
+    with pytest.raises(tu.PricingCacheUnreadableError):
+        tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert tu.PRICING_CACHE_PATH.read_text() == raw
+
+
+def test_overwriting_a_bad_card_repairs_it_without_refusal():
+    tu.PRICING_CACHE_PATH.write_text(
+        json.dumps({"version": 1, "models": {"bad-model": {**_pricing_card(), "surprise": 1}}})
+    )
+    tu.update_pricing_cache({"bad-model": (1, 2, 3, 4)})
+    assert tu.resolve_prices("bad-model")["output"] == 4
+
+
 def test_explicit_write_refuses_deeply_nested_cache():
     tu.PRICING_CACHE_PATH.write_text('{"version": 1, "models": ' + "[" * 5000 + "]" * 5000 + "}")
     with pytest.raises(tu.PricingCacheUnreadableError):
@@ -2988,7 +3016,7 @@ def test_explicit_write_refuses_wrong_version_even_without_models():
     assert tu.PRICING_CACHE_PATH.read_text() == raw
 
 
-def test_unreadable_cache_raises_pricing_unreadable(monkeypatch):
+def test_unreadable_cache_raises_plain_oserror(monkeypatch):
     from contextlib import contextmanager
     from types import SimpleNamespace
 
@@ -3003,8 +3031,9 @@ def test_unreadable_cache_raises_pricing_unreadable(monkeypatch):
         )
 
     monkeypatch.setattr(tu, "locked_json_rmw", fake_rmw)
-    with pytest.raises(tu.PricingCacheUnreadableError):
+    with pytest.raises(OSError) as caught:
         tu.update_pricing_cache({"custom-model": (1, 2, 3, 4)})
+    assert not isinstance(caught.value, tu.PricingCacheUnreadableError)
 
 
 def test_explicit_write_refuses_oversize_int_literal_cache():

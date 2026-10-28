@@ -229,6 +229,41 @@ class TestPricingFlags:
         assert "\x1b" not in result.output
         assert not tu.PRICING_CACHE_PATH.exists()
 
+    def test_write_failure_retry_reconstructs_requested_specs(self, monkeypatch):
+        from mind_meld import token_usage as tu
+        from mind_meld.cli import app
+
+        def fail(*args, **kwargs):
+            raise OSError("read-only cache")
+
+        monkeypatch.setattr(tu, "update_pricing_cache", fail)
+        result = CliRunner().invoke(
+            app,
+            [
+                "retro-fleet",
+                "--set-model-price",
+                "new-model=1,.2,0,3",
+                "--set-model-price",
+                "new-model=9,9,9,9",
+                "--set-model-price",
+                "other-model=2,0.1,2.5,10",
+            ],
+        )
+        assert result.exit_code == 1, result.output
+        assert "Fix: mm retro-fleet 7d --set-model-price new-model=9.0,9.0,9.0,9.0" in result.output
+        assert "--set-model-price other-model=2.0,0.1,2.5,10.0" in result.output
+        assert result.output.count("new-model=") == 1
+
+    def test_too_many_model_prices_exit_two(self):
+        from mind_meld.cli import app
+
+        specs = []
+        for i in range(129):
+            specs += ["--set-model-price", f"model-{i}=1,1,1,1"]
+        result = CliRunner().invoke(app, ["retro-fleet", *specs])
+        assert result.exit_code == 2, result.output
+        assert "too many --set-model-price" in result.output
+
     def test_write_failure_exits_one_and_sanitizes(self, monkeypatch):
         from mind_meld import token_usage as tu
         from mind_meld.cli import app

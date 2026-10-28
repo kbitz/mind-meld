@@ -97,10 +97,10 @@ Unknown usage key, `cached != cache_read`, `reasoning >
 output`, a missing/oversize envelope id, an oversize model or missing model on
 a nonzero completion, and a conflicting
 duplicate envelope id (in one log or across logs, including the same
-id under another model) refuse the whole reader as `unsupported`.
-A validated zero-token model-less step is skipped before dedup, so it
-never conflicts with a counted turn carrying the same envelope id
-(Track 31A isolates the drop to this reader). A `recorded_at` before
+id under another model) refuse the whole reader as `unsupported`
+(Track 31A isolates the drop to this reader). A validated zero-token
+model-less step is skipped before dedup, so it never conflicts with a
+counted turn carrying the same envelope id. A `recorded_at` before
 2020-01-01 UTC, more than a day in the future, or longer than 20
 digits is `malformed`. A step recorded more than one UTC day before its
 session directory's date (history copied into a later session) is

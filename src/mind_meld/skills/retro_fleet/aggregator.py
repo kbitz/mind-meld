@@ -790,12 +790,12 @@ def aggregate_agent_usage(
         # Per-model slice for pricing. Absent on a pre-33A peer, in which case
         # the family keeps its token volume and loses only its cost basis.
         by_model, residual = _windowed_host_by_model(snap, lo, hi)
-        families_match = _host_model_families_match(snap, lo, hi)
+        legacy_codex = _legacy_codex_prefixes(snap)
+        families_match = _host_model_families_match(snap, lo, hi, legacy_codex=legacy_codex)
         if not families_match:
             # The acceptor deliberately permits classifier differences across
             # versions. Never price one family's volume under another label.
             by_model = {}
-        legacy_codex = _legacy_codex_prefixes(snap)
         for model, usage in by_model.items():
             family = _host_model_family(snap, model, legacy_codex=legacy_codex)
             if family not in _HOST_FAMILIES:
@@ -3711,14 +3711,17 @@ def _host_model_family(
     return family
 
 
-def _host_model_families_match(snap: HostDeviceSnapshot, lo: str, hi: str) -> bool:
+def _host_model_families_match(
+    snap: HostDeviceSnapshot, lo: str, hi: str, *, legacy_codex: bool | None = None
+) -> bool:
     """Check pricing attribution without rejecting a cross-version snapshot.
 
     Detail may be smaller than family totals because the writer caps models.
     Check each day and counter separately so a mismatch cannot cancel out.
     """
     bounds = window_bounds(snap, lo, hi)
-    legacy_codex = _legacy_codex_prefixes(snap)
+    if legacy_codex is None:
+        legacy_codex = _legacy_codex_prefixes(snap)
     for day, bucket in (snap.tokens_by_day or {}).items():
         if not isinstance(day, str) or not isinstance(bucket, dict):
             continue
@@ -4996,21 +4999,33 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         model_prices[model] = rates
+    if len(model_prices) > 128:
+        sys.stderr.write(
+            "mm: too many --set-model-price values: the pricing cache holds at most 128 models. "
+            "Fix: mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2,0.1,2.5,10'\n"
+        )
+        return 2
     if model_prices or args.mark_pricing_verified:
         try:
             token_usage.update_pricing_cache(model_prices, mark_verified=args.mark_pricing_verified)
         except OSError as exc:
             if isinstance(exc, token_usage.PricingCacheUnreadableError):
-                fix = "rm -- " + shlex.quote(str(token_usage.PRICING_CACHE_PATH))
+                fix = safety.safe_terminal_str(
+                    "rm -- " + shlex.quote(str(token_usage.PRICING_CACHE_PATH))
+                )
             else:
-                # Reconstruct the requested write so the retry records it;
-                # specs were charset-validated before parsing.
+                # Reconstruct the requested write canonically from the
+                # deduped prices so the retry records exactly this write.
                 fix = (
                     "mm retro-fleet "
                     + str(args.window)
                     + "d"
                     + "".join(
-                        " --set-model-price " + shlex.quote(spec) for spec in args.set_model_price
+                        " --set-model-price "
+                        + shlex.quote(
+                            model + "=" + ",".join(repr(rate) for rate in model_prices[model])
+                        )
+                        for model in sorted(model_prices)
                     )
                 )
                 if args.mark_pricing_verified:

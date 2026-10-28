@@ -1025,9 +1025,11 @@ def update_pricing_cache(
     with locked_json_rmw(PRICING_CACHE_PATH, on_contention="block") as locked:
         if not locked.is_locked:
             raise OSError("could not lock pricing cache")
-        if locked.read_state in {"malformed", "non_dict", "unreadable"}:
+        if locked.read_state in {"malformed", "non_dict"}:
             # lockedjson would degrade these to an empty dict; an explicit
             # pricing write must not silently discard the existing cards.
+            # "unreadable" stays a plain OSError: the cards may be intact,
+            # so the fixing command is a retry, not removal.
             raise PricingCacheUnreadableError(
                 f"existing pricing cache is {locked.read_state}"
             ) from locked.read_error
@@ -1035,17 +1037,23 @@ def update_pricing_cache(
             raise locked.read_error
         cache = _validated_pricing_cache(locked.data)
         raw_models = locked.data.get("models") if isinstance(locked.data, dict) else None
+        kept = (
+            {m: c for m, c in raw_models.items() if m not in model_prices}
+            if isinstance(raw_models, dict)
+            else {}
+        )
         if isinstance(locked.data, dict) and (
-            locked.data.get("version", 1) != 1
-            or ("models" in locked.data and not isinstance(raw_models, dict))
-            or (isinstance(raw_models, dict) and set(raw_models) != set(cache["models"]))
+            ("version" in locked.data and type(locked.data["version"]) is not int)
+            or locked.data.get("version", 1) != 1
             or (
-                isinstance(raw_models, dict)
-                and any(
-                    not isinstance(raw_models[m], dict)
-                    or set(raw_models[m]) != set(cache["models"].get(m, {}))
-                    for m in raw_models
-                )
+                "verified_date" in locked.data
+                and cache.get("verified_date") != locked.data["verified_date"]
+            )
+            or ("models" in locked.data and not isinstance(raw_models, dict))
+            or (isinstance(raw_models, dict) and set(kept) != set(cache["models"]) & set(kept))
+            or any(
+                not isinstance(kept[m], dict) or set(kept[m]) != set(cache["models"].get(m, {}))
+                for m in kept
             )
         ):
             # A syntactically valid cache whose version or cards fail

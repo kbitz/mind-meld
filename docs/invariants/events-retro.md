@@ -3374,11 +3374,15 @@ dates the whole-table check today UTC; setting cards alone cannot do that.
 Writes use `locked_json_rmw(..., on_contention="block")`, the fsutil pytest
 real-state guard, and oldest `(verified_date, model_id)` eviction above
 128 models (cards written by the update are evicted last). An existing
-malformed, non-dict or unreadable cache refuses the explicit write instead
-of discarding its cards (`PricingCacheUnreadableError`, exit 1 with an `rm`
-fix naming the quoted path); the same refusal covers a present
-`version != 1`, a non-dict `models`, and cards that would fail validation
-or carry fields this writer would strip. Other top-level keys are dropped
+malformed or non-dict cache refuses the explicit write instead of
+discarding its cards (`PricingCacheUnreadableError`, exit 1 with an `rm`
+fix naming the quoted, terminal-sanitized path; an `unreadable` cache stays
+a plain `OSError` with a retry fix, because its cards may be intact); the
+same refusal covers a present version that is not exactly integer `1`, a
+non-dict `models`, a `verified_date` validation would not preserve, and
+cards that would fail validation or carry fields this writer would strip
+(a card the same update overwrites is exempt, so it can be repaired).
+More than 128 distinct `--set-model-price` values exit 2. Other top-level keys are dropped
 on write (forward compatibility is one-directional). `lockedjson`
 classifies any `ValueError` or `RecursionError` from `json.loads`
 (oversize int literals, pathological nesting) as `malformed`, so neither
