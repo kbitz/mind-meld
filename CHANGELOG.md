@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.15] - 2026-10-28
+
+**`mm recapture` and `mm push` walk each Git object store once across worktrees and filter commits by configured authors during `git log`.** Linked worktrees no longer multiply the git walk or time out the capture budget, commits on worktree-only branches still count, and repeated `mm recapture --dry-run` runs report identical results.
+
+### Fixed
+
+- `discover_git_roots` and `walk_git_projects` group discovered repositories and linked Git worktrees by their common Git directory (`git rev-parse --git-common-dir` semantics), elect each group's main checkout first, and walk each object store once with `git log --all` so commits on worktree-only branches and detached worktree `HEAD`s are still captured without duplicate walks.
+- `_walk_one_repo` passes `--no-mailmap --regexp-ignore-case --fixed-strings --author=<email>` for each configured author email (from `[retro].author_emails`, a completed `identity-cache.json`, the global gitconfig including `GIT_CONFIG_GLOBAL` and `include`/`includeIf` files, and per-repository `.git/config`/`config.worktree` for the main and every linked checkout) so upstream clones with zero matching commits finish without computing rename/numstat diffs across unrelated history or starving user repositories of walk budget. A `.mailmap` entry cannot hide commits made with the configured address. Identity gathering reads each checkout's email before listing the next worktree, and a listing that exhausts the budget does not replace the trust set. Filtering is skipped until identity refresh has completed, so a cold cache cannot drop commits that per-repository cursors would then advance past; stash commits are excluded from the `--all` walk, and an undiscovered sibling worktree's older cursor — including one whose checkout has been removed — folds into the retained checkout instead of being retired. A sibling cursor timestamp in the future does not become that floor.
+- Repeated `mm recapture --dry-run` runs walk groups in a deterministic order and sort project/skip outputs deterministically, reporting identical results across back-to-back runs while still naming any genuinely skipped repository in `--dry-run` and `MM_HEALTH`.
+
 ## [1.11.14] - 2026-10-28
 
 **`mm pull` and `mm autopull` behave the same.** Pull planning, download, and apply now live outside the command shell. Flags, exit codes, conflict copies, and the files `mm` writes are unchanged.

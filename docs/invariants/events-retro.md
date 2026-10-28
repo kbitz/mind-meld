@@ -223,9 +223,37 @@ helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
 `SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
 code is untouched.
 
-Push walks roots from their oldest effective per-root cursor, breaking ties by
-path. Budget aborts and errors keep the old lower bound; successful roots and
-benign `no_commits` advance only after the exact event append is observed on disk.
+Push and recapture deduplicate discovered roots by common Git directory
+(`_git_common_dir`, matching `git rev-parse --git-common-dir`), electing each
+group's main checkout ahead of linked worktrees and walking each object store
+once with `git log --no-mailmap --exclude=refs/stash --all` (plus
+`--regexp-ignore-case --fixed-strings --author=<email>` when read-only author
+emails are available from `[retro].author_emails`, a completed
+`identity-cache.json` (`refreshed_at` set), the global gitconfig (honoring
+`GIT_CONFIG_GLOBAL` and following `include`/`includeIf` files, including a
+`[user] email = ...` header and a backslash-continued value), or per-repo
+`.git/config`/`config.worktree` for the main and every linked checkout).
+`--no-mailmap` is required: `log.mailmap` makes `--author` match the mapped
+address while `%ae` stays the raw one, so a successful empty walk would
+advance the cursor past the owner's commits. Author patterns keep the
+configured spelling as well as its lowercase form because `LC_ALL=C` folds
+ASCII only. Author filtering fails open (no `--author`) until that identity
+cache has a completed refresh, because capture runs before the tail's
+identity refresh and a partial or never-refreshed set would drop commits the
+cursor then passes. A completed cache that has no
+`<id>+<login>@users.noreply.github.com` address gets one bounded `gh api user`
+lookup, remembered for the cache TTL even when ``refreshed_at`` is already
+old. A never-refreshed cache is not created to store the check. A failed
+lookup does not fail open and is not repeated on every push.
+Push walks group representatives from their oldest effective per-group cursor
+— including an older cursor left by a sibling worktree this run did not
+discover, which discovery retirement folds into the retained representative
+instead of deleting, and including a removed checkout whose common dir was
+saved with the cursor — breaking ties by main-checkout status and path. A
+sibling timestamp after now is not that floor. Each common dir is resolved
+once per cursor, not once per group. Budget
+aborts and errors keep the old lower bound; successful roots and benign
+`no_commits` advance only after the exact event append is observed on disk.
 `write_push_event` keeps its existing non-strict return contract: a `None` return
 alone never proves persistence. Push confirms its terminal `mm-push` row before
 committing cursor state and stamps completion no earlier than that row's timestamp.
@@ -2850,8 +2878,15 @@ yields nothing for that source; cache still rebuilds with what was
 reachable):
 
 1. `git config --global user.email`
-2. Per-repo `git config user.email` for every discovered git root,
-   bounded by `_PER_REPO_BUDGET_S` total wall-clock (5s)
+2. Per-repo `git config user.email` for every discovered git root and
+   every linked worktree checkout of its object store (discovery elects
+   one representative for the walk; identity gathering reads that
+   representative's email before the next root's `git worktree list`,
+   then expands the root so a sibling's `config.worktree` email still
+   reaches the trust set), bounded by `_PER_REPO_BUDGET_S` total
+   wall-clock (5s). A budget-truncated gather does not refresh the cache,
+   and that bit is per thread so a concurrent complete gather cannot make
+   the truncated one persist.
 3. `[retro].author_emails` from mm `config.toml` — additive (D4 from
    /plan-eng-review: backwards compat with existing configs)
 4. `<id>+<login>@users.noreply.github.com` derived from `gh api user`

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -400,6 +402,181 @@ class TestGatherSources:
             f"budget enforcement failed: scanned {len(scanned)} repos out of 100"
         )
 
+    def test_slow_worktree_list_still_collects_first_repo_email(self, monkeypatch):
+        """Listing worktrees happens after that root's email, so a slow list cannot drop it."""
+        import subprocess as _subprocess
+
+        roots = [Path(f"/fake/repo-{i}") for i in range(8)]
+        monkeypatch.setattr(identity, "_PER_REPO_BUDGET_S", 0.05)
+
+        def fake_run(cmd, **_kwargs):
+            if cmd[3:5] == ["worktree", "list"]:
+                time.sleep(0.01)
+                return _subprocess.CompletedProcess(cmd, 0, f"worktree {cmd[2]}\n", "")
+            if cmd[3:] == ["config", "user.email"]:
+                return _subprocess.CompletedProcess(cmd, 0, "dev@example.com\n", "")
+            return _subprocess.CompletedProcess(cmd, 1, "", "")
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+        found = identity._gather_per_repo_emails(
+            root_discovery=events.GitRootDiscovery(tuple(roots), (), False)
+        )
+        assert "dev@example.com" in found
+
+    def test_budget_truncated_gather_does_not_refresh_cache(self, monkeypatch):
+        """A 5s window that never reads every repo must not replace the trust set."""
+        import subprocess as _subprocess
+
+        refreshed_at = datetime.now(timezone.utc).isoformat()
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps({"version": 2, "refreshed_at": refreshed_at, "emails": ["kept@example.com"]})
+        )
+        roots = [Path(f"/fake/repo-{i}") for i in range(8)]
+        monkeypatch.setattr(identity, "_PER_REPO_BUDGET_S", 0.01)
+
+        def fake_run(cmd, **_kwargs):
+            if cmd[3:5] == ["worktree", "list"]:
+                time.sleep(0.02)
+                return _subprocess.CompletedProcess(cmd, 0, "", "")
+            if cmd[3:] == ["config", "user.email"]:
+                return _subprocess.CompletedProcess(cmd, 0, "dev@example.com\n", "")
+            return _subprocess.CompletedProcess(cmd, 1, "", "")
+
+        monkeypatch.setattr(_subprocess, "run", fake_run)
+        monkeypatch.setattr(identity, "_gather_global_email", lambda: None)
+        monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: [])
+        monkeypatch.setattr(identity, "_gather_gh_noreply_email", lambda: None)
+        identity.refresh_identity_cache(
+            force=True,
+            root_discovery=events.GitRootDiscovery(tuple(roots), (), False),
+        )
+        saved = json.loads(identity.CACHE_PATH.read_text())
+        assert saved["refreshed_at"] == refreshed_at
+        assert saved["emails"] == ["kept@example.com"]
+
+    def test_concurrent_complete_gather_cannot_persist_a_truncated_one(self, monkeypatch):
+        """Overlapping gathers keep their own completeness bit."""
+        refreshed_at = datetime.now(timezone.utc).isoformat()
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps({"version": 2, "refreshed_at": refreshed_at, "emails": ["kept@example.com"]})
+        )
+        slow_id: list[int] = []
+        slow_started = threading.Event()
+        slow_ready = threading.Event()
+        fast_persisted = threading.Event()
+        real_note = identity._note_gather_complete
+        slow_notes = {"n": 0}
+
+        def note(_complete: bool) -> None:
+            # Call one is the pre-gather reset. Call two is the finish. Force
+            # that finish incomplete, then wait until the other gather has
+            # persisted, so a shared flag would already say complete.
+            if threading.get_ident() == slow_id[0]:
+                slow_notes["n"] += 1
+                if slow_notes["n"] == 1:
+                    real_note(True)
+                    return
+                real_note(False)
+                slow_ready.set()
+                assert fast_persisted.wait(3)
+                return
+            assert slow_ready.wait(3)
+            real_note(True)
+
+        def read_email(checkout: Path) -> str:
+            if threading.get_ident() == slow_id[0]:
+                return "truncated@example.com"
+            return "complete@example.com"
+
+        monkeypatch.setattr(identity, "_note_gather_complete", note)
+        monkeypatch.setattr(identity, "_read_checkout_email", read_email)
+        monkeypatch.setattr(identity, "_worktree_checkouts", lambda root: [root])
+        monkeypatch.setattr(identity, "_gather_global_email", lambda: None)
+        monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: [])
+        monkeypatch.setattr(identity, "_gather_gh_noreply_email", lambda: None)
+        discovery = events.GitRootDiscovery((Path("/fake/repo"),), (), False)
+        errors: list[BaseException] = []
+
+        def slow() -> None:
+            slow_id.append(threading.get_ident())
+            slow_started.set()
+            try:
+                identity.refresh_identity_cache(force=True, root_discovery=discovery)
+            except BaseException as exc:
+                errors.append(exc)
+
+        def fast() -> None:
+            try:
+                assert slow_started.wait(3)
+                identity.refresh_identity_cache(force=True, root_discovery=discovery)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                fast_persisted.set()
+
+        threads = [threading.Thread(target=slow), threading.Thread(target=fast)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        assert errors == []
+        assert all(not thread.is_alive() for thread in threads)
+        saved = json.loads(identity.CACHE_PATH.read_text())
+        assert saved["emails"] == ["complete@example.com"]
+        assert saved["refreshed_at"] != refreshed_at
+
+    def test_stale_cache_remembers_one_noreply_lookup(self, monkeypatch):
+        """An old completed cache records the check so the next push skips ``gh``."""
+        stale = datetime.now(timezone.utc) - timedelta(seconds=identity.TTL_SECONDS + 60)
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "refreshed_at": stale.isoformat(),
+                    "emails": ["owner@example.com"],
+                }
+            )
+        )
+        calls = {"n": 0}
+
+        def fake() -> str:
+            calls["n"] += 1
+            return "1+owner@users.noreply.github.com"
+
+        monkeypatch.setattr(identity, "_gather_gh_noreply_email", fake)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        first = identity.union_checked_github_noreply(("owner@example.com",))
+        saved = json.loads(identity.CACHE_PATH.read_text())
+        # The next capture reads the cache, which now carries the noreply address.
+        second = identity.union_checked_github_noreply(tuple(saved["emails"]))
+        identity.union_checked_github_noreply(("owner@example.com",))
+        assert calls["n"] == 1
+        assert "1+owner@users.noreply.github.com" in first
+        assert "1+owner@users.noreply.github.com" in second
+        assert saved["refreshed_at"] == stale.isoformat()
+        assert isinstance(saved["github_noreply_checked_at"], str)
+
+    def test_never_refreshed_cache_does_not_record_noreply_lookup(self, monkeypatch):
+        """A default cache must not become a completed baseline just to remember ``gh``."""
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(
+            json.dumps({"version": 2, "refreshed_at": None, "emails": ["owner@example.com"]})
+        )
+        monkeypatch.setattr(
+            identity,
+            "_gather_gh_noreply_email",
+            lambda: "1+owner@users.noreply.github.com",
+        )
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        found = identity.union_checked_github_noreply(("owner@example.com",))
+        saved = json.loads(identity.CACHE_PATH.read_text())
+        assert "1+owner@users.noreply.github.com" in found
+        assert saved["emails"] == ["owner@example.com"]
+        assert "github_noreply_checked_at" not in saved
+
     def test_collaborator_email_in_repo_history_NOT_included(self, monkeypatch, tmp_path):
         """**Trust-rooted regression pin (carried from aggregator).**
         A shared repo where a collaborator has commits in the local
@@ -694,6 +871,38 @@ class TestIncompleteDiscoveryIdentityCache:
 
 
 class TestGitEnvironment:
+    def test_per_repo_gather_expands_linked_worktrees_of_elected_root(self, tmp_path, monkeypatch):
+        """Discovery dedup elects one checkout per object store; identity
+        gathering must still see a sibling worktree's own config.worktree
+        email or the retro trust set drops that worktree's commits."""
+        target, _, _ = _git_env_repos(tmp_path, monkeypatch)
+        subprocess.run(
+            ["git", "-C", str(target), "config", "extensions.worktreeConfig", "true"],
+            check=True,
+        )
+        sibling = tmp_path / "sibling"
+        subprocess.run(
+            ["git", "-C", str(target), "worktree", "add", "-b", "sib", str(sibling)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling),
+                "config",
+                "--worktree",
+                "user.email",
+                "sibling@example.com",
+            ],
+            check=True,
+        )
+        assert identity._gather_per_repo_emails(root_discovery=([target], [])) == {
+            "target@example.com",
+            "sibling@example.com",
+        }
+
     @pytest.mark.parametrize("override", ["dir", "parameters"])
     def test_repo_identity_ignores_inherited_overrides(self, tmp_path, monkeypatch, override):
         target, decoy, _ = _git_env_repos(tmp_path, monkeypatch)
