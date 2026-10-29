@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.18] - 2026-10-29
+
+**`mm init` behaves the same.** Help text, prompts, flags, exit codes, and the files it writes are unchanged.
+
+### Changed
+
+- The init command body now lives outside the command shell. `mm init` still creates a first device or joins an existing store, and a refused passphrase or an empty source list still leaves no new config.
+
 ## [1.11.17] - 2026-10-29
 
 **`mm pull` waits for content a sync tool has not delivered yet instead of failing.** A file whose blob has not arrived is reported as waiting, the other files still apply, the exit stays 0, and `mm autopull` stays `success`. Syncthing temporary files and conflict copies no longer count as devices, and a manifest replaced mid-read no longer reads as corrupt.
