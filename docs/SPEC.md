@@ -12,8 +12,12 @@ reporting are the two products, 2.0 carries the existing store onto Syncthing
 instead of building the store-v2 log design, standalone Grok Build support is
 removed, the 1.x compatibility contract is retired, and command output follows
 one rule (O8). Amended 2026-10-23 to add the core-and-extensions engineering
-constraint; outcomes, target and release policy are unchanged. Earlier text
-lives in `git log -- docs/SPEC.md`.
+constraint; outcomes, target and release policy are unchanged. Amended
+2026-10-29 by `/project-spec` with three owner decisions: cross-model memory
+is planned after 2.0 as O9 with its own MINOR checkpoint; mmm-factory's
+durable state syncs through an opt-in source for single-Mac handover; and
+gstack's machine-local files leave the gstack source. The selected target is
+unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -22,7 +26,9 @@ several machines:
 1. **Sync.** It keeps the agents' context identical on every machine, with no
    server and nobody else able to read it: Claude Code memory, Codex skills,
    Muse memory, Antigravity skills and rules, and gstack project state. Finish on one machine and `mm push`;
-   start on another and `mm pull`, and it is all there.
+   start on another and `mm pull`, and it is all there. With
+   `mm enable-source mmm`, it also carries mmm-factory's durable state so
+   the factory can stop on one Mac and start on another.
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
    Code, Codex, Cursor, Muse and Antigravity.
@@ -43,12 +49,13 @@ Syncthing.
 | Cursor | Nothing: no user-authored tree exists, and Cursor reads `~/.claude/skills` | Runs from Conductor and the enrolled `cursor-agent` CLI, counted under each model's family (Grok, Claude, GPT) |
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
-| gstack, gstack-extend | Project state, analytics and retros; generator output excluded | — |
+| gstack, gstack-extend | Project state, analytics and retros; generator output and machine-local files (factory manager files, evidence ledgers, browser profiles, pair-review resume copies) excluded | — |
+| mmm-factory | Durable factory state under `~/.mmm/`, after `mm enable-source mmm` ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
 Intentional gaps: Cursor runs through an ACP front-end such as Paseo report
-no usage (no source exists); Codex memory does not sync (no qualified route,
-Track 68A); session transcripts and credentials never sync. Standalone Grok
+no usage (no source exists); Codex memory does not sync until cross-model
+memory (O9, after 2.0); session transcripts and credentials never sync. Standalone Grok
 Build is no longer supported: its sync source and usage reader are removed.
 Grok models used through Cursor still appear in the Grok row.
 
@@ -80,6 +87,8 @@ Grok models used through Cursor still appear in the Grok row.
 
 MVP-1 on the 1.x iCloud store, macOS only, was achieved with v1.0.0 on
 2026-09-22; the outcomes below redefine MVP-1 for Syncthing and Linux.
+Cross-model memory (O9) is planned after 2.0 for the same owner fleet. It is
+a capability, not an audience stage, and does not gate 2.0.
 
 ## Selected target acceptance
 ### O1: Sync converges across macOS and Linux over Syncthing
@@ -166,6 +175,30 @@ manual step.
 5. Evidence: tests pin the success, failure and degraded-capture output, and
    the owner's own pushes during the soak.
 
+## Planned after 2.0
+
+### O9: Cross-model memory
+What one agent learned on any of the owner's machines can be found by the
+other agents on every machine (Claude Code, Codex, and agents that read
+`AGENTS.md`), by searching, without mm copying a memory into another agent's
+store. Design: [cross-model memory](designs/cross-model-memory.md).
+1. Each machine publishes its own Codex memory files as per-machine copies,
+   one writer per file. Peers receive them outside every host's native store,
+   so they never conflict, and forgetting follows the source machine's own
+   regeneration.
+2. Static "search, don't read" pointers in the owner's `AGENTS.md` and
+   `CLAUDE.md`, installed once with the owner's approval, say where the other
+   agents' memories are and to search them rather than load them. mm never
+   writes into generated memory files.
+3. Phase 2, not part of acceptance: a per-machine search index (qmd) over the
+   same markdown, never synced and rebuilt after `mm pull`, when grep proves
+   too blunt or the owner accepts its dependencies.
+4. Evidence: two live checks in isolated homes before implementation (fresh
+   Codex and Claude sessions follow the pointer and find the other agent's
+   memory by search; regenerating per-machine copies does not churn sync),
+   then the owner's own sessions on two machines, recorded in PROGRESS.md
+   `## Acceptance`.
+
 ## Constraints and accepted limitations
 - End-to-end encryption is mandatory; no plaintext sync data reaches storage.
 - Sync is allowlisted; session transcripts, credentials and whole-file
@@ -190,6 +223,20 @@ manual step.
   Code no planned change touches stays where it is; there is no one-shot
   rewrite. While working and reviewing, run only the tests whose recorded
   coverage reaches the changed code; the full suite runs in CI before merge.
+- <a id="factory-handover"></a>Factory handover (owner, 2026-10-29). The
+  opt-in `mmm` source carries mmm-factory's durable state so the owner can
+  stop the factory on one Mac and start it on another; managers never run on
+  two Macs at once. It syncs items with their plans and cards, the run
+  ledgers, and for each project its `manager.toml`, passport, handoff note
+  and its archives, the manager's launch cards (`cards/`) and the briefs and
+  evidence its handoff notes point at (`briefs/`). It never syncs locks
+  (`*.lock`), the watcher's owner, status and watch files, fields files,
+  worker-ID lists, usage caches, SQLite stores, `traces/`, `release/`,
+  `review-compare/`, `~/.mmm/picker-jev/`, `~/.local/share/mmm-factory/` or
+  `~/.config/mmm-factory/`. Item records hold raw worker text (stored
+  handoffs, final messages and poll output), so that text reaches every
+  machine with the source enabled. In-flight work does not transfer: finish
+  or ship every item before handing over; the README says both.
 - Accepted manual steps: installing Syncthing, pairing machines and sharing
   the folder with the README's options; running the cutover runbook once;
   `mm resolve` for real conflicts; unlocking the Linux keyring before hooks
@@ -216,8 +263,10 @@ manual step.
   become a recurring manual burden after 2.0.
 - Standalone Grok Build support, removed 2026-10-19. Revisit when the owner
   uses Grok Build directly again.
-- Codex and cross-agent memory sync. Revisit when Codex ships a portable
-  memory store or an mm-owned route qualifies (Track 68A evidence).
+- Cross-model memory before 2.0, and writing into any host's native memory
+  store at any time. O9 starts after the cutover.
+- Concurrent factory managers on two Macs, and moving in-flight factory
+  work. Revisit when mmm-factory supports concurrent managers.
 - Usage for Cursor run through ACP front-ends such as Paseo. Revisit when
   `cursor-agent`'s ACP mode exposes usage.
 - Qualification ceremonies for shipped features: the self-update
@@ -229,8 +278,9 @@ manual step.
 ## Release policy
 - Owner-only, before any public stage: ordinary releases are PATCH;
   documentation-only changes take no bump.
-- Capability checkpoints, each a MINOR when accepted: **quiet output** (O8)
-  and **complete usage** (O7 criteria 1 to 3 on the owner's machines).
+- Capability checkpoints, each a MINOR when accepted: **quiet output** (O8),
+  **complete usage** (O7 criteria 1 to 3 on the owner's machines) and, after
+  2.0, **cross-model memory** (O9 criteria 1, 2 and 4; owner, 2026-10-29).
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
   Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted after the soak,
   with O6 to O8 holding. MAJOR because the transport changes and every
@@ -271,9 +321,12 @@ manual step.
     design for the Grok Build reader, retired on 2026-10-22.
   - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
     cited by invariants.
+  - [Cross-model memory](designs/cross-model-memory.md): O9's design and
+    its qualification record.
   - [Memory continuity](designs/memory-continuity.md) and the
     [Codex memory contract](designs/codex-memory-contract.md): Track 68A
-    evidence behind the deferred memory work.
+    evidence. Their cross-agent design is superseded by cross-model memory
+    as of 2026-10-29.
 - Superseded history:
   - [Store-v2 design](archive/store-v2.md): superseded as the 2.0 design on
     2026-10-19. Evidence: the "Why a new store" hazard table (the Syncthing
