@@ -1116,6 +1116,30 @@ def test_diag_counts_peers(tmp_path, monkeypatch):
     assert "peer-bbbbbbbb" not in result.stdout
 
 
+def test_diag_counts_foreign_storage_files_and_totals_count_valid_keys_only(tmp_path, monkeypatch):
+    """Track 87A: what mm ignores is counted, and never inflates a total."""
+    _storage, _cfg, backend = _setup(tmp_path, monkeypatch)
+    before = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["storage_inventory"]
+    assert before["ignored_storage_files"] == 0
+
+    stamp = "sync-conflict-20260101-101010-ABCDEFG"
+    backend.put("manifests/peer-aaaaaaaa/manifest.json.enc", b"stub")
+    backend.put(f"manifests/peer-aaaaaaaa/manifest.json.{stamp}.enc", b"copy")
+    backend.put("devices/peer-aaaaaaaa.json", b'{"device_id": "peer-aaaaaaaa"}')
+    backend.put(f"devices/peer-aaaaaaaa.{stamp}.json", b'{"device_id": "peer-aaaaaaaa"}')
+    backend.put("devices/.syncthing.peer-aaaaaaaa.json.tmp", b"{")
+    backend.put(".stversions/devices/old.json~20260101-101010", b"old")
+
+    result = runner.invoke(app, ["diag", "--json"])
+    inventory = json.loads(result.stdout)["storage_inventory"]
+
+    # temp file + .stversions file + the devices/ conflict copy
+    assert inventory["ignored_storage_files"] == 3
+    assert inventory["manifests_total"] == before["manifests_total"] + 1
+    assert inventory["devices_total"] == before["devices_total"] + 1
+    assert "ignored storage files:   3" in runner.invoke(app, ["diag"]).stdout
+
+
 # ── Discovery (Track 29A) ────────────────────────────────────────────────
 
 

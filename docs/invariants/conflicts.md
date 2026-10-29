@@ -21,6 +21,8 @@ Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_
 
 Pre-v0.9.2 produced the opposite mapping; pre-existing files migrate to a `v0-` prefix on first lock-protected discovery in `mm pull` / `mm resolve` (NEVER from `mm conflicts` — lockless, would race autopull, codex-2 #5).
 
+**Track 5E reads one device inventory (Track 87A).** `_check_fleet_version_or_refuse` takes the pull's single `devices.inventory_devices` result. Only a key-named entry (`devices/<id>.json` holding that id) is a device: a conflict copy of one (`<id>.sync-conflict-...json`, `<id> 2.json`, `(conflicted copy)`), a misnamed file and a body whose id is not its file name are foreign, so a stale copy of a peer's record can neither refuse the pull nor appear as a second device. A key-named entry that is unreadable or shape-invalid still refuses by storage key (we cannot read its `last_seen_version`). One that vanished mid-read is waiting, not corrupt, and does not refuse. Conflict-name rules: `find_conflict_copies` recognizes iCloud, Dropbox and Syncthing names (`manifest.json.sync-conflict-20260101-101010-ABCDEFG.enc`, stacked, or extensionless); `mm-crypto-init.preserved-*` never matches; a candidate gone at validation is skipped silently. See [sync.md](sync.md#syncthing-tolerant-reads-and-waiting-track-87a).
+
 `_resolve_interactive_loop` is dual-mode dispatched BY FILENAME PREFIX (not timestamp — sound, since post-v0.9.2 code never produces a `v0-` file directly). `v0-` files: `(l)ocal` renames sidecar over canonical, `(r)emote` unlinks sidecar. No-prefix (and `v1`) files: `(l)ocal` unlinks sidecar, `(r)emote` renames sidecar over canonical. Diff fromfile/tofile labels flip per row to match.
 
 ## Clock separation (load-bearing, v0.14.0)

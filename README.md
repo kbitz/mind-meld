@@ -16,6 +16,20 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Undelivered content is waiting, not failed (Track 87A):** on a Syncthing
+folder a manifest can arrive before its blobs, or a file can be replaced while
+mm reads it. A blob that has not been delivered yet used to count as a failed
+file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
+`mm pull` says `Pull: ... waiting for 2 files from Mac B.` and exits 0, and
+`mm autopull` records `success` with the same detail (`mm status` shows it).
+Nothing was applied and nothing is wrong; the next pull picks the files up once
+they sync. A failed file still means a real error (decrypt, write, permission).
+`mm pull` and `mm status` also ignore Syncthing's temporary and conflict files
+and the `.stversions` folder, retry a file Syncthing is replacing, and count a
+`devices/` file as a device only when its name is that device's id; `mm diag`
+reports the number of ignored files as `ignored storage files`. See
+[waiting content](#waiting-content-is-not-a-failure).
+
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
 **Push and pull output (Track 78A):** attended `mm push` and `mm pull` now end
@@ -463,6 +477,12 @@ and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
 paths. Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
+Content a sync tool has not delivered yet is **waiting**, not failed: the line
+gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
+device entry`), the exit stays 0, and the next pull retries. When a pull also
+failed, the waiting clause comes before `Run:`. `--verbose` lists the waiting
+paths. Attended runs do not record a waiting count; `mm autopull` records it in
+the `success` breadcrumb detail.
 
 ```text
 $ mm pull
@@ -1145,6 +1165,18 @@ one before continuing.
 
 **On mm older than v0.14.5, `mm pull` died with `TypeError: '<' not supported between instances of 'str' and 'int'` (or `bool` / `list` / `dict`), or an unattended `mm autopull` reported an unexpected error and a later file never arrived.** A `.jsonl` file mixed a string `ts` with a non-string value. Current `mm` keeps every unique normalized line and continues the pull. On **each** Mac: confirm with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. If `pipx upgrade` leaves you on an old version, the install is pinned to a frozen tag — see [Upgrading](#upgrading). `mm devices` shows the version at last push, not a live probe of the installed binary; after a successful `mm push` it can corroborate the fleet. Numeric-only timestamps now sort as whole-line text rather than numbers; until every active Mac is upgraded, old and new clients can keep rewriting that order. `mm log --action merged --limit 20` can show repeated merges, but a merged outcome alone does not prove timestamp oscillation.
 
+### Waiting content is not a failure
+
+On a Syncthing folder a peer's manifest can arrive before the blobs it names,
+and a file can be replaced while mm reads it. `mm pull` reports blobs that are
+not there yet as **waiting**: nothing was applied, nothing failed, the exit is
+0 and `mm autopull` stays `success` with a `N files waiting from <peer>` detail.
+A peer's manifest copies are kept while any of its files are waiting. A device
+entry or peer manifest that vanished mid-read is reported the same way. Run
+`mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
+paths. If a file stays waiting for a long time, check that Syncthing shows the
+folder as up to date on both Macs.
+
 ### Pull incomplete / could not pull a file
 
 One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `Pull incomplete [result-degraded]` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
@@ -1204,7 +1236,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` says `stale — no autorun in Nh`.** Nothing has run `mm autopull` / `mm autopush` in 48 hours, so your agent's lifecycle hook is not firing. Check the `# Mind Meld` block is still in the global instructions file that agent actually reads.
 
-**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means some content did not arrive — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
+**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
 **`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 

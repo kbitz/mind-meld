@@ -63,6 +63,7 @@ from mind_meld.errors import (
     MindMeldError,
     NewerFormatError,
     SnapshotError,
+    StorageNotFound,
     os_error_cause,
     snapshot_refusal,
 )
@@ -114,12 +115,20 @@ class ManifestFetch:
     prior merges the copies with the local sidecar and freezes only stored
     blobs; blob diffs use the copies alone. Other callers may use the merged
     copies.
+
+    `vanished` (Track 87A) marks a canonical manifest that was observed and
+    then gone after the bounded retry, which on a Syncthing folder means a
+    replacement is in flight. Readers treat it as "missing" (the content has
+    not arrived), never "corrupt". A writer must not treat it as a first push:
+    `_recover_prior_manifest` sends a vanished own manifest through the
+    sidecar and peer tombstones before it refuses.
     """
 
     status: FetchStatus
     manifest: dict | None = None
     newer_version: int | None = None
     conflict_copies_only: bool = False
+    vanished: bool = False
 
     @property
     def is_ok(self) -> bool:
@@ -371,6 +380,7 @@ def _fetch_remote_manifest(
     manifests: list[dict] = []
 
     canonical_exists = backend.exists(mkey)
+    canonical_vanished = False
     # Reserved-window bytes are unreadable even beside an older sibling.
     # The validator used to return False for them, which hid a newer conflict
     # or let an older copy win. Record every observed byte, including the
@@ -391,7 +401,9 @@ def _fetch_remote_manifest(
 
     if canonical_exists:
         try:
-            _note_manifest_bytes(backend.get(mkey))
+            _note_manifest_bytes(backend.get(mkey, expected=True))
+        except StorageNotFound:
+            canonical_vanished = True
         except (OSError, MindMeldError):
             pass
     for path in backend.find_conflict_copies(mkey, lambda _path: True):
@@ -421,18 +433,20 @@ def _fetch_remote_manifest(
     conflict_copies = backend.find_conflict_copies(mkey, _valid_and_current)
     if (blocked := _corrupt_if_newer()) is not None:
         return blocked
-    had_any_source = canonical_exists or bool(conflict_copies)
+    had_any_source = (canonical_exists and not canonical_vanished) or bool(conflict_copies)
 
     # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
     # MindMeldError) are treated as "this copy unreadable" — try conflict
     # copies next. Without this, a TOCTOU race between backend.exists() and
     # backend.get(), or a permission flip mid-scan, would escape as an
     # exception and crash recovery.
-    if canonical_exists:
+    if canonical_exists and not canonical_vanished:
         try:
-            enc_data = backend.get(mkey)
+            enc_data = backend.get(mkey, expected=True)
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
+        except StorageNotFound:
+            canonical_vanished = True
         except NewerFormatError as exc:
             # The preliminary scan can miss a copy that becomes newer before
             # this read. Do not fall through to an older sibling.
@@ -456,11 +470,14 @@ def _fetch_remote_manifest(
     if not manifests:
         if had_any_source:
             return ManifestFetch(status="corrupt")
-        return ManifestFetch(status="missing")
+        return ManifestFetch(status="missing", vanished=canonical_vanished)
 
     if len(manifests) == 1:
         return ManifestFetch(
-            status="ok", manifest=manifests[0], conflict_copies_only=conflict_copies_only
+            status="ok",
+            manifest=manifests[0],
+            conflict_copies_only=conflict_copies_only,
+            vanished=canonical_vanished,
         )
 
     # Merge multiple manifests additively.
@@ -480,6 +497,7 @@ def _fetch_remote_manifest(
         status="ok",
         manifest=_merge_manifests(manifests),
         conflict_copies_only=conflict_copies_only,
+        vanished=canonical_vanished,
     )
 
 
@@ -1386,6 +1404,11 @@ def _recover_prior_manifest(
       3. status == "corrupt"  → try sidecar (fresh-deletion-preserving);
                                  then peer fallback (propagated tombstones
                                  only); then _error with recovery steps.
+      4. status == "missing" with `vanished` (Track 87A: the manifest was
+                                 there and a sync tool is replacing it) →
+                                 the same chain as corrupt, because a writer
+                                 that read it as a first push would drop this
+                                 device's tombstones.
 
     An "ok" built only from conflict copies may predate this device's latest
     deletions, so it is merged with the sidecar to keep their tombstones.
@@ -1423,14 +1446,15 @@ def _recover_prior_manifest(
         if sidecar_manifest is None:
             return fetch.manifest
         return _merge_manifests([fetch.manifest, sidecar_manifest])
-    if fetch.status == "missing":
+    if fetch.status == "missing" and not fetch.vanished:
         return None
 
-    # status == "corrupt" — recovery chain
+    # status == "corrupt", or "missing" because the manifest vanished mid-read.
+    what = "corrupt" if fetch.status == "corrupt" else "unreadable (still arriving from sync)"
     sidecar_manifest = sidecar.read(device_id)
     if sidecar_manifest is not None:
         msg = (
-            "remote manifest corrupt; recovered prior state from local "
+            f"remote manifest {what}; recovered prior state from local "
             f"sidecar ({sidecar.sidecar_path()})."
         )
         with _pause_sync_progress():
@@ -1447,7 +1471,7 @@ def _recover_prior_manifest(
     peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)
     if peer_tombstones:
         msg = (
-            "remote manifest corrupt and no local sidecar; recovered "
+            f"remote manifest {what} and no local sidecar; recovered "
             f"{len(peer_tombstones)} tombstone(s) from peer device(s). "
             "Recent local deletions may be lost — verify no files have "
             "resurrected."
@@ -1467,10 +1491,14 @@ def _recover_prior_manifest(
 
     # Nothing to recover from — refuse rather than silently drop tombstones.
     suffix = " Nothing was changed except the local lock file (dry run)." if dry_run else ""
+    remedy = (
+        "Run 'mm status' to inspect storage state, then 'mm init' if storage is unrecoverable."
+        if fetch.status == "corrupt"
+        else "Wait for the sync to finish, then run 'mm push' again."
+    )
     _error(
-        "remote manifest corrupt, no local sidecar, and no peer manifests "
-        "available for recovery. Run 'mm status' to inspect storage state, "
-        "then 'mm init' if storage is unrecoverable. Pushing now would "
+        f"remote manifest {what}, no local sidecar, and no peer manifests "
+        f"available for recovery. {remedy} Pushing now would "
         "erase this device's deletion records across your fleet." + suffix
     )
     return None  # unreachable; _error raises

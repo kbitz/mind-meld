@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from mind_meld import fsutil
-from mind_meld.errors import StorageError
+from mind_meld.errors import StorageError, StorageNotFound
 from mind_meld.storage import local as storage_local
 from mind_meld.storage.local import LocalBackend
+from tests.syncthing_folder import SyncthingFolder
 
 
 def _always_valid(_: Path) -> bool:
@@ -585,3 +587,199 @@ class TestRejectedFilenameWarnings:
         assert "dir" in captured.err
         assert conflicts == []
         assert sibling.exists()
+
+
+STAMP = "sync-conflict-20260101-101010-ABCDEFG"
+
+
+class TestSyncthingNames:
+    """Track 87A: foreign names are ignored and Syncthing conflict names are known."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        return LocalBackend(tmp_path / "storage")
+
+    def test_list_keys_skips_dot_prefixed_and_syncthing_temp_names(self, backend):
+        backend.put("manifests/abc/manifest.json.enc", b"m")
+        backend.put("data/abc/" + "a" * 64 + ".enc", b"b")
+        backend.put("devices/abc.json", b"{}")
+        backend.put("manifests/abc/.syncthing.manifest.json.enc.tmp", b"x")
+        backend.put("data/abc/~syncthing~blob.tmp", b"x")
+        backend.put("devices/.stfolder-note", b"x")
+        backend.put(".stversions/manifests/abc/manifest.json~20260101-101010.enc", b"old")
+        backend.put(".DS_Store", b"x")
+
+        assert backend.list_keys("") == [
+            "data/abc/" + "a" * 64 + ".enc",
+            "devices/abc.json",
+            "manifests/abc/manifest.json.enc",
+        ]
+        assert backend.list_keys("manifests/") == ["manifests/abc/manifest.json.enc"]
+
+    def test_list_foreign_keys_reports_what_list_keys_skips(self, backend):
+        backend.put("devices/abc.json", b"{}")
+        backend.put("manifests/abc/.syncthing.manifest.json.enc.tmp", b"x")
+        backend.put(".stversions/devices/abc.json~20260101-101010", b"old")
+        backend.put(".stversions/deeper/still/old.enc", b"old")
+
+        assert backend.list_foreign_keys() == [
+            ".stversions/deeper/still/old.enc",
+            ".stversions/devices/abc.json~20260101-101010",
+            "manifests/abc/.syncthing.manifest.json.enc.tmp",
+        ]
+        assert backend.list_foreign_keys("manifests/") == [
+            "manifests/abc/.syncthing.manifest.json.enc.tmp"
+        ]
+
+    @pytest.mark.parametrize(
+        ("key", "name"),
+        [
+            ("manifests/abc/manifest.json.enc", f"manifest.json.{STAMP}.enc"),
+            ("manifests/abc/manifest.json.enc", "manifest.json.sync-conflict-20260101-101010.enc"),
+            (
+                "manifests/abc/manifest.json.enc",
+                f"manifest.json.{STAMP}.sync-conflict-20260102-111111-ZYXWVUT.enc",
+            ),
+            ("mm-crypto-init", f"mm-crypto-init.{STAMP}"),
+            ("devices/abc.json", f"abc.{STAMP}.json"),
+        ],
+    )
+    def test_find_conflict_copies_recognizes_syncthing_names(self, backend, key, name):
+        backend.put(key, b"canonical")
+        sibling = (backend.root / key).parent / name
+        sibling.write_bytes(b"copy")
+
+        assert backend.find_conflict_copies(key) == [sibling]
+
+    def test_find_conflict_copies_ignores_other_keys_and_foreign_names(self, backend):
+        key = "manifests/abc/manifest.json.enc"
+        backend.put(key, b"canonical")
+        folder = backend.root / "manifests/abc"
+        (folder / f"other.json.{STAMP}.enc").write_bytes(b"other key")
+        (folder / f".syncthing.manifest.json.{STAMP}.enc.tmp").write_bytes(b"temp")
+        (folder / f"~syncthing~manifest.json.{STAMP}.enc").write_bytes(b"temp")
+        (folder / "manifest.json.preserved-ab12cd34-20260101.enc").write_bytes(b"preserved")
+
+        assert backend.find_conflict_copies(key) == []
+
+    def test_crypto_init_preserved_copies_never_match(self, backend):
+        backend.put("mm-crypto-init", b"canonical")
+        (backend.root / "mm-crypto-init.preserved-ab12cd34-20260101T101010Z").write_bytes(b"kept")
+
+        assert backend.find_conflict_copies("mm-crypto-init") == []
+
+    def test_candidate_gone_at_validation_is_skipped_silently(self, backend, capsys):
+        key = "manifests/abc/manifest.json.enc"
+        backend.put(key, b"canonical")
+        copy = backend.root / f"manifests/abc/manifest.json.{STAMP}.enc"
+        copy.write_bytes(b"copy")
+
+        def replaced_while_validating(path: Path) -> bool:
+            path.unlink()
+            return False
+
+        assert backend.find_conflict_copies(key, replaced_while_validating) == []
+        assert capsys.readouterr().err == ""
+
+    def test_candidate_that_fails_validation_still_warns(self, backend, capsys):
+        key = "manifests/abc/manifest.json.enc"
+        backend.put(key, b"canonical")
+        (backend.root / f"manifests/abc/manifest.json.{STAMP}.enc").write_bytes(b"copy")
+
+        assert backend.find_conflict_copies(key, _always_invalid) == []
+        assert "ignoring suspicious file" in capsys.readouterr().err
+
+
+class TestVanishedReads:
+    """Track 87A: a file the caller has seen vanish is retried, and absence is not corruption."""
+
+    @pytest.fixture
+    def folder(self, tmp_path):
+        return SyncthingFolder(tmp_path / "storage")
+
+    def test_vanished_file_that_returns_is_read(self, folder):
+        folder.put("manifests/abc/manifest.json.enc", b"new bytes")
+        folder.vanish_at_open("manifests/abc/manifest.json.enc", reappear_after=2)
+
+        assert folder.get("manifests/abc/manifest.json.enc", expected=True) == b"new bytes"
+        assert folder.sleeps == [0.05, 0.1]
+
+    def test_file_that_stays_gone_reads_as_vanished_after_the_bounded_retry(self, folder):
+        folder.put("devices/abc.json", b"{}")
+        folder.vanish_at_open("devices/abc.json")
+
+        with pytest.raises(StorageNotFound) as caught:
+            folder.get("devices/abc.json", expected=True)
+
+        assert caught.value.vanished is True
+        assert caught.value.key == "devices/abc.json"
+        assert folder.sleeps == [0.05, 0.1, 0.2]
+        assert sum(folder.sleeps) < 0.5
+
+    def test_key_never_seen_reads_missing_at_once(self, folder):
+        with pytest.raises(StorageNotFound) as caught:
+            folder.get("data/abc/" + "a" * 64 + ".enc")
+
+        assert caught.value.vanished is False
+        assert folder.sleeps == []
+
+    def test_not_found_is_still_a_storage_error_with_the_old_message(self, folder):
+        with pytest.raises(StorageError, match="file not found — data/x"):
+            folder.get("data/x")
+
+    def test_swap_before_the_open_reads_the_new_bytes(self, folder):
+        folder.put("manifests/abc/manifest.json.enc", b"old")
+        folder.swap_at_open("manifests/abc/manifest.json.enc", b"new")
+
+        assert folder.get("manifests/abc/manifest.json.enc", expected=True) == b"new"
+        assert folder.sleeps == []
+
+    def test_retry_budget_is_per_backend_and_stops_sleeping_when_spent(self, folder):
+        for i in range(12):
+            key = f"devices/d{i}.json"
+            folder.put(key, b"{}")
+            folder.vanish_at_open(key)
+            with pytest.raises(StorageNotFound):
+                folder.get(key, expected=True)
+
+        assert sum(folder.sleeps) <= 2.0
+        spent = len(folder.sleeps)
+        folder.put("devices/late.json", b"{}")
+        folder.vanish_at_open("devices/late.json")
+        with pytest.raises(StorageNotFound) as caught:
+            folder.get("devices/late.json", expected=True)
+        assert caught.value.vanished is True
+        assert len(folder.sleeps) == spent  # spent budget: missing without sleeping
+
+    def test_only_file_not_found_reads_as_missing(self, folder):
+        folder.put("manifests/abc", b"a file where a directory is expected")
+
+        with pytest.raises(StorageError) as caught:
+            folder.get("manifests/abc/manifest.json.enc", expected=True)
+
+        assert not isinstance(caught.value, StorageNotFound)
+        assert folder.sleeps == []
+
+    def test_permission_failure_is_a_failure_not_missing(self, folder):
+        folder.put("data/abc/locked.enc", b"secret")
+        path = folder.root / "data/abc/locked.enc"
+        path.chmod(0)
+        try:
+            if os.access(path, os.R_OK):  # e.g. running as root
+                pytest.skip("file mode is not enforced for this user")
+            with pytest.raises(StorageError) as caught:
+                folder.get("data/abc/locked.enc", expected=True)
+            assert not isinstance(caught.value, StorageNotFound)
+            assert folder.sleeps == []
+        finally:
+            path.chmod(0o600)
+
+    def test_removal_after_listing_is_a_vanished_read(self, folder):
+        folder.put("devices/abc.json", b"{}")
+        folder.vanish_after_listing("devices/abc.json")
+
+        keys = folder.list_keys("devices/")
+        assert keys == ["devices/abc.json"]
+        with pytest.raises(StorageNotFound) as caught:
+            folder.get(keys[0], expected=True)
+        assert caught.value.vanished is True

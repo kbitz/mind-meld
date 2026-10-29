@@ -98,6 +98,19 @@ def device_key(device_id: str) -> str:
     return f"{DEVICES_PREFIX}{device_id}.json"
 
 
+def parse_device_key(key: str) -> str | None:
+    """Parse ``devices/<id>.json`` into its device id. None unless it is exactly
+    that shape, so a conflict copy or stray file never reads as a device."""
+    if not key.startswith(DEVICES_PREFIX) or not key.endswith(".json"):
+        return None
+    device_id = key[len(DEVICES_PREFIX) : -len(".json")]
+    try:
+        _validate_component(device_id, "device_id")
+    except ValueError:
+        return None
+    return device_id
+
+
 def parse_blob_key(key: str) -> tuple[str, str] | None:
     """Parse a blob key into (device_id, sha256). Returns None on malformed.
 

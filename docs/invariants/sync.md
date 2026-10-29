@@ -956,7 +956,71 @@ pullhistory.maintain_best_effort()
 ```
 
 ## Corrupt-manifest recovery (load-bearing)
-`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. Older copies can predate this device's latest deletions, so `_recover_prior_manifest` merges the local sidecar into the prior (tombstones, source retention, nested-checkout freeze) with a warning, even in autopush, that also says recent deletions may be lost when no usable sidecar exists. Like other recovered priors, it freezes nested-checkout entries only when their blob is still stored. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
+`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt` (or `missing` with `vanished`, see [Syncthing-tolerant reads](#syncthing-tolerant-reads-and-waiting-track-87a)), `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. Older copies can predate this device's latest deletions, so `_recover_prior_manifest` merges the local sidecar into the prior (tombstones, source retention, nested-checkout freeze) with a warning, even in autopush, that also says recent deletions may be lost when no usable sidecar exists. Like other recovered priors, it freezes nested-checkout entries only when their blob is still stored. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
+
+## Syncthing-tolerant reads and waiting (Track 87A)
+
+Syncthing delivers files late and out of order, replaces them with a rename and
+leaves temporary and conflict files beside them. Storage reads tolerate that
+without treating it as corruption or failure. Tests use one shared folder,
+`tests/syncthing_folder.py` (late delivery, manifest before blobs, removal after
+listing and during a read); no sleeps: the retry clock is injected.
+
+**One name classifier** (`storage/local.py`: `is_foreign_name`, `is_foreign_key`,
+`is_conflict_name`, `is_conflict_of`) serves `list_keys`, `find_conflict_copies`,
+the device table and `mm diag`. *Foreign*: any dot-prefixed component
+(`.syncthing.<name>.tmp`, `.stfolder`, `.stversions/`, `.DS_Store`) or a
+`~syncthing~` name. `list_keys` never returns a foreign key and does not descend
+into a foreign directory; `list_foreign_keys` returns them for diag. *Conflict
+copies* are iCloud (`name 2.ext`), Dropbox (`(conflicted copy ...)`) and
+Syncthing (`<stem>.sync-conflict-YYYYMMDD-HHMMSS[-<7 chars>]<ext>`, stacked, or
+extensionless like `mm-crypto-init.sync-conflict-...`). `mm-crypto-init.preserved-*`
+never matches. A candidate that disappears before validation is skipped silently.
+
+**`LocalBackend.get(key, *, expected=False)`** opens the file directly (no
+`exists` pre-check). Only `FileNotFoundError` is absence and raises
+`StorageNotFound(key, vanished=)`; every other `OSError` (EACCES, ENOTDIR) stays a
+`StorageError` failure. `expected=True` means the caller listed, `exists`-checked
+or conflict-scanned the key, so ENOENT from the first open is a replacement in
+flight: retry on `_VANISH_RETRY_DELAYS_S` (0.05, 0.1, 0.2 s, about 0.35 s per
+file) within a per-backend-instance budget of about 2 s (one backend per
+command), then raise with `vanished=True`. A key never seen (blobs, a manifest
+that was never there) reads missing at once, with no delay. `sleep` is injectable.
+
+**`ManifestFetch.vanished`**: an observed canonical manifest that is gone after
+the retry reads `status="missing", vanished=True` (or `ok` from conflict copies).
+Readers treat it as missing, never corrupt. Writers must not read it as a first
+push: `_recover_prior_manifest` runs a vanished own manifest through the
+corrupt chain (sidecar, then peer tombstones, then refuse with a wait remedy) and
+`push` rewrites it (`recovering_from_corrupt`). GC's missing-own-manifest skip
+already holds.
+
+**One device inventory per pull** (`devices.inventory_devices`, `DeviceInventory`:
+`valid`, `dropped`, `vanished`, `foreign`) feeds the fleet gate, peer selection,
+tombstone collection, early returns and the waiting notice, so a replacement
+between two reads cannot make them disagree. A file counts as a device only when
+it is `devices/<id>.json` holding `device_id == <id>`. Conflict copies, misnamed
+files and a body whose id is not its file name are foreign: never a device, never
+a refusal. A key-named unreadable or shape-invalid entry is `dropped` and still
+refuses the pull (Track 5E). A key-named entry that vanished mid-read stays in the
+manifest set (its tombstones still apply) and is skipped only for the version
+check and for pulling its files; it is reported as waiting.
+
+**`waiting` outcome.** Per file: `_download_and_apply` maps `StorageNotFound` on a
+blob to `waiting` (an `ApplyOutcome` key). Nothing was applied, nothing failed, no
+`pullhistory` row is written, and it is never `degraded`. Per peer: a device is
+applied only when it has zero waiting and zero failed files; a peer's manifest
+conflict-copy cleanup runs only then (a kept copy may be the only holder of the
+manifest the missing blob belongs to), and a waiting-only device gets no
+`device_names` entry. `PullResult.waiting` holds per-peer `WaitingPeer` facts
+(files, vanished manifest, vanished device entry) and `total_waiting` counts
+files. `waiting_clause` builds `waiting for 2 files from Mac B, Mac C's manifest,
+cccccccc's device entry`, appended to the attended success line and placed before
+`Run:` on a failed one; `waiting_detail` is the autopull `success` breadcrumb
+detail (`mm status` prints it). Attended runs record no waiting count. A published
+peer's not-yet-arrived manifest and an attended waiting count in `mm status` stay
+with Track 92A. `mm diag` adds `ignored_storage_files`; its manifest and device
+totals count valid keys only.
 
 ## Manifest read-path invariant (load-bearing)
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).

@@ -9,14 +9,15 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 from mind_meld import __version__, fsutil
-from mind_meld.errors import StorageError
-from mind_meld.storage.keys import DEVICES_PREFIX, device_key
-from mind_meld.storage.local import LocalBackend
+from mind_meld.errors import StorageError, StorageNotFound
+from mind_meld.storage.keys import DEVICES_PREFIX, device_key, parse_device_key
+from mind_meld.storage.local import LocalBackend, is_conflict_name
 
 # Local sentinel for serializing read-modify-write of devices/<id>.json
 # entries across concurrent autopush + interactive push (Group 7 preflight
@@ -152,6 +153,30 @@ def update_last_seen(
         backend.put(key, json.dumps(data, indent=2).encode("utf-8"))
 
 
+@dataclass
+class DeviceInventory:
+    """Everything one read of ``devices/`` found (Track 87A).
+
+    A pull reads this once and feeds the fleet-version gate, peer selection,
+    tombstone collection and the waiting notice from it, so a Syncthing
+    replacement between two reads cannot make them disagree.
+
+    * ``valid``: entries named ``devices/<id>.json`` whose body is a valid
+      device record with that same ``device_id``.
+    * ``dropped``: ``(key, reason)`` for key-named entries that are unreadable
+      or shape-invalid. These still refuse the pull (Track 5E).
+    * ``vanished``: ids of key-named entries that were listed and then
+      disappeared mid-read. Their content has not arrived yet.
+    * ``foreign``: keys ignored as not a device: conflict copies, misnamed
+      files, a body whose ``device_id`` is not its file name.
+    """
+
+    valid: list[dict[str, Any]] = field(default_factory=list)
+    dropped: list[tuple[str, str]] = field(default_factory=list)
+    vanished: list[str] = field(default_factory=list)
+    foreign: list[str] = field(default_factory=list)
+
+
 def list_devices(backend: LocalBackend) -> list[dict[str, Any]]:
     """List all registered devices from storage.
 
@@ -186,9 +211,8 @@ def list_devices_with_drops(
     JSON object", "missing or invalid device_id", "missing or invalid
     device_name").
     """
-    drops: list[tuple[str, str]] = []
-    valid = _list_devices_impl(backend, on_drop=lambda k, r: drops.append((k, r)))
-    return valid, drops
+    inventory = inventory_devices(backend)
+    return inventory.valid, inventory.dropped
 
 
 # Process-local set of device-short prefixes for which we've already emitted
@@ -294,33 +318,55 @@ def _list_devices_impl(
     """Shared implementation. `on_drop`, if provided, is called with
     (key, reason) for each dropped entry — cli.py uses this to emit warnings.
     """
-    keys = backend.list_keys(DEVICES_PREFIX)
-    devices = []
-    for key in keys:
-        if not key.endswith(".json"):
+    inventory = inventory_devices(backend)
+    if on_drop is not None:
+        for key, reason in inventory.dropped:
+            on_drop(key, reason)
+    return inventory.valid
+
+
+def inventory_devices(backend: LocalBackend) -> DeviceInventory:
+    """Read ``devices/`` once (see `DeviceInventory`).
+
+    A file counts as a device only when its name is that device's key
+    (``devices/<id>.json`` holding ``device_id == <id>``). Everything else is
+    foreign and never refuses a pull: a Syncthing conflict copy or an iCloud
+    ``<id> 2.json`` would otherwise list the same device twice.
+    """
+    inventory = DeviceInventory()
+    for key in backend.list_keys(DEVICES_PREFIX):
+        key_id = parse_device_key(key)
+        if key_id is None or is_conflict_name(key.rsplit("/", 1)[-1]):
+            # Not `devices/<id>.json`, or a conflict copy of one: never read,
+            # so a half-delivered copy cannot refuse the pull.
+            inventory.foreign.append(key)
             continue
         try:
-            raw = json.loads(backend.get(key))
-        except (StorageError, json.JSONDecodeError) as e:
-            if on_drop is not None:
-                on_drop(key, f"unreadable ({type(e).__name__})")
+            raw = json.loads(backend.get(key, expected=True))
+        except StorageNotFound:
+            # Listed, then gone after the bounded retry: Syncthing is replacing
+            # it. Not corrupt; the pull reports it as waiting.
+            inventory.vanished.append(key_id)
+            continue
+        except (StorageError, ValueError) as e:
+            inventory.dropped.append((key, f"unreadable ({type(e).__name__})"))
             continue
         # Shape validation: top-level must be a dict with a non-empty string
         # device_id and a string device_name. Anything else would crash
         # downstream `d["device_id"]` / `d["device_name"]` indexing.
         if not isinstance(raw, dict):
-            if on_drop is not None:
-                on_drop(key, "not a JSON object")
+            inventory.dropped.append((key, "not a JSON object"))
             continue
         did = raw.get("device_id")
         dname = raw.get("device_name")
         if not isinstance(did, str) or not did:
-            if on_drop is not None:
-                on_drop(key, "missing or invalid device_id")
+            inventory.dropped.append((key, "missing or invalid device_id"))
             continue
         if not isinstance(dname, str):
-            if on_drop is not None:
-                on_drop(key, "missing or invalid device_name")
+            inventory.dropped.append((key, "missing or invalid device_name"))
             continue
-        devices.append(raw)
-    return devices
+        if did != key_id:
+            inventory.foreign.append(key)
+            continue
+        inventory.valid.append(raw)
+    return inventory

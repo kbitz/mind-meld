@@ -585,6 +585,26 @@ class TestConflictConvergence:
         assert not (tmp_path / f"{CRYPTO_INIT_KEY} 2").exists()
         assert next(tmp_path.glob("mm-crypto-init.preserved-*")).read_bytes()[5:21] == salt_higher
 
+    def test_syncthing_conflict_copy_is_a_candidate_and_can_win(self, tmp_path):
+        """Track 87A: a Syncthing-named mm-crypto-init copy takes part in the winner
+        selection exactly like an iCloud one. (Repairing the fleet is Track 89A's.)"""
+        crypto.clear_crypto_session()
+        backend = LocalBackend(tmp_path)
+        salt_higher = bytes([0xFF] * 16)
+        salt_lower = bytes([0x00] * 16)
+        self._write_raw_init_blob(tmp_path / CRYPTO_INIT_KEY, 1024, salt_higher)
+        self._write_raw_init_blob(
+            tmp_path / f"{CRYPTO_INIT_KEY}.sync-conflict-20260101-101010-ABCDEFG", 1024, salt_lower
+        )
+
+        fetch = fetch_crypto_init(backend)
+
+        assert fetch.status == "ok"
+        assert fetch.root_salt == salt_lower
+        assert (tmp_path / CRYPTO_INIT_KEY).read_bytes()[
+            5:21
+        ] == salt_higher  # a read repairs nothing
+
     def test_concurrent_canonical_replacement_retains_conflict_copies(self, tmp_path):
         """Codex adversarial finding (PR #177): if a concurrent writer
         replaces canonical again AFTER this process's own overwrite, the

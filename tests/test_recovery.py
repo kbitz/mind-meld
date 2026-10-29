@@ -22,6 +22,7 @@ from mind_meld.crypto import encrypt
 from mind_meld.devices import register_device
 from mind_meld.manifest import serialize_manifest
 from mind_meld.storage.local import LocalBackend
+from tests.syncthing_folder import SyncthingFolder
 
 PASSPHRASE = "test-passphrase"
 MEMORY_KB = 1024
@@ -174,6 +175,184 @@ class TestRecoverPriorManifest:
         fetch = ManifestFetch(status="corrupt")
         with pytest.raises(typer.Exit):
             core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+
+
+# ── Track 87A: vanished and Syncthing-copied own manifests ────────────
+
+STAMP = "sync-conflict-20260101-101010-ABCDEFG"
+MKEY = "manifests/abc/manifest.json.enc"
+
+
+class TestVanishedManifest:
+    """A manifest that was there and is gone mid-read is not a first push."""
+
+    def test_vanished_canonical_reads_missing_with_the_flag_not_corrupt(self, tmp_path):
+        folder = SyncthingFolder(tmp_path / "storage")
+        _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
+        folder.vanish_at_open(MKEY)
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert (fetch.status, fetch.vanished) == ("missing", True)
+        assert fetch.manifest is None
+        assert folder.sleeps == [0.05, 0.1, 0.2]
+
+    def test_never_existing_manifest_is_a_plain_first_push(self, tmp_path):
+        folder = SyncthingFolder(tmp_path / "storage")
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert (fetch.status, fetch.vanished) == ("missing", False)
+        assert folder.sleeps == []
+
+    def test_manifest_replaced_mid_read_is_read_after_the_retry(self, tmp_path):
+        folder = SyncthingFolder(tmp_path / "storage")
+        _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
+        folder.vanish_at_open(MKEY, reappear_after=1)
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert fetch.is_ok and fetch.vanished is False
+        assert "a.md" in fetch.manifest["sources"]["claude"]["files"]
+
+    def test_vanished_canonical_with_a_syncthing_copy_reads_the_copy(self, tmp_path):
+        folder = SyncthingFolder(tmp_path / "storage")
+        _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
+        folder.put(
+            MKEY.replace("manifest.json.enc", f"manifest.json.{STAMP}.enc"), folder.get(MKEY)
+        )
+        folder.vanish_at_open(MKEY)
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert fetch.is_ok and fetch.conflict_copies_only and fetch.vanished
+
+    def test_syncthing_manifest_copy_merges_with_the_canonical(self, tmp_path):
+        folder = SyncthingFolder(tmp_path / "storage")
+        _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
+        copy = _make_manifest(
+            "abc",
+            {"b.md": {"sha256": "bbb"}},
+            tombstones={
+                "claude:gone.md": {"deleted_at": "2026-04-21T00:00:00+00:00", "device_id": "abc"}
+            },
+        )
+        folder.put(
+            MKEY.replace("manifest.json.enc", f"manifest.json.{STAMP}.enc"),
+            encrypt(serialize_manifest(copy), PASSPHRASE, memory_kb=MEMORY_KB),
+        )
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert fetch.is_ok and not fetch.conflict_copies_only
+        assert set(fetch.manifest["sources"]["claude"]["files"]) == {"a.md", "b.md"}
+        assert "claude:gone.md" in fetch.manifest["tombstones"]
+
+    def test_copy_that_vanishes_during_validation_is_skipped_silently(self, tmp_path, capsys):
+        folder = SyncthingFolder(tmp_path / "storage")
+        _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
+        copy_name = f"manifest.json.{STAMP}.enc"
+        folder.put(MKEY.replace("manifest.json.enc", copy_name), b"being-replaced")
+        folder.vanish_copy_at_validation(copy_name)
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert fetch.is_ok and not fetch.conflict_copies_only
+        assert "suspicious" not in capsys.readouterr().err
+
+    def test_recover_sends_a_vanished_own_manifest_through_the_sidecar(self, tmp_path, monkeypatch):
+        _isolate_sidecar(monkeypatch, tmp_path)
+        backend = LocalBackend(tmp_path / "storage")
+        prior = _make_manifest(
+            "abc",
+            {"a.md": {"sha256": "aaa"}},
+            tombstones={
+                "claude:gone.md": {"deleted_at": "2026-04-21T00:00:00+00:00", "device_id": "abc"}
+            },
+        )
+        sidecar.write(prior)
+
+        fetch = ManifestFetch(status="missing", vanished=True)
+        out = core._recover_prior_manifest(fetch, backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True)
+
+        assert out is not None and out["tombstones"] == prior["tombstones"]
+
+    def test_recover_vanished_falls_back_to_peers_then_refuses_with_a_wait_remedy(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _isolate_sidecar(monkeypatch, tmp_path)
+        backend = LocalBackend(tmp_path / "storage")
+        register_device(backend, "me", "me-host")
+        fetch = ManifestFetch(status="missing", vanished=True)
+
+        with pytest.raises(typer.Exit):
+            core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+        err = capsys.readouterr().err
+        assert "still arriving from sync" in err and "Wait for the sync to finish" in err
+        assert "mm init" not in err
+
+        register_device(backend, "peer1", "peer-host")
+        _put_manifest(
+            backend,
+            "peer1",
+            _make_manifest(
+                "peer1",
+                {},
+                tombstones={
+                    "claude:by-peer.md": {
+                        "deleted_at": datetime.now(timezone.utc).isoformat(),
+                        "device_id": "peer1",
+                    }
+                },
+            ),
+        )
+        out = core._recover_prior_manifest(fetch, backend, "me", PASSPHRASE, MEMORY_KB, quiet=True)
+        assert out is not None and "claude:by-peer.md" in out["tombstones"]
+
+    def test_first_push_missing_still_has_no_prior_state(self, tmp_path):
+        backend = LocalBackend(tmp_path / "storage")
+
+        out = core._recover_prior_manifest(
+            ManifestFetch(status="missing"), backend, "abc", PASSPHRASE, MEMORY_KB, quiet=True
+        )
+
+        assert out is None
+
+    def test_push_with_a_vanished_own_manifest_keeps_the_sidecar_tombstones(
+        self, tmp_path, monkeypatch
+    ):
+        _isolate_sidecar(monkeypatch, tmp_path)
+        storage_path = tmp_path / "icloud"
+        folder = SyncthingFolder(storage_path)
+        monkeypatch.setattr("mind_meld.cli.get_backend", lambda config: folder)
+        claude_a = tmp_path / "claude-a"
+        (claude_a / "projects" / "p1" / "memory").mkdir(parents=True)
+        (claude_a / "projects" / "p1" / "memory" / "keep.md").write_text("stays")
+        (claude_a / "projects" / "p1" / "memory" / "kill.md").write_text("doomed")
+        register_device(folder, "mac-a", "mac-a-name")
+        config_a = {
+            "device": {"id": "mac-a", "name": "mac-a-name"},
+            "storage": {"path": str(storage_path)},
+            "crypto": {"argon2_memory_kb": MEMORY_KB},
+            "sync": {
+                "claude_dir": str(claude_a),
+                "max_file_size": 52_428_800,
+                "sources": [{"name": "claude", "path": str(claude_a), "type": "claude"}],
+            },
+        }
+        _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
+        (claude_a / "projects" / "p1" / "memory" / "kill.md").unlink()
+        _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
+
+        # Syncthing is replacing this Mac's own manifest at the next push.
+        folder.vanish_at_open("manifests/mac-a/manifest.json.enc")
+        _push_core(config_a, PASSPHRASE, MEMORY_KB, quiet=True)
+
+        fetch = _fetch_remote_manifest(folder, "mac-a", PASSPHRASE, MEMORY_KB)
+        assert fetch.is_ok
+        assert any("kill.md" in key for key in fetch.manifest.get("tombstones", {})), (
+            "a vanished own manifest was read as a first push and dropped its tombstones"
+        )
 
 
 # ── sidecar ──────────────────────────────────────────────────────────
@@ -589,7 +768,7 @@ class TestListDevicesShapeValidation:
         backend = self._with_entries(
             tmp_path,
             {
-                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
                 "bad.json": b"not-json{",
             },
         )
@@ -603,7 +782,7 @@ class TestListDevicesShapeValidation:
         backend = self._with_entries(
             tmp_path,
             {
-                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
                 "array.json": json.dumps(["not", "a", "dict"]).encode(),
                 "scalar.json": json.dumps(42).encode(),
             },
@@ -618,7 +797,7 @@ class TestListDevicesShapeValidation:
         backend = self._with_entries(
             tmp_path,
             {
-                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
                 "noid.json": json.dumps({"device_name": "orphan"}).encode(),
                 "emptyid.json": json.dumps({"device_id": "", "device_name": "also-bad"}).encode(),
                 "nonstringid.json": json.dumps(
@@ -636,7 +815,7 @@ class TestListDevicesShapeValidation:
         backend = self._with_entries(
             tmp_path,
             {
-                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
                 "numname.json": json.dumps({"device_id": "x", "device_name": 42}).encode(),
             },
         )
@@ -651,7 +830,7 @@ class TestListDevicesShapeValidation:
         backend = self._with_entries(
             tmp_path,
             {
-                "good.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
+                "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
                 "bad-json.json": b"not-json{",
                 "bad-shape.json": json.dumps({"device_name": "missing-id"}).encode(),
             },

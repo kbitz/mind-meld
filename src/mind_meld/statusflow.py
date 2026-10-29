@@ -7,6 +7,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +43,7 @@ from mind_meld.crypto import (
     fetch_crypto_init,
     root_salt_fingerprint,
 )
+from mind_meld.devices import inventory_devices
 from mind_meld.errors import (
     CURSOR_SQLITE_URL,
     KEYRING_UNAVAILABLE_URL,
@@ -56,7 +58,6 @@ from mind_meld.safety import safe_str
 from mind_meld.storage import get_backend
 from mind_meld.storage.keys import (
     DATA_PREFIX,
-    DEVICES_PREFIX,
     MANIFESTS_PREFIX,
     manifest_key,
 )
@@ -462,7 +463,11 @@ def status(
             console.print(
                 "  [yellow]Git repository discovery incomplete:[/yellow] run [bold]mm diag[/bold]"
             )
-        if fetch.status == "missing":
+        if fetch.status == "missing" and fetch.vanished:
+            console.print(
+                "  [dim]Remote manifest: still arriving from sync; check again shortly.[/dim]"
+            )
+        elif fetch.status == "missing":
             console.print("  [dim]Remote manifest: not yet pushed from this device.[/dim]")
         elif fetch.newer_version is not None:
             console.print(
@@ -1475,10 +1480,17 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     except Exception as e:  # very defensive — diag must not crash
         sidecar_info["state"] = f"error: {type(e).__name__}"
 
-    # Storage inventory — counts only, no identifiers.
-    def _count(prefix: str, suffix: str = ".enc") -> int:
+    # Storage inventory — counts only, no identifiers. The manifest and device
+    # totals count valid keys only (Track 87A): a conflict copy, a misnamed file
+    # or a sync tool's temporary file is never a manifest or a device, and is
+    # counted separately as ignored.
+    def _is_manifest_key(k: str) -> bool:
+        parts = k.split("/")
+        return len(parts) == 3 and parts[2] == "manifest.json.enc"
+
+    def _count(prefix: str, valid: Callable[[str], bool]) -> int:
         try:
-            return sum(1 for k in backend.list_keys(prefix) if k.endswith(suffix))
+            return sum(1 for k in backend.list_keys(prefix) if valid(k))
         except Exception:
             return -1  # signals "could not enumerate"
 
@@ -1491,6 +1503,23 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
                 if len(parts) >= 3:
                     prefixes.add(parts[1])
             return len(prefixes)
+        except Exception:
+            return -1
+
+    # One read of devices/ feeds both the device total and the ignored count.
+    try:
+        device_inventory = inventory_devices(backend)
+    except Exception:
+        device_inventory = None
+
+    def _ignored_files() -> int:
+        if device_inventory is None:
+            return -1
+        try:
+            # Foreign names anywhere, plus entries in devices/ that are not a
+            # device (conflict copies, misnamed files, an id that is not the
+            # file name).
+            return len(backend.list_foreign_keys()) + len(device_inventory.foreign)
         except Exception:
             return -1
 
@@ -1508,11 +1537,18 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             pass
 
     storage_inv = {
-        "manifests_total": _count(MANIFESTS_PREFIX),
+        "manifests_total": _count(MANIFESTS_PREFIX, _is_manifest_key),
         "manifest_peer_count": _count_device_prefixes(MANIFESTS_PREFIX),
         "data_peer_count": _count_device_prefixes(DATA_PREFIX),
-        "devices_total": _count(DEVICES_PREFIX, suffix=".json"),
+        "devices_total": (
+            -1
+            if device_inventory is None
+            else len(device_inventory.valid)
+            + len(device_inventory.dropped)
+            + len(device_inventory.vanished)
+        ),
         "own_manifest_conflict_copies": own_conflict_copies,
+        "ignored_storage_files": _ignored_files(),
     }
 
     # Last autorun breadcrumb (ops-oriented: when did autopush/autopull
@@ -1692,6 +1728,7 @@ def diag(
     console.print(f"  data peer count:         {inv['data_peer_count']}")
     console.print(f"  devices/ entries:        {inv['devices_total']}")
     console.print(f"  own manifest conflicts:  {inv['own_manifest_conflict_copies']}")
+    console.print(f"  ignored storage files:   {inv['ignored_storage_files']}")
 
     console.print("\n[bold]Last autorun[/bold]")
     br = state["last_autorun"]
