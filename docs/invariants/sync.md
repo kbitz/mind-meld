@@ -999,7 +999,10 @@ already holds. Pull must not read it as waiting either: the own manifest carries
 this Mac's deletion records, which are not applied that pull, so a file deleted
 here can come back from a peer. `_pull_core` adds it to `corrupt_peers`
 (`_CorruptPeer.own_vanished`), which keeps the load-bearing stderr warning and
-`corrupt_peer_count`, so `mm autopull` records `degraded`.
+`corrupt_peer_count`, so `mm autopull` records `degraded` (detail
+`N corrupt peer manifest(s)`). `mm status` must not read it as a first push:
+`_status_verdict(manifest_arriving=)` opens with the still-arriving verdict
+(see [Status verdict](#status-verdict-and-attended-sync-evidence-track-77a)).
 
 **One device inventory per pull** (`devices.inventory_devices`, `DeviceInventory`:
 `valid`, `dropped`, `vanished`, `foreign`) feeds the fleet gate, peer selection,
@@ -1165,9 +1168,12 @@ After existing authentication, status emits one sanitized, unwrapped stdout
 line before notices, title or detail. `_status_verdict` is pure over explicit
 observations: blocking setup/storage/format/incomplete scan, conflicts, unresolved
 same-verb failure/actionable degradation or uncertain history, current capture
-prerequisite/reader blockers, first push, pending content or forward-only metadata,
-then “In sync with this device's last push.” Missing own metadata selects the
-first-push verdict unless a higher-priority action applies. No incoming peer convergence
+prerequisite/reader blockers, own manifest still arriving, first push, pending content
+or forward-only metadata, then “In sync with this device's last push.” Missing own
+metadata selects the first-push verdict unless a higher-priority action applies;
+missing with `ManifestFetch.vanished` (observed, then gone mid-read; Track 87A)
+selects “This device's manifest is still arriving from sync. Run: mm status”
+instead. No incoming peer convergence
 is measured. Every --source verdict names its source, and all counts use one
 materialized diff list. Selection, availability and previous publication must
 agree: missing previously published enabled roots, unavailable requested roots,

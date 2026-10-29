@@ -441,7 +441,7 @@ attended push's conditional activity tail and exit contract, read
 
 1. Acquire lockfile.
 2. Sweep this device's stale `tmp*.tmp` files left behind by a crashed push (runs under the lock already held, so no concurrent writer can race it).
-3. Read and decrypt only this device's raw manifest (no exclude or disabled-source filtering). If it is missing, warn that blob collection was skipped and no blobs were deleted, then continue with local retention. If it is corrupt or newer-format, or only iCloud conflict copies of it load because the canonical is absent or unreadable, refuse in apply and preview. When only conflict copies load, `mm push` rewrites the canonical even with no content change; newer-format and unrecoverable corrupt manifests keep their own refusal guidance.
+3. Read and decrypt only this device's raw manifest (no exclude or disabled-source filtering). If it is missing, warn that blob collection was skipped and no blobs were deleted, then continue with local retention. If it is corrupt or newer-format, or only conflict copies (iCloud, Dropbox or Syncthing) of it load because the canonical is absent or unreadable, refuse in apply and preview. When only conflict copies load, `mm push` rewrites the canonical even with no content change; newer-format and unrecoverable corrupt manifests keep their own refusal guidance.
 4. Collect the SHA-256 hashes that manifest references.
 5. Re-read this device's manifest, refusing or skipping on the same conditions and adding any new references, then list only `data/<this-device-id>/` (`storage.keys.data_prefix`).
 6. Delete listed blobs whose parsed owner is this device and whose hash is unreferenced. Peer namespaces are never listed, counted or deleted.
@@ -457,7 +457,7 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 ### `mm status [--source NAME]`
 
 1. Authenticate using the existing passphrase flow, then inspect selected local sources and this device's own manifest without uploading. Incomplete source observations cannot establish a healthy comparison.
-2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
+2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, this device's manifest still arriving from sync (it vanished mid-read; `Run: mm status`), first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
 3. If `--source` is given, name it in the verdict and limit content counts to that source. Keep current capture/publication diagnostics independent of this content filter.
 4. Show local/own-manifest file counts and pending pushes by source. Summarize skipped nested repositories as an exact selected-source count; `mm diag` retains their paths.
 5. Show the selected latest auto or attended execution per push/pull verb. Strictly later valid completed success can resolve an earlier same-verb failure only with sufficient scope; skips, uncertain ordering and limited scope cannot prove recovery. Keep raw autorun and attended evidence plus their projection in `mm diag` and `mm diag --json`. A displayed `keyring-locked` or `keyring-no-collection` auto skip retains the existing keyring troubleshooting hint.
@@ -478,7 +478,7 @@ There are two distinct conflict surfaces: **manifest-level conflicts** created b
 
 ### Manifest conflicts (iCloud / Dropbox / Syncthing)
 
-iCloud Drive (and Dropbox, if the storage path points there) can create conflicted copies when two machines write the same file concurrently.
+iCloud Drive (and Dropbox or Syncthing, if the storage path points there) can create conflicted copies when two machines write the same file concurrently.
 
 **iCloud conflict pattern:** `filename 2.ext`, `filename 3.ext`
 **Dropbox conflict pattern:** `filename (conflicted copy YYYY-MM-DD).ext`
@@ -501,7 +501,7 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 `_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
 - `ok` — at least one copy decrypted; caller uses `.manifest`. When the canonical copy is absent or unreadable and only conflict copies decrypted, `ManifestFetch.conflict_copies_only` is also set: `mm gc` refuses it as incomplete own metadata, and `push` rewrites the canonical from local truth even with no content change, merging the local sidecar into the prior so this device's deletion records survive (with no usable sidecar it warns that recent local deletions may be lost; see [sync invariants](docs/invariants/sync.md#corrupt-manifest-recovery-load-bearing)).
-- `missing` — no canonical or validated conflict copy remains at the final reads. With `vanished=False`, push treats this as no prior state. With `vanished=True`, an observed canonical disappeared after bounded retries or a validated conflict copy disappeared on its final read; pull reports waiting and push follows the recovery chain below to preserve deletion records.
+- `missing` — no canonical or validated conflict copy remains at the final reads. With `vanished=False`, push treats this as no prior state. With `vanished=True`, an observed canonical disappeared after bounded retries or a validated conflict copy disappeared on its final read; pull reports a peer's as waiting, but reports this device's own like a corrupt manifest (its deletion records were not applied: stderr warning, `corrupt_peer_count`, autopull `degraded`), status reports this device's own as still arriving, and push follows the recovery chain below to preserve deletion records.
 - `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
 
 On `corrupt` or `missing` with `vanished=True`, `push` runs the following recovery chain before writing a new manifest:
