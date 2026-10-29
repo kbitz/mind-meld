@@ -1517,6 +1517,9 @@ ConflictMode = Literal["prompt", "keep-both", "fail"]
 class _CorruptPeer:
     device_id: str
     device_name: str
+    # This Mac's own manifest vanished mid-read: its deletion records were not
+    # applied, so it is reported like a corrupt manifest, never as waiting.
+    own_vanished: bool = False
 
 
 @dataclass
@@ -2182,6 +2185,20 @@ def _print_pull_summary(
     # as successful pull). device_name and device_id are peer-controlled —
     # sanitize before render (Group 7 preflight #1 sweep extension).
     for peer in corrupt_peers:
+        if peer.own_vanished:
+            text = (
+                "this device's manifest ({}) vanished during the read - its deletion "
+                "records were not applied, so files deleted on this Mac may have come "
+                "back from peers. Check them before the next mm push."
+            )
+            if quiet:
+                print(
+                    "mm: warning: " + text.format(safety.safe_terminal_str(peer.device_id)),
+                    file=sys.stderr,
+                )
+            else:
+                console.print("[yellow]Warning:[/yellow] " + text.format(safe_str(peer.device_id)))
+            continue
         msg = (
             f"manifest for device {safe_str(peer.device_name)} "
             f"({safe_str(peer.device_id)}) "
@@ -2491,6 +2508,15 @@ def _pull_core(
             passphrase,
             memory_kb,
             vanished_out=vanished_manifests,
+        )
+        # This Mac's own manifest carries its deletion records. If it vanished
+        # mid-read they are not applied this pull, so a file deleted here can
+        # come back from a peer: data at risk, reported like a corrupt
+        # manifest (warning plus a degraded autopull), never as waiting.
+        corrupt_peers.extend(
+            _CorruptPeer(p.device_id, p.device_name, own_vanished=True)
+            for p in vanished_manifests
+            if p.device_id == my_device_id
         )
         vanished_manifests = [
             p

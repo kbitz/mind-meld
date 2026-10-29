@@ -16,6 +16,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 - A storage file that disappears or is replaced between listing and reading is retried briefly, then reads as missing instead of corrupt. Corrupt bytes and permission errors still fail.
 - A device entry that vanishes during a pull no longer refuses the pull, and a peer manifest that vanishes no longer reads as corrupt; both are reported as waiting. A push whose own manifest vanished recovers from its local sidecar or peer tombstones, and otherwise refuses.
+- If this Mac's own manifest vanishes during a pull, its deletion records cannot be applied, so pull still warns and `mm autopull` records `degraded` instead of `success`. If it vanishes while `mm status` reads it, status says `This device's manifest is still arriving from sync. Run: mm status` instead of telling you to push.
 
 ## [1.11.16] - 2026-10-28
 

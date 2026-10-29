@@ -455,6 +455,39 @@ def test_vanished_peer_manifest_is_waiting_not_corrupt(fleet, syncthing, monkeyp
     assert syncthing.sleeps == [0.05, 0.1, 0.2]
 
 
+def test_vanished_own_manifest_is_data_at_risk_not_waiting(fleet, syncthing, monkeypatch):
+    # The own manifest carries this Mac's deletion records; when it vanishes
+    # mid-read they are not applied, so the pull must keep the corrupt-manifest
+    # signal (stderr warning, degraded autopull), not report waiting.
+    _seed(fleet, {"note.md": b"peer content\n"})
+    own = manifest.build_manifest_v2(
+        LOCAL,
+        "Local A",
+        [{"name": "notes", "type": "generic", "path": str(fleet.local), "include_dirs": ["."]}],
+    )
+    own["tombstones"] = {
+        "notes:note.md": {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "device_id": LOCAL,
+        }
+    }
+    fleet.backend.put(
+        manifest_key(LOCAL),
+        crypto.encrypt(manifest.serialize_manifest(own), PASSPHRASE, MEMORY_KB),
+    )
+    syncthing.vanish_at_open(manifest_key(LOCAL))
+
+    result, _, (_out, err) = _run(fleet, monkeypatch, "quiet")
+
+    assert result.corrupt_peer_count == 1
+    assert result.waiting == []
+    assert (
+        f"mm: warning: this device's manifest ({LOCAL}) vanished during the read - "
+        "its deletion records were not applied" in err
+    )
+    assert "Check them before the next mm push." in err
+
+
 def test_vanished_device_entry_is_waiting_and_never_refuses(fleet, syncthing, monkeypatch):
     _seed(fleet, {"note.md": b"peer content\n"})
     _third_device(fleet)

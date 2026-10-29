@@ -995,7 +995,11 @@ these absences as missing, never corrupt. Writers must not read it as a first
 push: `_recover_prior_manifest` runs a vanished own manifest through the
 corrupt chain (sidecar, then peer tombstones, then refuse with a wait remedy) and
 `push` rewrites it (`recovering_from_corrupt`). GC's missing-own-manifest skip
-already holds.
+already holds. Pull must not read it as waiting either: the own manifest carries
+this Mac's deletion records, which are not applied that pull, so a file deleted
+here can come back from a peer. `_pull_core` adds it to `corrupt_peers`
+(`_CorruptPeer.own_vanished`), which keeps the load-bearing stderr warning and
+`corrupt_peer_count`, so `mm autopull` records `degraded`.
 
 **One device inventory per pull** (`devices.inventory_devices`, `DeviceInventory`:
 `valid`, `dropped`, `vanished`, `foreign`) feeds the fleet gate, peer selection,

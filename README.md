@@ -1184,6 +1184,10 @@ folder as up to date on both Macs.
 If this Mac's own manifest is replaced while `mm status` reads it, status shows
 `Remote manifest: still arriving from sync; check again shortly.`; run it again
 once Syncthing finishes.
+If this Mac's own manifest vanishes while `mm pull` reads it, that is not
+waiting: its deletion records were not applied, so files deleted on this Mac may
+come back from peers. Pull warns on stderr and `mm autopull` records `degraded`;
+check those files before the next `mm push`.
 
 ### Pull incomplete / could not pull a file
 
