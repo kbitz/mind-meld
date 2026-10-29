@@ -131,7 +131,7 @@ deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does n
 repair missing metadata. No blob completion/orphan-success summary is printed.
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
 newer-format metadata refuses in apply and preview. So does an own manifest held
-only by iCloud conflict copies because the canonical is absent or unreadable
+only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable
 (`ManifestFetch.conflict_copies_only`): an older copy alone is an incomplete
 reference set, and no peer reference masks it any more. The refusal's `mm push`
 remedy works without a content change: push treats that state like a corrupt

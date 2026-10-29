@@ -623,8 +623,8 @@ GC reads only this device's raw manifest and lists only its blob directory.
 If that manifest is missing, it warns that blob collection was skipped and no
 blobs were deleted: wait for sync, inspect with `mm diag`, then retry `mm gc`.
 Local retention still runs. A valid empty own manifest can collect own orphans.
-If this device's manifest is unreadable, or only iCloud conflict copies of it
-load, GC refuses and says what to do. When only conflict copies load, `mm push`
+If this device's manifest is unreadable, or only conflict copies of it (iCloud,
+Dropbox or Syncthing) load, GC refuses and says what to do. When only conflict copies load, `mm push`
 on this device rewrites the manifest even with no content change; then retry
 `mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
 only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
@@ -1180,6 +1180,9 @@ entry or peer manifest that vanished mid-read is reported the same way. Run
 `mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
 paths. If a file stays waiting for a long time, check that Syncthing shows the
 folder as up to date on both Macs.
+If this Mac's own manifest is replaced while `mm status` reads it, status shows
+`Remote manifest: still arriving from sync; check again shortly.`; run it again
+once Syncthing finishes.
 
 ### Pull incomplete / could not pull a file
 
@@ -1250,7 +1253,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
-**A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud/Dropbox conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
+**A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud, Dropbox or Syncthing conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
 
 ### Dropped repositories and ignored git environment variables
 
@@ -1879,7 +1882,7 @@ The lock allowance includes creating its parent if absent.
 | Command | May touch | Not previewed | Exit codes |
 |---|---|---|---|
 | `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (a scan-time hold is applied and its count shown) | 0 completed, including held files; 1 stopped |
-| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
+| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures, blobs not delivered yet (waiting) | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
 | `mm gc --dry-run` | Local lock only | No cleanup is applied; conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
 | `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |
 | `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
