@@ -15,6 +15,11 @@ routing. Later work packages receive implementation Tracks after qualification.
 > [drain](../TODOS.md#roadmap-drain--2026-10-19) that records the drop.
 > This file remains Track 68A evidence.
 
+> **Superseded design (2026-10-29):** the owner approved
+> [cross-model memory](cross-model-memory.md) as docs/SPEC.md O9, planned
+> after 2.0. It replaces this file's cross-agent design and work packages;
+> the Future anchors below now point at its implementation bullet.
+
 ## Outcome and scope
 
 First make Claude and Codex comparable for memory capture, recall, and sync
