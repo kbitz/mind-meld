@@ -24,11 +24,11 @@ from mind_meld.cli import (
     _filter_disabled_sources,
     _filter_unselected_sources,
     _known_source_names,
-    _prompt_source_toggle,
     _validate_source_name,
     app,
 )
 from mind_meld.config import get_default_source, save_config
+from mind_meld.core import _prompt_source_toggle
 from mind_meld.errors import ConfigError
 
 runner = CliRunner()

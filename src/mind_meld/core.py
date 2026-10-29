@@ -1213,6 +1213,49 @@ def _resolve_all_configured_sources(config: dict) -> list[dict[str, Any]]:
     return get_sources(config_no_disable)
 
 
+def _prompt_source_toggle(
+    source: dict[str, Any], *, current_state: bool, detected: bool | None = None
+) -> bool:
+    """One Y/n confirm for a single source.
+
+    Single source of truth for the prompt copy + default-Y/N rule. Used
+    by `_prompt_sources` (init flow) and `reconfigure_sources` (eng-review
+    D5). `current_state` is the default answer:
+      - init: whether the source has a qualifying on-disk tree
+      - reconfigure: existing consent, or detected Antigravity on legacy config
+    """
+    name = source["name"]
+    path_str = str(source.get("path", ""))
+    if path_str:
+        if detected is None:
+            detected = _source_path_is_detected(source)
+        detection_label = "detected" if detected else "not detected"
+        prompt = f"Sync '{name}' source at {path_str}? ({detection_label})"
+    else:
+        prompt = f"Sync '{name}' source?"
+    return typer.confirm(prompt, default=current_state)
+
+
+def _source_path_is_detected(source: dict[str, Any]) -> bool:
+    """Return whether a source has the on-disk state that warrants a Y default.
+
+    Muse detection requires its hardcoded ``memory/`` tree, though its prompt
+    still defaults off. Antigravity's default source is also detected by its
+    separate local conversations root. Custom paths use their own existence.
+    """
+    path_str = str(source.get("path", ""))
+    if not path_str:
+        return False
+    root = Path(path_str).expanduser()
+    if source.get("type") == "muse" or source.get("name") == "muse":
+        return _config_module.muse_memory_dir_exists(root)
+    if source.get("name") == "agy" and path_str == _config_module.DEFAULT_AGY_DIR:
+        from mind_meld import host_usage as _host_usage
+
+        return root.exists() or _host_usage.agy_sessions_root().exists()
+    return root.exists()
+
+
 def _compute_recommended_excludes_diff(
     sources: list[dict],
 ) -> list[tuple[str, list[str], list[str]]]:

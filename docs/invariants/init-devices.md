@@ -2,7 +2,8 @@
 
 Read BEFORE editing any of these:
 
-- `src/mind_meld/cli.py` — `_register_and_save` / `_ensure_device_registered` / `init` / `_init_storage_guard` / `_do_gc`
+- `src/mind_meld/cli.py` — `_ensure_device_registered` / `init` / `_do_gc`
+- `src/mind_meld/initflow.py` — `init` / `_register_and_save` / `_init_storage_guard` / `_probe_storage_occupancy` / `_bootstrap_or_verify_crypto`
 - `src/mind_meld/crypto.py` — `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `store_passphrase_in_keyring`
 - `src/mind_meld/errors.py` — `KeyringUnavailableError`
 - `src/mind_meld/devices.py` — `register_device` / `update_last_seen` / `list_devices` / `inventory_devices` / `_devices_write_lock`
@@ -10,7 +11,9 @@ Read BEFORE editing any of these:
 - `src/mind_meld/safety.py` — `safe_str` / `safe_text` / `strip_terminal_escapes` / `safe_terminal_str`
 - Anywhere a peer-controlled string is rendered (filename, path, source name, device name, `str(e)` exception tail) — use `safe_str` in Rich markup, `safe_text` for diff content, and `safe_terminal_str` for single-line plain stderr
 
-Tests: `tests/test_devices.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`, `tests/test_recovery.py`; keyring reads: `tests/test_crypto.py`, `tests/test_diag.py`, `tests/test_secret_service_live.py` (live, opt-in).
+Tests: `tests/test_devices.py`, `tests/test_initflow.py`, `tests/test_safe_str.py`, `tests/test_silent_failure_contract.py`, `tests/test_storage_local.py`, `tests/test_recover.py`, `tests/test_recovery.py`; keyring reads: `tests/test_crypto.py`, `tests/test_diag.py`, `tests/test_secret_service_live.py` (live, opt-in).
+
+Init's body lives in `initflow.py` (Track 88A); `cli.py:init` is the Typer shell and keeps the `mm init --help` text, and tests patch init helpers at `initflow`.
 
 ---
 

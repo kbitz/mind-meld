@@ -24,7 +24,7 @@ from typer.testing import CliRunner
 
 from mind_meld import cli as cli_module
 from mind_meld import config as config_module
-from mind_meld import core, events_tail, fsutil, pullflow, synclog
+from mind_meld import core, events_tail, fsutil, initflow, pullflow, synclog
 from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
 from mind_meld import host_registry as _mm_host_registry
@@ -3964,13 +3964,12 @@ class TestAutoCommands:
         config_path = tmp_path / "config.toml"
         storage = tmp_path / "icloud"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
-        # Force store_passphrase_in_keyring to leak a non-KeyringError.
-        import mind_meld.cli as cli_mod
 
+        # Force store_passphrase_in_keyring to leak a non-KeyringError.
         def boom(*_a, **_kw):
             raise RuntimeError("keyring backend exploded")
 
-        monkeypatch.setattr(cli_mod, "store_passphrase_in_keyring", boom)
+        monkeypatch.setattr(initflow, "store_passphrase_in_keyring", boom)
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
         # confirm passphrase, then source prompts (Y claude, all others n).
@@ -9328,7 +9327,13 @@ def _check_read_only_policy62(source):
 
 
 def test_read_only_policy62():
-    for module in (cli_module, cli_module.core, cli_module.statusflow, cli_module.pullflow):
+    for module in (
+        cli_module,
+        cli_module.core,
+        cli_module.statusflow,
+        cli_module.pullflow,
+        initflow,
+    ):
         _check_read_only_policy62(Path(module.__file__).read_text())
     for function in (cli_module.core._get_config, core._maybe_prompt_migration):
         parameter = inspect.signature(function).parameters["read_only"]
@@ -10844,8 +10849,9 @@ def test_bootstrap_calls_stay_in_explicit_writers59a():
             ):
                 owner = parents.get(owner)
             found.add((path.name, owner.name if owner else None))
-    assert found == {("cli.py", n) for n in ("init", "_push_core", "recapture")} | {
-        ("pullflow.py", "_pull_one_source")
+    assert found == {("cli.py", n) for n in ("_push_core", "recapture")} | {
+        ("initflow.py", "init"),
+        ("pullflow.py", "_pull_one_source"),
     }
 
 
@@ -10914,7 +10920,7 @@ class TestNewerStorage66A:
             raise StorageError("already exists")
 
         if race:
-            monkeypatch.setattr(cli_module, "bootstrap_crypto_init", arrive)
+            monkeypatch.setattr(initflow, "bootstrap_crypto_init", arrive)
         else:
             (storage / "mm-crypto-init").write_bytes(b"\x03")
         result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
@@ -10930,14 +10936,14 @@ class TestNewerStorage66A:
         cfg = TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "storage"
         storage.mkdir()
-        original = cli_module.bootstrap_crypto_init
+        original = initflow.bootstrap_crypto_init
 
         def bootstrap(backend, passphrase, **kwargs):
             result = original(backend, passphrase, **kwargs)
             (backend.root / "mm-crypto-init").write_bytes(b"\x03")
             return result
 
-        monkeypatch.setattr(cli_module, "bootstrap_crypto_init", bootstrap)
+        monkeypatch.setattr(initflow, "bootstrap_crypto_init", bootstrap)
         result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
         assert result.exit_code == 1, result.output
         assert upgrade.INSTALL_CMD in " ".join(result.output.split())
@@ -11359,7 +11365,7 @@ class TestCryptoInspection60A:
 
         monkeypatch.setattr(crypto_module, "apply_crypto_init_repair", replace_winner)
         monkeypatch.setattr(
-            cli_module, "_register_and_save", lambda *a, **kw: pytest.fail("stale init registered")
+            initflow, "_register_and_save", lambda *a, **kw: pytest.fail("stale init registered")
         )
         result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\n{PASSPHRASE}\n")
         assert result.exit_code == 1, result.output

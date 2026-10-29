@@ -5,7 +5,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/upgrade.py` — `run_transition_hook` / `update_or_nudge` / `emit_nudge_if_due` / `detect_install` / `update_argv` / `run_update` / `_claim_install_attempt` / `_run_pipx` / `_signal_pipx_group` / `_PipxOutputStream` / `_pipx_output_stream` / `_hangup_ignored` / `_ProgressRelay` / `_final_frames` / `_spawn_pipx` / `_pick_latest_tag` / `INSTALL_SPEC` / `INSTALL_CMD` / upgrade-state cache layout
 - `src/mind_meld/updateprogress.py` — `PipxProgressParser` / `UpdateProgress`
 - `src/mind_meld/core.py` — `_get_config` / (read-only transition gate)
-- `src/mind_meld/cli.py` — `_auto_command_setup` / `init` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / (transition and update/nudge seams)
+- `src/mind_meld/initflow.py` — `init` / (transition seam)
+- `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / (transition and update/nudge seams)
 - `src/mind_meld/statusflow.py` — `status` / (cached upgrade surfacing)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
@@ -343,9 +344,9 @@ the latter because `0.9.4+local > 0.9.4` per packaging) → max-semver. Cap at
 releases (~3 years at current velocity). Why tags not raw-pyproject-on-main:
 HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
 
-**3 hook seams across core.py, cli.py and statusflow.py:**
+**3 hook seams across core.py, cli.py, initflow.py and statusflow.py:**
 1. **Transition detection** (`upgrade.run_transition_hook`) called AFTER each of
-   3 load_config sites: `core._get_config`, `cli._auto_command_setup`, `cli.init`.
+   3 load_config sites: `core._get_config`, `cli._auto_command_setup`, `initflow.init`.
    `_get_config(*, read_only: bool)` has no default: every caller states its
    policy. Read-only callers defer the entire transition to the next mutating
    command. The AST gate also confines direct transition calls to these three
