@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 import typer
@@ -186,16 +187,70 @@ MKEY = "manifests/abc/manifest.json.enc"
 class TestVanishedManifest:
     """A manifest that was there and is gone mid-read is not a first push."""
 
-    def test_vanished_canonical_reads_missing_with_the_flag_not_corrupt(self, tmp_path):
+    @pytest.mark.parametrize("vanish_on_read", [1, 2])
+    def test_vanished_canonical_reads_missing_with_the_flag_not_corrupt(
+        self, tmp_path, monkeypatch, vanish_on_read
+    ):
         folder = SyncthingFolder(tmp_path / "storage")
         _put_manifest(folder, "abc", _make_manifest("abc", {"a.md": {"sha256": "aaa"}}))
-        folder.vanish_at_open(MKEY)
+        original_get = folder.get
+        reads = 0
+
+        def get(key, **kwargs):
+            nonlocal reads
+            if key == MKEY:
+                reads += 1
+                if reads == vanish_on_read:
+                    folder.vanish_at_open(key)
+            return original_get(key, **kwargs)
+
+        monkeypatch.setattr(folder, "get", get)
 
         fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
 
         assert (fetch.status, fetch.vanished) == ("missing", True)
         assert fetch.manifest is None
         assert folder.sleeps == [0.05, 0.1, 0.2]
+
+    @pytest.mark.parametrize("corrupt_canonical", [False, True])
+    @pytest.mark.parametrize("final_read", ["vanished", "corrupt", "permission"])
+    def test_validated_copy_final_read_distinguishes_absence_from_corruption(
+        self, tmp_path, monkeypatch, corrupt_canonical, final_read
+    ):
+        folder = SyncthingFolder(tmp_path / "storage")
+        copy_key = MKEY.replace("manifest.json.enc", f"manifest.json.{STAMP}.enc")
+        folder.put(
+            copy_key,
+            encrypt(serialize_manifest(_make_manifest("abc", {})), PASSPHRASE, MEMORY_KB),
+        )
+        if corrupt_canonical:
+            folder.put(MKEY, b"corrupt")
+        copy_path = folder.root / copy_key
+        original_read = Path.read_bytes
+        reads = 0
+
+        def read(path):
+            nonlocal reads
+            if path == copy_path:
+                reads += 1
+                if reads == 3:  # The format scan and validation already read it.
+                    if final_read == "vanished":
+                        path.unlink()
+                    elif final_read == "corrupt":
+                        return b"corrupt replacement"
+                    else:
+                        raise PermissionError("copy became unreadable")
+            return original_read(path)
+
+        monkeypatch.setattr(Path, "read_bytes", read)
+
+        fetch = _fetch_remote_manifest(folder, "abc", PASSPHRASE, MEMORY_KB)
+
+        assert reads == 3
+        missing = not corrupt_canonical and final_read == "vanished"
+        assert fetch.status == ("missing" if missing else "corrupt")
+        assert fetch.vanished is missing
+        assert fetch.manifest is None
 
     def test_never_existing_manifest_is_a_plain_first_push(self, tmp_path):
         folder = SyncthingFolder(tmp_path / "storage")
@@ -816,7 +871,7 @@ class TestListDevicesShapeValidation:
             tmp_path,
             {
                 "g.json": json.dumps({"device_id": "g", "device_name": "good"}).encode(),
-                "numname.json": json.dumps({"device_id": "x", "device_name": 42}).encode(),
+                "numname.json": json.dumps({"device_id": "numname", "device_name": 42}).encode(),
             },
         )
         result = list_devices(backend)

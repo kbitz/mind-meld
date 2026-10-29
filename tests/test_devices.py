@@ -398,6 +398,36 @@ class TestDeviceCountsOnlyUnderItsOwnKey:
         assert inventory.dropped == []
         assert len(inventory.foreign) == 2
 
+    @pytest.mark.parametrize("device_name", [None, 42])
+    def test_misnamed_record_is_foreign_before_display_name_validation(
+        self, backend: LocalBackend, device_name
+    ) -> None:
+        from mind_meld import pullflow
+
+        backend.put(
+            device_key("alias"),
+            json.dumps({"device_id": "peer", "device_name": device_name}).encode(),
+        )
+
+        inventory = inventory_devices(backend)
+
+        assert inventory.foreign == [device_key("alias")]
+        assert inventory.valid == inventory.dropped == []
+        pullflow._check_fleet_version_or_refuse(backend, "me", inventory=inventory)
+
+    def test_matching_id_with_invalid_display_name_still_refuses(self, backend: LocalBackend):
+        import typer
+
+        from mind_meld import pullflow
+
+        backend.put(device_key("peer"), b'{"device_id":"peer","device_name":42}')
+        inventory = inventory_devices(backend)
+
+        assert inventory.foreign == inventory.valid == []
+        assert inventory.dropped == [(device_key("peer"), "missing or invalid device_name")]
+        with pytest.raises(typer.Exit):
+            pullflow._check_fleet_version_or_refuse(backend, "me", inventory=inventory)
+
     def test_key_named_unreadable_entry_still_refuses(self, backend: LocalBackend) -> None:
         backend.put("devices/good.json", _record("good"))
         backend.put("devices/bad.json", b"not-json{")

@@ -380,6 +380,11 @@ def _third_device(fleet, *, tombstones=None):
 
 
 @pytest.mark.parametrize("mode", MODES)
+# Coverage audit value card:
+# Value: protects=undelivered blobs create no file history before they arrive;
+# fails_when=waiting is persisted as an apply event;
+# why_new=existing waiting assertions cover counts and files but not history;
+# seam=none; no_claim=live Syncthing delivery (temporary folder with withheld blobs).
 def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, monkeypatch, mode):
     peer, _ = _seed(fleet, {"a.md": b"alpha\n", "b.md": b"bravo\n"})
     keys = [_blob(peer, "a.md"), _blob(peer, "b.md")]
@@ -393,6 +398,7 @@ def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, mo
     assert result.total_failed == 0 and result.durability_fsync_failures == 0
     assert not (fleet.local / "a.md").exists() and not (fleet.local / "b.md").exists()
     assert syncthing.sleeps == []
+    assert list(pullhistory.read_records()) == []
     if mode == "quiet":
         assert summaries == [("", "")]
     elif mode == "attended":

@@ -15,7 +15,7 @@ import re
 
 from typer.testing import CliRunner
 
-from mind_meld import pullflow
+from mind_meld import core, pullflow
 from mind_meld.cli import app, iter_source_diffs
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
@@ -327,6 +327,26 @@ def _withhold_blobs(backend, device_id):
 
 
 class TestWaitingOutcome:
+    # Coverage audit value card:
+    # Value: protects=status distinguishes a vanished own manifest from first push;
+    # fails_when=the missing branch hides the still-arriving explanation;
+    # why_new=fetch tests assert classification but no test covers its status rendering;
+    # seam=none; no_claim=live Syncthing delivery (manifest result injected at reader boundary).
+    def test_status_distinguishes_vanished_manifest_from_first_push(self, tmp_path, monkeypatch):
+        _setup_real_config(tmp_path, monkeypatch)
+        for vanished in (False, True):
+            monkeypatch.setattr(
+                core,
+                "_fetch_remote_manifest",
+                lambda *args, vanished=vanished: core.ManifestFetch(
+                    status="missing", vanished=vanished
+                ),
+            )
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0, (result.stdout, result.stderr)
+            assert ("still arriving from sync" in result.stdout) is vanished
+            assert ("not yet pushed from this device" in result.stdout) is not vanished
+
     def test_autopull_waiting_is_success_with_detail_never_degraded(self, tmp_path, monkeypatch):
         backend, _claude_a, claude_b = _prime_two_devices(tmp_path, monkeypatch)
         iso = _redirect_sidecar(monkeypatch, tmp_path)

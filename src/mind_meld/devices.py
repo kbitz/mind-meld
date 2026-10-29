@@ -362,11 +362,11 @@ def inventory_devices(backend: LocalBackend) -> DeviceInventory:
         if not isinstance(did, str) or not did:
             inventory.dropped.append((key, "missing or invalid device_id"))
             continue
-        if not isinstance(dname, str):
-            inventory.dropped.append((key, "missing or invalid device_name"))
-            continue
         if did != key_id:
             inventory.foreign.append(key)
+            continue
+        if not isinstance(dname, str):
+            inventory.dropped.append((key, "missing or invalid device_name"))
             continue
         inventory.valid.append(raw)
     return inventory

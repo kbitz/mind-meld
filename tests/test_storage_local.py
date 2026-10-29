@@ -599,6 +599,27 @@ class TestSyncthingNames:
     def backend(self, tmp_path):
         return LocalBackend(tmp_path / "storage")
 
+    # Coverage audit value card:
+    # Value: protects=storage listing keeps surviving keys when a directory disappears;
+    # fails_when=a vanished subtree aborts enumeration or hides a stable sibling;
+    # why_new=existing removal scenarios remove files after listing, not a subtree during it;
+    # seam=none; no_claim=live Syncthing timing (temporary directory removed at scandir).
+    def test_directory_vanishing_during_walk_preserves_other_keys(self, backend, monkeypatch):
+        backend.put("devices/stable.json", b"{}")
+        gone = backend.root / "departing"
+        gone.mkdir()
+        original_scandir = os.scandir
+
+        def scandir(path):
+            if Path(path) == gone:
+                gone.rmdir()
+            return original_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", scandir)
+
+        assert backend.list_keys("") == ["devices/stable.json"]
+        assert not gone.exists()
+
     def test_list_keys_skips_dot_prefixed_and_syncthing_temp_names(self, backend):
         backend.put("manifests/abc/manifest.json.enc", b"m")
         backend.put("data/abc/" + "a" * 64 + ".enc", b"b")

@@ -116,10 +116,10 @@ class ManifestFetch:
     blobs; blob diffs use the copies alone. Other callers may use the merged
     copies.
 
-    `vanished` (Track 87A) marks a canonical manifest that was observed and
-    then gone after the bounded retry, which on a Syncthing folder means a
-    replacement is in flight. Readers treat it as "missing" (the content has
-    not arrived), never "corrupt". A writer must not treat it as a first push:
+    `vanished` (Track 87A) marks an observed canonical gone after bounded
+    retries, or a missing result after a validated conflict copy disappears
+    on its final read. Either can be a sync replacement in flight. Readers
+    treat absence as "missing", never "corrupt". A writer must not treat it as a first push:
     `_recover_prior_manifest` sends a vanished own manifest through the
     sidecar and peer tombstones before it refuses.
     """
@@ -433,7 +433,6 @@ def _fetch_remote_manifest(
     conflict_copies = backend.find_conflict_copies(mkey, _valid_and_current)
     if (blocked := _corrupt_if_newer()) is not None:
         return blocked
-    had_any_source = (canonical_exists and not canonical_vanished) or bool(conflict_copies)
 
     # Try canonical manifest. Storage-layer errors (OSError, StorageError, any
     # MindMeldError) are treated as "this copy unreadable" — try conflict
@@ -455,22 +454,28 @@ def _fetch_remote_manifest(
             pass  # canonical unreadable — try conflict copies
     # Absent or unreadable canonical: any result comes from conflict copies.
     conflict_copies_only = not manifests
+    # Decide absence after the final reads: a source observed during the scan
+    # can disappear before decryption. Other read/decrypt errors stay corrupt.
+    had_any_source = canonical_exists and not canonical_vanished
+    conflict_vanished = False
 
-    # Try conflict copies (iCloud/Dropbox)
+    # Try conflict copies (iCloud/Dropbox/Syncthing)
     for conflict_path in conflict_copies:
         try:
             enc_data = conflict_path.read_bytes()
             plain = decrypt(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
+        except FileNotFoundError:
+            conflict_vanished = True
         except NewerFormatError as exc:
             return ManifestFetch(status="corrupt", newer_version=exc.version)
         except (CryptoError, ManifestError, OSError, MindMeldError):
-            pass  # skip unreadable conflict copies
+            had_any_source = True  # unreadable is distinct from absent
 
     if not manifests:
         if had_any_source:
             return ManifestFetch(status="corrupt")
-        return ManifestFetch(status="missing", vanished=canonical_vanished)
+        return ManifestFetch(status="missing", vanished=canonical_vanished or conflict_vanished)
 
     if len(manifests) == 1:
         return ManifestFetch(

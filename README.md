@@ -22,11 +22,14 @@ mm reads it. A blob that has not been delivered yet used to count as a failed
 file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
 `mm pull` says `Pull: ... waiting for 2 files from Mac B.` and exits 0, and
 `mm autopull` records `success` with the same detail (`mm status` shows it).
-Nothing was applied and nothing is wrong; the next pull picks the files up once
-they sync. A failed file still means a real error (decrypt, write, permission).
-`mm pull` and `mm status` also ignore Syncthing's temporary and conflict files
-and the `.stversions` folder, retry a file Syncthing is replacing, and count a
-`devices/` file as a device only when its name is that device's id; `mm diag`
+Waiting files are not applied; other available files still apply. The next pull
+picks up the waiting files once they sync. A failed file still means a real
+error (decrypt, write, permission).
+`mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
+folder and retry observed canonical files that disappear during a read. Device
+listing ignores conflict copies and counts a `devices/` file only when its name
+matches the id in its body; valid manifest conflict copies remain recovery
+inputs. `mm diag`
 reports the number of ignored files as `ignored storage files`. See
 [waiting content](#waiting-content-is-not-a-failure).
 
@@ -1169,8 +1172,9 @@ one before continuing.
 
 On a Syncthing folder a peer's manifest can arrive before the blobs it names,
 and a file can be replaced while mm reads it. `mm pull` reports blobs that are
-not there yet as **waiting**: nothing was applied, nothing failed, the exit is
-0 and `mm autopull` stays `success` with a `N files waiting from <peer>` detail.
+not there yet as **waiting**: those files are not applied, and other available
+files still apply. Waiting alone keeps the exit at 0 and `mm autopull` at
+`success` with a `N files waiting from <peer>` detail.
 A peer's manifest copies are kept while any of its files are waiting. A device
 entry or peer manifest that vanished mid-read is reported the same way. Run
 `mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
@@ -1808,7 +1812,7 @@ can record it again; this notice does not itself become a stored blocker.
 
 A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
 
-**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is rewriting a corrupt or conflict-copy manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
+**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is recovering a corrupt, conflict-copy-only or vanished manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
 
 ```text
 $ mm push
@@ -1848,7 +1852,7 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 | What happened | What to do |
 |---|---|
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
-| File changed, vanished or grew while being read, and a hold is not possible (the push is rewriting a corrupt or conflict-copy manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
+| File changed, vanished or grew while being read, and a hold is not possible (the push is recovering a corrupt, conflict-copy-only or vanished manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
 | Directory vanished while being listed, or `.extend-root` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |

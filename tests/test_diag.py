@@ -1143,6 +1143,33 @@ def test_diag_counts_foreign_storage_files_and_totals_count_valid_keys_only(tmp_
 # ── Discovery (Track 29A) ────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("failed_reader", ["devices", "foreign"])
+# Coverage audit value card:
+# Value: protects=diag reports unknown inventory counts when enumeration fails;
+# fails_when=failed enumeration crashes diag or falsely reports zero ignored files;
+# why_new=foreign inventory test covers successful enumeration only;
+# seam=none; no_claim=real filesystem permission failures (reader raises injected OSError).
+def test_diag_inventory_read_failure_reports_unknown(tmp_path, monkeypatch, failed_reader):
+    from mind_meld import statusflow
+
+    _setup(tmp_path, monkeypatch)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("inventory temporarily unavailable")
+
+    if failed_reader == "devices":
+        monkeypatch.setattr(statusflow, "inventory_devices", unavailable)
+    else:
+        monkeypatch.setattr(LocalBackend, "list_foreign_keys", unavailable)
+
+    result = runner.invoke(app, ["diag", "--json"])
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    inventory = json.loads(result.stdout)["storage_inventory"]
+    assert inventory["ignored_storage_files"] == -1
+    assert inventory["devices_total"] == (-1 if failed_reader == "devices" else 0)
+
+
 class TestDiagDiscovery:
     def test_discovery_block_present_in_text_and_json(self, tmp_path, monkeypatch):
         _setup(tmp_path, monkeypatch)
