@@ -1600,6 +1600,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         lead += f" ({result.total_conflicted} conflict {word})"
     if result.total_skipped:
         lead += f"; {result.total_skipped} skipped"
+    if clause := pullflow.waiting_clause(result):
+        lead += f"; {clause}"
     return "Pull: " + lead + "."
 
 
@@ -1704,6 +1706,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
         )
         if partial:
             effects = "completed changes remain; repair the reported failures before one retry"
+        if clause := pullflow.waiting_clause(result):
+            effects += f"; {clause}"
     elif isinstance(result, PushResult) and result.content_accepted:
         accepted = result.published_content_files
         if accepted is None:
@@ -2524,7 +2528,9 @@ def _push_core(
     advertised_prior_sources = set((remote_manifest or {}).get("sources", {}))
     # A manifest held only by conflict copies is rewritten like a corrupt one,
     # so GC's "run mm push" remedy works without a content change.
-    recovering_from_corrupt = fetch.status == "corrupt" or fetch.conflict_copies_only
+    recovering_from_corrupt = (
+        fetch.status == "corrupt" or fetch.conflict_copies_only or fetch.vanished
+    )
     resolution = core._retain_prior_default_sources(resolution, remote_manifest, config)
     sources = _include_prior_host_if_needed(
         config,
@@ -6279,7 +6285,9 @@ def autopull() -> None:
             if degradations:
                 _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
             else:
-                _write_autorun_breadcrumb("pull", "success")
+                # Undelivered content is waiting, not degraded: the sync tool
+                # is still delivering it and the next pull picks it up.
+                _write_autorun_breadcrumb("pull", "success", pullflow.waiting_detail(result))
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)

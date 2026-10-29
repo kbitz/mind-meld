@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.17] - 2026-10-29
+
+**`mm pull` waits for content a sync tool has not delivered yet instead of failing.** A file whose blob has not arrived is reported as waiting, the other files still apply, the exit stays 0, and `mm autopull` stays `success`. Syncthing temporary files and conflict copies no longer count as devices, and a manifest replaced mid-read no longer reads as corrupt.
+
+### Changed
+
+- A blob named by a peer's manifest but not yet in the folder is **waiting**, not failed. `mm pull` ends with `; waiting for N files from <peer>` and exits 0, `mm pull --verbose` lists the waiting paths, and `mm autopull` records `success` with the waiting count. Waiting files are not applied or recorded as applied, and that peer's manifest conflict copies are kept until the files arrive. A failed file still means a real error such as decrypt, write or permission.
+- Storage listing skips dot-prefixed names, Syncthing temporary files and `.stversions`, and recognizes Syncthing `*.sync-conflict-*` copies. A `devices/` file counts only when its name matches the device id inside it; conflict copies and misnamed files are ignored.
+- `mm diag` reports `ignored storage files`, and its manifest and device totals count only valid keys.
+
+### Fixed
+
+- A storage file that disappears or is replaced between listing and reading is retried briefly, then reads as missing instead of corrupt. Corrupt bytes and permission errors still fail.
+- A device entry that vanishes during a pull no longer refuses the pull, and a peer manifest that vanishes no longer reads as corrupt; both are reported as waiting. A push whose own manifest vanished recovers from its local sidecar or peer tombstones, and otherwise refuses.
+- If this Mac's own manifest vanishes during a pull, its deletion records cannot be applied, so pull still warns and `mm autopull` records `degraded` instead of `success`. If it vanishes while `mm status` reads it, status says `This device's manifest is still arriving from sync. Run: mm status` instead of telling you to push.
+
 ## [1.11.16] - 2026-10-28
 
 **`mm retro-fleet` shows Muse usage and keeps Codex review traffic out of the cost.** You can record a local model rate with `--set-model-price` and mark the table checked with `--mark-pricing-verified`. Overrides stay on this Mac.

@@ -53,7 +53,11 @@ from mind_meld.conflictmtime import (
 )
 from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import decrypt
-from mind_meld.devices import list_devices_with_drops, lookup_device_by_short_id
+from mind_meld.devices import (
+    DeviceInventory,
+    inventory_devices,
+    lookup_device_by_short_id,
+)
 from mind_meld.errors import (
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
@@ -62,6 +66,7 @@ from mind_meld.errors import (
     NewerFormatError,
     SnapshotError,
     StorageError,
+    StorageNotFound,
 )
 from mind_meld.manifest import (
     CONFLICT_INFIX,
@@ -92,6 +97,7 @@ ApplyOutcome = Literal[
     "conflicted",
     "unchanged",
     "failed",
+    "waiting",
 ]
 
 
@@ -121,6 +127,22 @@ INVERSION_MIN_VERSION = "0.9.2"
 
 
 @dataclass
+class WaitingPeer:
+    """What one pull is waiting for from one peer (Track 87A).
+
+    ``files`` counts blobs not delivered yet. ``manifest`` marks a peer
+    manifest that vanished mid-read; ``entry`` marks a device entry that
+    vanished mid-read (``device_name`` is then the device id).
+    """
+
+    device_id: str
+    device_name: str
+    files: int = 0
+    manifest: bool = False
+    entry: bool = False
+
+
+@dataclass
 class PullResult:
     """Result of a pull operation.
 
@@ -132,6 +154,11 @@ class PullResult:
                    preserved, remote written to .sync-conflict-*
       unchanged  — apply-time re-read showed local already matches remote
       failed     — rename/write error; local preserved, no change applied
+      waiting    — the blob has not been delivered by the sync tool yet
+                   (Track 87A); nothing was applied and nothing failed. It
+                   is retried on the next pull and is never a failure or a
+                   degradation. A peer's manifest conflict copies are kept
+                   while any of its files are waiting.
 
     `total_skipped_unknown_source` counts (device, source_name) pairs where
     a peer advertised a source name the local config doesn't know about
@@ -157,6 +184,12 @@ class PullResult:
     # surfaced to stderr by _print_pull_summary.
     durability_fsync_failures: int = 0
     corrupt_peer_count: int = 0
+    # Content the sync tool has not delivered yet (Track 87A): blobs per peer,
+    # a peer manifest or a device entry that vanished mid-read. Never a failure
+    # and never a degradation; the outcome line names it and the next pull
+    # picks it up. Attended runs do not record it.
+    total_waiting: int = 0
+    waiting: list[WaitingPeer] = field(default_factory=list)
 
     @property
     def total_applied(self) -> int:
@@ -167,7 +200,8 @@ class PullResult:
 PULL_NOT_PREVIEWED = (
     "Not previewed: renaming pre-v0.9.2 conflict files to the v0- prefix, "
     "pull-history rows, per-project .mind-meld-log.md sync logs, cleanup of "
-    "merged manifest conflict copies in storage, and blob download and decrypt failures."
+    "merged manifest conflict copies in storage, blob download and decrypt failures, "
+    "and blobs the sync tool has not delivered yet (reported as waiting)."
 )
 
 
@@ -1339,6 +1373,13 @@ def _download_and_apply(
                 continue
             try:
                 enc_data = backend.get(bkey)
+            except StorageNotFound:
+                # The sync tool has not delivered this blob yet (Syncthing
+                # sends manifests and blobs independently). Waiting, not a
+                # failure: nothing was touched and the next pull retries it.
+                outcomes.setdefault("waiting", []).append(rel_path)
+                _advance()
+                continue
             except MindMeldError:
                 if verbose and not quiet:
                     with core._pause_sync_progress():
@@ -1476,6 +1517,9 @@ ConflictMode = Literal["prompt", "keep-both", "fail"]
 class _CorruptPeer:
     device_id: str
     device_name: str
+    # This Mac's own manifest vanished mid-read: its deletion records were not
+    # applied, so it is reported like a corrupt manifest, never as waiting.
+    own_vanished: bool = False
 
 
 @dataclass
@@ -1526,7 +1570,7 @@ class _PerSourceResult:
 
     @property
     def had_changes(self) -> bool:
-        """True if ANY file was PROCESSED (written/merged/skipped/conflicted/failed).
+        """True if ANY file was PROCESSED (written/merged/skipped/conflicted/failed/waiting).
 
         Excludes "unchanged" deliberately. "unchanged" means the apply-time
         re-read matched remote — nothing happened. Treating unchanged-only as
@@ -1537,13 +1581,20 @@ class _PerSourceResult:
 
         Includes skipped/failed intentionally: one-way-sync setups (always
         local-newer = all skipped) still need cleanup to run or iCloud dup
-        files accumulate forever.
+        files accumulate forever. Includes waiting so a device whose blobs
+        have not arrived still reaches accounting; `_pull_core` then holds
+        the cleanup back for it (a kept conflict copy may be the only holder
+        of the manifest those blobs belong to).
         """
         return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
 
 
 def _check_fleet_version_or_refuse(
-    backend: LocalBackend, my_device_id: str, *, refusal_suffix: str = ""
+    backend: LocalBackend,
+    my_device_id: str,
+    *,
+    refusal_suffix: str = "",
+    inventory: DeviceInventory | None = None,
 ) -> None:
     """Refuse pull if any peer's last_seen_version is pre-v0.9.2 OR the
     peer's device.json is corrupt/shape-invalid.
@@ -1566,11 +1617,14 @@ def _check_fleet_version_or_refuse(
         files (codex-2 #3).
 
     Refusal exits non-zero via `_error` BEFORE any pull I/O. Implementation
-    uses the silent `list_devices_with_drops`; the loud-on-stderr
-    `_list_devices_warn` runs later in `_select_devices` only if the
-    fleet check passes.
+    reads the silent device inventory (one read per pull, shared with
+    `_select_devices`; Track 87A). Only key-named entries count: a conflict
+    copy or misnamed file is foreign, and a key-named entry that vanished
+    mid-read is waiting, not corrupt. Neither refuses.
     """
-    valid, dropped = list_devices_with_drops(backend)
+    if inventory is None:
+        inventory = inventory_devices(backend)
+    valid, dropped = inventory.valid, inventory.dropped
     refusals: list[str] = []
 
     for key, reason in dropped:
@@ -1636,7 +1690,10 @@ def _check_fleet_version_or_refuse(
 
 
 def _select_devices(
-    backend: LocalBackend, my_device_id: str, from_device: str | None
+    backend: LocalBackend,
+    my_device_id: str,
+    from_device: str | None,
+    inventory: DeviceInventory | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Return (all_devices, pull_targets).
 
@@ -1652,7 +1709,12 @@ def _select_devices(
     `pull_targets` is filtered: only the peer `from_device` matches, or
     all peers excluding self.
     """
-    all_devices = core._list_devices_warn(backend)
+    if inventory is None:
+        all_devices = core._list_devices_warn(backend)
+    else:
+        # The pull's single inventory: dropped entries already refused at the
+        # gate, so nothing is left to warn about here.
+        all_devices = inventory.valid
     if from_device:
         pull_targets = [d for d in all_devices if d["device_id"] == from_device]
     else:
@@ -1661,13 +1723,20 @@ def _select_devices(
 
 
 def _prefetch_manifests(
-    backend: LocalBackend, devices: list[dict], passphrase: str, memory_kb: int
+    backend: LocalBackend,
+    devices: list[dict],
+    passphrase: str,
+    memory_kb: int,
+    vanished_out: list[_CorruptPeer] | None = None,
 ) -> tuple[dict[str, dict | None], list[_CorruptPeer]]:
     """Fetch every device's manifest. Missing/corrupt both map to None.
 
     Returns (cache, corrupt_peers). Callers route corrupt_peers to stderr
     via _print_pull_summary (load-bearing signal: silent skip = partial
-    pull that looks like a successful pull).
+    pull that looks like a successful pull). A manifest that vanished
+    mid-read (a sync tool replacing it; Track 87A) is missing, not corrupt:
+    it is appended to `vanished_out` when given so the pull can report it as
+    waiting.
     """
     cache: dict[str, dict | None] = {}
     corrupt: list[_CorruptPeer] = []
@@ -1678,6 +1747,8 @@ def _prefetch_manifests(
         peer_fetch = core._fetch_remote_manifest(backend, did, passphrase, memory_kb)
         if peer_fetch.status == "corrupt":
             corrupt.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
+        elif peer_fetch.status == "missing" and peer_fetch.vanished and vanished_out is not None:
+            vanished_out.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
         cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
         core._sync_progress_advance()
     return cache, corrupt
@@ -1733,6 +1804,9 @@ def _preflight_conflicts(
     return _fail_mode_refusals(planner.predictions)
 
 
+_UNAPPLIED = frozenset({"unchanged", "waiting"})
+
+
 def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
     return {
         "written": [],
@@ -1742,6 +1816,7 @@ def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
         "conflicted": [],
         "unchanged": [],
         "failed": [],
+        "waiting": [],
     }
 
 
@@ -1953,6 +2028,53 @@ def _fsync_touched_parents(touched_parents: set[Path]) -> list[_FsyncWarning]:
     return warnings
 
 
+def _waiting_peers(
+    per_source_results: list[_PerSourceResult],
+    vanished_manifests: list[_CorruptPeer],
+    vanished_entries: list[str],
+) -> list[WaitingPeer]:
+    """Per-peer waiting facts for `PullResult.waiting`, in first-seen order."""
+    by_device: dict[str, WaitingPeer] = {}
+    for r in per_source_results:
+        if n := len(r.outcomes.get("waiting", ())):
+            peer = by_device.setdefault(r.device_id, WaitingPeer(r.device_id, r.device_name))
+            peer.files += n
+    waiting = list(by_device.values())
+    waiting.extend(
+        WaitingPeer(p.device_id, p.device_name, manifest=True) for p in vanished_manifests
+    )
+    waiting.extend(WaitingPeer(i, i, entry=True) for i in vanished_entries)
+    return waiting
+
+
+def _waiting_items(result: PullResult, *, detail: bool) -> list[str]:
+    items = []
+    for w in result.waiting:
+        name = safety.safe_terminal_str(w.device_name)
+        if w.entry:
+            items.append(f"{name}'s device entry" + (" waiting" if detail else ""))
+        elif w.manifest:
+            items.append(f"{name}'s manifest" + (" waiting" if detail else ""))
+        else:
+            files = core._count(w.files, "file", "files")
+            items.append(f"{files} waiting from {name}" if detail else f"{files} from {name}")
+    return items
+
+
+def waiting_clause(result: PullResult) -> str:
+    """The outcome-line clause for undelivered content, or "" when none:
+    ``waiting for 2 files from Mac B, Mac C's manifest``. Peer text goes
+    through `safety`; nothing here is a failure."""
+    items = _waiting_items(result, detail=False)
+    return "waiting for " + ", ".join(items) if items else ""
+
+
+def waiting_detail(result: PullResult) -> str:
+    """The autopull breadcrumb detail for the same facts (``2 files waiting
+    from Mac B``), or "" when none."""
+    return "; ".join(_waiting_items(result, detail=True))
+
+
 def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
     """Print predicted fail-mode refusals before --conflict-mode=fail raises.
 
@@ -2063,6 +2185,20 @@ def _print_pull_summary(
     # as successful pull). device_name and device_id are peer-controlled —
     # sanitize before render (Group 7 preflight #1 sweep extension).
     for peer in corrupt_peers:
+        if peer.own_vanished:
+            text = (
+                "this device's manifest ({}) vanished during the read - its deletion "
+                "records were not applied, so files deleted on this Mac may have come "
+                "back from peers. Check them before the next mm push."
+            )
+            if quiet:
+                print(
+                    "mm: warning: " + text.format(safety.safe_terminal_str(peer.device_id)),
+                    file=sys.stderr,
+                )
+            else:
+                console.print("[yellow]Warning:[/yellow] " + text.format(safe_str(peer.device_id)))
+            continue
         msg = (
             f"manifest for device {safe_str(peer.device_name)} "
             f"({safe_str(peer.device_id)}) "
@@ -2146,6 +2282,7 @@ def _print_pull_summary(
         src_skipped = len(r.outcomes["skipped"])
         src_conflicted = len(r.outcomes["conflicted"])
         src_failed = len(r.outcomes["failed"])
+        src_waiting = len(r.outcomes.get("waiting", ()))
         if src_conflicted or src_failed or verbose:
             line = f"  [bold]{r.src_name}:[/bold]"
             if src_written:
@@ -2158,6 +2295,8 @@ def _print_pull_summary(
                 line += f" [yellow]{src_conflicted} conflicts[/yellow]"
             if src_failed:
                 line += f" [red]{src_failed} failed[/red]"
+            if src_waiting:
+                line += f" [yellow]{src_waiting} waiting[/yellow]"
             console.print(line)
             # Task 2: inline conflicted/failed path list under per-source
             # line. 4-space indent keeps the device→source→file hierarchy
@@ -2167,6 +2306,8 @@ def _print_pull_summary(
                 _print_inline_paths(r.outcomes["conflicted"], verbose=verbose, color="yellow")
             if src_failed:
                 _print_inline_paths(r.outcomes["failed"], verbose=verbose, color="red")
+            if src_waiting and verbose:
+                _print_inline_paths(r.outcomes.get("waiting", []), verbose=verbose, color="yellow")
 
     if core._SYNC_OUTPUT.get() is not None:
         _conflict_review_notice(result)
@@ -2199,6 +2340,8 @@ def _print_pull_summary(
         parts.append(f"[yellow]{result.total_conflicted} conflicts[/yellow]")
     if result.total_failed:
         parts.append(f"[red]{result.total_failed} failed[/red]")
+    if result.total_waiting:
+        parts.append(f"[yellow]{result.total_waiting} waiting[/yellow]")
     if result.total_skipped_unknown_source:
         parts.append(
             f"[yellow]{result.total_skipped_unknown_source} unknown source(s) skipped[/yellow]"
@@ -2207,6 +2350,8 @@ def _print_pull_summary(
         console.print("  " + ", ".join(parts))
     else:
         console.print("  nothing to apply")
+    if clause := waiting_clause(result):
+        console.print(f"  [yellow]{safe_str(clause)}[/yellow]; run 'mm pull' again once it syncs.")
     if result.bytes_transferred:
         mb = result.bytes_transferred / (1024 * 1024)
         console.print(f"  {mb:.1f}MB transferred")
@@ -2293,7 +2438,13 @@ def _pull_core(
         # files in a refusal scenario where the user is about to upgrade
         # their peers and re-pull. Exits via _error → typer.Exit(1).
         core._sync_progress_phase("Reading peer manifests")
-        _check_fleet_version_or_refuse(backend, my_device_id, refusal_suffix=refusal_suffix)
+        # One device inventory per pull (Track 87A): the gate, peer selection,
+        # tombstone collection and the waiting notice all read this, so a
+        # Syncthing replacement between two reads cannot make them disagree.
+        inventory = inventory_devices(backend)
+        _check_fleet_version_or_refuse(
+            backend, my_device_id, refusal_suffix=refusal_suffix, inventory=inventory
+        )
 
         # Pre-inversion conflict-file migration. Runs once per pull under the
         # already-held mm lockfile — safe against autopull racing with another
@@ -2326,8 +2477,16 @@ def _pull_core(
             for src_cfg in pull_sources
         }
 
-        all_devices, pull_targets = _select_devices(backend, my_device_id, from_device)
-        if from_device and not pull_targets:
+        all_devices, pull_targets = _select_devices(backend, my_device_id, from_device, inventory)
+        # A device entry that vanished mid-read is waiting, not corrupt and not
+        # unknown. Its id stays in the manifest set (its tombstones still
+        # apply); only its version check and its files are skipped.
+        vanished_entries = [
+            i
+            for i in inventory.vanished
+            if i != my_device_id and (not from_device or i == from_device)
+        ]
+        if from_device and not pull_targets and from_device not in inventory.vanished:
             if not quiet:
                 core._error(f"Device not found: {from_device}" + refusal_suffix)
         if not pull_targets:
@@ -2336,12 +2495,36 @@ def _pull_core(
             if dry_run and not quiet:
                 console.print("No changes predicted.")
             return PullResult(
-                no_peers=True, no_sources=not pull_resolution.selected, elapsed=time.time() - start
+                no_peers=not (from_device and from_device in inventory.vanished),
+                no_sources=not pull_resolution.selected,
+                elapsed=time.time() - start,
+                waiting=_waiting_peers([], [], vanished_entries),
             )
 
+        vanished_manifests: list[_CorruptPeer] = []
         manifest_cache, corrupt_peers = _prefetch_manifests(
-            backend, all_devices, passphrase, memory_kb
+            backend,
+            all_devices + [{"device_id": i, "device_name": i} for i in inventory.vanished],
+            passphrase,
+            memory_kb,
+            vanished_out=vanished_manifests,
         )
+        # This Mac's own manifest carries its deletion records. If it vanished
+        # mid-read they are not applied this pull, so a file deleted here can
+        # come back from a peer: data at risk, reported like a corrupt
+        # manifest (warning plus a degraded autopull), never as waiting.
+        corrupt_peers.extend(
+            _CorruptPeer(p.device_id, p.device_name, own_vanished=True)
+            for p in vanished_manifests
+            if p.device_id == my_device_id
+        )
+        vanished_manifests = [
+            p
+            for p in vanished_manifests
+            if p.device_id != my_device_id
+            and p.device_id not in inventory.vanished
+            and (not from_device or p.device_id == from_device)
+        ]
         core._sync_progress_phase("Checking local files")
 
         # Consumer-boundary exclude_patterns filter for pull. Drops excluded
@@ -2527,6 +2710,7 @@ def _pull_core(
         fsync_warnings: list[_FsyncWarning] = []
         total_written = total_merged = total_skipped = total_conflicted = 0
         total_failed = total_skipped_unknown_source = bytes_transferred = 0
+        total_waiting = 0
 
         in_flight: _ApplyReporter | None = None
         per_source: _PerSourceResult | None = None
@@ -2535,7 +2719,7 @@ def _pull_core(
 
         def _account_source(per_source: _PerSourceResult) -> None:
             nonlocal bytes_transferred, total_written, total_merged, total_skipped
-            nonlocal total_conflicted, total_failed, touched_parents
+            nonlocal total_conflicted, total_failed, touched_parents, total_waiting
             per_source_results.append(per_source)
             bytes_transferred += per_source.bytes_transferred
             touched_parents |= per_source.touched_parents
@@ -2546,6 +2730,7 @@ def _pull_core(
             total_skipped += len(per_source.outcomes["skipped"])
             total_conflicted += len(per_source.outcomes["conflicted"])
             total_failed += len(per_source.outcomes["failed"])
+            total_waiting += len(per_source.outcomes.get("waiting", ()))
 
         try:
             for device in pull_targets:
@@ -2641,7 +2826,10 @@ def _pull_core(
 
                     _account_source(per_source)
                     accounted = True
-                    device_had_changes = True
+                    # Waiting alone applies nothing: no device-name entry and no
+                    # manifest cleanup for a peer whose blobs are still arriving.
+                    if any(v for k, v in per_source.outcomes.items() if k not in _UNAPPLIED):
+                        device_had_changes = True
 
                     _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
                     in_flight = None
@@ -2654,8 +2842,12 @@ def _pull_core(
                     # accumulated warnings from the visible-failure contract.
                     # Skip after a contained apply failure so an alternate
                     # conflict-copy of this device's manifest remains for retry.
+                    # Waiting counts like failed: a kept copy of this peer's
+                    # manifest may be the only holder of the manifest whose
+                    # blobs have not been delivered yet.
                     device_failed = any(
-                        r.device_id == did and r.outcomes["failed"] for r in per_source_results
+                        r.device_id == did and (r.outcomes["failed"] or r.outcomes.get("waiting"))
+                        for r in per_source_results
                     )
                     if not device_failed:
                         try:
@@ -2722,6 +2914,8 @@ def _pull_core(
                 elapsed=time.time() - start,
                 durability_fsync_failures=len(fsync_warnings),
                 corrupt_peer_count=len(corrupt_peers),
+                total_waiting=total_waiting,
+                waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
             )
             if result_observer is not None:
                 with suppress(Exception, SystemExit):

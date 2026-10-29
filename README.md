@@ -16,6 +16,23 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Undelivered content is waiting, not failed (Track 87A):** on a Syncthing
+folder a manifest can arrive before its blobs, or a file can be replaced while
+mm reads it. A blob that has not been delivered yet used to count as a failed
+file (attended `mm pull` exit 1, autopull `degraded`). It is now **waiting**:
+`mm pull` says `Pull: ... waiting for 2 files from Mac B.` and exits 0, and
+`mm autopull` records `success` with the same detail (`mm status` shows it).
+Waiting files are not applied; other available files still apply. The next pull
+picks up the waiting files once they sync. A failed file still means a real
+error (decrypt, write, permission).
+`mm pull` and `mm status` ignore Syncthing's temporary files and `.stversions`
+folder and retry observed canonical files that disappear during a read. Device
+listing ignores conflict copies and counts a `devices/` file only when its name
+matches the id in its body; valid manifest conflict copies remain recovery
+inputs. `mm diag`
+reports the number of ignored files as `ignored storage files`. See
+[waiting content](#waiting-content-is-not-a-failure).
+
 **Host usage snapshot compatibility:** an un-upgraded peer drops incoming `host-usage-snapshot` records carrying `"muse"` or `"agy"` until it updates. Content sync is unaffected; upgrade the peer with `mm update` or `pipx upgrade mind-meld` to include its usage in `retro-fleet`.
 
 **Push and pull output (Track 78A):** attended `mm push` and `mm pull` now end
@@ -303,7 +320,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopull` checks all other registered devices for changes and applies them locally. It writes a `.mind-meld-log.md` breadcrumb to each affected project so Claude Code knows what changed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
-- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest, unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
+- "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest (including this Mac's own manifest vanishing mid-pull), unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
 - Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
@@ -463,6 +480,12 @@ and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
 paths. Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
+Content a sync tool has not delivered yet is **waiting**, not failed: the line
+gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
+device entry`), the exit stays 0, and the next pull retries. When a pull also
+failed, the waiting clause comes before `Run:`. `--verbose` lists the waiting
+paths. Attended runs do not record a waiting count; `mm autopull` records it in
+the `success` breadcrumb detail.
 
 ```text
 $ mm pull
@@ -515,6 +538,7 @@ In sync with this device's last push.
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
 Metadata-only changes waiting to push. Run: mm push
 This device has not pushed yet. Run: mm push
+This device's manifest is still arriving from sync. Run: mm status
 Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm push
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```
@@ -600,8 +624,8 @@ GC reads only this device's raw manifest and lists only its blob directory.
 If that manifest is missing, it warns that blob collection was skipped and no
 blobs were deleted: wait for sync, inspect with `mm diag`, then retry `mm gc`.
 Local retention still runs. A valid empty own manifest can collect own orphans.
-If this device's manifest is unreadable, or only iCloud conflict copies of it
-load, GC refuses and says what to do. When only conflict copies load, `mm push`
+If this device's manifest is unreadable, or only conflict copies of it (iCloud,
+Dropbox or Syncthing) load, GC refuses and says what to do. When only conflict copies load, `mm push`
 on this device rewrites the manifest even with no content change; then retry
 `mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
 only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
@@ -1145,6 +1169,29 @@ one before continuing.
 
 **On mm older than v0.14.5, `mm pull` died with `TypeError: '<' not supported between instances of 'str' and 'int'` (or `bool` / `list` / `dict`), or an unattended `mm autopull` reported an unexpected error and a later file never arrived.** A `.jsonl` file mixed a string `ts` with a non-string value. Current `mm` keeps every unique normalized line and continues the pull. On **each** Mac: confirm with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. If `pipx upgrade` leaves you on an old version, the install is pinned to a frozen tag — see [Upgrading](#upgrading). `mm devices` shows the version at last push, not a live probe of the installed binary; after a successful `mm push` it can corroborate the fleet. Numeric-only timestamps now sort as whole-line text rather than numbers; until every active Mac is upgraded, old and new clients can keep rewriting that order. `mm log --action merged --limit 20` can show repeated merges, but a merged outcome alone does not prove timestamp oscillation.
 
+### Waiting content is not a failure
+
+On a Syncthing folder a peer's manifest can arrive before the blobs it names,
+and a file can be replaced while mm reads it. `mm pull` reports blobs that are
+not there yet as **waiting**: those files are not applied, and other available
+files still apply. Waiting alone keeps the exit at 0 and `mm autopull` at
+`success` with a `N files waiting from <peer>` detail.
+A peer's manifest copies are kept while any of its files are waiting. A device
+entry or peer manifest that vanished mid-read is reported the same way. Run
+`mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
+paths. If a file stays waiting for a long time, check that Syncthing shows the
+folder as up to date on both Macs.
+If this Mac's own manifest is replaced while `mm status` reads it, status opens
+with `This device's manifest is still arriving from sync. Run: mm status` instead
+of the first-push line and shows
+`Remote manifest: still arriving from sync; check again shortly.`; run it again
+once Syncthing finishes.
+If this Mac's own manifest vanishes while `mm pull` reads it, that is not
+waiting: its deletion records were not applied, so files deleted on this Mac may
+come back from peers. Pull warns on stderr and `mm autopull` records `degraded`
+(its detail counts it as `1 corrupt peer manifest(s)`); check those files before
+the next `mm push`.
+
 ### Pull incomplete / could not pull a file
 
 One blocked file no longer stops later files, sources, or peers. Each apply warning on stderr names the peer, source, path, cause, and remedy. Completed files stay on disk and in `mm log`; failed files are retried on the next pull. `mm autopull` exits 0 and records `degraded: N file(s) failed`. Attended `mm pull` exits 1 for any failed file, after recovery and cleanup. Read the per-file warnings and final `Pull incomplete [result-degraded]` outcome; repair the named problem before one retry. An unexpected failure or interruption also exits 1 with known completed effects. Unknown effects require read-only diagnosis before retrying.
@@ -1204,7 +1251,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` says `stale — no autorun in Nh`.** Nothing has run `mm autopull` / `mm autopush` in 48 hours, so your agent's lifecycle hook is not firing. Check the `# Mind Meld` block is still in the global instructions file that agent actually reads.
 
-**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means some content did not arrive — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
+**`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
 **`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
@@ -1214,7 +1261,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
-**A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud/Dropbox conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
+**A warning mentions a suspicious storage file.** Mind Meld left that entry in place. Rejection is not proof of malicious content — an older passphrase, a leftover iCloud, Dropbox or Syncthing conflict copy, or an unrelated file whose name happens to match can all produce it. Leaving the entry may repeat the warning on the next scan. `storage.path` in `~/.config/mind-meld/config.toml` identifies the folder. Inspect the original entry in Finder and preserve any uncertain data; do not delete it from a diagnostic path. The path shown in the warning is display text, not a shell argument, and may differ from the on-disk spelling (nonprintable characters become visible notation, so some joined emoji spellings appear split).
 
 ### Dropped repositories and ignored git environment variables
 
@@ -1776,7 +1823,7 @@ can record it again; this notice does not itself become a stored blocker.
 
 A successful `mm push` publishes a complete snapshot of the **selected** sources: each advertised digest and size describe the accepted file bytes, and mtime describes that same file revision. An unreadable selected file or directory, a directory that vanishes while it is being listed, a still-present file omitted only because it exceeds `sync.max_file_size` or shares an inode alias, a symlink, hard link or non-regular file where a regular file was, or a missing user-source root that was previously published, **refuses the whole push** and keeps the previous snapshot; run `mm push` again after the cause is fixed.
 
-**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is rewriting a corrupt or conflict-copy manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
+**A file that changes while mm reads it does not stop the push.** mm re-reads it once during the scan. If a file later changes before or during upload verification, mm re-reads it once after the rest of that source has uploaded. If either retry finds it still changing, it is **held**: the previously published version stays published, a file that was never published is left out, nothing is deleted, and the rest of the push goes out. A scan-held file is not read again during upload. The push exits 0 and counts the held files; they go with a later push. The attended outcome line shows the count (`; 2 held`) and `--verbose` lists every path as *not yet synced*. Held files also appear in `mm push --dry-run` (which applies the scan-time hold), and in `mm autopush`'s `mm status` line (autopush prints nothing). A file that keeps changing is held on every push: `exclude_patterns` under that source ends it. A push that is recovering a corrupt, conflict-copy-only or vanished manifest has no accepted version to hold at, so there a still-changing file refuses and names itself.
 
 ```text
 $ mm push
@@ -1816,7 +1863,7 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 | What happened | What to do |
 |---|---|
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
-| File changed, vanished or grew while being read, and a hold is not possible (the push is rewriting a corrupt or conflict-copy manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
+| File changed, vanished or grew while being read, and a hold is not possible (the push is recovering a corrupt, conflict-copy-only or vanished manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
 | Directory vanished while being listed, or `.extend-root` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
@@ -1843,7 +1890,7 @@ The lock allowance includes creating its parent if absent.
 | Command | May touch | Not previewed | Exit codes |
 |---|---|---|---|
 | `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (a scan-time hold is applied and its count shown) | 0 completed, including held files; 1 stopped |
-| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
+| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures, blobs not delivered yet (waiting) | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
 | `mm gc --dry-run` | Local lock only | No cleanup is applied; conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
 | `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |
 | `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |

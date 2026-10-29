@@ -322,7 +322,9 @@ class TestFinalOutputSinks:
         monkeypatch.setattr(
             cli.core,
             "_fetch_remote_manifest",
-            lambda *args: SimpleNamespace(is_ok=False, manifest=None, status="missing"),
+            lambda *args: SimpleNamespace(
+                is_ok=False, manifest=None, status="missing", vanished=False
+            ),
         )
         monkeypatch.setattr(
             cli.core,

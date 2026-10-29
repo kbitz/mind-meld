@@ -131,7 +131,7 @@ deleted. Wait for sync, inspect with `mm diag`, then retry GC; inspection does n
 repair missing metadata. No blob completion/orphan-success summary is printed.
 A valid empty manifest is distinct and can collect own orphans. Own corrupt or
 newer-format metadata refuses in apply and preview. So does an own manifest held
-only by iCloud conflict copies because the canonical is absent or unreadable
+only by conflict copies (iCloud, Dropbox or Syncthing) because the canonical is absent or unreadable
 (`ManifestFetch.conflict_copies_only`): an older copy alone is an incomplete
 reference set, and no peer reference masks it any more. The refusal's `mm push`
 remedy works without a content change: push treats that state like a corrupt
@@ -317,7 +317,7 @@ Publishing scans (`_push_core`, including the mm-events rescan) use strict mode:
 
 Each site re-reads **once**, counted exactly: scan read 1 in `_record_file`, immediate read 2; upload read 1 is the verify read, read 2 is deferred to the end of that source's upload loop (the other uploads are the settle delay; no sleep; there is no read 3). A verified read 2 publishes *its own* revision, which need not equal read 1 or the scan: at upload its blob is keyed by its own digest and `_upload_changed_blobs` returns the replacement entry in `UploadOutcome.patches` (a read-2 digest equal to the scanned one is an idempotent put plus an mtime-only republish, no special case). A file still changing after read 2 is **held** when the caller passed a collector (`build_manifest_v2(held=..., held_candidates=...)`, opt-in like `nested_roots`; status and diff pass none, and a transient without one raises after its retry). A hold leaves the previously published version in place: the file keeps its accepted prior entry (no upload, no tombstone), or, if it was never published, is left out. Only the accepted prior entry is ever carried, never a first-scan revision: that revision's blob is not stored until the upload loop, so carrying it would publish a dangling entry. The same file is therefore never both held and re-uploaded, and a held scan path reads as unchanged and cannot be held again at upload.
 
-Hold eligibility is exactly `not recovering_from_corrupt` (`fetch.status == "corrupt"` or `fetch.conflict_copies_only`). `ok` holds at the fetched entry; `missing` (first push, not recovery) holds by omission; a recovered prior (sidecar, peers or conflict copies) was never accepted as-is, so there the retry still runs and settles normally, but a still-changing file refuses, naming the file and the fix. `_push_core` passes no collector under recovery and `_upload_changed_blobs(allow_hold=False)` re-raises. Held-file injection (`_inject_held_entries`, one helper for the scan and the rescan) runs after the unselected/exclude filters, the symlink prior-drop and the nested-checkout freeze, and before the omission proof and tombstones: it skips frozen, excluded and tombstoned paths (pruned, never counted: excluded or deleted, not waiting), needs no blob-exists probe (parity with the accepted freeze path), and so needs no omission-proof exemption (the proof skips locally present paths). A hold candidate is a scandir entry that vanished between its listing and its stat; it is re-lstat'ed at injection: still missing and an exact prior file holds at the prior, still missing under a prior directory refuses (an unenumerated subtree cannot be proven tombstone-safe), still missing and neither is omitted, present again in any form refuses.
+Hold eligibility is exactly `not recovering_from_corrupt` (`fetch.status == "corrupt"` or `fetch.conflict_copies_only` or `fetch.vanished`). `ok` holds at the fetched entry; `missing` (first push, not recovery) holds by omission; a recovered prior (sidecar, peers or conflict copies) was never accepted as-is, so there the retry still runs and settles normally, but a still-changing file refuses, naming the file and the fix. `_push_core` passes no collector under recovery and `_upload_changed_blobs(allow_hold=False)` re-raises. Held-file injection (`_inject_held_entries`, one helper for the scan and the rescan) runs after the unselected/exclude filters, the symlink prior-drop and the nested-checkout freeze, and before the omission proof and tombstones: it skips frozen, excluded and tombstoned paths (pruned, never counted: excluded or deleted, not waiting), needs no blob-exists probe (parity with the accepted freeze path), and so needs no omission-proof exemption (the proof skips locally present paths). A hold candidate is a scandir entry that vanished between its listing and its stat; it is re-lstat'ed at injection: still missing and an exact prior file holds at the prior, still missing under a prior directory refuses (an unenumerated subtree cannot be proven tombstone-safe), still missing and neither is omitted, present again in any form refuses.
 
 The mm-events rescan replaces its sources, so it takes their holds from its own scan: a path it reads cleanly leaves the held set and uploads normally, a path it holds keeps its accepted prior entry (or is left out), and a held path under a checkout the rescan reports moves to frozen handling (held and frozen stay disjoint; upload skips both). An upload-time hold puts no blob and skips only that file: the loop continues and the manifest still publishes the rest. Its entry is patched back to the accepted prior entry (or removed) and read-2 patches are applied **before the manifest is serialized**, so the manifest never advertises a blob that was not put. After upload holds, tombstones are reconciled against those final entries: a recreated file that could not publish keeps its accepted deletion and is not counted as waiting. Counters describe published bytes: upload holds leave `total_new`/`total_modified` by fresh-diff membership, and `content_files` only for non-mm-internal sources; `content_changed` is the pre-upload gate fact and is not recomputed.
 
@@ -956,7 +956,81 @@ pullhistory.maintain_best_effort()
 ```
 
 ## Corrupt-manifest recovery (load-bearing)
-`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt`, `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. Older copies can predate this device's latest deletions, so `_recover_prior_manifest` merges the local sidecar into the prior (tombstones, source retention, nested-checkout freeze) with a warning, even in autopush, that also says recent deletions may be lost when no usable sidecar exists. Like other recovered priors, it freezes nested-checkout entries only when their blob is still stored. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
+`_fetch_remote_manifest` returns a tri-state `ManifestFetch(status: "ok"|"missing"|"corrupt", manifest)`. On `corrupt` (or `missing` with `vanished`, see [Syncthing-tolerant reads](#syncthing-tolerant-reads-and-waiting-track-87a)), `push` runs a recovery chain before writing a new manifest: (1) local sidecar at `~/.config/mind-meld/last-push.json` (preserves this device's fresh deletions), (2) peer-manifest tombstone aggregation (propagated deletions only), (3) refuse with actionable error. Never treat corrupt as empty — that silently un-deletes files fleet-wide. An `ok` result built only from conflict copies (canonical absent or unreadable) sets `conflict_copies_only`; push then bypasses its no-op gate and rewrites the canonical from local truth, diffing against the merged copies so unchanged blobs are not re-uploaded. Older copies can predate this device's latest deletions, so `_recover_prior_manifest` merges the local sidecar into the prior (tombstones, source retention, nested-checkout freeze) with a warning, even in autopush, that also says recent deletions may be lost when no usable sidecar exists. Like other recovered priors, it freezes nested-checkout entries only when their blob is still stored. `mm gc` refuses when its own manifest is corrupt or conflict-copies-only (referenced own blobs may still be live); peer manifests are outside its collection scope. See SPEC.md "Manifest corruption recovery" and "Merge invariants" for the full invariant.
+
+## Syncthing-tolerant reads and waiting (Track 87A)
+
+Syncthing delivers files late and out of order, replaces them with a rename and
+leaves temporary and conflict files beside them. Storage reads tolerate that
+without treating it as corruption or failure. Tests use one shared folder,
+`tests/syncthing_folder.py` (late delivery, manifest before blobs, removal after
+listing and during a read); no sleeps: the retry clock is injected.
+
+**One name classifier** (`storage/local.py`: `is_foreign_name`, `is_foreign_key`,
+`is_conflict_name`, `is_conflict_of`) serves `list_keys`, `find_conflict_copies`,
+the device table and `mm diag`. *Foreign*: any dot-prefixed component
+(`.syncthing.<name>.tmp`, `.stfolder`, `.stversions/`, `.DS_Store`) or a
+`~syncthing~` name. `list_keys` never returns a foreign key and does not descend
+into a foreign directory; `list_foreign_keys` returns them for diag. *Conflict
+copies* are iCloud (`name 2.ext`), Dropbox (`(conflicted copy ...)`) and
+Syncthing (`<stem>.sync-conflict-YYYYMMDD-HHMMSS[-<7 chars>]<ext>`, stacked, or
+extensionless like `mm-crypto-init.sync-conflict-...`). `mm-crypto-init.preserved-*`
+never matches. A candidate that disappears before validation is skipped silently.
+
+**`LocalBackend.get(key, *, expected=False)`** opens the file directly (no
+`exists` pre-check). Only `FileNotFoundError` is absence and raises
+`StorageNotFound(key, vanished=)`; every other `OSError` (EACCES, ENOTDIR) stays a
+`StorageError` failure. `expected=True` means the caller listed, `exists`-checked
+or conflict-scanned the key, so ENOENT from the first open is a replacement in
+flight: retry on `_VANISH_RETRY_DELAYS_S` (0.05, 0.1, 0.2 s, about 0.35 s per
+file) within a per-backend-instance budget of about 2 s (one backend per
+command), then raise with `vanished=True`. A key never seen (blobs, a manifest
+that was never there) reads missing at once, with no delay. `sleep` is injectable.
+
+**`ManifestFetch.vanished`**: an observed canonical manifest that is gone after
+the retry reads `status="missing", vanished=True` (or `ok` from conflict copies).
+A validated conflict copy that disappears at its final read also sets `vanished`
+when no manifest remains; that direct read has no bounded retry. Readers treat
+these absences as missing, never corrupt. Writers must not read it as a first
+push: `_recover_prior_manifest` runs a vanished own manifest through the
+corrupt chain (sidecar, then peer tombstones, then refuse with a wait remedy) and
+`push` rewrites it (`recovering_from_corrupt`). GC's missing-own-manifest skip
+already holds. Pull must not read it as waiting either: the own manifest carries
+this Mac's deletion records, which are not applied that pull, so a file deleted
+here can come back from a peer. `_pull_core` adds it to `corrupt_peers`
+(`_CorruptPeer.own_vanished`), which keeps the load-bearing stderr warning and
+`corrupt_peer_count`, so `mm autopull` records `degraded` (detail
+`N corrupt peer manifest(s)`). `mm status` must not read it as a first push:
+`_status_verdict(manifest_arriving=)` opens with the still-arriving verdict
+(see [Status verdict](#status-verdict-and-attended-sync-evidence-track-77a)).
+
+**One device inventory per pull** (`devices.inventory_devices`, `DeviceInventory`:
+`valid`, `dropped`, `vanished`, `foreign`) feeds the fleet gate, peer selection,
+tombstone collection, early returns and the waiting notice, so a replacement
+between two reads cannot make them disagree. A file counts as a device only when
+it is `devices/<id>.json` holding `device_id == <id>`. Conflict copies, misnamed
+files and a body whose id is not its file name are foreign: never a device, never
+a refusal. A key-named unreadable or shape-invalid entry is `dropped` and still
+refuses the pull (Track 5E). A key-named entry that vanished mid-read stays in the
+manifest set (its tombstones still apply) and is skipped only for the version
+check and for pulling its files; it is reported as waiting.
+
+**`waiting` outcome.** Per file: `_download_and_apply` maps `StorageNotFound` on a
+blob to `waiting` (an `ApplyOutcome` key). Nothing was applied, nothing failed, no
+`pullhistory` row is written, and it is never `degraded`. Available files from
+the same peer still apply. A peer is fully applied only when it has zero waiting
+and zero failed files; manifest conflict-copy cleanup waits for that point
+(a kept copy may be the only holder of the manifest the missing blob belongs
+to), and a waiting-only device gets no
+`device_names` entry. `PullResult.waiting` holds per-peer `WaitingPeer` facts
+(files, vanished manifest, vanished device entry) and `total_waiting` counts
+files. `waiting_clause` builds `waiting for 2 files from Mac B, Mac C's manifest,
+cccccccc's device entry`, appended to the attended success line and placed before
+`Run:` on a failed one; `waiting_detail` is the autopull `success` breadcrumb
+detail (`mm status` prints it). Attended runs record no waiting count. A published
+peer's not-yet-arrived manifest and an attended waiting count in `mm status` stay
+with Track 92A. `mm diag` adds `ignored_storage_files`; its manifest and device
+totals count valid keys only.
 
 ## Manifest read-path invariant (load-bearing)
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).
@@ -976,7 +1050,7 @@ Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(by
 
 A per-source `_ApplyReporter` owns outcomes, byte accounting, deferred-bump invalidation, and touched parents. Each file starts with `begin`; all five publication sites call `published` immediately after successful `atomic_write_bytes`, before mtime restore, cleanup, or output. Publication and normal return must agree; different words raise `RuntimeError`. Unchanged/skipped/failed and deduplicated conflict returns are recorded at the boundary if nothing was published. No disk reconcile: matching bytes cannot prove this attempt wrote them. Direct helper calls default to diagnostics without a ledger.
 
-Every apply failure uses `_warn_apply_failure`, on stderr in quiet and interactive modes. Interactive progress is constructed with `redirect_stderr=False` so those lines stay on the real stderr while the widget runs. Every dynamic field uses `safety.safe_terminal_str` to enforce one physical line, including device/source/path, operation, preservation text, and exception. Errno comes from the exception or its cause (atomic writes wrap OSError in StorageError). The actual first existing non-directory ancestor is named as a folder/file conflict with the peer. `_print_apply_warning` swallows only output `OSError`. A contained exception after publication preserves the outcome and prints a notice naming the publication and failed follow-up; stale-sidecar cleanup warnings and unreadable-sidecar scan warnings use the same non-raising printer. Directory creation is one component at a time so a later mkdir failure still registers every directory that landed. iCloud/Dropbox manifest conflict-copy cleanup waits until that device had no contained apply failures.
+Every apply failure uses `_warn_apply_failure`, on stderr in quiet and interactive modes. Interactive progress is constructed with `redirect_stderr=False` so those lines stay on the real stderr while the widget runs. Every dynamic field uses `safety.safe_terminal_str` to enforce one physical line, including device/source/path, operation, preservation text, and exception. Errno comes from the exception or its cause (atomic writes wrap OSError in StorageError). The actual first existing non-directory ancestor is named as a folder/file conflict with the peer. `_print_apply_warning` swallows only output `OSError`. A contained exception after publication preserves the outcome and prints a notice naming the publication and failed follow-up; stale-sidecar cleanup warnings and unreadable-sidecar scan warnings use the same non-raising printer. Directory creation is one component at a time so a later mkdir failure still registers every directory that landed. iCloud/Dropbox/Syncthing manifest conflict-copy cleanup waits until that device had no contained apply failures or waiting files.
 
 `_pull_core` sets `in_flight` before calling the source and clears it after bookkeeping. Aggregate accounting is separate from `_record_source_bookkeeping`; history and sync-log attempts are tracked so recovery never replays already attempted writes. On `BaseException`, partial outcomes are counted once, `_fsync_touched_parents` runs first (its warnings assigned to the enclosing summary), bookkeeping runs under an `(Exception, SystemExit)` guard, and the original exception is re-raised. A summary or progress teardown failure cannot replace an in-flight exception; a summary failure on normal completion still propagates. Deferred inline bumps drain only in the normal try path.
 
@@ -1094,9 +1168,12 @@ After existing authentication, status emits one sanitized, unwrapped stdout
 line before notices, title or detail. `_status_verdict` is pure over explicit
 observations: blocking setup/storage/format/incomplete scan, conflicts, unresolved
 same-verb failure/actionable degradation or uncertain history, current capture
-prerequisite/reader blockers, first push, pending content or forward-only metadata,
-then “In sync with this device's last push.” Missing own metadata selects the
-first-push verdict unless a higher-priority action applies. No incoming peer convergence
+prerequisite/reader blockers, own manifest still arriving, first push, pending content
+or forward-only metadata, then “In sync with this device's last push.” Missing own
+metadata selects the first-push verdict unless a higher-priority action applies;
+missing with `ManifestFetch.vanished` (observed, then gone mid-read; Track 87A)
+selects “This device's manifest is still arriving from sync. Run: mm status”
+instead. No incoming peer convergence
 is measured. Every --source verdict names its source, and all counts use one
 materialized diff list. Selection, availability and previous publication must
 agree: missing previously published enabled roots, unavailable requested roots,

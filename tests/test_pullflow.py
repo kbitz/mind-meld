@@ -16,6 +16,7 @@ the retargeted shell suites; these tests pin module results and summary channels
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import subprocess
@@ -32,6 +33,7 @@ from rich.console import Console
 from mind_meld import core, crypto, devices, manifest, pullflow, pullhistory, sidecar, statedb
 from mind_meld.storage.keys import blob_key, device_key, manifest_key
 from mind_meld.storage.local import LocalBackend
+from tests.syncthing_folder import SyncthingFolder
 
 PASSPHRASE = "pullflow-contract-test-only"
 MEMORY_KB = 1024
@@ -250,15 +252,11 @@ def test_dry_run_predicts_without_any_writes(fleet, monkeypatch, mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("failure", ("missing", "corrupt"))
-def test_bad_blob_failure_lines_and_counts(fleet, monkeypatch, mode, failure):
+def test_corrupt_blob_failure_lines_and_counts(fleet, monkeypatch, mode):
     peer, _ = _seed(fleet, {"note.md": b"peer content\n"})
     key = blob_key(PEER, peer["sources"]["notes"]["files"]["note.md"]["sha256"])
-    if failure == "missing":
-        fleet.backend.delete(key)
-    else:
-        raw = fleet.backend.get(key)
-        fleet.backend.put(key, raw[:-1] + bytes([raw[-1] ^ 1]))
+    raw = fleet.backend.get(key)
+    fleet.backend.put(key, raw[:-1] + bytes([raw[-1] ^ 1]))
     result, summaries, output = _run(fleet, monkeypatch, mode, verbose=True)
     _counts(result, total_failed=1, device_names=["Peer B"])
     assert not (fleet.local / "note.md").exists()
@@ -267,13 +265,9 @@ def test_bad_blob_failure_lines_and_counts(fleet, monkeypatch, mode, failure):
         assert output == ("", "mm: warning: Peer B/notes — 1 failed: note.md\n")
     else:
         cause = (
-            f"blob missing: {key}"
-            if failure == "missing"
-            else (
-                "decrypt failed: note.md — decrypt: GCM tag mismatch — wrong passphrase, "
-                "wrong root_salt in mm-crypto-init, or corrupt blob. "
-                "Verify mm-crypto-init integrity if other decrypts also fail."
-            )
+            "decrypt failed: note.md — decrypt: GCM tag mismatch — wrong passphrase, "
+            "wrong root_salt in mm-crypto-init, or corrupt blob. "
+            "Verify mm-crypto-init integrity if other decrypts also fail."
         )
         assert cause in " ".join(output[0].split())
         assert output[1] == ""
@@ -338,3 +332,240 @@ def test_pullflow_contract_import_does_not_register_cli():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ── Track 87A: reads that tolerate Syncthing ─────────────────────────
+
+THIRD = "cccccccc"
+CONFLICT_STAMP = "sync-conflict-20260101-101010-ABCDEFG"
+
+
+@pytest.fixture
+def syncthing(fleet, monkeypatch):
+    """The fleet's storage as a Syncthing folder; `_pull_core` reads through it."""
+    folder = SyncthingFolder(fleet.backend.root)
+    monkeypatch.setattr(pullflow, "get_backend", lambda config: folder)
+    return folder
+
+
+def _blob(peer, name):
+    return blob_key(PEER, peer["sources"]["notes"]["files"][name]["sha256"])
+
+
+def _waiting(device_id, name, **fields):
+    return {
+        "device_id": device_id,
+        "device_name": name,
+        "files": 0,
+        "manifest": False,
+        "entry": False,
+    } | fields
+
+
+def _third_device(fleet, *, tombstones=None):
+    """Register a third device whose manifest holds only `tombstones`."""
+    devices.register_device(fleet.backend, THIRD, "Third C")
+    devices.update_last_seen(fleet.backend, THIRD)
+    third = {
+        "device_id": THIRD,
+        "device_name": "Third C",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "sources": {},
+        "tombstones": tombstones or {},
+    }
+    fleet.backend.put(
+        manifest_key(THIRD),
+        crypto.encrypt(manifest.serialize_manifest(third), PASSPHRASE, MEMORY_KB),
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+# Coverage audit value card:
+# Value: protects=undelivered blobs create no file history before they arrive;
+# fails_when=waiting is persisted as an apply event;
+# why_new=existing waiting assertions cover counts and files but not history;
+# seam=none; no_claim=live Syncthing delivery (temporary folder with withheld blobs).
+def test_manifest_before_blobs_reports_waiting_then_applies(fleet, syncthing, monkeypatch, mode):
+    peer, _ = _seed(fleet, {"a.md": b"alpha\n", "b.md": b"bravo\n"})
+    keys = [_blob(peer, "a.md"), _blob(peer, "b.md")]
+    for key in keys:
+        syncthing.hide(key)
+
+    result, summaries, output = _run(fleet, monkeypatch, mode, verbose=True)
+
+    # Not delivered yet is neither a failure nor a degradation, and costs no retry.
+    _counts(result, total_waiting=2, waiting=[_waiting(PEER, "Peer B", files=2)])
+    assert result.total_failed == 0 and result.durability_fsync_failures == 0
+    assert not (fleet.local / "a.md").exists() and not (fleet.local / "b.md").exists()
+    assert syncthing.sleeps == []
+    assert list(pullhistory.read_records()) == []
+    if mode == "quiet":
+        assert summaries == [("", "")]
+    elif mode == "attended":
+        assert summaries == [("  notes: 2 waiting\n    - a.md\n    - b.md\n", "")]
+    else:
+        text = summaries[0][0]
+        assert "Pull complete." in text and "2 waiting" in text
+        assert "waiting for 2 files from Peer B" in text
+        assert "Pull incomplete" not in text
+
+    for key in keys:
+        syncthing.arrive(key)
+    result, _, _ = _run(fleet, monkeypatch, mode)
+    _counts(
+        result,
+        total_written=2,
+        bytes_transferred=result.bytes_transferred,
+        device_names=["Peer B"],
+    )
+    assert (fleet.local / "a.md").read_bytes() == b"alpha\n"
+    assert (fleet.local / "b.md").read_bytes() == b"bravo\n"
+
+
+def test_waiting_keeps_the_peer_manifest_copy_until_blobs_arrive(fleet, syncthing, monkeypatch):
+    peer, _ = _seed(fleet, {"a.md": b"alpha\n", "b.md": b"bravo\n"})
+    mkey = manifest_key(PEER)
+    copy_key = mkey.replace("manifest.json.enc", f"manifest.json.{CONFLICT_STAMP}.enc")
+    fleet.backend.put(copy_key, fleet.backend.get(mkey))
+    syncthing.hide(_blob(peer, "b.md"))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    # One file applied and one waiting: the copy may be the only holder of the
+    # manifest the missing blob belongs to, so it stays.
+    assert (result.total_written, result.total_waiting, result.total_failed) == (1, 1, 0)
+    assert fleet.backend.exists(copy_key)
+
+    syncthing.arrive(_blob(peer, "b.md"))
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+    assert (result.total_written, result.total_waiting) == (1, 0)
+    assert not fleet.backend.exists(copy_key)
+    assert fleet.backend.exists(mkey)
+
+
+def test_vanished_peer_manifest_is_waiting_not_corrupt(fleet, syncthing, monkeypatch):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    syncthing.vanish_at_open(manifest_key(PEER))
+
+    result, summaries, _ = _run(fleet, monkeypatch, "quiet")
+
+    _counts(result, waiting=[_waiting(PEER, "Peer B", manifest=True)])
+    assert result.corrupt_peer_count == 0 and result.total_failed == 0
+    assert summaries == [("", "")]
+    assert syncthing.sleeps == [0.05, 0.1, 0.2]
+
+
+def test_vanished_own_manifest_is_data_at_risk_not_waiting(fleet, syncthing, monkeypatch):
+    # The own manifest carries this Mac's deletion records; when it vanishes
+    # mid-read they are not applied, so the pull must keep the corrupt-manifest
+    # signal (stderr warning, degraded autopull), not report waiting.
+    _seed(fleet, {"note.md": b"peer content\n"})
+    own = manifest.build_manifest_v2(
+        LOCAL,
+        "Local A",
+        [{"name": "notes", "type": "generic", "path": str(fleet.local), "include_dirs": ["."]}],
+    )
+    own["tombstones"] = {
+        "notes:note.md": {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "device_id": LOCAL,
+        }
+    }
+    fleet.backend.put(
+        manifest_key(LOCAL),
+        crypto.encrypt(manifest.serialize_manifest(own), PASSPHRASE, MEMORY_KB),
+    )
+    syncthing.vanish_at_open(manifest_key(LOCAL))
+
+    result, _, (_out, err) = _run(fleet, monkeypatch, "quiet")
+
+    assert result.corrupt_peer_count == 1
+    assert result.waiting == []
+    assert (
+        f"mm: warning: this device's manifest ({LOCAL}) vanished during the read - "
+        "its deletion records were not applied" in err
+    )
+    assert "Check them before the next mm push." in err
+
+
+def test_vanished_device_entry_is_waiting_and_never_refuses(fleet, syncthing, monkeypatch):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    _third_device(fleet)
+    syncthing.vanish_at_open(device_key(THIRD))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    _counts(
+        result,
+        total_written=1,
+        bytes_transferred=result.bytes_transferred,
+        device_names=["Peer B"],
+        waiting=[_waiting(THIRD, THIRD, entry=True)],
+    )
+    assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
+    # One inventory per pull feeds the gate, selection and the tombstone set.
+    assert syncthing.listings.count("devices/") == 1
+
+
+def test_vanished_device_still_supplies_its_tombstones(fleet, syncthing, monkeypatch):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    _third_device(
+        fleet,
+        tombstones={
+            "notes:note.md": {
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+                "device_id": THIRD,
+            }
+        },
+    )
+    syncthing.vanish_at_open(device_key(THIRD))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    # Skipping the vanished device must not resurrect what it deleted.
+    assert result.total_written == 0
+    assert not (fleet.local / "note.md").exists()
+    assert result.waiting[0].entry and result.waiting[0].device_id == THIRD
+
+
+def test_pull_from_a_vanished_device_reports_waiting_not_unknown(fleet, syncthing, monkeypatch):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    _third_device(fleet)
+    syncthing.vanish_at_open(device_key(THIRD))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended", from_device=THIRD)
+
+    _counts(result, waiting=[_waiting(THIRD, THIRD, entry=True)])
+    assert not (fleet.local / "note.md").exists()
+
+
+def test_no_readable_peers_left_still_names_the_vanished_one(fleet, syncthing, monkeypatch):
+    fleet.backend.delete(device_key(PEER))
+    _third_device(fleet)
+    syncthing.vanish_at_open(device_key(THIRD))
+
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+
+    _counts(result, no_peers=True, waiting=[_waiting(THIRD, THIRD, entry=True)])
+
+
+def test_conflict_copies_and_misnamed_device_files_never_refuse_or_duplicate(
+    fleet, syncthing, monkeypatch
+):
+    _seed(fleet, {"note.md": b"peer content\n"})
+    record = json.loads(fleet.backend.get(device_key(PEER)))
+    stale = dict(record, last_seen_version="0.1.0")  # would trip the Track 5E gate
+    for key in (
+        f"devices/{PEER}.{CONFLICT_STAMP}.json",
+        f"devices/{PEER} 2.json",
+        "devices/renamed.json",
+    ):
+        fleet.backend.put(key, json.dumps(stale).encode())
+    fleet.backend.put("devices/.syncthing.x.json.tmp", b"{")
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    _counts(
+        result, total_written=1, bytes_transferred=result.bytes_transferred, device_names=["Peer B"]
+    )
+    assert result.waiting == []

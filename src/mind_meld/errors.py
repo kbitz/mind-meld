@@ -90,6 +90,23 @@ class StorageError(MindMeldError):
     """Storage backend I/O failure."""
 
 
+class StorageNotFound(StorageError):
+    """A storage key is not there (Track 87A).
+
+    Only ``FileNotFoundError`` maps here; every other ``OSError`` stays a plain
+    ``StorageError`` (a failure, not an absence). ``vanished`` is True when the
+    caller had observed the key (listed, ``exists``-checked or conflict-scanned)
+    and it was still gone after the bounded retry, which on a Syncthing folder
+    means a replacement was in flight. A key never seen reads missing at once
+    with ``vanished`` False. Subclassing keeps ``except StorageError`` unchanged.
+    """
+
+    def __init__(self, key: str, *, vanished: bool = False) -> None:
+        self.key = key
+        self.vanished = vanished
+        super().__init__(f"storage: file not found — {key}")
+
+
 class ConfigError(MindMeldError):
     """Configuration parsing or validation failure."""
 

@@ -30,6 +30,7 @@ from typer.testing import CliRunner
 from mind_meld import core, pullflow, pullplan, resolveflow
 from mind_meld.cli import app
 from mind_meld.config import save_config
+from mind_meld.devices import DeviceInventory
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     _canonical_for_conflict,
@@ -2560,6 +2561,12 @@ class TestResolveLocalMtimeBump:
             raise typer.Abort()
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        # `_pull_core` reads one device inventory per pull (Track 87A).
+        monkeypatch.setattr(
+            pullflow,
+            "inventory_devices",
+            lambda b: DeviceInventory(valid=fake_list_devices_warn(b)),
+        )
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(pullflow, "_download_and_apply", aborting_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)
@@ -2654,6 +2661,12 @@ class TestResolveLocalMtimeBump:
             }
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        # `_pull_core` reads one device inventory per pull (Track 87A).
+        monkeypatch.setattr(
+            pullflow,
+            "inventory_devices",
+            lambda b: DeviceInventory(valid=fake_list_devices_warn(b)),
+        )
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(pullflow, "_download_and_apply", keep_local_download_and_apply)
         monkeypatch.setattr(cli_module, "get_backend", lambda c: None)

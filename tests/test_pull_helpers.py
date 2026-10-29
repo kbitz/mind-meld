@@ -34,6 +34,7 @@ from mind_meld.cli import (
 )
 from mind_meld.config import DEFAULT_SOURCES, SourceResolution
 from mind_meld.conflictmtime import _restore_mtime_best_effort
+from mind_meld.devices import DeviceInventory
 from mind_meld.errors import SnapshotChanged, SnapshotError, StorageError
 from mind_meld.manifest import _FileTooLarge, read_file_revision
 
@@ -1560,6 +1561,7 @@ class TestDownloadAndApplyQuietAndProgress:
             "conflicted": [],
             "unchanged": [],
             "failed": [],
+            "waiting": [],
         }
 
     @staticmethod
@@ -1849,6 +1851,12 @@ class TestWarningsSurvivePartialPull:
         # Stub out crypto-init bootstrap (get_backend should work; we
         # monkeypatch the deeper operations).
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        # `_pull_core` reads one device inventory per pull (Track 87A).
+        monkeypatch.setattr(
+            pullflow,
+            "inventory_devices",
+            lambda b: DeviceInventory(valid=fake_list_devices_warn(b)),
+        )
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(pullflow, "_download_and_apply", fake_download_and_apply)
         monkeypatch.setattr(core, "_cleanup_conflict_copies", raising_cleanup)
@@ -1950,6 +1958,12 @@ class TestWriteSyncLogBestEffort:
             raise OSError("disk full")
 
         monkeypatch.setattr(cli_module.core, "_list_devices_warn", fake_list_devices_warn)
+        # `_pull_core` reads one device inventory per pull (Track 87A).
+        monkeypatch.setattr(
+            pullflow,
+            "inventory_devices",
+            lambda b: DeviceInventory(valid=fake_list_devices_warn(b)),
+        )
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fake_fetch_remote_manifest)
         monkeypatch.setattr(pullflow, "_download_and_apply", fake_download_and_apply)
         monkeypatch.setattr(core, "_cleanup_conflict_copies", lambda *a, **kw: 0)

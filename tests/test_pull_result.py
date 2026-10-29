@@ -11,10 +11,11 @@ coverage for these stable surfaces.
 from __future__ import annotations
 
 import json
+import re
 
 from typer.testing import CliRunner
 
-from mind_meld import pullflow
+from mind_meld import core, pullflow
 from mind_meld.cli import app, iter_source_diffs
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
@@ -157,6 +158,32 @@ class TestPullResultDegradationFields:
         assert crumb["pull"]["outcome"] == "success"
 
 
+def _prime_two_devices(tmp_path, monkeypatch):
+    """Push from dev-a, switch to dev-b so there's something to pull."""
+    storage_dir = tmp_path / "storage"
+    claude_a = tmp_path / "machine_a" / ".claude"
+    claude_b = tmp_path / "machine_b" / ".claude"
+    _populate_claude(claude_a)
+    claude_b.mkdir(parents=True)
+
+    config_a, _ = _make_config(tmp_path / "a", storage_dir, claude_a, "dev-a", "Mac A")
+    config_b, _ = _make_config(tmp_path / "b", storage_dir, claude_b, "dev-b", "Mac B")
+
+    backend = LocalBackend(storage_dir)
+    bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+    register_device(backend, "dev-a", "Mac A")
+    register_device(backend, "dev-b", "Mac B")
+
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+    _redirect_lock(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    assert runner.invoke(app, ["push"]).exit_code == 0
+
+    # Switch to B for the upcoming autopull.
+    monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+    return backend, claude_a, claude_b
+
+
 # ─── Autopull breadcrumb: "degraded" outcome ─────────────────────────────
 
 
@@ -167,29 +194,7 @@ class TestAutopullDegradedBreadcrumb:
     """
 
     def _prime_two_devices(self, tmp_path, monkeypatch):
-        """Push from dev-a, switch to dev-b so there's something to pull."""
-        storage_dir = tmp_path / "storage"
-        claude_a = tmp_path / "machine_a" / ".claude"
-        claude_b = tmp_path / "machine_b" / ".claude"
-        _populate_claude(claude_a)
-        claude_b.mkdir(parents=True)
-
-        config_a, _ = _make_config(tmp_path / "a", storage_dir, claude_a, "dev-a", "Mac A")
-        config_b, _ = _make_config(tmp_path / "b", storage_dir, claude_b, "dev-b", "Mac B")
-
-        backend = LocalBackend(storage_dir)
-        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
-        register_device(backend, "dev-a", "Mac A")
-        register_device(backend, "dev-b", "Mac B")
-
-        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
-        _redirect_lock(monkeypatch, tmp_path)
-        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
-        assert runner.invoke(app, ["push"]).exit_code == 0
-
-        # Switch to B for the upcoming autopull.
-        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
-        return backend, claude_a, claude_b
+        return _prime_two_devices(tmp_path, monkeypatch)
 
     def test_degraded_on_fsync_failure(self, tmp_path, monkeypatch):
         """REG-2: autopull breadcrumb outcome=degraded when fsync fails.
@@ -306,6 +311,118 @@ class TestAutopullDegradedBreadcrumb:
         assert "4 file(s) failed" in detail
         # Signals joined with "; " — 4 signals → 3 joins.
         assert detail.count("; ") == 3
+
+
+# ─── Track 87A: undelivered content is waiting, not failed ───────────────
+
+
+def _withhold_blobs(backend, device_id):
+    """Take a peer's blobs out of storage, as if Syncthing had not delivered them."""
+    held = {}
+    for key in backend.list_keys(f"data/{device_id}/"):
+        held[key] = backend.get(key)
+        backend.delete(key)
+    assert held
+    return held
+
+
+class TestWaitingOutcome:
+    # Coverage audit value card:
+    # Value: protects=status distinguishes a vanished own manifest from first push;
+    # fails_when=the missing branch hides the still-arriving explanation;
+    # why_new=fetch tests assert classification but no test covers its status rendering;
+    # seam=none; no_claim=live Syncthing delivery (manifest result injected at reader boundary).
+    def test_status_distinguishes_vanished_manifest_from_first_push(self, tmp_path, monkeypatch):
+        _setup_real_config(tmp_path, monkeypatch)
+        for vanished in (False, True):
+            monkeypatch.setattr(
+                core,
+                "_fetch_remote_manifest",
+                lambda *args, vanished=vanished: core.ManifestFetch(
+                    status="missing", vanished=vanished
+                ),
+            )
+            result = runner.invoke(app, ["status"])
+            assert result.exit_code == 0, (result.stdout, result.stderr)
+            assert ("still arriving from sync" in result.stdout) is vanished
+            assert ("not yet pushed from this device" in result.stdout) is not vanished
+            assert ("has not pushed yet" in result.stdout) is not vanished
+            assert ("manifest is still arriving from sync. Run: mm status" in result.stdout) is (
+                vanished
+            )
+
+    def test_autopull_waiting_is_success_with_detail_never_degraded(self, tmp_path, monkeypatch):
+        backend, _claude_a, claude_b = _prime_two_devices(tmp_path, monkeypatch)
+        iso = _redirect_sidecar(monkeypatch, tmp_path)
+        held = _withhold_blobs(backend, "dev-a")
+
+        r = runner.invoke(app, ["autopull"])
+
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        assert r.stderr == "" and r.stdout == ""  # autopull stays silent
+        crumb = json.loads((iso / "last-autorun.json").read_text())
+        assert crumb["pull"]["outcome"] == "success"
+        assert "waiting from Mac A" in crumb["pull"]["detail"]
+        assert not list(claude_b.rglob("*.md"))
+
+        for key, raw in held.items():
+            backend.put(key, raw)
+        r = runner.invoke(app, ["autopull"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        crumb = json.loads((iso / "last-autorun.json").read_text())
+        assert crumb["pull"]["outcome"] == "success" and "detail" not in crumb["pull"]
+        assert list(claude_b.rglob("*.md"))
+
+    def test_attended_pull_names_what_it_waits_for_and_exits_zero(self, tmp_path, monkeypatch):
+        backend, _claude_a, _claude_b = _prime_two_devices(tmp_path, monkeypatch)
+        _redirect_sidecar(monkeypatch, tmp_path)
+        _withhold_blobs(backend, "dev-a")
+
+        r = runner.invoke(app, ["pull"])
+
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        line = r.stdout.strip().splitlines()[-1]
+        assert re.fullmatch(r"Pull: no changes; waiting for \d+ files? from Mac A\.", line), line
+
+    def test_waiting_comes_before_the_remedy_when_the_pull_also_failed(self, tmp_path, monkeypatch):
+        _setup_real_config(tmp_path, monkeypatch)
+        _redirect_sidecar(monkeypatch, tmp_path)
+        waiting = [pullflow.WaitingPeer("dev-a", "Mac A", files=2)]
+        monkeypatch.setattr(
+            pullflow,
+            "_pull_core",
+            lambda *a, **kw: pullflow.PullResult(
+                total_failed=1, total_waiting=2, waiting=waiting, elapsed=0.1
+            ),
+        )
+
+        r = runner.invoke(app, ["pull"])
+
+        assert r.exit_code == 1
+        line = r.stderr.strip().splitlines()[-1]
+        assert "; waiting for 2 files from Mac A. Run: mm diag" in line, line
+
+    def test_clause_and_detail_forms_and_sanitizing(self):
+        result = pullflow.PullResult(
+            waiting=[
+                pullflow.WaitingPeer("a", "Mac\x1b[2J A", files=1),
+                pullflow.WaitingPeer("b", "Mac B", manifest=True),
+                pullflow.WaitingPeer("cccccccc", "cccccccc", entry=True),
+            ]
+        )
+
+        clause = pullflow.waiting_clause(result)
+        detail = pullflow.waiting_detail(result)
+
+        assert "\x1b" not in clause and "\x1b" not in detail
+        assert clause == (
+            "waiting for 1 file from Mac A, Mac B's manifest, cccccccc's device entry"
+        )
+        assert detail == (
+            "1 file waiting from Mac A; Mac B's manifest waiting; cccccccc's device entry waiting"
+        )
+        assert pullflow.waiting_clause(pullflow.PullResult()) == ""
+        assert pullflow.waiting_detail(pullflow.PullResult()) == ""
 
 
 # ─── REG-1: GC safety for non-hex-sha blob paths ─────────────────────────

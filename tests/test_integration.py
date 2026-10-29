@@ -805,9 +805,9 @@ class TestExcludePatterns5C:
         fetched = []
         real_get = LocalBackend.get
 
-        def record_get(self, key):
+        def record_get(self, key, **kwargs):
             fetched.append(key)
-            return real_get(self, key)
+            return real_get(self, key, **kwargs)
 
         monkeypatch.setattr(LocalBackend, "get", record_get)
         invoke(config_a, ["pull"])
@@ -3501,9 +3501,9 @@ class TestGCSafety:
             )
         original = LocalBackend.get
 
-        def get(storage, key):
+        def get(storage, key, **kwargs):
             assert not key.startswith(("devices/", "manifests/peer/"))
-            return original(storage, key)
+            return original(storage, key, **kwargs)
 
         def forbidden(*args, **kwargs):
             raise AssertionError("GC read the peer registry")
@@ -8632,10 +8632,10 @@ class TestApplyRecovery53A:
             original_get = LocalBackend.get
             digest = hashlib.sha256(b"b").hexdigest()
 
-            def get(backend, key):
+            def get(backend, key, **kwargs):
                 if digest in key:
                     raise exc
-                return original_get(backend, key)
+                return original_get(backend, key, **kwargs)
 
             monkeypatch.setattr(LocalBackend, "get", get)
         else:
@@ -9773,7 +9773,7 @@ def test_preview_storage_refusal62(preview62, monkeypatch, command):
         raise StorageError("injected storage refusal")
 
     if command == "pull":
-        monkeypatch.setattr(pullflow, "list_devices_with_drops", fail)
+        monkeypatch.setattr(pullflow, "inventory_devices", fail)
     elif command == "recapture":
         monkeypatch.setattr(events_tail, "_prepare_recapture", fail)
     else:
@@ -11080,8 +11080,8 @@ class TestNewerStorage66A:
         reads = {"n": 0}
         original = type(backend).get
 
-        def get(self, storage_key):
-            data = original(self, storage_key)
+        def get(self, storage_key, **kwargs):
+            data = original(self, storage_key, **kwargs)
             if storage_key == key:
                 reads["n"] += 1
                 if reads["n"] > 1:

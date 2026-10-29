@@ -2915,6 +2915,9 @@ def test_status77_pure_precedence_and_hostile_scope():
     )
     assert "Metadata-only" in cli_module._status_verdict(**{**base, "counts": (0, 0, 0)})
     assert "has not pushed yet" in cli_module._status_verdict(**{**base, "first_push": True})
+    assert cli_module._status_verdict(**{**base, "manifest_arriving": True}) == (
+        "This device's manifest is still arriving from sync. Run: mm status"
+    )
     clean = {**base, "counts": (0, 0, 0), "metadata": False}
     assert cli_module._status_verdict(**clean) == "In sync with this device's last push."
     text = cli_module._status_verdict(**{**clean, "source": "[red]evil\n\x1b[2Jname"})

@@ -18,10 +18,17 @@ from datetime import datetime, timezone
 
 import pytest
 
-from mind_meld.devices import register_device, update_last_seen
+from mind_meld.devices import (
+    inventory_devices,
+    list_devices,
+    list_devices_with_drops,
+    register_device,
+    update_last_seen,
+)
 from mind_meld.errors import StorageError
-from mind_meld.storage.keys import device_key
+from mind_meld.storage.keys import device_key, parse_device_key
 from mind_meld.storage.local import LocalBackend
+from tests.syncthing_folder import SyncthingFolder
 
 
 @pytest.fixture
@@ -333,3 +340,149 @@ class TestGenerateUniqueShortDeviceId:
         assert "mm: warning:" in captured.err
         assert "could not generate" in captured.err
         assert "3 attempts" in captured.err
+
+
+STAMP = "sync-conflict-20260101-101010-ABCDEFG"
+
+
+def _record(device_id: str, **extra) -> bytes:
+    return json.dumps({"device_id": device_id, "device_name": f"Mac {device_id}", **extra}).encode()
+
+
+class TestDeviceCountsOnlyUnderItsOwnKey:
+    """Track 87A: devices/<id>.json holding that same id is a device; nothing else is."""
+
+    def test_parse_device_key_accepts_only_the_key_shape(self) -> None:
+        assert parse_device_key("devices/abc12345.json") == "abc12345"
+        assert parse_device_key(device_key("peer-1")) == "peer-1"
+        for key in (
+            "devices/abc.txt",
+            "devices/sub/abc.json",
+            "devices/.json",
+            "manifests/abc.json",
+            "devices/abc",
+        ):
+            assert parse_device_key(key) is None
+
+    def test_conflict_copies_and_misnamed_files_are_foreign_never_a_device(
+        self, backend: LocalBackend
+    ) -> None:
+        backend.put("devices/abc.json", _record("abc"))
+        backend.put(f"devices/abc.{STAMP}.json", _record("abc"))  # Syncthing copy
+        backend.put("devices/abc 2.json", _record("abc"))  # iCloud copy
+        backend.put("devices/renamed.json", _record("abc"))  # name is not the key
+        backend.put("devices/notes.txt", b"hello")
+        backend.put("devices/.syncthing.abc.json.tmp", b"{")  # temp: not even listed
+
+        inventory = inventory_devices(backend)
+
+        assert [d["device_id"] for d in inventory.valid] == ["abc"]
+        assert inventory.dropped == []
+        assert inventory.vanished == []
+        assert sorted(inventory.foreign) == [
+            "devices/abc 2.json",
+            f"devices/abc.{STAMP}.json",
+            "devices/notes.txt",
+            "devices/renamed.json",
+        ]
+        assert [d["device_id"] for d in list_devices(backend)] == ["abc"]
+
+    def test_unreadable_conflict_copy_is_foreign_not_a_refusal(self, backend: LocalBackend) -> None:
+        backend.put("devices/abc.json", _record("abc"))
+        backend.put(f"devices/abc.{STAMP}.json", b"half-deliv")  # Syncthing, mid-delivery
+        backend.put("devices/abc (conflicted copy 2026-01-01).json", b"{")  # Dropbox
+
+        inventory = inventory_devices(backend)
+
+        assert [d["device_id"] for d in inventory.valid] == ["abc"]
+        assert inventory.dropped == []
+        assert len(inventory.foreign) == 2
+
+    @pytest.mark.parametrize("device_name", [None, 42])
+    def test_misnamed_record_is_foreign_before_display_name_validation(
+        self, backend: LocalBackend, device_name
+    ) -> None:
+        from mind_meld import pullflow
+
+        backend.put(
+            device_key("alias"),
+            json.dumps({"device_id": "peer", "device_name": device_name}).encode(),
+        )
+
+        inventory = inventory_devices(backend)
+
+        assert inventory.foreign == [device_key("alias")]
+        assert inventory.valid == inventory.dropped == []
+        pullflow._check_fleet_version_or_refuse(backend, "me", inventory=inventory)
+
+    def test_matching_id_with_invalid_display_name_still_refuses(self, backend: LocalBackend):
+        import typer
+
+        from mind_meld import pullflow
+
+        backend.put(device_key("peer"), b'{"device_id":"peer","device_name":42}')
+        inventory = inventory_devices(backend)
+
+        assert inventory.foreign == inventory.valid == []
+        assert inventory.dropped == [(device_key("peer"), "missing or invalid device_name")]
+        with pytest.raises(typer.Exit):
+            pullflow._check_fleet_version_or_refuse(backend, "me", inventory=inventory)
+
+    def test_key_named_unreadable_entry_still_refuses(self, backend: LocalBackend) -> None:
+        backend.put("devices/good.json", _record("good"))
+        backend.put("devices/bad.json", b"not-json{")
+        backend.put("devices/shape.json", json.dumps({"device_name": "no id"}).encode())
+
+        valid, dropped = list_devices_with_drops(backend)
+
+        assert [d["device_id"] for d in valid] == ["good"]
+        assert sorted(key for key, _ in dropped) == ["devices/bad.json", "devices/shape.json"]
+
+    def test_fleet_gate_ignores_a_stale_conflict_copy_but_not_a_stale_device(
+        self, backend: LocalBackend
+    ) -> None:
+        import typer
+
+        from mind_meld import pullflow
+
+        backend.put("devices/me.json", _record("me"))
+        stale = _record("peer", last_seen="2026-01-01T00:00:00+00:00", last_seen_version="0.1.0")
+        backend.put(f"devices/peer.{STAMP}.json", stale)
+
+        pullflow._check_fleet_version_or_refuse(backend, "me")  # no refusal
+
+        backend.put("devices/peer.json", stale)
+        with pytest.raises(typer.Exit):
+            pullflow._check_fleet_version_or_refuse(backend, "me")
+
+
+class TestVanishedDeviceEntry:
+    def test_entry_removed_after_listing_is_vanished_not_dropped(self, tmp_path) -> None:
+        folder = SyncthingFolder(tmp_path / "storage")
+        folder.put("devices/good.json", _record("good"))
+        folder.put("devices/gone.json", _record("gone"))
+        folder.vanish_at_open("devices/gone.json")
+
+        inventory = inventory_devices(folder)
+
+        assert [d["device_id"] for d in inventory.valid] == ["good"]
+        assert inventory.vanished == ["gone"]
+        assert inventory.dropped == []
+        assert folder.sleeps == [0.05, 0.1, 0.2]
+
+    def test_entry_replaced_mid_read_is_read_after_the_retry(self, tmp_path) -> None:
+        folder = SyncthingFolder(tmp_path / "storage")
+        folder.put("devices/peer.json", _record("peer"))
+        folder.vanish_at_open("devices/peer.json", reappear_after=1)
+
+        inventory = inventory_devices(folder)
+
+        assert [d["device_id"] for d in inventory.valid] == ["peer"]
+        assert inventory.vanished == []
+        assert folder.sleeps == [0.05]
+
+    def test_listing_does_not_include_temp_names_as_foreign(self, backend: LocalBackend) -> None:
+        backend.put("devices/.syncthing.peer.json.tmp", b"{")
+        backend.put("devices/~syncthing~peer.json.tmp", b"{")
+
+        assert inventory_devices(backend).foreign == []

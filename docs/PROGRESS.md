@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.17 | 2026-10-29 | **`mm pull` waits for content a sync tool has not delivered yet instead of failing.** A file whose blob has not arrived is reported as waiting, the other files still apply, the exit stays 0, and `mm autopull` stays `success`. Syncthing temporary files and conflict copies no longer count as devices, and a manifest replaced mid-read no longer reads as corrupt. |
 | 1.11.16 | 2026-10-28 | **`mm retro-fleet` shows Muse usage and keeps Codex review traffic out of the cost.** You can record a local model rate with `--set-model-price` and mark the table checked with `--mark-pricing-verified`. Overrides stay on this Mac. |
 | 1.11.15 | 2026-10-28 | **`mm recapture` and `mm push` walk each Git object store once across worktrees and filter commits by configured authors during `git log`.** Linked worktrees no longer multiply the git walk or time out the capture budget, commits on worktree-only branches still count, and repeated `mm recapture --dry-run` runs report identical results. |
 | 1.11.14 | 2026-10-28 | **`mm pull` and `mm autopull` behave the same.** Pull planning, download, and apply now live outside the command shell. Flags, exit codes, conflict copies, and the files `mm` writes are unchanged. |

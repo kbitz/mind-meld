@@ -288,15 +288,16 @@ fingerprint and refuses on mismatch with an actionable error.
 ```python
 class LocalBackend:
     def put(self, key: str, data: bytes) -> None: ...
-    def get(self, key: str) -> bytes: ...
+    def get(self, key: str, *, expected: bool = False) -> bytes: ...
     def list_keys(self, prefix: str) -> list[str]: ...
+    def list_foreign_keys(self, prefix: str = "") -> list[str]: ...
     def delete(self, key: str) -> None: ...
     def exists(self, key: str) -> bool: ...
 ```
 
 - Keys map to file paths relative to the configured root folder.
 - Atomic writes via temp file + `os.replace`. Replacement is the publication point; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures) for what a failed durable write does and does not guarantee.
-- Detects and resolves iCloud and Dropbox-style conflicted copies automatically (see Conflict Resolution).
+- Recognizes iCloud, Dropbox and Syncthing conflict copies (see Conflict Resolution). Foreign temporary names are excluded from key listings; observed keys that disappear are retried briefly. See [storage reads and waiting](docs/invariants/sync.md#syncthing-tolerant-reads-and-waiting-track-87a).
 
 Factory function `get_backend(config) → LocalBackend` reads `config.storage.path` and returns the backend.
 
@@ -423,24 +424,24 @@ attended push's conditional activity tail and exit contract, read
 1. Acquire lockfile.
 2. List devices from `devices/` prefix.
 3. If `--from` specified, pull only that device's manifest. Otherwise pull all.
-4. Download + decrypt remote manifest(s). Handle iCloud/Dropbox conflict resolution if applicable.
+4. Download + decrypt remote manifest(s). Handle iCloud/Dropbox/Syncthing conflict resolution if applicable.
 5. If `--source` specified, diff only that source. Otherwise diff all sources.
 6. Apply tombstones: files in the remote manifest tombstone set are skipped.
 7. For each incoming file, re-read the local hash and mtime, then decide per `_apply_incoming_file`: write / update-base / merge / skip (local newer) / conflict-copy. See Conflict Resolution for the full decision tree.
-8. Download + decrypt changed blobs. Decompress (gzip).
+8. Download + decrypt changed blobs. Decompress (gzip). Missing blobs count as waiting, not failed; continue applying available files and retain the peer's manifest conflict copies while any files wait.
 9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
 10. Write files to their respective source paths using atomic writes (write to a `.tmp` sibling, then `os.replace`; a caught write error unlinks the sibling best-effort and a crash can strand it; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures)).
 11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
 12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
-15. Print summary with split counts: written / merged / skipped / conflicted / failed.
+15. Print the final outcome with applied, skipped and waiting counts; real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail.
 
 ### `mm gc`
 
 1. Acquire lockfile.
 2. Sweep this device's stale `tmp*.tmp` files left behind by a crashed push (runs under the lock already held, so no concurrent writer can race it).
-3. Read and decrypt only this device's raw manifest (no exclude or disabled-source filtering). If it is missing, warn that blob collection was skipped and no blobs were deleted, then continue with local retention. If it is corrupt or newer-format, or only iCloud conflict copies of it load because the canonical is absent or unreadable, refuse in apply and preview. When only conflict copies load, `mm push` rewrites the canonical even with no content change; newer-format and unrecoverable corrupt manifests keep their own refusal guidance.
+3. Read and decrypt only this device's raw manifest (no exclude or disabled-source filtering). If it is missing, warn that blob collection was skipped and no blobs were deleted, then continue with local retention. If it is corrupt or newer-format, or only conflict copies (iCloud, Dropbox or Syncthing) of it load because the canonical is absent or unreadable, refuse in apply and preview. When only conflict copies load, `mm push` rewrites the canonical even with no content change; newer-format and unrecoverable corrupt manifests keep their own refusal guidance.
 4. Collect the SHA-256 hashes that manifest references.
 5. Re-read this device's manifest, refusing or skipping on the same conditions and adding any new references, then list only `data/<this-device-id>/` (`storage.keys.data_prefix`).
 6. Delete listed blobs whose parsed owner is this device and whose hash is unreferenced. Peer namespaces are never listed, counted or deleted.
@@ -456,7 +457,7 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 ### `mm status [--source NAME]`
 
 1. Authenticate using the existing passphrase flow, then inspect selected local sources and this device's own manifest without uploading. Incomplete source observations cannot establish a healthy comparison.
-2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
+2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, this device's manifest still arriving from sync (it vanished mid-read; `Run: mm status`), first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
 3. If `--source` is given, name it in the verdict and limit content counts to that source. Keep current capture/publication diagnostics independent of this content filter.
 4. Show local/own-manifest file counts and pending pushes by source. Summarize skipped nested repositories as an exact selected-source count; `mm diag` retains their paths.
 5. Show the selected latest auto or attended execution per push/pull verb. Strictly later valid completed success can resolve an earlier same-verb failure only with sufficient scope; skips, uncertain ordering and limited scope cannot prove recovery. Keep raw autorun and attended evidence plus their projection in `mm diag` and `mm diag --json`. A displayed `keyring-locked` or `keyring-no-collection` auto skip retains the existing keyring troubleshooting hint.
@@ -473,24 +474,25 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 
 ## Conflict Resolution
 
-There are two distinct conflict surfaces: **manifest-level conflicts** created by the iCloud/Dropbox sync layer, and **source-file conflicts** where the same logical file was edited on two machines before a sync round-trip.
+There are two distinct conflict surfaces: **manifest-level conflicts** created by the iCloud/Dropbox/Syncthing sync layer, and **source-file conflicts** where the same logical file was edited on two machines before a sync round-trip.
 
-### Manifest conflicts (iCloud / Dropbox)
+### Manifest conflicts (iCloud / Dropbox / Syncthing)
 
-iCloud Drive (and Dropbox, if the storage path points there) can create conflicted copies when two machines write the same file concurrently.
+iCloud Drive (and Dropbox or Syncthing, if the storage path points there) can create conflicted copies when two machines write the same file concurrently.
 
 **iCloud conflict pattern:** `filename 2.ext`, `filename 3.ext`
 **Dropbox conflict pattern:** `filename (conflicted copy YYYY-MM-DD).ext`
+**Syncthing conflict pattern:** `<stem>.sync-conflict-YYYYMMDD-HHMMSS[-<7 chars>]<ext>` (including stacked and extensionless forms)
 
-The `LocalBackend` detects both patterns via regex matching.
+The `LocalBackend` detects these patterns via regex matching.
 
 **Resolution strategy:**
 
-1. On `get()` for manifest files, scan for conflicted copies.
-2. If found, attempt to decrypt both the original and each conflicted copy.
-3. Keep the one with the newest `timestamp` in the decrypted manifest JSON.
-4. Delete the losers.
-5. If all copies fail to decrypt, fall back to full re-push.
+1. `_fetch_remote_manifest` scans the canonical and recognized conflict copies.
+2. Validate and decrypt readable copies; an observed newer format refuses the result.
+3. Merge valid copies additively using the file and tombstone rules below.
+4. Pull cleans up manifest copies only after that peer has no failed or waiting files; push cleans up after publishing the canonical manifest.
+5. If no copy remains readable, distinguish missing from corrupt and use the recovery rules below.
 
 Additive resolution for the multi-manifest case: when multiple conflict copies coexist, the union of referenced files is preserved so no device's entries are dropped before a losing copy is deleted.
 
@@ -499,10 +501,10 @@ Additive resolution for the multi-manifest case: when multiple conflict copies c
 `_fetch_remote_manifest` returns a tri-state result (`ManifestFetch`):
 
 - `ok` — at least one copy decrypted; caller uses `.manifest`. When the canonical copy is absent or unreadable and only conflict copies decrypted, `ManifestFetch.conflict_copies_only` is also set: `mm gc` refuses it as incomplete own metadata, and `push` rewrites the canonical from local truth even with no content change, merging the local sidecar into the prior so this device's deletion records survive (with no usable sidecar it warns that recent local deletions may be lost; see [sync invariants](docs/invariants/sync.md#corrupt-manifest-recovery-load-bearing)).
-- `missing` — no manifest at the expected key (first push or fresh device). Callers that read remote state treat this as "empty remote." Push treats this as the correct "no prior state" signal and writes the first manifest.
+- `missing` — no canonical or validated conflict copy remains at the final reads. With `vanished=False`, push treats this as no prior state. With `vanished=True`, an observed canonical disappeared after bounded retries or a validated conflict copy disappeared on its final read; pull reports a peer's as waiting, but reports this device's own like a corrupt manifest (its deletion records were not applied: stderr warning, `corrupt_peer_count`, autopull `degraded`), status reports this device's own as still arriving, and push follows the recovery chain below to preserve deletion records.
 - `corrupt` — manifest(s) exist but every copy failed to decrypt/parse. Callers must NOT treat this as "missing"; doing so would drop this device's tombstones and silently un-delete files across the fleet on the next pull.
 
-On `corrupt`, `push` runs the following recovery chain before writing a new manifest:
+On `corrupt` or `missing` with `vanished=True`, `push` runs the following recovery chain before writing a new manifest:
 
 1. **Local sidecar.** Read `~/.config/mind-meld/last-push.json` (written atomically at the end of every successful push). If present and parseable, use it as the prior-state manifest. This is the only recovery source that preserves **fresh local deletions** — deletions this device made since its last successful push but not yet propagated anywhere.
 2. **Peer fallback.** If no sidecar, iterate peer devices and aggregate their tombstones via `collect_tombstones`. This recovers only deletions that previously propagated. Fresh local deletions since the last good push are lost. A warning surfaces this explicitly.
@@ -555,7 +557,7 @@ Sidecars remain local-only. Promote or copy a managed sidecar to a regular filen
 
 **Pre-inversion file migration.** Files produced by pre-v0.9.2 code carry no marker. The first lock-protected discovery in `mm pull` or `mm resolve` migrates them by renaming to `<stem>.sync-conflict-v0-<ts>-<dev>.<ext>` — the `v0-` prefix is reserved for migrated files; post-v0.9.2 code never produces it directly. The dual-mode resolve dispatch is keyed by the prefix, NOT by timestamp (sound — post-inversion code is the only producer of un-prefixed files). `mm conflicts` is intentionally read-only and does NOT migrate (it's lockless and would race autopull, codex-2 #5).
 
-**Strict pull-start fleet-version refusal (load-bearing).** `mm pull` exits non-zero before any I/O if any peer's `last_seen_version < 0.9.2`, OR if any peer's `device.json` is corrupt (can't read its version). Per-peer classification: safe / inactive (registered, never pushed → ALLOW) / pre-v0.9.2 (REFUSE) / dropped (REFUSE by storage key, codex-2 #3). The refusal cites every offending peer; recovery is to upgrade peers and have each push once. Last-resort: hand-edit `device.json` to add `"last_seen_version": "0.9.2"` only after verifying the peer is actually upgraded. Without this gate, a pre-v0.9.2 peer pushing now would produce conflict files under the OLD direction (canonical = remote, sidecar = local), and a v0.9.2 puller would silently mis-resolve them under the NEW dual-mode dispatch.
+**Strict pull-start fleet-version refusal (load-bearing).** `mm pull` exits non-zero before applying files if any peer's `last_seen_version < 0.9.2`, OR if any peer's `device.json` is corrupt (can't read its version). Per-peer classification: safe / inactive (registered, never pushed → ALLOW) / pre-v0.9.2 (REFUSE) / dropped (REFUSE by storage key, codex-2 #3). One device inventory feeds the gate and peer selection: foreign entries are ignored and entries that vanish mid-read are waiting, not corrupt. The refusal cites every offending peer; recovery is to upgrade peers and have each push once. Last-resort: hand-edit `device.json` to add `"last_seen_version": "0.9.2"` only after verifying the peer is actually upgraded. Without this gate, a pre-v0.9.2 peer pushing now would produce conflict files under the OLD direction (canonical = remote, sidecar = local), and a v0.9.2 puller would silently mis-resolve them under the NEW dual-mode dispatch.
 
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
@@ -579,7 +581,7 @@ The shared leaf renderers (`render_prompt`, `render_banner`, `render_capped_diff
 - `mm resolve [PATH]` — walk conflicts (or a single path) interactively. Shows banners + timestamps + divergence summary + unified diff, then prompts `(m)erge` / `(l)ocal` / `(r)emote` / `(n)ewer` / `(p)romote` / `(s)kip` / `(a)bort`. `(p)romote` keeps BOTH by giving the conflict file its own first-class filename; `(n)ewer` (v0.12.10) remaps onto the existing `(l)` / `(r)` dispatch rather than adding an apply branch, is offered only when both sides' mtimes are readable, and re-prompts on an exact tie instead of guessing. Dual-mode dispatch by filename prefix: `v0-` → pre-inversion ops ((l) renames sidecar over canonical, (r) unlinks sidecar); no prefix → post-inversion ops ((l) unlinks sidecar, (r) renames sidecar over canonical). Acquires the mm lockfile so autopull can't race the rename/unlink. Migrates pre-inversion files to `v0-` prefix on first discovery. Exits 1 if any per-conflict rename/unlink/read fails, so scripts can detect partial failure; the walk still continues through every conflict. Lives in `resolveflow.py` (the `@app.command()` shell stays in `cli.py`).
 - `mm gc --conflicts` — reap post-inversion `.sync-conflict-*` files older than `CONFLICT_AGE_DAYS` (30 days) by filename birth, only after their bytes match an existing canonical. Pre-inversion, live, ownerless, missing-canonical, and unhashable copies remain. Bare `mm gc --dry-run` previews the candidates.
 
-**Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed`. Pull summary, autopull one-liner, `.mind-meld-log.md`, and `mm diff` annotations all reflect the split so cross-machine work is visible.
+**Reporting.** `PullResult` splits into `total_written` / `total_merged` / `total_skipped` / `total_conflicted` / `total_failed` / `total_waiting`, with per-peer `waiting` facts. Waiting appears in the attended outcome and autopull success breadcrumb, never in per-file history or sync-log rows. Attended run records do not retain a waiting count; see [waiting invariants](docs/invariants/sync.md#syncthing-tolerant-reads-and-waiting-track-87a).
 
 ---
 
@@ -829,6 +831,7 @@ exit 1), not a capture-only exit.
 class MindMeldError(Exception): ...           # base — all mm errors
 class CryptoError(MindMeldError): ...         # encryption/decryption failures
 class StorageError(MindMeldError): ...        # backend I/O failures
+class StorageNotFound(StorageError): ...      # absent key, with observed-then-vanished metadata
 class ConfigError(MindMeldError): ...         # config parsing/validation
 class ManifestError(MindMeldError): ...       # manifest corruption/incompatibility
 class LockError(MindMeldError): ...           # concurrent operation conflict
@@ -836,7 +839,7 @@ class SnapshotError(MindMeldError): ...       # incomplete selected scan or unve
 class SnapshotChanged(SnapshotError): ...     # one file changed/vanished/grew while read: re-read once, then held
 ```
 
-A single file that changes, vanishes or grows while it is read (`SnapshotChanged`) is re-read once and, if it is still changing, **held**: its previously published version stays in the manifest (a never-published file is left out, with no tombstone), the rest of the push publishes, and the outcome names the held count (`PushResult.held`; autopush records a `degraded` breadcrumb). Only a push that has no accepted prior manifest to hold at (recovery from a corrupt or conflict-copy manifest) still refuses on it. Every other snapshot failure refuses the whole push.
+A single file that changes, vanishes or grows while it is read (`SnapshotChanged`) is re-read once and, if it is still changing, **held**: its previously published version stays in the manifest (a never-published file is left out, with no tombstone), the rest of the push publishes, and the outcome names the held count (`PushResult.held`; autopush records a `degraded` breadcrumb). Only a push that has no accepted prior manifest to hold at (recovery from a corrupt, conflict-copy-only or vanished manifest) still refuses on it. Every other snapshot failure refuses the whole push.
 
 Snapshot refusals use a four-part message: location (source/path), problem, preservation (`Previous snapshot kept`), and the next action, plus a README `#snapshot-failures` link. Interactive `mm push` exits 1 with no traceback. `mm autopush` keeps exit 0, typed stderr, and a failed breadcrumb.
 
