@@ -19,16 +19,11 @@ import pytest
 
 from mind_meld import core, pullflow, pullplan, resolveflow
 from mind_meld.cli import (
-    _bootstrap_or_verify_crypto,
     _held_breadcrumb_detail,
     _held_count_phrase,
     _include_prior_host_if_needed,
     _inject_held_entries,
-    _load_prior_device_metadata,
-    _prompt_passphrase,
-    _prompt_sources,
     _prove_omitted_paths_absent,
-    _register_and_save,
     _retain_prior_default_sources,
     _upload_changed_blobs,
 )
@@ -36,6 +31,13 @@ from mind_meld.config import DEFAULT_SOURCES, SourceResolution
 from mind_meld.conflictmtime import _restore_mtime_best_effort
 from mind_meld.devices import DeviceInventory
 from mind_meld.errors import SnapshotChanged, SnapshotError, StorageError
+from mind_meld.initflow import (
+    _bootstrap_or_verify_crypto,
+    _load_prior_device_metadata,
+    _prompt_passphrase,
+    _prompt_sources,
+    _register_and_save,
+)
 from mind_meld.manifest import _FileTooLarge, read_file_revision
 
 # ── fixtures ─────────────────────────────────────────────────────────
@@ -2225,14 +2227,14 @@ class TestRegisterAndSave:
         """Track 5D order: register MUST run before save_config so a
         save failure at most leaves an orphan storage breadcrumb, never
         an orphan local config that silently breaks pushes."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
 
         call_order: list[str] = []
 
-        original_save = cli_module.save_config
+        original_save = initflow.save_config
 
         def tracking_save(c, path=None):
             call_order.append("save")
@@ -2245,9 +2247,9 @@ class TestRegisterAndSave:
             call_order.append("keyring")
             return True
 
-        monkeypatch.setattr(cli_module, "save_config", tracking_save)
-        monkeypatch.setattr(cli_module, "register_device", tracking_register)
-        monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", tracking_keyring)
+        monkeypatch.setattr(initflow, "save_config", tracking_save)
+        monkeypatch.setattr(initflow, "register_device", tracking_register)
+        monkeypatch.setattr(initflow, "store_passphrase_in_keyring", tracking_keyring)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2261,13 +2263,13 @@ class TestRegisterAndSave:
     def test_no_keyring_still_succeeds(self, tmp_path: Path, monkeypatch) -> None:
         """Keyring unavailable (lambda _pw: False) → function completes
         without raising; caller sees a yellow warning on stdout."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
 
-        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
-        monkeypatch.setattr(cli_module, "store_passphrase_in_keyring", lambda _pw: False)
+        monkeypatch.setattr(initflow, "register_device", lambda *a, **kw: None)
+        monkeypatch.setattr(initflow, "store_passphrase_in_keyring", lambda _pw: False)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2283,7 +2285,7 @@ class TestRegisterAndSave:
         register_device raises before save_config runs, so there is no
         local config to roll back — the saved-config file must simply
         not exist. Storage has nothing because register failed atomically."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
@@ -2293,12 +2295,12 @@ class TestRegisterAndSave:
         def tracking_save(c, path=None):
             save_called.append(True)
 
-        monkeypatch.setattr(cli_module, "save_config", tracking_save)
+        monkeypatch.setattr(initflow, "save_config", tracking_save)
 
         def boom(*_a, **_kw):
             raise StorageError("transient iCloud put failure")
 
-        monkeypatch.setattr(cli_module, "register_device", boom)
+        monkeypatch.setattr(initflow, "register_device", boom)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2319,19 +2321,19 @@ class TestRegisterAndSave:
         registered devices/<id>.json so retry init doesn't trip
         _init_storage_guard's orphan-case warning. Original save_config
         error propagates regardless of cleanup outcome."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
         from mind_meld.storage.keys import device_key
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
 
         backend = MagicMock()
-        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
+        monkeypatch.setattr(initflow, "register_device", lambda *a, **kw: None)
 
         def boom_save(_c, path=None):
             raise OSError("disk full")
 
-        monkeypatch.setattr(cli_module, "save_config", boom_save)
+        monkeypatch.setattr(initflow, "save_config", boom_save)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2352,19 +2354,19 @@ class TestRegisterAndSave:
         Masking the real cause behind a confusing cleanup error would
         hide what actually went wrong (same defense the original
         rollback-unlink test pinned, now phrased for the new ordering)."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
 
         backend = MagicMock()
         backend.delete.side_effect = StorageError("storage cleanup also failed")
-        monkeypatch.setattr(cli_module, "register_device", lambda *a, **kw: None)
+        monkeypatch.setattr(initflow, "register_device", lambda *a, **kw: None)
 
         def boom_save(_c, path=None):
             raise OSError("disk full")
 
-        monkeypatch.setattr(cli_module, "save_config", boom_save)
+        monkeypatch.setattr(initflow, "save_config", boom_save)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2386,7 +2388,7 @@ class TestRegisterAndSave:
         """User-facing message ordering: 'Device registered' and 'Config
         written' are committed-state confirmations; on register failure
         neither should appear since no durable step succeeded."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
 
         cfg = tmp_path / "config.toml"
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", cfg)
@@ -2394,7 +2396,7 @@ class TestRegisterAndSave:
         def boom(*_a, **_kw):
             raise StorageError("nope")
 
-        monkeypatch.setattr(cli_module, "register_device", boom)
+        monkeypatch.setattr(initflow, "register_device", boom)
 
         config = {
             "device": {"id": "d1", "name": "Mac"},
@@ -2522,7 +2524,7 @@ class TestBootstrapOrVerifyCrypto:
     ) -> None:
         """bootstrap raises StorageError → fall through to retry_fetch +
         verify_passphrase. Pins the rare lost-race branch."""
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
         from mind_meld.crypto import CryptoInitFetch
 
         # bootstrap raises (simulating race)
@@ -2541,20 +2543,18 @@ class TestBootstrapOrVerifyCrypto:
                 keycheck_blob=winner_keycheck,
             )
 
-        monkeypatch.setattr(cli_module, "bootstrap_crypto_init", raising_bootstrap)
-        monkeypatch.setattr(cli_module, "fetch_crypto_init", fake_retry_fetch)
-        monkeypatch.setattr(cli_module, "load_master_key", lambda *a, **kw: b"\x00" * 32)
+        monkeypatch.setattr(initflow, "bootstrap_crypto_init", raising_bootstrap)
+        monkeypatch.setattr(initflow, "fetch_crypto_init", fake_retry_fetch)
+        monkeypatch.setattr(initflow, "load_master_key", lambda *a, **kw: b"\x00" * 32)
         order = []
-        monkeypatch.setattr(
-            cli_module, "verify_passphrase", lambda *a, **kw: order.append("verify")
-        )
+        monkeypatch.setattr(initflow, "verify_passphrase", lambda *a, **kw: order.append("verify"))
 
         def repair(backend, fetched):
             assert fetched.root_salt == winner_salt
             order.append("repair")
 
-        monkeypatch.setattr(cli_module.crypto, "apply_crypto_init_repair", repair)
-        monkeypatch.setattr(cli_module, "set_crypto_session", lambda *a, **kw: None)
+        monkeypatch.setattr("mind_meld.crypto.apply_crypto_init_repair", repair)
+        monkeypatch.setattr(initflow, "set_crypto_session", lambda *a, **kw: None)
 
         # Seed fetch (not used on first-device path but required as param)
         seed_fetch = CryptoInitFetch(status="missing")
@@ -2571,16 +2571,16 @@ class TestBootstrapOrVerifyCrypto:
         """A bootstrap loser must re-fetch and refuse a missing/corrupt winner."""
         import typer
 
-        from mind_meld import cli as cli_module
+        from mind_meld import initflow
         from mind_meld.crypto import CryptoInitFetch
 
         monkeypatch.setattr(
-            cli_module,
+            initflow,
             "bootstrap_crypto_init",
             lambda *args, **kwargs: (_ for _ in ()).throw(StorageError("concurrent put")),
         )
         monkeypatch.setattr(
-            cli_module,
+            initflow,
             "fetch_crypto_init",
             lambda _backend: CryptoInitFetch(status=status),
         )

@@ -444,7 +444,7 @@ class TestInitWiring:
         claude_dir = tmp_path / "claude"
         claude_dir.mkdir()
         monkeypatch.setattr(
-            "mind_meld.cli._prompt_sources",
+            "mind_meld.initflow._prompt_sources",
             lambda: [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
         )
 

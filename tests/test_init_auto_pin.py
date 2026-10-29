@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from mind_meld import cli as cli_module
+from mind_meld import initflow
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def fake_icloud_root(tmp_path, monkeypatch):
     """
     root = tmp_path / "fake-icloud"
     root.mkdir()
-    monkeypatch.setattr(cli_module, "_ICLOUD_DRIVE_ROOT", root)
+    monkeypatch.setattr(initflow, "_ICLOUD_DRIVE_ROOT", root)
     return root
 
 
@@ -66,9 +66,9 @@ class TestAutoPinStorageForIcloud:
             assert kwargs.get("timeout") == 10
             return _make_completed(0)
 
-        monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(initflow.subprocess, "run", fake_run)
 
-        cli_module._auto_pin_storage_for_icloud(storage)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         assert calls == [["brctl", "download", str(storage)]], (
             "brctl must be invoked exactly once with the storage path"
@@ -93,9 +93,9 @@ class TestAutoPinStorageForIcloud:
             called.append(args)
             return _make_completed(0)
 
-        monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(initflow.subprocess, "run", fake_run)
 
-        cli_module._auto_pin_storage_for_icloud(storage)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         assert called == [], "brctl must NOT be called for non-iCloud storage"
         out = capsys.readouterr().out
@@ -111,9 +111,9 @@ class TestAutoPinStorageForIcloud:
         def boom(_args, **_kwargs):
             raise FileNotFoundError(2, "No such file or directory: 'brctl'")
 
-        monkeypatch.setattr(cli_module.subprocess, "run", boom)
+        monkeypatch.setattr(initflow.subprocess, "run", boom)
 
-        cli_module._auto_pin_storage_for_icloud(storage)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         # Rich wraps long paths at arbitrary characters in non-TTY capture
         # mode; the meaningful UX signal is that the Finder tip surfaces,
@@ -132,9 +132,9 @@ class TestAutoPinStorageForIcloud:
         def boom(_args, **_kwargs):
             raise subprocess.TimeoutExpired(cmd="brctl", timeout=10)
 
-        monkeypatch.setattr(cli_module.subprocess, "run", boom)
+        monkeypatch.setattr(initflow.subprocess, "run", boom)
 
-        cli_module._auto_pin_storage_for_icloud(storage)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         out = _notice(capsys)
         assert "right-click" in out
@@ -152,9 +152,9 @@ class TestAutoPinStorageForIcloud:
         def fake_run(_args, **_kwargs):
             return _make_completed(1)
 
-        monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(initflow.subprocess, "run", fake_run)
 
-        cli_module._auto_pin_storage_for_icloud(storage)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         out = _notice(capsys)
         assert "Storage pinned" not in out, (
@@ -173,15 +173,15 @@ class TestAutoPinStorageForIcloud:
         """
         root = tmp_path / ("icloud-" + "x" * 80)
         root.mkdir()
-        monkeypatch.setattr(cli_module, "_ICLOUD_DRIVE_ROOT", root)
+        monkeypatch.setattr(initflow, "_ICLOUD_DRIVE_ROOT", root)
         storage = root / "mind-meld"
         storage.mkdir()
 
         def boom(_args, **_kwargs):
             raise FileNotFoundError(2, "No such file or directory: 'brctl'")
 
-        monkeypatch.setattr(cli_module.subprocess, "run", boom)
-        cli_module._auto_pin_storage_for_icloud(storage)
+        monkeypatch.setattr(initflow.subprocess, "run", boom)
+        initflow._auto_pin_storage_for_icloud(storage)
 
         out = _notice(capsys)
         assert "right-click" in out
@@ -219,7 +219,7 @@ class TestInitWiring:
         def stub_pin(storage_path):
             calls.append(storage_path)
 
-        monkeypatch.setattr("mind_meld.cli._auto_pin_storage_for_icloud", stub_pin)
+        monkeypatch.setattr("mind_meld.initflow._auto_pin_storage_for_icloud", stub_pin)
 
         storage = tmp_path / "icloud"
         # storage path, device name, passphrase x2, claude=Y, all other sources=n

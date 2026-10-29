@@ -40,6 +40,7 @@ EXTRACTED = [
     "core",
     "statusflow",
     "pullflow",
+    "initflow",
     "host_registry",
     *HOST_ADAPTER_MODULES,
 ]
@@ -806,6 +807,7 @@ def test_no_consumer_owned_agent_name_lists() -> None:
         SRC / "core.py",
         SRC / "statusflow.py",
         SRC / "pullflow.py",
+        SRC / "initflow.py",
         Path(__file__).resolve().parent / "conftest.py",
         Path(__file__).resolve().parent / "test_skill_link.py",
         Path(__file__),
@@ -1191,6 +1193,35 @@ STATUSFLOW_DEFINITIONS = frozenset(
     """.split()
 )
 
+# Track 88A: `mm init`'s body moved to initflow.py; the two prompt helpers it
+# shares with `reconfigure-sources` moved to core. Kept out of CORE_DEFINITIONS
+# so the count assertion in test_status_core_single_ownership_and_qualified_calls
+# stays as 86A left it.
+INIT_CORE_DEFINITIONS = frozenset(
+    """
+    _prompt_source_toggle
+    _source_path_is_detected
+    """.split()
+)
+
+INITFLOW_DEFINITIONS = frozenset(
+    """
+    _ICLOUD_DRIVE_ROOT
+    _StorageOccupancy
+    _auto_pin_storage_for_icloud
+    _bootstrap_or_verify_crypto
+    _default_device_name
+    _init_storage_guard
+    _load_prior_device_metadata
+    _probe_storage_occupancy
+    _prompt_passphrase
+    _prompt_sources
+    _register_and_save
+    _verify_existing_crypto_init
+    init
+    """.split()
+)
+
 
 def _top_level_definitions(source: str) -> set[str]:
     names = set()
@@ -1232,9 +1263,11 @@ def _unqualified_owner_calls(
     owners = dict.fromkeys(core_names, "core")
     if not extraction_only:
         owners.update(dict.fromkeys(STATUSFLOW_DEFINITIONS, "statusflow"))
+        owners.update(dict.fromkeys(INIT_CORE_DEFINITIONS, "core"))
+        owners.update(dict.fromkeys(INITFLOW_DEFINITIONS, "initflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
-    module_aliases = {name: name for name in ("core", "statusflow", "pullflow")}
+    module_aliases = {name: name for name in ("core", "statusflow", "pullflow", "initflow")}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = (node.module or "").split(".")[-1]
@@ -1368,6 +1401,23 @@ def test_status_core_single_ownership_and_qualified_calls():
     assert len(PULLFLOW_DEFINITIONS) == 48
 
 
+def test_init_single_ownership_and_qualified_calls():
+    inventories = {
+        "cli": {"init"},
+        "core": INIT_CORE_DEFINITIONS,
+        "initflow": INITFLOW_DEFINITIONS,
+    }
+    moved = INIT_CORE_DEFINITIONS | INITFLOW_DEFINITIONS
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & moved == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(INIT_CORE_DEFINITIONS) == 2
+    assert len(INITFLOW_DEFINITIONS) == 13
+
+
 def test_pull_test_consumers_use_qualified_owner_names():
     offenders = {}
     for path in Path(__file__).resolve().parent.rglob("*.py"):
@@ -1394,13 +1444,17 @@ def test_pull_test_consumers_use_qualified_owner_names():
         ),
         ("def caller(): _status_verdict()", "statusflow", False),
         ("def caller():\n def _count(): pass\n _count()", "statusflow", False),
+        ("def caller(): _prompt_sources()", "cli", True),
+        ("def caller(): initflow._prompt_sources()", "cli", False),
+        ("def caller(): _prompt_source_toggle({}, current_state=True)", "initflow", True),
+        ("def caller(): core._prompt_source_toggle({}, current_state=True)", "initflow", False),
     ],
 )
 def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
     assert bool(_unqualified_owner_calls(source, consumer)) is flags
 
 
-@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow"])
+@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow", "initflow"])
 def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
     for node in ast.walk(tree):
@@ -1426,10 +1480,33 @@ def test_statusflow_import_does_not_register_cli():
     assert result.returncode == 0, result.stderr
 
 
+def test_initflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import initflow; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_core_sync_output_is_shared_with_cli():
     from mind_meld import cli, core
 
     assert cli._SYNC_OUTPUT is core._SYNC_OUTPUT
+
+
+def test_init_bindings_have_one_owner():
+    from mind_meld import cli, consoles, initflow, safety
+
+    assert initflow.console is consoles.console
+    assert initflow.stderr_console is consoles.stderr_console
+    assert initflow.safe_str is safety.safe_str
+    for name in (INIT_CORE_DEFINITIONS | INITFLOW_DEFINITIONS) - {"init"}:
+        assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
 
 
 # ---------------------------------------------------------------------------

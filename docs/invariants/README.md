@@ -13,9 +13,10 @@ one-liner, which does not match a search for `resolveflow.py`.)
 
 | Module | Owns |
 |---|---|
-| `cli.py` | Every `@app.command()` shell, `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, `init`, and the `autopull`/`autopush` shells |
-| `core.py` | (83A/86A) Shared setup, crypto-session and manifest helpers, source filtering and comparison, config migration, autorun breadcrumb normalization, shared sync-output state and the complete `_SyncProgress` family |
+| `cli.py` | Every `@app.command()` shell, `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `init` shell, and the `autopull`/`autopush` shells |
+| `core.py` | (83A/86A) Shared setup, crypto-session and manifest helpers, source filtering and comparison, config migration, autorun breadcrumb normalization, shared sync-output state and the complete `_SyncProgress` family; (88A) the per-source prompt helpers shared by init and `reconfigure-sources` |
 | `pullflow.py` | (86A) `_pull_core`, per-file download/apply and inline conflict helpers, `PullResult`, pull planning orchestration and summary rendering; the command shells stay in `cli.py` |
+| `initflow.py` | (88A) `mm init`'s body (`init`) and its init-only helpers: storage-occupancy probe and two-tier guard, passphrase prompts, crypto bootstrap/verify, `_register_and_save`, source prompts, iCloud auto-pin; the command shell stays in `cli.py` |
 | `statusflow.py` | (83A) Status and diagnostic collection/rendering, host-usage and publication inspection, and autorun breadcrumb read/presentation helpers; command shells stay in `cli.py` |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes |
@@ -54,10 +55,10 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `storage/keys.py` | Validated storage-key construction (1.x namespace) |
 | `skills/retro_fleet/aggregator.py` | Fleet-retro aggregator and its `SKILL.md`; documented invocations use `mm retro-fleet` (`cli.py:retro_fleet_cmd`), and SKILL.md must never fall back to `python -m`. Store, installer and packaging rules: `docs/invariants/events-retro.md` |
 
-**Import direction (Tracks 16A/83A/84A/86A, load-bearing).** `cli` imports `core`,
-`statusflow`, `pullflow` and the six Track 16A modules above; none of them imports `cli`,
-at module scope *or* function scope. `statusflow` and `pullflow` may import `core`; `core`
-never imports `statusflow` or `pullflow`. Host reader adapters under `hosts/` import only
+**Import direction (Tracks 16A/83A/84A/86A/88A, load-bearing).** `cli` imports `core`,
+`statusflow`, `pullflow`, `initflow` and the six Track 16A modules above; none of them imports
+`cli`, at module scope *or* function scope. `statusflow`, `pullflow` and `initflow` may import
+`core`; `core` never imports `statusflow`, `pullflow` or `initflow`. Host reader adapters under `hosts/` import only
 stdlib and `host_usage`, `token_usage`, `lockedjson`, `fsutil`, and `errors`,
 calling shared `host_usage` helpers module-qualified (`host_usage._expired(...)`);
 `host_usage` never imports `hosts/*` or `host_registry`, and `host_registry`
@@ -74,7 +75,7 @@ test would not reach it — the dead-alias trap in reverse.
 
 The symbol-to-owner inventories, patch example and add/exempt/move procedure are
 in [the boundary gates](../../tests/test_module_boundaries.py) beside
-`PULL_CORE_DEFINITIONS` and `PULLFLOW_DEFINITIONS`. New shared dependencies
+`PULL_CORE_DEFINITIONS`, `PULLFLOW_DEFINITIONS`, `INIT_CORE_DEFINITIONS` and `INITFLOW_DEFINITIONS`. New shared dependencies
 follow AC1 to `core` to a fixed point; shells and tests follow their owner.
 
 ## Invariant pointer table
@@ -113,13 +114,13 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
 | `pullflow.py:_record_inline_bump` / `pullflow.py:_invalidate_inline_bump` / `pullflow.py:_drain_inline_bumps` / `pullflow.py:_CANONICAL_WRITE_OUTCOMES` / `pullflow.py:_pull_core` / `pullflow.py:_pull_one_source` / `pullflow.py:_download_and_apply` / (`pending_inline_bumps` plumbing and outcome-gated invalidation) | `docs/invariants/conflicts.md` |
 | `conflictdiff.py` (incl. `format_ts` / `format_age_delta` / `newer_side` / `render_time_line` / `render_verdict` / `merge_has_line_structure`) / `merge.py:lcs_merge` / `merge_jsonl` / `_extract_ts` / `manifest.py:_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_v1_conflict_filename` / either prompt site's `merge_available` computation | `docs/invariants/conflicts.md` |
-| `cli.py:_register_and_save` / `cli.py:_ensure_device_registered` / `cli.py:init` / `cli.py:_init_storage_guard` / `cli.py:_do_gc` / (its peer-controlled blob-key prints) | `docs/invariants/init-devices.md` and `docs/invariants/sync.md` (Own-device blob collection) |
+| `initflow.py:_register_and_save` / `cli.py:_ensure_device_registered` / `initflow.py:init` / `initflow.py:_init_storage_guard` / `cli.py:_do_gc` / (its peer-controlled blob-key prints) | `docs/invariants/init-devices.md` and `docs/invariants/sync.md` (Own-device blob collection) |
 | `devices.py` / `storage/local.py:put_exclusive` / `find_conflict_copies` | `docs/invariants/init-devices.md` |
 | `storage/local.py:LocalBackend.get` / `list_keys` / `list_foreign_keys` / `is_foreign_name` / `is_foreign_key` / `is_conflict_name` / `is_conflict_of` / `errors.py:StorageNotFound` / `storage/keys.py:parse_device_key` / `devices.py:inventory_devices` / `DeviceInventory` / `core.py:ManifestFetch.vanished` / `pullflow.py:WaitingPeer` / `waiting_clause` / `waiting_detail` / `_waiting_peers` / the `waiting` outcome | `docs/invariants/sync.md` (Syncthing-tolerant reads), `docs/invariants/init-devices.md` and `docs/invariants/conflicts.md` |
 | `safety.py` or any new print site interpolating peer-controlled strings | `docs/invariants/init-devices.md` |
 | `crypto.py:store_passphrase_in_keyring` / `get_passphrase` / `_non_interactive_keyring_read` / `_read_secret_service` / `_secret_service_state` / `errors.py:KeyringUnavailableError` / keyring path | `docs/invariants/init-devices.md` |
 | `fsutil.py:refuse_real_state_write_under_pytest` / `PytestRealStateWriteError` / `_pytest_refused_roots` / `_pytest_config_stamp` / `_pytest_config_strings` / `_expand_pytest_root` / `_root_cache_identity` / `_pytest_resolved_roots` / `_pytest_root_anchors` / `_PYTEST_CONFIG_MAX_BYTES` / `atomic_write_bytes` / `flock_append_jsonl` / `append_rotatable_jsonl` / `rotate_jsonl` / `lockedjson.py:locked_json_rmw` / `locked_json_durable_rmw` (test write protection) | [Test write guard](README.md#test-write-guard); keyring protection: `docs/invariants/init-devices.md` |
-| `cli.py:_log_unexpected` / `cli.py:_write_migration_breadcrumb` / `pullflow.py:_apply_incoming_file` / `cli.py:init` | [Test write guard](README.md#test-write-guard); `test_log_unexpected_refuses_protected_root`, `test_migration_write_refuses_protected_root`, `test_migration_unlink_refuses_protected_root`, `test_pull_apply_refuses_protected_root`, `test_init_storage_refuses_protected_root` |
+| `cli.py:_log_unexpected` / `cli.py:_write_migration_breadcrumb` / `pullflow.py:_apply_incoming_file` / `initflow.py:init` | [Test write guard](README.md#test-write-guard); `test_log_unexpected_refuses_protected_root`, `test_migration_write_refuses_protected_root`, `test_migration_unlink_refuses_protected_root`, `test_pull_apply_refuses_protected_root`, `test_init_storage_refuses_protected_root` |
 | `storage/local.py:LocalBackend.put` / `LocalBackend.put_exclusive` / `LocalBackend.delete` / `LocalBackend.delete_conflict_copies` | [Test write guard](README.md#test-write-guard); `test_local_put_refuses_protected_root`, `test_local_put_exclusive_refuses_protected_root`, `test_local_delete_refuses_protected_root`, `test_local_delete_conflict_copies_refuses_protected_root` |
 | `seen_sources.py:read` / `acknowledge` / `write` | [Test write guard](README.md#test-write-guard); `test_seen_read_refuses_protected_root`, `test_seen_acknowledge_refuses_protected_root`, `test_seen_write_refuses_protected_root` |
 | `upgrade.py:_pipx_install_lock` / `_write_update_log` / `_spawn_pipx` | [Test write guard](README.md#test-write-guard); `test_pipx_install_lock_refuses_protected_root`, `test_update_log_refuses_protected_root`, `test_spawn_pipx_refuses_protected_root` (pipx guard disabled, as `test_self_update` does) |
@@ -254,7 +255,7 @@ marker; it does not establish suite-wide safety.
 | `cli.py:_log_unexpected` | log path before SIDECAR_DIR mkdir and `a+b` open | BaseException escapes its Exception handler; original error stays diagnosable |
 | `cli.py:_write_migration_breadcrumb` | breadcrumb path at entry, before unlink or mkdir | even missing-file deletion refuses; docstring has guard carve-out |
 | `pullflow.py:_apply_incoming_file` | local_path once before ancestor mkdir loop | leaf symlink skip remains read-only |
-| `cli.py:init` | full storage path before mkdir | CliRunner flow tested |
+| `initflow.py:init` | full storage path before mkdir | CliRunner flow tested |
 | `storage/local.py:LocalBackend.put` / `put_exclusive` | key path before mkdir/temp/link | exclusive EEXIST path also refuses |
 | `storage/local.py:LocalBackend.delete` / `delete_conflict_copies` | key path at entry | missing key and zero copies still refuse |
 | `seen_sources.py:read` / `acknowledge` / `write` | SEEN file before recovery/write mkdir | successful O_RDONLY read never guards |

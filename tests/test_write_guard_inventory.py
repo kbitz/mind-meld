@@ -215,7 +215,7 @@ REVIEWED = {
             "directory.mkdir(exist_ok=True)",
         ],
     ),
-    "cli.py:init": (
+    "initflow.py:init": (
         *_GUARDED,
         [
             "full_path.mkdir(parents=True, exist_ok=True)",

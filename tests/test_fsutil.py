@@ -1565,6 +1565,7 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         cli,
         config,
         devices,
+        initflow,
         lockfile,
         resolveflow,
         seen_sources,
@@ -1580,9 +1581,9 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
     monkeypatch.setattr(devices, "DEVICES_WRITE_LOCK", base / "devices.lock")
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "init-config.toml")
     monkeypatch.setattr(config, "_is_default_mm_events_path", lambda path: True)
-    monkeypatch.setattr(cli, "DEFAULT_ARGON2_MEMORY_KB", 1024)
+    monkeypatch.setattr(initflow, "DEFAULT_ARGON2_MEMORY_KB", 1024)
     monkeypatch.setattr(
-        cli,
+        initflow,
         "_prompt_sources",
         lambda: [{"name": "custom", "path": str(tmp_path), "type": "generic", "include_dirs": []}],
     )
