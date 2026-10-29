@@ -21,7 +21,7 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-Declared active (factory, 2026-10-29): Track 88A is between review and ship as [PR #240](https://github.com/kbitz/mind-meld/pull/240) (branch `mmm/4c490f01`). Its ID and Group are pinned; only its downstream references (`_out:`, and the init-changing Track now numbered 90A) follow this run's renumbering.
+Declared active (factory, 2026-10-29): Track 88A is between review and ship as [PR #240](https://github.com/kbitz/mind-meld/pull/240) (branch `mmm/4c490f01`). Its ID, Group and card are pinned; only its `_out:` line adds the gstack Track 94A.
 
 #### Group 88: Init module
 
@@ -31,12 +31,12 @@ _Depends on: none_
 
 ##### Track 88A: Move init out of cli.py
 _2 tasks . ~150 LOC . low risk . 7 files_
-**Outcome:** `mm init` lives in its own module behind a contract test, so Track 90A changes and reviews that module instead of `cli.py`; nothing the owner sees changes.
-**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 90A (O2.1).
+**Outcome:** `mm init` lives in its own module behind a contract test, so Track 89A changes and reviews that module instead of `cli.py`; nothing the owner sees changes.
+**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 89A (O2.1).
 **Done when:** `init`'s body and the helpers only it calls move to `initflow.py`, and any shared helpers it calls that are still in `cli.py` move to `core.py`; `cli.py` keeps the command shell; `initflow` never imports `cli`, and `tests/test_module_boundaries.py` lists it; a contract test runs init against an empty and a populated `tmp_path` folder without importing `cli` and pins its outcome and exit codes; tests that patched moved helpers patch them at their new owner, and no existing assertion changes; no output, flag or exit code change; the routing README and `init-devices.md` name the module; `./bin/check` passes.
 _touches: src/mind_meld/cli.py, src/mind_meld/core.py, src/mind_meld/initflow.py (new), tests/test_initflow.py (new), tests/test_init_auto_pin.py, tests/test_init_events_backfill.py, tests/test_module_boundaries.py, docs/invariants/README.md, docs/invariants/init-devices.md_
 _blocked-by: Track 87A_
-_out: 89A, 90A_
+_out: 89A, 94A_
 _read-first: docs/invariants/README.md, docs/invariants/init-devices.md, tests/test_module_boundaries.py_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_initflow.py tests/test_init_auto_pin.py tests/test_module_boundaries.py_
 
@@ -54,20 +54,20 @@ _tombstone: 27, 70, 71, 72, 73, 74, 86, 87_
 **End-state:** The owner's Macs and Linux machine sync over one Syncthing folder that carries the 1.x store, with Syncthing-tolerant reads, a join that never re-keys, shared Claude paths, fast-forward pulls, propagated deletions, Syncthing state in status and a cutover runbook; gstack's machine-local files no longer sync and the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on a one-week soak and released as 2.0.0.
 **Groups:** 89, 90, 91, 92, 93, 94, 95
 
-#### Group 89: gstack sync scope
+#### Group 94: gstack sync scope
 
 _Depends on: Group 88_
 
 **This group delivers:** Machine-local gstack files (factory manager files, evidence ledgers, a browser profile, resume copies) stop syncing.
 
-##### Track 89A: Keep machine-local gstack files and browser profiles out of sync
+##### Track 94A: Keep machine-local gstack files and browser profiles out of sync
 _3 tasks . ~230 LOC . medium risk . 7 files_
 **Outcome:** The owner's Macs stop syncing files that belong to one machine: gstack's factory manager files, the live factory handoff, evidence ledgers and pair-review resume copies, and any Chromium browser profile (saved logins included) in any generic source. Shared question history, the taste profile, analytics and design documents keep syncing.
 **Supports:** MVP-1, docs/SPEC.md O6.1 (credentials never sync) and the "What mm syncs and reports" gstack row (owner decisions 2026-10-29).
 **Done when:** the generic walker skips any directory holding a `Local State` file at its root (a Chromium user-data directory) in every generic source, the same way `manifest.marker_skip_globs` skips `.extend-root` directories, so no folder name is hard-coded; `config._GSTACK_INCLUDE_PATTERNS` no longer admits `projects/*/manager-*.json`, `projects/*/*-evidence.jsonl` or the live `projects/*/driver-handoff.md` (the timestamped `driver-handoff-*.md` archives stay); `projects/*/pair-review/*` narrows to `deploy.md`, `report.md` and `parked-bugs.md`, so `session.from-*` resolve copies and stray scripts stay local; artifact directories such as `projects/*/designs/**` narrow to document file types (md, html, png, json, css and similar); `question-log.jsonl`, `question-events.jsonl`, `question-preferences.json`, `taste-profile.json` and `analytics/**` still sync, and the comment beside them records the owner's 2026-10-29 decision and gstack's line-based telemetry-sync cursor hazard; on a Mac whose config already pins the previous default lists, `mm migrate-config` offers the narrowed lists, and README Upgrading says the generic rule replaces the owner's local `projects/*/chrome-profile/*` stopgap exclude, that narrowing deletes nothing on any Mac, and how to remove already-synced profile copies by hand; `sync.md` names the removed readers and the marker skip; tests pin each pattern in and out and a fixture profile under `designs/` and under `pair-review/branches/`; `./bin/check --affected` passes.
 _touches: src/mind_meld/manifest.py, src/mind_meld/config.py, src/mind_meld/core.py, tests/test_manifest.py, tests/test_config.py, docs/invariants/sync.md, README.md_
 _blocked-by: Track 88A_
-_out: 90A, 94A_
+_out: 89A, 95A_
 _read-first: docs/invariants/README.md, docs/invariants/sync.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
@@ -77,20 +77,20 @@ _Source: owner decisions 2026-10-29 on the gstack sync audit (`~/.gstack/project
 - **Narrow the gstack lists** -- _src/mind_meld/config.py, tests/test_config.py, tests/test_manifest.py, ~80 lines._ (M)
 - **Reach existing configs** -- _src/mind_meld/core.py, tests/test_config.py, README.md, ~70 lines._ (S)
 
-#### Group 90: Fleet creation and join
+#### Group 89: Fleet creation and join
 
-_Depends on: Group 88, Group 89_
+_Depends on: Group 88, Group 94_
 
 **This group delivers:** Only a new fleet creates the key header, and iCloud defaults go.
 
-##### Track 90A: Let only a new fleet create the key header, and drop iCloud defaults
+##### Track 89A: Let only a new fleet create the key header, and drop iCloud defaults
 _3 tasks . ~180 LOC . high risk . 10 files_
 **Outcome:** A machine joining over Syncthing waits for the fleet's key header instead of minting a second one, and new installs default to a Syncthing folder instead of iCloud Drive.
 **Supports:** MVP-1, docs/SPEC.md O2.1 and the cutover.
 **Done when:** `mm init --new-fleet` creates `mm-crypto-init` only in an empty folder and writes `.stignore` with mm's temporary-file patterns; plain `mm init` joins: with no key header it stops and says to wait for Syncthing, never writes one, then verifies the passphrase and pulls; `apply_crypto_init_repair` never rewrites the canonical file and removes only byte-identical copies; the missing-key-header remedy no longer says to run `mm init`; the default storage path is `~/Sync/mind-meld` on macOS and Linux, and `_auto_pin_storage_for_icloud`, the iCloud default and iCloud wording are removed; tests cover init on an empty, an unsynced and a populated folder; the new `.stignore` writer calls `fsutil.refuse_real_state_write_under_pytest` before its first mutation and joins the raw-writer census; `./bin/check` passes.
 _touches: src/mind_meld/cli.py, src/mind_meld/initflow.py, src/mind_meld/core.py, src/mind_meld/crypto.py, src/mind_meld/config.py, tests/test_crypto.py, tests/test_init_auto_pin.py, tests/test_initflow.py, tests/test_integration.py, tests/test_fsutil.py, docs/invariants/init-devices.md, README.md_
-_blocked-by: Track 87A, Track 88A, Track 89A_
-_out: 91A, 91B, 95A_
+_blocked-by: Track 87A, Track 88A, Track 94A_
+_out: 90A, 90B, 93A_
 _read-first: docs/invariants/README.md, docs/invariants/init-devices.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_crypto.py tests/test_initflow.py tests/test_integration.py_
 
@@ -100,20 +100,20 @@ _Source: docs/archive/store-v2.md hazard "Init on an unsynced folder mints a sec
 - **Write-once key header** -- _src/mind_meld/crypto.py, src/mind_meld/core.py, tests/test_crypto.py, ~40 lines._ (S)
 - **Drop the iCloud defaults** -- _src/mind_meld/initflow.py, src/mind_meld/config.py, tests/test_init_auto_pin.py, docs/invariants/init-devices.md, README.md, ~40 lines (+120 del)._ (S)
 
-#### Group 91: Portable Claude paths ∥ Source commands module
+#### Group 90: Portable Claude paths ∥ Source commands module
 
-_Depends on: Group 90_
+_Depends on: Group 89_
 
 **This group delivers:** Claude project memory is one folder on macOS and Linux, and the source commands move into their own module.
 
-##### Track 91A: Share Claude project memory between macOS and Linux paths
+##### Track 90A: Share Claude project memory between macOS and Linux paths
 _2 tasks . ~270 LOC . high risk . 6 files_
 **Outcome:** The owner's Claude project memory for `~/src/<project>` is one folder on a Mac and on the Linux machine, instead of separate `-Users-<name>-…` and `-home-<name>-…` copies.
 **Supports:** MVP-1, docs/SPEC.md O1.2.
 **Done when:** the Claude walker publishes home-encoded project folder names in a home-relative form and pull maps them back to the local encoding; tombstone keys and `is_tombstoned` use the same form, so the switch mints no deletions; `synclog` project parsing follows; a test round-trips a project between a macOS-style and a Linux-style home; README Upgrading says every machine must update before the first push in the new form; `./bin/check` passes.
 _touches: src/mind_meld/manifest.py, src/mind_meld/pullflow.py, src/mind_meld/synclog.py, tests/test_manifest.py, tests/test_integration.py, tests/test_synclog.py, docs/invariants/sync.md, README.md_
-_blocked-by: Track 90A_
-_out: 92A_
+_blocked-by: Track 89A_
+_out: 91A_
 _read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/archive/store-v2.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_manifest.py tests/test_integration.py tests/test_synclog.py_
 
@@ -122,14 +122,14 @@ _Source: docs/archive/store-v2.md §7 (current evidence) and its hazard row on a
 - **Home-relative wire paths** -- _src/mind_meld/manifest.py, src/mind_meld/pullflow.py, tests/test_manifest.py, tests/test_integration.py, ~150 lines._ (M)
 - **Tombstones and history follow** -- _src/mind_meld/manifest.py, src/mind_meld/synclog.py, tests/test_synclog.py, docs/invariants/sync.md, README.md, ~120 lines._ (M)
 
-##### Track 91B: Move the source commands out of cli.py
+##### Track 90B: Move the source commands out of cli.py
 _2 tasks . ~150 LOC . low risk . 8 files_
-**Outcome:** `mm sources`, `mm enable-source`, `mm disable-source` and `mm reconfigure-sources` live in their own module behind a contract test, so Track 94A adds the `mmm` source there instead of in `cli.py`; nothing the owner sees changes.
-**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 94A (factory handover).
+**Outcome:** `mm sources`, `mm enable-source`, `mm disable-source` and `mm reconfigure-sources` live in their own module behind a contract test, so Track 95A adds the `mmm` source there instead of in `cli.py`; nothing the owner sees changes.
+**Supports:** MVP-1 delivery under docs/SPEC.md Constraints, "Core and extensions"; prerequisite for Track 95A (factory handover).
 **Done when:** the four command bodies and the helpers only they call move to `sourceflow.py`, and shared helpers still in `cli.py` move to `core.py`; `cli.py` keeps the command shells; `sourceflow` never imports `cli`, and `tests/test_module_boundaries.py` lists it; a contract test enables and disables a default source and an opt-in source over `tmp_path` config without importing `cli` and pins the outcome lines and exit codes; tests that patched moved helpers patch them at their new owner, and no existing assertion changes; no output, flag or exit-code change; the routing README names the module; `./bin/check --affected` passes.
 _touches: src/mind_meld/cli.py, src/mind_meld/core.py, src/mind_meld/sourceflow.py (new), tests/test_sourceflow.py (new), tests/test_source_toggle.py, tests/test_muse_source.py, tests/test_module_boundaries.py, docs/invariants/README.md_
-_blocked-by: Track 90A_
-_out: 94A_
+_blocked-by: Track 89A_
+_out: 95A_
 _read-first: docs/invariants/README.md, tests/test_module_boundaries.py_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
@@ -138,20 +138,20 @@ _Source: docs/SPEC.md Constraints, "Core and extensions". Re-checked at 6a49f66:
 - **Source command module** -- _src/mind_meld/cli.py, src/mind_meld/core.py, src/mind_meld/sourceflow.py, tests/test_source_toggle.py, tests/test_muse_source.py, ~300 lines moved._ (M)
 - **Source contract test and routing** -- _tests/test_sourceflow.py, tests/test_module_boundaries.py, docs/invariants/README.md, ~150 lines._ (S)
 
-#### Group 92: Fast-forward pulls
+#### Group 91: Fast-forward pulls
 
-_Depends on: Group 91_
+_Depends on: Group 90_
 
 **This group delivers:** Peer edits fast-forward, conflicts need two real edits, and deletions propagate.
 
-##### Track 92A: Fast-forward peer edits and propagate deletions
+##### Track 91A: Fast-forward peer edits and propagate deletions
 _2 tasks . ~450 LOC . high risk . 9 files_
 **Outcome:** A peer's change to a file the owner has not touched simply applies, a conflict appears only when both machines changed the file, deleted `MEMORY.md` lines stay deleted, and a file deleted on one machine is deleted on the others with a 30-day recovery copy.
 **Supports:** MVP-1, docs/SPEC.md O1.1.
 **Done when:** a `state.db` migration adds a per-peer last-synced base (`peer, source, path, sha`); `_apply_incoming_file` skips when the remote equals the base, fast-forwards with no union when the local file equals the base, and unions a mergeable file or writes a conflict copy only when both changed, falling back to today's rule when no base exists; a peer tombstone deletes the local file when it still equals the base and keeps the bytes recoverable for 30 days; bases are recorded after applied, matched and deleted outcomes, never after failed or waiting ones; `pullplan` predicts the same; `conflicts.md` and `sync.md` describe the rule; tests cover each branch and a three-machine sequence; the recovery-copy writer calls `fsutil.refuse_real_state_write_under_pytest` before its first mutation and joins the raw-writer census; the provisional `state.db` tables each name a reader or an explicit no-reader, and the pre-2026-10-19 Track IDs in `sync.md`'s history-log section, `statedb.py`, the routing README, `init-devices.md` and `tests/test_pullhistory.py` are retired (including `sync.md`'s deferred hold-escalation pointer, killed 2026-10-21 as unobserved); `./bin/check` passes.
 _touches: src/mind_meld/statedb.py, src/mind_meld/pullflow.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, src/mind_meld/retention.py, tests/test_statedb.py, tests/test_merge.py, tests/test_additive_sync.py, tests/test_integration.py, tests/test_fsutil.py, docs/invariants/conflicts.md, docs/invariants/sync.md, README.md, docs/invariants/README.md, docs/invariants/init-devices.md, tests/test_pullhistory.py_
-_blocked-by: Track 87A, Track 91A_
-_out: 93A, 95A_
+_blocked-by: Track 87A, Track 90A_
+_out: 92A, 93A_
 _read-first: docs/invariants/README.md, docs/invariants/conflicts.md, docs/invariants/sync.md_
 _session: fresh · effort: high · verify: ./bin/check tests/test_statedb.py tests/test_merge.py tests/test_additive_sync.py tests/test_integration.py_
 
@@ -160,20 +160,20 @@ _Source: docs/archive/store-v2.md hazard rows "Every peer edit to an untouched f
 - **Base table and the fast-forward rule** -- _src/mind_meld/statedb.py, src/mind_meld/pullflow.py, src/mind_meld/pullplan.py, src/mind_meld/merge.py, tests/test_statedb.py, tests/test_merge.py, tests/test_additive_sync.py, ~300 lines._ (L)
 - **Propagated deletions with recovery** -- _src/mind_meld/pullflow.py, src/mind_meld/retention.py, tests/test_integration.py, docs/invariants/conflicts.md, docs/invariants/sync.md, README.md, ~150 lines._ (M)
 
-#### Group 93: Syncthing status
+#### Group 92: Syncthing status
 
-_Depends on: Group 92_
+_Depends on: Group 91_
 
 **This group delivers:** Status shows Syncthing's state and each machine's latest push.
 
-##### Track 93A: Report Syncthing state and each machine's latest push
+##### Track 92A: Report Syncthing state and each machine's latest push
 _2 tasks . ~350 LOC . medium risk . 9 files_
 **Outcome:** `mm status` tells the owner whether Syncthing is connected and in sync and whether this machine has applied each peer's latest push, and `mm diag` flags folder settings that would break sync.
 **Supports:** MVP-1, docs/SPEC.md O2.2 and O3.2.
 **Done when:** a new `syncthing.py` finds the local Syncthing configuration and reads its REST API read-only with timeouts (connected peers, folder state, and the folder options README lists); mm never writes Syncthing's configuration; pull records each peer's applied manifest time, and status shows each peer's last push and whether it is applied, warning in every mode when something has waited more than 24 h; diag lints the folder options and `.stignore`; a missing or unreachable Syncthing is reported, not an error; tests use a fake REST server; `./bin/check` passes.
 _touches: src/mind_meld/syncthing.py (new), src/mind_meld/statusflow.py, src/mind_meld/pullflow.py, src/mind_meld/statedb.py, tests/test_syncthing.py (new), tests/test_diag.py, tests/test_module_boundaries.py, README.md, docs/invariants/README.md_
-_blocked-by: Track 77A, Track 92A_
-_out: 94A, 95A_
+_blocked-by: Track 77A, Track 91A_
+_out: 93A, 95A_
 _read-first: docs/invariants/README.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_syncthing.py tests/test_diag.py tests/test_module_boundaries.py_
 
@@ -182,20 +182,20 @@ _Source: docs/SPEC.md O2.2 and O3.2; docs/archive/store-v2.md §10 folder option
 - **Read-only Syncthing client and diag lint** -- _src/mind_meld/syncthing.py, src/mind_meld/statusflow.py, tests/test_syncthing.py, tests/test_module_boundaries.py, docs/invariants/README.md, ~200 lines._ (M)
 - **Each peer's push in status** -- _src/mind_meld/statusflow.py, src/mind_meld/pullflow.py, src/mind_meld/statedb.py, tests/test_diag.py, README.md, ~150 lines._ (M)
 
-#### Group 94: Factory handover
+#### Group 95: Factory handover
 
-_Depends on: Group 89, Group 91, Group 93_
+_Depends on: Group 90, Group 92, Group 94_
 
 **This group delivers:** An opt-in `mmm` source carries mmm-factory's durable state between Macs.
 
-##### Track 94A: Add an opt-in mmm source for factory handover
+##### Track 95A: Add an opt-in mmm source for factory handover
 _2 tasks . ~220 LOC . medium risk . 7 files_
 **Outcome:** After `mm enable-source mmm` on each Mac, the owner stops the factory on one Mac, pushes, pulls on another Mac and starts it there with the items, plans, cards, settings, passports, handoff notes, briefs and run ledgers in place; locks, watcher state, fields files, worker-ID lists, usage caches and other machine-local factory files stay behind.
 **Supports:** docs/SPEC.md "What mm syncs and reports" mmm-factory row and [factory handover](SPEC.md#factory-handover) (owner decisions 2026-10-29).
 **Done when:** a default `mmm` source on `~/.mmm` is opt-in like Muse (never active until `mm enable-source mmm` on that machine, or an explicit choice at `mm init` or `mm reconfigure-sources`); it syncs `items/` (each item's `<id>.json`, `.plan.md` and `.card.md`), the four run ledgers (`provenance.jsonl`, `hangs.jsonl`, `records.jsonl`, `picker.jsonl`) and, per project, `manager.toml`, the passport (`manager-passport.txt`), the handoff note (`driver-handoff.md`) and its timestamped archives, the manager's launch cards (`cards/`) and `briefs/`; it never syncs `*.lock`, `manager-watch.*`, `manager-status.json`, `manager-fields.json`, `manager-usage.json`, the worker-ID lists (`manager-docs-workers.txt`, `release-text-workers.txt`), the worker-side `mmm-<id>-card.md` and `mmm-<id>-autoplan-<n>.md` copies, SQLite files, `traces/`, `release/`, `review-compare/` or `picker-jev/`, and `~/.local/share/mmm-factory/` and `~/.config/mmm-factory/` are never sources; `~/.mmm` must be a real directory (a link is refused, as the factory requires); README documents enabling it, the single-Mac rule, that in-flight work does not transfer (finish or ship first), and that item records carry raw worker text to every machine with the source enabled; tests pin the allowlist against a fixture factory home; `./bin/check --affected` passes.
 _touches: src/mind_meld/config.py, src/mind_meld/sourceflow.py, tests/test_config.py, tests/test_sourceflow.py, tests/test_mmm_source.py (new), docs/invariants/sync.md, README.md_
-_blocked-by: Track 89A, Track 91B, Track 93A_
-_out: 95A_
+_blocked-by: Track 90B, Track 92A, Track 94A_
+_out: 93A_
 _read-first: docs/invariants/README.md, docs/invariants/sync.md, docs/SPEC.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
@@ -204,19 +204,19 @@ _Source: owner decisions 2026-10-29, including mmm-factory manager Ugarit's reco
 - **The mmm source and its allowlist** -- _src/mind_meld/config.py, src/mind_meld/sourceflow.py, tests/test_config.py, tests/test_mmm_source.py, ~150 lines._ (M)
 - **Handover docs** -- _README.md, docs/invariants/sync.md, tests/test_sourceflow.py, ~70 lines._ (S)
 
-#### Group 95: Cutover runbook
+#### Group 93: Cutover runbook
 
-_Depends on: Group 90, Group 92, Group 93, Group 94_
+_Depends on: Group 89, Group 91, Group 92, Group 95_
 
 **This group delivers:** A runbook and agent docs for moving the fleet onto Syncthing.
 
-##### Track 95A: Write the cutover runbook and the Syncthing documentation
+##### Track 93A: Write the cutover runbook and the Syncthing documentation
 _2 tasks . ~400 LOC . low risk . 7 files_
 **Outcome:** The owner has a step-by-step runbook to move the fleet from iCloud Drive to Syncthing and bring the Linux machine in, and every document an agent reads describes the Syncthing store.
 **Supports:** MVP-1, docs/SPEC.md O1 to O4 (cutover and soak).
 **Done when:** README covers installing Syncthing on macOS and Arch, pairing, the folder options mm relies on, and a cutover runbook (update every machine, stop hooks, move the store folder from iCloud Drive into the Syncthing folder, point `storage.path` at it, join the Linux machine with `mm init`, remove a dead machine's directories by hand, delete the iCloud folder two weeks later); AGENTS.md Key Principles and root SPEC.md's storage sections describe the Syncthing folder; `sync.md` and `init-devices.md` drop iCloud-only rules; `pyproject.toml` description and keywords drop iCloud; docs/SPEC.md's superseded-history entry for the store design names §13 (cutover) as evidence alongside §7, §10 and §11; `./bin/check` passes.
 _touches: README.md, AGENTS.md, SPEC.md, docs/SPEC.md, docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/README.md, pyproject.toml_
-_blocked-by: Track 90A, Track 92A, Track 93A, Track 94A_
+_blocked-by: Track 89A, Track 91A, Track 92A, Track 95A_
 _out: 96A_
 _read-first: docs/SPEC.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_docs_routing.py_
@@ -228,7 +228,7 @@ _Source: docs/SPEC.md O1 to O4 and the accepted manual cutover step; docs/archiv
 
 #### Group 96: Cross-model memory qualification
 
-_Depends on: Group 95_
+_Depends on: Group 93_
 
 **This group delivers:** Two live checks prove or refute the cross-model memory design before implementation.
 
@@ -238,7 +238,7 @@ _1 task . ~120 LOC . low risk . 1 file_
 **Supports:** docs/SPEC.md O9.4 (qualification before implementation), after 2.0.
 **Done when:** `docs/designs/cross-model-memory.md` records Q1 and Q2 run in temporary `HOME` and `CODEX_HOME` directories (never the owner's real stores), with the observed codex-cli and Claude Code versions; Q1: a fresh Codex session finds a Claude-origin memory through an `AGENTS.md` pointer and a fresh Claude session finds a Codex-origin memory through a `CLAUDE.md` pointer, by search, without loading `MEMORY.md` whole, and which file Codex loads at startup is recorded; Q2: after Codex regenerates its memory files on one machine, a push publishes only that machine's copies and a peer applies them with no conflict copy and no write into any native store; the chosen Codex file set is recorded; a failed check is written up for the owner and no implementation Track is proposed; no product code changes.
 _touches: docs/designs/cross-model-memory.md_
-_blocked-by: Track 95A_
+_blocked-by: Track 93A_
 _read-first: docs/designs/cross-model-memory.md, docs/SPEC.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_docs_routing.py_
 
@@ -255,14 +255,14 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
 - Group 88 ← {}
-- Group 89 ← {88}
-- Group 90 ← {88, 89}
+- Group 94 ← {88}
+- Group 89 ← {88, 94}
+- Group 90 ← {89}
 - Group 91 ← {90}
 - Group 92 ← {91}
-- Group 93 ← {92}
-- Group 94 ← {89, 91, 93}
-- Group 95 ← {90, 92, 93, 94}
-- Group 96 ← {95}
+- Group 95 ← {90, 92, 94}
+- Group 93 ← {89, 91, 92, 95}
+- Group 96 ← {93}
 ```
 
 Track detail per group:
@@ -270,30 +270,30 @@ Track detail per group:
 ```
 Group 88: Init module          (in progress)
   +-- Track 88A ........... ~M . 2 tasks
-Group 89: gstack sync scope
+Group 94: gstack sync scope
+  +-- Track 94A ........... ~L . 3 tasks
+Group 89: Fleet creation and join
   +-- Track 89A ........... ~L . 3 tasks
-Group 90: Fleet creation and join
-  +-- Track 90A ........... ~L . 3 tasks
-Group 91: Portable Claude paths ∥ Source commands module
+Group 90: Portable Claude paths ∥ Source commands module
+  +-- Track 90A ........... ~L . 2 tasks
+  +-- Track 90B ........... ~M . 2 tasks
+Group 91: Fast-forward pulls
   +-- Track 91A ........... ~L . 2 tasks
-  +-- Track 91B ........... ~M . 2 tasks
-Group 92: Fast-forward pulls
+Group 92: Syncthing status
   +-- Track 92A ........... ~L . 2 tasks
-Group 93: Syncthing status
-  +-- Track 93A ........... ~L . 2 tasks
-Group 94: Factory handover
-  +-- Track 94A ........... ~L . 2 tasks
-Group 95: Cutover runbook
+Group 95: Factory handover
   +-- Track 95A ........... ~L . 2 tasks
+Group 93: Cutover runbook
+  +-- Track 93A ........... ~L . 2 tasks
 Group 96: Cross-model memory qualification
   +-- Track 96A ........... ~M . 1 task
 ```
 
 **Total: 9 groups . 10 tracks remaining.**
 
-Almost every Track edits `README.md`, `config.py`, `cli.py` or an invariants doc another Track also edits, so the packer emits one chain with one parallel pair (91A ∥ 91B). The gstack scope fix (89A) goes first after the pinned init move because the owner asked for it now and it shares `config.py` and `core.py` with the init and join Tracks. The source-command move (91B) sits just before the `mmm` source (94A) under docs/SPEC.md's core-and-extensions constraint, and 94A lands before the cutover runbook (95A) so the runbook can cover factory handover. Track 77A stays on Track 93A, and the shipped Track 87A stays on Tracks 88A, 90A and 92A.
+Almost every Track edits `README.md`, `config.py`, `cli.py` or an invariants doc another Track also edits, so the packer emits one chain with one parallel pair (90A ∥ 90B). The gstack scope fix (94A) goes first after the pinned init move because the owner asked for it now and it shares `config.py` and `core.py` with the init and join Tracks. The source-command move (90B) sits just before the `mmm` source (95A) under docs/SPEC.md's core-and-extensions constraint, and 95A lands before the cutover runbook (93A) so the runbook can cover factory handover. Track 77A stays on Track 92A, and the shipped Track 87A stays on Tracks 88A, 89A and 91A. Track IDs 89A to 93A keep the meaning they had before this regeneration, so tests, README and invariant docs that cite them stay correct; the new Tracks take IDs that were never used (94A, 90B, 95A, 96A), which is why Group numbers do not follow execution order.
 
-The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 95's runbook. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
+The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on the one-week Mac plus Linux soak, with O6 to O8 holding and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance` after following Group 93's runbook. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
 
 ---
 
