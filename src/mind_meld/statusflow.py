@@ -100,6 +100,7 @@ def _status_verdict(
     metadata: bool,
     first_push: bool,
     capture_action: str | None = None,
+    manifest_arriving: bool = False,
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
     scope = f"Source '{source}' — " if source is not None else ""
@@ -131,6 +132,8 @@ def _status_verdict(
         if not verdict:
             if capture_action:
                 verdict = capture_action
+            elif manifest_arriving:
+                verdict = "This device's manifest is still arriving from sync. Run: mm status"
             elif first_push:
                 verdict = "This device has not pushed yet. Run: mm push"
             elif any(counts):
@@ -349,8 +352,9 @@ def status(
             projection=projection,
             counts=pending_counts,
             metadata=metadata_pending,
-            first_push=fetch.status == "missing",
+            first_push=fetch.status == "missing" and not fetch.vanished,
             capture_action=capture_action,
+            manifest_arriving=fetch.status == "missing" and fetch.vanished,
         )
         report["verdict"] = verdict
 

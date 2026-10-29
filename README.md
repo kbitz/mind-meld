@@ -538,6 +538,7 @@ In sync with this device's last push.
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
 Metadata-only changes waiting to push. Run: mm push
 This device has not pushed yet. Run: mm push
+This device's manifest is still arriving from sync. Run: mm status
 Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm push
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```

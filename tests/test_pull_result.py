@@ -346,6 +346,10 @@ class TestWaitingOutcome:
             assert result.exit_code == 0, (result.stdout, result.stderr)
             assert ("still arriving from sync" in result.stdout) is vanished
             assert ("not yet pushed from this device" in result.stdout) is not vanished
+            assert ("has not pushed yet" in result.stdout) is not vanished
+            assert ("manifest is still arriving from sync. Run: mm status" in result.stdout) is (
+                vanished
+            )
 
     def test_autopull_waiting_is_success_with_detail_never_degraded(self, tmp_path, monkeypatch):
         backend, _claude_a, claude_b = _prime_two_devices(tmp_path, monkeypatch)
