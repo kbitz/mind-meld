@@ -528,7 +528,9 @@ def _local_state_parent_prefix(
 
     Looks only at ``BROWSER_PROFILE_MARKER``. A symlink directory is not
     entered, a symlink marker marks nothing, and a missing path is not an
-    error. Strict mode refuses on a read error; permissive mode skips it.
+    error. A directory inside a nested checkout is not probed: that checkout
+    is already frozen, and an unreadable path there must not refuse the push.
+    Strict mode refuses on a read error; permissive mode skips it.
     Never walks above ``base``.
     """
     try:
@@ -557,6 +559,19 @@ def _local_state_parent_prefix(
                     )
                 ) from e
             directory_st = None
+        if (
+            directory_st is not None
+            and not stat.S_ISLNK(directory_st.st_mode)
+            and stat.S_ISDIR(directory_st.st_mode)
+        ):
+            rel_current = current.relative_to(base).as_posix()
+            checkout = nested_repo_root(current, base, strict=strict, source_name=source_name)
+            if (
+                checkout is not None
+                and rel_current != checkout
+                and rel_current.startswith(checkout + "/")
+            ):
+                directory_st = None
         if (
             directory_st is not None
             and not stat.S_ISLNK(directory_st.st_mode)
