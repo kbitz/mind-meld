@@ -1088,18 +1088,18 @@ class TestExcludePatterns5C:
         config = config_module.load_config(config_path)
         exclude_map, skip_prefixes = core._build_exclude_map(config)
         assert skip_prefixes == {"gstack": ["projects/myapp/designs/t/chrome-profile"]}
-        peer_cookie = "projects/myapp/designs/t/chrome-profile/Default/Cookies"
+        peer_profile_rel = "projects/myapp/designs/t/chrome-profile/Default/Cookies"
         peer = {
             "sources": {
                 "gstack": {
                     "files": {
-                        peer_cookie: {"sha256": "a"},
+                        peer_profile_rel: {"sha256": "a"},
                         "projects/myapp/designs/t/finalized.html": {"sha256": "b"},
                     }
                 }
             },
             "tombstones": {
-                f"gstack:{peer_cookie}": {"deleted_at": "2026-01-01T00:00:00+00:00"},
+                f"gstack:{peer_profile_rel}": {"deleted_at": "2026-01-01T00:00:00+00:00"},
             },
         }
         out = core._filter_excluded_paths(peer, exclude_map, skip_prefixes)
