@@ -5342,9 +5342,13 @@ class TestInitTerminalAndHelp89A:
         assert "mm init needs a terminal" in " ".join(capsys.readouterr().err.split())
 
     def test_help_lists_new_fleet_and_has_no_brick_or_icloud_wording(self):
+        import re
+
         result = runner.invoke(app, ["init", "--help"])
         assert result.exit_code == 0
-        text = " ".join(result.output.split())
+        # CI renders Rich help in color; strip SGR codes before matching.
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        text = " ".join(plain.split())
         assert "--new-fleet" in text
         assert "BRICK" not in text and "iCloud" not in text
         assert "stops" in text and "writes nothing" in text
