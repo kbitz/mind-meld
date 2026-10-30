@@ -345,7 +345,7 @@ mm disable-source NAME [--force]   # turn a configured sync source OFF for this 
                             # retired grok/opencode names are rejected even with --force; use mm migrate-config
                             # NAME=cursor revokes that consent first, then removes mm's hook; a hooks.json mm cannot edit only warns
 mm reconfigure-sources      # re-run the source picker against current config + new defaults
-mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns to existing [[sync.sources]] entries; preserves user customizations
+mm migrate-config [--yes] [--dry-run]   # idempotent: append missing recommended exclude_patterns, and set include_patterns to the current default when that key is absent or still a previous default list; an edited list, even empty, stays
 mm refresh-identity [--json]   # force-refresh the local identity (author-email) cache feeding mm-push event rows; --json emits the resolved set
 mm install-skills [--agent KEY]  # check/install the retro-fleet skill link for every authorized agent; reports declined rows, repairs mm's own dangling and legacy links, never overwrites a foreign one
                                # --agent is repeatable: persist a maintenance grant without enabling sync or usage reading, then install every authorized agent
@@ -609,7 +609,7 @@ Each sync source has a type that determines how files are discovered:
 SYNCED_SUBDIRS = ["memory", "todos"]
 ```
 
-**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. This is used for `~/.gstack`, Codex and Antigravity customization allowlists.
+**`generic` type** — whitelist-based walker. Walks only the directories listed in `include_dirs` (recursively) and includes individual files listed in `include_files` at the source root. Nothing else is synced. A non-empty `include_patterns` allowlist narrows that set. A directory holding a regular, non-symlink `Local State` file is skipped, including when the selected path starts inside it. This is used for `~/.gstack`, Codex and Antigravity customization allowlists.
 
 **Retired sources.** Standalone Grok Build and OpenCode sources are ignored on push and pull without creating deletion tombstones. `mm migrate-config` removes their obsolete config entries; it does not remove local files. The `grok` source type is no longer supported.
 
@@ -651,12 +651,14 @@ Validated as `list[str]` of strings at config load via
 `_validate_exclude_patterns`; malformed shapes raise `ConfigError` at the
 load boundary, not mid-sync.
 
-The default `gstack` source ships with
+The default `gstack` source includes
 `["projects/*/repo-mode.json", "projects/*/land-deploy-confirmed"]` —
 gstack's per-machine artifacts (7-day TTL solo-vs-collaborative cache
 and deploy-config-hash markers, both recomputed locally per device).
 Without these, every pull conflict-copies them on every device every day
-(2026-04-24 first-pull regression).
+(2026-04-24 first-pull regression). Those two globs are not the whole
+default. The current excludes, allowlist and `Local State` skip are in
+[Syncing gstack](README.md#syncing-gstack).
 
 **Consumer-boundary filter (load-bearing).** The exclude filter applies at
 TWO call sites — both **after** `_fetch_remote_manifest` returns:
@@ -687,7 +689,9 @@ pre-exclude paths via the sidecar (codex-2 #2).
 **Migration UX (visible-failure contract).** Existing configs need to opt
 in by running `mm migrate-config` (idempotent, prompts before mutating).
 Interactive `mm pull` / `mm push` prompt-once if recommended excludes are
-missing. autopull / autopush NEVER auto-mutate config — they record the
+missing, or if a generic source's `include_patterns` key is absent or still
+a previous default list. An edited include list, even empty, stays.
+autopull / autopush NEVER auto-mutate config — they record the
 missing-excludes signal to `~/.config/mind-meld/migration-state.json` and
 let `mm status` surface it. Silent config mutation in a hook would be
 exactly the class of "wedged sync I never noticed" failure the visible-
@@ -733,7 +737,7 @@ Mind Meld supports syncing multiple data sources beyond `~/.claude`. Each source
 
 - **`claude`** — The original walker. Scans `projects/*/memory/` and `projects/*/todos/`. One claude source is always present. Session jsonls under `projects/` are never synced.
 - **`muse`** — Claude-shaped walker. Scans `memory/` at `~/.local/share/muse`. Sessions and the session index are never synced. The default source never auto-activates: only `mm enable-source muse`, or an explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it. Both prompts default to N.
-- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. Used for `~/.gstack`, `mm-events`, and the Codex and Antigravity customization allowlists.
+- **`generic`** — Whitelist-based walker. Walks only `include_dirs` recursively (never into a nested git checkout) and picks up `include_files` at the source root. A non-empty `include_patterns` allowlist narrows that set, and a directory holding a regular, non-symlink `Local State` file is skipped. Used for `~/.gstack`, `mm-events`, and the Codex and Antigravity customization allowlists.
 
 Default generic sources (see `config.py:DEFAULT_SOURCES`):
 

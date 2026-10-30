@@ -789,7 +789,7 @@ matching `include_patterns` entry or the allowlist leaves it local; run
 
 ### Syncing gstack-extend
 
-If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source — sibling of the `gstack` treatment above. The whitelist walker is scoped to `projects/` only; per-machine bookkeeping at the root (`config`, `just-upgraded-from`, `update-snoozed`) is excluded by construction. Anything `gstack-extend` skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` rides this same source so cross-machine resume keeps working as the gstack-extend feature surface grows.
+If `~/.gstack-extend/` is detected during `mm init`, it is automatically added as a sync source. It has no `include_patterns` allowlist: the walker is scoped to `projects/` only, and per-machine bookkeeping at the root (`config`, `just-upgraded-from`, `update-snoozed`) is excluded by construction. A directory holding a regular, non-symlink `Local State` file is still skipped. Files that gstack-extend skills (pair-review, test-plan, full-review) persist under `~/.gstack-extend/projects/<slug>/` sync through this source, so cross-machine resume keeps working as the gstack-extend feature surface grows.
 
 Existing installs see this as a `New source available: gstack-extend` hint on next `mm status`. Opt in with `mm enable-source gstack-extend` or dismiss with `mm disable-source gstack-extend` — same shape as every other source toggle.
 
@@ -1100,8 +1100,11 @@ That Track has to supply recovery for the base before this move-aside is safe.
 
 Check the [gstack default exclusions](#syncing-gstack) and run `mm sources`
 to inspect this Mac's selected sources and Excluded counts. Generated output
-is kept locally but omitted from sync; project notes, copied source, fixtures
-and review receipts remain in scope unless another exclusion applies.
+is kept locally but omitted from sync. Project notes, copied source, fixtures
+and review receipts remain in scope when they match the gstack allowlist
+(document types inside the artifact directories). Browser profiles and the
+machine-local files named under [Syncing gstack](#syncing-gstack) stay on
+this Mac.
 
 ### Another mm operation is running
 
