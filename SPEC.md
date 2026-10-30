@@ -33,7 +33,7 @@ Every piece of documentation targets one of two audiences:
 
 ## Architecture
 
-Single storage backend: iCloud Drive via the local filesystem. Encrypted blobs are written to `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld/` and iCloud handles sync. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
+Single local-folder storage backend. New init defaults to `~/Sync/mind-meld`; existing configured paths, including iCloud Drive, remain unchanged. Encrypted blobs are written to that folder, and the folder's sync tool moves them between machines. The CLI supports multiple sync sources (e.g. `~/.claude` and `~/.gstack`) via configurable `[[sync.sources]]` in config.toml.
 
 ```
 ┌─────────────┐         encrypted blobs    ┌──────────────────┐
@@ -86,7 +86,7 @@ Track 16A (v0.12.21) cut six modules out of `cli.py`. The load-bearing rule that
 
 ### No API Server
 
-claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI writes encrypted blobs to a local folder synced by iCloud Drive. Manifests live alongside the data.
+claude-sync.com runs an API that brokers auth, generates presigned URLs, and stores manifests. We skip all of that. The CLI writes encrypted blobs to a local folder. A new init defaults to `~/Sync/mind-meld`; an existing configured path, including iCloud Drive, stays as it is. Manifests live alongside the data.
 
 ---
 
@@ -95,7 +95,7 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
 ### Storage Layout
 
 ```
-{storage_root}/                            # iCloud Drive folder
+{storage_root}/                            # configured folder; new init defaults to ~/Sync/mind-meld
 ├── devices/
 │   ├── {device_id}.json                   # device metadata (unencrypted)
 │   └── ...
@@ -198,7 +198,7 @@ The manifest is a **truth-based snapshot** of the selected local filesystem stat
 
 ### End-to-End Encryption
 
-All session data is encrypted on the device before it touches iCloud Drive. iCloud never sees plaintext. This is a hard invariant — the CLI must never write unencrypted session data to storage under any code path.
+All session data is encrypted on the device before it is written to the storage folder. The folder never holds plaintext session data. This is a hard invariant — the CLI must never write unencrypted session data to storage under any code path.
 
 **What's encrypted:**
 - All session files, todos, artifacts, tool results, plans, subagent sessions (everything under `data/`)
@@ -249,7 +249,7 @@ later by renaming one to a conflict copy (`mm-crypto-init 2`,
 `mm-crypto-init.sync-conflict-...`). `fetch_crypto_init` (run at the start of
 every command) scans for conflict copies and picks the deterministic winner
 (lex-smallest `root_salt`) without changing any file. After the passphrase
-verifies, `push`, `pull`, `autopull` and `autopush` remove only conflict copies
+verifies, a joining `mm init`, plus `push`, `pull`, `autopull` and `autopush`, remove only conflict copies
 whose bytes equal the main file; nothing is rewritten, moved or copied. A copy
 that differs stays where it is, and a machine whose fingerprint differs from the
 winner refuses (see the README's "Key header copies differ").
@@ -263,7 +263,7 @@ fingerprint and refuses on mismatch with an actionable error.
 - First machine of a new fleet: `mm init --new-fleet` double-prompts, generates
   `root_salt` + keycheck, and writes `mm-crypto-init` atomically (via `os.link`
   EEXIST) into an empty folder, after writing `.stignore`. It refuses any folder
-  that holds anything beyond Syncthing's own bookkeeping.
+  that holds anything beyond `.stfolder`, `.stignore`, `.stversions` and `.DS_Store`.
 - Every other machine: plain `mm init` single-prompts, fetches `mm-crypto-init`,
   decrypts keycheck to verify the passphrase matches the first machine's, then
   registers the device, saves config and pulls. With no `mm-crypto-init` in the

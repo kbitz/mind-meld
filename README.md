@@ -297,7 +297,7 @@ command always exits 0 so it cannot stop the agent loop.
 
 ## Quick Start
 
-The storage path is the root of a Syncthing folder shared by every machine. One block per role:
+The storage path is the root of a Syncthing folder shared by every machine. A store already on iCloud Drive stays on that path: type it at the prompt instead of accepting `~/Sync/mind-meld`. One block per role:
 
 ```bash
 # First machine of a new fleet (empty folder):
@@ -326,6 +326,8 @@ Config lives at `~/.config/mind-meld/config.toml` — not tied to your current d
 See [Status verdicts](#status-verdicts) to interpret `mm status` after your first push.
 
 ## Setting up a second (or third) Mac
+
+A fleet already stored on iCloud Drive stays there. On the new Mac, type that existing iCloud path at the `mm init` prompt instead of accepting `~/Sync/mind-meld`.
 
 1. `pipx install git+https://github.com/kbitz/mind-meld.git@latest` on the new machine.
 2. In Syncthing, accept the shared folder and let it finish. The storage path you give mm is the **root of that Syncthing folder**.
@@ -434,7 +436,7 @@ Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first run
 1. `mm enable-source agy`
 2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
 3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
-4. Optionally verify end to end from a **second Mac** after iCloud delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
+4. Optionally verify end to end from a **second Mac** after the shared folder delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
 
 ```sh
 mm pull
@@ -688,7 +690,7 @@ Dropbox or Syncthing) load, GC refuses and says what to do. When only conflict c
 on this device rewrites the manifest even with no content change; then retry
 `mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
 only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
-through hooks; otherwise its superseded blobs accumulate in iCloud. Abandoned
+through hooks; otherwise its superseded blobs accumulate in the storage folder. Abandoned
 peers' blobs remain; 1.x has no retirement command. A lagging peer
 reading this device's prior manifest can still miss a blob this device has
 already collected; this repair does not solve every arrival order.
@@ -816,7 +818,7 @@ Existing installs see this as a `New source available: gstack-extend` hint on ne
 `config.toml` lives at `~/.config/mind-meld/` and is never synced — making it the natural home for per-device preferences. To turn off a source on one machine without affecting the others:
 
 ```bash
-mm disable-source gstack       # this Mac only; iCloud peers untouched
+mm disable-source gstack       # this machine only; other machines untouched
 mm enable-source gstack        # turn it back on
 ```
 
@@ -1239,8 +1241,9 @@ data. If no valid copy is available, stop and recover one before continuing.
 The key header is the file `mm-crypto-init` at the root of the storage folder.
 A second copy can appear next to it (a `.sync-conflict-` or numbered name from
 Syncthing, or a stray copy from an earlier version). mm never rewrites or moves
-a copy for you. After a successful passphrase check, `push`, `pull`, `autopull`
-and `autopush` only remove conflict copies whose bytes equal the main file.
+a copy for you. After a successful passphrase check, a joining `mm init`, `push`,
+`pull`, `autopull` and `autopush` only remove conflict copies whose bytes equal
+the main file.
 Anything that differs stays in place, and `mm status` and `mm diag` count it
 (`pending_repair`) without printing names. A machine whose recorded
 fingerprint differs from the header it finds stops and says so; do not
@@ -2082,7 +2085,7 @@ command -v security >/dev/null && security delete-generic-password -s mind-meld 
 command -v secret-tool >/dev/null && secret-tool clear service mind-meld username passphrase
 ```
 
-Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
+Your storage folder is untouched by all of the above. That path is `storage.path` in `~/.config/mind-meld/config.toml` (`~/Sync/mind-meld` on a new install, or an existing folder such as one on iCloud Drive). Delete it only when you are retiring the whole fleet — every other machine pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
 
