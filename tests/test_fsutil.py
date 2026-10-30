@@ -1595,6 +1595,7 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         "migration_unlink": "migration-state.json",
         "pull_apply": "nested/note.md",
         "init_storage": "storage",
+        "stignore_write": ".stignore",
         "seen_read": "seen-sources.json",
         "seen_acknowledge": "seen-sources.json",
         "seen_write": "seen-sources.json",
@@ -1636,9 +1637,13 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
             return pullflow._apply_incoming_file(path, "note.md", b"new", {}, "peer")
         if writer == "init_storage":
             # CliRunner catches Exception only; the guard's BaseException escapes.
-            result = CliRunner().invoke(cli.app, ["init"], input=f"{path}\nTest Mac\npw\npw\n")
+            result = CliRunner().invoke(
+                cli.app, ["init", "--new-fleet"], input=f"{path}\nTest Mac\npw\npw\n"
+            )
             assert result.exit_code == 0, (result.output, result.exception)
             return result
+        if writer == "stignore_write":
+            return initflow._write_stignore(path)
         if writer == "seen_read":
             return seen_sources.read(["new"])
         if writer == "seen_acknowledge":
@@ -1700,7 +1705,9 @@ def raw_writer_refusal(
         calls = forbid_fs_mutations()
         with pytest.raises(fsutil.PytestRealStateWriteError) as caught:
             invoke()
-        _assert_guard_diagnostic(caught.value, path, "protected account-state path")
+        # init's first mutation is the .stignore writer's guard inside the folder.
+        guarded = path / ".stignore" if writer == "init_storage" else path
+        _assert_guard_diagnostic(caught.value, guarded, "protected account-state path")
         assert calls == [], f"denied mutation attempts: {calls!r}"
         assert _tree_bytes_modes(synthetic_state_root) == before
 
@@ -1713,6 +1720,8 @@ def raw_writer_control(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "control-home"))
 
     def check(writer, exists):
+        from mind_meld import initflow
+
         path, invoke = _raw_writer_case(writer, tmp_path / "safe", monkeypatch, tmp_path, exists)
         if writer == "local_put_exclusive" and exists:
             with pytest.raises(StorageError, match="already exists"):
@@ -1732,6 +1741,7 @@ def raw_writer_control(tmp_path, monkeypatch):
                 assert path.is_dir()
                 if writer == "init_storage":
                     assert (path / "mm-crypto-init").is_file()
+                    assert initflow.STIGNORE_LINE in (path / ".stignore").read_text()
                 else:
                     assert stat.S_IMODE(path.stat().st_mode) == 0o700
             else:
@@ -1753,6 +1763,9 @@ def raw_writer_control(tmp_path, monkeypatch):
                     assert json.loads(path.read_bytes())["missing_sources"] == ["custom"]
                 elif writer in ("sidecar_write", "attemptlog_write", "save_config"):
                     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+                elif writer == "stignore_write":
+                    expected = b"keep\n" if exists else b""
+                    assert path.read_bytes() == expected + initflow.STIGNORE_LINE.encode() + b"\n"
 
     return check
 
@@ -1795,6 +1808,14 @@ def test_init_storage_refuses_protected_root(raw_writer_refusal, raw_writer_exis
 
 def test_init_storage_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("init_storage", raw_writer_exists)
+
+
+def test_stignore_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("stignore_write", raw_writer_exists)
+
+
+def test_stignore_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("stignore_write", raw_writer_exists)
 
 
 def test_local_put_refuses_protected_root(raw_writer_refusal, raw_writer_exists):

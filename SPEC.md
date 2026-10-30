@@ -242,13 +242,17 @@ Each file gets a fresh random salt and nonce on every encrypt. Same plaintext
 produces different ciphertext each time. Plaintext is gzip-compressed (default
 level) before encryption — session JSONs typically compress 5-10x.
 
-**iCloud convergence for mm-crypto-init.** If two devices run `mm init` nearly
-simultaneously, iCloud can leave both devices with different local blobs that
-reconcile later by renaming one to `mm-crypto-init 2`. `fetch_crypto_init` (run
-at the start of every command) scans for conflict copies, picks the
-deterministic winner (lex-smallest `root_salt`), canonicalizes it via
-`os.rename`, and deletes the losers. All devices converge on the same winner
-as iCloud replicates the reconciled state.
+**Convergence for mm-crypto-init.** `mm-crypto-init` has exactly one writer:
+`mm init --new-fleet` (`bootstrap_crypto_init`, an exclusive create), and only in
+an empty folder. If two machines ever create one anyway, the sync tool reconciles
+later by renaming one to a conflict copy (`mm-crypto-init 2`,
+`mm-crypto-init.sync-conflict-...`). `fetch_crypto_init` (run at the start of
+every command) scans for conflict copies and picks the deterministic winner
+(lex-smallest `root_salt`) without changing any file. After the passphrase
+verifies, `push`, `pull`, `autopull` and `autopush` remove only conflict copies
+whose bytes equal the main file; nothing is rewritten, moved or copied. A copy
+that differs stays where it is, and a machine whose fingerprint differs from the
+winner refuses (see the README's "Key header copies differ").
 
 **Cross-process drift detection.** Each device's local config stores
 `[crypto].root_salt_fp` — a 16-char hex fingerprint of the `root_salt` it was
@@ -256,12 +260,17 @@ initialized against. Every command compares this to the current storage
 fingerprint and refuses on mismatch with an actionable error.
 
 **Passphrase handling:**
-- First device: `mm init` double-prompts, generates `root_salt` + keycheck, writes
-  `mm-crypto-init` atomically (via `os.link` EEXIST).
-- Subsequent devices: `mm init` single-prompts, fetches `mm-crypto-init`, decrypts
-  keycheck to verify the passphrase matches the first-device's. Wrong passphrase
-  aborts cleanly with no local state written (no config, no device registration,
-  no keyring write).
+- First machine of a new fleet: `mm init --new-fleet` double-prompts, generates
+  `root_salt` + keycheck, and writes `mm-crypto-init` atomically (via `os.link`
+  EEXIST) into an empty folder, after writing `.stignore`. It refuses any folder
+  that holds anything beyond Syncthing's own bookkeeping.
+- Every other machine: plain `mm init` single-prompts, fetches `mm-crypto-init`,
+  decrypts keycheck to verify the passphrase matches the first machine's, then
+  registers the device, saves config and pulls. With no `mm-crypto-init` in the
+  folder it stops and writes nothing (no folder, config, device entry, keyring
+  item, key header or `.stignore`); wait for the sync tool to deliver it and run
+  `mm init` again. Wrong passphrase aborts cleanly with no local state written
+  (no config, no device registration, no keyring write).
 - Derived key cached in the OS keyring via `keyring` library (macOS Keychain)
 - **Headless fallback:** if no keyring is available, fall back to `MINDMELD_PASSPHRASE` environment variable
 - **Single function:** `crypto.get_passphrase()` encapsulates the full fallback chain (keyring → env var → prompt). All commands call this — no duplication.
@@ -271,7 +280,7 @@ fingerprint and refuses on mismatch with an actionable error.
 
 **Multi-device key sharing:**
 - All devices must use the same passphrase — this is the "end-to-end" part
-- When running `mm init` on a second machine, the user enters the same passphrase
+- When running `mm init` on another machine, the user enters the same passphrase
 - There is no key exchange protocol; the passphrase is the shared secret
 - If a user enters the wrong passphrase, decryption fails with a clear error (GCM tag verification), not silent corruption
 
@@ -310,7 +319,7 @@ Built with `typer`. Installed as `mm` (Mind Meld).
 ### Commands
 
 ```
-mm init                     # generate device ID, configure storage, set passphrase
+mm init [--new-fleet]       # join the fleet (verify passphrase, register, pull); --new-fleet creates the key header in an empty folder
 mm push [--dry-run]         # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
                             # attended push refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
@@ -390,14 +399,14 @@ receipt or proof that another Mac has received a row. See
 
 ### `mm init`
 
-1. Detect if already initialized. If config.toml exists, ask to overwrite.
-2. Generate a UUID4 device ID.
-3. Prompt for device name.
-4. Prompt for storage folder path (default: iCloud Drive `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`). Create it if it doesn't exist.
-5. Prompt for encryption passphrase.
-6. Store derived key in OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring).
-7. Write `config.toml`.
-8. Write `devices/{device_id}.json` to storage.
+1. Detect if already initialized. If config.toml exists, ask to overwrite (under `--new-fleet` the prompt names the current `storage.path` and `root_salt_fp`).
+2. Prompt for the storage folder path (default `~/Sync/mind-meld`, the root of a Syncthing folder). Read the folder; create nothing yet.
+3. Plain `mm init`: fetch `mm-crypto-init`. If it is missing, stop with exit 1 and write nothing. If it is corrupt or newer, refuse. `--new-fleet`: the folder must be absent or hold only `.stfolder`, `.stignore`, `.stversions` and `.DS_Store`; anything else refuses.
+4. Generate a short device ID and prompt for the device name.
+5. Prompt for the encryption passphrase (twice under `--new-fleet`).
+6. `--new-fleet`: write `.stignore`, then create `mm-crypto-init`. Plain `mm init`: verify the passphrase against it.
+7. Prompt for sources. Register the device in storage, then write `config.toml`, then store the passphrase in the OS keyring (or instruct to set `MINDMELD_PASSPHRASE` if no keyring).
+8. Plain `mm init` ends by pulling with the passphrase it just verified; `--new-fleet` does not pull.
 
 ### `mm push`
 

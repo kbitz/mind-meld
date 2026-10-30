@@ -33,9 +33,7 @@ DEFAULT_CLAUDE_DIR = "~/.claude"
 DEFAULT_CODEX_DIR = "~/.codex"
 DEFAULT_MUSE_DIR = "~/.local/share/muse"
 DEFAULT_AGY_DIR = "~/.gemini/config"
-DEFAULT_STORAGE_PATH = str(
-    Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs" / "mind-meld"
-)
+DEFAULT_STORAGE_PATH = "~/Sync/mind-meld"
 # Source names that are mm-owned infrastructure (auto-included at init,
 # not user-prompted). Per-machine opt-out remains via `mm disable-source`.
 MM_INTERNAL_SOURCE_NAMES: frozenset[str] = frozenset({"mm-events"})

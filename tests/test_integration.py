@@ -37,6 +37,7 @@ from mind_meld.crypto import (
     encrypt,
 )
 from mind_meld.devices import register_device
+from mind_meld.errors import MindMeldError
 from mind_meld.hosts import codex as _mm_codex_host
 from mind_meld.manifest import (
     deserialize_manifest,
@@ -3662,7 +3663,7 @@ class TestGCSafety:
         assert {blob: backend.get(blob) for blob in blobs} == blobs
         assert result.exit_code == 1, result.output
         flat = " ".join(result.output.split())
-        assert "held only by iCloud conflict copies" in flat and "Mac A (dev-a)" in flat
+        assert "held only by conflict copies" in flat and "Mac A (dev-a)" in flat
         assert "corrupt" not in flat
         assert listings == []
         if dry_run:
@@ -4070,7 +4071,7 @@ class TestAutoCommands:
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
         # confirm passphrase, then source prompts (Y claude, all others n).
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         # Init should complete despite the keyring write failure.
         assert result.exit_code == 0, result.output
         assert "Keyring backend error" in result.output
@@ -4801,7 +4802,7 @@ class TestInitFlow:
         # then per-source prompts (claude Y, all others n) — we
         # need at least one source enabled for init to succeed.
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
 
@@ -4838,7 +4839,7 @@ class TestInitFlow:
 
         # Decline every user-facing source.
         stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code != 0, result.output
         assert "no sync sources enabled" in result.output
 
@@ -4849,8 +4850,8 @@ class TestInitFlow:
         assert backend.exists("mm-crypto-init")
 
     def test_first_device_refuse_all_is_recoverable(self, tmp_path, monkeypatch):
-        """First-device refuse-all leaves mm-crypto-init orphaned. Re-running
-        init with the same passphrase should succeed via the second-device
+        """--new-fleet refuse-all leaves mm-crypto-init orphaned. Running plain
+        init with the same passphrase should succeed via the join
         verify path (against the orphaned bootstrap).
         """
 
@@ -4859,7 +4860,7 @@ class TestInitFlow:
 
         # First attempt: refuse all, leaves mm-crypto-init orphan.
         stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\nn\n"
-        result1 = runner.invoke(app, ["init"], input=stdin1)
+        result1 = runner.invoke(app, ["init", "--new-fleet"], input=stdin1)
         assert result1.exit_code != 0
 
         # Second attempt: same passphrase, accept claude. Takes the
@@ -4884,7 +4885,7 @@ class TestInitFlow:
 
         # Decline claude, accept gstack, decline the other sources.
         stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
         with open(cfg_path, "rb") as f:
@@ -4907,7 +4908,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
         with open(cfg_path, "rb") as f:
@@ -4926,13 +4927,12 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         stdin = f"{storage}\nMac A\npw123\npw456\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code != 0
         assert "don't match" in result.output or "don" in result.output
 
-        # Storage was created (mkdir), but mm-crypto-init was NOT written.
-        backend = LocalBackend(storage)
-        assert not backend.exists("mm-crypto-init")
+        # Nothing was created: not the folder, not mm-crypto-init.
+        assert not storage.exists()
         # Config was NOT written.
         assert not cfg_path.exists()
 
@@ -5029,12 +5029,14 @@ class TestInitFlow:
         assert winner_salt_in_canonical == fetched.root_salt
 
 
-class TestInitTwoTierGuard:
-    """Group 2 Pre-flight 3: storage-occupancy-based re-init guard.
+class TestInitReInitGuard:
+    """Re-init guard and the no-header stop (Track 89A).
 
-    Two tiers:
-      * ORPHAN — mm-crypto-init ok + any occupancy: typer.confirm warn.
-      * BRICK — mm-crypto-init missing + blobs/manifests: require typed BRICK.
+    * ORPHAN: a machine that already has a device entry re-runs init against a
+      populated folder: typer.confirm warns that a new device entry orphans it.
+    * No key header: plain init stops without writing anything, with or
+      without blobs. The typed-token override is gone; only `--new-fleet`
+      creates a header, and only in an empty folder.
     """
 
     def _setup(self, tmp_path, monkeypatch):
@@ -5043,137 +5045,365 @@ class TestInitTwoTierGuard:
         monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
         return cfg
 
-    def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
-        """Existing mm-crypto-init + existing blob + we answer 'y' to orphan
-        prompt → init proceeds on the second-device path."""
-
-        self._setup(tmp_path, monkeypatch)
+    def _populated(self, tmp_path):
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
         bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
         # Seed a blob so occupancy.has_any_blobs is True.
         backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
+        return storage, backend
 
-        # Inputs: storage path, orphan-confirm y, device name, passphrase,
-        # per-source (claude Y, all others n).
-        stdin = f"{storage}\ny\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+    def test_fresh_machine_joining_a_populated_folder_is_not_asked(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        storage, _backend = self._populated(tmp_path)
+
+        # Inputs: storage path, device name, passphrase, per-source
+        # (claude Y, all others n). No orphan confirm: nothing to orphan.
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
-        # existing_device_id is None (no prior config in this test), so the
-        # orphan prompt takes the "alongside existing devices" form.
-        assert "alongside the existing devices" in result.output
-        # Second-device verify completed.
+        assert "orphaning" not in result.output
+        assert "Verified passphrase against existing mm-crypto-init" in result.output
+
+    def test_orphan_case_warns_and_confirms(self, tmp_path, monkeypatch):
+        """A configured machine re-running init against a populated folder
+        answers 'y' to the orphan prompt and proceeds on the join path."""
+
+        self._setup(tmp_path, monkeypatch)
+        storage, _backend = self._populated(tmp_path)
+        first = runner.invoke(
+            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        )
+        assert first.exit_code == 0, first.output
+
+        # Inputs: overwrite confirm, storage path, orphan-confirm y, device
+        # name, passphrase, per-source.
+        stdin = f"y\n{storage}\ny\nMac C\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        result = runner.invoke(app, ["init"], input=stdin)
+        assert result.exit_code == 0, result.output
+        assert "orphaning existing device" in result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
 
     def test_orphan_case_abort_on_n_leaves_state_clean(self, tmp_path, monkeypatch):
-
         cfg = self._setup(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-        backend = LocalBackend(storage)
-        bootstrap_crypto_init(backend, "pw-shared", argon2_memory_kb=MEMORY_KB)
-        backend.put("data/oldpeer/decafbad.enc", b"stub-blob")
+        storage, backend = self._populated(tmp_path)
+        first = runner.invoke(
+            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        )
+        assert first.exit_code == 0, first.output
+        saved = cfg.read_bytes()
+        devices_before = sorted(backend.list_keys("devices/"))
 
-        # Answer 'n' to the orphan prompt.
-        stdin = f"{storage}\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        # Answer 'y' to the overwrite prompt, 'n' to the orphan prompt.
+        result = runner.invoke(app, ["init"], input=f"y\n{storage}\nn\n")
         assert result.exit_code == 0  # typer.Exit() without code is 0
-        # Config not written.
-        assert not cfg.exists()
+        assert "Nothing changed." in result.output
+        assert cfg.read_bytes() == saved
+        assert sorted(backend.list_keys("devices/")) == devices_before
 
-    def test_brick_case_refuses_without_exact_typed_token(self, tmp_path, monkeypatch):
-        """mm-crypto-init missing + blobs exist + user types wrong token."""
+    @pytest.mark.parametrize("token", ["whatever", "brick", "BRICK"])
+    def test_blobs_without_a_key_header_never_mint_one(self, tmp_path, monkeypatch, token):
+        """No header + blobs: plain init stops before any prompt that could
+        write, and no typed token overrides it."""
 
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
-        # Seed blobs but NO mm-crypto-init (simulating deletion / iCloud loss).
+        # Seed blobs but NO mm-crypto-init (simulating deletion / sync loss).
         backend.put("data/peer/cafebabe.enc", b"stub-blob")
+        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
+        before = sorted(p.relative_to(storage) for p in storage.rglob("*"))
 
-        # Inputs: storage path, then WRONG token for BRICK.
-        stdin = f"{storage}\nwhatever\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        assert result.exit_code != 0, result.output
-        assert "DANGER" in (result.stderr or "") + result.output
-        # Config not written.
+        result = runner.invoke(app, ["init"], input=f"{storage}\n{token}\nMac A\npw\npw\n")
+        assert result.exit_code == 1, result.output
+        assert "holds fleet files" in result.output
+        assert "BRICK" not in result.output and "DANGER" not in result.output
+        assert "--new-fleet" not in result.output
         assert not cfg.exists()
-        # mm-crypto-init still not created.
         assert not backend.exists("mm-crypto-init")
+        assert sorted(p.relative_to(storage) for p in storage.rglob("*")) == before
 
-    def test_brick_case_rejects_lowercase_brick(self, tmp_path, monkeypatch):
-        """Case-sensitive match: 'brick' is NOT accepted."""
-
+    def test_new_fleet_refuses_blobs_without_a_key_header(self, tmp_path, monkeypatch):
         cfg = self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
         backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
 
-        stdin = f"{storage}\nbrick\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        assert result.exit_code != 0
+        result = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\n")
+        assert result.exit_code == 1, result.output
+        assert "--new-fleet needs an empty folder" in " ".join(result.output.split())
         assert not cfg.exists()
         assert not backend.exists("mm-crypto-init")
-
-    def test_brick_case_accepts_exact_BRICK(self, tmp_path, monkeypatch):
-        """Exact typed 'BRICK' proceeds to first-device bootstrap path."""
-
-        self._setup(tmp_path, monkeypatch)
-        storage = tmp_path / "icloud"
-        storage.mkdir()
-        backend = LocalBackend(storage)
-        # Seed a manifest (no mm-crypto-init — our target scenario).
-        backend.put("manifests/peer/manifest.json.enc", b"stub-manifest")
-
-        # After BRICK, init continues on the first-device path:
-        # device name, passphrase, confirm passphrase, per-source
-        # (claude Y, all others n).
-        stdin = f"{storage}\nBRICK\nMac A\npw-new\npw-new\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        assert result.exit_code == 0, result.output
-        # New mm-crypto-init bootstrapped.
-        assert backend.exists("mm-crypto-init")
+        assert not (storage / ".stignore").exists()
 
     def test_first_device_path_not_gated_on_empty_storage(self, tmp_path, monkeypatch):
-        """Empty storage: no guard triggers, first-device path works normally.
+        """Empty storage: no guard triggers, --new-fleet works normally.
 
-        Regression guard: the two-tier logic must not fire on fresh init.
+        Regression guard: the guard must not fire on a fresh new fleet.
         """
 
         self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
-        # No orphan or BRICK output polluted the happy path.
         assert "orphaning" not in result.output
         assert "DANGER" not in (result.stderr or "") + result.output
 
-    def test_devices_only_occupancy_triggers_orphan_not_brick(self, tmp_path, monkeypatch):
-        """If only devices/ is populated (no blobs, no manifests, no
-        mm-crypto-init), BRICK must NOT fire — no encrypted state is at risk.
-
-        The guard should reach the orphan-case check, and since
-        has_crypto_init is False, fall through to first-device path.
-        """
+    def test_devices_only_folder_is_fleet_data_not_empty(self, tmp_path, monkeypatch):
+        """A folder holding only devices/ is not empty: --new-fleet refuses and
+        plain init stops without offering to mint a header."""
 
         self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
         storage.mkdir()
         backend = LocalBackend(storage)
-        # Seed ONLY a devices/ entry (no data/, no manifests/).
         backend.put(
             "devices/stale.json",
             json.dumps({"device_id": "stale", "device_name": "stale-dev"}).encode(),
         )
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
-        # BRICK did NOT fire (no typed token consumed from stdin).
+        refused = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\n")
+        assert refused.exit_code == 1, refused.output
+        stopped = runner.invoke(app, ["init"], input=f"{storage}\n")
+        assert stopped.exit_code == 1, stopped.output
+        assert "holds fleet files" in " ".join(stopped.output.split())
+        assert not backend.exists("mm-crypto-init")
+
+
+class TestInitJoinPull89A:
+    """`mm init` joins by pulling with the passphrase it just verified (Track 89A).
+
+    The join's pull runs in the `cli.init` shell; `--new-fleet` never pulls.
+    """
+
+    def _fleet(self, tmp_path, monkeypatch):
+        """Machine A has pushed to a shared folder; machine B is about to join."""
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        memory = claude_a / "projects" / "-Users-kb-myapp" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "user_role.md").write_text("---\nname: role\n---\nData scientist")
+        claude_b.mkdir(parents=True)
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        config_a = tmp_path / "config_a.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [{"name": "claude", "path": str(claude_a), "type": "claude"}],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_a,
+        )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_a)
+        pushed = runner.invoke(app, ["push"])
+        assert pushed.exit_code == 0, pushed.output
+        # Machine B has no keyring entry and no environment passphrase.
+        monkeypatch.delenv("MINDMELD_PASSPHRASE")
+        config_b = tmp_path / "config_b.toml"
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        monkeypatch.setattr("mind_meld.crypto.store_passphrase_in_keyring", lambda _pw: False)
+        monkeypatch.setattr(
+            initflow,
+            "_prompt_sources",
+            lambda: [{"name": "claude", "path": str(claude_b), "type": "claude"}],
+        )
+        monkeypatch.setattr(initflow.events_tail, "_run_events_backfill", lambda *a, **kw: None)
+        monkeypatch.setattr(initflow.skill_link, "_ensure_retro_skill_links", lambda **kw: ())
+        return storage_dir, claude_a, claude_b, config_b, backend
+
+    def test_join_pulls_the_peers_files_with_the_verified_passphrase(self, tmp_path, monkeypatch):
+        storage, claude_a, claude_b, config_b, backend = self._fleet(tmp_path, monkeypatch)
+        asked = []
+
+        def no_prompt(*a, **kw):
+            asked.append(True)
+            raise AssertionError("the join's pull asked for the passphrase again")
+
+        monkeypatch.setattr(core, "get_passphrase", no_prompt)
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
         assert result.exit_code == 0, result.output
-        assert "DANGER" not in (result.stderr or "") + result.output
+        assert asked == []
+        rel = "projects/-Users-kb-myapp/memory/user_role.md"
+        assert (claude_b / rel).read_bytes() == (claude_a / rel).read_bytes()
+        assert config_b.exists()
+        assert len(backend.list_keys("devices/")) == 2
+        last = result.output.strip().splitlines()[-1]
+        assert last.startswith("Pull:"), result.output
+        assert "Run 'mm push'" not in result.output
+
+    def test_a_stale_keyring_entry_does_not_fail_the_join(self, tmp_path, monkeypatch):
+        storage, _claude_a, claude_b, _config_b, _backend = self._fleet(tmp_path, monkeypatch)
+        monkeypatch.setattr(core, "get_passphrase", lambda *a, **kw: "stale-wrong-passphrase")
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        assert result.exit_code == 0, result.output
+        assert (claude_b / "projects/-Users-kb-myapp/memory/user_role.md").exists()
+
+    def test_a_failed_pull_keeps_config_and_device_and_ends_with_its_remedy(
+        self, tmp_path, monkeypatch
+    ):
+        storage, _claude_a, _claude_b, config_b, backend = self._fleet(tmp_path, monkeypatch)
+
+        def broken(*a, **kw):
+            raise MindMeldError("storage went away")
+
+        monkeypatch.setattr(cli_module.pullflow, "_pull_core", broken)
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        assert result.exit_code == 1, result.output
+        assert config_b.exists()
+        assert len(backend.list_keys("devices/")) == 2
+        last = result.stderr.strip().splitlines()[-1]
+        assert last.startswith("Pull failed [")
+        assert last.endswith("Run: mm diag")
+
+    def test_a_wrong_passphrase_writes_nothing_and_never_pulls(self, tmp_path, monkeypatch):
+        storage, _claude_a, _claude_b, config_b, backend = self._fleet(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            cli_module, "_attended_pull", lambda **kw: pytest.fail("pulled after a bad passphrase")
+        )
+        result = runner.invoke(app, ["init"], input=f"{storage}\nMac B\nwrong\n")
+        assert result.exit_code == 1, result.output
+        assert not config_b.exists()
+        assert len(backend.list_keys("devices/")) == 1
+
+    def test_new_fleet_makes_no_pull_call(self, tmp_path, monkeypatch):
+        TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            cli_module, "_attended_pull", lambda **kw: pytest.fail("--new-fleet pulled")
+        )
+        storage = tmp_path / "fresh"
+        result = runner.invoke(
+            app,
+            ["init", "--new-fleet"],
+            input=f"{storage}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "as the root of a Syncthing folder" in " ".join(result.output.split())
+
+    def test_pull_command_still_prompts_for_its_own_passphrase(self, tmp_path, monkeypatch):
+        """The shared helper only skips the lookup when init hands it a passphrase."""
+        storage, _claude_a, _claude_b, _config_b, _backend = self._fleet(tmp_path, monkeypatch)
+        joined = runner.invoke(app, ["init"], input=f"{storage}\nMac B\n{PASSPHRASE}\n")
+        assert joined.exit_code == 0, joined.output
+        seen = []
+
+        def lookup():
+            seen.append(True)
+            return PASSPHRASE
+
+        monkeypatch.setattr(core, "get_passphrase", lookup)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        assert seen == [True]
+
+
+class TestInitTerminalAndHelp89A:
+    def _setup(self, tmp_path, monkeypatch):
+        return TestInitFlow()._setup_monkeypatch(tmp_path, monkeypatch)
+
+    def test_closed_stdin_before_anything_is_written(self, tmp_path, monkeypatch):
+        cfg = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(app, ["init"], input="")
+        assert result.exit_code == 1, result.output
+        text = " ".join(result.output.split())
+        assert "mm init needs a terminal" in text
+        assert "Aborted." not in text
+        assert not cfg.exists()
+
+    def test_closed_stdin_after_the_key_header_is_written_says_init_continues(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = self._setup(tmp_path, monkeypatch)
+        storage = tmp_path / "fresh"
+        # Input ends at the first source prompt, after the header exists.
+        result = runner.invoke(
+            app, ["init", "--new-fleet"], input=f"{storage}\nMac A\npw123\npw123\n"
+        )
+        assert result.exit_code == 1, result.output
+        text = " ".join(result.output.split())
+        assert "mm init needs a terminal" in text
+        assert "running 'mm init' again in a terminal continues from it" in text
+        assert (storage / "mm-crypto-init").exists()
+        assert not cfg.exists()
+
+    def test_stdin_none_exits_through_the_same_message(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setattr(sys, "stdin", None)
+        with pytest.raises(typer.Exit) as caught:
+            cli_module.init(new_fleet=False)
+        assert caught.value.exit_code == 1
+        assert "mm init needs a terminal" in " ".join(capsys.readouterr().err.split())
+
+    def test_help_lists_new_fleet_and_has_no_brick_or_icloud_wording(self):
+        result = runner.invoke(app, ["init", "--help"])
+        assert result.exit_code == 0
+        text = " ".join(result.output.split())
+        assert "--new-fleet" in text
+        assert "BRICK" not in text and "iCloud" not in text
+        assert "stops" in text and "writes nothing" in text
+
+    def test_locals_never_print_in_a_traceback(self):
+        assert app.pretty_exceptions_show_locals is False
+
+    def test_the_prompt_default_and_the_diag_fallback_expand_under_the_home(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import statusflow
+        from mind_meld.config import DEFAULT_STORAGE_PATH
+
+        self._setup(tmp_path, monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert DEFAULT_STORAGE_PATH == "~/Sync/mind-meld"
+        expected = tmp_path / "Sync" / "mind-meld"
+        # Accepting the prompt default names the expanded path and creates nothing.
+        result = runner.invoke(app, ["init"], input="\n")
+        assert result.exit_code == 1, result.output
+        assert str(expected).replace(" ", "") in "".join(result.output.split())
+        assert not expected.exists()
+        roots = []
+
+        def capture(root):
+            roots.append(Path(root))
+            return LocalBackend(root)
+
+        monkeypatch.setattr(statusflow, "LocalBackend", capture)
+        assert runner.invoke(app, ["diag", "--json"]).exit_code == 0
+        assert roots == [expected]
+
+
+@pytest.mark.parametrize("state", ["missing", "corrupt"])
+@pytest.mark.parametrize("command", ["push", "pull"])
+def test_missing_or_corrupt_key_header_remedy_never_reinitializes89a(
+    push_preview56, command, state
+):
+    """AC4: the remedy waits for sync and restores from another machine; it never
+    says `mm init`, names the folder, and the outcome line routes to `mm diag`."""
+    env = push_preview56
+    canonical = env["backend"].root / "mm-crypto-init"
+    if state == "missing":
+        canonical.unlink()
+    else:
+        canonical.write_bytes(b"garbage")
+    result = runner.invoke(app, [command])
+    assert result.exit_code == 1, result.output
+    last = result.stderr.strip().splitlines()[-1]
+    assert last.startswith(f"{command.title()} failed [crypto-error]:")
+    assert str(env["backend"].root) in last
+    assert "finish syncing" in last
+    assert "never reinitialize" in last.lower()
+    assert "mm init" not in last
+    assert "iCloud" not in last and "Syncthing" not in last
+    assert last.endswith("Run: mm diag")
 
 
 class TestBackfillPreservesRawPaths:
@@ -10485,8 +10715,9 @@ class TestPushPreviewNoMutation56A:
         copy.write_bytes(env["backend"].get("mm-crypto-init"))
         result = env["invoke"]()
         _assert_preview_complete(result)
-        assert "delete 1 identical conflict copies" in _preview_text(result)
+        assert "remove 1 identical conflict copy of mm-crypto-init" in _preview_text(result)
         assert "autopull or autopush that verifies the passphrase" in _preview_text(result)
+        assert "reconcile" not in _preview_text(result)
         if no_op:
             assert "Nothing to push" in result.output
 
@@ -10498,7 +10729,7 @@ class TestPushPreviewNoMutation56A:
         result = env["invoke"]()
         _assert_preview_complete(result)
         assert "no sync sources found" in result.output
-        assert "delete 1 identical conflict copies" in _preview_text(result)
+        assert "remove 1 identical conflict copy of mm-crypto-init" in _preview_text(result)
 
     @pytest.mark.parametrize("tty", [False, True])
     def test_migration_notice_without_prompt(self, push_preview56, monkeypatch, tty):
@@ -10631,24 +10862,70 @@ class TestPushPreviewNoMutation56A:
         result = env["invoke"]()
         _assert_preview_refused(result)
         text = _preview_text(result)
-        assert "root_salt changed" in text
+        assert "changed since this device was initialized" in text
         assert f"local fp={env['config']['crypto']['root_salt_fp']}" in text
         assert f"storage fp={crypto_module.root_salt_fingerprint(salt)}" in text
-        assert "Allow the fleet's mm-crypto-init copies to finish syncing" in text
-        assert "inspect with 'mm diag'" in text
-        assert "If the fingerprints still differ after syncing, stop" in text
+        assert "If the fleet's copies are still syncing, wait" in text
+        assert "'mm status' explains the copies" in text
+        assert "If the fingerprints still differ, stop" in text
         assert "do not reinitialize or re-key" in text
         assert "mm init" not in text
         assert "minutes" not in text and "seconds" not in text
-        qualification = (
-            "Pending conflict cleanup does not resolve this device's fingerprint mismatch"
-        )
+        qualification = "Pending cleanup does not resolve this mismatch"
         assert (qualification in text) == pending_repair
+        assert "key-header-copies-differ" in text
         if pending_repair:
-            assert "replace the canonical copy; delete 1 identical conflict copies" in text
-            assert "preserve 1 differing or unreadable copies" in text
-            assert text.index("after syncing, stop") < text.index(qualification)
-            assert "verifies the passphrase will reconcile mm-crypto-init" in text
+            # The winner lives only in the conflict copy, so nothing is removable.
+            assert "1 differing or unreadable copy stay in place" in text
+            assert "mm never moves or rewrites them" in text
+            assert "remove" not in text
+            assert text.index("still differ, stop") < text.index(qualification)
+            assert "reconcile" not in text
+        assert not list(env["backend"].root.glob("mm-crypto-init.preserved-*"))
+
+    @pytest.mark.parametrize("pending_repair", [False, True])
+    @pytest.mark.parametrize("command", ["push", "pull"])
+    def test_drift_outcome_line_keeps_the_stop_sentence_and_pointer(
+        self, push_preview56, pending_repair, command
+    ):
+        """The final one-line outcome cuts the reason at 384 characters: the stop
+        sentence and the pointer to `mm status` must come before any cleanup text."""
+        env = push_preview56
+        salt = b"\x00" * 16
+        key = crypto_module.derive_key(PASSPHRASE, salt, memory_kb=MEMORY_KB)
+        blob = crypto_module._serialize_crypto_init(
+            MEMORY_KB,
+            salt,
+            crypto_module._encrypt_with_master_key(crypto_module._KEYCHECK_PLAINTEXT, key),
+        )
+        if pending_repair:
+            (env["backend"].root / "mm-crypto-init 2").write_bytes(blob)
+            (env["backend"].root / "mm-crypto-init 3").write_bytes(b"unreadable junk")
+        else:
+            env["backend"].put("mm-crypto-init", blob)
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 1, result.output
+        last = result.stderr.strip().splitlines()[-1]
+        assert last.startswith(f"{command.title()} failed [crypto-error]:")
+        assert "stop: do not reinitialize or re-key" in last
+        assert "'mm status' explains the copies" in last
+        assert last.endswith("Run: mm diag")
+
+    def test_status_names_the_key_header_anchor_on_drift(self, push_preview56):
+        env = push_preview56
+        salt = b"\x00" * 16
+        key = crypto_module.derive_key(PASSPHRASE, salt, memory_kb=MEMORY_KB)
+        env["backend"].put(
+            "mm-crypto-init",
+            crypto_module._serialize_crypto_init(
+                MEMORY_KB,
+                salt,
+                crypto_module._encrypt_with_master_key(crypto_module._KEYCHECK_PLAINTEXT, key),
+            ),
+        )
+        result = runner.invoke(app, ["status"])
+        assert result.exit_code == 1, result.output
+        assert "key-header-copies-differ" in " ".join(result.output.split())
 
     def test_scan_failure_is_lock_only(self, push_preview56, monkeypatch):
         env = push_preview56
@@ -10703,7 +10980,9 @@ class TestMmEventsOwnership59A:
 
         monkeypatch.setattr(cli_module.events_tail, "_run_events_backfill", backfill)
         result = runner.invoke(
-            app, ["init"], input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n"
+            app,
+            ["init", "--new-fleet"],
+            input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert calls == [True]
@@ -11019,12 +11298,16 @@ class TestNewerStorage66A:
             monkeypatch.setattr(initflow, "bootstrap_crypto_init", arrive)
         else:
             (storage / "mm-crypto-init").write_bytes(b"\x03")
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
+        args = ["init", "--new-fleet"] if race else ["init"]
+        result = runner.invoke(app, args, input=f"{storage}\nMac A\npw\npw\n")
         assert result.exit_code == 1, result.output
         assert upgrade.INSTALL_CMD in " ".join(result.output.split())
         assert "delete" not in result.output.lower()
         assert not cfg.exists()
-        assert {p.name: p.read_bytes() for p in storage.iterdir()} == {"mm-crypto-init": b"\x03"}
+        expected = {"mm-crypto-init": b"\x03"}
+        if race:  # .stignore is written before the exclusive create
+            expected[".stignore"] = b"(?d)tmp*.tmp\n"
+        assert {p.name: p.read_bytes() for p in storage.iterdir()} == expected
 
     def test_init_refuses_newer_arriving_after_successful_bootstrap(self, tmp_path, monkeypatch):
         from mind_meld import upgrade
@@ -11040,7 +11323,7 @@ class TestNewerStorage66A:
             return result
 
         monkeypatch.setattr(initflow, "bootstrap_crypto_init", bootstrap)
-        result = runner.invoke(app, ["init"], input=f"{storage}\nMac A\npw\npw\n")
+        result = runner.invoke(app, ["init", "--new-fleet"], input=f"{storage}\nMac A\npw\npw\n")
         assert result.exit_code == 1, result.output
         assert upgrade.INSTALL_CMD in " ".join(result.output.split())
         assert not cfg.exists()
@@ -11388,16 +11671,15 @@ class TestCryptoInspection60A:
         if command[0] == "diag":
             counts = json.loads(result.stdout)["crypto_init"]["pending_repair"]
             assert counts == {
-                "replace_canonical": False,
                 "delete": 0 if two_distinct else 1,
                 "preserve": 2 if two_distinct else 1,
             }
             assert paths[1].name not in result.stdout
         else:
-            assert (
-                f"delete {0 if two_distinct else 1} identical conflict copies; "
-                f"preserve {2 if two_distinct else 1}" in _preview_text(result)
-            )
+            text = _preview_text(result)
+            preserved = "2 differing or unreadable copies" if two_distinct else "1 differing"
+            assert preserved in text
+            assert ("identical conflict cop" in text) == (not two_distinct)
 
     @pytest.mark.parametrize("correct", [False, True])
     def test_push_repairs_only_after_verification(self, push_preview56, monkeypatch, correct):
@@ -11409,11 +11691,12 @@ class TestCryptoInspection60A:
         result = runner.invoke(app, ["push"])
         if correct:
             assert result.exit_code == 0, result.output
-            assert not paths[1].exists() and not paths[2].exists()
+            # Only the copy identical to canonical goes; the differing one stays
+            # where it is and nothing is written or preserved.
+            assert not paths[1].exists()
+            assert paths[2].read_bytes() == before[paths[2]]
             assert paths[0].read_bytes() == before[paths[0]]
-            assert [
-                p.read_bytes() for p in env["backend"].root.glob("mm-crypto-init.preserved-*")
-            ] == [before[paths[2]]]
+            assert not list(env["backend"].root.glob("mm-crypto-init.preserved-*"))
         else:
             assert result.exit_code == 1, result.output
             assert {p: p.read_bytes() for p in paths} == before

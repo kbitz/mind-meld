@@ -149,10 +149,19 @@ class LocalBackend:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
         try:
-            os.write(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            # A failed write or fsync must not leave a temp file for the next
+            # run to trip over; a failed cleanup is left to that run's refusal.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         try:
             os.link(tmp_path, path)
         except OSError as e:

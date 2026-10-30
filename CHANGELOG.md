@@ -2,6 +2,12 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## Unreleased
+
+### Changed
+
+- GitHub CI skips all three jobs while a pull request is draft and runs them when it is marked ready for review. This keeps draft review and repair pushes from running the full GitHub checks.
+
 ## [1.11.19] - 2026-10-30
 
 **Browser profiles and machine-local gstack files stay on this Mac.** A directory holding a Chromium or Electron `Local State` file is left out of every generic source, and the default gstack allowlist no longer publishes runtime files. `mm migrate-config` offers the narrower list to a config that still pins the previous default. Copies that already synced stay until you exclude them and push; this narrowing does not delete them.

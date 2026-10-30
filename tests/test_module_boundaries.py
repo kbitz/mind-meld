@@ -1206,18 +1206,31 @@ INIT_CORE_DEFINITIONS = frozenset(
 
 INITFLOW_DEFINITIONS = frozenset(
     """
-    _ICLOUD_DRIVE_ROOT
+    STIGNORE_LINE
+    STIGNORE_PATTERN
+    _BOOKKEEPING_NAMES
+    _FLEET_DIRS
+    _Folder
+    _HEADER_STEM
+    _IN_FLIGHT_PREFIXES
     _StorageOccupancy
-    _auto_pin_storage_for_icloud
-    _bootstrap_or_verify_crypto
+    _bootstrap_new_fleet
+    _classify_folder
     _default_device_name
+    _entry_names
     _init_storage_guard
     _load_prior_device_metadata
+    _overwrite_prompt
     _probe_storage_occupancy
     _prompt_passphrase
     _prompt_sources
+    _refuse_new_fleet
     _register_and_save
+    _stop_for_missing_header
+    _unreadable_folder
     _verify_existing_crypto_init
+    _verify_join
+    _write_stignore
     init
     """.split()
 )
@@ -1415,7 +1428,7 @@ def test_init_single_ownership_and_qualified_calls():
         )
         assert _unqualified_owner_calls(source, module) == []
     assert len(INIT_CORE_DEFINITIONS) == 2
-    assert len(INITFLOW_DEFINITIONS) == 13
+    assert len(INITFLOW_DEFINITIONS) == 26
 
 
 def test_pull_test_consumers_use_qualified_owner_names():
