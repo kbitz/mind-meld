@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.20 | 2026-10-30 | **`mm init` creates a fleet only when you pass `--new-fleet`, and joining an existing folder waits for that fleet's key instead of starting a second one.** Plain `mm init` writes nothing until `mm-crypto-init` arrives, then checks the passphrase and pulls. New installs default to `~/Sync/mind-meld`. A store you already configured, including one on iCloud Drive, stays where it is. |
 | 1.11.19 | 2026-10-30 | **Browser profiles and machine-local gstack files stay on this Mac.** A directory holding a Chromium or Electron `Local State` file is left out of every generic source, and the default gstack allowlist no longer publishes runtime files. `mm migrate-config` offers the narrower list to a config that still pins the previous default. Copies that already synced stay until you exclude them and push; this narrowing does not delete them. |
 | 1.11.18 | 2026-10-29 | **`mm init` behaves the same.** Help text, prompts, flags, exit codes, and the files it writes are unchanged. |
 | 1.11.17 | 2026-10-29 | **`mm pull` waits for content a sync tool has not delivered yet instead of failing.** A file whose blob has not arrived is reported as waiting, the other files still apply, the exit stays 0, and `mm autopull` stays `success`. Syncthing temporary files and conflict copies no longer count as devices, and a manifest replaced mid-read no longer reads as corrupt. |

@@ -2,11 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
-## Unreleased
+## [1.11.20] - 2026-10-30
+
+**`mm init` creates a fleet only when you pass `--new-fleet`, and joining an existing folder waits for that fleet's key instead of starting a second one.** Plain `mm init` writes nothing until `mm-crypto-init` arrives, then checks the passphrase and pulls. New installs default to `~/Sync/mind-meld`. A store you already configured, including one on iCloud Drive, stays where it is.
 
 ### Changed
 
-- GitHub CI skips all three jobs while a pull request is draft and runs them when it is marked ready for review. This keeps draft review and repair pushes from running the full GitHub checks.
+- `mm init --new-fleet` creates the key header only in an empty folder and writes `.stignore` so temporary files stay out of the sync. Any other entry refuses, names what blocked it, and writes nothing.
+- Plain `mm init` joins. Until the key header arrives it stops and creates no folder, config, device, or header. Once the header is there, it checks the passphrase you typed and pulls.
+- The default path for a new install is `~/Sync/mind-meld` on macOS and Linux. `mm init` on a Mac that still uses iCloud Drive needs that path typed at the prompt.
+- Repair no longer rewrites the key header. It removes a conflict copy only when that copy matches the main file byte for byte. Differing copies stay in the folder, and a missing or corrupt header tells you to wait for sync or restore the file from another machine.
+- GitHub CI skips its three jobs while a pull request is draft and runs them when the pull request is marked ready.
+
+### Removed
+
+- The typed `BRICK` override and the iCloud auto-pin step are gone.
 
 ## [1.11.19] - 2026-10-30
 
