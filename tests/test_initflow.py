@@ -219,15 +219,52 @@ def test_a_file_at_the_storage_path_is_reported_on_both_flows(env, tmp_path, fla
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
 @pytest.mark.parametrize("flags", [(), ("--new-fleet",)])
-def test_an_unreadable_folder_is_reported_on_both_flows(env, flags):
+@pytest.mark.parametrize("mode", [0o000, 0o444])
+def test_an_unreadable_folder_is_reported_on_both_flows(env, flags, mode):
+    # Value: protects=both init modes report inaccessible storage without writes;
+    # fails_when=the header probe leaks PermissionError; why_new=listable folders
+    # bypass the scandir error; seam=none; no_claim=Syncthing delivery behavior.
     storage, _backend = env
-    storage.chmod(0o000)
+    storage.chmod(mode)
     try:
         result, text = _run(f"{storage}\n", *flags)
     finally:
         storage.chmod(0o755)
     assert result.exit_code == 1, result.output
     assert "cannot read the storage folder" in text
+    assert "Nothing was written" in text
+    assert list(storage.iterdir()) == []
+    assert not config.CONFIG_PATH.exists()
+
+
+@pytest.mark.parametrize("failed_read", [2, 3])
+def test_new_fleet_header_probe_failure_reports_whether_creation_happened(
+    env, monkeypatch, failed_read
+):
+    # Value: protects=bootstrap probe errors report actual creation state;
+    # fails_when=read failures escape or claim no write after creation;
+    # why_new=first-probe permission tests cannot reach these later reads;
+    # seam=none; no_claim=physical crash durability.
+    storage, _backend = env
+    original = initflow.fetch_crypto_init
+    calls = 0
+
+    def fetch(backend):
+        nonlocal calls
+        calls += 1
+        if calls == failed_read:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original(backend)
+
+    monkeypatch.setattr(initflow, "fetch_crypto_init", fetch)
+    result, text = _new_fleet(f"{storage}\nMac A\npw\npw\n")
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    assert "Permission denied" in text
+    assert ((storage / "mm-crypto-init").exists()) == (failed_read == 3)
+    assert ("Nothing was written" in text) == (failed_read == 2)
+    if failed_read == 3:
+        assert "key header was created" in text and "run 'mm init' to join it" in text
     assert not config.CONFIG_PATH.exists()
 
 
@@ -274,9 +311,22 @@ def test_new_fleet_refuses_when_the_exclusive_create_loses(env, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", [errno.ENOSPC, errno.EACCES])
-def test_an_oserror_during_the_exclusive_create_is_not_a_lost_race(env, monkeypatch, failure):
+@pytest.mark.parametrize("diagnostic_read_fails", [False, True])
+def test_an_oserror_during_the_exclusive_create_is_not_a_lost_race(
+    env, monkeypatch, failure, diagnostic_read_fails
+):
+    # Value: protects=header creation errors survive a failed diagnostic read;
+    # fails_when=the fallback read masks ENOSPC or EACCES with EIO;
+    # why_new=existing cases keep the diagnostic read available;
+    # seam=none; no_claim=physical disk failure behavior.
     storage, backend = env
     calls = []
+    original_fetch = initflow.fetch_crypto_init
+
+    def fetch(backend):
+        if diagnostic_read_fails and calls:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return original_fetch(backend)
 
     def fail(self, key, data):
         calls.append(key)
@@ -286,10 +336,12 @@ def test_an_oserror_during_the_exclusive_create_is_not_a_lost_race(env, monkeypa
     # isolation (upgrade cache, sidecar, keyring) and the rerun would reach real state.
     with monkeypatch.context() as patch:
         patch.setattr(LocalBackend, "put_exclusive", fail)
+        patch.setattr(initflow, "fetch_crypto_init", fetch)
         result, text = _new_fleet(f"{storage}\nMac A\npw\npw\n{SOURCES_CLAUDE_ONLY}")
     assert result.exit_code == 1, result.output
     assert calls == ["mm-crypto-init"]
     assert "could not create the key header" in text
+    assert os.strerror(failure) in text
     assert "No key header was created" in text
     assert "mm init --new-fleet" in text
     assert "first, so none was created here" not in text
@@ -501,6 +553,7 @@ def test_plain_init_on_a_bookkeeping_only_folder_reserves_new_fleet(env):
     assert "Nothing was written" in text
     assert "wait for Syncthing to deliver it, then run 'mm init' again" in text
     assert "Only the fleet's first machine runs 'mm init --new-fleet'" in text
+    assert text.rstrip().endswith("then run 'mm init' again.")
     _assert_nothing_written(storage, before)
 
 

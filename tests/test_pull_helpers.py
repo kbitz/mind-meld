@@ -2553,7 +2553,7 @@ class TestBootstrapNewFleetAndVerifyJoin:
 
     @pytest.mark.parametrize("winner", ["ok", "corrupt", "missing"])
     def test_lost_race_refuses_and_never_verifies(
-        self, tmp_path: Path, monkeypatch, winner: str
+        self, tmp_path: Path, monkeypatch, capsys, winner: str
     ) -> None:
         """A bootstrap loser refuses whatever the winner looks like: this machine was
         not joining, so it never falls through to verify against the peer's header."""
@@ -2562,7 +2562,7 @@ class TestBootstrapNewFleetAndVerifyJoin:
         from mind_meld import initflow
         from mind_meld.crypto import CryptoInitFetch
 
-        fetches = iter([CryptoInitFetch(status="missing")] * 2)
+        fetches = iter([CryptoInitFetch(status="missing")])
 
         def fetch(_backend):
             return next(fetches, CryptoInitFetch(status=winner))
@@ -2581,6 +2581,12 @@ class TestBootstrapNewFleetAndVerifyJoin:
         folder = tmp_path / "storage"
         with pytest.raises(typer.Exit):
             _bootstrap_new_fleet(backend=None, passphrase="pw", full_path=folder)
+        message = " ".join(capsys.readouterr().err.split())
+        if winner in {"ok", "corrupt"}:
+            assert "another machine's key header arrived" in message
+            assert "first, so none was created here" in message
+        else:
+            assert "could not create the key header" in message
         # .stignore is written before the exclusive create; nothing else is.
         assert sorted(p.name for p in folder.iterdir()) == [".stignore"]
 

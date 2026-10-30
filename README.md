@@ -310,6 +310,11 @@ mm push    # upload configured agent context
 # Every other machine (after Syncthing has delivered the folder):
 mm init    # verifies the passphrase, registers this device, pulls
 mm push    # publishes this machine's own files
+```
+
+After setup, pull whenever you want changes from another machine:
+
+```bash
 mm pull --dry-run   # preview: changes nothing except the lock file
 mm pull    # download from another device, any time
 ```
@@ -1220,9 +1225,12 @@ crypto session.
 
 If this Mac is already on the latest release and no newer mm exists, the file
 may be damaged. Wait for this folder to finish syncing and locate a known-valid
-crypto-init copy from another machine or backup. mm no longer moves or rewrites
-key-header copies, so move the damaged copy out of the storage folder by hand
-into a backup, then run `mm pull` to verify the valid copy. Keep the backup;
+crypto-init copy from another machine or backup. Back up every header outside
+the storage folder first. mm no longer moves or rewrites key-header copies:
+move the damaged canonical file into that backup, then copy the known-valid
+header to `<storage>/mm-crypto-init` without overwriting another file. If the
+valid header exists only under a conflict name, keep it in place until the
+canonical copy is restored. Run `mm pull` to verify the restored header. Keep the backup;
 never delete crypto-init or bootstrap a fresh salt over existing encrypted
 data. If no valid copy is available, stop and recover one before continuing.
 
@@ -1238,13 +1246,20 @@ Anything that differs stays in place, and `mm status` and `mm diag` count it
 fingerprint differs from the header it finds stops and says so; do not
 reinitialize or re-key.
 
-To find the right copy with the existing commands, work on a machine that was
-already working:
+If the main file is missing or unreadable, the remaining copies may be the
+only usable key header. Keep them in place and follow the restoration steps
+above; a pending-copy count alone is not a reason to move a header.
+
+Only if a **fingerprint refusal** remains after syncing, work on a machine
+that previously worked. Back up every header outside the storage folder
+before changing anything, and keep at least one usable header in the folder:
 
 1. Let Syncthing finish, then move the extra copies out of the folder one at a
    time into a backup directory **outside** it. Never delete one.
-2. After each move, run `mm status` until the fingerprint refusal clears.
-3. If no single copy clears it, stop and keep every copy.
+2. After each move, run `mm status`. Stop moving files as soon as the
+   fingerprint refusal clears. If a move introduces a missing-header error,
+   restore that exact copy immediately.
+3. If no single copy clears it, restore the moved copies, stop and keep every copy.
 
 A device bound to the wrong header reruns `mm init` once the right header
 stands alone in the folder.
@@ -2070,6 +2085,10 @@ command -v secret-tool >/dev/null && secret-tool clear service mind-meld usernam
 Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
+
+CI skips all three jobs on draft pull requests. Mark a pull request ready for
+review to start them; later pushes to that ready PR and pushes to `main` also
+run them. A skipped draft check is not validation.
 
 CI uses three jobs. `ci` runs on `macos-latest` with Python 3.13: the
 portable checks (`./bin/check --no-bootstrap`), a real-Keychain backend

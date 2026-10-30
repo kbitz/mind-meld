@@ -204,8 +204,9 @@ def _stop_for_missing_header(path: Path, folder: _Folder) -> None:
     else:
         what = (
             f"the key header (mm-crypto-init) is not in {where} yet. Nothing was written. "
+            f"{first_machine.strip()} "
             "If another machine already has this fleet, wait for Syncthing to deliver "
-            f"it, then run 'mm init' again.{first_machine}"
+            "it, then run 'mm init' again."
         )
     core._error(f"init: {what}")
 
@@ -395,7 +396,10 @@ def _bootstrap_new_fleet(
     folder = _classify_folder(full_path)
     if not folder.accepts_new_fleet:
         _refuse_new_fleet(full_path, folder)
-    arrived = fetch_crypto_init(backend)
+    try:
+        arrived = fetch_crypto_init(backend)
+    except OSError as e:
+        _unreadable_folder(full_path, e)
     if arrived.newer_version is not None:
         core._error(core._newer_format_message(arrived.newer_version))
     if arrived.status != "missing":
@@ -413,11 +417,17 @@ def _bootstrap_new_fleet(
             backend, passphrase, argon2_memory_kb=DEFAULT_ARGON2_MEMORY_KB
         )
     except (OSError, StorageError) as e:
-        arrived = fetch_crypto_init(backend)
+        try:
+            arrived = fetch_crypto_init(backend)
+        except OSError:
+            # A failed diagnostic read must not mask the creation failure.
+            arrived = None
         if attemptlog.storage_errno(e) == "EEXIST" or (
-            attemptlog.storage_errno(e) is None and arrived.status != "missing"
+            attemptlog.storage_errno(e) is None
+            and arrived is not None
+            and arrived.status != "missing"
         ):
-            if arrived.newer_version is not None:
+            if arrived is not None and arrived.newer_version is not None:
                 core._error(core._newer_format_message(arrived.newer_version))
             core._error(
                 f"init: another machine's key header arrived in {safe_terminal_str(full_path)} "
@@ -428,7 +438,13 @@ def _bootstrap_new_fleet(
             f"{os_error_cause(e)}. No key header was created. Fix that, then run "
             "'mm init --new-fleet' again."
         )
-    arrived = fetch_crypto_init(backend)
+    try:
+        arrived = fetch_crypto_init(backend)
+    except OSError as e:
+        core._error(
+            f"init: the key header was created in {safe_terminal_str(full_path)}, but "
+            f"could not be read: {os_error_cause(e)}. Fix that, then run 'mm init' to join it."
+        )
     if arrived.newer_version is not None:
         core._error(core._newer_format_message(arrived.newer_version))
     assert bootstrap.root_salt is not None
@@ -479,9 +495,8 @@ def _verify_existing_crypto_init(
 ) -> tuple[bytes, int, bytes]:
     """Verify an already-fetched crypto init and activate its session.
 
-    The caller owns any race retry before invoking this helper. In particular,
-    `_bootstrap_or_verify_crypto` must never feed its stale pre-bootstrap fetch
-    here after an exclusive-create loss.
+    Only the join path calls this helper. A new-fleet exclusive-create loss
+    refuses; the owner must explicitly rerun plain init to join.
     """
     assert fetch.root_salt is not None
     assert fetch.argon2_memory_kb is not None
@@ -518,8 +533,8 @@ def _register_and_save(
     BEFORE this function runs, so keyring never holds an invalid secret.
 
     Crash safety (Track 5D, v0.9.4):
-      * register fails → re-raise; nothing local was written, retry init
-        runs the first-device path naturally.
+      * register fails → re-raise; nothing local was written, and retrying
+        plain init joins the existing key header.
       * save_config fails → best-effort `backend.delete(devices/<id>.json)`
         before re-raising. Normal save failures (disk full, permissions)
         self-clean so retry init doesn't trip `_init_storage_guard`'s
@@ -527,8 +542,8 @@ def _register_and_save(
         save error propagates — masking the real cause behind a confusing
         secondary error is worse than the cosmetic orphan that remains.
       * SIGKILL between register and save_config → cosmetic orphan device
-        entry in storage. `_init_storage_guard` warns + prompts on retry
-        init; user confirms and a fresh device_id is minted alongside.
+        entry in storage. A fresh device_id is minted on retry; the orphan
+        prompt applies only when this machine already has a saved device ID.
         The orphan is inert (no `last_seen`, never used).
       * Pre-existing victims of the v0.8.15..v0.9.3 inverse half-state
         (config has device_id, storage lacks devices/<id>.json) self-heal
@@ -636,7 +651,10 @@ def init(new_fleet: bool = False) -> str | None:
     backend = LocalBackend(str(full_path))
 
     # Probe storage for mm-crypto-init BEFORE committing any local state.
-    fetch = fetch_crypto_init(backend)
+    try:
+        fetch = fetch_crypto_init(backend)
+    except OSError as e:
+        _unreadable_folder(full_path, e)
     if fetch.newer_version is not None:
         core._error(core._newer_format_message(fetch.newer_version))
     if fetch.status == "corrupt":
@@ -655,8 +673,12 @@ def init(new_fleet: bool = False) -> str | None:
     # config. Runs BEFORE any further prompt, so a refused init never touches
     # the keyring or writes config.
     if not new_fleet:
+        try:
+            occupancy = _probe_storage_occupancy(backend)
+        except OSError as e:
+            _unreadable_folder(full_path, e)
         _init_storage_guard(
-            _probe_storage_occupancy(backend),
+            occupancy,
             existing_device_id=existing_device_id,
             existing_device_name=existing_device_name,
         )

@@ -398,8 +398,7 @@ def _read_regular_nofollow(path: Path) -> bytes | None:
     """Read a regular file without following a final symlink.
 
     Symlinks, non-regular files, and unreadable names return None so they
-    stay unhashed: no digest authorizes deletion or a preserve-copy into
-    shared storage.
+    stay unhashed: no digest authorizes their deletion.
     """
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -574,15 +573,15 @@ def bootstrap_crypto_init(backend: Any, passphrase: str, argon2_memory_kb: int) 
     """Generate mm-crypto-init for a fresh storage root. Called only on first device.
 
     Raises StorageError("already exists") if another device won the bootstrap race.
-    Caller should handle that by re-running fetch_crypto_init and taking the
-    verify path.
+    The new-fleet caller refuses that collision; the owner must explicitly
+    rerun plain init to join the existing fleet.
     """
     root_salt = os.urandom(ROOT_SALT_LEN)
     master_key = derive_key(passphrase, root_salt, memory_kb=argon2_memory_kb)
     keycheck_blob = _encrypt_with_master_key(_KEYCHECK_PLAINTEXT, master_key)
     blob = _serialize_crypto_init(argon2_memory_kb, root_salt, keycheck_blob)
 
-    # put_exclusive raises StorageError on EEXIST. Caller inspects and retries.
+    # put_exclusive raises StorageError on EEXIST. Caller inspects and refuses.
     backend.put_exclusive(CRYPTO_INIT_KEY, blob)
 
     # Prime the cache so the caller's subsequent load_master_key is a hit.

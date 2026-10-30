@@ -4985,12 +4985,8 @@ class TestInitFlow:
             # register a device) — so there should be zero entries actually.
             assert list(devices_dir.iterdir()) == []
 
-    def test_convergence_cross_device_via_conflict_copy(self, tmp_path, monkeypatch):
-        """Simulate post-iCloud-reconciliation state: canonical + 'mm-crypto-init 2'.
-
-        fetch_crypto_init picks the deterministic winner and canonicalizes.
-        Subsequent commands interoperate as if only one init had happened.
-        """
+    def test_fetch_selects_canonical_without_rewriting_conflict_copy(self, tmp_path, monkeypatch):
+        """A canonical with the lower salt wins without rewriting either header."""
 
         self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
@@ -5023,7 +5019,7 @@ class TestInitFlow:
         assert fetched.status == "ok"
         # Reading selects a winner without changing either lineage.
         assert (storage / "mm-crypto-init 2").read_bytes() == other_blob
-        # Canonical now holds the winner (whichever of the two had the smaller salt).
+        # The existing canonical wins; fetching did not replace either lineage.
         canonical_bytes = (storage / "mm-crypto-init").read_bytes()
         winner_salt_in_canonical = canonical_bytes[5:21]
         assert winner_salt_in_canonical == fetched.root_salt
@@ -5318,6 +5314,7 @@ class TestInitTerminalAndHelp89A:
         text = " ".join(result.output.split())
         assert "mm init needs a terminal" in text
         assert "Aborted." not in text
+        assert "Otherwise retry your original command in a terminal" in text
         assert not cfg.exists()
 
     def test_closed_stdin_after_the_key_header_is_written_says_init_continues(
@@ -10842,6 +10839,25 @@ class TestPushPreviewNoMutation56A:
         finally:
             parent.chmod(0o700)
 
+    def test_missing_main_header_note_keeps_the_only_usable_copy(self, push_preview56):
+        # Value: protects=inspection tells owners to retain a sole usable header;
+        # fails_when=an absent canonical labels its copy as disposable/differing;
+        # why_new=drift cases retain a canonical; seam=none;
+        # no_claim=real Syncthing propagation or owner recovery execution.
+        env = push_preview56
+        canonical = env["backend"].root / "mm-crypto-init"
+        copy = env["backend"].root / "mm-crypto-init 2"
+        raw = canonical.read_bytes()
+        canonical.rename(copy)
+        result = env["invoke"]()
+        _assert_preview_complete(result)
+        text = _preview_text(result)
+        assert "main mm-crypto-init file is missing or unreadable" in text
+        assert "keep every key-header copy in place" in text
+        assert "differing or unreadable copy" not in text
+        assert not canonical.exists()
+        assert copy.read_bytes() == raw
+
     @pytest.mark.parametrize("pending_repair", [False, True])
     def test_drift_reports_safe_remedy_and_pending_facts_without_repair(
         self, push_preview56, pending_repair
@@ -10876,7 +10892,7 @@ class TestPushPreviewNoMutation56A:
         assert "key-header-copies-differ" in text
         if pending_repair:
             # The winner lives only in the conflict copy, so nothing is removable.
-            assert "1 differing or unreadable copy stay in place" in text
+            assert "1 differing or unreadable copy stays in place" in text
             assert "mm never moves or rewrites them" in text
             assert "remove" not in text
             assert text.index("still differ, stop") < text.index(qualification)

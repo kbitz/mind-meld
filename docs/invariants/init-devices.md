@@ -27,7 +27,7 @@ A crypto session on a folder with no header (`core._init_crypto_session`) says t
 ---
 
 ## Init order + push-time self-heal (load-bearing, v0.9.4)
-`_register_and_save` (renamed from `_save_and_register`) writes the remote first, the local pointer last: `register_device(backend, ...)` → `save_config(...)` → keyring store. Canonical filesystem/DB transaction discipline — a SIGKILL/OOM/power-loss in the window between the two writes leaves an inert orphan storage entry (recoverable on retry init via `_init_storage_guard`'s orphan-case prompt), never the inverse half-state where local config claims a `device_id` storage doesn't contain. Pre-v0.9.4 produced the inverse mapping. Do NOT reorder these calls.
+`_register_and_save` (renamed from `_save_and_register`) writes the remote first, the local pointer last: `register_device(backend, ...)` → `save_config(...)` → keyring store. Canonical filesystem/DB transaction discipline — a SIGKILL/OOM/power-loss in the window between the two writes leaves an inert orphan storage entry (recoverable on retry with plain `mm init`; the orphan-case prompt applies only when local config already has a device ID), never the inverse half-state where local config claims a `device_id` storage doesn't contain. Pre-v0.9.4 produced the inverse mapping. Do NOT reorder these calls.
 
 If `save_config` raises (disk full, permissions), a best-effort `backend.delete(device_key(device_id))` cleanup runs before the original exception propagates — keeps orphans from accumulating in storage when normal save failures hit. Cleanup-failure surfaces a `mm: warning:` stderr breadcrumb but does NOT mask the original save error (visible-failure contract). The `device_key(device_id)` storage key is precomputed BEFORE `register_device` so the cleanup-warning f-string can't itself raise from `device_key`'s validation and mask the real cause (codex adversarial 2026-04-25).
 
@@ -164,8 +164,9 @@ Tests: `TestNonInteractiveSecretServiceRead`, `TestNonInteractiveOtherBackends`,
 `crypto.FORMAT_VERSION_MAX` reserves 0x03–0x0F for future crypto-init and blob
 versions. Read the version byte before assuming a layout, even on a one-byte
 envelope. A current-format init with a keycheck in that window is newer too.
-Empty/truncated v2 and bytes above 0x0F remain corrupt; ASCII garbage beside a
-valid copy still self-heals. If **any** observed canonical or conflict copy is
+Empty/truncated v2 and bytes above 0x0F remain corrupt; a valid conflict copy
+can still be selected beside ASCII garbage, but cleanup never rewrites canonical.
+If **any** observed canonical or conflict copy is
 newer, `fetch_crypto_init` returns `corrupt` with `newer_version` set, no winner
 and no repair plan. Every crypto session refuses. Status reports the refusal;
 diag remains an inspection and exposes `crypto_init.newer_version` (null when

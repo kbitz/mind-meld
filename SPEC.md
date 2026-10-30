@@ -110,7 +110,7 @@ claude-sync.com runs an API that brokers auth, generates presigned URLs, and sto
     └── ...
 ```
 
-Default `storage_root`: `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld/`
+Default `storage_root` for new init: `~/Sync/mind-meld/`. Existing configured paths remain unchanged.
 
 ### Device Config (`~/.config/mind-meld/config.toml`)
 
@@ -120,7 +120,7 @@ id = "a1b2c3d4"           # generated on init
 name = "MacBook Pro"       # user-friendly label
 
 [storage]
-path = "~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld"
+path = "~/Sync/mind-meld"
 
 [sync]
 max_file_size = 52428800   # bytes (50MB). Skip files larger than this.

@@ -305,10 +305,20 @@ def _init_crypto_session(
                 f"will remove {copies} of mm-crypto-init."
             )
         if counts["preserve"]:
-            differing = _count(
-                counts["preserve"], "differing or unreadable copy", "differing or unreadable copies"
-            )
-            notes.append(f"{differing} stay in place; mm never moves or rewrites them.")
+            canonical = fetch.repair_plan.canonical
+            if canonical is None or canonical.content_hash is None:
+                notes.append(
+                    "The main mm-crypto-init file is missing or unreadable; "
+                    "keep every key-header copy in place."
+                )
+            else:
+                differing = _count(
+                    counts["preserve"],
+                    "differing or unreadable copy",
+                    "differing or unreadable copies",
+                )
+                stay = "stays" if counts["preserve"] == 1 else "stay"
+                notes.append(f"{differing} {stay} in place; mm never moves or rewrites them.")
         repair_note = " ".join(notes)
         if read_only and pending is not None:
             pointer = (

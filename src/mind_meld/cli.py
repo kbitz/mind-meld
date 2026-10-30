@@ -637,7 +637,8 @@ def _init_needs_terminal() -> None:
     core._error(
         "mm init needs a terminal: it asks for the storage path, device name, passphrase "
         "and sources, so the owner must run it in an interactive shell. Anything it "
-        "already wrote stays; running 'mm init' again in a terminal continues from it."
+        "already wrote stays. If a key header was written, running 'mm init' again "
+        "in a terminal continues from it. Otherwise retry your original command in a terminal."
     )
 
 
