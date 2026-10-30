@@ -215,10 +215,10 @@ REVIEWED = {
             "directory.mkdir(exist_ok=True)",
         ],
     ),
-    "initflow.py:init": (
+    "initflow.py:_write_stignore": (
         *_GUARDED,
         [
-            "full_path.mkdir(parents=True, exist_ok=True)",
+            "path.parent.mkdir(parents=True, exist_ok=True)",
         ],
     ),
     "cli.py:_push_core": (
@@ -346,10 +346,7 @@ REVIEWED = {
     "crypto.py:fetch_crypto_init": (
         *_READ_ONLY,
         [
-            (
-                "replace(winner, winner_bytes=winner_raw, repair_plan=p"
-                "lan if plan.replace_canonical or plan.copies else None)"
-            ),
+            ("replace(winner, winner_bytes=winner_raw, repair_plan=plan if plan.copies else None)"),
         ],
     ),
     "crypto.py:apply_crypto_init_repair": (
@@ -763,6 +760,7 @@ REVIEWED = {
             "path.parent.mkdir(parents=True, exist_ok=True)",
             "tempfile.mkstemp(dir=path.parent, suffix='.tmp')",
             "os.link(tmp_path, path)",
+            "os.unlink(tmp_path)",
             "os.unlink(tmp_path)",
             "os.unlink(tmp_path)",
             "os.unlink(tmp_path)",

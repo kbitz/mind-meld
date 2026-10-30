@@ -37,7 +37,6 @@ import os
 import stat
 from contextlib import closing
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -333,7 +332,6 @@ class CryptoInitRepairPlan:
     winner_bytes: bytes
     canonical: CryptoInitCandidate | None
     copies: tuple[CryptoInitCandidate, ...]
-    replace_canonical: bool
 
 
 @dataclass(frozen=True)
@@ -400,8 +398,7 @@ def _read_regular_nofollow(path: Path) -> bytes | None:
     """Read a regular file without following a final symlink.
 
     Symlinks, non-regular files, and unreadable names return None so they
-    stay unhashed: no digest authorizes deletion or a preserve-copy into
-    shared storage.
+    stay unhashed: no digest authorizes their deletion.
     """
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
@@ -473,47 +470,47 @@ def fetch_crypto_init(backend: Any) -> CryptoInitFetch:
     winner_raw, winner = min(valid, key=lambda item: item[1].root_salt)
 
     def candidate(name: str, raw: bytes | None) -> CryptoInitCandidate:
+        # Cleanup eligibility is separate from winner selection: a copy is
+        # removable only when canonical is readable and holds the same bytes,
+        # so the winner's last copy can never be the one deleted.
+        identical = name != CRYPTO_INIT_KEY and canonical_raw is not None and raw == canonical_raw
         return CryptoInitCandidate(
             name=name,
             content_hash=hashlib.sha256(raw).hexdigest() if raw is not None else None,
-            disposition="delete" if raw == winner_raw else "preserve",
+            disposition="delete" if identical else "preserve",
         )
 
     plan = CryptoInitRepairPlan(
         winner_bytes=winner_raw,
         canonical=candidate(CRYPTO_INIT_KEY, canonical_raw) if canonical_exists else None,
         copies=tuple(candidate(name, raw) for name, raw in observed if name != CRYPTO_INIT_KEY),
-        replace_canonical=canonical_raw != winner_raw,
     )
     return replace(
         winner,
         winner_bytes=winner_raw,
-        repair_plan=plan if plan.replace_canonical or plan.copies else None,
+        repair_plan=plan if plan.copies else None,
     )
 
 
-def crypto_init_repair_counts(fetch: CryptoInitFetch) -> dict[str, int | bool]:
+def crypto_init_repair_counts(fetch: CryptoInitFetch) -> dict[str, int]:
     """Path-free projection shared by inspection and drift diagnostics."""
     plan = fetch.repair_plan
     if plan is None:
-        return {"replace_canonical": False, "delete": 0, "preserve": 0}
-    candidates = list(plan.copies)
-    if plan.replace_canonical and plan.canonical is not None:
-        candidates.append(plan.canonical)
+        return {"delete": 0, "preserve": 0}
     return {
-        "replace_canonical": plan.replace_canonical,
         "delete": sum(c.disposition == "delete" for c in plan.copies),
-        "preserve": sum(c.disposition == "preserve" for c in candidates),
+        "preserve": sum(c.disposition == "preserve" for c in plan.copies),
     }
 
 
 def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
-    """Reconcile only after verification, durably preserving distinct bytes.
+    """Remove conflict copies that are byte-identical to canonical; write nothing.
 
-    Re-list names instead of trusting paths stored in the plan. All required
-    writes/fsyncs precede the first conflict unlink, so a failed write leaves
-    every conflict candidate in place. Concurrent replacements are left alone.
-    First-device bootstrap remains the separate create-only operation.
+    The canonical file has one writer, `bootstrap_crypto_init`. Repair never
+    rewrites it and never copies bytes anywhere. Re-list names instead of
+    trusting paths stored in the plan. Differing, unreadable and unreadable-
+    canonical cases leave every copy in place. Concurrent replacements are
+    left alone.
     """
     changed = "crypto: mm-crypto-init changed while the command ran; nothing was published. Retry."
     fresh = fetch_crypto_init(backend)
@@ -531,48 +528,15 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
         canonical_raw = None
     else:
         canonical_raw = _read_regular_nofollow(canonical_path)
-        if canonical_raw is None:
-            raise CryptoError(
-                "crypto: cannot preserve unreadable canonical mm-crypto-init; "
-                "nothing was published."
-            )
+    planned_hash = plan.canonical.content_hash if plan.canonical else None
     current_hash = hashlib.sha256(canonical_raw).hexdigest() if canonical_raw is not None else None
-    if current_hash != (plan.canonical.content_hash if plan.canonical else None):
+    if current_hash != planned_hash:
         raise CryptoError(changed)
+    if canonical_raw is None:
+        # Missing or unreadable canonical: no copy is provably redundant.
+        return
 
-    def preserve(raw: bytes) -> None:
-        parsed = _parse_crypto_init(raw)
-        fp = (
-            root_salt_fingerprint(parsed.root_salt)[:8]
-            if parsed.root_salt
-            else hashlib.sha256(raw).hexdigest()[:8]
-        )
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        key = f"{CRYPTO_INIT_KEY}.preserved-{fp}-{stamp}"
-        # The hash suffix makes timestamp collisions harmless for equal data,
-        # and prevents different same-salt copies from overwriting one another.
-        if backend.exists(key):
-            key += "-" + hashlib.sha256(raw).hexdigest()
-        backend.put(key, raw)
-
-    # Preserve a displaced canonical lineage before overwriting it.
-    if canonical_raw is not None and plan.replace_canonical:
-        preserve(canonical_raw)
-    # A newer copy can arrive while preserve() writes. Recheck before the
-    # canonical replacement so that write cannot cover the new bytes.
-    fresh_before_put = fetch_crypto_init(backend)
-    if fresh_before_put.newer_version is not None:
-        raise NewerFormatError(
-            fresh_before_put.newer_version,
-            "mm-crypto-init changed while the command ran",
-        )
-    before_put = _read_regular_nofollow(canonical_path)
-    before_hash = hashlib.sha256(before_put).hexdigest() if before_put is not None else None
-    if before_hash != (plan.canonical.content_hash if plan.canonical else None):
-        raise CryptoError(changed)
-    backend.put(CRYPTO_INIT_KEY, plan.winner_bytes)
-
-    planned = {candidate.name: candidate for candidate in plan.copies}
+    planned = {c.name: c for c in plan.copies if c.disposition == "delete"}
     removable: dict[str, str] = {}
     for path in backend.find_conflict_copies(CRYPTO_INIT_KEY):
         candidate = planned.get(path.name)
@@ -581,30 +545,19 @@ def apply_crypto_init_repair(backend: Any, fetch: CryptoInitFetch) -> None:
         raw = _read_regular_nofollow(path)
         if raw is None or hashlib.sha256(raw).hexdigest() != candidate.content_hash:
             continue
-        if candidate.disposition == "preserve":
-            preserve(raw)
         removable[path.name] = candidate.content_hash
 
-    # A concurrent writer may have replaced canonical again after our own
-    # put() above. If canonical no longer holds our winner, the conflict
-    # copies about to be unlinked may be the only remaining copy of it —
-    # retain everything instead of deleting. A later, uncontended repair
-    # pass will finish the cleanup once storage settles.
-    winner_hash = hashlib.sha256(plan.winner_bytes).hexdigest()
-    canonical_now = _read_regular_nofollow(canonical_path)
-    canonical_now_hash = (
-        hashlib.sha256(canonical_now).hexdigest() if canonical_now is not None else None
-    )
-    if canonical_now_hash != winner_hash:
-        return
-
-    # No fallible write or fsync remains after this point. Re-check each
-    # observed name immediately before unlink to leave late replacements alone.
+    # Re-check each observed name, and canonical, immediately before unlink so
+    # a late replacement of either is left alone. Canonical must still hold the
+    # bytes the copies were compared with, or a copy may be the only one left.
     for path in backend.find_conflict_copies(CRYPTO_INIT_KEY):
         digest = removable.get(path.name)
         if digest is None:
             continue
         try:
+            canonical_now = _read_regular_nofollow(canonical_path)
+            if canonical_now is None or hashlib.sha256(canonical_now).hexdigest() != planned_hash:
+                return
             raw = _read_regular_nofollow(path)
             if raw is not None and hashlib.sha256(raw).hexdigest() == digest:
                 path.unlink()
@@ -620,15 +573,15 @@ def bootstrap_crypto_init(backend: Any, passphrase: str, argon2_memory_kb: int) 
     """Generate mm-crypto-init for a fresh storage root. Called only on first device.
 
     Raises StorageError("already exists") if another device won the bootstrap race.
-    Caller should handle that by re-running fetch_crypto_init and taking the
-    verify path.
+    The new-fleet caller refuses that collision; the owner must explicitly
+    rerun plain init to join the existing fleet.
     """
     root_salt = os.urandom(ROOT_SALT_LEN)
     master_key = derive_key(passphrase, root_salt, memory_kb=argon2_memory_kb)
     keycheck_blob = _encrypt_with_master_key(_KEYCHECK_PLAINTEXT, master_key)
     blob = _serialize_crypto_init(argon2_memory_kb, root_salt, keycheck_blob)
 
-    # put_exclusive raises StorageError on EEXIST. Caller inspects and retries.
+    # put_exclusive raises StorageError on EEXIST. Caller inspects and refuses.
     backend.put_exclusive(CRYPTO_INIT_KEY, blob)
 
     # Prime the cache so the caller's subsequent load_master_key is a hit.
@@ -658,7 +611,7 @@ def verify_passphrase(master_key: bytes, keycheck_blob: bytes) -> None:
     except CryptoError as e:
         raise CryptoError(
             "init: passphrase does not match the one used to initialize this "
-            "storage. Did you use the same passphrase on your other Mac?"
+            "storage. Did you use the same passphrase on another machine?"
         ) from e
     if plaintext != _KEYCHECK_PLAINTEXT:
         raise CryptoError(

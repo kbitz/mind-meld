@@ -259,6 +259,8 @@ app = typer.Typer(
     name="mm",
     help="Mind Meld — sync Claude Code sessions and other sources across machines.",
     add_completion=True,
+    # `mm init` frames hold the passphrase; a traceback must never print it.
+    pretty_exceptions_show_locals=False,
 )
 # `console` / `stderr_console` now live in `mind_meld.consoles` (Track 16A) so
 # `resolveflow` and `retention` can render through the SAME objects without
@@ -631,31 +633,60 @@ def _upload_mtime_matches(accepted_iso: str, advertised: str) -> bool:
 # ── init ──────────────────────────────────────────────────────────────
 
 
+def _init_needs_terminal() -> None:
+    core._error(
+        "mm init needs a terminal: it asks for the storage path, device name, passphrase "
+        "and sources, so the owner must run it in an interactive shell. Anything it "
+        "already wrote stays. If a key header was written, running 'mm init' again "
+        "in a terminal continues from it. Otherwise retry your original command in a terminal."
+    )
+
+
 @app.command()
-def init() -> None:
-    """Initialize Mind Meld: generate device ID, configure iCloud storage, set passphrase.
+def init(
+    new_fleet: bool = typer.Option(
+        False,
+        "--new-fleet",
+        help=(
+            "Create the fleet's key header (mm-crypto-init) in an empty folder. Only the "
+            "fleet's first machine uses this; every other machine runs plain 'mm init'."
+        ),
+    ),
+) -> None:
+    """Join this machine to the fleet's synced store, or start a new fleet.
 
-    Two-path flow. Storage is probed (mm-crypto-init) BEFORE any local state is
-    written or any passphrase is committed to the keyring.
+    The storage path is the root of a Syncthing folder shared by every machine.
+    Plain 'mm init' joins: it needs the fleet's key header (mm-crypto-init) in
+    that folder. If the header has not arrived it stops and writes nothing; wait
+    for Syncthing to finish delivering, then run it again. Once your passphrase
+    verifies, it registers this device, saves config and pulls.
 
-    First-device path (mm-crypto-init missing):
-        Double-prompt passphrase, generate root_salt + keycheck, atomic write,
-        then register device + save config + store passphrase (Track 5D order).
+    'mm init --new-fleet' is for the fleet's first machine only. It needs an
+    empty folder, writes .stignore with mm's temporary-file pattern and creates
+    the key header. Then run 'mm push', share the folder in Syncthing and run
+    'mm init' on the other machines.
 
-    Second-device path (mm-crypto-init ok):
-        Single-prompt passphrase, derive master_key from the stored root_salt,
-        verify keycheck. On success, register device + save config + store
-        passphrase. On failure, nothing local is written.
-
-    Two-tier re-init guard (Group 2 pre-flight 3):
-        * Orphan case — mm-crypto-init ok + other occupancy: warn that
-          a new device entry gets created alongside existing devices;
-          require typer.confirm.
-        * BRICK case — mm-crypto-init missing + blobs/manifests exist:
-          re-bootstrap would generate a new root_salt and brick every
-          existing blob. Refuse by default; require exact typed "BRICK".
+    Running init again on a configured machine asks before it replaces this
+    device's entry.
     """
-    initflow.init()
+    if sys.stdin is None or getattr(sys.stdin, "closed", False):
+        _init_needs_terminal()
+    try:
+        passphrase = initflow.init(new_fleet=new_fleet)
+    except typer.Abort:
+        if core._stdin_is_terminal():
+            raise
+        _init_needs_terminal()
+        return
+    if passphrase is not None:
+        _attended_pull(
+            from_device=None,
+            source=None,
+            verbose=False,
+            dry_run=False,
+            conflict_mode="keep-both",
+            passphrase=passphrase,
+        )
 
 
 def _capture_notice(message: str) -> None:
@@ -2554,6 +2585,30 @@ def pull(
     1 stopped or any file failed to apply, 2 usage error,
     3 conflicts or failures predicted in fail mode.
     """
+    _attended_pull(
+        from_device=from_device,
+        source=source,
+        verbose=verbose,
+        dry_run=dry_run,
+        conflict_mode=conflict_mode,
+    )
+
+
+def _attended_pull(
+    *,
+    from_device: str | None,
+    source: str | None,
+    verbose: bool,
+    dry_run: bool,
+    conflict_mode: pullflow.ConflictMode,
+    passphrase: str | None = None,
+) -> None:
+    """The body of `mm pull`, shared with `mm init`'s join.
+
+    `passphrase` is the one init just verified: a keyring that failed to store
+    it (or holds a stale entry) must not fail the join's own pull. It is passed
+    as an argument, never through the environment.
+    """
     with _sync_outcome("pull", verbose=verbose, dry_run=dry_run):
         with (
             _attended_sync_run(
@@ -2575,7 +2630,8 @@ def pull(
                 config = core._get_config(read_only=False)
             refusal_suffix = core.DRY_RUN_REFUSAL if dry_run else ""
             run["stage"] = "authentication-error"
-            passphrase = core._get_passphrase_or_exit()
+            if passphrase is None:
+                passphrase = core._get_passphrase_or_exit()
             run["stage"] = "command-refused"
 
             try:
@@ -3044,7 +3100,7 @@ def _do_gc(
         # supply a trustworthy orphan list for a separate delete flow.
         if fetch.conflict_copies_only:
             core._error(
-                "cannot GC safely — this device's manifest is held only by iCloud "
+                "cannot GC safely — this device's manifest is held only by "
                 f"conflict copies (its main copy is missing or unreadable): {label}. "
                 "Run 'mm push' on this device to rewrite it, then retry GC."
                 + (core.DRY_RUN_REFUSAL if dry_run else "")

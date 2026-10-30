@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -15,6 +16,7 @@ permissions:
 
 jobs:
   ci:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -93,6 +95,7 @@ jobs:
           fi
 
   portable-linux:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Track 73A: the portable suite on Linux/Python 3.14, so later 2.0
     # Tracks cannot land macOS-only code unseen. No Keychain assertion
     # (that's the macOS job's); the live keyring test stays opt-in and
@@ -154,6 +157,7 @@ jobs:
           "
 
   secret-service-live:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     # Track 73A: the only real-D-Bus evidence before the 2.0 soak. Runs
     # tests/test_secret_service_live.py against a real gnome-keyring in
     # an Arch container (the supported Linux flavor). The test fails —

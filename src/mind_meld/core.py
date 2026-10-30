@@ -55,6 +55,7 @@ from mind_meld.devices import (
     _list_devices_impl,
 )
 from mind_meld.errors import (
+    KEY_HEADER_COPIES_URL,
     NEWER_STORAGE_URL,
     ConfigError,
     CryptoError,
@@ -276,13 +277,15 @@ def _init_crypto_session(
         raise CryptoError(_newer_format_message(fetch.newer_version))
     if fetch.status == "missing":
         raise CryptoError(
-            "crypto: mm-crypto-init not found at storage root. "
-            "Run 'mm init' to initialize this storage."
+            f"crypto: mm-crypto-init (the key header) not found in {backend.root}. "
+            "Wait for this folder to finish syncing; if the file never arrives, "
+            "restore it from another machine. Never reinitialize this storage."
         )
     if fetch.status == "corrupt":
         raise CryptoError(
-            "crypto: mm-crypto-init is corrupt. If another device still has a "
-            "valid copy in its local iCloud cache, wait for sync to reconcile. "
+            f"crypto: mm-crypto-init in {backend.root} is corrupt. Wait for this "
+            "folder to finish syncing; if it stays corrupt, restore a valid copy "
+            "from another machine and never reinitialize this storage. "
             f"For non-destructive recovery, see {NEWER_STORAGE_URL}."
         )
 
@@ -292,30 +295,54 @@ def _init_crypto_session(
     repair_note = ""
     if fetch.repair_plan is not None:
         counts = crypto.crypto_init_repair_counts(fetch)
-        replacement = "replace the canonical copy; " if counts["replace_canonical"] else ""
-        repair_note = (
-            "The next mm push, pull, autopull or autopush that verifies the passphrase "
-            f"will reconcile mm-crypto-init: {replacement}delete {counts['delete']} identical "
-            f"conflict copies; preserve {counts['preserve']} differing or unreadable copies. "
-            "This storage is shared by every Mac."
-        )
+        notes = []
+        if counts["delete"]:
+            copies = _count(
+                counts["delete"], "identical conflict copy", "identical conflict copies"
+            )
+            notes.append(
+                "The next mm push, pull, autopull or autopush that verifies the passphrase "
+                f"will remove {copies} of mm-crypto-init."
+            )
+        if counts["preserve"]:
+            canonical = fetch.repair_plan.canonical
+            if canonical is None or canonical.content_hash is None:
+                notes.append(
+                    "The main mm-crypto-init file is missing or unreadable; "
+                    "keep every key-header copy in place."
+                )
+            else:
+                differing = _count(
+                    counts["preserve"],
+                    "differing or unreadable copy",
+                    "differing or unreadable copies",
+                )
+                stay = "stays" if counts["preserve"] == 1 else "stay"
+                notes.append(f"{differing} {stay} in place; mm never moves or rewrites them.")
+        repair_note = " ".join(notes)
         if read_only and pending is not None:
-            pending.append(repair_note)
+            pointer = (
+                " Check this device with 'mm status'; to sort them out, "
+                f"see {KEY_HEADER_COPIES_URL}"
+                if counts["preserve"]
+                else ""
+            )
+            pending.append(repair_note + pointer)
 
     if local_fp and local_fp != storage_fp:
+        # The stop sentence and the pointer come first: _sync_failure cuts the
+        # reason at 384 characters, so pending-cleanup text goes last.
         raise CryptoError(
-            f"crypto: mm-crypto-init root_salt changed since this device was "
-            f"initialized (local fp={local_fp}, storage fp={storage_fp}). "
-            f"Another device may have bootstrapped storage concurrently. "
-            "Allow the fleet's mm-crypto-init copies to finish syncing, then inspect "
-            "with 'mm diag'. If the fingerprints still differ after syncing, stop; "
-            "do not reinitialize or re-key."
+            f"crypto: mm-crypto-init changed since this device was initialized "
+            f"(local fp={local_fp}, storage fp={storage_fp}). If the fleet's copies "
+            "are still syncing, wait. If the fingerprints still differ, stop: do not "
+            "reinitialize or re-key; 'mm status' explains the copies."
             + (
-                " Pending conflict cleanup does not resolve this device's fingerprint "
-                f"mismatch. {repair_note}"
+                f" Pending cleanup does not resolve this mismatch. {repair_note}"
                 if repair_note
                 else ""
             )
+            + f" See {KEY_HEADER_COPIES_URL}"
         )
 
     set_crypto_session(fetch.root_salt, fetch.argon2_memory_kb)

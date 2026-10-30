@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml/badge.svg)](https://github.com/kbitz/mind-meld/actions/workflows/ci.yml)
 
-Sync AI coding-agent context, skills, and gstack activity across Macs via iCloud Drive. End-to-end encrypted. Supports Claude Code, Codex, Muse, and Antigravity. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Muse discovers that directory, so it needs no link.
+Sync AI coding-agent context, skills, and gstack activity across your machines through one shared Syncthing folder. End-to-end encrypted. Supports Claude Code, Codex, Muse, and Antigravity. `mm` maintains a `retro-fleet` skill link only for hosts that do not discover `~/.claude/skills` (Claude Code, Codex, and Antigravity). Muse discovers that directory, so it needs no link.
 
 ## Install
 
-Prerequisites: macOS with iCloud Drive, Python 3.11+, and pipx.
+Prerequisites: Python 3.11+, pipx, and Syncthing sharing one folder between your machines.
 
 ```bash
 pipx install git+https://github.com/kbitz/mind-meld.git@latest
@@ -15,6 +15,23 @@ pipx install git+https://github.com/kbitz/mind-meld.git@latest
 Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the release workflow force-advances to each tagged release, so you always get the newest *released* version (never untagged work-in-progress off `main`) **and** plain `pipx upgrade` keeps working (see below).
 
 ## Upgrading
+
+**`mm init --new-fleet` and the new default storage path (Track 89A):** only
+`mm init --new-fleet` creates the fleet's key header (`mm-crypto-init`), and only
+in an empty folder; plain `mm init` joins, and when the header has not arrived
+it stops without writing anything, so a machine that joins before Syncthing
+has delivered the folder can no longer start a second fleet. On a join,
+`mm init` now also runs the first `mm pull` with the passphrase you just typed.
+The first machine of a brand-new fleet therefore needs `--new-fleet`; the
+typed `BRICK` override is gone. The default storage path is now
+`~/Sync/mind-meld`. It does not move an existing store or change a configured
+`storage.path`, and Macs still on iCloud Drive keep working. On such a Mac, `mm init` needs the
+iCloud path typed at the prompt. mm no longer rewrites the key header or
+moves a differing copy: repair now only removes `mm-crypto-init` conflict
+copies that are byte-identical to the main file. Differing copies stay
+where they are (see [Key header copies differ](#key-header-copies-differ)),
+and `mm diag` reports `pending_repair` as `delete` and `preserve` counts only
+(no `replace_canonical`). The iCloud auto-pin step is removed.
 
 **Machine-local gstack files and browser profiles (Track 94A):** any directory
 holding a regular, non-symlink `Local State` file, the marker Chromium and Electron write at the
@@ -280,13 +297,29 @@ command always exits 0 so it cannot stop the agent loop.
 
 ## Quick Start
 
+The storage path is the root of a Syncthing folder shared by every machine. A store already on iCloud Drive stays on that path: type it at the prompt instead of accepting `~/Sync/mind-meld`. One block per role:
+
 ```bash
-mm init    # configure iCloud storage + passphrase
+# First machine of a new fleet (empty folder):
+mm init --new-fleet   # creates the key header and .stignore, sets passphrase
 mm push --dry-run   # preview: changes nothing except the lock file
 mm push    # upload configured agent context
-mm pull --dry-run   # preview: changes nothing except the lock file
-mm pull    # download from another device
 ```
+
+```bash
+# Every other machine (after Syncthing has delivered the folder):
+mm init    # verifies the passphrase, registers this device, pulls
+mm push    # publishes this machine's own files
+```
+
+After setup, pull whenever you want changes from another machine:
+
+```bash
+mm pull --dry-run   # preview: changes nothing except the lock file
+mm pull    # download from another device, any time
+```
+
+Plain `mm init` stops and writes nothing until the key header (`mm-crypto-init`) has arrived in the folder. Wait for Syncthing to finish delivering it, then run `mm init` again.
 
 Config lives at `~/.config/mind-meld/config.toml` — not tied to your current directory. Install `mm` anywhere, run from anywhere; it always syncs the sources configured in your global config.
 
@@ -294,10 +327,12 @@ See [Status verdicts](#status-verdicts) to interpret `mm status` after your firs
 
 ## Setting up a second (or third) Mac
 
+A fleet already stored on iCloud Drive stays there. On the new Mac, type that existing iCloud path at the `mm init` prompt instead of accepting `~/Sync/mind-meld`.
+
 1. `pipx install git+https://github.com/kbitz/mind-meld.git@latest` on the new machine.
-2. `mm init` — point it at the **same iCloud folder** as your first Mac and enter the **same passphrase**. This registers the new device against the existing roster.
-3. `mm pull` — downloads everything the other machine(s) have pushed.
-4. `mm push` — uploads anything this machine has that the others don't.
+2. In Syncthing, accept the shared folder and let it finish. The storage path you give mm is the **root of that Syncthing folder**.
+3. `mm init` — point it at the folder and enter the **same passphrase**. It verifies the passphrase against the fleet's key header, registers the new device against the existing roster, and pulls. If the folder is still syncing, run `mm pull` again when delivery finishes.
+4. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
 
 Push and pull on each Mac to exchange changes according to each file's sync rules:
 
@@ -308,22 +343,6 @@ Push and pull on each Mac to exchange changes according to each file's sync rule
 After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then confirm one selected file you edited on A is present on B.
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
-
-## Fast pulls (auto-pin)
-
-`mm init` automatically pins your iCloud storage folder so blobs stay resident on this Mac. Without pinning, iCloud may evict cold blobs to save local disk and `mm pull` then blocks on iCloud File Provider materialization — fine over time, but slow on a fresh Mac's first sync.
-
-Auto-pin runs `brctl download <storage_path>` (Apple's iCloud File Provider CLI) once at init. It's non-destructive, idempotent, and asynchronous: brctl returns immediately while iCloud materializes files in the background. You'll see a `Storage pinned for fast pulls` line on success, or a Finder right-click tip if `brctl` errors.
-
-If you ever want to undo the pin (free up local disk):
-
-```bash
-brctl evict ~/Library/Mobile\ Documents/com~apple~CloudDocs/mind-meld
-```
-
-…or in Finder, right-click the folder and choose **Remove Download**.
-
-If your storage path is **not** under iCloud Drive (e.g. a custom local folder or a different cloud sync), auto-pin is silently skipped — the slow-pull case only applies to iCloud-managed paths.
 
 ## Claude Code Integration
 
@@ -417,7 +436,7 @@ Upgrade is per Mac, and **upgrading is not enough**. On each Mac, first run
 1. `mm enable-source agy`
 2. Run **`mm push`**. It needs enabled, resolved `mm-events` and host consent, but no Git roots or content changes. With `--verbose`, each cold reader may print scanning progress; scanning is cooperative, not a hard ceiling. Autopush never warms.
 3. Verify on the **producing Mac** with `mm status`: a recent recorded capture, Antigravity contributed (or explicitly partial), and `Publication: published`. A prior successful scan or `agy usage read blocker: none` describes only the cache.
-4. Optionally verify end to end from a **second Mac** after iCloud delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
+4. Optionally verify end to end from a **second Mac** after the shared folder delivers the files. Run `mm devices --format=json` to find the producing Mac's id and substitute it for `<id>`:
 
 ```sh
 mm pull
@@ -456,7 +475,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 |---------|-------------|
 | `mm --version` | Print the installed version and exit |
 | `mm update` | Update mm to the latest release through pipx. Needs no config or passphrase. Exit 0 means mm is on the latest release; exit 1 means the update did not complete, or `mm update` leaves this install alone (a source-tree build, a non-pipx install, a `pipx pin` or a fork; the message names the fix). `pull` and `push` do this on their own — see [Automatic updates](#automatic-updates) |
-| `mm init` | Configure device, storage path, passphrase |
+| `mm init` | Join the fleet: verify the passphrase against the key header in the storage folder, register this device, save config and pull. Stops and writes nothing until the key header has arrived |
+| `mm init --new-fleet` | First machine of a new fleet only: create the key header (`mm-crypto-init`) and `.stignore` in an empty folder |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
 | `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
@@ -670,7 +690,7 @@ Dropbox or Syncthing) load, GC refuses and says what to do. When only conflict c
 on this device rewrites the manifest even with no content change; then retry
 `mm gc`. Hooks (`mm autopush`, `mm autopull`) never run GC, and each Mac cleans
 only its own blobs, so run `mm gc` now and then on a Mac that syncs mostly
-through hooks; otherwise its superseded blobs accumulate in iCloud. Abandoned
+through hooks; otherwise its superseded blobs accumulate in the storage folder. Abandoned
 peers' blobs remain; 1.x has no retirement command. A lagging peer
 reading this device's prior manifest can still miss a blob this device has
 already collected; this repair does not solve every arrival order.
@@ -798,7 +818,7 @@ Existing installs see this as a `New source available: gstack-extend` hint on ne
 `config.toml` lives at `~/.config/mind-meld/` and is never synced — making it the natural home for per-device preferences. To turn off a source on one machine without affecting the others:
 
 ```bash
-mm disable-source gstack       # this Mac only; iCloud peers untouched
+mm disable-source gstack       # this machine only; other machines untouched
 mm enable-source gstack        # turn it back on
 ```
 
@@ -1206,12 +1226,50 @@ newer-format conflict copies; the shared crypto-init gate still applies to every
 crypto session.
 
 If this Mac is already on the latest release and no newer mm exists, the file
-may be damaged. Wait for iCloud to finish syncing and locate a known-valid
-crypto-init copy from another Mac or backup. Move the damaged copy aside to a
-backup outside the storage folder, then let `mm pull` verify and reconcile the
-valid copy. Keep the backup; never delete crypto-init or bootstrap a fresh salt
-over existing encrypted data. If no valid copy is available, stop and recover
-one before continuing.
+may be damaged. Wait for this folder to finish syncing and locate a known-valid
+crypto-init copy from another machine or backup. Back up every header outside
+the storage folder first. mm no longer moves or rewrites key-header copies:
+move the damaged canonical file into that backup, then copy the known-valid
+header to `<storage>/mm-crypto-init` without overwriting another file. If the
+valid header exists only under a conflict name, keep it in place until the
+canonical copy is restored. Run `mm pull` to verify the restored header. Keep the backup;
+never delete crypto-init or bootstrap a fresh salt over existing encrypted
+data. If no valid copy is available, stop and recover one before continuing.
+
+### Key header copies differ
+
+The key header is the file `mm-crypto-init` at the root of the storage folder.
+A second copy can appear next to it (a `.sync-conflict-` or numbered name from
+Syncthing, or a stray copy from an earlier version). mm never rewrites or moves
+a copy for you. After a successful passphrase check, a joining `mm init`, `push`,
+`pull`, `autopull` and `autopush` only remove conflict copies whose bytes equal
+the main file.
+Anything that differs stays in place, and `mm status` and `mm diag` count it
+(`pending_repair`) without printing names. A machine whose recorded
+fingerprint differs from the header it finds stops and says so; do not
+reinitialize or re-key.
+
+If the main file is missing or unreadable, the remaining copies may be the
+only usable key header. Keep them in place and follow the restoration steps
+above; a pending-copy count alone is not a reason to move a header.
+
+Only if a **fingerprint refusal** remains after syncing, work on a machine
+that previously worked. Back up every header outside the storage folder
+before changing anything, and keep at least one usable header in the folder:
+
+1. Let Syncthing finish, then move the extra copies out of the folder one at a
+   time into a backup directory **outside** it. Never delete one.
+2. After each move, run `mm status`. Stop moving files as soon as the
+   fingerprint refusal clears. If a move introduces a missing-header error,
+   restore that exact copy immediately.
+3. If no single copy clears it, restore the moved copies, stop and keep every copy.
+
+A device bound to the wrong header reruns `mm init` once the right header
+stands alone in the folder.
+
+If every copy is lost, the stored blobs cannot be decrypted. Machines keep
+their local files. The way forward is to retire that folder, run
+`mm init --new-fleet` on an empty one, and join the other machines to it.
 
 **On mm older than v0.14.5, `mm pull` died with `TypeError: '<' not supported between instances of 'str' and 'int'` (or `bool` / `list` / `dict`), or an unattended `mm autopull` reported an unexpected error and a later file never arrived.** A `.jsonl` file mixed a string `ts` with a non-string value. Current `mm` keeps every unique normalized line and continues the pull. On **each** Mac: confirm with `mm --version`, then `pipx upgrade mind-meld` and `mm pull`. If `pipx upgrade` leaves you on an old version, the install is pinned to a frozen tag — see [Upgrading](#upgrading). `mm devices` shows the version at last push, not a live probe of the installed binary; after a successful `mm push` it can corroborate the fleet. Numeric-only timestamps now sort as whole-line text rather than numbers; until every active Mac is upgraded, old and new clients can keep rewriting that order. `mm log --action merged --limit 20` can show repeated merges, but a merged outcome alone does not prove timestamp oscillation.
 
@@ -2027,9 +2085,13 @@ command -v security >/dev/null && security delete-generic-password -s mind-meld 
 command -v secret-tool >/dev/null && secret-tool clear service mind-meld username passphrase
 ```
 
-Your iCloud storage folder is untouched by all of the above. Delete it only when you are retiring the whole fleet — every other Mac pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
+Your storage folder is untouched by all of the above. That path is `storage.path` in `~/.config/mind-meld/config.toml` (`~/Sync/mind-meld` on a new install, or an existing folder such as one on iCloud Drive). Delete it only when you are retiring the whole fleet — every other machine pulls from it, and it holds the only copy of anything that machine hasn't pulled yet. The encrypted blobs are unreadable without the passphrase, so leaving it in place is safe.
 
 ## Development
+
+CI skips all three jobs on draft pull requests. Mark a pull request ready for
+review to start them; later pushes to that ready PR and pushes to `main` also
+run them. A skipped draft check is not validation.
 
 CI uses three jobs. `ci` runs on `macos-latest` with Python 3.13: the
 portable checks (`./bin/check --no-bootstrap`), a real-Keychain backend

@@ -10,8 +10,8 @@ Up to eight Tracks can run across separate workspaces; the host owns branch and 
 Python 3.11+, typer, cryptography, argon2-cffi, keyring, secretstorage (Linux), rich, packaging.
 
 ## Key Principles
-- No API server. The CLI talks directly to iCloud Drive through the local filesystem.
-- Single storage backend: `~/Library/Mobile Documents/com~apple~CloudDocs/mind-meld`.
+- No API server. The CLI reads and writes a shared folder through the local filesystem.
+- Single local-folder storage backend. New init defaults to `~/Sync/mind-meld`; existing configured paths, including iCloud Drive, remain unchanged.
 - **End-to-end encryption is mandatory.** All synced manifests, artifacts, and allowlisted context are encrypted client-side with AES-256-GCM before touching storage. No plaintext sync data may reach storage.
 - **Scoped sync.** Built-in sources are allowlisted. Session databases, credentials, and whole-file settings that may contain credentials stay local.
 - **Truth-based manifests.** Complete snapshots of local state propagate deletions automatically; there is no separate prune step.

@@ -32,11 +32,12 @@ from mind_meld.conflictmtime import _restore_mtime_best_effort
 from mind_meld.devices import DeviceInventory
 from mind_meld.errors import SnapshotChanged, SnapshotError, StorageError
 from mind_meld.initflow import (
-    _bootstrap_or_verify_crypto,
+    _bootstrap_new_fleet,
     _load_prior_device_metadata,
     _prompt_passphrase,
     _prompt_sources,
     _register_and_save,
+    _verify_join,
 )
 from mind_meld.manifest import _FileTooLarge, read_file_revision
 
@@ -2024,14 +2025,14 @@ class TestLoadPriorDeviceMetadata:
 
 
 class TestPromptPassphrase:
-    """_prompt_passphrase — double-prompt on first-device, single otherwise."""
+    """_prompt_passphrase — double-prompt for a new fleet, single for a join."""
 
     def test_first_device_match(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
 
         responses = iter(["pw123", "pw123"])
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
-        assert _prompt_passphrase(is_first_device=True) == "pw123"
+        assert _prompt_passphrase(new_fleet=True) == "pw123"
 
     def test_first_device_mismatch_exits(self, monkeypatch) -> None:
         import typer as _typer
@@ -2041,7 +2042,7 @@ class TestPromptPassphrase:
         responses = iter(["pw123", "pw456"])
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: next(responses))
         with pytest.raises(_typer.Exit):
-            _prompt_passphrase(is_first_device=True)
+            _prompt_passphrase(new_fleet=True)
 
     def test_first_device_empty_exits(self, monkeypatch) -> None:
         import typer as _typer
@@ -2050,7 +2051,7 @@ class TestPromptPassphrase:
 
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
         with pytest.raises(_typer.Exit):
-            _prompt_passphrase(is_first_device=True)
+            _prompt_passphrase(new_fleet=True)
 
     def test_second_device_single_prompt(self, monkeypatch) -> None:
         from mind_meld import cli as cli_module
@@ -2062,7 +2063,7 @@ class TestPromptPassphrase:
             return "pw-shared"
 
         monkeypatch.setattr(cli_module.typer, "prompt", counting_prompt)
-        assert _prompt_passphrase(is_first_device=False) == "pw-shared"
+        assert _prompt_passphrase(new_fleet=False) == "pw-shared"
         assert len(calls) == 1  # single prompt, no confirm
 
     def test_second_device_empty_exits(self, monkeypatch) -> None:
@@ -2072,7 +2073,7 @@ class TestPromptPassphrase:
 
         monkeypatch.setattr(cli_module.typer, "prompt", lambda *a, **kw: "")
         with pytest.raises(_typer.Exit):
-            _prompt_passphrase(is_first_device=False)
+            _prompt_passphrase(new_fleet=False)
 
 
 class TestPromptSources:
@@ -2512,68 +2513,61 @@ class TestEnsureDeviceRegistered:
         assert registered == [], "dry_run must not call register_device"
 
 
-class TestBootstrapOrVerifyCrypto:
-    """_bootstrap_or_verify_crypto — one spot check for the lost-race path.
+class TestBootstrapNewFleetAndVerifyJoin:
+    """`_verify_join` and `_bootstrap_new_fleet` — spot checks for the paths
+    that are hard to exercise via CliRunner.
 
-    The happy-path branches are covered end-to-end by TestInitFlow; here
-    we pin the lost-race path that's hard to exercise via CliRunner.
+    The happy-path branches are covered end-to-end by TestInitFlow; here we pin
+    the join's verify-then-repair order and that a lost bootstrap race refuses
+    instead of falling through to verify (Track 89A).
     """
 
-    def test_first_device_lost_race_falls_through_to_verify(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """bootstrap raises StorageError → fall through to retry_fetch +
-        verify_passphrase. Pins the rare lost-race branch."""
+    def test_join_verifies_then_repairs(self, monkeypatch) -> None:
         from mind_meld import initflow
         from mind_meld.crypto import CryptoInitFetch
 
-        # bootstrap raises (simulating race)
-        def raising_bootstrap(backend, pp, argon2_memory_kb):
-            raise StorageError("concurrent put")
-
-        # retry_fetch returns a valid winner
         winner_salt = b"\x00" * 16
         winner_keycheck = b"\x00" * 32
-
-        def fake_retry_fetch(backend, **kwargs):
-            return CryptoInitFetch(
-                status="ok",
-                root_salt=winner_salt,
-                argon2_memory_kb=1024,
-                keycheck_blob=winner_keycheck,
-            )
-
-        monkeypatch.setattr(initflow, "bootstrap_crypto_init", raising_bootstrap)
-        monkeypatch.setattr(initflow, "fetch_crypto_init", fake_retry_fetch)
+        fetched = CryptoInitFetch(
+            status="ok",
+            root_salt=winner_salt,
+            argon2_memory_kb=1024,
+            keycheck_blob=winner_keycheck,
+        )
         monkeypatch.setattr(initflow, "load_master_key", lambda *a, **kw: b"\x00" * 32)
         order = []
         monkeypatch.setattr(initflow, "verify_passphrase", lambda *a, **kw: order.append("verify"))
 
-        def repair(backend, fetched):
-            assert fetched.root_salt == winner_salt
+        def repair(backend, fetch):
+            assert fetch.root_salt == winner_salt
             order.append("repair")
 
         monkeypatch.setattr("mind_meld.crypto.apply_crypto_init_repair", repair)
         monkeypatch.setattr(initflow, "set_crypto_session", lambda *a, **kw: None)
 
-        # Seed fetch (not used on first-device path but required as param)
-        seed_fetch = CryptoInitFetch(status="missing")
-        rs, mk, kc = _bootstrap_or_verify_crypto(
-            backend=None, passphrase="pw", is_first_device=True, fetch=seed_fetch
-        )
+        rs, mk, kc = _verify_join(backend=None, passphrase="pw", fetch=fetched)
         assert order == ["verify", "repair"]
         assert rs == winner_salt
         assert mk == 1024
         assert kc == winner_keycheck
 
-    @pytest.mark.parametrize("status", ["missing", "corrupt"])
-    def test_first_device_lost_race_refuses_non_ok_winner(self, monkeypatch, status: str) -> None:
-        """A bootstrap loser must re-fetch and refuse a missing/corrupt winner."""
+    @pytest.mark.parametrize("winner", ["ok", "corrupt", "missing"])
+    def test_lost_race_refuses_and_never_verifies(
+        self, tmp_path: Path, monkeypatch, capsys, winner: str
+    ) -> None:
+        """A bootstrap loser refuses whatever the winner looks like: this machine was
+        not joining, so it never falls through to verify against the peer's header."""
         import typer
 
         from mind_meld import initflow
         from mind_meld.crypto import CryptoInitFetch
 
+        fetches = iter([CryptoInitFetch(status="missing")])
+
+        def fetch(_backend):
+            return next(fetches, CryptoInitFetch(status=winner))
+
+        monkeypatch.setattr(initflow, "fetch_crypto_init", fetch)
         monkeypatch.setattr(
             initflow,
             "bootstrap_crypto_init",
@@ -2581,17 +2575,20 @@ class TestBootstrapOrVerifyCrypto:
         )
         monkeypatch.setattr(
             initflow,
-            "fetch_crypto_init",
-            lambda _backend: CryptoInitFetch(status=status),
+            "verify_passphrase",
+            lambda *a, **kw: pytest.fail("a lost race verified against the peer's header"),
         )
-
+        folder = tmp_path / "storage"
         with pytest.raises(typer.Exit):
-            _bootstrap_or_verify_crypto(
-                backend=None,
-                passphrase="pw",
-                is_first_device=True,
-                fetch=CryptoInitFetch(status="missing"),
-            )
+            _bootstrap_new_fleet(backend=None, passphrase="pw", full_path=folder)
+        message = " ".join(capsys.readouterr().err.split())
+        if winner in {"ok", "corrupt"}:
+            assert "another machine's key header arrived" in message
+            assert "first, so none was created here" in message
+        else:
+            assert "could not create the key header" in message
+        # .stignore is written before the exclusive create; nothing else is.
+        assert sorted(p.name for p in folder.iterdir()) == [".stignore"]
 
 
 class TestDownloadAndApplyPathTraversalGuard:

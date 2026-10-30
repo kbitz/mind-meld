@@ -110,9 +110,8 @@ class TestNewerFormats66A:
             crypto.apply_crypto_init_repair(backend, fetched)
         assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
 
-    def test_newer_canonical_arriving_during_preserve_is_not_overwritten(
-        self, tmp_path, monkeypatch
-    ):
+    def test_newer_canonical_arriving_during_repair_is_not_touched(self, tmp_path, monkeypatch):
+        """A newer-format canonical landing after the gate keeps every copy and its bytes."""
         tmp_path = tmp_path / "storage"
         backend = LocalBackend(tmp_path)
 
@@ -126,24 +125,25 @@ class TestNewerFormats66A:
 
         canonical = tmp_path / CRYPTO_INIT_KEY
         backend.put(CRYPTO_INIT_KEY, init_bytes(b"\xff" * 16))
-        (tmp_path / "mm-crypto-init 2").write_bytes(init_bytes(b"\x00" * 16))
+        (tmp_path / "mm-crypto-init 2").write_bytes(init_bytes(b"\xff" * 16))
         fetched = fetch_crypto_init(backend)
-        assert fetched.repair_plan is not None and fetched.repair_plan.replace_canonical
-        original_put = backend.put
+        assert fetched.repair_plan is not None
+        real = backend.find_conflict_copies
+        calls = []
 
-        def put(key, data):
-            if str(key).startswith(f"{CRYPTO_INIT_KEY}.preserved-"):
+        def racing(key, *args, **kwargs):
+            found = real(key, *args, **kwargs)
+            calls.append(key)
+            if len(calls) == 2:
                 canonical.write_bytes(b"\x03")
-            return original_put(key, data)
+            return found
 
-        monkeypatch.setattr(backend, "put", put)
-        with pytest.raises(NewerFormatError, match="changed while the command ran"):
-            crypto.apply_crypto_init_repair(backend, fetched)
+        monkeypatch.setattr(backend, "find_conflict_copies", racing)
+        crypto.apply_crypto_init_repair(backend, fetched)
         assert canonical.read_bytes() == b"\x03"
+        assert (tmp_path / "mm-crypto-init 2").exists()
 
-    def test_current_canonical_arriving_during_preserve_is_not_overwritten(
-        self, tmp_path, monkeypatch
-    ):
+    def test_current_canonical_replaced_before_repair_changes_nothing(self, tmp_path, monkeypatch):
         tmp_path = tmp_path / "storage"
         backend = LocalBackend(tmp_path)
 
@@ -161,14 +161,10 @@ class TestNewerFormats66A:
         conflict.write_bytes(init_bytes(b"\x00" * 16))
         fetched = fetch_crypto_init(backend)
         replacement = init_bytes(b"\xaa" * 16)
-        original_put = backend.put
-
-        def put(key, data):
-            if str(key).startswith(f"{CRYPTO_INIT_KEY}.preserved-"):
-                canonical.write_bytes(replacement)
-            return original_put(key, data)
-
-        monkeypatch.setattr(backend, "put", put)
+        canonical.write_bytes(replacement)
+        monkeypatch.setattr(backend, "put", lambda *a: pytest.fail("repair wrote storage"))
+        # The winner lives only in the conflict copy, so the changed canonical
+        # is the winner-selection gate's concern, not a write.
         with pytest.raises(CryptoError, match="changed while the command ran"):
             crypto.apply_crypto_init_repair(backend, fetched)
         assert canonical.read_bytes() == replacement
@@ -560,7 +556,8 @@ class TestConflictConvergence:
     def test_conflict_copy_deterministic_winner(self, tmp_path):
         """Two mm-crypto-init blobs coexist (canonical + 'mm-crypto-init 2').
 
-        fetch_crypto_init must pick the lex-smallest root_salt and canonicalize.
+        fetch_crypto_init picks the lex-smallest root_salt. Repair rewrites
+        nothing: the winner lives only in the conflict copy, so that copy stays.
         """
         crypto.clear_crypto_session()
         backend = LocalBackend(tmp_path)
@@ -579,11 +576,10 @@ class TestConflictConvergence:
         verify_passphrase(master, fetch.keycheck_blob)
         crypto.apply_crypto_init_repair(backend, fetch)
 
-        # Canonical now holds the winner.
-        assert (tmp_path / CRYPTO_INIT_KEY).read_bytes()[5:21] == salt_lower
-        # Conflict copy was cleaned up.
-        assert not (tmp_path / f"{CRYPTO_INIT_KEY} 2").exists()
-        assert next(tmp_path.glob("mm-crypto-init.preserved-*")).read_bytes()[5:21] == salt_higher
+        # Canonical keeps its bytes; the copy holding the winner survives.
+        assert (tmp_path / CRYPTO_INIT_KEY).read_bytes()[5:21] == salt_higher
+        assert (tmp_path / f"{CRYPTO_INIT_KEY} 2").read_bytes()[5:21] == salt_lower
+        assert not list(tmp_path.glob("mm-crypto-init.preserved-*"))
 
     def test_syncthing_conflict_copy_is_a_candidate_and_can_win(self, tmp_path):
         """Track 87A: a Syncthing-named mm-crypto-init copy takes part in the winner
@@ -606,51 +602,45 @@ class TestConflictConvergence:
         ] == salt_higher  # a read repairs nothing
 
     def test_concurrent_canonical_replacement_retains_conflict_copies(self, tmp_path):
-        """Codex adversarial finding (PR #177): if a concurrent writer
-        replaces canonical again AFTER this process's own overwrite, the
-        conflict copy holding the verified winner must survive -- deleting
-        it would destroy the only remaining copy of that winner anywhere."""
+        """Codex adversarial finding (PR #177): if a concurrent writer replaces
+        canonical after the copies were compared with it, the identical copy may
+        be the only remaining copy of those bytes and must survive."""
         crypto.clear_crypto_session()
         backend = LocalBackend(tmp_path)
-        salt_higher = bytes([0xFF] * 16)  # canonical, loses
-        salt_lower = bytes([0x00] * 16)  # conflict copy, wins
+        salt_lower = bytes([0x00] * 16)
         salt_third = bytes([0x77] * 16)  # a concurrent racer's write
-        self._write_raw_init_blob(tmp_path / CRYPTO_INIT_KEY, 1024, salt_higher)
-        self._write_raw_init_blob(tmp_path / f"{CRYPTO_INIT_KEY} 2", 1024, salt_lower)
+        self._write_raw_init_blob(tmp_path / CRYPTO_INIT_KEY, 1024, salt_lower)
+        (tmp_path / f"{CRYPTO_INIT_KEY} 2").write_bytes((tmp_path / CRYPTO_INIT_KEY).read_bytes())
 
         fetch = fetch_crypto_init(backend)
-        assert fetch.root_salt == salt_lower
-        master = load_master_key(PASSPHRASE, fetch.root_salt, fetch.argon2_memory_kb)
-        verify_passphrase(master, fetch.keycheck_blob)
+        assert crypto.crypto_init_repair_counts(fetch) == {"delete": 1, "preserve": 0}
 
         racer_path = tmp_path / "racer.tmp"
         self._write_raw_init_blob(racer_path, 1024, salt_third)
         racer_raw = racer_path.read_bytes()
         racer_path.unlink()
 
-        real_put = backend.put
+        real_find = backend.find_conflict_copies
+        listings = []
 
-        def racing_put(key, data):
-            real_put(key, data)
-            if key == CRYPTO_INIT_KEY:
-                # Simulate another device's write landing immediately after
-                # ours -- e.g. iCloud delivering a concurrent repair.
-                real_put(key, racer_raw)
+        def racing_find(key, *args, **kwargs):
+            found = real_find(key, *args, **kwargs)
+            listings.append(key)
+            if len(listings) == 2:  # after planning, before the unlink pass
+                (tmp_path / CRYPTO_INIT_KEY).write_bytes(racer_raw)
+            return found
 
-        backend.put = racing_put
+        backend.find_conflict_copies = racing_find
+        backend.put = lambda *a: pytest.fail("repair wrote storage")
         crypto.apply_crypto_init_repair(backend, fetch)
 
-        # Canonical now holds the racer's value, not our winner.
         assert (tmp_path / CRYPTO_INIT_KEY).read_bytes()[5:21] == salt_third
-        # The conflict copy -- the only remaining place the verified winner
-        # lived -- must NOT have been deleted.
         assert (tmp_path / f"{CRYPTO_INIT_KEY} 2").exists()
         assert (tmp_path / f"{CRYPTO_INIT_KEY} 2").read_bytes()[5:21] == salt_lower
 
-    def test_counts_include_displaced_canonical_when_replaced(self, tmp_path):
-        """crypto_init_repair_counts must count a displaced (losing) canonical
-        under 'preserve', not silently drop it. Every existing convergence
-        test seeds canonical as the winner, so this branch was untested."""
+    def test_counts_exclude_the_canonical_and_never_replace_it(self, tmp_path):
+        """crypto_init_repair_counts has no replace_canonical key and counts only
+        conflict copies: a losing canonical is not a copy to delete or preserve."""
         crypto.clear_crypto_session()
         backend = LocalBackend(tmp_path)
         salt_higher = bytes([0xFF] * 16)
@@ -661,9 +651,9 @@ class TestConflictConvergence:
 
         fetch = fetch_crypto_init(backend)
         counts = crypto.crypto_init_repair_counts(fetch)
-        assert counts["replace_canonical"] is True
-        assert counts["delete"] == 1  # the winning conflict copy itself
-        assert counts["preserve"] == 1  # the displaced canonical
+        assert counts == {"delete": 0, "preserve": 1}
+        assert "replace_canonical" not in counts
+        assert not hasattr(fetch.repair_plan, "replace_canonical")
 
     def test_all_copies_corrupt_returns_corrupt(self, tmp_path):
         """Canonical and conflicts both present but all unparseable → corrupt.
@@ -917,9 +907,9 @@ class TestCryptoInitRepairPreview56A:
             preview = fetch_crypto_init(backend)
         assert preview.status == "ok"
         assert preview.root_salt == b"\x00" * 16
-        assert preview.repair_plan.replace_canonical == (canonical != "winner")
+        # A copy is removable only when it equals a readable canonical.
         assert {c.name: c.disposition for c in preview.repair_plan.copies} == {
-            copy.name: "delete",
+            copy.name: "delete" if canonical == "winner" else "preserve",
             unreadable.name: "preserve",
         }
         unreadable_plan = next(c for c in preview.repair_plan.copies if c.name == unreadable.name)
@@ -929,7 +919,7 @@ class TestCryptoInitRepairPreview56A:
         } == before
 
         crypto.apply_crypto_init_repair(backend, preview)
-        assert not copy.exists()
+        assert copy.exists() == (canonical != "winner")
         # Unreadable at planning time means no digest authorizes its removal.
         assert unreadable.exists()
 
@@ -959,31 +949,20 @@ class TestVerifiedRepair60A:
         writer(distinct, MEMORY_KB, b"\xff" * 16)
         return backend, canonical, same, distinct
 
-    def test_repair_preserves_distinct_lineage_and_durable_canonical(self, tmp_path, monkeypatch):
-        from mind_meld import fsutil
-
+    def test_repair_removes_only_identical_copies_and_writes_nothing(self, tmp_path, monkeypatch):
         backend, canonical, same, distinct = self._seed(tmp_path)
         winner = canonical.read_bytes()
         other = distinct.read_bytes()
-        synced = []
-        real_fsync = fsutil._fsync_fd
-
-        def fsync(fd):
-            synced.append(True)
-            assert same.exists() and distinct.exists()
-            real_fsync(fd)
-
-        monkeypatch.setattr(fsutil, "_fsync_fd", fsync)
+        monkeypatch.setattr(backend, "put", lambda *a: pytest.fail("repair wrote storage"))
+        monkeypatch.setattr(backend, "put_exclusive", lambda *a: pytest.fail("repair wrote"))
         fetch = fetch_crypto_init(backend)
         assert fetch.repair_plan.winner_bytes == winner
         crypto.apply_crypto_init_repair(backend, fetch)
-        assert len(synced) >= 4  # file and directory for canonical and preserved copy
         assert canonical.read_bytes() == winner
-        assert not same.exists() and not distinct.exists()
-        preserved = list(tmp_path.glob("mm-crypto-init.preserved-*"))
-        assert [p.read_bytes() for p in preserved] == [other]
-        assert len(preserved[0].name.split(".preserved-", 1)[1].split("-", 1)[0]) == 8
-        assert backend.find_conflict_copies(CRYPTO_INIT_KEY) == []
+        assert not same.exists()
+        assert distinct.read_bytes() == other
+        assert not list(tmp_path.glob("mm-crypto-init.preserved-*"))
+        assert backend.find_conflict_copies(CRYPTO_INIT_KEY) == [distinct]
 
     @pytest.mark.parametrize("change", ["replacement", "new"])
     def test_late_copies_are_left_alone(self, tmp_path, change):
@@ -994,10 +973,10 @@ class TestVerifiedRepair60A:
         path.write_bytes(replacement)
         crypto.apply_crypto_init_repair(backend, fetch)
         assert path.read_bytes() == replacement
-        assert not distinct.exists()
+        assert distinct.exists()
 
     @pytest.mark.parametrize("field", ["memory", "keycheck"])
-    def test_same_salt_different_bytes_are_preserved(self, tmp_path, field):
+    def test_same_salt_different_bytes_are_kept_in_place(self, tmp_path, field):
         backend, canonical, same, distinct = self._seed(tmp_path)
         raw = canonical.read_bytes()
         if field == "memory":
@@ -1006,27 +985,74 @@ class TestVerifiedRepair60A:
             raw = raw[:-1] + bytes([raw[-1] ^ 1])
         distinct.write_bytes(raw)
         crypto.apply_crypto_init_repair(backend, fetch_crypto_init(backend))
-        assert not same.exists() and not distinct.exists()
-        assert [p.read_bytes() for p in tmp_path.glob("mm-crypto-init.preserved-*")] == [raw]
+        assert not same.exists()
+        assert distinct.read_bytes() == raw
+        assert not list(tmp_path.glob("mm-crypto-init.preserved-*"))
 
-    @pytest.mark.parametrize("failure_at", [1, 2, 3, 4])
-    def test_fsync_failure_leaves_every_candidate(self, tmp_path, monkeypatch, failure_at):
-        from mind_meld import fsutil
-
+    def test_unlink_failure_leaves_the_copy_and_reports_it(self, tmp_path, monkeypatch):
         backend, canonical, same, distinct = self._seed(tmp_path)
-        candidates = {p: p.read_bytes() for p in (canonical, same, distinct)}
-        count = 0
+        fetch = fetch_crypto_init(backend)
 
-        def fsync(fd):
-            nonlocal count
-            count += 1
-            if count == failure_at:
-                raise OSError("fsync denied")
+        def deny(self, *args, **kwargs):
+            raise PermissionError("unlink denied")
 
-        monkeypatch.setattr(fsutil, "_fsync_fd", fsync)
-        with pytest.raises(StorageError, match="fsync"):
-            crypto.apply_crypto_init_repair(backend, fetch_crypto_init(backend))
-        assert {p: p.read_bytes() for p in candidates} == candidates
+        monkeypatch.setattr(Path, "unlink", deny)
+        with pytest.raises(CryptoError, match="could not finish mm-crypto-init reconciliation"):
+            crypto.apply_crypto_init_repair(backend, fetch)
+        assert same.exists() and distinct.exists() and canonical.exists()
+
+    @pytest.mark.parametrize("canonical_state", ["missing", "unreadable", "winner", "loser"])
+    def test_cleanup_state_matrix(self, tmp_path, monkeypatch, canonical_state):
+        """counts["delete"] is exactly the number of files a repair removes."""
+        backend = LocalBackend(tmp_path)
+        writer = TestConflictConvergence()._write_raw_init_blob
+        canonical = tmp_path / CRYPTO_INIT_KEY
+        winner = tmp_path / "mm-crypto-init 2"
+        writer(winner, MEMORY_KB, b"\x00" * 16)
+        twin = tmp_path / "mm-crypto-init 3"
+        twin.write_bytes(winner.read_bytes())
+        if canonical_state == "winner":
+            canonical.write_bytes(winner.read_bytes())
+        elif canonical_state in ("loser", "unreadable"):
+            writer(canonical, MEMORY_KB, b"\xff" * 16)
+        if canonical_state == "unreadable":
+            real = crypto._read_regular_nofollow
+            monkeypatch.setattr(
+                crypto, "_read_regular_nofollow", lambda p: None if p == canonical else real(p)
+            )
+        fetch = fetch_crypto_init(backend)
+        expected = 2 if canonical_state == "winner" else 0
+        counts = crypto.crypto_init_repair_counts(fetch)
+        assert counts["delete"] == expected
+        names = {p.name for p in tmp_path.iterdir()}
+        crypto.apply_crypto_init_repair(backend, fetch)
+        removed = names - {p.name for p in tmp_path.iterdir()}
+        assert len(removed) == counts["delete"]
+        # The winner's bytes are never left without a surviving copy.
+        assert any(p.read_bytes() == fetch.winner_bytes for p in tmp_path.iterdir() if p.is_file())
+
+    def test_identical_copies_of_a_loser_canonical_keep_both(self, tmp_path):
+        """Canonical A with copies B and B: neither equals canonical, so both stay."""
+        backend = LocalBackend(tmp_path)
+        writer = TestConflictConvergence()._write_raw_init_blob
+        writer(tmp_path / CRYPTO_INIT_KEY, MEMORY_KB, b"\xff" * 16)
+        writer(tmp_path / "mm-crypto-init 2", MEMORY_KB, b"\x00" * 16)
+        (tmp_path / "mm-crypto-init 3").write_bytes((tmp_path / "mm-crypto-init 2").read_bytes())
+        fetch = fetch_crypto_init(backend)
+        assert crypto.crypto_init_repair_counts(fetch) == {"delete": 0, "preserve": 2}
+        crypto.apply_crypto_init_repair(backend, fetch)
+        assert (tmp_path / "mm-crypto-init 2").exists() and (tmp_path / "mm-crypto-init 3").exists()
+
+    def test_missing_canonical_with_two_identical_copies_removes_nothing(self, tmp_path):
+        backend = LocalBackend(tmp_path)
+        writer = TestConflictConvergence()._write_raw_init_blob
+        writer(tmp_path / "mm-crypto-init 2", MEMORY_KB, b"\x00" * 16)
+        (tmp_path / "mm-crypto-init 3").write_bytes((tmp_path / "mm-crypto-init 2").read_bytes())
+        fetch = fetch_crypto_init(backend)
+        assert fetch.status == "ok" and fetch.repair_plan.canonical is None
+        crypto.apply_crypto_init_repair(backend, fetch)
+        assert (tmp_path / "mm-crypto-init 2").exists() and (tmp_path / "mm-crypto-init 3").exists()
+        assert not (tmp_path / CRYPTO_INIT_KEY).exists()
 
     def test_winner_bytes_change_aborts_even_without_a_pending_repair(self, tmp_path, monkeypatch):
         backend, canonical, same, distinct = self._seed(tmp_path)
@@ -1074,7 +1100,7 @@ class TestVerifiedRepair60A:
             for p in tmp_path.glob("mm-crypto-init.preserved-*")
         )
 
-    def test_symlink_canonical_aborts_repair_without_copying_target(self, tmp_path):
+    def test_symlink_canonical_removes_nothing_and_copies_nothing(self, tmp_path):
         backend, canonical, same, distinct = self._seed(tmp_path)
         secret = tmp_path.parent / (tmp_path.name + "-secret")
         secret.write_bytes(b"credential-bytes")
@@ -1082,16 +1108,15 @@ class TestVerifiedRepair60A:
         canonical.symlink_to(secret)
         fetch = fetch_crypto_init(backend)
         assert fetch.status == "ok"
-        with pytest.raises(CryptoError, match="cannot preserve unreadable canonical"):
-            crypto.apply_crypto_init_repair(backend, fetch)
-        assert canonical.is_symlink()
+        crypto.apply_crypto_init_repair(backend, fetch)
+        assert canonical.is_symlink() and same.exists() and distinct.exists()
         assert secret.read_bytes() == b"credential-bytes"
         assert not any(
             p.read_bytes() == b"credential-bytes"
             for p in tmp_path.glob("mm-crypto-init.preserved-*")
         )
 
-    def test_unreadable_canonical_aborts_repair_without_writes(self, tmp_path, monkeypatch):
+    def test_canonical_turning_unreadable_after_planning_aborts(self, tmp_path, monkeypatch):
         backend, canonical, same, distinct = self._seed(tmp_path)
         before = {p: p.read_bytes() for p in (canonical, same, distinct)}
         fetch = fetch_crypto_init(backend)
@@ -1103,7 +1128,7 @@ class TestVerifiedRepair60A:
             return real(path)
 
         monkeypatch.setattr(crypto, "_read_regular_nofollow", boom)
-        with pytest.raises(CryptoError, match="cannot preserve unreadable canonical"):
+        with pytest.raises(CryptoError, match="changed while the command ran"):
             crypto.apply_crypto_init_repair(backend, fetch)
         assert {p: p.read_bytes() for p in before} == before
 
@@ -1130,10 +1155,7 @@ def test_crypto_repair_has_one_mutating_owner():
             while owner is not None and not isinstance(owner, ast.FunctionDef):
                 owner = parents.get(owner)
             owners.add((path.name, owner.name))
-    assert owners == {
-        ("crypto.py", "apply_crypto_init_repair"),
-        ("crypto.py", "bootstrap_crypto_init"),
-    }
+    assert owners == {("crypto.py", "bootstrap_crypto_init")}
 
 
 # ── non-interactive keyring read (Track 73A) ─────────────────────────

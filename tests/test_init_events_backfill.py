@@ -413,7 +413,7 @@ class TestInitWiring:
         storage = tmp_path / "icloud"
         # storage path, device name, passphrase x2, claude=Y, all other sources=n
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
         assert len(calls) == 1, "init must call _run_events_backfill exactly once"
@@ -450,7 +450,7 @@ class TestInitWiring:
 
         storage = tmp_path / "icloud"
         stdin = f"{storage}\nMac A\npw123\npw123\n"
-        result = CliRunner().invoke(app, ["init"], input=stdin)
+        result = CliRunner().invoke(app, ["init", "--new-fleet"], input=stdin)
 
         assert result.exit_code == 0, result.output
         assert received == [frozenset({"claude"})]
@@ -478,7 +478,7 @@ class TestInitWiring:
 
         storage = tmp_path / "icloud"
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
 
         assert result.exit_code == 0, result.output
         assert backfill_calls, "init must continue to the events backfill"
@@ -540,7 +540,7 @@ class TestEventsDirIsolation:
 
         storage = tmp_path / "icloud"
         stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
-        result = runner.invoke(app, ["init"], input=stdin)
+        result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
         after = set(real_dir.glob("*.jsonl")) if real_dir.is_dir() else set()

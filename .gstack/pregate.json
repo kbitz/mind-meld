@@ -1,6 +1,7 @@
 {
   "runner": "./bin/check --tests {files}",
   "dependencies": {
+    "tests/test_init_auto_pin.py": [],
     ".gstack/secret-dispositions.json": [],
     ".github/workflows/ci.yml": [
       "tests/test_docs_routing.py"

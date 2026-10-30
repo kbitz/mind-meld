@@ -266,6 +266,47 @@ class TestPutExclusive:
         entries = sorted(p.name for p in parent.iterdir())
         assert entries == ["mm-crypto-init"]
 
+    @pytest.mark.parametrize("failing", ["write", "fsync"])
+    def test_put_exclusive_removes_its_temp_when_write_or_fsync_fails(
+        self, backend, tmp_path, monkeypatch, failing
+    ):
+        import os
+
+        parent = tmp_path / "storage"
+
+        def fail(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        # Scoped to the failing call: monkeypatch.undo() would also strip conftest's
+        # autouse isolation fixtures for the rest of the test.
+        with monkeypatch.context() as patch:
+            patch.setattr(os, failing if failing == "fsync" else "write", fail)
+            with pytest.raises(OSError):
+                backend.put_exclusive("mm-crypto-init", b"data")
+        assert sorted(p.name for p in parent.iterdir()) == []
+        # The failure left nothing behind, so a retry succeeds.
+        backend.put_exclusive("mm-crypto-init", b"data")
+        assert sorted(p.name for p in parent.iterdir()) == ["mm-crypto-init"]
+        assert backend.get("mm-crypto-init") == b"data"
+
+    def test_put_exclusive_failed_cleanup_leaves_the_temp_for_the_next_refusal(
+        self, backend, tmp_path, monkeypatch
+    ):
+        import os
+
+        def fail_write(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        def fail_unlink(*args, **kwargs):
+            raise OSError(1, "Operation not permitted")
+
+        monkeypatch.setattr(os, "write", fail_write)
+        monkeypatch.setattr(os, "unlink", fail_unlink)
+        with pytest.raises(OSError, match="No space"):
+            backend.put_exclusive("mm-crypto-init", b"data")
+        leftovers = [p.name for p in (tmp_path / "storage").iterdir()]
+        assert len(leftovers) == 1 and leftovers[0].endswith(".tmp")
+
 
 class TestExtensionlessConflictRegex:
     """iCloud conflict detection for files without an extension (e.g. mm-crypto-init).
