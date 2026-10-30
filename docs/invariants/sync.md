@@ -20,7 +20,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/initflow.py` — `_register_and_save` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
@@ -451,21 +451,59 @@ names recurring in 3+ projects: 13 dirs, 12 files). The default list in
 `config._GSTACK_INCLUDE_PATTERNS` therefore names readers instead:
 `/context-restore` (checkpoints + checkpoint-pointers), plan/design resume
 (ceo-plans, plans, designs, specs), factory handoffs (briefs, cards,
-handoffs, `driver-handoff*.md`, `manager-*.json`), land-and-deploy
-(deploy-reports), pair-review top-level prose, and the loose ledgers
-(learnings/decisions search, timeline + context recovery, question
-log/preferences/events, taste profile, `*-reviews.jsonl` /
-`*-evidence.jsonl` reused cross-machine by wtree fingerprint, test plans
-`/ship` reads, autoplan plan/restore artifacts). `analytics/**`, `retros/**`
-and the `include_files` literals keep non-`projects/` content unchanged.
-Result on the measured Mac: 3,375 files / 40 MB inside `projects/`.
-New skill output stays local until an entry is added — fail-closed is the
-point; admission requires naming the cross-machine reader.
+handoffs, the timestamped `driver-handoff-*.md` archives), land-and-deploy
+(deploy-reports), pair-review's `deploy.md`, `report.md` and
+`parked-bugs.md`, and the loose ledgers (learnings/decisions search,
+timeline + context recovery, question log/preferences/events, taste
+profile, `*-reviews.jsonl` reused cross-machine by wtree fingerprint, test
+plans `/ship` reads, autoplan plan/restore artifacts). The ten artifact
+directories (checkpoints, checkpoint-pointers, ceo-plans, plans, designs,
+specs, briefs, cards, handoffs, deploy-reports) admit document types only:
+`projects/*/<dir>/**/*.<ext>` for md, txt, html, css, json, jsonl, png, jpg,
+jpeg, gif, svg, webp, pdf, patch and diff, matched case-sensitively.
+`analytics/**`, `retros/**` and the `include_files` literals keep
+non-`projects/` content unchanged. Result on the measured Mac with the
+original list: 3,375 files / 40 MB inside `projects/`. New skill output
+stays local until an entry is added — fail-closed is the point; admission
+requires naming the cross-machine reader. `matches_include_patterns`
+compiles the whole list into one cached alternation, so a 184-entry list
+costs the walker about what the original 44 did per path.
+
+### Removed 2026-10-29 (Track 94A, owner decisions)
+
+Five readers above were machine-local state, not cross-machine readers, and
+left the allowlist. Narrowing writes no tombstones and deletes nothing on any
+Mac (mechanics below). Browser profiles under any of these paths are also
+skipped by marker (see "Browser profiles (Track 94A)").
+
+- `projects/*/manager-*.json`: mmm-factory manager live state, with agent IDs
+  and status/watch files rewritten every poll (gstack sync audit 2026-10-29).
+  Factory handover moves to the opt-in `mmm` source (docs/SPEC.md "Factory
+  handover").
+- `projects/*/*-evidence.jsonl`: gstack-evidence documents itself as
+  "MACHINE-LOCAL by design" (`bin/gstack-evidence`). `*-reviews.jsonl` stays.
+- the live `projects/*/driver-handoff.md`: the timestamped
+  `driver-handoff-*.md` archives stay.
+- pair-review top-level files other than `deploy.md`, `report.md` and
+  `parked-bugs.md`: the `session.from-*` copies `resolveflow.py` writes and
+  stray scripts.
+- non-document files in the ten artifact directories (`.sh`, `.cjs`,
+  `.stderr`, `.yaml` and similar): per-run scripts and output, e.g. 53 `.sh`
+  and 43 `.stderr` files under `plans/` on the measured Mac.
+
+Kept by the same decision: `question-log.jsonl`, `question-events.jsonl`,
+`question-preferences.json`, `taste-profile.json` and `analytics/**` still
+sync, although upstream gstack keeps them machine-local
+(`bin/gstack-artifacts-init`). Hazard: `analytics/skill-usage.jsonl`
+set-union merges across Macs, while gstack-telemetry-sync's per-Mac cursor
+`analytics/.last-sync-line` (excluded per Mac) counts lines of that file, so
+peer lines merged into it shift what the cursor points at and telemetry can
+re-send or skip lines.
 
 Review resume survives de-scoping `review-and-prep/` and `ship-and-land/` by
 design: both skills keep their durable handoff in the PR receipt and state
 that a machine-local path is not portable evidence; the synced
-`*-evidence.jsonl` / `*-reviews.jsonl` ledgers carry completed-review reuse.
+`*-reviews.jsonl` ledgers carry completed-review reuse.
 This supersedes [Bulk generator output](#bulk-generator-output) Decision 6's
 retention of `compact-snapshots/` / `ranking-summaries/` receipts (owner
 decision 2026-10-22): those trees are out with the rest of review-prep.
@@ -487,9 +525,14 @@ fresh-pull-from-fat-peer, widen) plus matcher/walker tests in
 `tests/test_manifest.py`.
 
 **Migration UX mirrors recommended excludes.** `_compute_recommended_includes_diff`
-fires only when the key is absent (a present list, even empty, is the user's
-choice; deleting the key re-prompts) and proposes the default wholesale —
-unlike excludes there is no per-glob merge. The signal unions into
+fires when the key is absent, or when the present list equals as a set a
+previous default frozen in `config.RETIRED_DEFAULT_INCLUDE_PATTERNS` (Track
+94A: the v1.11.6 list). Any other present list, even empty, is the user's
+choice; deleting the key re-prompts. It proposes the default wholesale —
+unlike excludes there is no per-glob merge — and `mm migrate-config` shows a
+replaced list as `(previous default list)` with only the removed and added
+entries. Exclude patterns are left alone, so a local
+`projects/*/chrome-profile/*` stopgap stays until the owner deletes it. The signal unions into
 `_config_missing_recommended_excludes`, so status breadcrumbs, auto-command
 breadcrumbs and the attended prompt all fire unchanged, and
 `_migrate_config_core` applies both halves in one config write. Own store
@@ -616,9 +659,18 @@ The four v0.12.51 additions, each with the observed conflict count:
 
 **Detection is by name AND by marker (v0.14.0, Track 47A).** gstack-extend drops a `.extend-root` file in each dir it renders. `manifest.marker_skip_globs` returns those directories as **path prefixes, not fnmatch globs** — `_under_skip_prefix` matches `rel_path == prefix` or `rel_path.startswith(prefix + "/")`. A `{rel_dir}/*` glob would be wrong twice over: fnmatch `*` crosses `/`, and a directory literally named `*` carrying a marker would exclude every sibling subtree. `walk_generic_source` and `core._build_exclude_map` both thread the prefixes alongside `exclude_patterns` so `_filter_excluded_paths` strips them from prior/peer manifests too. A marker skip must not generate deletion tombstones, exactly as adding a glob must not. The name-based `_GENERATED_HOST_SKILL_GLOBS` stay as belt-and-braces for dirs that lost their marker; a new gstack-extend skill no longer needs a new glob to drop out of sync.
 
+**Browser profiles (Track 94A).** A directory holding a regular, non-symlink `Local State` file (`manifest.BROWSER_PROFILE_MARKER`, written by Chromium and Electron at the root of a user-data directory) is skipped in every generic source, the same way as an `.extend-root` directory: `marker_skip_globs` returns it as a path **prefix**, never a glob, and no folder name is hard-coded (`chrome-profile`, `signed-profile` and `.dev/user-data` all occur). Differences from `.extend-root`:
+
+- No include-root exemption. A `Local State` on an include root returns that include as its prefix; `.extend-root` there still marks nothing.
+- `_collect_marker_files` looks `Local State` up by name before stat-ing any sibling and returns without descending. A live profile churns, and a strict scan refuses on an entry that vanishes mid-scan, so profile internals are never enumerated or stat-ed.
+- No tombstones: `core._build_exclude_map` feeds the same prefixes to `_filter_excluded_paths`, so the first push after the marker appears drops the profile from the manifest without a deletion record.
+- A peer's `Local State` is applied, not dropped as a peer-planted `.extend-root` is (`_filter_excluded_paths._conflict_shaped` is unchanged): an un-upgraded peer honestly publishes it, and dropping it would let the rest of that profile land here without the marker and be republished. Applied, the local marker stops the republication. The cost is that a peer can plant one and narrow a subtree: lost propagation, nothing deleted.
+
+Transition residual: until every Mac runs this release, an un-upgraded peer keeps publishing profile files, and a migrated Mac without that profile can receive them on pull (document types under artifact directories, or everything when the config has no allowlist). Narrowing deletes nothing, so synced copies stay until removed by hand (README "Upgrading"); deleting a copy before that Mac's post-upgrade push mints tombstones, and an un-upgraded peer applies them into the 30-day recoverable store. A non-browser directory holding a file named `Local State` drops out of sync silently, which loses propagation but deletes nothing.
+
 The remaining over-exclusion: `roadmap`, `full-review`, `test-plan`, `pair-review`, and `review-apparatus` are **generic names**, and unlike `skills/gstack-*` they carry no distinguishing prefix. A user who hand-authors `~/.codex/skills/roadmap/SKILL.md` on a machine without gstack-extend (and without an `.extend-root` marker) still gets it **silently dropped from sync** by the name glob. Nothing is deleted (exclusion only narrows the manifest), so this is lost propagation rather than lost data, but the user is not told.
 
-**What is deliberately NOT excluded.** `~/.gstack/projects/*/pair-review/` prose artifacts (`deploy.md`, `report.md`, `parked-bugs.md`) stay in scope: pair-review advertises cross-machine resume as a feature. `projects/*/pair-review/session.yaml` IS excluded (v0.14.0) — it is a live per-machine state machine and definitionally cannot be shared. The measurement behind leaving the prose in: the same paths took **31 conflicts against 178 mtime-skips**, so the existing local-is-newer gate already absorbs 85% of these collisions. The fuller fix is device-scoped artifact paths (`pair-review/<device>/`) in gstack, not a blanket mm exclusion.
+**What is deliberately NOT excluded.** `~/.gstack/projects/*/pair-review/` prose artifacts (`deploy.md`, `report.md`, `parked-bugs.md`) stay in scope: pair-review advertises cross-machine resume as a feature. Since Track 94A the allowlist admits exactly those three pair-review files and nothing else at that level. `projects/*/pair-review/session.yaml` IS excluded (v0.14.0) — it is a live per-machine state machine and definitionally cannot be shared. The measurement behind leaving the prose in: the same paths took **31 conflicts against 178 mtime-skips**, so the existing local-is-newer gate already absorbs 85% of these collisions. The fuller fix is device-scoped artifact paths (`pair-review/<device>/`) in gstack, not a blanket mm exclusion.
 
 ### Bulk generator output
 

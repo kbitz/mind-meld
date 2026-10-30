@@ -16,6 +16,33 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Machine-local gstack files and browser profiles (Track 94A):** any directory
+holding a `Local State` file, the marker Chromium and Electron write at the
+root of a browser user-data directory, is now skipped in every generic source.
+No folder name is hard-coded: `chrome-profile`, `signed-profile` and
+`.dev/user-data` all qualify. The default gstack `include_patterns` also
+narrowed. `manager-*.json`, `*-evidence.jsonl` and the live `driver-handoff.md`
+no longer sync (the timestamped `driver-handoff-*.md` archives still do),
+`pair-review/` admits only `deploy.md`, `report.md` and `parked-bugs.md`, and
+the ten artifact directories admit document file types only. On a Mac whose
+config pins the previous default list, `mm migrate-config` offers the
+narrowed list, showing only the entries that change; then run `mm push`.
+
+The generic rule replaces a local `projects/*/chrome-profile/*` stopgap
+exclude, which you can delete from `config.toml`. It is not a recommended
+glob, so deleting it brings back no prompt. Narrowing deletes nothing on any
+Mac: no tombstones are written, every Mac keeps its copies, and own store
+space is reclaimed by an attended push's GC or `mm gc`. To remove profile
+copies that already synced:
+
+1. Wait until every Mac runs this release and has pushed once.
+2. On each Mac, list the profile directories with
+   `find ~/.gstack/projects -name 'Local State' -type f`.
+3. Delete each listed directory that is a synced copy rather than a profile a
+   tool still uses.
+4. mm skips these directories, so each deletion stays on that Mac. Repeat on
+   every Mac.
+
 **Undelivered content is waiting, not failed (Track 87A):** on a Syncthing
 folder a manifest can arrive before its blobs, or a file can be replaced while
 mm reads it. A blob that has not been delivered yet used to count as a failed
@@ -684,7 +711,7 @@ If `~/.gstack` is detected during `mm init`, it is automatically added as a sync
 
 - `include_dirs`: `projects/`, `analytics/`, `retros/`
 - `include_files`: `retro-context.md`, `greptile-history.md`, `.completeness-intro-seen`, `.telemetry-prompted`, `.proactive-prompted`, `.welcome-seen`, `.codex-desc-healed`
-- `include_patterns` (segment-aware: `*` stays within one directory segment, `**` crosses): everything under `analytics/` and `retros/`, the `include_files` above, and inside each `projects/<slug>/` the `checkpoints/`, `checkpoint-pointers/`, `ceo-plans/`, `plans/`, `designs/`, `specs/`, `briefs/`, `cards/`, `handoffs/` and `deploy-reports/` directories, top-level `pair-review/` prose, and the loose ledgers (`learnings.jsonl`, `decisions*.jsonl`, `timeline.jsonl`, `question-*.json*`, `*-reviews.jsonl`, `*-evidence.jsonl`, `*-autoplan-*.md`, `*-test-plan-*.md`, `*-card.md`, `driver-handoff*.md`, `manager-*.json`, plus a few history files). The full list with per-entry readers and the measurement behind it lives in [the sync invariants](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter). Excludes below still win over an allowlist match. Existing installs opt in with `mm migrate-config` (a present-but-edited list, even empty, is respected; deleting the key brings the prompt back). On the measured Mac this takes `projects/` from about 43,000 synced files / 1.5 GB to about 3,400 files / 40 MB; de-scoped files stay on every Mac's disk, no tombstones are written, and own store space is reclaimed by the next attended push's GC or `mm gc`. Until every active Mac has migrated and pushed, an attended pull on a migrated Mac logs one excluded row per de-scoped file an unmigrated peer still lists (same behavior as the v1.8.0 trim, larger counts) — migrate and push every active Mac before the next attended pull on any of them.
+- `include_patterns` (segment-aware: `*` stays within one directory segment, `**` crosses): everything under `analytics/` and `retros/`, the `include_files` above, and inside each `projects/<slug>/` the document files (md, txt, html, css, json, jsonl, png, jpg, jpeg, gif, svg, webp, pdf, patch, diff) of the `checkpoints/`, `checkpoint-pointers/`, `ceo-plans/`, `plans/`, `designs/`, `specs/`, `briefs/`, `cards/`, `handoffs/` and `deploy-reports/` directories, the three `pair-review/` files `deploy.md`, `report.md` and `parked-bugs.md`, and the loose ledgers (`learnings.jsonl`, `decisions*.jsonl`, `timeline.jsonl`, `question-*.json*`, `*-reviews.jsonl`, `*-autoplan-*.md`, `*-test-plan-*.md`, `*-card.md`, the timestamped `driver-handoff-*.md` archives, plus a few history files). `manager-*.json`, `*-evidence.jsonl`, the live `driver-handoff.md`, `session.from-*` resume copies and scripts or logs inside the artifact directories stay on the Mac that wrote them. The full list with per-entry readers and the measurement behind it lives in [the sync invariants](docs/invariants/sync.md#include_patterns-allowlist--inverse-consumer-filter). Excludes below still win over an allowlist match. Existing installs opt in with `mm migrate-config`, which also offers the narrowed list to a config that still pins the previous default list (any other present list, even empty, is respected; deleting the key brings the prompt back). On the measured Mac this takes `projects/` from about 43,000 synced files / 1.5 GB to about 3,400 files / 40 MB; de-scoped files stay on every Mac's disk, no tombstones are written, and own store space is reclaimed by the next attended push's GC or `mm gc`. Until every active Mac has migrated and pushed, an attended pull on a migrated Mac logs one excluded row per de-scoped file an unmigrated peer still lists (same behavior as the v1.8.0 trim, larger counts) — migrate and push every active Mac before the next attended pull on any of them.
 - `exclude_patterns`, per-machine caches and state: `config.yaml`,
   `projects/*/repo-mode.json`, `projects/*/land-deploy-confirmed`,
   `analytics/.last-sync-*`, `projects/*/decisions.active.json`,
@@ -705,6 +732,8 @@ Those directory names are skipped at any depth inside a project; removing a
 default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
 
 This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
+
+**Browser profiles are skipped:** a directory holding a Chromium `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced, wherever it sits under the included directories. See [Upgrading](#upgrading) for removing copies that synced before.
 
 **Not synced by default** (machine-local by design): `sessions/`, `sidebar-sessions/`, `slug-cache/`, `worktrees/`, `builder-profile.jsonl`, `developer-profile.json`. If you want any of these on every Mac, add them to your config (see below).
 
@@ -1864,7 +1893,7 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 |---|---|
 | File or directory could not be read | Restore read access, then `mm push`. `mm disable-source <name>` is a coarse escape hatch if that source should stop syncing. |
 | File changed, vanished or grew while being read, and a hold is not possible (the push is recovering a corrupt, conflict-copy-only or vanished manifest) | Wait for the editor/writer to finish, then `mm push`. With an accepted manifest the file is held instead: see above. |
-| Directory vanished while being listed, or `.extend-root` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
+| Directory vanished while being listed, or `.extend-root` or `Local State` marker discovery lost an entry | Wait for the writer to finish, then `mm push`. |
 | Previously published file is still present but over `max_file_size` | Raise `sync.max_file_size` in `config.toml`, or add a precise `exclude_patterns` glob **under that source**. Creating a new `[[sync.sources]]` list replaces default auto-detection — keep your other sources. |
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
 | Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |

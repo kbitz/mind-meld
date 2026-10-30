@@ -1049,6 +1049,63 @@ class TestExcludePatterns5C:
         assert "skills/new-skill/SKILL.md" not in remote["sources"]["codex"]["files"]
         assert "skills/keep/SKILL.md" in remote["sources"]["codex"]["files"]
 
+    def test_browser_profile_skip_does_not_emit_tombstone94a(self, tmp_path, monkeypatch):
+        """A `Local State` skip must not generate deletion tombstones, and the
+        consumer filter drops a peer's entries under the local profile prefix."""
+        storage_dir = tmp_path / "storage"
+        gstack = tmp_path / ".gstack"
+        self._populate_gstack(gstack)
+        design = gstack / "projects" / "myapp" / "designs" / "t"
+        profile = design / "chrome-profile"
+        (profile / "Default").mkdir(parents=True)
+        (profile / "Default" / "Preferences").write_text("{}")
+        (design / "finalized.html").write_text("<p>kept</p>")
+
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        config_path = self._make_gstack_config(
+            tmp_path, storage_dir, gstack, "dev-a", "A", exclude_patterns=None
+        )
+        self._activate(monkeypatch, config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        prefs = "projects/myapp/designs/t/chrome-profile/Default/Preferences"
+        assert prefs in remote["sources"]["gstack"]["files"]
+
+        (profile / "Local State").write_text("{}")
+        (gstack / "projects" / "myapp" / "role.md").write_text("data scientist v2")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        enc = backend.get("manifests/dev-a/manifest.json.enc")
+        remote = load_manifest(decrypt(enc, PASSPHRASE, memory_kb=MEMORY_KB))
+        offending = [k for k in remote.get("tombstones", {}) if "chrome-profile" in k]
+        assert offending == [], f"profile skip must not tombstone; got {offending}"
+        files = remote["sources"]["gstack"]["files"]
+        assert not [rel for rel in files if "chrome-profile" in rel]
+        assert "projects/myapp/designs/t/finalized.html" in files
+
+        config = config_module.load_config(config_path)
+        exclude_map, skip_prefixes = core._build_exclude_map(config)
+        assert skip_prefixes == {"gstack": ["projects/myapp/designs/t/chrome-profile"]}
+        peer_cookie = "projects/myapp/designs/t/chrome-profile/Default/Cookies"
+        peer = {
+            "sources": {
+                "gstack": {
+                    "files": {
+                        peer_cookie: {"sha256": "a"},
+                        "projects/myapp/designs/t/finalized.html": {"sha256": "b"},
+                    }
+                }
+            },
+            "tombstones": {
+                f"gstack:{peer_cookie}": {"deleted_at": "2026-01-01T00:00:00+00:00"},
+            },
+        }
+        out = core._filter_excluded_paths(peer, exclude_map, skip_prefixes)
+        assert set(out["sources"]["gstack"]["files"]) == {"projects/myapp/designs/t/finalized.html"}
+        assert out["tombstones"] == {}
+
     def test_no_spurious_tombstone_on_unexclude_transition(self, tmp_path, monkeypatch):
         """Removing a glob brings the path back into sync as new — push
         must record it as a fresh entry, NOT as a tombstone."""
@@ -2094,7 +2151,46 @@ class TestMigrateConfigCommand:
         loaded = config_module.load_config(config_path)
         gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
         assert gstack["include_patterns"] == list(gstack_default["include_patterns"])
-        assert "projects/*/checkpoints/**" in gstack["include_patterns"]
+        assert "projects/*/checkpoints/**/*.md" in gstack["include_patterns"]
+
+    def test_offers_narrowed_list_over_pinned_previous_default94a(self, tmp_path, monkeypatch):
+        """A config pinning the previous default list is offered the narrowed one,
+        and the owner's local profile stopgap exclude stays untouched."""
+        from mind_meld.config import _GSTACK_INCLUDE_PATTERNS_1_11_6, DEFAULT_SOURCES
+
+        gstack_default = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+        excludes = [*gstack_default["exclude_patterns"], "projects/*/chrome-profile/*"]
+        config_path = self._write_explicit_config(
+            tmp_path,
+            exclude_patterns=excludes,
+            include_patterns=list(_GSTACK_INCLUDE_PATTERNS_1_11_6),
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        self._redirect_lock(monkeypatch, tmp_path)
+
+        before = config_path.read_bytes()
+        dry = runner.invoke(app, ["migrate-config", "--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        shown = " ".join(dry.output.split())
+        assert "previous default list" in shown
+        assert "- projects/*/manager-*.json" in shown
+        assert "+ projects/*/pair-review/report.md" in shown
+        # Only the difference is listed: unchanged entries are not news.
+        assert "+ projects/*/learnings.jsonl" not in shown
+        assert "- projects/*/learnings.jsonl" not in shown
+        assert config_path.read_bytes() == before
+
+        result = runner.invoke(app, ["migrate-config", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert "Run mm push" in " ".join(result.output.split())
+        loaded = config_module.load_config(config_path)
+        gstack = next(s for s in loaded["sync"]["sources"] if s["name"] == "gstack")
+        assert gstack["include_patterns"] == list(gstack_default["include_patterns"])
+        assert gstack["exclude_patterns"] == excludes
+
+        again = runner.invoke(app, ["migrate-config", "--yes"])
+        assert again.exit_code == 0, again.output
+        assert "already up to date" in again.output
 
     def test_user_edited_include_patterns_left_alone(self, tmp_path, monkeypatch):
         """A present (even empty) include_patterns is the user's choice."""

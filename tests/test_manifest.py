@@ -1,22 +1,27 @@
 """Tests for mind_meld.manifest — walking, hashing, diffing."""
 
+import contextlib
 import errno
 import hashlib
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from mind_meld.config import get_default_source
 from mind_meld.errors import ManifestError, SnapshotChanged, SnapshotError
 from mind_meld.manifest import (
+    BROWSER_PROFILE_MARKER,
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
     TOMBSTONE_TTL_DAYS,
     SourceHolds,
     _canonical_for_conflict,
     _FileTooLarge,
+    _include_pattern_body,
     _is_active_tombstone,
     _is_excluded,
     _record_file,
@@ -43,6 +48,12 @@ from mind_meld.manifest import (
     walk_generic_source,
     walk_muse_source,
     walk_source,
+)
+from tests.test_config import (
+    GSTACK_ARTIFACT_DIRS94A,
+    GSTACK_DOCUMENT_EXTENSIONS94A,
+    GSTACK_LOCAL_PATHS94A,
+    GSTACK_SYNCED_PATHS94A,
 )
 
 
@@ -1485,6 +1496,206 @@ class TestMarkerSkipGlobs:
         files = walk_generic_source(cfg)
         assert "projects/myapp/role.md" in files
         assert "projects/*/SKILL.md" not in files
+
+
+class TestBrowserProfileMarker94A:
+    """Track 94A: a directory holding `Local State` is a browser profile and stays local."""
+
+    @staticmethod
+    def _write(base: Path, *rels: str) -> None:
+        for rel in rels:
+            path = base / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+
+    @staticmethod
+    def _gstack(base: Path, *, allowlist: bool = True) -> dict[str, Any]:
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(base)
+        if not allowlist:
+            del source["include_patterns"]
+        return source
+
+    def test_marker_is_chromiums_user_data_file(self):
+        assert BROWSER_PROFILE_MARKER == "Local State"
+
+    def test_profile_under_designs_is_skipped_by_marker_not_by_type(self, tmp_path: Path):
+        design = "projects/acme/designs/track-17f"
+        self._write(
+            tmp_path,
+            f"{design}/chrome-profile/Local State",
+            f"{design}/chrome-profile/Default/Login Data",
+            # Document types the allowlist admits: only the marker drops them.
+            f"{design}/chrome-profile/Default/Extensions/x/1.0/manifest.json",
+            f"{design}/chrome-profile/Default/Extensions/x/1.0/icon.png",
+            f"{design}/finalized.html",
+            f"{design}/notes.md",
+        )
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source) == [f"{design}/chrome-profile"]
+        assert set(walk_generic_source(source)) == {
+            f"{design}/finalized.html",
+            f"{design}/notes.md",
+        }
+
+    def test_profiles_under_pair_review_branches_are_skipped(self, tmp_path: Path):
+        runtime = "projects/p/pair-review/branches/feat/runtime"
+        self._write(
+            tmp_path,
+            f"{runtime}/signed-profile/Local State",
+            f"{runtime}/signed-profile/Default/Login Data",
+            f"{runtime}/desktop/.dev/user-data/Local State",
+            f"{runtime}/desktop/.dev/user-data/Default/Cookies",
+            "projects/p/pair-review/branches/feat/report.md",
+        )
+        source = self._gstack(tmp_path, allowlist=False)
+        assert marker_skip_globs(source) == [
+            f"{runtime}/desktop/.dev/user-data",
+            f"{runtime}/signed-profile",
+        ]
+        assert set(walk_generic_source(source)) == {
+            "projects/p/pair-review/branches/feat/report.md"
+        }
+
+    def test_no_folder_name_is_hard_coded(self, tmp_path: Path):
+        self._write(tmp_path, "projects/p/chrome-profile/Default/Preferences")
+        self._write(
+            tmp_path, "projects/p/dir-marker/Local State/inside.txt", "projects/p/dir-marker/k.txt"
+        )
+        self._write(tmp_path, "projects/p/link-marker/real.txt", "projects/p/link-marker/k.txt")
+        os.symlink(
+            tmp_path / "projects/p/link-marker/real.txt",
+            tmp_path / "projects/p/link-marker/Local State",
+        )
+        source = self._gstack(tmp_path, allowlist=False)
+        assert marker_skip_globs(source) == []
+        kept = set(walk_generic_source(source))
+        assert "projects/p/chrome-profile/Default/Preferences" in kept
+        assert "projects/p/dir-marker/Local State/inside.txt" in kept
+        assert "projects/p/dir-marker/k.txt" in kept
+        assert "projects/p/link-marker/k.txt" in kept
+
+    def test_every_generic_source_honors_the_marker(self, tmp_path: Path):
+        self._write(
+            tmp_path,
+            "skills/x/browser/Local State",
+            "skills/x/browser/Default/Cookies",
+            "skills/x/SKILL.md",
+        )
+        source = get_default_source("codex")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert marker_skip_globs(source) == ["skills/x/browser"]
+        assert set(walk_generic_source(source)) == {"skills/x/SKILL.md"}
+
+    def test_profile_internals_are_never_enumerated(self, tmp_path: Path, monkeypatch):
+        import mind_meld.manifest as m
+
+        profile = tmp_path / "projects/p/designs/t/chrome-profile"
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Local State")
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Default/Cookies")
+        scanned: list[Path] = []
+        real_scandir = os.scandir
+
+        def tracking(path):
+            scanned.append(Path(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", tracking)
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source, strict=True) == ["projects/p/designs/t/chrome-profile"]
+        assert profile in scanned
+        assert profile / "Default" not in scanned
+        scanned.clear()
+        assert walk_generic_source(source, strict=True) == {}
+        assert profile / "Default" not in scanned
+
+    def test_profile_siblings_are_not_stat_ed_so_churn_cannot_refuse(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A live profile churns: a sibling that vanishes mid-scan must not
+        refuse a strict scan once `Local State` has marked the directory."""
+        import mind_meld.manifest as m
+
+        profile = tmp_path / "projects/p/designs/t/chrome-profile"
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Local State")
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/churn.tmp")
+        real_scandir = os.scandir
+
+        class _Entry:
+            def __init__(self, entry: os.DirEntry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def stat(self, *, follow_symlinks: bool = True):
+                if self.name == "churn.tmp":
+                    raise FileNotFoundError(errno.ENOENT, "vanished", self.path)
+                return self._entry.stat(follow_symlinks=follow_symlinks)
+
+        @contextlib.contextmanager
+        def churning(path):
+            with real_scandir(path) as iterator:
+                yield [_Entry(entry) for entry in iterator]
+
+        monkeypatch.setattr(m.os, "scandir", churning)
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source, strict=True) == ["projects/p/designs/t/chrome-profile"]
+        (profile / "Local State").unlink()
+        with pytest.raises(SnapshotError):
+            marker_skip_globs(source, strict=True)
+
+    @pytest.mark.parametrize("configured", ["designs", "designs/", "./designs"])
+    def test_profile_at_include_root_skips_the_include(self, tmp_path: Path, configured: str):
+        self._write(tmp_path, "designs/Local State", "designs/notes.md", "designs/a/b.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": [configured],
+        }
+        assert marker_skip_globs(source) == ["designs"]
+        assert walk_generic_source(source) == {}
+
+
+class TestGstackAllowlistWalk94A:
+    """Track 94A: the default gstack allowlist, walked and matched as one list."""
+
+    def test_walk_keeps_exactly_the_reader_backed_paths(self, tmp_path: Path):
+        for rel in (*GSTACK_LOCAL_PATHS94A, *GSTACK_SYNCED_PATHS94A):
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert set(walk_generic_source(source)) == set(GSTACK_SYNCED_PATHS94A)
+
+    def test_combined_matcher_equals_any_over_single_patterns(self):
+        defaults = get_default_source("gstack")
+        assert defaults is not None
+        patterns = defaults["include_patterns"]
+        paths = [
+            *GSTACK_LOCAL_PATHS94A,
+            *GSTACK_SYNCED_PATHS94A,
+            "retro-context.md",
+            "retros/2026/w43.json",
+            "projects/acme/review-and-prep/run-1/x.md",
+            "projects/a/b/checkpoints/x.md",
+            "projects/acme/checkpoints/line1\nline2.md",
+            *(
+                f"projects/acme/{directory}/{depth}a.{extension}"
+                for directory in GSTACK_ARTIFACT_DIRS94A
+                for extension in (*GSTACK_DOCUMENT_EXTENSIONS94A, "sh")
+                for depth in ("", "one/two/")
+            ),
+        ]
+        for rel in paths:
+            expected = any(re.fullmatch(_include_pattern_body(p), rel, re.DOTALL) for p in patterns)
+            assert matches_include_patterns(rel, patterns) is expected, rel
+        assert matches_include_patterns("anything", []) is False
+        assert matches_include_patterns("a/b", ("a/*",)) is True
 
 
 class TestWalkerExcludesConflictFiles:

@@ -3803,7 +3803,8 @@ def migrate_config(
 
     Compares each user-configured source against the matching DEFAULT_SOURCES
     entry and proposes adding any missing recommended exclude globs, plus a
-    recommended `include_patterns` allowlist when the key is absent. Also removes a
+    recommended `include_patterns` allowlist when the key is absent or still
+    holds a previous default list. Also removes a
     leftover ``grok`` or ``opencode`` source blocks and records their
     names in ``disabled_sources``. These sources have already stopped syncing.
     Idempotent — re-running on a fully-migrated
