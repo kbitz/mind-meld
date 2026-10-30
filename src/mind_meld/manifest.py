@@ -556,7 +556,7 @@ def _local_state_parent_prefix(
                         next_action="Restore read access, then run mm push.",
                     )
                 ) from e
-            return None
+            directory_st = None
         if (
             directory_st is not None
             and not stat.S_ISLNK(directory_st.st_mode)
@@ -578,7 +578,7 @@ def _local_state_parent_prefix(
                             next_action="Restore read access, then run mm push.",
                         )
                     ) from e
-                return None
+                marker_st = None
             if (
                 marker_st is not None
                 and not stat.S_ISLNK(marker_st.st_mode)
@@ -670,9 +670,7 @@ def marker_skip_globs(
             continue
         if _under_skip_prefix(rel, globs):
             continue
-        prefix = _local_state_parent_prefix(
-            chosen, base, strict=strict, source_name=source_name
-        )
+        prefix = _local_state_parent_prefix(chosen, base, strict=strict, source_name=source_name)
         if prefix is None:
             continue
         if prefix == ".":
