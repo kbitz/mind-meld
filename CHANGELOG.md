@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.11.19] - 2026-10-30
+
+**Browser profiles and machine-local gstack files stay on this Mac.** A directory holding a Chromium or Electron `Local State` file is left out of every generic source, and the default gstack allowlist no longer publishes runtime files. `mm migrate-config` offers the narrower list to a config that still pins the previous default. Copies that already synced stay until you exclude them and push; this narrowing does not delete them.
+
+### Changed
+
+- A directory with a regular, non-symlink `Local State` file is skipped in every generic source. The folder name is not hard-coded.
+- The default gstack allowlist no longer syncs `manager-*.json`, `*-evidence.jsonl`, or the live `driver-handoff.md`. Timestamped `driver-handoff-*.md` archives still sync. `pair-review/` keeps `deploy.md`, `report.md`, and `parked-bugs.md`. Artifact directories keep document files.
+- On a config that pins the previous default list, `mm migrate-config` offers the narrowed list and leaves an exclude you added yourself in place.
+
 ## [1.11.18] - 2026-10-29
 
 **`mm init` behaves the same.** Help text, prompts, flags, exit codes, and the files it writes are unchanged.
