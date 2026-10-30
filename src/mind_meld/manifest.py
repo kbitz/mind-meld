@@ -521,6 +521,79 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
     return sorted(roots)
 
 
+def _local_state_parent_prefix(
+    selected: Path, base: Path, *, strict: bool, source_name: str | None
+) -> str | None:
+    """Return the parent of ``selected``, up through ``base``, that holds Local State.
+
+    Looks only at ``BROWSER_PROFILE_MARKER``. A symlink directory is not
+    entered, a symlink marker marks nothing, and a missing path is not an
+    error. Strict mode refuses on a read error; permissive mode skips it.
+    Never walks above ``base``.
+    """
+    try:
+        selected.relative_to(base)
+    except ValueError:
+        return None
+    current = selected.parent
+    while True:
+        try:
+            current.relative_to(base)
+        except ValueError:
+            return None
+        try:
+            directory_st = current.lstat()
+        except FileNotFoundError:
+            directory_st = None
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(current, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return None
+        if (
+            directory_st is not None
+            and not stat.S_ISLNK(directory_st.st_mode)
+            and stat.S_ISDIR(directory_st.st_mode)
+        ):
+            marker = current / BROWSER_PROFILE_MARKER
+            try:
+                marker_st = marker.lstat()
+            except FileNotFoundError:
+                marker_st = None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(marker, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                return None
+            if (
+                marker_st is not None
+                and not stat.S_ISLNK(marker_st.st_mode)
+                and stat.S_ISREG(marker_st.st_mode)
+            ):
+                rel = current.relative_to(base).as_posix()
+                return rel or "."
+        if current == base:
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def marker_skip_globs(
     source_config: dict[str, Any],
     *,
@@ -545,10 +618,14 @@ def marker_skip_globs(
     Permissive mode is best-effort: any OSError on a scan dir is skipped.
     Strict publishing raises SnapshotError instead. Symlinked scan dirs
     and symlink markers are ignored (same as the walker). Generic sources
-    only — callers with no ``include_dirs`` get ``[]``.
+    only. Each selected include directory and include file also checks its
+    parent directories, up to and including the source root, for a regular
+    non-symlink ``Local State``. That lookup does not apply to
+    ``.extend-root``. An empty include list returns ``[]``.
     """
     include_dirs: list[str] = source_config.get("include_dirs") or []
-    if not include_dirs:
+    include_files: list[str] = source_config.get("include_files") or []
+    if not include_dirs and not include_files:
         return []
     source_name = source_config.get("name")
     try:
@@ -583,6 +660,26 @@ def marker_skip_globs(
         return []
     globs: list[str] = []
     seen: set[str] = set()
+    selected = [*include_dirs, *include_files]
+    selected.sort(key=lambda name: len((base / name).parts))
+    for name in selected:
+        chosen = base / name
+        try:
+            rel = chosen.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        if _under_skip_prefix(rel, globs):
+            continue
+        prefix = _local_state_parent_prefix(
+            chosen, base, strict=strict, source_name=source_name
+        )
+        if prefix is None:
+            continue
+        if prefix == ".":
+            return ["."]
+        if prefix not in seen:
+            seen.add(prefix)
+            globs.append(prefix)
     # Discover ancestor markers before probing any overlapping child include.
     for dir_name in sorted(include_dirs, key=lambda name: len((base / name).parts)):
         scan_dir = base / dir_name

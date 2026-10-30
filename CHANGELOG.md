@@ -8,7 +8,7 @@ All notable changes to Mind Meld will be documented in this file.
 
 ### Changed
 
-- A directory with a regular, non-symlink `Local State` file is skipped in every generic source. The folder name is not hard-coded.
+- A directory with a regular, non-symlink `Local State` file is skipped in every generic source, including when the selected directory or file starts inside that directory. The folder name is not hard-coded.
 - The default gstack allowlist no longer syncs `manager-*.json`, `*-evidence.jsonl`, or the live `driver-handoff.md`. Timestamped `driver-handoff-*.md` archives still sync. `pair-review/` keeps `deploy.md`, `report.md`, and `parked-bugs.md`. Artifact directories keep document files.
 - On a config that pins the previous default list, `mm migrate-config` offers the narrowed list and leaves an exclude you added yourself in place.
 

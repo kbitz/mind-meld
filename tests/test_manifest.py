@@ -1769,6 +1769,81 @@ class TestBrowserProfileMarker94A:
             == {}
         )
 
+    def _assert_left_out(self, source: dict[str, Any], rel: str, kept: str | None) -> None:
+        from mind_meld import core
+
+        walked = walk_generic_source(source, strict=True)
+        assert rel not in walked
+        if kept is not None:
+            assert kept in walked
+        prior = {
+            "sources": {
+                source["name"]: {
+                    "files": {rel: {"sha256": "a"}, **({kept: {"sha256": "b"}} if kept else {})}
+                }
+            }
+        }
+        exclude_map, prefixes = core._build_exclude_map({}, [source], strict=True)
+        filtered = core._filter_excluded_paths(prior, exclude_map, prefixes)
+        files = filtered["sources"][source["name"]]["files"]
+        assert rel not in files
+        if kept is not None:
+            assert kept in files
+        tombstones = generate_tombstones(
+            {"sources": {source["name"]: {"files": walked}}}, filtered, "me"
+        )
+        assert f"{source['name']}:{rel}" not in tombstones
+
+    def test_include_below_profile_is_skipped(self, tmp_path: Path):
+        self._write(tmp_path, "profile/Local State", "profile/Default/Cookies")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["profile/Default"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", None)
+
+    def test_include_file_below_profile_is_skipped_without_include_dirs(self, tmp_path: Path):
+        self._write(tmp_path, "profile/Local State", "profile/Default/Cookies", "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": ["profile/Default/Cookies", "keep.md"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", "keep.md")
+
+    def test_include_file_below_profile_is_skipped_beside_unrelated_dirs(self, tmp_path: Path):
+        self._write(
+            tmp_path,
+            "profile/Local State",
+            "profile/Default/Cookies",
+            "notes/keep.md",
+        )
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["notes"],
+            "include_files": ["profile/Default/Cookies"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", "notes/keep.md")
+
+    def test_extend_root_in_a_parent_does_not_skip_the_child(self, tmp_path: Path):
+        self._write(tmp_path, "rendered/.extend-root", "rendered/child/SKILL.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["rendered/child"],
+        }
+        assert marker_skip_globs(source, strict=True) == []
+        assert set(walk_generic_source(source, strict=True)) == {"rendered/child/SKILL.md"}
+
 
 class TestGstackAllowlistWalk94A:
     """Track 94A: the default gstack allowlist, walked and matched as one list."""

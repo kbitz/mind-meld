@@ -747,7 +747,7 @@ default glob brings back the migration prompt. [Existing installs: v1.8.0 steps]
 
 This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
 
-**Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced, wherever it sits under the included directories. See [Upgrading](#upgrading) for removing copies that synced before.
+**Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced. That includes an include that starts inside the profile, and a file selected when the source has no `include_dirs`. See [Upgrading](#upgrading) for removing copies that synced before.
 
 **Not synced by default** (machine-local by design): `sessions/`, `sidebar-sessions/`, `slug-cache/`, `worktrees/`, `builder-profile.jsonl`, `developer-profile.json`. If you want any of these on every Mac, add them to your config (see below).
 
