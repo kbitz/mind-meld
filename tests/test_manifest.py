@@ -1658,6 +1658,117 @@ class TestBrowserProfileMarker94A:
         assert marker_skip_globs(source) == ["designs"]
         assert walk_generic_source(source) == {}
 
+    @pytest.mark.parametrize("configured", [["."], ["./"], [".", "Default"], ["Default", "."]])
+    def test_profile_at_source_root_is_pruned(self, tmp_path: Path, configured, monkeypatch):
+        self._write(tmp_path, "Local State", "notes.md", "Default/manifest.json")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": configured,
+            "include_files": ["notes.md"],
+        }
+        real_scandir = os.scandir
+
+        def no_profile_internals(path):
+            assert Path(path) != tmp_path / "Default"
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", no_profile_internals)
+        assert marker_skip_globs(source, strict=True) == ["."]
+        assert walk_generic_source(source, strict=True) == {}
+        assert nested_repo_skip_prefixes(source, strict=True) == []
+
+    def test_absolute_include_root_keeps_extend_root_exemption(self, tmp_path):
+        self._write(tmp_path, ".extend-root", "notes.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": [str(tmp_path)],
+        }
+        assert marker_skip_globs(source, strict=True) == []
+        assert set(walk_generic_source(source, strict=True)) == {"notes.md"}
+
+    @pytest.mark.parametrize(
+        "configured", [["profile", "profile/Default"], ["profile/Default", "profile"]]
+    )
+    def test_nested_overlapping_profile_includes_are_pruned(
+        self, tmp_path, configured, monkeypatch
+    ):
+        self._write(tmp_path, "profile/Local State", "profile/Default/manifest.json")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": configured,
+            "include_files": [
+                "profile/Default/manifest.json",
+                str(tmp_path / "profile/Default/manifest.json"),
+            ],
+        }
+        real_scandir, real_lstat = os.scandir, Path.lstat
+
+        def guarded_scandir(path):
+            assert not Path(path).is_relative_to(tmp_path / "profile/Default")
+            return real_scandir(path)
+
+        def guarded_lstat(path, *args, **kwargs):
+            assert not path.is_relative_to(tmp_path / "profile/Default")
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", guarded_scandir)
+        monkeypatch.setattr(Path, "lstat", guarded_lstat)
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        assert walk_generic_source(source, strict=True) == {}
+        assert nested_repo_skip_prefixes(source, strict=True) == []
+
+    def test_source_root_skip_filters_prior_files_and_peer_tombstones(self, tmp_path):
+        from mind_meld import core
+
+        self._write(tmp_path, "Local State", "notes.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["."],
+        }
+        exclude_map, prefixes = core._build_exclude_map({}, [source], strict=True)
+        prior = {
+            "sources": {"notes": {"files": {"notes.md": {"sha256": "a"}}}},
+            "tombstones": {"notes:gone.md": {"deleted_at": "2026-01-01T00:00:00+00:00"}},
+        }
+        filtered = core._filter_excluded_paths(prior, exclude_map, prefixes)
+        assert filtered["sources"]["notes"]["files"] == {}
+        assert filtered["tombstones"] == {}
+
+    def test_default_pull_filter_can_leave_unmarked_profile_fragments(self, tmp_path):
+        from mind_meld import core
+
+        source = self._gstack(tmp_path)
+        profile = "projects/acme/designs/t/user-data"
+        marker = f"{profile}/Local State"
+        document = f"{profile}/Default/Extensions/x/manifest.json"
+        peer = {"sources": {"gstack": {"files": {marker: {}, document: {}}}}}
+        excludes, prefixes = core._build_exclude_map({}, [source], strict=True)
+        includes = core._build_include_map({}, [source])
+        received = core._filter_excluded_paths(peer, excludes, prefixes, includes)
+        assert set(received["sources"]["gstack"]["files"]) == {document}
+        self._write(tmp_path, *received["sources"]["gstack"]["files"])
+        assert marker_skip_globs(source) == []
+        assert set(walk_generic_source(source)) == {document}
+        # An explicit local exclusion also removes prior entries: push before
+        # deleting the fragment, just as the manual cleanup instructions say.
+        source["exclude_patterns"].append(f"{profile}/*")
+        excludes, prefixes = core._build_exclude_map({}, [source], strict=True)
+        assert walk_generic_source(source) == {}
+        assert (
+            core._filter_excluded_paths(received, excludes, prefixes, includes)["sources"][
+                "gstack"
+            ]["files"]
+            == {}
+        )
+
 
 class TestGstackAllowlistWalk94A:
     """Track 94A: the default gstack allowlist, walked and matched as one list."""
@@ -1671,6 +1782,23 @@ class TestGstackAllowlistWalk94A:
         assert source is not None
         source["path"] = str(tmp_path)
         assert set(walk_generic_source(source)) == set(GSTACK_SYNCED_PATHS94A)
+
+    def test_walk_artifact_types_at_each_depth(self, tmp_path: Path):
+        expected = set()
+        for directory in GSTACK_ARTIFACT_DIRS94A:
+            for extension in (*GSTACK_DOCUMENT_EXTENSIONS94A, "PNG", "sh", "cjs", "stderr"):
+                for depth in ("", "one/two/"):
+                    stem = "upper" if extension == "PNG" else "a"
+                    rel = f"projects/acme/{directory}/{depth}{stem}.{extension}"
+                    path = tmp_path / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("x")
+                    if extension in GSTACK_DOCUMENT_EXTENSIONS94A:
+                        expected.add(rel)
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert set(walk_generic_source(source)) == expected
 
     def test_combined_matcher_equals_any_over_single_patterns(self):
         defaults = get_default_source("gstack")

@@ -299,12 +299,13 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
     """True if ``rel_path`` is a skip-prefix or a file under one.
 
     Prefix match, not fnmatch: a directory literally named ``*`` with a
-    marker must not exclude ``projects/myapp/foo``.
+    marker must not exclude ``projects/myapp/foo``. ``.`` is the source
+    root, so its marker excludes every relative path in that source.
     """
     if not prefixes:
         return False
     for prefix in prefixes:
-        if rel_path == prefix or rel_path.startswith(prefix + "/"):
+        if prefix == "." or rel_path == prefix or rel_path.startswith(prefix + "/"):
             return True
     return False
 
@@ -388,6 +389,8 @@ def nested_repo_skip_prefixes(
     scan_dirs: list[Path] = []
     if source_type == "generic" and skip_prefixes is None:
         skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if _under_skip_prefix("", skip_prefixes):
+        return []
     if source_type == "claude":
         projects = base / "projects"
         if path_has_descendant_symlink(projects, base, strict=strict, source_name=source_name):
@@ -433,12 +436,18 @@ def nested_repo_skip_prefixes(
         scan_dirs = [base / name for name in dirs]
         include_files = source_config.get("include_files") or [] if source_type == "generic" else []
         for name in include_files:
-            if _under_skip_prefix(name, skip_prefixes):
-                continue
             path = base / name
+            if path.is_relative_to(base) and _under_skip_prefix(
+                path.relative_to(base).as_posix(), skip_prefixes
+            ):
+                continue
             if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
                 roots.add(root)
     for directory in scan_dirs:
+        if directory.is_relative_to(base) and _under_skip_prefix(
+            directory.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         # An absent or linked include inside a checkout still excludes that checkout.
         if root := nested_repo_root(directory, base, strict=strict, source_name=source_name):
             roots.add(root)
@@ -574,8 +583,13 @@ def marker_skip_globs(
         return []
     globs: list[str] = []
     seen: set[str] = set()
-    for dir_name in include_dirs:
+    # Discover ancestor markers before probing any overlapping child include.
+    for dir_name in sorted(include_dirs, key=lambda name: len((base / name).parts)):
         scan_dir = base / dir_name
+        if scan_dir.is_relative_to(base) and _under_skip_prefix(
+            scan_dir.relative_to(base).as_posix(), globs
+        ):
+            continue
         # A checkout covering this include is reported and frozen by the
         # walker; never probe beneath it or through a link above the include.
         if nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
@@ -649,18 +663,15 @@ def marker_skip_globs(
             # entire source tree (`skills/.extend-root` → skip `skills/`).
             # gstack-extend drops the marker in each rendered child dir.
             #
-            # Compare NORMALIZED forms. `rel_dir` came from `as_posix()`,
-            # but `dir_name` is raw config and `include_dirs` entries are
-            # not validated or normalized anywhere (`_validate_sources`
-            # checks only name/path/type). A user writing
-            # `include_dirs = ["skills/"]` or `["./skills"]` would miss
-            # this exemption and silently drop the WHOLE tree — including
-            # hand-authored files — out of sync.
+            # Compare paths, not the raw include spelling: trailing slashes,
+            # `./skills` and a resolved absolute include keep this exemption.
             #
             # `Local State` has no such exemption: an include that is itself
             # a browser profile is skipped whole.
-            if marker.name == MARKER_SKIP_NAME and rel_dir == Path(dir_name).as_posix():
+            if marker.name == MARKER_SKIP_NAME and marker.parent == scan_dir:
                 continue
+            if rel_dir == ".":
+                return ["."]
             if rel_dir not in seen:
                 seen.add(rel_dir)
                 globs.append(rel_dir)
@@ -1963,12 +1974,18 @@ def walk_generic_source(
     # for tombstone suppression. Do NOT skip this — a walker-only skip
     # would tombstone previously-synced files on the next push.
     skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if _under_skip_prefix("", skip_prefixes):
+        return {}
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        if scan_dir.is_relative_to(base) and _under_skip_prefix(
+            scan_dir.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         # Report a checkout above an include even when the include is absent or
         # linked, so push freezes its published entries instead of dropping them.
         if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
@@ -1998,6 +2015,10 @@ def walk_generic_source(
 
     for filename in include_files:
         path = base / filename
+        if path.is_relative_to(base) and _under_skip_prefix(
+            path.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(root, NESTED_REPO_SKIP_REASON)
