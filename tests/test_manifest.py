@@ -662,6 +662,28 @@ class TestNestedRepositories:
         assert skipped == [("repo", "nested git repository")]
         assert prefixes == ["repo"]
 
+    def test_unreadable_descendant_of_a_checkout_stays_a_freeze(self, tmp_path):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        locked = tmp_path / "repo" / "secret"
+        (locked / "nested" / "deep").mkdir(parents=True)
+        (tmp_path / "repo" / "notes.md").write_text("n")
+        cfg = {
+            "name": "g",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["repo/secret/nested/deep", "repo/notes.md/a/b"],
+            "include_files": ["repo/secret/nested/Cookies"],
+        }
+        locked.chmod(0)
+        try:
+            files = walk_source(cfg, strict=True)[1]
+            assert marker_skip_globs(cfg, strict=True) == []
+            prefixes = nested_repo_skip_prefixes(cfg, strict=True)
+        finally:
+            locked.chmod(0o700)
+        assert files == {}
+        assert prefixes == ["repo"]
+
     def test_link_to_a_checkout_is_a_symlink_not_a_checkout(self, tmp_path):
         (tmp_path / "real" / ".git").mkdir(parents=True)
         (tmp_path / "real" / "notes").mkdir()
@@ -1843,6 +1865,46 @@ class TestBrowserProfileMarker94A:
         }
         assert marker_skip_globs(source, strict=True) == []
         assert set(walk_generic_source(source, strict=True)) == {"rendered/child/SKILL.md"}
+
+    def test_dotdot_include_does_not_adopt_an_outside_marker(self, tmp_path: Path):
+        outside = tmp_path.parent / f"mm-out-{tmp_path.name}"
+        outside.mkdir()
+        (outside / "Local State").write_text("x")
+        self._write(tmp_path, "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": ["keep.md", f"sub/../../{outside.name}/Cookies"],
+        }
+        try:
+            assert marker_skip_globs(source, strict=True) == []
+            assert set(walk_generic_source(source, strict=True)) == {"keep.md"}
+        finally:
+            (outside / "Local State").unlink()
+            outside.rmdir()
+
+    def test_symlink_parent_does_not_adopt_an_outside_marker(self, tmp_path: Path):
+        outside = tmp_path.parent / f"mm-link-{tmp_path.name}"
+        (outside / "Default").mkdir(parents=True)
+        (outside / "Local State").write_text("x")
+        (outside / "Default" / "Cookies").write_text("c")
+        (tmp_path / "up").symlink_to(Path(".."), target_is_directory=True)
+        self._write(tmp_path, "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": [f"up/{outside.name}/Default/Cookies", "keep.md"],
+        }
+        try:
+            assert marker_skip_globs(source, strict=True) == []
+            assert set(walk_generic_source(source, strict=True)) == {"keep.md"}
+        finally:
+            (outside / "Default" / "Cookies").unlink()
+            (outside / "Local State").unlink()
+            (outside / "Default").rmdir()
+            outside.rmdir()
 
 
 class TestGstackAllowlistWalk94A:

@@ -521,6 +521,69 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
     return sorted(roots)
 
 
+def _contained_path(path: Path, base: Path) -> Path | None:
+    """Collapse ``.`` and ``..`` and return ``path`` only when it stays under ``base``."""
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        return None
+    current = base
+    for part in relative.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if current == base:
+                return None
+            current = current.parent
+            continue
+        current /= part
+    return current
+
+
+def _inside_frozen_checkout(
+    current: Path, base: Path, *, strict: bool, source_name: str | None
+) -> bool:
+    """True when ``current`` is strictly inside a nested checkout below ``base``.
+
+    ``nested_repo_root`` stops at the checkout, so an unreadable descendant is
+    not stat-ed. The checkout root itself is still eligible for ``Local State``.
+    """
+    try:
+        relative = current.relative_to(base).as_posix()
+    except ValueError:
+        return False
+    checkout = nested_repo_root(current, base, strict=strict, source_name=source_name)
+    return bool(checkout) and relative != checkout and relative.startswith(checkout + "/")
+
+
+def _crosses_symlink(path: Path, base: Path, *, strict: bool, source_name: str | None) -> bool:
+    """True when reaching ``path`` from ``base`` would traverse a symlink."""
+    probe = base
+    for part in path.relative_to(base).parts:
+        probe /= part
+        try:
+            component = probe.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(probe, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return True
+        if stat.S_ISLNK(component.st_mode):
+            return True
+        if not stat.S_ISDIR(component.st_mode):
+            return False
+    return False
+
+
 def _local_state_parent_prefix(
     selected: Path, base: Path, *, strict: bool, source_name: str | None
 ) -> str | None:
@@ -533,44 +596,55 @@ def _local_state_parent_prefix(
     Strict mode refuses on a read error; permissive mode skips it.
     Never walks above ``base``.
     """
-    try:
-        selected.relative_to(base)
-    except ValueError:
+    contained = _contained_path(selected, base)
+    if contained is None:
         return None
-    current = selected.parent
+    current = contained.parent
     while True:
-        try:
-            current.relative_to(base)
-        except ValueError:
+        current = _contained_path(current, base)
+        if current is None:
             return None
-        try:
-            directory_st = current.lstat()
-        except FileNotFoundError:
+        if _inside_frozen_checkout(current, base, strict=strict, source_name=source_name):
             directory_st = None
-        except OSError as e:
-            if strict:
-                raise SnapshotError(
-                    snapshot_refusal(
-                        source=source_name,
-                        rel_path=_rel_or_name(current, base),
-                        problem="could not be read",
-                        cause=os_error_cause(e),
-                        next_action="Restore read access, then run mm push.",
-                    )
-                ) from e
+        elif _crosses_symlink(current, base, strict=strict, source_name=source_name):
             directory_st = None
+        else:
+            try:
+                directory_st = current.lstat()
+            except FileNotFoundError:
+                directory_st = None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(current, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                directory_st = None
         if (
             directory_st is not None
             and not stat.S_ISLNK(directory_st.st_mode)
             and stat.S_ISDIR(directory_st.st_mode)
         ):
-            rel_current = current.relative_to(base).as_posix()
-            checkout = nested_repo_root(current, base, strict=strict, source_name=source_name)
-            if (
-                checkout is not None
-                and rel_current != checkout
-                and rel_current.startswith(checkout + "/")
-            ):
+            try:
+                current.resolve().relative_to(base)
+            except ValueError:
+                return None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(current, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
                 directory_st = None
         if (
             directory_st is not None
