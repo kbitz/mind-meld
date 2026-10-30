@@ -17,7 +17,7 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 ## Upgrading
 
 **Machine-local gstack files and browser profiles (Track 94A):** any directory
-holding a `Local State` file, the marker Chromium and Electron write at the
+holding a regular, non-symlink `Local State` file, the marker Chromium and Electron write at the
 root of a browser user-data directory, is now skipped in every generic source.
 No folder name is hard-coded: `chrome-profile`, `signed-profile` and
 `.dev/user-data` all qualify. The default gstack `include_patterns` also
@@ -473,7 +473,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
-| `mm migrate-config` | Append any missing recommended `exclude_patterns` to your existing `[[sync.sources]]` entries. Idempotent and preserves your customizations; `--dry-run` to preview, `--yes` to skip the prompt |
+| `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
@@ -747,7 +747,7 @@ default glob brings back the migration prompt. [Existing installs: v1.8.0 steps]
 
 This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
 
-**Browser profiles are skipped:** a directory holding a Chromium `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced, wherever it sits under the included directories. See [Upgrading](#upgrading) for removing copies that synced before.
+**Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced, wherever it sits under the included directories. See [Upgrading](#upgrading) for removing copies that synced before.
 
 **Not synced by default** (machine-local by design): `sessions/`, `sidebar-sessions/`, `slug-cache/`, `worktrees/`, `builder-profile.jsonl`, `developer-profile.json`. If you want any of these on every Mac, add them to your config (see below).
 
