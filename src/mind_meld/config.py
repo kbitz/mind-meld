@@ -168,16 +168,105 @@ _GSTACK_GENERATOR_GLOBS: list[str] = [
 # vocabulary is unbounded while the cross-machine readers are a short,
 # stable list. Each entry names a reader: checkpoints + checkpoint-
 # pointers (/context-restore), ceo-plans/plans/designs/specs (plan and
-# design resume), briefs/cards/handoffs/driver-handoff*/manager-*.json
-# (factory handoffs), deploy-reports (land-and-deploy), pair-review
-# top-level prose (cross-machine resume), and the loose ledgers
-# (learnings/decisions search, timeline + context recovery, question
-# log/preferences, taste profile, review/evidence ledgers that make
+# design resume), briefs/cards/handoffs/driver-handoff-*.md archives
+# (factory handoffs), deploy-reports (land-and-deploy), pair-review's
+# deploy.md/report.md/parked-bugs.md (cross-machine resume), and the loose
+# ledgers (learnings/decisions search, timeline + context recovery,
+# question log/preferences, taste profile, `*-reviews.jsonl` that make
 # completed reviews reusable by wtree fingerprint, test plans /ship
 # reads, autoplan plan/restore artifacts). analytics/**, retros/** and
 # the include_files literals keep non-projects content as before.
 # New skill output stays local until an entry is added here.
+#
+# Track 94A removed the readers that were really machine-local state:
+# manager-*.json, *-evidence.jsonl, the live driver-handoff.md, pair-review
+# resume copies and stray scripts, and non-document files in the artifact
+# directories (docs/invariants/sync.md "Removed 2026-10-29").
+_GSTACK_ARTIFACT_DIRS: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint-pointers",
+    "ceo-plans",
+    "plans",
+    "designs",
+    "specs",
+    "briefs",
+    "cards",
+    "handoffs",
+    "deploy-reports",
+)
+# Document file types the artifact directories admit. Fail-closed: a `.sh`,
+# `.cjs`, `.stderr` or `.yaml` there stays local until an entry is added.
+# Matching is case-sensitive, so `.PNG` stays local too.
+_GSTACK_DOCUMENT_EXTENSIONS: tuple[str, ...] = (
+    "md",
+    "txt",
+    "html",
+    "css",
+    "json",
+    "jsonl",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "svg",
+    "webp",
+    "pdf",
+    "patch",
+    "diff",
+)
 _GSTACK_INCLUDE_PATTERNS: list[str] = [
+    "retro-context.md",
+    "greptile-history.md",
+    ".completeness-intro-seen",
+    ".telemetry-prompted",
+    ".proactive-prompted",
+    ".welcome-seen",
+    ".codex-desc-healed",
+    "retros/**",
+    *(
+        f"projects/*/{directory}/**/*.{extension}"
+        for directory in _GSTACK_ARTIFACT_DIRS
+        for extension in _GSTACK_DOCUMENT_EXTENSIONS
+    ),
+    "projects/*/pair-review/deploy.md",
+    "projects/*/pair-review/report.md",
+    "projects/*/pair-review/parked-bugs.md",
+    "projects/*/learnings.jsonl",
+    "projects/*/decisions.jsonl",
+    "projects/*/decisions.archive.jsonl",
+    "projects/*/timeline.jsonl",
+    "projects/*/greptile-history.md",
+    "projects/*/land-and-deploy.jsonl",
+    "projects/*/land-deploy.jsonl",
+    "projects/*/health-history.jsonl",
+    "projects/*/canary-history.jsonl",
+    "projects/*/distillation-proposals.json",
+    "projects/*/.former-slugs",
+    "projects/*/reviews.jsonl",
+    "projects/*/resources-shown.jsonl",
+    "projects/*/*-reviews.jsonl",
+    "projects/*/*-autoplan-*.md",
+    "projects/*/*-test-plan-*.md",
+    "projects/*/*-card.md",
+    "projects/*/driver-handoff-*.md",
+    # Owner decision 2026-10-29 (Track 94A): these keep syncing. Upstream
+    # gstack keeps them machine-local (bin/gstack-artifacts-init allowlist).
+    # Hazard: analytics/skill-usage.jsonl set-union merges across Macs, while
+    # gstack-telemetry-sync's per-Mac cursor analytics/.last-sync-line counts
+    # lines of that file (excluded per Mac below). Peer lines merged into the
+    # file shift what the cursor points at, so telemetry can re-send or skip
+    # lines.
+    "analytics/**",
+    "projects/*/question-log.jsonl",
+    "projects/*/question-events.jsonl",
+    "projects/*/question-preferences.json",
+    "projects/*/taste-profile.json",
+]
+
+# Frozen literal copy of the allowlist v1.11.6 shipped (commit 5dc484b), the
+# only version before Track 94A narrowed it. Do not edit it: it is data, the
+# list a config written by that release pins.
+_GSTACK_INCLUDE_PATTERNS_1_11_6: tuple[str, ...] = (
     "analytics/**",
     "retros/**",
     "retro-context.md",
@@ -222,7 +311,16 @@ _GSTACK_INCLUDE_PATTERNS: list[str] = [
     "projects/*/*-card.md",
     "projects/*/driver-handoff*.md",
     "projects/*/manager-*.json",
-]
+)
+
+# Previous default `include_patterns` lists per source, each compared as a
+# set. `core._compute_recommended_includes_diff` offers the current default
+# to a config that still pins exactly one of them; any other present list
+# (edited, extended or empty) stays the owner's choice. Named like
+# RETIRED_SOURCE_NAMES.
+RETIRED_DEFAULT_INCLUDE_PATTERNS: dict[str, tuple[frozenset[str], ...]] = {
+    "gstack": (frozenset(_GSTACK_INCLUDE_PATTERNS_1_11_6),),
+}
 
 DEFAULT_SOURCES: list[dict[str, Any]] = [
     {"name": "claude", "path": DEFAULT_CLAUDE_DIR, "type": "claude"},

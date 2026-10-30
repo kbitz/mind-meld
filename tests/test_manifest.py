@@ -1,22 +1,27 @@
 """Tests for mind_meld.manifest — walking, hashing, diffing."""
 
+import contextlib
 import errno
 import hashlib
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from mind_meld.config import get_default_source
 from mind_meld.errors import ManifestError, SnapshotChanged, SnapshotError
 from mind_meld.manifest import (
+    BROWSER_PROFILE_MARKER,
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
     TOMBSTONE_TTL_DAYS,
     SourceHolds,
     _canonical_for_conflict,
     _FileTooLarge,
+    _include_pattern_body,
     _is_active_tombstone,
     _is_excluded,
     _record_file,
@@ -43,6 +48,12 @@ from mind_meld.manifest import (
     walk_generic_source,
     walk_muse_source,
     walk_source,
+)
+from tests.test_config import (
+    GSTACK_ARTIFACT_DIRS94A,
+    GSTACK_DOCUMENT_EXTENSIONS94A,
+    GSTACK_LOCAL_PATHS94A,
+    GSTACK_SYNCED_PATHS94A,
 )
 
 
@@ -649,6 +660,28 @@ class TestNestedRepositories:
             locked.chmod(0o700)
         assert files == {}
         assert skipped == [("repo", "nested git repository")]
+        assert prefixes == ["repo"]
+
+    def test_unreadable_descendant_of_a_checkout_stays_a_freeze(self, tmp_path):
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        locked = tmp_path / "repo" / "secret"
+        (locked / "nested" / "deep").mkdir(parents=True)
+        (tmp_path / "repo" / "notes.md").write_text("n")
+        cfg = {
+            "name": "g",
+            "type": "generic",
+            "path": str(tmp_path),
+            "include_dirs": ["repo/secret/nested/deep", "repo/notes.md/a/b"],
+            "include_files": ["repo/secret/nested/Cookies"],
+        }
+        locked.chmod(0)
+        try:
+            files = walk_source(cfg, strict=True)[1]
+            assert marker_skip_globs(cfg, strict=True) == []
+            prefixes = nested_repo_skip_prefixes(cfg, strict=True)
+        finally:
+            locked.chmod(0o700)
+        assert files == {}
         assert prefixes == ["repo"]
 
     def test_link_to_a_checkout_is_a_symlink_not_a_checkout(self, tmp_path):
@@ -1485,6 +1518,449 @@ class TestMarkerSkipGlobs:
         files = walk_generic_source(cfg)
         assert "projects/myapp/role.md" in files
         assert "projects/*/SKILL.md" not in files
+
+
+class TestBrowserProfileMarker94A:
+    """Track 94A: a directory holding `Local State` is a browser profile and stays local."""
+
+    @staticmethod
+    def _write(base: Path, *rels: str) -> None:
+        for rel in rels:
+            path = base / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+
+    @staticmethod
+    def _gstack(base: Path, *, allowlist: bool = True) -> dict[str, Any]:
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(base)
+        if not allowlist:
+            del source["include_patterns"]
+        return source
+
+    def test_marker_is_chromiums_user_data_file(self):
+        assert BROWSER_PROFILE_MARKER == "Local State"
+
+    def test_profile_under_designs_is_skipped_by_marker_not_by_type(self, tmp_path: Path):
+        design = "projects/acme/designs/track-17f"
+        self._write(
+            tmp_path,
+            f"{design}/chrome-profile/Local State",
+            f"{design}/chrome-profile/Default/Login Data",
+            # Document types the allowlist admits: only the marker drops them.
+            f"{design}/chrome-profile/Default/Extensions/x/1.0/manifest.json",
+            f"{design}/chrome-profile/Default/Extensions/x/1.0/icon.png",
+            f"{design}/finalized.html",
+            f"{design}/notes.md",
+        )
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source) == [f"{design}/chrome-profile"]
+        assert set(walk_generic_source(source)) == {
+            f"{design}/finalized.html",
+            f"{design}/notes.md",
+        }
+
+    def test_profiles_under_pair_review_branches_are_skipped(self, tmp_path: Path):
+        runtime = "projects/p/pair-review/branches/feat/runtime"
+        self._write(
+            tmp_path,
+            f"{runtime}/signed-profile/Local State",
+            f"{runtime}/signed-profile/Default/Login Data",
+            f"{runtime}/desktop/.dev/user-data/Local State",
+            f"{runtime}/desktop/.dev/user-data/Default/Cookies",
+            "projects/p/pair-review/branches/feat/report.md",
+        )
+        source = self._gstack(tmp_path, allowlist=False)
+        assert marker_skip_globs(source) == [
+            f"{runtime}/desktop/.dev/user-data",
+            f"{runtime}/signed-profile",
+        ]
+        assert set(walk_generic_source(source)) == {
+            "projects/p/pair-review/branches/feat/report.md"
+        }
+
+    def test_no_folder_name_is_hard_coded(self, tmp_path: Path):
+        self._write(tmp_path, "projects/p/chrome-profile/Default/Preferences")
+        self._write(
+            tmp_path, "projects/p/dir-marker/Local State/inside.txt", "projects/p/dir-marker/k.txt"
+        )
+        self._write(tmp_path, "projects/p/link-marker/real.txt", "projects/p/link-marker/k.txt")
+        os.symlink(
+            tmp_path / "projects/p/link-marker/real.txt",
+            tmp_path / "projects/p/link-marker/Local State",
+        )
+        source = self._gstack(tmp_path, allowlist=False)
+        assert marker_skip_globs(source) == []
+        kept = set(walk_generic_source(source))
+        assert "projects/p/chrome-profile/Default/Preferences" in kept
+        assert "projects/p/dir-marker/Local State/inside.txt" in kept
+        assert "projects/p/dir-marker/k.txt" in kept
+        assert "projects/p/link-marker/k.txt" in kept
+
+    def test_every_generic_source_honors_the_marker(self, tmp_path: Path):
+        self._write(
+            tmp_path,
+            "skills/x/browser/Local State",
+            "skills/x/browser/Default/Cookies",
+            "skills/x/SKILL.md",
+        )
+        source = get_default_source("codex")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert marker_skip_globs(source) == ["skills/x/browser"]
+        assert set(walk_generic_source(source)) == {"skills/x/SKILL.md"}
+
+    def test_profile_internals_are_never_enumerated(self, tmp_path: Path, monkeypatch):
+        import mind_meld.manifest as m
+
+        profile = tmp_path / "projects/p/designs/t/chrome-profile"
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Local State")
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Default/Cookies")
+        scanned: list[Path] = []
+        real_scandir = os.scandir
+
+        def tracking(path):
+            scanned.append(Path(path))
+            return real_scandir(path)
+
+        monkeypatch.setattr(m.os, "scandir", tracking)
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source, strict=True) == ["projects/p/designs/t/chrome-profile"]
+        assert profile in scanned
+        assert profile / "Default" not in scanned
+        scanned.clear()
+        assert walk_generic_source(source, strict=True) == {}
+        assert profile / "Default" not in scanned
+
+    def test_profile_siblings_are_not_stat_ed_so_churn_cannot_refuse(
+        self, tmp_path: Path, monkeypatch
+    ):
+        """A live profile churns: a sibling that vanishes mid-scan must not
+        refuse a strict scan once `Local State` has marked the directory."""
+        import mind_meld.manifest as m
+
+        profile = tmp_path / "projects/p/designs/t/chrome-profile"
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/Local State")
+        self._write(tmp_path, "projects/p/designs/t/chrome-profile/churn.tmp")
+        real_scandir = os.scandir
+
+        class _Entry:
+            def __init__(self, entry: os.DirEntry):
+                self._entry = entry
+                self.name = entry.name
+                self.path = entry.path
+
+            def stat(self, *, follow_symlinks: bool = True):
+                if self.name == "churn.tmp":
+                    raise FileNotFoundError(errno.ENOENT, "vanished", self.path)
+                return self._entry.stat(follow_symlinks=follow_symlinks)
+
+        @contextlib.contextmanager
+        def churning(path):
+            with real_scandir(path) as iterator:
+                yield [_Entry(entry) for entry in iterator]
+
+        monkeypatch.setattr(m.os, "scandir", churning)
+        source = self._gstack(tmp_path)
+        assert marker_skip_globs(source, strict=True) == ["projects/p/designs/t/chrome-profile"]
+        (profile / "Local State").unlink()
+        with pytest.raises(SnapshotError):
+            marker_skip_globs(source, strict=True)
+
+    @pytest.mark.parametrize("configured", ["designs", "designs/", "./designs"])
+    def test_profile_at_include_root_skips_the_include(self, tmp_path: Path, configured: str):
+        self._write(tmp_path, "designs/Local State", "designs/notes.md", "designs/a/b.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": [configured],
+        }
+        assert marker_skip_globs(source) == ["designs"]
+        assert walk_generic_source(source) == {}
+
+    @pytest.mark.parametrize("configured", [["."], ["./"], [".", "Default"], ["Default", "."]])
+    def test_profile_at_source_root_is_pruned(self, tmp_path: Path, configured, monkeypatch):
+        self._write(tmp_path, "Local State", "notes.md", "Default/manifest.json")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": configured,
+            "include_files": ["notes.md"],
+        }
+        real_scandir = os.scandir
+
+        def no_profile_internals(path):
+            assert Path(path) != tmp_path / "Default"
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", no_profile_internals)
+        assert marker_skip_globs(source, strict=True) == ["."]
+        assert walk_generic_source(source, strict=True) == {}
+        assert nested_repo_skip_prefixes(source, strict=True) == []
+
+    def test_absolute_include_root_keeps_extend_root_exemption(self, tmp_path):
+        self._write(tmp_path, ".extend-root", "notes.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": [str(tmp_path)],
+        }
+        assert marker_skip_globs(source, strict=True) == []
+        assert set(walk_generic_source(source, strict=True)) == {"notes.md"}
+
+    @pytest.mark.parametrize(
+        "configured", [["profile", "profile/Default"], ["profile/Default", "profile"]]
+    )
+    def test_nested_overlapping_profile_includes_are_pruned(
+        self, tmp_path, configured, monkeypatch
+    ):
+        self._write(tmp_path, "profile/Local State", "profile/Default/manifest.json")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": configured,
+            "include_files": [
+                "profile/Default/manifest.json",
+                str(tmp_path / "profile/Default/manifest.json"),
+            ],
+        }
+        real_scandir, real_lstat = os.scandir, Path.lstat
+
+        def guarded_scandir(path):
+            assert not Path(path).is_relative_to(tmp_path / "profile/Default")
+            return real_scandir(path)
+
+        def guarded_lstat(path, *args, **kwargs):
+            assert not path.is_relative_to(tmp_path / "profile/Default")
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", guarded_scandir)
+        monkeypatch.setattr(Path, "lstat", guarded_lstat)
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        assert walk_generic_source(source, strict=True) == {}
+        assert nested_repo_skip_prefixes(source, strict=True) == []
+
+    def test_source_root_skip_filters_prior_files_and_peer_tombstones(self, tmp_path):
+        from mind_meld import core
+
+        self._write(tmp_path, "Local State", "notes.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["."],
+        }
+        exclude_map, prefixes = core._build_exclude_map({}, [source], strict=True)
+        prior = {
+            "sources": {"notes": {"files": {"notes.md": {"sha256": "a"}}}},
+            "tombstones": {"notes:gone.md": {"deleted_at": "2026-01-01T00:00:00+00:00"}},
+        }
+        filtered = core._filter_excluded_paths(prior, exclude_map, prefixes)
+        assert filtered["sources"]["notes"]["files"] == {}
+        assert filtered["tombstones"] == {}
+
+    def test_default_pull_filter_can_leave_unmarked_profile_fragments(self, tmp_path):
+        from mind_meld import core
+
+        source = self._gstack(tmp_path)
+        profile = "projects/acme/designs/t/user-data"
+        marker = f"{profile}/Local State"
+        document = f"{profile}/Default/Extensions/x/manifest.json"
+        peer = {"sources": {"gstack": {"files": {marker: {}, document: {}}}}}
+        excludes, prefixes = core._build_exclude_map({}, [source], strict=True)
+        includes = core._build_include_map({}, [source])
+        received = core._filter_excluded_paths(peer, excludes, prefixes, includes)
+        assert set(received["sources"]["gstack"]["files"]) == {document}
+        self._write(tmp_path, *received["sources"]["gstack"]["files"])
+        assert marker_skip_globs(source) == []
+        assert set(walk_generic_source(source)) == {document}
+        # An explicit local exclusion also removes prior entries: push before
+        # deleting the fragment, just as the manual cleanup instructions say.
+        source["exclude_patterns"].append(f"{profile}/*")
+        excludes, prefixes = core._build_exclude_map({}, [source], strict=True)
+        assert walk_generic_source(source) == {}
+        assert (
+            core._filter_excluded_paths(received, excludes, prefixes, includes)["sources"][
+                "gstack"
+            ]["files"]
+            == {}
+        )
+
+    def _assert_left_out(self, source: dict[str, Any], rel: str, kept: str | None) -> None:
+        from mind_meld import core
+
+        walked = walk_generic_source(source, strict=True)
+        assert rel not in walked
+        if kept is not None:
+            assert kept in walked
+        prior = {
+            "sources": {
+                source["name"]: {
+                    "files": {rel: {"sha256": "a"}, **({kept: {"sha256": "b"}} if kept else {})}
+                }
+            }
+        }
+        exclude_map, prefixes = core._build_exclude_map({}, [source], strict=True)
+        filtered = core._filter_excluded_paths(prior, exclude_map, prefixes)
+        files = filtered["sources"][source["name"]]["files"]
+        assert rel not in files
+        if kept is not None:
+            assert kept in files
+        tombstones = generate_tombstones(
+            {"sources": {source["name"]: {"files": walked}}}, filtered, "me"
+        )
+        assert f"{source['name']}:{rel}" not in tombstones
+
+    def test_include_below_profile_is_skipped(self, tmp_path: Path):
+        self._write(tmp_path, "profile/Local State", "profile/Default/Cookies")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["profile/Default"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", None)
+
+    def test_include_file_below_profile_is_skipped_without_include_dirs(self, tmp_path: Path):
+        self._write(tmp_path, "profile/Local State", "profile/Default/Cookies", "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": ["profile/Default/Cookies", "keep.md"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", "keep.md")
+
+    def test_include_file_below_profile_is_skipped_beside_unrelated_dirs(self, tmp_path: Path):
+        self._write(
+            tmp_path,
+            "profile/Local State",
+            "profile/Default/Cookies",
+            "notes/keep.md",
+        )
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["notes"],
+            "include_files": ["profile/Default/Cookies"],
+        }
+        assert marker_skip_globs(source, strict=True) == ["profile"]
+        self._assert_left_out(source, "profile/Default/Cookies", "notes/keep.md")
+
+    def test_extend_root_in_a_parent_does_not_skip_the_child(self, tmp_path: Path):
+        self._write(tmp_path, "rendered/.extend-root", "rendered/child/SKILL.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_dirs": ["rendered/child"],
+        }
+        assert marker_skip_globs(source, strict=True) == []
+        assert set(walk_generic_source(source, strict=True)) == {"rendered/child/SKILL.md"}
+
+    def test_dotdot_include_does_not_adopt_an_outside_marker(self, tmp_path: Path):
+        outside = tmp_path.parent / f"mm-out-{tmp_path.name}"
+        outside.mkdir()
+        (outside / "Local State").write_text("x")
+        self._write(tmp_path, "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": ["keep.md", f"sub/../../{outside.name}/Cookies"],
+        }
+        try:
+            assert marker_skip_globs(source, strict=True) == []
+            assert set(walk_generic_source(source, strict=True)) == {"keep.md"}
+        finally:
+            (outside / "Local State").unlink()
+            outside.rmdir()
+
+    def test_symlink_parent_does_not_adopt_an_outside_marker(self, tmp_path: Path):
+        outside = tmp_path.parent / f"mm-link-{tmp_path.name}"
+        (outside / "Default").mkdir(parents=True)
+        (outside / "Local State").write_text("x")
+        (outside / "Default" / "Cookies").write_text("c")
+        (tmp_path / "up").symlink_to(Path(".."), target_is_directory=True)
+        self._write(tmp_path, "keep.md")
+        source = {
+            "name": "notes",
+            "path": str(tmp_path),
+            "type": "generic",
+            "include_files": [f"up/{outside.name}/Default/Cookies", "keep.md"],
+        }
+        try:
+            assert marker_skip_globs(source, strict=True) == []
+            assert set(walk_generic_source(source, strict=True)) == {"keep.md"}
+        finally:
+            (outside / "Default" / "Cookies").unlink()
+            (outside / "Local State").unlink()
+            (outside / "Default").rmdir()
+            outside.rmdir()
+
+
+class TestGstackAllowlistWalk94A:
+    """Track 94A: the default gstack allowlist, walked and matched as one list."""
+
+    def test_walk_keeps_exactly_the_reader_backed_paths(self, tmp_path: Path):
+        for rel in (*GSTACK_LOCAL_PATHS94A, *GSTACK_SYNCED_PATHS94A):
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert set(walk_generic_source(source)) == set(GSTACK_SYNCED_PATHS94A)
+
+    def test_walk_artifact_types_at_each_depth(self, tmp_path: Path):
+        expected = set()
+        for directory in GSTACK_ARTIFACT_DIRS94A:
+            for extension in (*GSTACK_DOCUMENT_EXTENSIONS94A, "PNG", "sh", "cjs", "stderr"):
+                for depth in ("", "one/two/"):
+                    stem = "upper" if extension == "PNG" else "a"
+                    rel = f"projects/acme/{directory}/{depth}{stem}.{extension}"
+                    path = tmp_path / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("x")
+                    if extension in GSTACK_DOCUMENT_EXTENSIONS94A:
+                        expected.add(rel)
+        source = get_default_source("gstack")
+        assert source is not None
+        source["path"] = str(tmp_path)
+        assert set(walk_generic_source(source)) == expected
+
+    def test_combined_matcher_equals_any_over_single_patterns(self):
+        defaults = get_default_source("gstack")
+        assert defaults is not None
+        patterns = defaults["include_patterns"]
+        paths = [
+            *GSTACK_LOCAL_PATHS94A,
+            *GSTACK_SYNCED_PATHS94A,
+            "retro-context.md",
+            "retros/2026/w43.json",
+            "projects/acme/review-and-prep/run-1/x.md",
+            "projects/a/b/checkpoints/x.md",
+            "projects/acme/checkpoints/line1\nline2.md",
+            *(
+                f"projects/acme/{directory}/{depth}a.{extension}"
+                for directory in GSTACK_ARTIFACT_DIRS94A
+                for extension in (*GSTACK_DOCUMENT_EXTENSIONS94A, "sh")
+                for depth in ("", "one/two/")
+            ),
+        ]
+        for rel in paths:
+            expected = any(re.fullmatch(_include_pattern_body(p), rel, re.DOTALL) for p in patterns)
+            assert matches_include_patterns(rel, patterns) is expected, rel
+        assert matches_include_patterns("anything", []) is False
+        assert matches_include_patterns("a/b", ("a/*",)) is True
 
 
 class TestWalkerExcludesConflictFiles:

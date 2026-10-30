@@ -5,13 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from mind_meld import core
 from mind_meld.config import (
     _GENERATED_HOST_SKILL_GLOBS,
     _GSTACK_GENERATOR_GLOBS,
+    _GSTACK_INCLUDE_PATTERNS,
+    _GSTACK_INCLUDE_PATTERNS_1_11_6,
     DEFAULT_SOURCES,
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
     HOST_USAGE_BUDGET_MAX_MS,
     HOST_USAGE_INTERACTIVE_BUDGET_MIN_MS,
+    RETIRED_DEFAULT_INCLUDE_PATTERNS,
     RETIRED_SOURCE_NAMES,
     _apply_defaults,
     _configured_sources,
@@ -26,6 +30,186 @@ from mind_meld.config import (
 )
 from mind_meld.errors import ConfigError, SnapshotError
 from mind_meld.manifest import _is_excluded
+
+# Track 94A: paths the narrowed gstack allowlist must keep local, and paths it
+# must still sync. Shared with tests/test_manifest.py's walker test.
+GSTACK_ARTIFACT_DIRS94A = (
+    "checkpoints",
+    "checkpoint-pointers",
+    "ceo-plans",
+    "plans",
+    "designs",
+    "specs",
+    "briefs",
+    "cards",
+    "handoffs",
+    "deploy-reports",
+)
+GSTACK_DOCUMENT_EXTENSIONS94A = (
+    "md",
+    "txt",
+    "html",
+    "css",
+    "json",
+    "jsonl",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "svg",
+    "webp",
+    "pdf",
+    "patch",
+    "diff",
+)
+GSTACK_LOCAL_PATHS94A = (
+    "projects/acme/manager-status.json",
+    "projects/acme/manager-fields.json",
+    "projects/acme/manager-watch.json",
+    "projects/acme/main-evidence.jsonl",
+    "projects/acme/driver-handoff.md",
+    "projects/acme/pair-review/session.from-ab12cd34-20261029-205310.yaml",
+    "projects/acme/pair-review/run-qa.sh",
+    "projects/acme/designs/track/build.cjs",
+    "projects/acme/plans/t.autoplan-lean/eng-outside.sh",
+    "projects/acme/plans/t.autoplan-lean/eng-outside.stderr",
+    "projects/acme/designs/t/chrome-profile/Default/Login Data",
+    "projects/acme/designs/t/Shot.PNG",
+)
+GSTACK_SYNCED_PATHS94A = (
+    "projects/acme/driver-handoff-20261030T012053Z.md",
+    "projects/acme/pair-review/deploy.md",
+    "projects/acme/pair-review/report.md",
+    "projects/acme/pair-review/parked-bugs.md",
+    "projects/acme/main-reviews.jsonl",
+    "projects/acme/x-card.md",
+    "projects/acme/x-autoplan-1.md",
+    # Owner decision 2026-10-29: these keep syncing.
+    "analytics/skill-usage.jsonl",
+    "projects/acme/question-log.jsonl",
+    "projects/acme/question-events.jsonl",
+    "projects/acme/question-preferences.json",
+    "projects/acme/taste-profile.json",
+)
+
+
+def _gstack_default_excluded94a(rel: str) -> bool:
+    gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+    return _is_excluded(rel, gstack["exclude_patterns"], None, gstack["include_patterns"])
+
+
+class TestGstackIncludeNarrowing94A:
+    """Track 94A: machine-local gstack files and artifact-dir clutter stay local."""
+
+    @pytest.mark.parametrize("rel", GSTACK_LOCAL_PATHS94A)
+    def test_machine_local_path_is_out(self, rel):
+        assert _gstack_default_excluded94a(rel)
+
+    @pytest.mark.parametrize("rel", GSTACK_SYNCED_PATHS94A)
+    def test_reader_backed_path_is_in(self, rel):
+        assert not _gstack_default_excluded94a(rel)
+
+    @pytest.mark.parametrize("directory", GSTACK_ARTIFACT_DIRS94A)
+    @pytest.mark.parametrize("extension", GSTACK_DOCUMENT_EXTENSIONS94A)
+    def test_artifact_dir_admits_every_document_type_at_any_depth(self, directory, extension):
+        assert not _gstack_default_excluded94a(f"projects/acme/{directory}/a.{extension}")
+        assert not _gstack_default_excluded94a(f"projects/acme/{directory}/one/two/a.{extension}")
+
+    @pytest.mark.parametrize("directory", GSTACK_ARTIFACT_DIRS94A)
+    def test_artifact_dir_rejects_non_document_types(self, directory):
+        for name in ("run.sh", "build.cjs", "x.stderr", "x.yaml", "no-extension"):
+            assert _gstack_default_excluded94a(f"projects/acme/{directory}/{name}")
+
+    def test_frozen_list_is_the_shipped_default(self):
+        assert len(_GSTACK_INCLUDE_PATTERNS_1_11_6) == 44
+        assert len(set(_GSTACK_INCLUDE_PATTERNS_1_11_6)) == 44
+        for removed in (
+            "projects/*/manager-*.json",
+            "projects/*/*-evidence.jsonl",
+            "projects/*/driver-handoff*.md",
+            "projects/*/pair-review/*",
+            "projects/*/designs/**",
+        ):
+            assert removed in _GSTACK_INCLUDE_PATTERNS_1_11_6
+            assert removed not in _GSTACK_INCLUDE_PATTERNS
+        assert set(_GSTACK_INCLUDE_PATTERNS_1_11_6) != set(_GSTACK_INCLUDE_PATTERNS)
+        assert RETIRED_DEFAULT_INCLUDE_PATTERNS["gstack"] == (
+            frozenset(_GSTACK_INCLUDE_PATTERNS_1_11_6),
+        )
+
+    def test_default_list_shape(self):
+        assert len(_GSTACK_INCLUDE_PATTERNS) == len(set(_GSTACK_INCLUDE_PATTERNS)) == 184
+        generated = [p for p in _GSTACK_INCLUDE_PATTERNS if "/**/*." in p]
+        assert len(generated) == len(GSTACK_ARTIFACT_DIRS94A) * len(GSTACK_DOCUMENT_EXTENSIONS94A)
+
+
+def _pinned_gstack94a(patterns):
+    return {
+        "name": "gstack",
+        "path": "~/.gstack",
+        "type": "generic",
+        "include_dirs": ["projects"],
+        "include_patterns": patterns,
+    }
+
+
+class TestRetiredIncludeDefaults94A:
+    """Track 94A: a config pinning the previous default list is offered the new one."""
+
+    def test_previous_list_is_offered_with_the_new_default(self):
+        diffs = core._compute_recommended_includes_diff(
+            [_pinned_gstack94a(list(_GSTACK_INCLUDE_PATTERNS_1_11_6))]
+        )
+        assert diffs == [
+            ("gstack", list(_GSTACK_INCLUDE_PATTERNS), list(_GSTACK_INCLUDE_PATTERNS_1_11_6))
+        ]
+
+    def test_reordered_previous_list_is_still_offered(self):
+        pinned = list(reversed(_GSTACK_INCLUDE_PATTERNS_1_11_6))
+        diffs = core._compute_recommended_includes_diff([_pinned_gstack94a(pinned)])
+        assert [(name, replaced) for name, _patterns, replaced in diffs] == [("gstack", pinned)]
+
+    def test_current_default_is_not_offered(self):
+        assert (
+            core._compute_recommended_includes_diff(
+                [_pinned_gstack94a(list(_GSTACK_INCLUDE_PATTERNS))]
+            )
+            == []
+        )
+
+    def test_edited_previous_list_stays_the_owners_choice(self):
+        pinned = [*_GSTACK_INCLUDE_PATTERNS_1_11_6, "projects/*/mine.md"]
+        assert core._compute_recommended_includes_diff([_pinned_gstack94a(pinned)]) == []
+        dropped = list(_GSTACK_INCLUDE_PATTERNS_1_11_6)[1:]
+        assert core._compute_recommended_includes_diff([_pinned_gstack94a(dropped)]) == []
+
+    def test_empty_list_stays_the_owners_choice(self):
+        assert core._compute_recommended_includes_diff([_pinned_gstack94a([])]) == []
+
+    def test_absent_key_is_offered_with_no_replaced_list(self):
+        source = _pinned_gstack94a([])
+        del source["include_patterns"]
+        assert core._compute_recommended_includes_diff([source]) == [
+            ("gstack", list(_GSTACK_INCLUDE_PATTERNS), None)
+        ]
+
+    def test_non_generic_source_is_skipped(self):
+        source = _pinned_gstack94a(list(_GSTACK_INCLUDE_PATTERNS_1_11_6))
+        source["type"] = "claude"
+        assert core._compute_recommended_includes_diff([source]) == []
+
+    def test_missing_recommended_names_the_pinned_source(self):
+        gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
+
+        def config_with(patterns):
+            source = _pinned_gstack94a(patterns)
+            source["exclude_patterns"] = list(gstack["exclude_patterns"])
+            return {"sync": {"sources": [source]}}
+
+        previous = config_with(list(_GSTACK_INCLUDE_PATTERNS_1_11_6))
+        assert core._config_missing_recommended_excludes(previous) == ["gstack"]
+        current = config_with(list(_GSTACK_INCLUDE_PATTERNS))
+        assert core._config_missing_recommended_excludes(current) == []
 
 
 class TestGstackGeneratorExcludes72B:
@@ -262,8 +446,8 @@ class TestDefaultSources:
 
         gstack = next(s for s in DEFAULT_SOURCES if s["name"] == "gstack")
         assert gstack["include_patterns"] == list(_GSTACK_INCLUDE_PATTERNS)
-        assert "projects/*/checkpoints/**" in gstack["include_patterns"]
-        assert "projects/*/checkpoint-pointers/**" in gstack["include_patterns"]
+        assert "projects/*/checkpoints/**/*.md" in gstack["include_patterns"]
+        assert "projects/*/checkpoint-pointers/**/*.json" in gstack["include_patterns"]
         assert "analytics/**" in gstack["include_patterns"]
         assert "retros/**" in gstack["include_patterns"]
         for f in gstack["include_files"]:

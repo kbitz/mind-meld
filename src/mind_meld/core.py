@@ -516,10 +516,10 @@ def _build_exclude_map(
     """Map source name -> exclude_patterns and directory-skip prefixes.
 
     Empty glob entries are pruned. Marker-skip prefixes (directories
-    containing `.extend-root`) are returned separately so the consumer-
-    boundary filter can prefix-match rather than fnmatch. Without that
-    merge, a walker-only skip would emit deletion tombstones for
-    previously-synced generated files.
+    containing `.extend-root` or a browser profile's `Local State`) are
+    returned separately so the consumer-boundary filter can prefix-match
+    rather than fnmatch. Without that merge, a walker-only skip would emit
+    deletion tombstones for previously-synced generated files.
 
     ``nested_roots`` adds nested-checkout roots the caller already observed
     (pull's and diff's probe of incoming paths); this helper never walks for
@@ -1284,25 +1284,38 @@ def _compute_recommended_excludes_diff(
 
 def _compute_recommended_includes_diff(
     sources: list[dict],
-) -> list[tuple[str, list[str]]]:
-    """Sources whose default declares `include_patterns` but config lacks the key.
+) -> list[tuple[str, list[str], list[str] | None]]:
+    """Sources whose default `include_patterns` the config lacks or has outgrown.
 
     Unlike exclude globs, a partial allowlist is a different allowlist, so
-    migration only fires when the key is absent entirely and proposes the
-    default list wholesale. A user-edited (even empty) list is left alone;
-    deleting the key brings the prompt back, mirroring recommended excludes.
-    Returns [(source_name, default_patterns)].
+    migration fires only when the key is absent or the present list equals,
+    as a set, a previous default in `config.RETIRED_DEFAULT_INCLUDE_PATTERNS`
+    that the current default replaced, and then proposes the default list
+    wholesale. Any other present list, even an empty one, is the user's
+    choice; deleting the key brings the prompt back, mirroring recommended
+    excludes.
+    Returns [(source_name, default_patterns, replaced)]: `replaced` is None
+    for an absent key and the list the config holds today otherwise.
     """
-    diffs: list[tuple[str, list[str]]] = []
+    diffs: list[tuple[str, list[str], list[str] | None]] = []
     for src in sources:
-        if src.get("type") != "generic" or "include_patterns" in src:
+        if src.get("type") != "generic":
             continue
         default = get_default_source(src.get("name", ""))
         if default is None:
             continue
         recommended = default.get("include_patterns") or []
-        if recommended:
-            diffs.append((src["name"], list(recommended)))
+        if not recommended:
+            continue
+        if "include_patterns" not in src:
+            diffs.append((src["name"], list(recommended), None))
+            continue
+        present = src["include_patterns"]
+        if not isinstance(present, list) or not all(isinstance(p, str) for p in present):
+            continue
+        retired = _config_module.RETIRED_DEFAULT_INCLUDE_PATTERNS.get(src["name"], ())
+        if set(present) != set(recommended) and frozenset(present) in retired:
+            diffs.append((src["name"], list(recommended), list(present)))
     return diffs
 
 
@@ -1321,7 +1334,7 @@ def _config_missing_recommended_excludes(config: dict) -> list[str]:
     if not sources:
         return []
     names = [name for name, _missing, _current in _compute_recommended_excludes_diff(sources)]
-    for name, _patterns in _compute_recommended_includes_diff(sources):
+    for name, _patterns, _replaced in _compute_recommended_includes_diff(sources):
         if name not in names:
             names.append(name)
     return names
@@ -1979,14 +1992,26 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             "\nThe include_patterns allowlist syncs only context with a cross-machine "
             "reader (checkpoints, plans, learnings/decisions ledgers, handoffs); per-run "
             "output (review-prep trees, loop state, gate diffs) stays on this Mac. "
+            "Factory manager files, evidence ledgers, pair-review resume copies and "
+            "non-document files in artifact directories stay local too. "
             "Pushing publishes the smaller set with no tombstones, and every Mac keeps "
             "its local files. Deleting the key later brings this prompt back; editing "
             "the list (even to empty) is respected as your choice."
         )
         console.print("\n[bold]Recommended include_patterns updates:[/bold]")
-        for name, patterns in include_diffs:
-            console.print(f"\n  [bold]{name}[/bold]  (no include_patterns today)")
-            for p in patterns:
+        for name, patterns, replaced in include_diffs:
+            if replaced is None:
+                console.print(f"\n  [bold]{name}[/bold]  (no include_patterns today)")
+                shown_removed: list[str] = []
+                shown_added = patterns
+            else:
+                # Only the difference: the unchanged entries are not news.
+                console.print(f"\n  [bold]{name}[/bold]  (previous default list)")
+                shown_removed = [p for p in replaced if p not in patterns]
+                shown_added = [p for p in patterns if p not in replaced]
+            for p in shown_removed:
+                console.print(f"    [red]- {p}[/red]")
+            for p in shown_added:
                 console.print(f"    [green]+ {p}[/green]")
     if retired:
         console.print("\n[bold]Retired sources:[/bold]")
@@ -2012,7 +2037,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
 
     try:
         diff_map = {name: missing for name, missing, _current in diffs}
-        include_map_new = {name: patterns for name, patterns in include_diffs}
+        include_map_new = {name: patterns for name, patterns, _replaced in include_diffs}
         new_sources: list[dict] = []
         for src in sources:
             if src.get("name") in _config_module.RETIRED_SOURCE_NAMES:
@@ -2050,7 +2075,7 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
             pass
         parts: list[str] = []
         if diffs or include_diffs:
-            updated = {name for name, _m, _c in diffs} | {name for name, _p in include_diffs}
+            updated = {name for name, _m, _c in diffs} | {name for name, _p, _r in include_diffs}
             parts.append(f"Updated {len(updated)} source(s)")
         if retired:
             parts.append(f"removed retired source block(s): {', '.join(retired)}")

@@ -77,6 +77,12 @@ CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGIT
 # gstack-extend drops this file in every directory it renders. The walker
 # skips the containing directory; see marker_skip_globs.
 MARKER_SKIP_NAME = ".extend-root"
+# Chromium and Electron write this file at the root of every user-data
+# directory, and the directory's name varies (`chrome-profile`,
+# `signed-profile`, `.dev/user-data`), so detection is by marker, never by
+# folder name. The containing directory is skipped like an `.extend-root`
+# one, minus the include-root exemption; see marker_skip_globs.
+BROWSER_PROFILE_MARKER = "Local State"
 NESTED_REPO_SKIP_REASON = "nested git repository"
 
 
@@ -293,12 +299,13 @@ def _under_skip_prefix(rel_path: str, prefixes: list[str] | None) -> bool:
     """True if ``rel_path`` is a skip-prefix or a file under one.
 
     Prefix match, not fnmatch: a directory literally named ``*`` with a
-    marker must not exclude ``projects/myapp/foo``.
+    marker must not exclude ``projects/myapp/foo``. ``.`` is the source
+    root, so its marker excludes every relative path in that source.
     """
     if not prefixes:
         return False
     for prefix in prefixes:
-        if rel_path == prefix or rel_path.startswith(prefix + "/"):
+        if prefix == "." or rel_path == prefix or rel_path.startswith(prefix + "/"):
             return True
     return False
 
@@ -382,6 +389,8 @@ def nested_repo_skip_prefixes(
     scan_dirs: list[Path] = []
     if source_type == "generic" and skip_prefixes is None:
         skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if _under_skip_prefix("", skip_prefixes):
+        return []
     if source_type == "claude":
         projects = base / "projects"
         if path_has_descendant_symlink(projects, base, strict=strict, source_name=source_name):
@@ -427,12 +436,18 @@ def nested_repo_skip_prefixes(
         scan_dirs = [base / name for name in dirs]
         include_files = source_config.get("include_files") or [] if source_type == "generic" else []
         for name in include_files:
-            if _under_skip_prefix(name, skip_prefixes):
-                continue
             path = base / name
+            if path.is_relative_to(base) and _under_skip_prefix(
+                path.relative_to(base).as_posix(), skip_prefixes
+            ):
+                continue
             if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
                 roots.add(root)
     for directory in scan_dirs:
+        if directory.is_relative_to(base) and _under_skip_prefix(
+            directory.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         # An absent or linked include inside a checkout still excludes that checkout.
         if root := nested_repo_root(directory, base, strict=strict, source_name=source_name):
             roots.add(root)
@@ -506,14 +521,178 @@ def nested_repo_roots_for_paths(source_config: dict[str, Any], rel_paths: Any) -
     return sorted(roots)
 
 
+def _contained_path(path: Path, base: Path) -> Path | None:
+    """Collapse ``.`` and ``..`` and return ``path`` only when it stays under ``base``."""
+    try:
+        relative = path.relative_to(base)
+    except ValueError:
+        return None
+    current = base
+    for part in relative.parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if current == base:
+                return None
+            current = current.parent
+            continue
+        current /= part
+    return current
+
+
+def _inside_frozen_checkout(
+    current: Path, base: Path, *, strict: bool, source_name: str | None
+) -> bool:
+    """True when ``current`` is strictly inside a nested checkout below ``base``.
+
+    ``nested_repo_root`` stops at the checkout, so an unreadable descendant is
+    not stat-ed. The checkout root itself is still eligible for ``Local State``.
+    """
+    try:
+        relative = current.relative_to(base).as_posix()
+    except ValueError:
+        return False
+    checkout = nested_repo_root(current, base, strict=strict, source_name=source_name)
+    return bool(checkout) and relative != checkout and relative.startswith(checkout + "/")
+
+
+def _crosses_symlink(path: Path, base: Path, *, strict: bool, source_name: str | None) -> bool:
+    """True when reaching ``path`` from ``base`` would traverse a symlink."""
+    probe = base
+    for part in path.relative_to(base).parts:
+        probe /= part
+        try:
+            component = probe.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(probe, base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return True
+        if stat.S_ISLNK(component.st_mode):
+            return True
+        if not stat.S_ISDIR(component.st_mode):
+            return False
+    return False
+
+
+def _local_state_parent_prefix(
+    selected: Path, base: Path, *, strict: bool, source_name: str | None
+) -> str | None:
+    """Return the parent of ``selected``, up through ``base``, that holds Local State.
+
+    Looks only at ``BROWSER_PROFILE_MARKER``. A symlink directory is not
+    entered, a symlink marker marks nothing, and a missing path is not an
+    error. A directory inside a nested checkout is not probed: that checkout
+    is already frozen, and an unreadable path there must not refuse the push.
+    Strict mode refuses on a read error; permissive mode skips it.
+    Never walks above ``base``.
+    """
+    contained = _contained_path(selected, base)
+    if contained is None:
+        return None
+    current = contained.parent
+    while True:
+        current = _contained_path(current, base)
+        if current is None:
+            return None
+        if _inside_frozen_checkout(current, base, strict=strict, source_name=source_name):
+            directory_st = None
+        elif _crosses_symlink(current, base, strict=strict, source_name=source_name):
+            directory_st = None
+        else:
+            try:
+                directory_st = current.lstat()
+            except FileNotFoundError:
+                directory_st = None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(current, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                directory_st = None
+        if (
+            directory_st is not None
+            and not stat.S_ISLNK(directory_st.st_mode)
+            and stat.S_ISDIR(directory_st.st_mode)
+        ):
+            try:
+                current.resolve().relative_to(base)
+            except ValueError:
+                return None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(current, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                directory_st = None
+        if (
+            directory_st is not None
+            and not stat.S_ISLNK(directory_st.st_mode)
+            and stat.S_ISDIR(directory_st.st_mode)
+        ):
+            marker = current / BROWSER_PROFILE_MARKER
+            try:
+                marker_st = marker.lstat()
+            except FileNotFoundError:
+                marker_st = None
+            except OSError as e:
+                if strict:
+                    raise SnapshotError(
+                        snapshot_refusal(
+                            source=source_name,
+                            rel_path=_rel_or_name(marker, base),
+                            problem="could not be read",
+                            cause=os_error_cause(e),
+                            next_action="Restore read access, then run mm push.",
+                        )
+                    ) from e
+                marker_st = None
+            if (
+                marker_st is not None
+                and not stat.S_ISLNK(marker_st.st_mode)
+                and stat.S_ISREG(marker_st.st_mode)
+            ):
+                rel = current.relative_to(base).as_posix()
+                return rel or "."
+        if current == base:
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def marker_skip_globs(
     source_config: dict[str, Any],
     *,
     strict: bool = False,
 ) -> list[str]:
-    """Return relative-dir prefixes for directories that contain ``.extend-root``.
+    """Return relative-dir prefixes for directories that contain a skip marker.
 
-    gstack-extend drops ``.extend-root`` in every directory it renders.
+    Two markers: gstack-extend drops ``.extend-root`` in every directory it
+    renders, and Chromium or Electron write ``Local State`` at the root of a
+    browser user-data directory (``BROWSER_PROFILE_MARKER``).
     ``exclude_patterns`` cannot express "skip the directory CONTAINING this
     file," so the walker and the consumer-boundary filter both call this
     helper. Results are PATH PREFIXES, not fnmatch globs — interpolating
@@ -521,13 +700,21 @@ def marker_skip_globs(
     path exclude unrelated files. A marker skip must not generate deletion
     tombstones, exactly as adding a glob must not.
 
+    Only ``.extend-root`` has an include-root exemption. A ``Local State``
+    on an include root returns that include as its prefix: it is a live
+    profile, not a misplaced render marker, and holds nothing worth keeping.
+
     Permissive mode is best-effort: any OSError on a scan dir is skipped.
     Strict publishing raises SnapshotError instead. Symlinked scan dirs
     and symlink markers are ignored (same as the walker). Generic sources
-    only — callers with no ``include_dirs`` get ``[]``.
+    only. Each selected include directory and include file also checks its
+    parent directories, up to and including the source root, for a regular
+    non-symlink ``Local State``. That lookup does not apply to
+    ``.extend-root``. An empty include list returns ``[]``.
     """
     include_dirs: list[str] = source_config.get("include_dirs") or []
-    if not include_dirs:
+    include_files: list[str] = source_config.get("include_files") or []
+    if not include_dirs and not include_files:
         return []
     source_name = source_config.get("name")
     try:
@@ -562,8 +749,31 @@ def marker_skip_globs(
         return []
     globs: list[str] = []
     seen: set[str] = set()
-    for dir_name in include_dirs:
+    selected = [*include_dirs, *include_files]
+    selected.sort(key=lambda name: len((base / name).parts))
+    for name in selected:
+        chosen = base / name
+        try:
+            rel = chosen.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        if _under_skip_prefix(rel, globs):
+            continue
+        prefix = _local_state_parent_prefix(chosen, base, strict=strict, source_name=source_name)
+        if prefix is None:
+            continue
+        if prefix == ".":
+            return ["."]
+        if prefix not in seen:
+            seen.add(prefix)
+            globs.append(prefix)
+    # Discover ancestor markers before probing any overlapping child include.
+    for dir_name in sorted(include_dirs, key=lambda name: len((base / name).parts)):
         scan_dir = base / dir_name
+        if scan_dir.is_relative_to(base) and _under_skip_prefix(
+            scan_dir.relative_to(base).as_posix(), globs
+        ):
+            continue
         # A checkout covering this include is reported and frozen by the
         # walker; never probe beneath it or through a link above the include.
         if nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
@@ -637,15 +847,15 @@ def marker_skip_globs(
             # entire source tree (`skills/.extend-root` → skip `skills/`).
             # gstack-extend drops the marker in each rendered child dir.
             #
-            # Compare NORMALIZED forms. `rel_dir` came from `as_posix()`,
-            # but `dir_name` is raw config and `include_dirs` entries are
-            # not validated or normalized anywhere (`_validate_sources`
-            # checks only name/path/type). A user writing
-            # `include_dirs = ["skills/"]` or `["./skills"]` would miss
-            # this exemption and silently drop the WHOLE tree — including
-            # hand-authored files — out of sync.
-            if rel_dir == Path(dir_name).as_posix():
+            # Compare paths, not the raw include spelling: trailing slashes,
+            # `./skills` and a resolved absolute include keep this exemption.
+            #
+            # `Local State` has no such exemption: an include that is itself
+            # a browser profile is skipped whole.
+            if marker.name == MARKER_SKIP_NAME and marker.parent == scan_dir:
                 continue
+            if rel_dir == ".":
+                return ["."]
             if rel_dir not in seen:
                 seen.add(rel_dir)
                 globs.append(rel_dir)
@@ -659,12 +869,45 @@ def _collect_marker_files(
     source_name: str | None,
     strict: bool,
 ) -> list[Path]:
-    """Find ``.extend-root`` markers under ``scan_dir`` without following links."""
+    """Find ``.extend-root`` and ``Local State`` markers under ``scan_dir``.
+
+    Never follows links. A directory holding a regular ``Local State`` is
+    marked and returned from at once, even at the include root, without
+    stat-ing its siblings or descending: a live browser profile churns, and
+    a strict scan refuses on an entry that vanishes mid-scan.
+    """
     found: list[Path] = []
     if path_has_descendant_symlink(
         scan_dir, base, strict=strict, source_name=source_name
     ) or nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
         return found
+
+    def stat_entry(entry: os.DirEntry[str]) -> os.stat_result | None:
+        try:
+            return entry.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(Path(entry.path), base),
+                        problem="disappeared while being read",
+                        next_action="Wait for the writer to finish, then run mm push.",
+                    )
+                ) from None
+            return None
+        except OSError as e:
+            if strict:
+                raise SnapshotError(
+                    snapshot_refusal(
+                        source=source_name,
+                        rel_path=_rel_or_name(Path(entry.path), base),
+                        problem="could not be read",
+                        cause=os_error_cause(e),
+                        next_action="Restore read access, then run mm push.",
+                    )
+                ) from e
+            return None
 
     def walk(directory: Path, *, discovered: bool) -> None:
         try:
@@ -704,33 +947,20 @@ def _collect_marker_files(
                 ) from e
             return
         entries.sort(key=lambda entry: entry.name)
+        # Look the profile marker up by name before stat-ing any sibling.
+        for entry in entries:
+            if entry.name != BROWSER_PROFILE_MARKER:
+                continue
+            marker_st = stat_entry(entry)
+            if marker_st is not None and stat.S_ISREG(marker_st.st_mode):
+                found.append(Path(entry.path))
+                return
+            break
         child_dirs: list[Path] = []
         marked = False
         for entry in entries:
-            try:
-                st = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                if strict:
-                    raise SnapshotError(
-                        snapshot_refusal(
-                            source=source_name,
-                            rel_path=_rel_or_name(Path(entry.path), base),
-                            problem="disappeared while being read",
-                            next_action="Wait for the writer to finish, then run mm push.",
-                        )
-                    ) from None
-                continue
-            except OSError as e:
-                if strict:
-                    raise SnapshotError(
-                        snapshot_refusal(
-                            source=source_name,
-                            rel_path=_rel_or_name(Path(entry.path), base),
-                            problem="could not be read",
-                            cause=os_error_cause(e),
-                            next_action="Restore read access, then run mm push.",
-                        )
-                    ) from e
+            st = stat_entry(entry)
+            if st is None:
                 continue
             child = Path(entry.path)
             if stat.S_ISLNK(st.st_mode):
@@ -776,8 +1006,8 @@ def mtime_from_path(path: Path) -> datetime:
 
 
 @functools.lru_cache(maxsize=512)
-def _compile_include_pattern(pattern: str) -> re.Pattern[str]:
-    """Compile one segment-aware include pattern to a regex.
+def _include_pattern_body(pattern: str) -> str:
+    """Translate one segment-aware include pattern to an unanchored regex body.
 
     Dialect (deliberately unlike the legacy fnmatch exclude globs, whose
     ``*`` crosses ``/``): a pattern is ``/``-separated segments; ``*`` and
@@ -810,12 +1040,28 @@ def _compile_include_pattern(pattern: str) -> re.Pattern[str]:
         out.append(
             "".join("[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in seg)
         )
-    return re.compile("^" + "".join(out) + r"\Z", re.DOTALL)
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=16)
+def _compile_include_patterns(patterns: tuple[str, ...]) -> re.Pattern[str] | None:
+    """Compile a whole include list to one anchored alternation, or None when empty.
+
+    The gstack allowlist runs to 184 entries and the walker tests every file
+    under the include dirs, so one combined regex keeps the per-path cost
+    well below an ``any()`` over per-pattern matches. A path matches when it
+    matches any one pattern's body in full.
+    """
+    if not patterns:
+        return None
+    bodies = "|".join(_include_pattern_body(pattern) for pattern in patterns)
+    return re.compile("^(?:" + bodies + r")\Z", re.DOTALL)
 
 
 def matches_include_patterns(rel_path: str, include_patterns: list[str] | tuple[str, ...]) -> bool:
     """True when ``rel_path`` matches any segment-aware include pattern."""
-    return any(_compile_include_pattern(pattern).match(rel_path) for pattern in include_patterns)
+    combined = _compile_include_patterns(tuple(include_patterns))
+    return combined is not None and combined.match(rel_path) is not None
 
 
 def _is_excluded(
@@ -1863,9 +2109,10 @@ def walk_generic_source(
             include_files: List of filenames to check at root level
             exclude_patterns: Optional fnmatch globs evaluated against the
                 relative path; matches are silently skipped. Directories
-                containing `.extend-root` are also skipped (see
-                `marker_skip_globs`); that skip is a path-prefix match so
-                it does not generate deletion tombstones.
+                containing `.extend-root` or a browser profile's
+                `Local State` are also skipped (see `marker_skip_globs`);
+                that skip is a path-prefix match so it does not generate
+                deletion tombstones.
             include_patterns: Optional segment-aware allowlist (see
                 `matches_include_patterns`); when non-empty, only matching
                 relative paths are walked. Excludes above win over a match.
@@ -1905,18 +2152,24 @@ def walk_generic_source(
     include_files: list[str] = source_config.get("include_files", [])
     include_patterns: list[str] = list(source_config.get("include_patterns") or [])
     exclude_patterns: list[str] = list(source_config.get("exclude_patterns") or [])
-    # Marker-aware skip: directories containing `.extend-root` drop out of
-    # the local manifest the same way a glob would, but as PATH PREFIXES
+    # Marker-aware skip: directories containing `.extend-root` or `Local State`
+    # drop out of the local manifest the same way a glob would, but as PATH PREFIXES
     # not fnmatch globs. `_build_exclude_map` threads the same prefixes
     # for tombstone suppression. Do NOT skip this — a walker-only skip
     # would tombstone previously-synced files on the next push.
     skip_prefixes = marker_skip_globs(source_config, strict=strict)
+    if _under_skip_prefix("", skip_prefixes):
+        return {}
 
     files: dict[str, dict[str, Any]] = {}
     collected_paths: list[Path] = []
 
     for dir_name in include_dirs:
         scan_dir = base / dir_name
+        if scan_dir.is_relative_to(base) and _under_skip_prefix(
+            scan_dir.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         # Report a checkout above an include even when the include is absent or
         # linked, so push freezes its published entries instead of dropping them.
         if root := nested_repo_root(scan_dir, base, strict=strict, source_name=source_name):
@@ -1946,6 +2199,10 @@ def walk_generic_source(
 
     for filename in include_files:
         path = base / filename
+        if path.is_relative_to(base) and _under_skip_prefix(
+            path.relative_to(base).as_posix(), skip_prefixes
+        ):
+            continue
         if root := nested_repo_root(path.parent, base, strict=strict, source_name=source_name):
             if on_skip:
                 on_skip(root, NESTED_REPO_SKIP_REASON)

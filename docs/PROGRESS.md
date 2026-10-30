@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.11.19 | 2026-10-30 | **Browser profiles and machine-local gstack files stay on this Mac.** A directory holding a Chromium or Electron `Local State` file is left out of every generic source, and the default gstack allowlist no longer publishes runtime files. `mm migrate-config` offers the narrower list to a config that still pins the previous default. Copies that already synced stay until you exclude them and push; this narrowing does not delete them. |
 | 1.11.18 | 2026-10-29 | **`mm init` behaves the same.** Help text, prompts, flags, exit codes, and the files it writes are unchanged. |
 | 1.11.17 | 2026-10-29 | **`mm pull` waits for content a sync tool has not delivered yet instead of failing.** A file whose blob has not arrived is reported as waiting, the other files still apply, the exit stays 0, and `mm autopull` stays `success`. Syncthing temporary files and conflict copies no longer count as devices, and a manifest replaced mid-read no longer reads as corrupt. |
 | 1.11.16 | 2026-10-28 | **`mm retro-fleet` shows Muse usage and keeps Codex review traffic out of the cost.** You can record a local model rate with `--set-model-price` and mark the table checked with `--mark-pricing-verified`. Overrides stay on this Mac. |
