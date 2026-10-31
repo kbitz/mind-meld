@@ -1542,6 +1542,11 @@ def test_status_never_masks_a_conflict_or_content_counts_with_the_names_verdict(
     assert "1 new" in verdict(counts=(1, 0, 0))
     stuck = {"selected": {"cause": "degraded"}, "unknown_reason": None, "unresolved": True}
     assert "needs attention" in verdict(projection={"pull": stuck, "push": idle})
+    # A hold names itself only when the owner has nothing to run.
+    held = {"names_ready": False, "names_held": True}
+    assert verdict(**held).startswith("Metadata-only changes waiting to push")
+    assert verdict(**held, metadata=False).startswith("Project memory not published until")
+    assert "1 new" in verdict(**held, metadata=False, counts=(1, 0, 0))
     # And through the command: a real conflict outranks the ready verdict.
     (mac.claude / "projects" / folder / "memory/new.md").unlink()
     assert first_line(mac.cli("status")).startswith("1 unresolved conflicts")
@@ -3313,7 +3318,7 @@ def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypa
     assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/x.md"}
 
 
-def test_a_held_switch_says_project_memory_waits(linux):
+def test_a_held_switch_says_project_memory_is_not_published(linux):
     from mind_meld.cli import _sync_success
 
     linux.checkout("/home/kb/proj")
@@ -3336,11 +3341,11 @@ def test_a_held_switch_says_project_memory_waits(linux):
         )
     assert linux.first_byte() == crypto.FORMAT_VERSION
     assert _sync_success("push", result) == (
-        "Push: project memory waits until Claude's projects folder can be listed."
+        "Push: project memory not published until Claude's projects folder can be listed."
     )
     assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == (
         "Push: 1 content change published; "
-        "project memory waits until Claude's projects folder can be listed."
+        "project memory not published until Claude's projects folder can be listed."
     )
 
 
@@ -3505,13 +3510,15 @@ def _held_machine(linux: Machine) -> None:
     (linux.claude / "projects").rename(linux.claude / "projects.parked")
 
 
-def test_status_during_a_hold_says_project_memory_waits_not_that_it_is_ready(linux):
+def test_status_during_a_hold_says_project_memory_is_not_published(linux):
     _held_machine(linux)
     status = linux.cli("status")
     assert status.exit_code == 0, status.output
     assert "ready to publish" not in status.output
-    assert "In sync with this device's last push" not in status.output
-    assert status.output.count("waits until Claude's projects folder can be listed") >= 1
+    assert "Local content matches" not in status.output
+    held = "not published until Claude's projects folder can be listed"
+    assert held in status.output.splitlines()[0]  # the verdict
+    assert status.output.count(held) == 2  # and the status body
 
 
 def test_status_names_a_hold_beside_other_pending_changes(linux):
@@ -3521,18 +3528,18 @@ def test_status_names_a_hold_beside_other_pending_changes(linux):
     status = linux.cli("status")
     assert status.exit_code == 0, status.output
     assert "Overall pending push" in status.output
-    assert "waits until Claude's projects folder can be listed" in status.output
+    assert "not published until Claude's projects folder can be listed" in status.output
 
 
-def test_a_second_held_push_still_says_project_memory_waits(linux):
+def test_a_second_held_push_still_says_project_memory_is_not_published(linux):
     _held_machine(linux)
     first = linux.cli("push")
     assert first.exit_code == 0, first.output
-    assert "waits until Claude's projects folder can be listed" in first.output
+    assert "not published until Claude's projects folder can be listed" in first.output
     assert linux.published()["sources"]["claude"]["files"] == {}  # the held push dropped them
     second = linux.cli("push")
     assert second.exit_code == 0, second.output
-    assert "waits until Claude's projects folder can be listed" in second.output
+    assert "not published until Claude's projects folder can be listed" in second.output
 
 
 def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux, monkeypatch):
@@ -3542,6 +3549,8 @@ def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux, monkeyp
     monkeypatch.setattr(config_module, "usage_capture_readiness", lambda *a, **k: "no-reader")
     _held_machine(linux)
     assert linux.cli("push").exit_code == 0
+    with linux.on():
+        assert attemptlog.read_runs()["runs"]["push"]["cause"] == "ok"  # it published a manifest
     assert linux.cli("push").exit_code == 0
     with linux.on():
         assert attemptlog.read_runs()["runs"]["push"]["cause"] == "no-changes"

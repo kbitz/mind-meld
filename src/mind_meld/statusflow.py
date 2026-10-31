@@ -230,10 +230,12 @@ def _status_verdict(
                 )
             elif names_ready:
                 verdict = "Project memory ready to publish under shared names. Run: mm push"
-            elif names_held:
-                verdict = "Project memory waits until Claude's projects folder can be listed."
             elif metadata:
                 verdict = "Metadata-only changes waiting to push. Run: mm push"
+            elif names_held:
+                verdict = (
+                    "Project memory not published until Claude's projects folder can be listed."
+                )
             else:
                 verdict = "In sync with this device's last push."
     return safety.safe_terminal_str(scope + verdict)
@@ -892,7 +894,9 @@ def status(
         elif not source and not names_held:
             console.print("\n  Local content matches this device's last push.")
         if names_held:
-            console.print("\n  Project memory waits until Claude's projects folder can be listed.")
+            console.print(
+                "\n  Project memory not published until Claude's projects folder can be listed."
+            )
 
         if len(devices) > 1:
             console.print("\n  Other devices:")

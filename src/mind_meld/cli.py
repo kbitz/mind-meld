@@ -981,7 +981,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             lead = "project names updated"
         parts = [lead]
         if result.switch_held:
-            held_note = "project memory waits until Claude's projects folder can be listed"
+            held_note = "project memory not published until Claude's projects folder can be listed"
             parts = [held_note] if lead == "no content changes" else [lead, held_note]
         if result.wire_names_published:
             if lead in ("no content changes", "project names updated"):
