@@ -140,10 +140,11 @@ stays inside that segment). The identity is `projectid.project_identity`: the
 canonical `host/path` of a network `origin` (`https`, `http`, `git`, `ssh`, or
 scp with user `git` or none) with a non-default port kept (`host:port/path`),
 another ssh user kept (`user@host/path`, with a leading `/` kept, so a path
-relative to that user's home differs from an absolute one) and no password,
-query or last-segment parameters, ever. Local paths, `file://`, a loopback host,
-a remote helper (`gcrypt::`), host-only forms, control characters and a malformed
-URL or port have none. This
+relative to that user's home differs from an absolute one) and no password, ever.
+A query or parameters on the last path segment are dropped; `?` or `;` in an earlier
+segment means no identity. Local paths, `file://`, a loopback or unspecified host, a
+remote helper (`gcrypt::`), host-only forms, control characters and a malformed URL
+or port have none. This
 name authorizes writes and deletions, so it is stricter than `retro-fleet`'s
 `canonicalize_remote_url`, which still groups loosely.
 
@@ -154,8 +155,8 @@ its name by descent from the filesystem root (never following a symlink, with a
 per-run listing memo) gives exactly one directory, that directory has a `.git`
 directory with `HEAD`, and its `.git/config` (`RawConfigParser`; a quoted or
 escaped value, an inline comment or continued line, a section spelling the parser
-misses, an `include` or a parse failure asks git itself, with an explicit git dir
-and a 2 s timeout, so it never reads a parent repository's config) names
+misses, an `include` or a parse failure asks git itself about this file only, with a
+2 s timeout, so it never reads a parent repository's config) names
 a network `origin`. No git spawn on the common path, no transcript read, no walk
 of the home folder. `FileNotFoundError` and `NotADirectoryError` mean gone; any
 other failure, including a non-regular `.git/config`, and a timeout, mean
@@ -167,8 +168,7 @@ home-relative. One odd folder never stops the others. Each identity has one owne
 and a folder owns one identity: folders holding `memory/` first, then the smallest
 encoded name; a retained identity competes only when nothing resolved; next, a
 folder deleted from `projects/` whose recorded checkout still resolves to that
-identity or cannot be read right now, so deleting a project's folder is a real
-deletion (not when `projects/` cannot be listed, which looks like an outage); a linked worktree's
+identity, so deleting a project's folder is a real deletion; a linked worktree's
 nomination of its main checkout, and the current directory's main checkout (pull
 paths only, `projectid.allow_cwd_candidate()` at `_pull_core` entry, probed on its
 own daemon thread under the same deadline), join only when the identity has no
@@ -211,7 +211,9 @@ same for a recovered prior, adding the recorded folder too, because a sidecar's
 files sit under it, and doing so when the identity has no owner now. A marked
 entry published from another Claude folder (`base_path` differs: a peer, or this
 machine before its home or `claude` path changed) adds every local folder it maps
-to, so moving the Claude folder mints nothing either. Recovery respells a sidecar's
+to, so moving the Claude folder mints nothing either, and so does an unmarked own
+prior from another Claude folder. A `projects/` that cannot be listed does the same
+for every name form: an outage is not a mass deletion. Recovery respells a sidecar's
 deletion records the way a healthy load would.
 `generate_tombstones` skips paths under it, and `core.content_counts` /
 `iter_content_diffs` do not count a prior entry under a moved or unplaceable
@@ -257,7 +259,11 @@ rule both places a project's memory in, and later publishes memory from, any
 directory whose `.git/config` claims that origin, unattended through `mm autopull`
 (decided in the plan); an ssh user name is kept as written, so a token used as one
 reaches the sidecar and `mm diag --json`; a query string is dropped, so two
-repositories differing only by it share an identity; a hand-edited `.git/config`
+repositories differing only by it share an identity; a project folder deleted during
+a push that cannot read its checkout, or whose index runs out of time, mints nothing,
+so peers keep their copies (a false tombstone would block the project fleet-wide); own
+manifest recovery combined with a home rename or a folder gaining a remote can leave
+one deletion record under the old spelling; a hand-edited `.git/config`
 with two spellings of `origin` can read differently from git; `mm diff` lists a renamed project's files
 as `+ push` where `mm status` reports only the rename; `mm status` and `mm diag`
 read each peer's whole manifest with no time bound, so an iCloud placeholder can

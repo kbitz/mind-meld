@@ -44,6 +44,37 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:severity=should] Own-manifest recovery can leave a deletion record under its old spelling
+- **Description:** With a corrupt own manifest plus a home rename, a folder that gained a remote, or a conflict copy older than a remote change, `core.reconcile_recovered_prior` can leave one tombstone under a name a healthy load would spell differently, so a deleted file can return. An own conflict copy from a previous home can also suppress one real deletion for one push through `moved_folders`.
+- **Why:** Each needs three rare conditions together; no bytes are lost. Deferred from Track 90A review (`docs/invariants/sync.md` limits).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit if deleted Claude memory returns after a recovered push.
+
+### [review:severity=nit] `mm diff` lists a renamed project's files as `+ push`
+- **Description:** `mm status` and push report a remote change or moved checkout as names only (`core.iter_content_diffs`); `mm diff` compares against the filtered prior, so it still lists those files as new.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 90A review. Revisit when `mm diff` output next changes, or if the mismatch confuses the owner.
+
+### [review:severity=should] Bound the new peer manifest reads in `mm status` and `mm diag`
+- **Description:** `mm status` and `mm diag` now read each peer's whole manifest with no time bound. `pullflow.py` records `backend.get` blocking on iCloud placeholders (a 263 s first pull), so an evicted peer manifest can stall these triage commands on an existing iCloud store.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 90A review, read from code and not run. Revisit if either command stalls, or when the store moves off iCloud (retire this item then).
+
+### [review:severity=should] Measure the project index on a Mac hook with macOS privacy prompts
+- **Description:** The project index lists directories such as `~/Documents` and `~/Desktop` from `mm autopull` and `mm autopush`, which used to read only `~/.claude`. A privacy prompt could block a listing past the 2 s cap, flipping folders that have no retained identity to home-relative for that run.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 90A review, unmeasured. Revisit at this Mac's first real publish in the new form (`## Post-merge` in the plan).
+
+### [review:severity=nit] Shared helpers offered by Track 90A review
+- **Description:** Advisory, kept as written: the empty `project_index` literal appears three times; the `wire_folders` moved loop appears in `manifest._from_wire_mapping` and `core.reconcile_recovered_prior`; `pullflow._unplaceable_project` repeats `core._filter_excluded_paths._unplaceable`; `projectid._git_origin` repeats `_origin_remote_url`; `_linked_main_checkout` re-parses what `_resolve_git_dirs` parses.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit when any of these is next changed.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-27
