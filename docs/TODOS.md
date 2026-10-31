@@ -44,6 +44,12 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:severity=should] A missing `projects/` is silent, and a partial restore still reads as deletion
+- **Description:** `mm status` says in sync and a push says `project names updated` while `~/.claude/projects` is missing. Once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
+
 ### [review:severity=should] Own-manifest recovery can leave a deletion record under its old spelling
 - **Description:** With a corrupt own manifest plus a home rename, a folder that gained a remote, or a conflict copy older than a remote change, `core.reconcile_recovered_prior` can leave one tombstone under a name a healthy load would spell differently, so a deleted file can return. An own conflict copy from a previous home can also suppress one real deletion for one push through `moved_folders`.
 - **Why:** Each needs three rare conditions together; no bytes are lost. Deferred from Track 90A review (`docs/invariants/sync.md` limits).
