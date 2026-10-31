@@ -168,10 +168,7 @@ home-relative. One odd folder never stops the others. Each identity has one owne
 and a folder owns one identity: folders holding `memory/` first, then the smallest
 encoded name; a retained identity competes only when nothing resolved; next, a
 folder deleted from `projects/` whose recorded checkout still resolves to that
-identity, so deleting a project's folder is a real deletion. A removed folder named only
-by this machine's own deletion records (a sidecar from before the switch) resolves the
-same way, so the first switch publishes those records under the project's identity; a
-linked worktree's
+identity, so deleting a project's folder is a real deletion; a linked worktree's
 nomination of its main checkout, and the current directory's main checkout (pull
 paths only, `projectid.allow_cwd_candidate()` at `_pull_core` entry, probed on its
 own daemon thread under the same deadline), join only when the identity has no
@@ -179,6 +176,12 @@ other candidate. Non-owners publish home-relative. Linked
 worktrees own nothing (Claude writes to the main checkout's folder); a
 submodule, a bare layout, no `origin` and a local-path remote are home-relative.
 `mm diag --json` reports the index as `project_index`.
+
+**The first switch.** A sidecar from before it records no identities, so `Index.record_identity`
+resolves the folders it names that are gone from `projects/`. Their deletion records
+publish under the project's identity, with no owner and no `wire_folders` entry, so a later
+pull in that checkout honours them; a pull elsewhere changes nothing. A marked sidecar never
+does this, and neither does an identity some folder already owns.
 
 **Loading.** `@git-<x>` goes to the folder owning that identity, else stays
 literal and is **unplaced**. `@home` forms go to the encoded home unless that
@@ -269,10 +272,13 @@ reaches the sidecar and `mm diag --json`; a query string is dropped, so two
 repositories differing only by it share an identity; a project folder deleted during
 a push that cannot read its checkout, or whose index runs out of time, mints nothing,
 so peers keep their copies (a false tombstone would block the project fleet-wide); a
+first-switch deletion record binds whatever origin sits at that path then, so a path
+re-cloned from another repository inside the 30 days can suppress that project's same-named
+file until the record expires; a peer with a withheld name keeps all its conflict copies
+until its next publishing push, so a dormant peer's copy can outlive a deletion's 30 days; a
 push while `projects/` is missing publishes those folders' removal, so a file deleted
-just before it mints nothing and can return, an identity folder with no deletion
-record then restores only on a pull inside its checkout, and a first switch made then
-publishes its records home-relative; if no push ran during the outage, once `projects/`
+just before it mints nothing and can return, and an identity folder with no deletion
+record then restores only on a pull inside its checkout; if no push ran during the outage, once `projects/`
 exists again, by a pull or by Claude, whatever is still absent reads as deleted at the
 next push, including a peer's blob not yet delivered, as every earlier release treated
 any absence; own
