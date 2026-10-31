@@ -1358,9 +1358,10 @@ def reconcile_recovered_prior(prior: dict | None) -> dict | None:
     prior's also under the current owner: when those differ, or the identity has
     no owner now, both join the in-memory ``moved_folders``, so recovery mints
     no deletion either. So does every folder of a sidecar written from another
-    Claude folder. Its deletion records are respelled as a healthy load would
-    spell them: a recorded folder follows its identity, and a carried ``@`` name
-    goes to the local folder it names now.
+    Claude folder, or read while ``projects/`` cannot be listed. Its deletion
+    records are respelled as a healthy load would spell them: a recorded folder
+    follows its identity, and a carried ``@`` name goes to the local folder it
+    names now.
     """
     entry = ((prior or {}).get("sources") or {}).get("claude")
     if not isinstance(entry, dict):
@@ -1380,7 +1381,7 @@ def reconcile_recovered_prior(prior: dict | None) -> dict | None:
                 moved.add(owner)
             respelled[recorded] = owner or wire
     base = entry.get("base_path")
-    if isinstance(base, str) and base and base != idx.claude_real:
+    if not idx.listed or (isinstance(base, str) and base and base != idx.claude_real):
         for rel in entry.get("files") or ():
             if isinstance(rel, str) and (parts := manifest._split_project_key(rel)):
                 moved.add(parts[0])

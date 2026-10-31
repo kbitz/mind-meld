@@ -25,6 +25,7 @@ import configparser
 import ipaddress
 import os
 import re
+import socket
 import stat
 import subprocess
 import threading
@@ -232,12 +233,16 @@ _PATH_PARAMS = re.compile(r"[?;]")
 def _is_local_host(host: str) -> bool:
     """A loopback or unspecified host: no two machines mean the same server by it."""
     bare = host.strip("[]").rstrip(".")
-    if not bare or bare == "localhost" or bare.endswith(".localhost") or bare.isdigit():
+    if not bare or bare == "localhost" or bare.endswith(".localhost"):
         return True
     try:
         address = ipaddress.ip_address(bare)
     except ValueError:
-        return False
+        try:  # the short forms the C resolver takes: 127.1, 0x7f.0.0.1, 2130706433
+            packed = socket.inet_aton(bare)
+        except OSError:
+            return False
+        return packed[0] == 127 or not any(packed)
     mapped = getattr(address, "ipv4_mapped", None)
     address = mapped or address
     return address.is_loopback or address.is_unspecified
@@ -568,6 +573,15 @@ def claude_real() -> str | None:
     return os.path.realpath(_CTX.claude_dir) if _CTX.claude_dir is not None else None
 
 
+def projects_listed() -> bool:
+    """False when the Claude ``projects/`` folder cannot be listed right now."""
+    if _CTX.index is not None:
+        return _CTX.index.listed
+    if _CTX.claude_dir is None:
+        return True
+    return _list_project_folders(_CTX.claude_dir / "projects") is not None
+
+
 # ---------------------------------------------------------------------------
 # Index
 # ---------------------------------------------------------------------------
@@ -694,9 +708,9 @@ def _read_origin(checkout: Path) -> str:
 def _git_origin(checkout: Path) -> str:
     try:
         result = subprocess.run(
-            # This file only: `-C` would walk up to a parent repository when this
-            # `.git` is not one git accepts, and name the wrong project.
-            ["git", "config", "--file", ".git/config", "--includes"]
+            # This file only, by absolute path: `-C` or a relative path can reach a
+            # parent repository when this `.git` is not one git accepts.
+            ["git", "config", "--file", str(checkout / ".git" / "config"), "--includes"]
             + ["--get", "remote.origin.url"],
             cwd=checkout,
             capture_output=True,
@@ -911,9 +925,10 @@ def _build_index(
     listed = listing is not None
     folders = listing or []
     # A folder deleted from `projects/` is still resolved when it published an
-    # identity: its checkout may be alive, so the deletion is a real one. A
-    # `projects/` that cannot be listed looks like an outage, not a reset.
-    deleted = sorted(set(retained) - set(folders)) if listed else []
+    # identity: its checkout may be alive, so the deletion is a real one. With
+    # `projects/` unlisted the owner still stands, so a pull restores the project;
+    # `manifest` is what keeps that outage from minting.
+    deleted = sorted(set(retained) - set(folders))
     worker = _Worker([*folders, *deleted], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS

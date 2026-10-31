@@ -232,6 +232,11 @@ def wire_keys(published: dict) -> list[str]:
         ("http://2130706433/repo", None),
         ("dev.localhost:repo", None),
         ("127.example.com:acme/widgets", "127.example.com/acme/widgets"),
+        ("git@127.1:acme/p", None),
+        ("http://0x7f.0.0.1/x", None),
+        ("0177.0.0.1:repo", None),
+        ("0x7f000001:repo", None),
+        ("0.0:repo", None),
         ("https://host/org/repo;token=SEC/RET", None),
         ("git@host:org/repo?token=SEC/RET", None),
         ("ssh://git@host/team/a?b/c.git", None),
@@ -1510,19 +1515,22 @@ def test_status_never_masks_a_conflict_or_content_counts_with_the_names_verdict(
     from mind_meld import statusflow
 
     idle = {"selected": None, "unknown_reason": None, "unresolved": False}
-    verdict = lambda **kw: statusflow._status_verdict(  # noqa: E731
-        **{
-            "source": None,
-            "blocking": None,
-            "conflicts": 0,
-            "projection": {"pull": idle, "push": idle},
-            "counts": (0, 0, 0),
-            "metadata": True,
-            "first_push": False,
-            "names_ready": True,
-            **kw,
-        }
-    )
+
+    def verdict(**kw):
+        return statusflow._status_verdict(
+            **{
+                "source": None,
+                "blocking": None,
+                "conflicts": 0,
+                "projection": {"pull": idle, "push": idle},
+                "counts": (0, 0, 0),
+                "metadata": True,
+                "first_push": False,
+                "names_ready": True,
+                **kw,
+            }
+        )
+
     ready = "Project memory ready to publish under shared names. Run: mm push"
     assert verdict() == ready
     assert verdict(conflicts=1).startswith("1 unresolved conflicts")
@@ -2528,7 +2536,7 @@ def test_mm_gc_keeps_both_shas_of_a_collision_and_collects_a_real_orphan(mac):
     assert not backend.exists(blob_key(mac.device_id, orphan))
 
 
-def test_an_unlistable_projects_folder_mints_nothing_and_owns_no_deleted_folder(mac):
+def test_an_unlistable_projects_folder_treats_every_prior_folder_as_moved(mac):
     mac.checkout("/Users/kb/proj")
     folder = mac.folder_for("/Users/kb/proj")
     mac.memory(folder, "a.md", "a\n")
@@ -2537,14 +2545,81 @@ def test_an_unlistable_projects_folder_mints_nothing_and_owns_no_deleted_folder(
         mp.setattr(projectid, "_list_project_folders", lambda projects: None)
         projectid.configure(mac.claude, retained={WIRE: folder})
         idx = projectid.index()
-        assert idx.listed is False and idx.owners == {}
+        assert idx.listed is False
         moved = manifest._from_wire_mapping(
-            {"-opt-shared", "@home-x"},
+            {"-opt-shared", "-opt-only-a-record", "@home-x"},
             {"wire_names": True, "base_path": idx.claude_real},
             idx,
             set(),
+            {"-opt-shared", "@home-x"},
         )[1]
-    assert "-opt-shared" in moved
+    # Only folders that hold files: a deletion record alone would republish forever.
+    assert moved == {"-opt-shared", "-Users-kb-x"}
+
+
+def test_a_missing_projects_folder_then_pull_then_push_restores_and_mints_nothing(mac, linux):
+    """The pull recreates `projects/`, so the push must not read the rest as deleted."""
+    import shutil
+
+    a = mac.checkout("/Users/kb/a", "git@github.com:acme/a.git")
+    mac.checkout("/Users/kb/q", "git@github.com:acme/q.git")
+    a_file = mac.memory(mac.folder_for("/Users/kb/a"), "a.md", "a\n")
+    q_file = mac.memory(mac.folder_for("/Users/kb/q"), "q.md", "q\n")
+    mac.push()
+    for name in ("a", "q"):
+        linux.checkout(f"/home/kb/{name}", f"git@github.com:acme/{name}.git")
+        (linux.claude / "projects" / linux.folder_for(f"/home/kb/{name}")).mkdir(parents=True)
+    linux.pull()
+    linux.push()
+    shutil.rmtree(mac.claude / "projects")
+    mac.cwd = a
+    mac.pull()
+    assert a_file.read_text() == "a\n" and q_file.read_text() == "q\n"
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    assert mac.pull().total_applied == 0  # nothing is blocked or missing
+
+
+def test_an_outage_with_only_a_deletion_record_republishes_once(mac):
+    import shutil
+
+    mac.memory("-Users-kb-loose", "keep.md", "k\n")
+    gone = mac.memory("-Users-kb-loose", "gone.md", "g\n")
+    mac.push()
+    gone.unlink()
+    mac.push()
+    assert list(mac.published()["tombstones"]) == ["claude:projects/@home-loose/memory/gone.md"]
+    shutil.rmtree(mac.claude / "projects")
+    assert mac.push() is not None
+    assert mac.push() is None  # it settles while `projects/` stays away
+    assert list(mac.published()["tombstones"]) == ["claude:projects/@home-loose/memory/gone.md"]
+
+
+def test_recovery_with_a_missing_projects_folder_mints_nothing(mac):
+    import shutil
+
+    mac.memory("-Users-kb-loose", "b.md", "b\n")
+    mac.memory("-opt-shared", "c.md", "c\n")
+    mac.push()
+    shutil.rmtree(mac.claude / "projects")
+    _corrupt_own_manifest(mac)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+def test_an_unmarked_prior_with_a_missing_projects_folder_mints_nothing(mac):
+    entry = {"base_path": os.path.realpath(mac.claude), "files": {}}
+    with mac.on():
+        moved = manifest._from_wire_mapping(
+            {"-Users-kb-loose"}, entry, None, set(), {"-Users-kb-loose"}
+        )[1]
+    assert moved == {"-Users-kb-loose"}  # `projects/` does not exist on this machine yet
+    mac.memory("-Users-kb-loose", "b.md", "b\n")
+    with mac.on():
+        moved = manifest._from_wire_mapping(
+            {"-Users-kb-loose"}, entry, None, set(), {"-Users-kb-loose"}
+        )[1]
+    assert moved == set()
 
 
 def test_a_deleted_folder_past_the_deadline_owns_nothing(mac, monkeypatch):
@@ -2843,7 +2918,8 @@ def test_sidecar_recovery_with_the_checkout_away_keeps_the_deletion(mac, linux):
     assert not doomed.exists()
 
 
-def test_git_fallback_never_reads_a_parent_repository(mac):
+@pytest.mark.parametrize("parent_format", [0, 99])
+def test_git_fallback_never_reads_a_parent_repository(mac, parent_format):
     import subprocess
 
     parent = mac.fs_root / "Users/kb/parent"
@@ -2851,6 +2927,8 @@ def test_git_fallback_never_reads_a_parent_repository(mac):
     subprocess.run(["git", "init", "-q", str(parent)], check=True)
     with (parent / ".git/config").open("a") as fh:
         fh.write('[remote "origin"]\n\turl = git@github.com:acme/parent.git\n')
+        # A format git refuses is what used to send a relative --file up a level.
+        fh.write(f"[core]\n\trepositoryformatversion = {parent_format}\n")
     child = mac.checkout("/Users/kb/parent/child", None)
     with (child / ".git/config").open("a") as fh:
         fh.write(f'[remote "origin"]\n\turl = "{GIT_URL}"\n')
@@ -2903,3 +2981,13 @@ def test_a_deleted_folder_with_an_unreadable_checkout_mints_nothing(mac, linux):
         pushed = mac.push()
     assert pushed.total_deleted == 0
     assert mac.published()["tombstones"] == {}
+
+
+def test_git_fallback_follows_an_include_with_real_git(mac):
+    path = mac.checkout("/Users/kb/Dev/widgets", None)
+    with (path / ".git/config").open("a") as fh:
+        fh.write("[include]\n\tpath = origin.inc\n")
+    (path / ".git/origin.inc").write_text(f'[remote "origin"]\n\turl = {GIT_URL}\n')
+    folder = mac.folder_for("/Users/kb/Dev/widgets")
+    mac.memory(folder, text="x\n")
+    assert index_for(mac).owners == {IDENTITY: folder}

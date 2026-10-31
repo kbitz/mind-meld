@@ -2721,12 +2721,18 @@ def _marked_mapping(names: set[str], idx: projectid.Index, home: str) -> dict[st
 
 
 def _from_wire_mapping(
-    names: set[str], entry: dict[str, Any], idx: projectid.Index | None, carried: set[str]
+    names: set[str],
+    entry: dict[str, Any],
+    idx: projectid.Index | None,
+    carried: set[str],
+    file_names: set[str],
 ) -> tuple[dict[str, str], set[str]]:
     """``(wire folder -> local folder, moved folders)`` for one decoded ``claude`` entry.
 
     ``carried`` holds the ``@`` names only deletion records use: a machine with
     the source disabled or the codec off still publishes those, unmarked.
+    ``file_names`` holds the names with files: a `projects/` outage moves only
+    those, or a deletion record alone would republish on every push.
     """
     moved: set[str] = set()
     home = projectid.encoded_home() if idx is None else idx.home_enc
@@ -2745,8 +2751,10 @@ def _from_wire_mapping(
         # Published from another Claude folder (a peer, or this machine before
         # its home or `claude` path changed), or `projects/` cannot be listed: no
         # name says what this folder should hold, so an absence is never a deletion.
-        if not idx.listed or (isinstance(base, str) and base and base != idx.claude_real):
+        if isinstance(base, str) and base and base != idx.claude_real:
             moved.update(local for local in mapping.values() if not local.startswith("@"))
+        elif not idx.listed:
+            moved.update(mapping[n] for n in file_names if not mapping[n].startswith("@"))
         return mapping, moved
     # Unmarked: path names, plus any `@` form carried on a deletion record, which
     # names its own provenance and maps like a marked one.
@@ -2757,6 +2765,8 @@ def _from_wire_mapping(
     real = projectid.claude_real()
     if real is not None and isinstance(base, str) and base and base != real:
         moved.update(name for name in names if not name.startswith("@"))
+    elif real is not None and not projectid.projects_listed():
+        moved.update(name for name in file_names if not name.startswith("@"))
     if (
         not projectid.configured()
         or home is None
@@ -2788,10 +2798,10 @@ def manifest_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     publisher's encoded home becomes ``@old-<folder>``. Tombstone keys follow
     the same rules; one whose source has no entry passes through unless its
     own ``@`` form names where it belongs. When ``wire_folders`` names a
-    different folder than the identity's current owner, or the entry was
-    published from another Claude folder, the affected folders join an
-    in-memory ``moved_folders`` list (never serialized) so a move mints no
-    deletion.
+    different folder than the identity's current owner, the entry was published
+    from another Claude folder, or ``projects/`` cannot be listed, the affected
+    folders join an in-memory ``moved_folders`` list (never serialized) so a
+    move or an outage mints no deletion.
     """
     entry = _claude_entry(manifest)
     if entry is not None:
@@ -2817,7 +2827,7 @@ def manifest_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     marked = entry is not None and entry.get("wire_names") is True
     idx = projectid.index() if marked or carried else None
     mapping, moved = _from_wire_mapping(
-        file_names | tomb_names, entry if entry is not None else {}, idx, carried
+        file_names | tomb_names, entry if entry is not None else {}, idx, carried, file_names
     )
     if any(old != new for old, new in mapping.items()):
         new_files, manifest["tombstones"] = _remap_keys(
