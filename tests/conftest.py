@@ -186,6 +186,33 @@ def forbid_fs_mutations(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _reset_project_names():
+    """Reset the process-wide project-name context (Track 90A) around every test.
+
+    The codec stays off under pytest unless a test opts in with ``wire_home``
+    (or ``MM_TEST_WIRE_HOME``), so existing fixtures behave as before the shared
+    project names and subprocess-driven tests inherit the same default.
+    """
+    from mind_meld import projectid
+
+    projectid.reset()
+    yield
+    projectid.reset()
+
+
+@pytest.fixture
+def wire_home(monkeypatch):
+    """Opt one test's device leg into the project-name codec.
+
+    The leg's HOME is the test's own (set it with ``monkeypatch.setenv`` first);
+    the opt-in is an environment variable, so child processes inherit it.
+    """
+    from mind_meld import projectid
+
+    monkeypatch.setenv(projectid.WIRE_HOME_TEST_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
 def _default_crypto_session() -> None:
     """Pin a default crypto session before each test; clear after.
 

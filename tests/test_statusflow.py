@@ -26,6 +26,7 @@ DIAG_KEYS = {
     "root_salt_drift",
     "sidecar",
     "storage_inventory",
+    "project_index",
     "sync_scope",
     "last_autorun",
     "last_attended_runs",

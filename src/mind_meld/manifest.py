@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 
+from mind_meld import projectid
 from mind_meld.errors import (
     ManifestError,
     SnapshotChanged,
@@ -84,6 +85,10 @@ MARKER_SKIP_NAME = ".extend-root"
 # one, minus the include-root exemption; see marker_skip_globs.
 BROWSER_PROFILE_MARKER = "Local State"
 NESTED_REPO_SKIP_REASON = "nested git repository"
+# Track 90A: a project folder whose name starts with "@" is a wire name, never a
+# folder Claude created; the walker skips it (verbose-only).
+UNPLACEABLE_SKIP_REASON = projectid.UNPLACEABLE_SKIP_REASON
+CLAUDE_SOURCE_NAME = "claude"
 
 
 def is_conflict_filename(name: str) -> bool:
@@ -1912,6 +1917,10 @@ def walk_claude_source(
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
                 continue
             project_dir = Path(entry.path)
+            if source_name == CLAUDE_SOURCE_NAME and entry.name.startswith("@"):
+                if on_skip:
+                    on_skip(project_dir.relative_to(base).as_posix(), UNPLACEABLE_SKIP_REASON)
+                continue
             if _directory_is_git_repo(project_dir, base, strict=True, source_name=source_name):
                 if on_skip:
                     on_skip(project_dir.relative_to(base).as_posix(), NESTED_REPO_SKIP_REASON)
@@ -1957,6 +1966,10 @@ def walk_claude_source(
 
     for project_dir in projects_dir.iterdir():
         if project_dir.is_symlink() or not project_dir.is_dir():
+            continue
+        if source_name == CLAUDE_SOURCE_NAME and project_dir.name.startswith("@"):
+            if on_skip:
+                on_skip(project_dir.relative_to(base).as_posix(), UNPLACEABLE_SKIP_REASON)
             continue
         if _directory_is_git_repo(project_dir, base, strict=False, source_name=source_name):
             if on_skip:
@@ -2564,6 +2577,217 @@ def _validate_rel_path(rel: Any, *, where: str) -> None:
             raise ManifestError(f"manifest: {where} must not contain '..' segments (got {rel!r})")
 
 
+# ── wire names for Claude project folders (Track 90A) ───────────────────
+#
+# In memory a manifest always carries LOCAL folder names: walkers, tombstones,
+# diffs, holds, freezes, uploads, apply, previews, status and history never see
+# a wire name. The codec runs at the manifest byte boundary only: encode maps
+# local -> wire on a copy just before encryption, and `load_manifest` maps
+# wire -> local once per decoded manifest. See docs/invariants/sync.md.
+
+
+def _split_project_key(rel: str) -> tuple[str, str] | None:
+    """``projects/<folder>/<rest>`` -> ``(folder, rest)``; any other shape is ``None``."""
+    parts = rel.split("/", 2)
+    if len(parts) == 3 and parts[0] == "projects" and parts[1] and parts[2]:
+        return parts[1], parts[2]
+    return None
+
+
+def _remap_keys(
+    files: dict[str, Any], tombstones: dict[str, Any], mapping: Callable[[str], str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rewrite the folder of every ``projects/<folder>/...`` file and claude tombstone key."""
+    new_files: dict[str, Any] = {}
+    for rel, info in files.items():
+        parts = _split_project_key(rel) if isinstance(rel, str) else None
+        new_files[f"projects/{mapping(parts[0])}/{parts[1]}" if parts else rel] = info
+    new_tombstones: dict[str, Any] = {}
+    prefix = f"{CLAUDE_SOURCE_NAME}:"
+    for key, info in tombstones.items():
+        parts = (
+            _split_project_key(key[len(prefix) :])
+            if isinstance(key, str) and key.startswith(prefix)
+            else None
+        )
+        if parts is None:
+            new_tombstones[key] = info
+            continue
+        new_key = f"{prefix}projects/{mapping(parts[0])}/{parts[1]}"
+        existing = new_tombstones.get(new_key)
+        if existing is None or str(info.get("deleted_at", "")) > str(
+            existing.get("deleted_at", "")
+        ):
+            new_tombstones[new_key] = info
+    return new_files, new_tombstones
+
+
+def _claude_entry(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    sources = manifest.get("sources")
+    entry = sources.get(CLAUDE_SOURCE_NAME) if isinstance(sources, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
+def manifest_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``manifest`` with Claude project folders under wire names.
+
+    Never mutates its argument. The codec is off (this returns ``manifest``
+    itself) without a configured Claude folder and a resolved home, and a
+    manifest with no ``claude`` source, or of a shape it does not recognise,
+    passes through. Raises `ManifestError` naming both folders if two local
+    folders would share a wire name, which one owner per identity makes
+    unreachable.
+    """
+    entry = _claude_entry(manifest)
+    idx = projectid.index()
+    if idx is None or entry is None or not isinstance(entry.get("files"), dict):
+        return manifest
+    tombstones = manifest.get("tombstones")
+    if not isinstance(tombstones, dict):
+        tombstones = {}
+    owners_by_wire: dict[str, str] = {}
+    wire_folders: dict[str, str] = {}
+
+    def to_wire(folder: str) -> str:
+        wire = idx.to_wire(folder)
+        other = owners_by_wire.setdefault(wire, folder)
+        if other != folder:
+            raise ManifestError(
+                f"manifest: project folders {other!r} and {folder!r} would share the "
+                f"wire name {wire!r}"
+            )
+        if wire.startswith(projectid.GIT_PREFIX):
+            wire_folders[wire] = folder
+        return wire
+
+    files, new_tombstones = _remap_keys(entry["files"], tombstones, to_wire)
+    out = dict(manifest)
+    out["sources"] = {
+        **manifest["sources"],
+        CLAUDE_SOURCE_NAME: {**entry, "files": files, "wire_folders": wire_folders},
+    }
+    out["tombstones"] = new_tombstones
+    return out
+
+
+def _from_wire_mapping(
+    names: set[str], entry: dict[str, Any], idx: projectid.Index | None
+) -> tuple[dict[str, str], set[str]]:
+    """``(wire folder -> local folder, moved folders)`` for one decoded ``claude`` entry."""
+    mapping: dict[str, str] = {}
+    moved: set[str] = set()
+    home = projectid.encoded_home() if idx is None else idx.home_enc
+    if entry.get("wire_names") is True:
+        if idx is None or home is None:
+            return {n: n for n in names}, moved
+        owned = idx.folder_identity
+        claimed: set[str] = set()
+
+        def displaced(local: str) -> str:
+            name = projectid.LIT_PREFIX + local
+            while name in names or name in claimed:
+                name += "-"
+            claimed.add(name)
+            return name
+
+        for wire in sorted(names):  # identity names take their owner's local name
+            if wire.startswith(projectid.GIT_PREFIX):
+                identity = projectid.wire_identity(wire)
+                owner = idx.owners.get(identity) if identity else None
+                mapping[wire] = owner or wire
+                if owner:
+                    claimed.add(owner)
+        for wire in sorted(names):
+            if wire == projectid.HOME_NAME or wire.startswith(projectid.HOME_NAME + "-"):
+                local = home + wire[len(projectid.HOME_NAME) :]
+                if local in owned:
+                    mapping[wire] = wire  # stale home-form copy of a project real here
+                elif local in claimed:
+                    mapping[wire] = displaced(local)
+                else:
+                    mapping[wire] = local
+                    claimed.add(local)
+        for wire in sorted(names):
+            if wire in mapping:
+                continue
+            if wire.startswith("@"):
+                mapping[wire] = wire
+            elif wire in owned or wire in claimed:
+                mapping[wire] = displaced(wire)
+            else:
+                mapping[wire] = wire
+                claimed.add(wire)
+        folders = entry.get("wire_folders")
+        if isinstance(folders, dict):
+            for wire, recorded in folders.items():
+                identity = projectid.wire_identity(wire) if isinstance(wire, str) else None
+                owner = idx.owners.get(identity) if identity else None
+                if owner and isinstance(recorded, str) and recorded != owner:
+                    moved.add(owner)
+        return mapping, moved
+    # Unmarked: path names. Another home's names are withheld as old form.
+    base = entry.get("base_path")
+    if (
+        not projectid.configured()
+        or home is None
+        or not isinstance(base, str)
+        or Path(base).name != ".claude"
+    ):
+        return {n: n for n in names}, moved
+    publisher = projectid.encode_path(str(Path(base).parent))
+    if publisher == home:
+        return {n: n for n in names}, moved
+    for name in names:
+        under = name == publisher or name.startswith(publisher + "-")
+        mapping[name] = projectid.OLD_PREFIX + name if under else name
+    return mapping, moved
+
+
+def manifest_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Map a decoded manifest's Claude project folders to this machine's local names.
+
+    Mutates ``manifest`` in place and returns it. Runs once per decoded
+    manifest (`load_manifest` calls it after its shape validation) and never
+    raises on shape. Marked entries (``wire_names`` is ``True``): ``@git-``
+    goes to the folder that owns the identity here, else stays literal and is
+    *unplaced*; ``@home`` forms go to the encoded home unless that folder owns
+    an identity (then they stay literal and are dropped as superseded); a
+    literal that names an owned folder, or a name another entry already holds,
+    becomes ``@lit-<folder>``, so nothing is dropped and ``mm gc`` keeps every
+    sha. Unmarked entries from another home: a folder equal to or under the
+    publisher's encoded home becomes ``@old-<folder>``. Tombstone keys follow
+    the same rules; one whose source has no entry passes through. When
+    ``wire_folders`` names a different folder than the identity's current
+    owner, the owner joins an in-memory ``moved_folders`` list (never
+    serialized) so a moved checkout mints no deletion.
+    """
+    entry = _claude_entry(manifest)
+    if entry is None or not isinstance(entry.get("files"), dict):
+        return manifest
+    tombstones = manifest.get("tombstones")
+    if not isinstance(tombstones, dict):
+        tombstones = {}
+    marked = entry.get("wire_names") is True
+    idx = projectid.index() if marked else None
+    prefix = f"{CLAUDE_SOURCE_NAME}:"
+    names: set[str] = set()
+    for rel in entry["files"]:
+        if isinstance(rel, str) and (parts := _split_project_key(rel)):
+            names.add(parts[0])
+    for key in tombstones:
+        if isinstance(key, str) and key.startswith(prefix):
+            if parts := _split_project_key(key[len(prefix) :]):
+                names.add(parts[0])
+    mapping, moved = _from_wire_mapping(names, entry, idx)
+    if any(old != new for old, new in mapping.items()):
+        entry["files"], manifest["tombstones"] = _remap_keys(
+            entry["files"], tombstones, lambda folder: mapping.get(folder, folder)
+        )
+    if moved:
+        entry["moved_folders"] = sorted(moved)
+    return manifest
+
+
 def load_manifest(data: bytes) -> dict[str, Any]:
     """Decode JSON bytes into a v2-normalized manifest dict.
 
@@ -2575,7 +2799,8 @@ def load_manifest(data: bytes) -> dict[str, Any]:
     only after that shape check. Every key in `sources[*].files` is
     confined to a relative path inside its source — no '..' segments, no
     absolute paths, no null bytes (see `_validate_rel_path`). Callers may
-    rely on these invariants.
+    rely on these invariants. It ends with `manifest_from_wire`, so a Claude
+    project folder arrives under this machine's local name (Track 90A).
 
     Raises ManifestError on bad bytes, non-dict top-level JSON, any inner-
     shape violation, or any rel_path that could escape its source root.
@@ -2622,6 +2847,7 @@ def load_manifest(data: bytes) -> dict[str, Any]:
             _, _, rel = key.partition(":")
             if rel:
                 _validate_rel_path(rel, where=f"tombstones[{key!r}] path part")
+    manifest_from_wire(normalized)
     return normalized
 
 
@@ -2794,9 +3020,19 @@ def generate_tombstones(
             local_src = local_sources.get(src_name, {"files": {}})
             local_files = local_src.get("files", {})
             remote_files = remote_src.get("files", {})
+            # A folder whose checkout moved holds another folder's published
+            # files under the identity's name; their absence here is a move,
+            # never a deletion (Track 90A). In-memory only, never serialized.
+            moved = (
+                set(remote_src.get("moved_folders") or ())
+                if src_name == CLAUDE_SOURCE_NAME and isinstance(remote_src, dict)
+                else set()
+            )
 
             for path in remote_files:
                 key = f"{src_name}:{path}"
+                if moved and (parts := _split_project_key(path)) and parts[0] in moved:
+                    continue
                 if path not in local_files and key not in tombstones:
                     tombstones[key] = {
                         "deleted_at": now_iso,

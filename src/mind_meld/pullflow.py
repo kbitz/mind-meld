@@ -37,7 +37,16 @@ from packaging.version import InvalidVersion, Version
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
 
 from mind_meld import config as _config_module
-from mind_meld import core, fsutil, manifest, pullhistory, pullplan, resolveflow, safety
+from mind_meld import (
+    core,
+    fsutil,
+    manifest,
+    projectid,
+    pullhistory,
+    pullplan,
+    resolveflow,
+    safety,
+)
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES, resolve_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
@@ -143,6 +152,19 @@ class WaitingPeer:
 
 
 @dataclass
+class OldFormPeer:
+    """A peer still publishing path names: files withheld until it updates (Track 90A).
+
+    Kept apart from `WaitingPeer`: this waits on a person updating a machine,
+    not on the sync tool's delivery, so it never reads as "waiting for".
+    """
+
+    device_id: str
+    device_name: str
+    files: int = 0
+
+
+@dataclass
 class PullResult:
     """Result of a pull operation.
 
@@ -190,6 +212,11 @@ class PullResult:
     # picks it up. Attended runs do not record it.
     total_waiting: int = 0
     waiting: list[WaitingPeer] = field(default_factory=list)
+    # Track 90A: another home's files from peers still on path names, and the
+    # projects whose checkout is not on this machine. Never a failure.
+    old_form_peers: list[OldFormPeer] = field(default_factory=list)
+    not_placed_files: int = 0
+    not_placed_projects: int = 0
 
     @property
     def total_applied(self) -> int:
@@ -1520,6 +1547,9 @@ class _CorruptPeer:
     # This Mac's own manifest vanished mid-read: its deletion records were not
     # applied, so it is reported like a corrupt manifest, never as waiting.
     own_vanished: bool = False
+    # Track 90A: the reserved byte of a manifest from a newer mm. This release
+    # names the remedy for a format it cannot read instead of "corrupt".
+    newer_version: int | None = None
 
 
 @dataclass
@@ -1746,7 +1776,13 @@ def _prefetch_manifests(
         did = d["device_id"]
         peer_fetch = core._fetch_remote_manifest(backend, did, passphrase, memory_kb)
         if peer_fetch.status == "corrupt":
-            corrupt.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
+            corrupt.append(
+                _CorruptPeer(
+                    device_id=did,
+                    device_name=d.get("device_name", did),
+                    newer_version=peer_fetch.newer_version,
+                )
+            )
         elif peer_fetch.status == "missing" and peer_fetch.vanished and vanished_out is not None:
             vanished_out.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
         cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
@@ -2075,6 +2111,44 @@ def waiting_detail(result: PullResult) -> str:
     return "; ".join(_waiting_items(result, detail=True))
 
 
+def _old_form_text(result: PullResult) -> str:
+    peers = result.old_form_peers
+    if not peers:
+        return ""
+    items = [
+        f"{core._count(p.files, 'file', 'files')} from {safety.safe_terminal_str(p.device_name)}"
+        for p in peers
+    ]
+    who = "it publishes" if len(peers) == 1 else "they publish"
+    return f"{', '.join(items)} wait until {who} shared names"
+
+
+def old_form_clause(result: PullResult) -> str:
+    """The outcome-line clause for another home's files from a peer still on path
+    names, or "" when none: ``312 files from Mac B wait until it publishes shared
+    names (mm status)``. Built apart from `waiting_clause`: it has no ``waiting
+    for`` prefix and no re-pull remedy, because it waits on a person."""
+    text = _old_form_text(result)
+    return f"{text} (mm status)" if text else ""
+
+
+def old_form_detail(result: PullResult) -> str:
+    """The autopull breadcrumb detail for the same facts, without the pointer."""
+    return _old_form_text(result)
+
+
+def not_placed_line(result: PullResult) -> str:
+    """The ``Not placed here`` line for projects whose checkout is not on this
+    machine, or "" when none (a join adds it once)."""
+    if not result.not_placed_projects:
+        return ""
+    projects = core._count(result.not_placed_projects, "project", "projects")
+    return (
+        f"Not placed here: {core._count(result.not_placed_files, 'file', 'files')} in "
+        f"{projects} with no known checkout (list: mm pull --dry-run --verbose)."
+    )
+
+
 def _print_preflight_conflicts(predicted: list[pullplan.PullPrediction], quiet: bool) -> None:
     """Print predicted fail-mode refusals before --conflict-mode=fail raises.
 
@@ -2198,6 +2272,14 @@ def _print_pull_summary(
                 )
             else:
                 console.print("[yellow]Warning:[/yellow] " + text.format(safe_str(peer.device_id)))
+            continue
+        if peer.newer_version is not None:
+            subject = f"manifest for {peer.device_name} ({peer.device_id})"
+            text = core._newer_format_message(peer.newer_version, subject)
+            if quiet:
+                print(f"mm: warning: {safety.safe_terminal_str(text)}", file=sys.stderr)
+            else:
+                console.print(f"[yellow]Warning:[/yellow] {safe_str(text)}")
             continue
         msg = (
             f"manifest for device {safe_str(peer.device_name)} "
@@ -2352,6 +2434,9 @@ def _print_pull_summary(
         console.print("  nothing to apply")
     if clause := waiting_clause(result):
         console.print(f"  [yellow]{safe_str(clause)}[/yellow]; run 'mm pull' again once it syncs.")
+    if clause := old_form_clause(result):
+        # Waits on a person updating a machine, not on delivery: no re-pull remedy.
+        console.print(f"  [yellow]{safe_str(clause)}[/yellow]")
     if result.bytes_transferred:
         mb = result.bytes_transferred / (1024 * 1024)
         console.print(f"  {mb:.1f}MB transferred")
@@ -2388,6 +2473,60 @@ def _print_pull_summary(
 # The rest of cli.py (push, status, diag, recover) still uses the older
 # side-effect-during-logic style. Migrate opportunistically when touching.
 #
+def _unplaceable_project(src_name: str, rel_path: str) -> bool:
+    """True for a ``claude`` file or tombstone path under a folder this machine cannot place."""
+    if src_name != "claude":
+        return False
+    parts = manifest._split_project_key(rel_path)
+    return parts is not None and projectid.unplaceable_reason(parts[0]) is not None
+
+
+def _files_from(by_device: dict[str, set[str]], labels: dict[str, str]) -> str:
+    return ", ".join(
+        f"{core._count(len(files), 'file', 'files')} from {safe_str(labels.get(did, did))}"
+        for did, files in sorted(by_device.items(), key=lambda item: labels.get(item[0], item[0]))
+    )
+
+
+def _print_project_lists(report: core.ProjectNameReport, labels: dict[str, str]) -> None:
+    """`mm pull --dry-run --verbose`'s one inspection list; it writes nothing."""
+    idx = projectid.index()
+    if report.not_placed:
+        console.print("Not placed here:")
+        for wire in sorted(report.not_placed):
+            console.print(
+                f"  {safe_str(projectid.display_name(wire))}: "
+                f"{_files_from(report.not_placed[wire], labels)}. "
+                "Have a checkout? Run mm pull inside it."
+            )
+    if idx is not None and idx.clones:
+        console.print("Clones of one project (memory goes to the first):")
+        for clone in idx.clones:
+            console.print(
+                f"  {safe_str(clone.identity)} -> {safe_str(clone.owner)} "
+                f"(other clone: {safe_str(', '.join(clone.others))})"
+            )
+    if report.superseded:
+        console.print("Not applied, this project has a git remote here:")
+        for wire in sorted(report.superseded):
+            console.print(
+                f"  {safe_str(projectid.display_name(wire))}: "
+                f"{_files_from(report.superseded[wire], labels)}"
+            )
+
+
+def _print_this_directory() -> None:
+    """The first line of `mm pull --dry-run --verbose`: what this directory resolves to."""
+    idx = projectid.index()
+    if idx is None or idx.cwd is None:
+        return
+    cwd = idx.cwd
+    if cwd.identity is not None and cwd.owner is not None:
+        console.print(f"This directory: {safe_str(cwd.identity)} -> {safe_str(cwd.owner)}")
+    else:
+        console.print(f"This directory: no identity ({cwd.why or projectid.WHY_NO_CHECKOUT})")
+
+
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -2425,6 +2564,13 @@ def _pull_core(
         start = time.time()
         my_device_id = config["device"]["id"]
         backend = get_backend(config)
+        # Track 90A: only the pull paths (mm pull, its dry run, mm autopull and the
+        # join's pull) let the current directory's main checkout own a project
+        # nobody else owns. Called before the first decode.
+        projectid.allow_cwd_candidate()
+
+        if dry_run and verbose and not quiet:
+            _print_this_directory()
 
         # Track 12A: shared accumulator for inline keep-canonical decisions, drained
         # once after the whole device loop. Only allocated in interactive (`prompt`)
@@ -2545,6 +2691,17 @@ def _pull_core(
             did: (None if m is None else core._filter_disabled_sources(m, disabled_sources))
             for did, m in manifest_cache.items()
         }
+        # Track 90A: what the peers hold that this machine cannot place, read
+        # before the consumer filter drops it.
+        target_ids = {d["device_id"] for d in pull_targets}
+        project_names = core.project_name_report(
+            {did: m for did, m in manifest_cache.items() if did in target_ids}
+        )
+        device_labels = {d["device_id"]: d.get("device_name", d["device_id"]) for d in all_devices}
+        old_form_peers = [
+            OldFormPeer(did, device_labels.get(did, did), files)
+            for did, files in project_names.old_form.items()
+        ]
         # Pull never walks local trees for nested checkouts: it probes only the
         # local ancestors of incoming peer paths, so it never writes into one.
         nested_roots = core._incoming_nested_roots(pull_sources, manifest_cache.values())
@@ -2601,6 +2758,11 @@ def _pull_core(
                         if root := checkout_root(src_name, rel_path):
                             log_root(src_name, root)
                             continue
+                        if _unplaceable_project(src_name, rel_path):
+                            # One row per peer per run for every name this
+                            # machine cannot place, not one per file.
+                            log_root(src_name, "projects/@")
+                            continue
                         pullhistory.append(
                             verb="pull",
                             device=did,
@@ -2615,6 +2777,8 @@ def _pull_core(
                     src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
                     if root := checkout_root(src_name, rel_path):
                         log_root(src_name, root)
+                    elif _unplaceable_project(src_name, rel_path):
+                        log_root(src_name, "projects/@")
             filtered_cache[did] = filtered
         manifest_cache = filtered_cache
 
@@ -2902,6 +3066,9 @@ def _pull_core(
             # contract requires corrupt-peer / unknown-source / fsync-failure
             # warnings to survive quiet mode AND partial pulls.
             _partial_result = PullResult(
+                old_form_peers=old_form_peers,
+                not_placed_files=project_names.not_placed_files,
+                not_placed_projects=project_names.not_placed_projects,
                 no_sources=not pull_resolution.selected,
                 total_written=total_written,
                 total_merged=total_merged,
@@ -2941,6 +3108,8 @@ def _pull_core(
         if dry_run and not quiet:
             assert planner is not None
             console.print(pullplan.totals(planner.predictions))
+            if verbose:
+                _print_project_lists(project_names, device_labels)
             if corrupt_peers:
                 console.print(
                     f"Preview incomplete: {len(corrupt_peers)} peer(s) could not be "

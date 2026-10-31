@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,6 +24,7 @@ from mind_meld import (
     __version__,
     crypto,
     manifest,
+    projectid,
     pullplan,
     safety,
     sidecar,
@@ -41,12 +42,14 @@ from mind_meld.config import (
 from mind_meld.consoles import console, stderr_console
 from mind_meld.crypto import (
     FORMAT_VERSION,
+    MANIFEST_FORMAT_VERSION,
     CryptoInitFetch,
-    _newer_version,
-    decrypt,
+    decrypt_manifest,
+    encrypt_manifest,
     fetch_crypto_init,
     get_passphrase,
     load_master_key,
+    newer_manifest_version,
     root_salt_fingerprint,
     set_crypto_session,
     verify_passphrase,
@@ -84,6 +87,7 @@ from mind_meld.manifest import (
     marker_skip_globs,
     matches_include_patterns,
     mtime_from_manifest,
+    serialize_manifest,
 )
 from mind_meld.manifest import (
     _is_excluded as _manifest_is_excluded,
@@ -248,6 +252,32 @@ def _apply_verified_crypto_repair(backend: LocalBackend, fetch: CryptoInitFetch)
         raise CryptoError(_newer_format_message(exc.version)) from exc
 
 
+def _configure_project_names(config: dict) -> None:
+    """Point the project-name codec (`projectid`) at this machine's Claude source.
+
+    The sidecar's recorded ``wire_folders`` are injected as the identities a
+    folder keeps when its resolution later times out or cannot be read
+    (`sidecar` imports `manifest`, so `projectid` cannot read it itself). A
+    config that does not resolve, or no `claude` source, turns the codec off.
+    """
+    try:
+        claude = next((src for src in get_sources(config) if src.get("name") == "claude"), None)
+    except Exception:
+        claude = None
+    if claude is None or claude.get("type") != "claude":
+        projectid.configure(None)
+        return
+    retained = None
+    try:
+        prior = sidecar.read(config.get("device", {}).get("id", ""))
+        entry = (prior or {}).get("sources", {}).get("claude")
+        if isinstance(entry, dict):
+            retained = entry.get("wire_folders")
+    except Exception:
+        retained = None
+    projectid.configure(Path(claude["path"]).expanduser(), retained=retained)
+
+
 def _init_crypto_session(
     backend: LocalBackend,
     passphrase: str,
@@ -351,6 +381,7 @@ def _init_crypto_session(
     verify_passphrase(master_key, fetch.keycheck_blob)
     if not read_only:
         _apply_verified_crypto_repair(backend, fetch)
+    _configure_project_names(config)
 
     # Backfill local config if needed (first command after an upgrade or
     # a previously-uninitialized config). Silent one-time write.
@@ -417,7 +448,7 @@ def _fetch_remote_manifest(
     def _note_manifest_bytes(raw: bytes | None) -> None:
         if raw is None:
             return
-        version = _newer_version(raw)
+        version = newer_manifest_version(raw)
         if version is not None:
             newer_seen.append(version)
 
@@ -449,10 +480,14 @@ def _fetch_remote_manifest(
         # Judge this read. A second read can observe a newer replacement and
         # report it as an ordinary invalid sibling.
         _note_manifest_bytes(raw)
-        if _newer_version(raw) is not None or not raw or raw[0] != FORMAT_VERSION:
+        if (
+            newer_manifest_version(raw) is not None
+            or not raw
+            or raw[0] not in (FORMAT_VERSION, MANIFEST_FORMAT_VERSION)
+        ):
             return False
         try:
-            deserialize_manifest(decrypt(raw, passphrase, memory_kb))
+            deserialize_manifest(decrypt_manifest(raw, passphrase, memory_kb))
             return True
         except Exception:
             return False
@@ -469,7 +504,7 @@ def _fetch_remote_manifest(
     if canonical_exists and not canonical_vanished:
         try:
             enc_data = backend.get(mkey, expected=True)
-            plain = decrypt(enc_data, passphrase, memory_kb)
+            plain = decrypt_manifest(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
         except StorageNotFound:
             canonical_vanished = True
@@ -490,7 +525,7 @@ def _fetch_remote_manifest(
     for conflict_path in conflict_copies:
         try:
             enc_data = conflict_path.read_bytes()
-            plain = decrypt(enc_data, passphrase, memory_kb)
+            plain = decrypt_manifest(enc_data, passphrase, memory_kb)
             manifests.append(load_manifest(plain))
         except FileNotFoundError:
             conflict_vanished = True
@@ -640,8 +675,19 @@ def _filter_excluded_paths(
             or any(part.casefold() == ".git" or part in ("", ".") for part in parts)
         )
 
+    def _unplaceable(src_name: str, rel_path: str) -> bool:
+        # Track 90A: a Claude project folder this machine cannot place (a wire
+        # name with no checkout here, another home's names from a peer still on
+        # path names, a superseded copy) is neither applied nor tombstoned.
+        if src_name != "claude" or not rel_path.startswith("projects/"):
+            return False
+        parts = rel_path.split("/", 2)
+        return len(parts) == 3 and projectid.unplaceable_reason(parts[1]) is not None
+
     def _excluded(src_name: str, rel_path: str) -> bool:
         if _conflict_shaped(rel_path):
+            return True
+        if _unplaceable(src_name, rel_path):
             return True
         if _under_skip_prefix(rel_path, (skip_prefixes or {}).get(src_name)):
             return True
@@ -653,9 +699,9 @@ def _filter_excluded_paths(
 
     if not exclude_map and not skip_prefixes and not include_map:
         has_conflict = False
-        for src_data in manifest.get("sources", {}).values():
+        for src_name, src_data in manifest.get("sources", {}).items():
             for rel in src_data.get("files", {}):
-                if _conflict_shaped(rel):
+                if _conflict_shaped(rel) or _unplaceable(src_name, rel):
                     has_conflict = True
                     break
             if has_conflict:
@@ -663,10 +709,10 @@ def _filter_excluded_paths(
         if not has_conflict:
             for key in manifest.get("tombstones", {}):
                 if isinstance(key, str) and ":" in key:
-                    _, _, rel = key.partition(":")
+                    tomb_src, _, rel = key.partition(":")
                 else:
-                    rel = key
-                if isinstance(rel, str) and _conflict_shaped(rel):
+                    tomb_src, rel = "claude", key
+                if isinstance(rel, str) and (_conflict_shaped(rel) or _unplaceable(tomb_src, rel)):
                     has_conflict = True
                     break
         if not has_conflict:
@@ -1072,6 +1118,19 @@ def _merge_manifests(manifests: list[dict]) -> dict:
                 }
             # Union: later manifests overwrite earlier for same path
             merged_sources[src_name]["files"].update(src_data.get("files", {}))
+            if src_name == "claude":
+                # Track 90A: the marker, the recorded folders and the moved
+                # folders survive a merge; per-name `@` forms carry provenance,
+                # so a 0x02 copy beside a 0x03 canonical stays correct.
+                dst = merged_sources[src_name]
+                if src_data.get("wire_names") is True:
+                    dst["wire_names"] = True
+                if isinstance(src_data.get("wire_folders"), dict):
+                    dst.setdefault("wire_folders", {}).update(src_data["wire_folders"])
+                if src_data.get("moved_folders"):
+                    dst["moved_folders"] = sorted(
+                        {*dst.get("moved_folders", ()), *src_data["moved_folders"]}
+                    )
 
     merged["sources"] = merged_sources
     # Track 1B: the redundant top-level "files" mirror is not written by
@@ -1211,6 +1270,216 @@ def iter_source_diffs(
         if skip_unchanged and not diff.has_changes:
             continue
         yield src_name, src_data, remote_src, diff
+
+
+@dataclass(frozen=True)
+class ProjectFormState:
+    """What a push does about the Claude project-name format (Track 90A).
+
+    ``publish_new``: the local manifest has a ``claude`` entry and the codec is
+    on, so the manifest is written with shared project names (byte 0x03).
+    ``switch_due``: ``publish_new`` and the own prior is not yet marked, so the
+    first push in the new form is owed even with no content change.
+    ``republish_due``: the own prior is marked but records a folder other than
+    the identity's current owner (a checkout moved), so the next push refreshes
+    it. Both dues upload no content blob outside ``mm-events``, mint no
+    tombstone, are not content changes and run no GC.
+    """
+
+    publish_new: bool
+    switch_due: bool
+    republish_due: bool
+
+    @property
+    def due(self) -> bool:
+        return self.switch_due or self.republish_due
+
+
+def project_form_state(local_manifest: dict, own_prior: dict | None) -> ProjectFormState:
+    """The one decision for push, its dry run and status. Reads no backend and no device."""
+    entry = local_manifest.get("sources", {}).get("claude")
+    publish_new = isinstance(entry, dict) and projectid.enabled()
+    prior_entry = ((own_prior or {}).get("sources") or {}).get("claude")
+    marked = isinstance(prior_entry, dict) and prior_entry.get("wire_names") is True
+    return ProjectFormState(
+        publish_new=publish_new,
+        switch_due=publish_new and not marked,
+        republish_due=publish_new
+        and marked
+        and bool(isinstance(prior_entry, dict) and prior_entry.get("moved_folders")),
+    )
+
+
+def encode_manifest(
+    local_manifest: dict, *, wire_names: bool, passphrase: str, memory_kb: int
+) -> bytes:
+    """The one production path from a local manifest to its published bytes.
+
+    With ``wire_names`` the ``claude`` entry is stamped, in place, with
+    ``"wire_names": true`` and the ``wire_folders`` it published (so the sidecar
+    keeps both), the Claude project folders are mapped to shared names on a copy,
+    and the envelope's first byte is 0x03. Without, the old form is written as
+    0x02. The marker is set exactly when the byte is 0x03.
+    """
+    if wire_names:
+        entry = local_manifest["sources"]["claude"]
+        entry["wire_names"] = True
+        wire_manifest = manifest.manifest_to_wire(local_manifest)
+        entry["wire_folders"] = dict(wire_manifest["sources"]["claude"].get("wire_folders", {}))
+        data = serialize_manifest(wire_manifest)
+    else:
+        data = serialize_manifest(local_manifest)
+    return encrypt_manifest(data, passphrase, memory_kb, wire_names=wire_names)
+
+
+def reconcile_recovered_prior(prior: dict | None) -> dict | None:
+    """Apply the moved-checkout rule to a prior recovered from a sidecar or a merge.
+
+    A folder whose recorded identity differs from its current owner joins the
+    in-memory ``moved_folders``, so recovery mints no deletion either.
+    """
+    entry = ((prior or {}).get("sources") or {}).get("claude")
+    if not isinstance(entry, dict) or not isinstance(entry.get("wire_folders"), dict):
+        return prior
+    idx = projectid.index()
+    if idx is None:
+        return prior
+    moved = set(entry.get("moved_folders") or ())
+    for wire, recorded in entry["wire_folders"].items():
+        identity = projectid.wire_identity(wire) if isinstance(wire, str) else None
+        owner = idx.owners.get(identity) if identity else None
+        if owner and isinstance(recorded, str) and recorded != owner:
+            moved.add(owner)
+    if moved:
+        entry["moved_folders"] = sorted(moved)
+    return prior
+
+
+def _name_only_adjusted(diff: DiffResult, remote_src: dict) -> DiffResult:
+    """Drop a ``claude`` diff's name-only differences (Track 90A).
+
+    A prior entry under an unplaceable (``@``) name, or under a moved folder,
+    is a name that changed and not a file that was deleted; a local file with
+    the same sha and subpath is not new.
+    """
+    moved = set(remote_src.get("moved_folders") or ())
+    freed: dict[tuple[str, str], int] = {}
+    deleted: list[str] = []
+    prior_files = remote_src.get("files", {})
+    for rel in diff.deleted:
+        parts = manifest._split_project_key(rel)
+        if parts and (projectid.unplaceable_reason(parts[0]) is not None or parts[0] in moved):
+            key = (parts[1], str(prior_files.get(rel, {}).get("sha256")))
+            freed[key] = freed.get(key, 0) + 1
+            continue
+        deleted.append(rel)
+    if len(deleted) == len(diff.deleted):
+        return diff
+    new: dict[str, dict] = {}
+    for rel, info in diff.new.items():
+        parts = manifest._split_project_key(rel)
+        key = (parts[1], str(info.get("sha256"))) if parts else None
+        if key is not None and freed.get(key):
+            freed[key] -= 1
+            continue
+        new[rel] = info
+    return DiffResult(new=new, modified=diff.modified, deleted=deleted, unchanged=diff.unchanged)
+
+
+def iter_content_diffs(
+    local_manifest: dict,
+    remote_sources: dict,
+    *,
+    source_filter: str | None = None,
+    skip_unchanged: bool = False,
+) -> Iterator[tuple[str, dict, dict, DiffResult]]:
+    """`iter_source_diffs` with the ``claude`` source's name-only differences removed."""
+    for src_name, src_data, remote_src, diff in iter_source_diffs(
+        local_manifest, remote_sources, source_filter=source_filter
+    ):
+        if src_name == "claude":
+            diff = _name_only_adjusted(diff, remote_src)
+        if skip_unchanged and not diff.has_changes:
+            continue
+        yield src_name, src_data, remote_src, diff
+
+
+def content_counts(
+    local_manifest: dict, remote_sources: dict, *, source_filter: str | None = None
+) -> tuple[int, int, int]:
+    """``(new, modified, deleted)`` file totals with name-only differences removed."""
+    new = modified = deleted = 0
+    for *_, diff in iter_content_diffs(
+        local_manifest, remote_sources, source_filter=source_filter, skip_unchanged=True
+    ):
+        new += len(diff.new)
+        modified += len(diff.modified)
+        deleted += len(diff.deleted)
+    return new, modified, deleted
+
+
+def names_only_change(local_manifest: dict, remote_sources: dict) -> bool:
+    """True when the ``claude`` diff differs only in project names (a rename)."""
+    raw = next(iter_source_diffs(local_manifest, remote_sources, source_filter="claude"), None)
+    if raw is None or not raw[3].has_changes:
+        return False
+    adjusted = next(
+        iter_content_diffs(local_manifest, remote_sources, source_filter="claude"), None
+    )
+    return adjusted is not None and not adjusted[3].has_changes
+
+
+@dataclass
+class ProjectNameReport:
+    """What a set of peer manifests holds that this machine cannot place (Track 90A).
+
+    ``old_form``: files per device withheld as another home's path names from a
+    peer still on the old form. ``not_placed``: ``@git-`` wire folder -> device
+    -> subpaths, for projects whose checkout is not on this machine.
+    ``superseded``: ``@home`` / ``@lit-`` folder -> device -> subpaths, stale
+    copies of a project that is real here (never applied, never deleted).
+    Counts are files, once per ``(wire folder, subpath)`` across devices.
+    """
+
+    old_form: dict[str, int] = field(default_factory=dict)
+    not_placed: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+    superseded: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+
+    @staticmethod
+    def _once(table: dict[str, dict[str, set[str]]]) -> int:
+        return sum(len(set().union(*by_device.values())) for by_device in table.values())
+
+    @property
+    def not_placed_files(self) -> int:
+        return self._once(self.not_placed)
+
+    @property
+    def not_placed_projects(self) -> int:
+        return len(self.not_placed)
+
+    @property
+    def superseded_files(self) -> int:
+        return self._once(self.superseded)
+
+
+def project_name_report(manifests: Mapping[str, dict | None]) -> ProjectNameReport:
+    """Classify the ``claude`` project folders of decoded peer manifests by wire name."""
+    report = ProjectNameReport()
+    for device_id, peer in manifests.items():
+        entry = ((peer or {}).get("sources") or {}).get("claude")
+        if not isinstance(entry, dict):
+            continue
+        for rel in entry.get("files") or ():
+            parts = manifest._split_project_key(rel) if isinstance(rel, str) else None
+            if parts is None:
+                continue
+            reason = projectid.unplaceable_reason(parts[0])
+            if reason == "old_form":
+                report.old_form[device_id] = report.old_form.get(device_id, 0) + 1
+            elif reason in ("unplaced", "superseded"):
+                table = report.not_placed if reason == "unplaced" else report.superseded
+                table.setdefault(parts[0], {}).setdefault(device_id, set()).add(parts[1])
+    return report
 
 
 def _home_relative_path(path: Path) -> str:
@@ -1433,10 +1702,10 @@ def _make_manifest_validator(passphrase: str, memory_kb: int) -> Callable[[Path]
         # Cheap magic-byte shortcut before paying Argon2. Non-Mind-Meld
         # files (stray backups, user scratch files) bail out in ~1ms
         # instead of ~200-500ms per candidate.
-        if not enc_data or enc_data[0] != FORMAT_VERSION:
+        if not enc_data or enc_data[0] not in (FORMAT_VERSION, MANIFEST_FORMAT_VERSION):
             return False
         try:
-            plain = decrypt(enc_data, passphrase, memory_kb)
+            plain = decrypt_manifest(enc_data, passphrase, memory_kb)
             deserialize_manifest(plain)
             return True
         except Exception:
@@ -1533,7 +1802,7 @@ def _recover_prior_manifest(
                 console.print(f"[yellow]Warning:[/yellow] {msg}")
         if sidecar_manifest is None:
             return fetch.manifest
-        return _merge_manifests([fetch.manifest, sidecar_manifest])
+        return reconcile_recovered_prior(_merge_manifests([fetch.manifest, sidecar_manifest]))
     if fetch.status == "missing" and not fetch.vanished:
         return None
 
@@ -1553,7 +1822,7 @@ def _recover_prior_manifest(
                 print(f"mm: warning: {msg}", file=sys.stderr)
             else:
                 console.print(f"[yellow]Warning:[/yellow] {msg}")
-        return sidecar_manifest
+        return reconcile_recovered_prior(sidecar_manifest)
 
     # No sidecar — try peer fallback
     peer_tombstones = _collect_peer_tombstones(backend, device_id, passphrase, memory_kb)

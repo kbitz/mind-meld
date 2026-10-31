@@ -152,7 +152,6 @@ from mind_meld.manifest import (
     mtime_from_manifest,
     parse_conflict_created_at,
     read_file_revision,
-    serialize_manifest,
     walk_source,
 )
 from mind_meld.manifest import (
@@ -225,6 +224,10 @@ class PushResult:
     no_sources: bool = False
     published_content_files: int | None = None
     metadata_updated: bool = False
+    # Track 90A: the first push in the shared project-name form, and a push that
+    # only renamed project folders (a remote change or a moved checkout).
+    wire_names_published: bool = False
+    names_updated: bool = False
     selection_updated: bool = False
     manifest_repaired: bool = False
     # User-source bytes, metadata or selection changed (mm-owned sources excluded).
@@ -686,6 +689,7 @@ def init(
             dry_run=False,
             conflict_mode="keep-both",
             passphrase=passphrase,
+            join=True,
         )
 
 
@@ -970,7 +974,14 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             if result.manifest_repaired
             else "no content changes"
         )
+        if lead == "no content changes" and result.names_updated:
+            lead = "project names updated"
         parts = [lead]
+        if result.wire_names_published:
+            if lead in ("no content changes", "project names updated"):
+                parts = ["project memory published under shared names"]
+            else:
+                parts.append("project memory published under shared names")
         if result.host_usage_published:
             parts.append("usage published")
         if result.held:
@@ -992,6 +1003,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
     if result.total_skipped:
         lead += f"; {result.total_skipped} skipped"
     if clause := pullflow.waiting_clause(result):
+        lead += f"; {clause}"
+    if clause := pullflow.old_form_clause(result):
         lead += f"; {clause}"
     return "Pull: " + lead + "."
 
@@ -1983,6 +1996,10 @@ def _push_core(
     held_files: dict[str, dict[str, str]] = {}
 
     def on_skip(path: str, reason: str) -> None:
+        if reason == manifest.UNPLACEABLE_SKIP_REASON:
+            if verbose and not quiet:
+                console.print(f"  [dim]skipped: {safe_str(path)} ({safe_str(reason)})[/dim]")
+            return
         if reason == manifest.NESTED_REPO_SKIP_REASON:
             # Autopush stays silent; attended push, preview, status and diag report it.
             if show and path not in skipped_repos:
@@ -2015,6 +2032,10 @@ def _push_core(
         held=held,
         held_candidates=held_candidates,
     )
+
+    # Track 90A: the one decision about the project-name format, from the own
+    # prior as recovered (before the consumer filters below copy it).
+    form = core.project_form_state(local_manifest, remote_manifest)
 
     total_file_count = sum(
         len(src_data["files"]) for src_data in local_manifest["sources"].values()
@@ -2119,7 +2140,12 @@ def _push_core(
     # but failed mid-upload). Pre-v0.12.2: events tail fired at HEAD of
     # _push_core unconditionally, so every `mm push` reported at least
     # the events-file modification.
-    source_diffs = list(core.iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True))
+    source_diffs = list(
+        core.iter_content_diffs(local_manifest, remote_sources, skip_unchanged=True)
+    )
+    # A project renamed on the wire (remote change, moved checkout) differs only
+    # in names: no content change, but the manifest is republished once.
+    names_pending = core.names_only_change(local_manifest, remote_sources)
     if fetch.is_ok:
         # Without an accepted manifest of our own, everything (including
         # content already fleet-wide) counts as new.
@@ -2154,6 +2180,8 @@ def _push_core(
         and not recovering_from_corrupt
         and not has_selection_change
         and not retro_catchup_pending
+        and not form.due
+        and not names_pending
     ):
         scan_held = _held_list(held_files)
         if show and (dry_run or result_observer is None):
@@ -2288,7 +2316,7 @@ def _push_core(
     total_deleted = 0
     upload_held = False
     source_diffs_to_upload = list(
-        core.iter_source_diffs(local_manifest, remote_sources, skip_unchanged=True)
+        core.iter_content_diffs(local_manifest, remote_sources, skip_unchanged=True)
     )
     if not dry_run:
         # diff.new and diff.modified are disjoint; count both without merging.
@@ -2379,6 +2407,8 @@ def _push_core(
                 console.print(
                     "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
                 )
+            elif (form.due or names_pending) and not (total_new or total_modified or total_deleted):
+                console.print("\n[bold]Would refresh manifest[/bold] (shared project names).")
             _print_held_outcome(_held_list(held_files), verbose=verbose, preview=True)
             console.print(f"  Completed in {elapsed:.1f}s")
         return None
@@ -2406,11 +2436,17 @@ def _push_core(
             console.print("\n[bold]Refreshing manifest (source selection changed)...[/bold]")
         elif has_mtime_only and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
+        elif (form.due or names_pending) and not (total_new or total_modified or total_deleted):
+            console.print("\n[bold]Refreshing manifest (shared project names)...[/bold]")
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     core._sync_progress_phase("Saving manifest")
-    manifest_data = serialize_manifest(local_manifest)
-    enc_manifest = encrypt(manifest_data, passphrase, memory_kb)
+    enc_manifest = core.encode_manifest(
+        local_manifest,
+        wire_names=form.publish_new,
+        passphrase=passphrase,
+        memory_kb=memory_kb,
+    )
     mkey = manifest_key(device_id)
     fresh_manifest = core._fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
     if fresh_manifest.newer_version is not None:
@@ -2420,7 +2456,7 @@ def _push_core(
     published_content_files = (
         sum(
             len(diff.new) + len(diff.modified) + len(diff.deleted)
-            for name, _local, _remote, diff in core.iter_source_diffs(
+            for name, _local, _remote, diff in core.iter_content_diffs(
                 local_manifest, remote_sources, skip_unchanged=True
             )
             if name not in MM_INTERNAL_SOURCE_NAMES
@@ -2454,6 +2490,8 @@ def _push_core(
         ),
         manifest_repaired=recovering_from_corrupt,
         held=_held_list(held_files),
+        wire_names_published=form.switch_due,
+        names_updated=names_pending or form.republish_due,
     )
     backend.put(mkey, enc_manifest)
     result.content_accepted = True
@@ -2602,8 +2640,9 @@ def _attended_pull(
     dry_run: bool,
     conflict_mode: pullflow.ConflictMode,
     passphrase: str | None = None,
+    join: bool = False,
 ) -> None:
-    """The body of `mm pull`, shared with `mm init`'s join.
+    """The body of `mm pull`, shared with `mm init`'s join (``join=True``).
 
     `passphrase` is the one init just verified: a keyring that failed to store
     it (or holds a stale entry) must not fail the join's own pull. It is passed
@@ -2655,7 +2694,7 @@ def _attended_pull(
                 except MindMeldError as e:
                     run["cause"] = "crypto-error" if isinstance(e, CryptoError) else "setup-error"
                     core._error(str(e) + refusal_suffix)
-                run["result"] = pullflow._pull_core(
+                pulled = pullflow._pull_core(
                     config,
                     passphrase,
                     memory_kb,
@@ -2667,6 +2706,10 @@ def _attended_pull(
                     diagnostics=verbose or dry_run,
                     result_observer=lambda result: run.__setitem__("result", result),
                 )
+                run["result"] = pulled
+                if join and (not_placed := pullflow.not_placed_line(pulled)):
+                    # A join adds the line once, ahead of its one outcome line.
+                    console.print(safe_str(not_placed))
                 if dry_run:
                     console.print(core.DRY_RUN_COMPLETE)
                     console.print(pullflow.PULL_NOT_PREVIEWED)
@@ -5704,7 +5747,15 @@ def autopull() -> None:
             else:
                 # Undelivered content is waiting, not degraded: the sync tool
                 # is still delivering it and the next pull picks it up.
-                _write_autorun_breadcrumb("pull", "success", pullflow.waiting_detail(result))
+                _write_autorun_breadcrumb(
+                    "pull",
+                    "success",
+                    "; ".join(
+                        d
+                        for d in (pullflow.waiting_detail(result), pullflow.old_form_detail(result))
+                        if d
+                    ),
+                )
 
             # Seam 2 — self-update or nudge at the TAIL. Runs AFTER the main work
             # + breadcrumb so the cold-cache HTTP fetch latency (~500ms 1x/24h)
@@ -5791,12 +5842,16 @@ def autopush() -> None:
                 details.append(
                     f"{result.maintenance_failures} post-publication maintenance failure(s)"
                 )
+            switched = bool(result and result.wire_names_published)
             if held:
                 used = len("; ".join(details)) + (2 if details else 0)
                 budget = max(_HELD_BREADCRUMB_BUDGET - used, 0)
                 details.append(_held_breadcrumb_detail(held, budget))
             if details:
                 _write_autorun_breadcrumb("push", "degraded", "; ".join(details))
+            elif switched:
+                # The first publish in the shared form leaves a trail (O8.3).
+                _write_autorun_breadcrumb("push", "success", "published under shared names")
             else:
                 _write_autorun_breadcrumb("push", "success")
 
