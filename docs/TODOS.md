@@ -45,7 +45,7 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 ### [review:severity=should] A missing `projects/` is silent, and a partial restore still reads as deletion
-- **Description:** While `~/.claude/projects` is missing on a machine that has switched, `mm status` tells the owner to run `mm push`, then says in sync, and the push says `project names updated`; none of them names the missing folder. If no push ran during the outage, then once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
+- **Description:** While `~/.claude/projects` is missing on a machine that has switched, `mm status` tells the owner to run `mm push`, then says in sync, and the push says `project names updated`; only `mm diag` names the missing folder (`project_index.reason`). If no push ran during the outage, then once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
 - **Effort:** M
 - **Priority:** P3
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
@@ -66,10 +66,17 @@ here by hand, use the H3 form.
 
 ### [review:severity=should] Losing `projects/` mid-push publishes false deletion records
 - **Description:** A push that loses `projects/` between the manifest load and the scan mints for every file it cannot see. On a switched machine, or one whose index was built at the load, those records are identity-wide: those names stop reaching the fleet until the files return and the next push clears them, or for up to 30 days. Earlier releases minted on the same absence path-scoped.
-- **Why:** Karl's accepted limit, 2026-10-31. The window is seconds and needs the folder to vanish inside it. A fix would re-list after the scan and treat every folder as moved. Post-push GC already refuses to run in this state.
+- **Why:** Karl's accepted limit, 2026-10-31. The window is seconds and needs the folder to vanish inside it. A fix would re-list after the scan and treat every folder as moved. Post-push GC refuses only while the folder is still unlisted at its gate.
 - **Effort:** S
 - **Priority:** P2
 - **Context:** Re-check before Track 91A starts, when tombstones begin to delete. Track 91A starts only after this release has run on the owner's real store, and all the first-switch limits in `docs/invariants/sync.md` are re-checked then.
+
+### [review:severity=should] The post-push GC gate delays the sweep, and `mm gc` has no gate
+- **Description:** A push that could not list `projects/` drops those references, and its GC gate reads the listing after publish. A folder recreated before the gate, or a later listed push without those files, collects their blobs with no tombstone. Explicit `mm gc` during an outage collects them too. A machine with no `projects/` collects nothing post-push, so orphans accumulate until `mm gc`.
+- **Why:** The one-line gate is what Karl approved, 2026-10-31; earlier releases swept one push sooner. Real protection needs a persisted set of dropped blobs. The blobs matter only if `projects/` is truly lost and no peer lists them.
+- **Effort:** M
+- **Priority:** P2
+- **Context:** Re-check before Track 91A starts. Revisit if project memory is lost after an outage, or if a machine with no `projects/` shows store growth.
 
 ### [review:severity=should] `sidecar.read` validates less than `load_manifest`
 - **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.
