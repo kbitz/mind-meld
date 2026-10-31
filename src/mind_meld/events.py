@@ -64,10 +64,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
-from urllib.parse import urlsplit
 
 from mind_meld import config as mm_config
-from mind_meld import fsutil, gitenv, identity, lockedjson, token_usage
+from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import safe_terminal_str
 
@@ -509,69 +508,12 @@ class HostUsageSnapshot(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# canonicalize_remote_url — pure function, table-tested.
+# canonicalize_remote_url moved to projectid (Track 90A). One alias stays
+# because skills/retro_fleet/aggregator.py and tests/test_events.py read it
+# here; nothing patches it.
 # ---------------------------------------------------------------------------
 
-# scp-form: user@host:path (no scheme, NO `//` after the colon, NO `:port`).
-# Examples: git@github.com:org/repo.git, hg@bitbucket.org:org/repo
-_SCP_FORM = re.compile(r"^(?P<user>[^@:/\s]+)@(?P<host>[^:/\s]+):(?P<path>[^\s]+)$")
-
-
-def canonicalize_remote_url(url: str) -> str:
-    """Normalize a git remote URL to ``<host>/<path>`` form for fleet dedup.
-
-    Strips: scheme, userinfo (user / user:password / token), port, query
-    string, fragment, trailing ``.git``, leading slash. Lowercases the host
-    while preserving path case. Returns "" on malformed input.
-
-    Security (CT-10): credential-laden inputs MUST NOT survive the
-    canonicalization. Tokens, x-access-token, OAuth user:password, and
-    query-string ``?token=`` / ``?access_token=`` are all stripped.
-
-    >>> canonicalize_remote_url("https://github.com/foo/bar.git")
-    'github.com/foo/bar'
-    >>> canonicalize_remote_url("git@github.com:foo/bar.git")
-    'github.com/foo/bar'
-    >>> canonicalize_remote_url("https://x-access-token:T@github.com/foo/bar.git?token=abc")
-    'github.com/foo/bar'
-    """
-    if not isinstance(url, str):
-        return ""
-    s = url.strip()
-    if not s:
-        return ""
-
-    # scp-form (no scheme) is special: urlsplit can't parse `git@host:path`
-    # cleanly because it interprets `host:path` as `scheme:path`.
-    m = _SCP_FORM.match(s)
-    if m:
-        host = m.group("host").lower()
-        path = m.group("path").lstrip("/")
-        return _strip_dot_git(f"{host}/{path}")
-
-    # Has a scheme. Use urlsplit to peel off userinfo + port + query +
-    # fragment. urlsplit needs a scheme to populate netloc correctly; if
-    # the input is a bare host/path with no scheme, fall back to manual
-    # parsing.
-    if "://" not in s:
-        # Bare `host/path` form — accept it as already-canonical-ish.
-        return _strip_dot_git(s.lstrip("/"))
-
-    parts = urlsplit(s)
-    host = (parts.hostname or "").lower()
-    if not host:
-        return ""
-    path = (parts.path or "").lstrip("/")
-    # urlsplit drops query and fragment automatically; just discard.
-    return _strip_dot_git(f"{host}/{path}" if path else host)
-
-
-def _strip_dot_git(s: str) -> str:
-    if s.endswith(".git"):
-        return s[: -len(".git")]
-    if s.endswith("/"):
-        return s.rstrip("/")
-    return s
+canonicalize_remote_url = projectid.canonicalize_remote_url
 
 
 # ---------------------------------------------------------------------------
@@ -1183,33 +1125,6 @@ def _classify_git_root(path: Path) -> bool:
         return False
 
 
-def _gitfile_target_dir(gitfile: Path) -> Path | None:
-    """Resolve the ``gitdir:`` target of a ``.git`` file if it has a ``HEAD`` file."""
-    try:
-        raw = gitfile.read_bytes()
-    except OSError:
-        return None
-    line = raw.split(b"\n", 1)[0]
-    try:
-        text = line.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    if not text.startswith("gitdir: "):
-        return None
-    target = text[len("gitdir: ") :].strip()
-    if not target:
-        return None
-    gitdir = Path(target)
-    if not gitdir.is_absolute():
-        gitdir = gitfile.parent / gitdir
-    try:
-        if gitdir.is_dir() and (gitdir / "HEAD").is_file():
-            return gitdir
-        return None
-    except OSError:
-        return None
-
-
 def _gitfile_points_at_gitdir(gitfile: Path) -> bool:
     """True when a ``.git`` file is a plausible gitdir pointer, not garbage.
 
@@ -1219,57 +1134,12 @@ def _gitfile_points_at_gitdir(gitfile: Path) -> bool:
     ``skipped[].reason``, and inflate ``n_repos`` so every real repo's
     subprocess timeout shrinks.
     """
-    return _gitfile_target_dir(gitfile) is not None
-
-
-def _resolve_git_dirs(path: Path) -> tuple[Path, Path] | None:
-    """Return ``(gitdir, common_dir)`` for a git root, or ``None`` if not a valid root.
-
-    Mirrors ``git rev-parse --git-dir --git-common-dir`` on the filesystem
-    without spawning a subprocess:
-    * For a normal clone, ``.git`` is a directory containing ``HEAD``; both
-      ``gitdir`` and ``common_dir`` are ``(path / ".git").resolve()`` (unless
-      a ``commondir`` file inside ``.git`` redirects ``common_dir``).
-    * For a linked worktree or submodule, ``.git`` is a file whose first line
-      is ``gitdir: <target>``. If ``<gitdir>/commondir`` exists (linked
-      worktree), ``common_dir`` resolves ``commondir`` relative to ``gitdir``;
-      otherwise (submodule) ``common_dir`` is ``gitdir``.
-    """
-    try:
-        dot_git = path / ".git"
-        if dot_git.is_dir():
-            if not (dot_git / "HEAD").is_file():
-                return None
-            gitdir = dot_git.resolve()
-        elif dot_git.is_file():
-            gitdir_raw = _gitfile_target_dir(dot_git)
-            if gitdir_raw is None:
-                return None
-            gitdir = gitdir_raw.resolve()
-        else:
-            return None
-        commondir_file = gitdir / "commondir"
-        if commondir_file.is_file():
-            raw = commondir_file.read_bytes()
-            rel = raw.split(b"\n", 1)[0].decode("utf-8").strip()
-            if not rel:
-                return None
-            cd = Path(rel)
-            if not cd.is_absolute():
-                cd = gitdir / cd
-            if not cd.is_dir() or not (cd / "HEAD").is_file():
-                return None
-            common_dir = cd.resolve()
-        else:
-            common_dir = gitdir
-        return gitdir, common_dir
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
+    return projectid._gitfile_target_dir(gitfile) is not None
 
 
 def _git_common_dir(path: Path) -> Path | None:
     """Return the resolved ``--git-common-dir`` for ``path``, or ``None``."""
-    dirs = _resolve_git_dirs(path)
+    dirs = projectid._resolve_git_dirs(path)
     return dirs[1] if dirs is not None else None
 
 
@@ -1429,7 +1299,7 @@ def dedup_git_root_discovery(discovery: GitRootDiscovery) -> GitRootDiscovery:
 
 def _has_no_commits_yet(path: Path) -> bool:
     """True when ``path`` is an initialized Git repository with an unborn HEAD and no refs."""
-    dirs = _resolve_git_dirs(path)
+    dirs = projectid._resolve_git_dirs(path)
     if dirs is None:
         return False
     gitdir, common_dir = dirs
@@ -1564,7 +1434,7 @@ def _read_repo_config_emails(path: Path) -> list[str]:
     ``config.worktree`` (``extensions.worktreeConfig``), so a worktree-only
     identity still reaches the representative's single ``--all`` walk.
     """
-    dirs = _resolve_git_dirs(path)
+    dirs = projectid._resolve_git_dirs(path)
     if dirs is None:
         return []
     _gitdir, common_dir = dirs
@@ -1982,33 +1852,14 @@ def _walk_one_repo(
     if not result.stdout and _has_no_commits_yet(root):
         return None, WALK_SKIP_NO_COMMITS
 
-    remote = _origin_remote_url(root)
+    remote = projectid._origin_remote_url(root)
     commits = _parse_git_log_numstat(result.stdout)
     proj: GitSnapshotProject = {
-        "remote": canonicalize_remote_url(remote) if remote else "",
+        "remote": projectid.canonicalize_remote_url(remote) if remote else "",
         "local_path": str(root),
         "commits": commits,
     }
     return proj, None
-
-
-def _origin_remote_url(root: Path) -> str:
-    """Return the `origin` remote URL or empty string on any failure."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            env=gitenv.scrubbed_git_env(),
-            timeout=2,
-        )
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return ""
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
 
 
 def _parse_git_log_numstat(out: str) -> list[GitCommit]:
