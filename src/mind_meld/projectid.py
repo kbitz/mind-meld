@@ -465,6 +465,9 @@ class Index:
     claude_real: str
     home_enc: str | None
     listed: bool = True  # False: `projects/` could not be listed, so absence proves nothing
+    # First switch only: a removed folder -> the identity its deletion records publish
+    # under, so a later pull in that checkout can honour them. It owns nothing here.
+    record_identity: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def owned(self) -> int:
@@ -489,15 +492,15 @@ class Index:
 Retained = Mapping[str, Any] | Callable[[], Mapping[str, Any] | None] | None
 
 
-# The folders the sidecar's deletion records name, or a callable that reads them.
-Tombstoned = set[str] | Callable[[], set[str] | None] | None
+# The folders a sidecar from before the first switch names, or a callable reading them.
+PreSwitch = set[str] | Callable[[], set[str] | None] | None
 
 
 @dataclass
 class _Context:
     claude_dir: Path | None = None
     retained: Retained = None
-    tombstoned: Tombstoned = None
+    pre_switch: PreSwitch = None
     cwd_candidate: bool = False
     index: Index | None = None
     home_checked: bool = False
@@ -522,17 +525,17 @@ def _retained_by_folder(retained: Retained) -> dict[str, str]:
         return {}
 
 
-def _tombstoned_folders(tombstoned: Tombstoned) -> set[str]:
-    """Local folder names from the sidecar's deletion records; never raises."""
+def _pre_switch_folders(pre_switch: PreSwitch) -> set[str]:
+    """Local folder names from a sidecar written before the first switch; never raises."""
     try:
-        recorded = tombstoned() if callable(tombstoned) else tombstoned
+        recorded = pre_switch() if callable(pre_switch) else pre_switch
         return {f for f in (recorded or ()) if isinstance(f, str) and f.startswith("-")}
     except Exception:
         return set()
 
 
 def configure(
-    claude_dir: Path | str | None, *, retained: Retained = None, tombstoned: Tombstoned = None
+    claude_dir: Path | str | None, *, retained: Retained = None, pre_switch: PreSwitch = None
 ) -> None:
     """Set the process-wide context and drop any built index.
 
@@ -540,14 +543,14 @@ def configure(
     or a callable returning them, read only when the index is built: a folder
     whose resolution later times out or cannot be read keeps the identity
     recorded for it there, and so does a folder deleted while its checkout lives.
-    ``tombstoned`` names the folders the sidecar's deletion records use. A removed
-    one is resolved too, so a first switch publishes its records under the
-    project's identity, where a later pull in that checkout can honour them.
+    ``pre_switch`` names the folders of a sidecar from before the first switch,
+    which records no identities. A removed one is resolved too, only to spell its
+    deletion records: see ``Index.record_identity``.
     """
     with _CTX.lock:
         _CTX.claude_dir = Path(claude_dir) if claude_dir is not None else None
         _CTX.retained = retained
-        _CTX.tombstoned = tombstoned
+        _CTX.pre_switch = pre_switch
         _CTX.cwd_candidate = False
         _CTX.index = None
         _CTX.home_checked = False
@@ -941,7 +944,7 @@ def _build_index(
     retained: Mapping[str, str],
     cwd_candidate: bool,
     home: str | None,
-    tombstoned: set[str] | frozenset[str] = frozenset(),
+    pre_switch: set[str] | frozenset[str] = frozenset(),
 ) -> Index:
     root = _fs_root()
     projects = claude_dir / "projects"
@@ -949,11 +952,13 @@ def _build_index(
     listed = listing is not None
     folders = listing or []
     # A folder deleted from `projects/` is still resolved when it published an
-    # identity: its checkout may be alive, so the deletion is a real one. With
+    # identity: its checkout may be alive, so the deletion is a real one. One a
+    # pre-switch sidecar names is resolved only to spell its deletion records. With
     # `projects/` unlisted the owner still stands, so a pull restores the project;
     # `manifest` is what keeps that outage from minting.
-    deleted = sorted((set(retained) | set(tombstoned)) - set(folders))
-    worker = _Worker([*folders, *deleted], projects, root)
+    deleted = sorted(set(retained) - set(folders))
+    removed_before_switch = sorted(set(pre_switch) - set(folders) - set(retained))
+    worker = _Worker([*folders, *deleted, *removed_before_switch], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS
     thread.start()
@@ -998,9 +1003,7 @@ def _build_index(
         res = done.get(folder)
         # Only a checkout read now proves a deletion. Unreadable or out of time, a
         # moved checkout may be behind it, and a false tombstone blocks the fleet.
-        if res is None or res.kind != "identity" or not res.identity:
-            continue
-        if retained.get(folder, res.identity) == res.identity:
+        if res is not None and res.kind == "identity" and res.identity == retained[folder]:
             kept.setdefault(res.identity, []).append(folder)
 
     cwd_info: CwdInfo | None = None
@@ -1039,6 +1042,12 @@ def _build_index(
         if cands:
             own(identity, cands)
     folder_identity = {folder: identity for identity, folder in owners.items()}
+    record_identity: dict[str, str] = {}
+    for folder in removed_before_switch:
+        res = done.get(folder)
+        if res is not None and res.kind == "identity" and res.identity:
+            if res.identity not in owners:
+                record_identity[folder] = res.identity
     if cwd_info is not None and cwd_info.identity is not None:
         cwd_info.owner = owners.get(cwd_info.identity)
 
@@ -1073,6 +1082,7 @@ def _build_index(
         claude_real=os.path.realpath(claude_dir),
         home_enc=home,
         listed=listed,
+        record_identity=record_identity,
     )
 
 
@@ -1087,7 +1097,7 @@ def index() -> Index | None:
                 _retained_by_folder(_CTX.retained),
                 _CTX.cwd_candidate,
                 _CTX.home_enc,
-                _tombstoned_folders(_CTX.tombstoned),
+                _pre_switch_folders(_CTX.pre_switch),
             )
         return _CTX.index
 

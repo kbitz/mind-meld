@@ -281,15 +281,22 @@ def _configure_project_names(config: dict) -> None:
         entry = (prior() or {}).get("sources", {}).get("claude")
         return entry.get("wire_folders") if isinstance(entry, dict) else None
 
-    def tombstoned() -> set[str]:
-        folders: set[str] = set()
-        for key in (prior() or {}).get("tombstones", {}):
+    def pre_switch() -> set[str]:
+        sidecar_manifest = prior() or {}
+        entry = sidecar_manifest.get("sources", {}).get("claude")
+        if not isinstance(entry, dict) or entry.get("wire_names") is True:
+            return set()
+        rels = list(entry.get("files") or ())
+        for key in sidecar_manifest.get("tombstones", {}):
             if isinstance(key, str) and key.startswith("claude:"):
-                if parts := manifest._split_project_key(key[len("claude:") :]):
-                    folders.add(parts[0])
-        return folders
+                rels.append(key[len("claude:") :])
+        return {
+            parts[0]
+            for rel in rels
+            if isinstance(rel, str) and (parts := manifest._split_project_key(rel))
+        }
 
-    projectid.configure(Path(claude["path"]).expanduser(), retained=retained, tombstoned=tombstoned)
+    projectid.configure(Path(claude["path"]).expanduser(), retained=retained, pre_switch=pre_switch)
 
 
 def _init_crypto_session(

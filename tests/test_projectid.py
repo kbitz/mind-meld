@@ -3105,3 +3105,118 @@ def test_the_first_switch_keeps_a_removed_folders_deletion_under_its_identity(ma
     landed = linux.claude / "projects" / folder / "memory"
     assert not (landed / "a.md").exists()  # the deletion holds against the peer's copy
     assert (landed / "b.md").read_text() == "b\n"  # and only that path is suppressed
+
+
+def _old_form_with_removed_folder(linux: Machine) -> tuple[Path, str]:
+    """A machine on the old form whose project folder is gone; its checkout is not."""
+    import shutil
+
+    checkout = linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "a\n", "-home-kb-other/memory/o.md": "o\n"})
+    # This machine wrote that manifest from this very Claude folder.
+    path = Path(linux.store) / manifest_key(linux.device_id)
+    with linux.on():
+        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
+        data["sources"]["claude"]["base_path"] = os.path.realpath(linux.claude)
+        path.write_bytes(
+            crypto.encrypt_manifest(
+                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=False
+            )
+        )
+    shutil.rmtree(linux.claude / "projects" / folder)
+    return checkout, folder
+
+
+def test_a_deletion_minted_by_the_first_switch_stays_bound_to_the_project(mac, linux):
+    """The folder went after the last old-form push, so the switching push mints the record."""
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.push()
+    checkout, folder = _old_form_with_removed_folder(linux)
+    linux.push()
+    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
+    linux.cwd = checkout
+    linux.pull()
+    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
+
+
+def test_a_first_switch_record_makes_no_owner_and_records_no_folder(mac, linux):
+    """A pull elsewhere must not restore the folder: only the name of the record changed."""
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.push()
+    _, folder = _old_form_with_removed_folder(linux)
+    seed_old_form(linux, {})  # the record is in the sidecar before the switch
+    linux.push()
+    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
+    published = linux.published()["sources"]["claude"]
+    assert WIRE not in published.get("wire_folders", {})
+    with linux.on():
+        assert projectid.index().owners == {}
+    result = linux.cli("autopull")  # from the home folder
+    assert result.exit_code == 0, result.output
+    assert not (linux.claude / "projects" / folder).exists()
+    assert linux.push() is None  # nothing to republish
+
+
+def test_a_removed_clone_never_outranks_the_live_checkout(mac, linux):
+    import shutil
+
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.push()
+    linux.checkout("/home/kb/archive/proj")
+    live = linux.checkout("/home/kb/code/proj")
+    archive_folder = linux.folder_for("/home/kb/archive/proj")
+    seed_old_form(
+        linux, {f"{archive_folder}/memory/old.md": "old\n", "-home-kb-other/memory/o.md": "o\n"}
+    )
+    shutil.rmtree(linux.claude / "projects" / archive_folder)
+    seed_old_form(linux, {})
+    linux.push()
+    linux.cwd = live
+    linux.pull()
+    assert (
+        linux.claude / "projects" / linux.folder_for("/home/kb/code/proj") / "memory/a.md"
+    ).exists()
+    assert not (linux.claude / "projects" / archive_folder).exists()
+
+
+def test_after_the_switch_a_removed_home_form_folder_keeps_its_own_name(mac):
+    """The translation is for a machine with no recorded identities: once only."""
+    import shutil
+
+    mac.checkout("/Users/kb/proj", None)  # no origin yet, so it publishes home-relative
+    folder = mac.folder_for("/Users/kb/proj")
+    doomed = mac.memory(folder, "a.md", "a\n")
+    mac.memory(folder, "b.md", "b\n")
+    mac.memory("-Users-kb-other", "o.md", "o\n")
+    mac.push()
+    doomed.unlink()
+    mac.push()  # a marked sidecar now holds a record under the local name
+    shutil.rmtree(mac.claude / "projects" / folder)
+    mac.checkout("/Users/kb/proj", GIT_URL)  # gains an origin after the switch
+    mac.push()
+    keys = list(mac.published()["tombstones"])
+    assert keys and all(key.startswith("claude:projects/@home-proj/") for key in keys)
+
+
+def test_conflict_copy_retention_is_per_device(tmp_path, store, mac, linux):
+    other = Machine(tmp_path, store, "other", "/Users/other", "dddddddd")
+    mac.checkout("/Users/kb/proj")
+    mac.memory(mac.folder_for("/Users/kb/proj"), "p.md", "p\n")
+    mac.memory("-Users-kb-loose", "t.md", "t\n")
+    mac.push()
+    other.memory("-Users-other-side", "s.md", "s\n")
+    other.push()
+    copies = []
+    for machine in (mac, other):
+        canonical = Path(store) / manifest_key(machine.device_id)
+        copy = canonical.with_name(canonical.name.replace(".enc", " 2.enc"))
+        copy.write_bytes(canonical.read_bytes())
+        copies.append(copy)
+    (linux.claude / "projects" / "-home-kb-mine").mkdir(parents=True)
+    linux.pull()
+    assert copies[0].exists()  # the mac's project is withheld here
+    assert not copies[1].exists()  # nothing of the other machine's is
