@@ -78,6 +78,13 @@ here by hand, use the H3 form.
 - **Priority:** P2
 - **Context:** Re-check before Track 91A starts. Revisit if project memory is lost after an outage, or if a machine with no `projects/` shows store growth.
 
+### [review:severity=nit] The project index lists `projects/` with no deadline
+- **Description:** `_build_index` lists `projects/` on the caller's thread before its worker and 2 s deadline start, and `projects_listed` lists it again, so a stalled mount under `~/.claude/projects` can hang `mm diag`, `mm status` or a push instead of timing out. The timeout tests block only later checkout reads.
+- **Why:** The design lists on the caller so every folder name is known if the worker times out. A stalled mount there has not been seen on this fleet. Greptile review of Track 90A.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit if any `mm` command hangs on a machine whose `~/.claude` is on a network or removable volume.
+
 ### [review:severity=should] `sidecar.read` validates less than `load_manifest`
 - **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.
 - **Why:** Predates Track 90A and needs a damaged sidecar plus a corrupt own manifest. With a healthy store the switching push was probed and does not crash.
