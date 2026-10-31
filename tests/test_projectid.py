@@ -3076,40 +3076,6 @@ def test_a_pull_still_cleans_a_conflict_copy_when_nothing_is_withheld(mac, linux
     assert not copy.exists()
 
 
-def test_the_first_switch_keeps_a_removed_folders_deletion_under_its_identity(mac, linux):
-    """Deleted on the old form, then switched: the record must still bind the project."""
-    import shutil
-
-    mac.checkout("/Users/kb/Dev/widgets")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "b.md", "b\n")
-    mac.push()
-
-    checkout = linux.checkout("/home/kb/proj")
-    folder = linux.folder_for("/home/kb/proj")
-    seed_old_form(
-        linux,
-        {f"{folder}/memory/a.md": "a\n", "-home-kb-other/memory/o.md": "o\n"},
-    )
-    shutil.rmtree(linux.claude / "projects" / folder)
-    seed_old_form(linux, {})
-    tombstones = linux.published()["tombstones"]
-    assert list(tombstones) == [f"claude:projects/{folder}/memory/a.md"]
-
-    linux.push()  # the first switch
-    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
-    assert set(linux.published()["tombstones"]) == {
-        f"claude:projects/{WIRE}/memory/a.md",
-        "claude:projects/@home-proj/memory/a.md",
-    }
-
-    linux.cwd = checkout
-    linux.pull()
-    landed = linux.claude / "projects" / folder / "memory"
-    assert not (landed / "a.md").exists()  # the deletion holds against the peer's copy
-    assert (landed / "b.md").read_text() == "b\n"  # and only that path is suppressed
-
-
 def _claim_this_claude_folder(machine: Machine) -> None:
     """The store's old-form manifest was written from this very Claude folder."""
     path = Path(machine.store) / manifest_key(machine.device_id)
@@ -3148,25 +3114,6 @@ def test_a_deletion_minted_by_the_first_switch_stays_home_relative(mac, linux):
     assert not (linux.claude / "projects" / folder).exists()
 
 
-def test_a_first_switch_record_makes_no_owner_and_records_no_folder(mac, linux):
-    """A pull elsewhere must not restore the folder: only the name of the record changed."""
-    mac.checkout("/Users/kb/Dev/widgets")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
-    mac.push()
-    _, folder = _old_form_with_removed_folder(linux)
-    seed_old_form(linux, {})  # the record is in the sidecar before the switch
-    linux.push()
-    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
-    published = linux.published()["sources"]["claude"]
-    assert WIRE not in published.get("wire_folders", {})
-    with linux.on():
-        assert projectid.index().owners == {}
-    result = linux.cli("autopull")  # from the home folder
-    assert result.exit_code == 0, result.output
-    assert not (linux.claude / "projects" / folder).exists()
-    assert linux.push() is None  # nothing to republish
-
-
 def test_a_removed_clone_never_outranks_the_live_checkout(mac, linux):
     import shutil
 
@@ -3190,25 +3137,6 @@ def test_a_removed_clone_never_outranks_the_live_checkout(mac, linux):
     assert not (linux.claude / "projects" / archive_folder).exists()
 
 
-def test_after_the_switch_a_removed_home_form_folder_keeps_its_own_name(mac):
-    """The translation is for a machine with no recorded identities: once only."""
-    import shutil
-
-    mac.checkout("/Users/kb/proj", None)  # no origin yet, so it publishes home-relative
-    folder = mac.folder_for("/Users/kb/proj")
-    doomed = mac.memory(folder, "a.md", "a\n")
-    mac.memory(folder, "b.md", "b\n")
-    mac.memory("-Users-kb-other", "o.md", "o\n")
-    mac.push()
-    doomed.unlink()
-    mac.push()  # a marked sidecar now holds a record under the local name
-    shutil.rmtree(mac.claude / "projects" / folder)
-    mac.checkout("/Users/kb/proj", GIT_URL)  # gains an origin after the switch
-    mac.push()
-    keys = list(mac.published()["tombstones"])
-    assert keys and all(key.startswith("claude:projects/@home-proj/") for key in keys)
-
-
 def test_conflict_copy_retention_is_per_device(tmp_path, store, mac, linux):
     other = Machine(tmp_path, store, "other", "/Users/other", "dddddddd")
     mac.checkout("/Users/kb/proj")
@@ -3229,7 +3157,7 @@ def test_conflict_copy_retention_is_per_device(tmp_path, store, mac, linux):
     assert not copies[1].exists()  # nothing of the other machine's is
 
 
-def test_a_first_switch_record_holds_against_a_same_home_peer_from_anywhere(tmp_path, store, linux):
+def test_a_removed_folders_record_holds_against_a_same_home_peer_elsewhere(tmp_path, store, linux):
     twin = Machine(tmp_path, store, "twin", "/home/kb", "dddddddd")
     _, folder = _old_form_with_removed_folder(linux)
     seed_old_form(linux, {})
@@ -3237,114 +3165,15 @@ def test_a_first_switch_record_holds_against_a_same_home_peer_from_anywhere(tmp_
     linux.push()
     assert linux.cli("autopull").exit_code == 0  # from the home folder, with no owner
     assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
-    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
-
-
-def test_a_first_switch_record_survives_recovery_under_both_spellings(mac, linux):
-    mac.checkout("/Users/kb/Dev/widgets")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
-    mac.push()
-    checkout, folder = _old_form_with_removed_folder(linux)
-    seed_old_form(linux, {})
-    linux.push()
-    _corrupt_own_manifest(linux)
-    linux.push()
-    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
-    linux.cwd = checkout
-    linux.pull()
-    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
-
-
-def test_a_first_switch_after_claude_was_disabled_still_spells_the_record(mac, linux):
-    mac.checkout("/Users/kb/Dev/widgets")
-    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
-    mac.push()
-    notes = linux.home / "notes-src"
-    (notes / "d").mkdir(parents=True)
-    (notes / "d/n.md").write_text("n\n")
-    linux.config["sync"]["sources"].append(
-        {"name": "notes", "path": str(notes), "type": "generic", "include_dirs": ["d"]}
-    )
-    checkout, folder = _old_form_with_removed_folder(linux)
-    seed_old_form(linux, {})
-    linux.config["sync"]["disabled_sources"] = ["claude"]
-    (notes / "d/n.md").write_text("changed\n")
-    linux.push()
-    assert list(linux.published()["tombstones"]) == [f"claude:projects/{folder}/memory/a.md"]
-    linux.config["sync"]["disabled_sources"] = []
-    linux.push()
-    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
-    linux.cwd = checkout
-    linux.pull()
-    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
-
-
-def test_a_first_switch_record_stays_home_relative_when_a_live_folder_owns_the_project(linux):
-    import shutil
-
-    linux.checkout("/home/kb/live/proj")
-    live = linux.folder_for("/home/kb/live/proj")
-    linux.checkout("/home/kb/gone/proj")
-    gone = linux.folder_for("/home/kb/gone/proj")
-    seed_old_form(linux, {f"{live}/memory/keep.md": "k\n", f"{gone}/memory/a.md": "a\n"})
-    shutil.rmtree(linux.claude / "projects" / gone)
-    seed_old_form(linux, {})
-    linux.push()
-    tombstones = linux.published()["tombstones"]
-    assert f"claude:projects/{WIRE}/memory/a.md" not in tombstones  # it would bind the live one
-    assert f"projects/{WIRE}/memory/keep.md" in wire_keys(linux.published())
-
-
-def test_a_switching_push_spells_only_records_the_sidecar_already_held(linux):
-    """A fresh mint in a folder with one older record stays path-scoped, like any other."""
-    import shutil
-
-    linux.checkout("/home/kb/proj")
-    folder = linux.folder_for("/home/kb/proj")
-    gone = linux.memory(folder, "a.md", "a\n")
-    seed_old_form(linux, {f"{folder}/memory/b.md": "b\n", "-home-kb-other/memory/o.md": "o\n"})
-    gone.unlink()
-    seed_old_form(linux, {})  # the sidecar now holds a.md's record
-    _claim_this_claude_folder(linux)
-    shutil.rmtree(linux.claude / "projects" / folder)
-    linux.push()
-    assert set(linux.published()["tombstones"]) == {
-        f"claude:projects/{WIRE}/memory/a.md",
-        "claude:projects/@home-proj/memory/a.md",
-        "claude:projects/@home-proj/memory/b.md",  # minted by this push: never identity-wide
-    }
-
-
-def test_a_stale_sidecar_key_never_passes_a_fresh_mint_as_a_held_record(linux):
-    """A failed sidecar write leaves a key the store cleared; this push's mint is still new."""
-    import shutil
-
-    linux.checkout("/home/kb/proj")
-    folder = linux.folder_for("/home/kb/proj")
-    gone = linux.memory(folder, "a.md", "a\n")
-    seed_old_form(linux, {f"{folder}/memory/b.md": "b\n", "-home-kb-other/memory/o.md": "o\n"})
-    gone.unlink()
-    seed_old_form(linux, {})  # the sidecar now holds a.md's record
-    with linux.on():
-        stale = sidecar.sidecar_path().read_bytes()
-    linux.memory(folder, "a.md", "a again\n")
-    seed_old_form(linux, {})  # the store clears that record, and this sidecar write fails
-    with linux.on():
-        sidecar.sidecar_path().write_bytes(stale)
-    _claim_this_claude_folder(linux)
-    shutil.rmtree(linux.claude / "projects" / folder)
-    linux.push()
-    assert set(linux.published()["tombstones"]) == {
-        "claude:projects/@home-proj/memory/a.md",
-        "claude:projects/@home-proj/memory/b.md",
-    }
+    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-proj/memory/a.md"}
 
 
 def test_a_push_that_cannot_list_projects_holds_the_first_switch(mac, linux):
-    """Unlisted, a live clone looks removed and a live folder's records cannot bind it, and
-    a marked sidecar never looks again. The next listed push switches with both still held."""
+    """Unlisted, nothing would own a project, so its records would take home names its folder
+    ignores once it returns. The next listed push switches with those records still held."""
     mac.checkout("/Users/kb/Dev/widgets")
     mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "x.md", "peer\n")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "y.md", "other\n")
     mac.push()
     linux.checkout("/home/kb/alive/proj")
     linux.checkout("/home/kb/zclone/proj")
@@ -3373,7 +3202,9 @@ def test_a_push_that_cannot_list_projects_holds_the_first_switch(mac, linux):
         "claude:projects/@home-zclone-proj/memory/a.md",
     }
     linux.pull()
-    assert not (linux.claude / "projects" / owner / "memory" / "x.md").exists()  # stays deleted
+    landed = linux.claude / "projects" / owner / "memory"
+    assert not (landed / "x.md").exists()  # stays deleted
+    assert (landed / "y.md").read_text() == "other\n"  # while the project still syncs
 
 
 def test_a_worktree_folder_owning_a_removed_folders_project_makes_its_records_identity_wide(linux):
@@ -3388,3 +3219,206 @@ def test_a_worktree_folder_owning_a_removed_folders_project_makes_its_records_id
     shutil.rmtree(linux.claude / "projects" / folder)
     linux.push()
     assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/a.md"}
+
+
+def test_a_missed_sidecar_write_then_an_outage_leaves_a_live_clones_record_on_its_path(mac, linux):
+    """The switch's sidecar write fails, then a push runs with `projects/` unlisted. A live
+    second clone's deletion binds only that clone: the peer's same-named file still arrives."""
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "peer\n")
+    mac.push()
+    linux.checkout("/home/kb/alive/proj")
+    linux.checkout("/home/kb/zclone/proj")
+    owner = linux.folder_for("/home/kb/alive/proj")
+    clone = linux.folder_for("/home/kb/zclone/proj")
+    gone = linux.memory(clone, "a.md", "a\n")
+    seed_old_form(linux, {f"{owner}/memory/keep.md": "k\n", f"{clone}/memory/c.md": "c\n"})
+    gone.unlink()
+    seed_old_form(linux, {})
+    _claim_this_claude_folder(linux)
+    with linux.on():
+        stale = sidecar.sidecar_path().read_bytes()
+    linux.push()  # the switch is accepted
+    with linux.on():
+        sidecar.sidecar_path().write_bytes(stale)  # and its sidecar write fails
+    projects = linux.claude / "projects"
+    parked = linux.claude / "projects.parked"
+    projects.rename(parked)
+    linux.push()
+    parked.rename(projects)
+    linux.push()
+    assert f"claude:projects/{WIRE}/memory/a.md" not in linux.published()["tombstones"]
+    linux.pull()
+    assert (projects / owner / "memory/a.md").read_text() == "peer\n"
+
+
+def test_losing_projects_mid_push_never_binds_an_undeleted_file_to_its_project(linux, monkeypatch):
+    """`projects/` goes between the manifest load and the scan, so that push records what it
+    cannot see. Only one project comes back, and nobody deleted the other's file."""
+    from mind_meld import cli as cli_module
+
+    linux.checkout("/home/kb/x/proj")
+    linux.checkout("/home/kb/y/other", "git@github.com:acme/other.git")
+    x = linux.folder_for("/home/kb/x/proj")
+    y = linux.folder_for("/home/kb/y/other")
+    seed_old_form(linux, {f"{x}/memory/a.md": "a\n", f"{y}/memory/e.md": "e\n"})
+    _claim_this_claude_folder(linux)
+    projects = linux.claude / "projects"
+    real = cli_module.build_manifest_v2
+
+    def vanish_then_scan(*args, **kwargs):
+        if projects.exists():
+            projects.rename(linux.claude / "projects.parked")
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_module, "build_manifest_v2", vanish_then_scan)
+        linux.push()
+    linux.memory(y, "e.md", "e\n")
+    linux.push()
+    tombstones = linux.published()["tombstones"]
+    assert f"claude:projects/{WIRE}/memory/a.md" not in tombstones
+    assert "claude:projects/@home-x-proj/memory/a.md" in tombstones
+
+
+def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypatch):
+    """`projects/` goes after the decision, during the upload. The push switches on what it
+    listed, so an owner's deletion record still binds the project."""
+    from mind_meld import cli as cli_module
+
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    gone = linux.memory(folder, "x.md", "x\n")
+    seed_old_form(linux, {f"{folder}/memory/keep.md": "k\n"})
+    gone.unlink()
+    seed_old_form(linux, {})
+    _claim_this_claude_folder(linux)
+    linux.memory(folder, "new.md", "n\n")
+    projects = linux.claude / "projects"
+    real = cli_module._upload_changed_blobs
+
+    def vanish_after(*args, **kwargs):
+        out = real(*args, **kwargs)
+        if projects.exists():
+            projects.rename(linux.claude / "projects.parked")
+        return out
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_module, "_upload_changed_blobs", vanish_after)
+        linux.push()
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/x.md"}
+
+
+def test_a_held_switch_says_project_memory_was_not_published(linux):
+    from mind_meld.cli import _sync_success
+
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "a\n"})
+    _claim_this_claude_folder(linux)
+    (linux.claude / "projects").rename(linux.claude / "projects.parked")
+    preview = linux.cli("push", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    assert "shared project names" not in preview.output
+    assert "cannot be listed" in preview.output
+    with linux.on():
+        result = _push_core(
+            linux.config,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+            attended=True,
+            result_observer=lambda r: None,
+        )
+    assert linux.first_byte() == crypto.FORMAT_VERSION
+    assert _sync_success("push", result) == (
+        "Push: project memory not published (Claude's projects folder cannot be listed)."
+    )
+
+
+def test_a_file_deleted_in_a_folder_gone_at_the_switch_can_return_inside_its_checkout(mac, linux):
+    """Karl's accepted limit: nothing ties a removed folder's record to its project, so it
+    binds that path only until a pull inside the checkout owns the identity."""
+    import shutil
+
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "b.md", "b\n")
+    mac.push()
+
+    checkout = linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "a\n", "-home-kb-other/memory/o.md": "o\n"})
+    shutil.rmtree(linux.claude / "projects" / folder)
+    seed_old_form(linux, {})
+    linux.push()  # the first switch
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-proj/memory/a.md"}
+
+    assert linux.cli("autopull").exit_code == 0  # from elsewhere the project stays unplaced
+    assert not (linux.claude / "projects" / folder).exists()
+    linux.cwd = checkout
+    linux.pull()
+    landed = linux.claude / "projects" / folder / "memory"
+    assert (landed / "a.md").read_text() == "a\n"
+    assert (landed / "b.md").read_text() == "b\n"
+
+
+def test_a_live_folder_with_its_checkout_away_at_the_switch_keeps_home_names(mac, linux):
+    """The same limit for a live folder: once the checkout returns and the folder owns the
+    project, the home-relative record no longer binds it and any pull restores the file."""
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "peer\n")
+    mac.push()
+    checkout = linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    gone = linux.memory(folder, "a.md", "a\n")
+    seed_old_form(linux, {f"{folder}/memory/keep.md": "k\n"})
+    gone.unlink()
+    seed_old_form(linux, {})
+    _claim_this_claude_folder(linux)
+    away = checkout.with_name("proj.away")
+    checkout.rename(away)
+    linux.push()
+    away.rename(checkout)
+    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-proj/memory/a.md"}
+    linux.pull()
+    assert (linux.claude / "projects" / folder / "memory/a.md").read_text() == "peer\n"
+
+
+def test_a_removed_folders_record_keeps_its_home_name_through_a_held_switch(linux):
+    _, folder = _old_form_with_removed_folder(linux)
+    seed_old_form(linux, {})  # the sidecar now holds the record
+    _claim_this_claude_folder(linux)
+    projects = linux.claude / "projects"
+    parked = linux.claude / "projects.parked"
+    projects.rename(parked)
+    linux.push()
+    assert linux.first_byte() == crypto.FORMAT_VERSION
+    assert set(linux.published()["tombstones"]) == {f"claude:projects/{folder}/memory/a.md"}
+    parked.rename(projects)
+    linux.push()
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-proj/memory/a.md"}
+
+
+@pytest.mark.parametrize(
+    "prior, listed, due",
+    [
+        (None, True, (True, True)),
+        ({"sources": {"claude": {}}}, True, (True, True)),
+        ({"sources": {"claude": {"wire_names": True}}}, True, (True, False)),
+        (None, False, (False, False)),
+        ({"sources": {"claude": {}}}, False, (False, False)),
+        ({"sources": {"claude": {"wire_names": True}}}, False, (True, False)),
+    ],
+)
+def test_only_the_first_switch_needs_a_listing(mac, prior, listed, due):
+    (mac.claude / "projects").mkdir(parents=True, exist_ok=True)
+    if not listed:
+        (mac.claude / "projects").rmdir()
+    with mac.on():
+        form = core.project_form_state({"sources": {"claude": {"files": {}}}}, prior)
+    assert (form.publish_new, form.switch_due) == due
+    assert form.switch_held == (not listed and due == (False, False))

@@ -228,6 +228,8 @@ class PushResult:
     # only renamed project folders (a remote change or a moved checkout).
     wire_names_published: bool = False
     names_updated: bool = False
+    # The first switch waits: this push could not list Claude's projects folder.
+    switch_held: bool = False
     selection_updated: bool = False
     manifest_repaired: bool = False
     # User-source bytes, metadata or selection changed (mm-owned sources excluded).
@@ -977,6 +979,9 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         if lead == "no content changes" and result.names_updated:
             lead = "project names updated"
         parts = [lead]
+        if result.switch_held:
+            held_note = "project memory not published (Claude's projects folder cannot be listed)"
+            parts = [held_note] if lead == "no content changes" else [lead, held_note]
         if result.wire_names_published:
             if lead in ("no content changes", "project names updated"):
                 parts = ["project memory published under shared names"]
@@ -2407,6 +2412,11 @@ def _push_core(
                 console.print(
                     "\n[bold]Would refresh manifest[/bold] (metadata-only changes pending)."
                 )
+            elif form.switch_held and not (total_new or total_modified or total_deleted):
+                console.print(
+                    "\n[bold]Would refresh manifest[/bold] "
+                    "(Claude's projects folder cannot be listed)."
+                )
             elif (form.due or names_pending) and not (total_new or total_modified or total_deleted):
                 console.print("\n[bold]Would refresh manifest[/bold] (shared project names).")
             _print_held_outcome(_held_list(held_files), verbose=verbose, preview=True)
@@ -2436,6 +2446,10 @@ def _push_core(
             console.print("\n[bold]Refreshing manifest (source selection changed)...[/bold]")
         elif has_mtime_only and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (metadata-only changes)...[/bold]")
+        elif form.switch_held and not (total_new or total_modified or total_deleted):
+            console.print(
+                "\n[bold]Refreshing manifest (Claude's projects folder cannot be listed)...[/bold]"
+            )
         elif (form.due or names_pending) and not (total_new or total_modified or total_deleted):
             console.print("\n[bold]Refreshing manifest (shared project names)...[/bold]")
         else:
@@ -2491,7 +2505,8 @@ def _push_core(
         manifest_repaired=recovering_from_corrupt,
         held=_held_list(held_files),
         wire_names_published=form.switch_due,
-        names_updated=names_pending or form.republish_due,
+        names_updated=(names_pending or form.republish_due) and not form.switch_held,
+        switch_held=form.switch_held,
     )
     backend.put(mkey, enc_manifest)
     result.content_accepted = True

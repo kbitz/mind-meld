@@ -465,9 +465,6 @@ class Index:
     claude_real: str
     home_enc: str | None
     listed: bool = True  # False: `projects/` could not be listed, so absence proves nothing
-    # First switch only: a removed folder -> the identity its deletion records also
-    # publish under, so a later pull in that checkout can honour them. It owns nothing.
-    record_identity: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def owned(self) -> int:
@@ -492,16 +489,10 @@ class Index:
 Retained = Mapping[str, Any] | Callable[[], Mapping[str, Any] | None] | None
 
 
-# The folders with deletion records in a sidecar from before the first switch, or a
-# callable reading them.
-PreSwitch = set[str] | Callable[[], set[str] | None] | None
-
-
 @dataclass
 class _Context:
     claude_dir: Path | None = None
     retained: Retained = None
-    pre_switch: PreSwitch = None
     cwd_candidate: bool = False
     index: Index | None = None
     home_checked: bool = False
@@ -526,32 +517,17 @@ def _retained_by_folder(retained: Retained) -> dict[str, str]:
         return {}
 
 
-def _pre_switch_folders(pre_switch: PreSwitch) -> set[str]:
-    """Local folder names from a pre-switch sidecar's deletion records; never raises."""
-    try:
-        recorded = pre_switch() if callable(pre_switch) else pre_switch
-        return {f for f in (recorded or ()) if isinstance(f, str) and f.startswith("-")}
-    except Exception:
-        return set()
-
-
-def configure(
-    claude_dir: Path | str | None, *, retained: Retained = None, pre_switch: PreSwitch = None
-) -> None:
+def configure(claude_dir: Path | str | None, *, retained: Retained = None) -> None:
     """Set the process-wide context and drop any built index.
 
     ``retained`` is the sidecar's ``wire_folders`` (wire name -> local folder),
     or a callable returning them, read only when the index is built: a folder
     whose resolution later times out or cannot be read keeps the identity
     recorded for it there, and so does a folder deleted while its checkout lives.
-    ``pre_switch`` names the folders a sidecar from before the first switch holds
-    deletion records for; it records no identities. A removed one is resolved too,
-    only to spell those records: see ``Index.record_identity``.
     """
     with _CTX.lock:
         _CTX.claude_dir = Path(claude_dir) if claude_dir is not None else None
         _CTX.retained = retained
-        _CTX.pre_switch = pre_switch
         _CTX.cwd_candidate = False
         _CTX.index = None
         _CTX.home_checked = False
@@ -945,7 +921,6 @@ def _build_index(
     retained: Mapping[str, str],
     cwd_candidate: bool,
     home: str | None,
-    pre_switch: set[str] | frozenset[str] = frozenset(),
 ) -> Index:
     root = _fs_root()
     projects = claude_dir / "projects"
@@ -953,13 +928,11 @@ def _build_index(
     listed = listing is not None
     folders = listing or []
     # A folder deleted from `projects/` is still resolved when it published an
-    # identity: its checkout may be alive, so the deletion is a real one. One a
-    # pre-switch sidecar names is resolved only to spell its deletion records. With
+    # identity: its checkout may be alive, so the deletion is a real one. With
     # `projects/` unlisted the owner still stands, so a pull restores the project;
     # `manifest` is what keeps that outage from minting.
     deleted = sorted(set(retained) - set(folders))
-    removed_before_switch = sorted(set(pre_switch) - set(folders) - set(retained))
-    worker = _Worker([*folders, *deleted, *removed_before_switch], projects, root)
+    worker = _Worker([*folders, *deleted], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS
     thread.start()
@@ -1043,12 +1016,6 @@ def _build_index(
         if cands:
             own(identity, cands)
     folder_identity = {folder: identity for identity, folder in owners.items()}
-    record_identity: dict[str, str] = {}
-    for folder in removed_before_switch:
-        res = done.get(folder)
-        if res is not None and res.kind == "identity" and res.identity:
-            if res.identity not in owners:
-                record_identity[folder] = res.identity
     if cwd_info is not None and cwd_info.identity is not None:
         cwd_info.owner = owners.get(cwd_info.identity)
 
@@ -1083,7 +1050,6 @@ def _build_index(
         claude_real=os.path.realpath(claude_dir),
         home_enc=home,
         listed=listed,
-        record_identity=record_identity,
     )
 
 
@@ -1098,7 +1064,6 @@ def index() -> Index | None:
                 _retained_by_folder(_CTX.retained),
                 _CTX.cwd_candidate,
                 _CTX.home_enc,
-                _pre_switch_folders(_CTX.pre_switch),
             )
         return _CTX.index
 

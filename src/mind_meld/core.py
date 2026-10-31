@@ -270,30 +270,12 @@ def _configure_project_names(config: dict) -> None:
         projectid.configure(None)
         return
 
-    read: list[dict | None] = []
-
-    def prior() -> dict | None:
-        if not read:
-            read.append(sidecar.read(config.get("device", {}).get("id", "")))
-        return read[0]
-
     def retained() -> Any:
-        entry = (prior() or {}).get("sources", {}).get("claude")
+        prior = sidecar.read(config.get("device", {}).get("id", ""))
+        entry = (prior or {}).get("sources", {}).get("claude")
         return entry.get("wire_folders") if isinstance(entry, dict) else None
 
-    def pre_switch() -> set[str]:
-        sidecar_manifest = prior() or {}
-        entry = sidecar_manifest.get("sources", {}).get("claude")
-        if isinstance(entry, dict) and entry.get("wire_names") is True:
-            return set()
-        folders: set[str] = set()
-        for key in sidecar_manifest.get("tombstones", {}):
-            if isinstance(key, str) and key.startswith("claude:"):
-                if parts := manifest._split_project_key(key[len("claude:") :]):
-                    folders.add(parts[0])
-        return folders
-
-    projectid.configure(Path(claude["path"]).expanduser(), retained=retained, pre_switch=pre_switch)
+    projectid.configure(Path(claude["path"]).expanduser(), retained=retained)
 
 
 def _init_crypto_session(
@@ -1316,6 +1298,8 @@ class ProjectFormState:
     ``publish_new``: the local manifest has a ``claude`` entry, the codec is on and
     the own prior is marked or ``projects/`` can be listed, so the manifest is
     written with shared project names (byte 0x03).
+    ``switch_held``: the first switch is owed but ``projects/`` cannot be listed, so
+    this push stays on the old form and the next listed push switches.
     ``switch_due``: ``publish_new`` and the own prior is not yet marked, so the
     first push in the new form is owed even with no content change.
     ``republish_due``: the own prior is marked but records a folder other than
@@ -1327,6 +1311,7 @@ class ProjectFormState:
     publish_new: bool
     switch_due: bool
     republish_due: bool
+    switch_held: bool = False
 
     @property
     def due(self) -> bool:
@@ -1338,45 +1323,23 @@ def project_form_state(local_manifest: dict, own_prior: dict | None) -> ProjectF
     entry = local_manifest.get("sources", {}).get("claude")
     prior_entry = ((own_prior or {}).get("sources") or {}).get("claude")
     marked = isinstance(prior_entry, dict) and prior_entry.get("wire_names") is True
-    # A first switch needs a listing: without one a live clone looks removed, a live
-    # folder's deletion records cannot bind it, and a marked sidecar never looks again.
-    publish_new = (
-        isinstance(entry, dict) and projectid.enabled() and (marked or projectid.projects_listed())
-    )
+    publish_new = isinstance(entry, dict) and projectid.enabled()
+    switch_held = False
+    if publish_new and not marked:
+        # A first switch needs a listing: without one nothing owns a project, so its
+        # deletion records would take home names its folder ignores once it returns.
+        # Encoding reads this same index, so one listing decides both.
+        idx = projectid.index()
+        switch_held = idx is not None and not idx.listed
+        publish_new = not switch_held
     return ProjectFormState(
         publish_new=publish_new,
         switch_due=publish_new and not marked,
         republish_due=publish_new
         and marked
         and bool(isinstance(prior_entry, dict) and prior_entry.get("moved_folders")),
+        switch_held=switch_held,
     )
-
-
-def _spell_first_switch_records(local_manifest: dict) -> None:
-    """Add a removed folder's deletion records under its identity, once, in place.
-
-    A machine with no recorded identities cannot tell a later pull which project a
-    removed folder was. The local spelling stays too: while nothing owns the identity
-    it is what binds this path, and once a folder does, the identity spelling binds.
-    The sidecar keeps both, so recovery does not lose them. Only records the pre-switch
-    sidecar already held are spelled: what this push mints may be housekeeping, and an
-    identity-wide record would block that project across the fleet. The record must match,
-    not just its key: a sidecar whose last write failed can hold a key the store cleared.
-    """
-    idx = projectid.index()
-    if idx is None or not idx.record_identity:
-        return
-    prior = sidecar.read(str(local_manifest.get("device_id", "")))
-    held = (prior or {}).get("tombstones") or {}
-    tombstones = local_manifest.get("tombstones") or {}
-    for key, info in list(tombstones.items()):
-        if held.get(key) != info or not isinstance(key, str) or not key.startswith("claude:"):
-            continue
-        parts = manifest._split_project_key(key[len("claude:") :])
-        identity = idx.record_identity.get(parts[0]) if parts else None
-        if parts and identity:
-            wire = projectid.git_wire(identity)
-            tombstones.setdefault(f"claude:projects/{wire}/{parts[1]}", info)
 
 
 def encode_manifest(
@@ -1385,16 +1348,14 @@ def encode_manifest(
     """The one production path from a local manifest to its published bytes.
 
     With ``wire_names`` the ``claude`` entry is stamped, in place, with
-    ``"wire_names": true`` and the ``wire_folders`` it published, a first switch adds
-    its identity-spelled deletion records to ``tombstones`` (the sidecar keeps all of
-    these), the Claude project folders are mapped to shared names on a copy, and the
-    envelope's first byte is 0x03. Without, the old form is written as 0x02. The marker
-    is set exactly when the byte is 0x03.
+    ``"wire_names": true`` and the ``wire_folders`` it published (so the sidecar
+    keeps both), the Claude project folders are mapped to shared names on a copy,
+    and the envelope's first byte is 0x03. Without, the old form is written as
+    0x02. The marker is set exactly when the byte is 0x03.
     """
     if wire_names:
         entry = local_manifest["sources"]["claude"]
         entry["wire_names"] = True
-        _spell_first_switch_records(local_manifest)
         wire_manifest = manifest.manifest_to_wire(local_manifest)
         entry["wire_folders"] = dict(wire_manifest["sources"]["claude"].get("wire_folders", {}))
         data = serialize_manifest(wire_manifest)
