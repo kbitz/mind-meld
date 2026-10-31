@@ -3551,3 +3551,81 @@ def test_diag_names_a_hold(linux):
     state = json.loads(diag.output)["project_index"]
     assert state["state"] == "path"
     assert state["reason"] == "projects_unlisted"
+
+
+# ── name-only diff adjustment (audit-added) ──────────────────────────
+
+
+def _claude_src(files: dict[str, str], **extra) -> dict:
+    return {"files": {rel: {"sha256": sha} for rel, sha in files.items()}, **extra}
+
+
+# Value: protects=a rename is not counted as deletions, a real deletion beside it still counts
+# Value: fails_when=the adjuster drops all @ deletions or shows a rename as new+deleted
+# Value: why_new=no test calls core.content_counts/names_only_change on bare manifests; e2e only
+# Value: seam=none; no_claim=full pull apply (pure functions on hand-built manifests)
+def test_name_only_adjustment_hides_a_rename_but_keeps_a_real_deletion():
+    old = "projects/@git-github.com%2Facme%2Fwidgets/memory/a.md"
+    new = "projects/-Users-kb-widgets/memory/a.md"
+    gone = "projects/-Users-kb-other/memory/b.md"
+    local = {"sources": {"claude": _claude_src({new: "s1"})}}
+    renamed_only = {"claude": _claude_src({old: "s1"})}
+    assert core.content_counts(local, renamed_only) == (0, 0, 0)
+    assert core.names_only_change(local, renamed_only) is True
+    mixed = {"claude": _claude_src({old: "s1", gone: "s2"})}
+    assert core.content_counts(local, mixed) == (0, 0, 1)
+    assert core.names_only_change(local, mixed) is False
+
+
+# Value: protects=a freed deletion pairs with one new file only, a duplicate still shows as new
+# Value: fails_when=freed counts are not decremented, hiding a genuinely new file with the same sha
+# Value: why_new=the pairing counter is exercised by no existing test; seam=none
+# Value: no_claim=none beyond protects
+def test_name_only_adjustment_pairs_each_freed_deletion_once():
+    old = "projects/@git-github.com%2Facme%2Fwidgets/memory/a.md"
+    a = "projects/-Users-kb-widgets/memory/a.md"
+    b = "projects/-Users-kb-widgets2/memory/a.md"
+    local = {"sources": {"claude": _claude_src({a: "s1", b: "s1"})}}
+    remote = {"claude": _claude_src({old: "s1"})}
+    assert core.content_counts(local, remote) == (1, 0, 0)
+    assert core.names_only_change(local, remote) is False
+
+
+# Value: protects=a moved folder frees its deletions; a placed folder does not
+# Value: fails_when=moved_folders is ignored (false deletion count) or applied to every folder
+# Value: why_new=moved_folders handling in the diff has no direct test; seam=none
+# Value: no_claim=none beyond protects
+def test_moved_folders_free_only_their_own_deletions():
+    moved = "projects/-Users-kb-old/memory/a.md"
+    kept = "projects/-Users-kb-live/memory/c.md"
+    local = {"sources": {"claude": _claude_src({})}}
+    remote = {"claude": _claude_src({moved: "s1", kept: "s3"}, moved_folders=["-Users-kb-old"])}
+    assert core.content_counts(local, remote) == (0, 0, 1)
+
+
+# Value: protects=only git and home wire names keep a machine's deletion records; old/lit never do
+# Value: fails_when=carries_a_deletion widens to @old-/@lit- or loses a home form
+# Value: why_new=carries_a_deletion and _split_project_key have no direct test; seam=none
+# Value: no_claim=none beyond protects
+def test_deletion_carrying_names_and_project_key_split():
+    assert projectid.carries_a_deletion(WIRE)
+    assert projectid.carries_a_deletion("@home")
+    assert projectid.carries_a_deletion("@home-wt-feature")
+    assert not projectid.carries_a_deletion("@old-Users-kb-x")
+    assert not projectid.carries_a_deletion("@lit-x")
+    assert not projectid.carries_a_deletion("-Users-kb-x")
+    assert manifest._split_project_key("projects/f/a/b.md") == ("f", "a/b.md")
+    for bad in ("projects/f", "projects//a", "projects/f/", "other/f/a", "projects"):
+        assert manifest._split_project_key(bad) is None
+
+
+# Value: protects=reconcile_recovered_prior leaves a prior with no claude entry untouched
+# Value: fails_when=it raises on or rewrites a sidecar prior it cannot reason about
+# Value: why_new=the early-return guards of reconcile_recovered_prior are untested; seam=none
+# Value: no_claim=moved-checkout rewriting (needs a live index)
+def test_reconcile_recovered_prior_passes_through_without_a_claude_entry():
+    assert core.reconcile_recovered_prior(None) is None
+    prior = {"sources": {"gstack": {"files": {}}}, "tombstones": {"x": 1}}
+    snapshot = json.dumps(prior, sort_keys=True)
+    assert core.reconcile_recovered_prior(prior) is prior
+    assert json.dumps(prior, sort_keys=True) == snapshot
