@@ -72,7 +72,7 @@ here by hand, use the H3 form.
 - **Context:** Re-check before Track 91A starts, when tombstones begin to delete. Track 91A starts only after this release has run on the owner's real store, and all the first-switch limits in `docs/invariants/sync.md` are re-checked then.
 
 ### [review:severity=should] The post-push GC gate delays the sweep, and `mm gc` has no gate
-- **Description:** A push that could not list `projects/` drops those references, and its GC gate reads the listing after publish. A folder recreated before the gate, or a later listed push without those files, collects their blobs with no tombstone. Explicit `mm gc` during an outage collects them too. A machine with no `projects/` collects nothing post-push, so orphans accumulate until `mm gc`.
+- **Description:** A push that could not list `projects/` drops those references, and its GC gate only delays the sweep: a later listed push without those files collects their blobs with no tombstone. After a mid-push loss the gate re-lists, so a folder recreated before it lets that push collect them too. Explicit `mm gc` during an outage collects them too. A machine with no `projects/` collects nothing post-push, so orphans accumulate until `mm gc`.
 - **Why:** The one-line gate is what Karl approved, 2026-10-31; earlier releases swept one push sooner. Real protection needs a persisted set of dropped blobs. The blobs matter only if `projects/` is truly lost and no peer lists them.
 - **Effort:** M
 - **Priority:** P2

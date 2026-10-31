@@ -245,7 +245,7 @@ has switched, and no remedy on it would clear the copy.
 is set exactly when the envelope byte is 0x03. A push that cannot list `projects/`
 does not switch (`switch_held`): nothing would own a project, so its deletion records would
 take home names its folder ignores once it returns. It publishes the old form, and an attended
-push and `mm status` say project memory waits; `mm diag --json` reports `project_index.reason` as
+push and `mm status` say project memory is not published; `mm diag --json` reports `project_index.reason` as
 `projects_unlisted`; autopush stays quiet. The next listed push switches with those records
 still held. Because the held push dropped the project files from its manifest, that push
 republishes them as content and can run GC, so it is not the no-content switch above. A symlinked
@@ -254,9 +254,10 @@ the prior, so a deleted file can return, and a live symlink lists, so it switche
 The decision reads the index encoding reads, so one listing decides both, and a machine with no
 `projects/` at all stays on the old form until the folder exists. Post-push GC does not run while
 `projects/` cannot be listed, on a held or a switched machine: that push dropped those references
-without seeing the files. The gate reads the listing after publish, so it delays the sweep rather
-than preventing it: a folder that is back by then, or a later listed push without those files,
-collects their blobs. Explicit `mm gc` has no gate. A machine with no `projects/` collects nothing
+without seeing the files. The gate delays the sweep rather than preventing it: a later listed push
+without those files collects their blobs. It holds for the whole push once the index saw `projects/`
+unlisted; when the index was built before a mid-push loss, it re-lists, so a folder back by then
+lets that push collect them too. Explicit `mm gc` has no gate. A machine with no `projects/` collects nothing
 post-push until the folder exists, so `mm gc` is its remedy. A machine with no readable prior
 publishes the new form at its next listed push and mints nothing; one with no resolvable
 home publishes the old form. Rollback past the switch is unsupported.
