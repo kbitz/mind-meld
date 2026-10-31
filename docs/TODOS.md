@@ -51,8 +51,8 @@ here by hand, use the H3 form.
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
 
 ### [review:severity=should] A first-switch record is identity-wide for a whole-folder removal and gets one chance to be spelled
-- **Description:** A folder removed by an old-form push in the 30 days before the switch, with its checkout alive and no owner, publishes identity-wide, so a peer in another layout silently stops receiving that project's same-named files until the record expires. A held record whose checkout, index or `projects/` listing is unavailable at the switching push stays home-relative for good, so a pull inside that checkout can restore the deleted file. `docs/invariants/sync.md` states both.
-- **Why:** Narrowing the first reopens the deleted-file restore the cross-vendor review found, and retrying the second needs a persisted marker outside the plan. Both are probed in the review evidence (`p7_first_switch.py` s4, s5); no bytes are destroyed.
+- **Description:** A folder removed by an old-form push in the 30 days before the switch, with its checkout alive and no owner, publishes identity-wide, so a peer in another layout silently stops receiving that project's same-named files until the record expires. A held record whose checkout or index is unavailable at the switching push stays home-relative for good, so a later pull can restore the deleted file. `docs/invariants/sync.md` states both.
+- **Why:** Narrowing the first reopens the deleted-file restore the cross-vendor review found, and retrying the second needs a persisted marker outside the plan. No bytes are destroyed. To reproduce the second: delete a file, push on the old form, remove its folder, move the checkout away, push with this release, move it back, then pull inside it.
 - **Effort:** M
 - **Priority:** P3
 - **Context:** Revisit if a machine in another layout joins within 30 days of a fleet machine's switch, or if deleted Claude memory returns after a switch.

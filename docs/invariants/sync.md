@@ -182,8 +182,7 @@ resolves the folders with deletion records there that are gone from `projects/`.
 records then publish under both spellings (`core._spell_first_switch_records`), with no
 owner and no `wire_folders` entry: the local spelling binds this path while nothing owns
 the identity, and the identity spelling binds once a pull inside that checkout owns it. A
-marked sidecar never does this, neither does an identity a folder already owns, and neither
-does a push that cannot list `projects/`, where a live clone looks removed. Only records the
+marked sidecar never does this, and neither does an identity a folder already owns. Only records the
 sidecar already held are spelled, the record and not just its key: what the switching push
 itself mints stays home-relative, even in a folder with an older record, because that absence
 may be housekeeping and an identity-wide record would block the project fleet-wide.
@@ -249,12 +248,15 @@ shared names (mm status)`), kept apart from `WaitingPeer` because it waits on a
 person. A marked peer's stale 0x02 conflict copy adds no such row: that machine
 has switched, and no remedy on it would clear the copy.
 
-**The first push.** `switch_due` (codec on, own prior not marked) and
+**The first push.** `switch_due` (codec on, own prior not marked, `projects/` listed) and
 `republish_due` join push's no-op check with their own wording
 (`Would refresh manifest (shared project names)`), upload no content blob outside
 `mm-events`, mint no tombstone, are not content changes and run no GC. The marker
-is set exactly when the envelope byte is 0x03. A machine with no readable prior
-publishes the new form at its next push and mints nothing; one with no resolvable
+is set exactly when the envelope byte is 0x03. A push that cannot list `projects/`
+does not switch: a live clone would look removed, a live folder's deletion records could
+not bind it, and a marked sidecar never looks again, so it publishes the old form and the
+next listed push switches with those records still held. A machine with no readable prior
+publishes the new form at its next listed push and mints nothing; one with no resolvable
 home publishes the old form. Rollback past the switch is unsupported.
 
 **Limits (accepted, owner-visible).** Linux's folder encoding is unmeasured
@@ -282,12 +284,14 @@ re-cloned from another repository inside the 30 days can suppress that project's
 file until the record expires; a folder gone since the last old-form push can have its memory
 restored by a pull inside that checkout, unless a linked worktree's folder still nominates it
 as owner, when that push's records are identity-wide as after any switch; a folder removed by
-an earlier old-form push cannot be told from housekeeping, so if its checkout still resolves and
-nothing owns the project, the switch makes those records identity-wide and a peer in another
-layout silently stops receiving that project's same-named files until they expire or this
-machine recreates them, as a removal with a live checkout does after a switch; a held record gets one chance to
-be spelled, so with the checkout unavailable, the index out of time or `projects/` unlisted at
-the switch it stays home-relative for good and a pull inside that checkout can restore the file; a
+an earlier old-form push cannot be told from housekeeping or from a clone, so if its checkout
+still resolves and nothing owns the project (no other folder, or one that cannot be read), the
+switch makes those records identity-wide and a peer in another layout silently stops receiving
+that project's same-named files until they expire or this machine recreates them, as a removal
+with a live checkout does after a switch; a held record gets one chance to be spelled, so with
+the checkout unavailable or the index out of time at the switch it stays home-relative for good
+and a later pull can restore the file (any pull once a folder owns the project, else one inside
+that checkout); a
 peer with a withheld name keeps all its conflict copies until its next publishing push, so a
 dormant peer's copy can outlive a deletion's 30 days; `mm pull` with `claude` disabled strips
 that source before the withheld check, so it can clean a peer's conflict copy that alone names
