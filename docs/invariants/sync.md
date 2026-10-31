@@ -213,7 +213,10 @@ entry published from another Claude folder (`base_path` differs: a peer, or this
 machine before its home or `claude` path changed) adds every local folder it maps
 to, so moving the Claude folder mints nothing either, and so does an unmarked own
 prior from another Claude folder. A `projects/` that cannot be listed does the same
-for every name form: an outage is not a mass deletion. Recovery respells a sidecar's
+for every name form and every kind of prior, for the folders that hold files: an
+outage is not a mass deletion. A deleted folder's recorded owner still stands in an
+outage, so a pull restores the project rather than leaving it to read as deleted when
+that pull recreates `projects/`. Recovery respells a sidecar's
 deletion records the way a healthy load would.
 `generate_tombstones` skips paths under it, and `core.content_counts` /
 `iter_content_diffs` do not count a prior entry under a moved or unplaceable
@@ -261,7 +264,9 @@ directory whose `.git/config` claims that origin, unattended through `mm autopul
 reaches the sidecar and `mm diag --json`; a query string is dropped, so two
 repositories differing only by it share an identity; a project folder deleted during
 a push that cannot read its checkout, or whose index runs out of time, mints nothing,
-so peers keep their copies (a false tombstone would block the project fleet-wide); own
+so peers keep their copies (a false tombstone would block the project fleet-wide); a
+push while `projects/` is missing publishes those folders' removal, so a file deleted
+just before it mints nothing and can return; own
 manifest recovery combined with a home rename or a folder gaining a remote can leave
 one deletion record under the old spelling; a hand-edited `.git/config`
 with two spellings of `origin` can read differently from git; `mm diff` lists a renamed project's files
