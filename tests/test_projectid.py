@@ -3098,7 +3098,10 @@ def test_the_first_switch_keeps_a_removed_folders_deletion_under_its_identity(ma
 
     linux.push()  # the first switch
     assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
-    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
+    assert set(linux.published()["tombstones"]) == {
+        f"claude:projects/{WIRE}/memory/a.md",
+        "claude:projects/@home-proj/memory/a.md",
+    }
 
     linux.cwd = checkout
     linux.pull()
@@ -3128,17 +3131,17 @@ def _old_form_with_removed_folder(linux: Machine) -> tuple[Path, str]:
     return checkout, folder
 
 
-def test_a_deletion_minted_by_the_first_switch_stays_bound_to_the_project(mac, linux):
-    """The folder went after the last old-form push, so the switching push mints the record."""
+def test_a_deletion_minted_by_the_first_switch_stays_home_relative(mac, linux):
+    """A folder gone since the last old-form push may be housekeeping, and an identity-wide
+    record would block that project fleet-wide. It keeps the path-scoped spelling."""
     mac.checkout("/Users/kb/Dev/widgets")
     mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
     mac.push()
-    checkout, folder = _old_form_with_removed_folder(linux)
+    _, folder = _old_form_with_removed_folder(linux)
     linux.push()
-    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
-    linux.cwd = checkout
-    linux.pull()
-    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
+    assert list(linux.published()["tombstones"]) == ["claude:projects/@home-proj/memory/a.md"]
+    assert linux.pull().total_applied == 0  # elsewhere, the project stays unplaced
+    assert not (linux.claude / "projects" / folder).exists()
 
 
 def test_a_first_switch_record_makes_no_owner_and_records_no_folder(mac, linux):
@@ -3149,7 +3152,7 @@ def test_a_first_switch_record_makes_no_owner_and_records_no_folder(mac, linux):
     _, folder = _old_form_with_removed_folder(linux)
     seed_old_form(linux, {})  # the record is in the sidecar before the switch
     linux.push()
-    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
+    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
     published = linux.published()["sources"]["claude"]
     assert WIRE not in published.get("wire_folders", {})
     with linux.on():
@@ -3220,3 +3223,69 @@ def test_conflict_copy_retention_is_per_device(tmp_path, store, mac, linux):
     linux.pull()
     assert copies[0].exists()  # the mac's project is withheld here
     assert not copies[1].exists()  # nothing of the other machine's is
+
+
+def test_a_first_switch_record_holds_against_a_same_home_peer_from_anywhere(tmp_path, store, linux):
+    twin = Machine(tmp_path, store, "twin", "/home/kb", "dddddddd")
+    _, folder = _old_form_with_removed_folder(linux)
+    seed_old_form(linux, {})
+    seed_old_form(twin, {f"{folder}/memory/a.md": "a\n"})  # the same path, still on old names
+    linux.push()
+    assert linux.cli("autopull").exit_code == 0  # from the home folder, with no owner
+    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
+    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
+
+
+def test_a_first_switch_record_survives_recovery_under_both_spellings(mac, linux):
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.push()
+    checkout, folder = _old_form_with_removed_folder(linux)
+    seed_old_form(linux, {})
+    linux.push()
+    _corrupt_own_manifest(linux)
+    linux.push()
+    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
+    linux.cwd = checkout
+    linux.pull()
+    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
+
+
+def test_a_first_switch_after_claude_was_disabled_still_spells_the_record(mac, linux):
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.push()
+    notes = linux.home / "notes-src"
+    (notes / "d").mkdir(parents=True)
+    (notes / "d/n.md").write_text("n\n")
+    linux.config["sync"]["sources"].append(
+        {"name": "notes", "path": str(notes), "type": "generic", "include_dirs": ["d"]}
+    )
+    checkout, folder = _old_form_with_removed_folder(linux)
+    seed_old_form(linux, {})
+    linux.config["sync"]["disabled_sources"] = ["claude"]
+    (notes / "d/n.md").write_text("changed\n")
+    linux.push()
+    assert list(linux.published()["tombstones"]) == [f"claude:projects/{folder}/memory/a.md"]
+    linux.config["sync"]["disabled_sources"] = []
+    linux.push()
+    assert f"claude:projects/{WIRE}/memory/a.md" in linux.published()["tombstones"]
+    linux.cwd = checkout
+    linux.pull()
+    assert not (linux.claude / "projects" / folder / "memory/a.md").exists()
+
+
+def test_a_first_switch_record_stays_home_relative_when_a_live_folder_owns_the_project(linux):
+    import shutil
+
+    linux.checkout("/home/kb/live/proj")
+    live = linux.folder_for("/home/kb/live/proj")
+    linux.checkout("/home/kb/gone/proj")
+    gone = linux.folder_for("/home/kb/gone/proj")
+    seed_old_form(linux, {f"{live}/memory/keep.md": "k\n", f"{gone}/memory/a.md": "a\n"})
+    shutil.rmtree(linux.claude / "projects" / gone)
+    seed_old_form(linux, {})
+    linux.push()
+    tombstones = linux.published()["tombstones"]
+    assert f"claude:projects/{WIRE}/memory/a.md" not in tombstones  # it would bind the live one
+    assert f"projects/{WIRE}/memory/keep.md" in wire_keys(linux.published())

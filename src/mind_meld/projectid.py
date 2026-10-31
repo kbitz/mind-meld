@@ -465,8 +465,8 @@ class Index:
     claude_real: str
     home_enc: str | None
     listed: bool = True  # False: `projects/` could not be listed, so absence proves nothing
-    # First switch only: a removed folder -> the identity its deletion records publish
-    # under, so a later pull in that checkout can honour them. It owns nothing here.
+    # First switch only: a removed folder -> the identity its deletion records also
+    # publish under, so a later pull in that checkout can honour them. It owns nothing.
     record_identity: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -492,7 +492,8 @@ class Index:
 Retained = Mapping[str, Any] | Callable[[], Mapping[str, Any] | None] | None
 
 
-# The folders a sidecar from before the first switch names, or a callable reading them.
+# The folders with deletion records in a sidecar from before the first switch, or a
+# callable reading them.
 PreSwitch = set[str] | Callable[[], set[str] | None] | None
 
 
@@ -526,7 +527,7 @@ def _retained_by_folder(retained: Retained) -> dict[str, str]:
 
 
 def _pre_switch_folders(pre_switch: PreSwitch) -> set[str]:
-    """Local folder names from a sidecar written before the first switch; never raises."""
+    """Local folder names from a pre-switch sidecar's deletion records; never raises."""
     try:
         recorded = pre_switch() if callable(pre_switch) else pre_switch
         return {f for f in (recorded or ()) if isinstance(f, str) and f.startswith("-")}
@@ -543,9 +544,9 @@ def configure(
     or a callable returning them, read only when the index is built: a folder
     whose resolution later times out or cannot be read keeps the identity
     recorded for it there, and so does a folder deleted while its checkout lives.
-    ``pre_switch`` names the folders of a sidecar from before the first switch,
-    which records no identities. A removed one is resolved too, only to spell its
-    deletion records: see ``Index.record_identity``.
+    ``pre_switch`` names the folders a sidecar from before the first switch holds
+    deletion records for; it records no identities. A removed one is resolved too,
+    only to spell those records: see ``Index.record_identity``.
     """
     with _CTX.lock:
         _CTX.claude_dir = Path(claude_dir) if claude_dir is not None else None

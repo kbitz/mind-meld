@@ -2652,8 +2652,6 @@ def manifest_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     def to_wire(folder: str) -> str:
         if folder.startswith("@"):
             return folder  # a carried deletion record under a wire name stays as it is
-        if identity := idx.record_identity.get(folder):
-            return projectid.git_wire(identity)  # a deletion record, and no owner: unrecorded
         wire = idx.to_wire(folder)
         other = owners_by_wire.setdefault(wire, folder)
         if other != folder:

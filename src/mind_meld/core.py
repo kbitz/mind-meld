@@ -284,17 +284,14 @@ def _configure_project_names(config: dict) -> None:
     def pre_switch() -> set[str]:
         sidecar_manifest = prior() or {}
         entry = sidecar_manifest.get("sources", {}).get("claude")
-        if not isinstance(entry, dict) or entry.get("wire_names") is True:
+        if isinstance(entry, dict) and entry.get("wire_names") is True:
             return set()
-        rels = list(entry.get("files") or ())
+        folders: set[str] = set()
         for key in sidecar_manifest.get("tombstones", {}):
             if isinstance(key, str) and key.startswith("claude:"):
-                rels.append(key[len("claude:") :])
-        return {
-            parts[0]
-            for rel in rels
-            if isinstance(rel, str) and (parts := manifest._split_project_key(rel))
-        }
+                if parts := manifest._split_project_key(key[len("claude:") :]):
+                    folders.add(parts[0])
+        return folders
 
     projectid.configure(Path(claude["path"]).expanduser(), retained=retained, pre_switch=pre_switch)
 
@@ -1350,6 +1347,28 @@ def project_form_state(local_manifest: dict, own_prior: dict | None) -> ProjectF
     )
 
 
+def _spell_first_switch_records(local_manifest: dict) -> None:
+    """Add a removed folder's deletion records under its identity, once, in place.
+
+    A machine with no recorded identities cannot tell a later pull which project a
+    removed folder was. The local spelling stays too: while nothing owns the identity
+    it is what binds this path, and once a folder does, the identity spelling binds.
+    The sidecar keeps both, so recovery does not lose them.
+    """
+    idx = projectid.index()
+    if idx is None or not idx.record_identity:
+        return
+    tombstones = local_manifest.get("tombstones") or {}
+    for key, info in list(tombstones.items()):
+        if not isinstance(key, str) or not key.startswith("claude:"):
+            continue
+        parts = manifest._split_project_key(key[len("claude:") :])
+        identity = idx.record_identity.get(parts[0]) if parts else None
+        if parts and identity:
+            wire = projectid.git_wire(identity)
+            tombstones.setdefault(f"claude:projects/{wire}/{parts[1]}", info)
+
+
 def encode_manifest(
     local_manifest: dict, *, wire_names: bool, passphrase: str, memory_kb: int
 ) -> bytes:
@@ -1364,6 +1383,7 @@ def encode_manifest(
     if wire_names:
         entry = local_manifest["sources"]["claude"]
         entry["wire_names"] = True
+        _spell_first_switch_records(local_manifest)
         wire_manifest = manifest.manifest_to_wire(local_manifest)
         entry["wire_folders"] = dict(wire_manifest["sources"]["claude"].get("wire_folders", {}))
         data = serialize_manifest(wire_manifest)
