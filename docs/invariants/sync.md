@@ -244,11 +244,17 @@ has switched, and no remedy on it would clear the copy.
 `mm-events`, mint no tombstone, are not content changes and run no GC. The marker
 is set exactly when the envelope byte is 0x03. A push that cannot list `projects/`
 does not switch (`switch_held`): nothing would own a project, so its deletion records would
-take home names its folder ignores once it returns. It publishes the old form and says so,
-and the next listed push switches with those records still held. A dangling-symlink
+take home names its folder ignores once it returns. It publishes the old form, and an attended
+push and `mm status` say the names wait; `mm diag --json` reports `project_index.reason` as
+`projects_unlisted`; autopush stays quiet. The next listed push switches with those records
+still held. Because the held push dropped the project files from its manifest, that push
+republishes them as content and can run GC, so it is not the no-content switch above. A symlinked
 `projects/` is the exception: `_filter_symlinked_paths` has already dropped those records from
-the prior, so a deleted file can return. The decision reads the index encoding reads, so one
-listing decides both. A machine with no readable prior
+the prior, so a deleted file can return, and a live symlink lists, so it switches with no hold.
+The decision reads the index encoding reads, so one listing decides both, and a machine with no
+`projects/` at all stays on the old form until the folder exists. Post-push GC never runs while
+`projects/` cannot be listed, on a held or a switched machine: that push dropped those references
+without seeing the files. A machine with no readable prior
 publishes the new form at its next listed push and mints nothing; one with no resolvable
 home publishes the old form. Rollback past the switch is unsupported.
 
@@ -272,16 +278,29 @@ reaches the sidecar and `mm diag --json`; a query string is dropped, so two
 repositories differing only by it share an identity; a project folder deleted during
 a push that cannot read its checkout, or whose index runs out of time, mints nothing,
 so peers keep their copies (a false tombstone would block the project fleet-wide); a
-file deleted on the old form, in a folder already gone at the switch, can come back on a pull
-inside that checkout for the rest of its 30 days, because nothing ties that record to the project
-(Karl, 2026-10-31, who removed the first-switch spelling rather than patch it), and so can a
-file in a folder gone since the last old-form push, unless a linked worktree's folder still
-nominates it as owner, when that push's records are identity-wide as after any switch; a live
-folder whose checkout is unavailable, or whose index runs out of time, at the switch publishes
-its deletion records home-relative, so once it owns the project any pull can restore those
-files; a push that loses `projects/` between the manifest load and the scan mints for what it
-cannot see, as any absence did in earlier releases, and those records stay home-relative for a
-folder that does not return; a peer with a withheld name keeps all its conflict copies until its next publishing push, so a
+file deleted on the old form, in a folder already gone when a machine switches, can come back on
+any machine that owns the project, on any pull, for the rest of its 30 days: nothing ties that
+record to the project, a machine owning it reads the home-relative name as superseded, and its
+next push republishes the file under the identity (Karl, 2026-10-31, who removed the first-switch
+spelling rather than patch it, and accepted this scope). On the switching machine itself, a pull
+elsewhere leaves the folder gone; a pull inside that checkout, or anything that recreates the
+folder, makes it an owner too. The same holds for a file in a folder gone since the last old-form
+push. A linked worktree's folder that still nominates the removed folder as owner is the
+exception: all that folder's records, earlier ones included, publish identity-wide as after any
+switch, so a peer in another layout stops receiving those names until they expire. A live
+folder's old-form record publishes under whatever origin sits at that path at the switch, so a
+path re-cloned from another repository inside the 30 days can suppress that repository's
+same-named file across the fleet until the record expires. A live folder whose checkout is
+unavailable, or whose index runs out of time, at the switch publishes its deletion records
+home-relative, so once it owns the project any pull can restore those files. A push that loses
+`projects/` between the manifest load and the scan mints for every file it cannot see. On a
+switched machine, or one whose index was built at the load, those records publish identity-wide,
+suppressing those names across the fleet until the files return and the next push clears them,
+or for up to 30 days; earlier releases minted on the same absence path-scoped, which a same-home
+fleet honours too. On an unswitched machine whose index is built later, the push holds and the
+records stay home-relative for a folder that does not return. These limits are re-checked before
+Track 91A starts, when tombstones begin to delete, and 91A starts only after this release has run
+on the owner's real store. A peer with a withheld name keeps all its conflict copies until its next publishing push, so a
 dormant peer's copy can outlive a deletion's 30 days; `mm pull` with `claude` disabled strips
 that source before the withheld check, so it can clean a peer's conflict copy that alone names
 unplaced memory, as it does for any disabled source; a

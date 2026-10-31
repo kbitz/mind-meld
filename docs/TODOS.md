@@ -50,12 +50,26 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
 
-### [review:severity=should] A file deleted on the old form can return after the first switch
-- **Description:** A file deleted on the old form, in a folder already gone at the switch, can come back on a pull inside that checkout for the rest of its 30 days. A live folder whose checkout or index is unavailable at the switching push has the same outcome on any later pull. `docs/invariants/sync.md` states both.
-- **Why:** Karl's accepted limit, 2026-10-31 ("Simplify"). Spelling those records under the project's identity took six attempts, and review found a false or lost deletion path in each. The limit restores a deleted file on one machine; the spelling could hide live memory across the fleet. No bytes are destroyed.
+### [review:severity=should] A file deleted on the old form can return on any machine after the first switch
+- **Description:** A file deleted on the old form, in a folder already gone when a machine switches, can come back on any machine that owns the project, on any pull, for the rest of its 30 days, and that machine's next push republishes it under the identity. The switching machine itself gets it on a pull inside that checkout or once anything recreates the folder. A live folder whose checkout or index is unavailable at the switching push has the same outcome on any later pull. `docs/invariants/sync.md` states all of this.
+- **Why:** Karl's accepted limit, 2026-10-31 ("Simplify", then "Finish" at this scope). Spelling those records under the project's identity took six attempts, and review found a false or lost deletion path in each. No bytes are destroyed, and restoring is the right result if the removal was housekeeping.
 - **Effort:** M
 - **Priority:** P3
-- **Context:** Revisit if deleted Claude memory returns after a fleet machine's switch. To reproduce: delete a file, push on the old form, remove its folder, push with this release, then pull inside the checkout.
+- **Context:** Revisit if deleted Claude memory returns after a fleet machine's switch. To reproduce: machine B deletes a file on the old form, then its folder goes; machine P still lists the file; B pushes with this release; machine S, which owns the project, pulls from anywhere.
+
+### [review:severity=should] An old-form record can still bind a project at the switch
+- **Description:** Two forms survive the removed spelling. A linked worktree's folder that nominates a removed main folder makes all that folder's records, earlier ones included, identity-wide. A live folder's old-form record publishes under whatever origin sits at that path at the switch, so a path re-cloned from another repository inside the 30 days suppresses that repository's same-named file across the fleet until the record expires. `docs/invariants/sync.md` states both.
+- **Why:** Karl's accepted limits, 2026-10-31. The old form records no provenance to tell them apart, and each needs a narrow sequence inside the 30 days. No bytes are destroyed.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Revisit if a project's memory stops arriving on a peer after a fleet machine's switch.
+
+### [review:severity=should] Losing `projects/` mid-push publishes false deletion records
+- **Description:** A push that loses `projects/` between the manifest load and the scan mints for every file it cannot see. On a switched machine, or one whose index was built at the load, those records are identity-wide: those names stop reaching the fleet until the files return and the next push clears them, or for up to 30 days. Earlier releases minted on the same absence path-scoped.
+- **Why:** Karl's accepted limit, 2026-10-31. The window is seconds and needs the folder to vanish inside it. A fix would re-list after the scan and treat every folder as moved. Post-push GC already refuses to run in this state.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Re-check before Track 91A starts, when tombstones begin to delete. Track 91A starts only after this release has run on the owner's real store, and all the first-switch limits in `docs/invariants/sync.md` are re-checked then.
 
 ### [review:severity=should] `sidecar.read` validates less than `load_manifest`
 - **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.

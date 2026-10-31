@@ -28,7 +28,11 @@ in the new form only from then.** Go one machine at a time, in any order; nothin
 the whole fleet. On each machine run the update command, then `mm push`. The first push
 after updating that can list `~/.claude/projects` (attended or from a hook) republishes the manifest with shared names and
 prints `Push: project memory published under shared names.`; it uploads no content, deletes
-nothing and runs no GC. Confirm with `mm diag --json`: `project_index.state` is `shared`,
+nothing and runs no GC. A push that cannot list the folder holds the switch: `mm status` and an
+attended push say the names wait, `project_index.reason` is `projects_unlisted`, and the next
+push that can list it switches and republishes that machine's project memory as content. A
+machine where Claude has not created the folder yet stays on the old form until it does.
+Confirm with `mm diag --json`: `project_index.state` is `shared`,
 and `project_index.machines` shows which other machines have switched.
 
 - Updated machines sync with each other at once. Older machines keep syncing with each
