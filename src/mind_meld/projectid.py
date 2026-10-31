@@ -954,12 +954,11 @@ def _build_index(
     folders = listing or []
     # A folder deleted from `projects/` is still resolved when it published an
     # identity: its checkout may be alive, so the deletion is a real one. One a
-    # pre-switch sidecar names is resolved only to spell its deletion records, and
-    # only from a listing: unlisted, a live clone looks removed and nothing is known
-    # to own its identity. With `projects/` unlisted the owner still stands, so a pull
-    # restores the project; `manifest` is what keeps that outage from minting.
+    # pre-switch sidecar names is resolved only to spell its deletion records. With
+    # `projects/` unlisted the owner still stands, so a pull restores the project;
+    # `manifest` is what keeps that outage from minting.
     deleted = sorted(set(retained) - set(folders))
-    removed_before_switch = sorted(set(pre_switch) - set(folders) - set(retained)) if listed else []
+    removed_before_switch = sorted(set(pre_switch) - set(folders) - set(retained))
     worker = _Worker([*folders, *deleted, *removed_before_switch], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS

@@ -1313,8 +1313,9 @@ def iter_source_diffs(
 class ProjectFormState:
     """What a push does about the Claude project-name format (Track 90A).
 
-    ``publish_new``: the local manifest has a ``claude`` entry and the codec is
-    on, so the manifest is written with shared project names (byte 0x03).
+    ``publish_new``: the local manifest has a ``claude`` entry, the codec is on and
+    the own prior is marked or ``projects/`` can be listed, so the manifest is
+    written with shared project names (byte 0x03).
     ``switch_due``: ``publish_new`` and the own prior is not yet marked, so the
     first push in the new form is owed even with no content change.
     ``republish_due``: the own prior is marked but records a folder other than
@@ -1335,9 +1336,13 @@ class ProjectFormState:
 def project_form_state(local_manifest: dict, own_prior: dict | None) -> ProjectFormState:
     """The one decision for push, its dry run and status. Reads no backend and no device."""
     entry = local_manifest.get("sources", {}).get("claude")
-    publish_new = isinstance(entry, dict) and projectid.enabled()
     prior_entry = ((own_prior or {}).get("sources") or {}).get("claude")
     marked = isinstance(prior_entry, dict) and prior_entry.get("wire_names") is True
+    # A first switch needs a listing: without one a live clone looks removed, a live
+    # folder's deletion records cannot bind it, and a marked sidecar never looks again.
+    publish_new = (
+        isinstance(entry, dict) and projectid.enabled() and (marked or projectid.projects_listed())
+    )
     return ProjectFormState(
         publish_new=publish_new,
         switch_due=publish_new and not marked,

@@ -3340,23 +3340,40 @@ def test_a_stale_sidecar_key_never_passes_a_fresh_mint_as_a_held_record(linux):
     }
 
 
-def test_an_unlisted_projects_folder_at_the_switch_spells_no_record(linux):
-    """Unlisted, a live second clone looks removed and nothing is known to own the project."""
+def test_a_push_that_cannot_list_projects_holds_the_first_switch(mac, linux):
+    """Unlisted, a live clone looks removed and a live folder's records cannot bind it, and
+    a marked sidecar never looks again. The next listed push switches with both still held."""
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "x.md", "peer\n")
+    mac.push()
     linux.checkout("/home/kb/alive/proj")
     linux.checkout("/home/kb/zclone/proj")
     owner = linux.folder_for("/home/kb/alive/proj")
     clone = linux.folder_for("/home/kb/zclone/proj")
-    gone = linux.memory(clone, "a.md", "a\n")
+    owner_gone = linux.memory(owner, "x.md", "x\n")
+    clone_gone = linux.memory(clone, "a.md", "a\n")
     seed_old_form(linux, {f"{owner}/memory/keep.md": "k\n", f"{clone}/memory/c.md": "c\n"})
-    gone.unlink()
-    seed_old_form(linux, {})  # the sidecar now holds the clone's record
+    owner_gone.unlink()
+    clone_gone.unlink()
+    seed_old_form(linux, {})  # the sidecar now holds both records
     _claim_this_claude_folder(linux)
     projects = linux.claude / "projects"
     parked = linux.claude / "projects.parked"
     projects.rename(parked)
     linux.push()
+    assert linux.first_byte() == crypto.FORMAT_VERSION
+    held = {f"claude:projects/{owner}/memory/x.md", f"claude:projects/{clone}/memory/a.md"}
+    assert set(linux.published()["tombstones"]) == held
     parked.rename(projects)
-    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-zclone-proj/memory/a.md"}
+
+    linux.push()
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert set(linux.published()["tombstones"]) == {
+        f"claude:projects/{WIRE}/memory/x.md",
+        "claude:projects/@home-zclone-proj/memory/a.md",
+    }
+    linux.pull()
+    assert not (linux.claude / "projects" / owner / "memory" / "x.md").exists()  # stays deleted
 
 
 def test_a_worktree_folder_owning_a_removed_folders_project_makes_its_records_identity_wide(linux):
