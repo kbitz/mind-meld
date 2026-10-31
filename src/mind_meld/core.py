@@ -270,12 +270,26 @@ def _configure_project_names(config: dict) -> None:
         projectid.configure(None)
         return
 
+    read: list[dict | None] = []
+
+    def prior() -> dict | None:
+        if not read:
+            read.append(sidecar.read(config.get("device", {}).get("id", "")))
+        return read[0]
+
     def retained() -> Any:
-        prior = sidecar.read(config.get("device", {}).get("id", ""))
-        entry = (prior or {}).get("sources", {}).get("claude")
+        entry = (prior() or {}).get("sources", {}).get("claude")
         return entry.get("wire_folders") if isinstance(entry, dict) else None
 
-    projectid.configure(Path(claude["path"]).expanduser(), retained=retained)
+    def tombstoned() -> set[str]:
+        folders: set[str] = set()
+        for key in (prior() or {}).get("tombstones", {}):
+            if isinstance(key, str) and key.startswith("claude:"):
+                if parts := manifest._split_project_key(key[len("claude:") :]):
+                    folders.add(parts[0])
+        return folders
+
+    projectid.configure(Path(claude["path"]).expanduser(), retained=retained, tombstoned=tombstoned)
 
 
 def _init_crypto_session(
@@ -1490,6 +1504,9 @@ class ProjectNameReport:
     old_form: dict[str, int] = field(default_factory=dict)
     not_placed: dict[str, dict[str, set[str]]] = field(default_factory=dict)
     superseded: dict[str, dict[str, set[str]]] = field(default_factory=dict)
+    # Devices with any name withheld here: their conflict copies stay, because one
+    # may be the only manifest naming memory this pull did not apply.
+    withheld: set[str] = field(default_factory=set)
 
     @staticmethod
     def _once(table: dict[str, dict[str, set[str]]]) -> int:
@@ -1516,6 +1533,8 @@ def project_name_report(manifests: Mapping[str, dict | None]) -> ProjectNameRepo
             if parts is None:
                 continue
             reason = projectid.unplaceable_reason(parts[0])
+            if reason is not None:
+                report.withheld.add(device_id)
             if reason == "old_form":
                 # A marked entry has switched: these names come from its stale
                 # conflict copy, and no remedy on that machine would clear them.

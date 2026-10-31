@@ -2696,12 +2696,11 @@ def _pull_core(
         # Track 90A: what the peers hold that this machine cannot place, read
         # before the consumer filter drops it.
         target_ids = {d["device_id"] for d in pull_targets}
+        peer_names = core.project_name_report(
+            {did: m for did, m in manifest_cache.items() if did in target_ids}
+        )
         project_names = (
-            core.project_name_report(
-                {did: m for did, m in manifest_cache.items() if did in target_ids}
-            )
-            if source_filter in (None, "claude")
-            else core.ProjectNameReport()
+            peer_names if source_filter in (None, "claude") else core.ProjectNameReport()
         )
         device_labels = {d["device_id"]: d.get("device_name", d["device_id"]) for d in all_devices}
         old_form_peers = [
@@ -3019,7 +3018,9 @@ def _pull_core(
                         r.device_id == did and (r.outcomes["failed"] or r.outcomes.get("waiting"))
                         for r in per_source_results
                     )
-                    if not device_failed:
+                    # A copy may also be the only manifest naming memory withheld
+                    # here (Track 90A), and that peer's `mm gc` reads its manifests.
+                    if not device_failed and did not in peer_names.withheld:
                         try:
                             core._cleanup_conflict_copies(backend, did, passphrase, memory_kb)
                         except (OSError, StorageError) as e:

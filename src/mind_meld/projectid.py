@@ -489,10 +489,15 @@ class Index:
 Retained = Mapping[str, Any] | Callable[[], Mapping[str, Any] | None] | None
 
 
+# The folders the sidecar's deletion records name, or a callable that reads them.
+Tombstoned = set[str] | Callable[[], set[str] | None] | None
+
+
 @dataclass
 class _Context:
     claude_dir: Path | None = None
     retained: Retained = None
+    tombstoned: Tombstoned = None
     cwd_candidate: bool = False
     index: Index | None = None
     home_checked: bool = False
@@ -517,17 +522,32 @@ def _retained_by_folder(retained: Retained) -> dict[str, str]:
         return {}
 
 
-def configure(claude_dir: Path | str | None, *, retained: Retained = None) -> None:
+def _tombstoned_folders(tombstoned: Tombstoned) -> set[str]:
+    """Local folder names from the sidecar's deletion records; never raises."""
+    try:
+        recorded = tombstoned() if callable(tombstoned) else tombstoned
+        return {f for f in (recorded or ()) if isinstance(f, str) and f.startswith("-")}
+    except Exception:
+        return set()
+
+
+def configure(
+    claude_dir: Path | str | None, *, retained: Retained = None, tombstoned: Tombstoned = None
+) -> None:
     """Set the process-wide context and drop any built index.
 
     ``retained`` is the sidecar's ``wire_folders`` (wire name -> local folder),
     or a callable returning them, read only when the index is built: a folder
     whose resolution later times out or cannot be read keeps the identity
     recorded for it there, and so does a folder deleted while its checkout lives.
+    ``tombstoned`` names the folders the sidecar's deletion records use. A removed
+    one is resolved too, so a first switch publishes its records under the
+    project's identity, where a later pull in that checkout can honour them.
     """
     with _CTX.lock:
         _CTX.claude_dir = Path(claude_dir) if claude_dir is not None else None
         _CTX.retained = retained
+        _CTX.tombstoned = tombstoned
         _CTX.cwd_candidate = False
         _CTX.index = None
         _CTX.home_checked = False
@@ -917,7 +937,11 @@ def _cwd_nomination(root: Path) -> tuple[CwdInfo, str | None, str | None]:
 
 
 def _build_index(
-    claude_dir: Path, retained: Mapping[str, str], cwd_candidate: bool, home: str | None
+    claude_dir: Path,
+    retained: Mapping[str, str],
+    cwd_candidate: bool,
+    home: str | None,
+    tombstoned: set[str] | frozenset[str] = frozenset(),
 ) -> Index:
     root = _fs_root()
     projects = claude_dir / "projects"
@@ -928,7 +952,7 @@ def _build_index(
     # identity: its checkout may be alive, so the deletion is a real one. With
     # `projects/` unlisted the owner still stands, so a pull restores the project;
     # `manifest` is what keeps that outage from minting.
-    deleted = sorted(set(retained) - set(folders))
+    deleted = sorted((set(retained) | set(tombstoned)) - set(folders))
     worker = _Worker([*folders, *deleted], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS
@@ -974,7 +998,9 @@ def _build_index(
         res = done.get(folder)
         # Only a checkout read now proves a deletion. Unreadable or out of time, a
         # moved checkout may be behind it, and a false tombstone blocks the fleet.
-        if res is not None and res.kind == "identity" and res.identity == retained[folder]:
+        if res is None or res.kind != "identity" or not res.identity:
+            continue
+        if retained.get(folder, res.identity) == res.identity:
             kept.setdefault(res.identity, []).append(folder)
 
     cwd_info: CwdInfo | None = None
@@ -1061,6 +1087,7 @@ def index() -> Index | None:
                 _retained_by_folder(_CTX.retained),
                 _CTX.cwd_candidate,
                 _CTX.home_enc,
+                _tombstoned_folders(_CTX.tombstoned),
             )
         return _CTX.index
 

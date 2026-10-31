@@ -2998,3 +2998,110 @@ def test_git_fallback_follows_an_include_with_real_git(mac):
     folder = mac.folder_for("/Users/kb/Dev/widgets")
     mac.memory(folder, text="x\n")
     assert index_for(mac).owners == {IDENTITY: folder}
+
+
+# ── the cross-vendor pass ────────────────────────────────────────────
+
+
+def _republish_without(machine: Machine, wire_folder: str) -> bytes:
+    """Rewrite a machine's canonical manifest without one project; return the old bytes."""
+    path = Path(machine.store) / manifest_key(machine.device_id)
+    raw = path.read_bytes()
+    with machine.on():
+        data = json.loads(crypto.decrypt_manifest(raw, PASSPHRASE, MEMORY_KB))
+        files = data["sources"]["claude"]["files"]
+        data["sources"]["claude"]["files"] = {
+            k: v for k, v in files.items() if not k.startswith(f"projects/{wire_folder}/")
+        }
+        path.write_bytes(
+            crypto.encrypt_manifest(
+                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=True
+            )
+        )
+    return raw
+
+
+@pytest.mark.parametrize("source_filter", [None, "claude"])
+def test_a_pull_keeps_the_conflict_copy_that_alone_names_unplaced_memory(mac, linux, source_filter):
+    """The copy may be the only manifest naming that memory, and `mm gc` reads manifests."""
+    mac.checkout("/Users/kb/proj")
+    mac.memory(mac.folder_for("/Users/kb/proj"), "p.md", "only here\n")
+    mac.memory("-Users-kb-loose", "t.md", "applies\n")
+    mac.push()
+    canonical = Path(mac.store) / manifest_key(mac.device_id)
+    older = _republish_without(mac, WIRE)
+    copy = canonical.with_name(canonical.name.replace(".enc", " 2.enc"))
+    copy.write_bytes(older)
+
+    (linux.claude / "projects" / "-home-kb-other").mkdir(parents=True)
+    result = linux.pull(source_filter=source_filter)
+    assert result.total_applied == 1  # the loose file arrived, so this peer "had changes"
+    assert (linux.claude / "projects/-home-kb-loose/memory/t.md").exists()
+    assert copy.exists()
+    assert result.not_placed_projects == 1
+
+
+def test_a_pull_of_another_source_keeps_that_conflict_copy_too(mac, linux):
+    notes = mac.home / "notes-src"
+    (notes / "d").mkdir(parents=True)
+    (notes / "d/n.md").write_text("n\n")
+    mac.config["sync"]["sources"].append(
+        {"name": "notes", "path": str(notes), "type": "generic", "include_dirs": ["d"]}
+    )
+    mac.checkout("/Users/kb/proj")
+    mac.memory(mac.folder_for("/Users/kb/proj"), "p.md", "only here\n")
+    mac.push()
+    canonical = Path(mac.store) / manifest_key(mac.device_id)
+    older = _republish_without(mac, WIRE)
+    copy = canonical.with_name(canonical.name.replace(".enc", " 2.enc"))
+    copy.write_bytes(older)
+    other_notes = linux.home / "notes-src"
+    other_notes.mkdir()
+    linux.config["sync"]["sources"].append(
+        {"name": "notes", "path": str(other_notes), "type": "generic", "include_dirs": ["d"]}
+    )
+    linux.pull(source_filter="notes")
+    assert (other_notes / "d/n.md").exists()  # this peer "had changes"
+    assert copy.exists()
+
+
+def test_a_pull_still_cleans_a_conflict_copy_when_nothing_is_withheld(mac, linux):
+    mac.memory("-Users-kb-loose", "t.md", "applies\n")
+    mac.push()
+    canonical = Path(mac.store) / manifest_key(mac.device_id)
+    copy = canonical.with_name(canonical.name.replace(".enc", " 2.enc"))
+    copy.write_bytes(canonical.read_bytes())
+    linux.pull()
+    assert (linux.claude / "projects/-home-kb-loose/memory/t.md").exists()
+    assert not copy.exists()
+
+
+def test_the_first_switch_keeps_a_removed_folders_deletion_under_its_identity(mac, linux):
+    """Deleted on the old form, then switched: the record must still bind the project."""
+    import shutil
+
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "a\n")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "b.md", "b\n")
+    mac.push()
+
+    checkout = linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(
+        linux,
+        {f"{folder}/memory/a.md": "a\n", "-home-kb-other/memory/o.md": "o\n"},
+    )
+    shutil.rmtree(linux.claude / "projects" / folder)
+    seed_old_form(linux, {})
+    tombstones = linux.published()["tombstones"]
+    assert list(tombstones) == [f"claude:projects/{folder}/memory/a.md"]
+
+    linux.push()  # the first switch
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert list(linux.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
+
+    linux.cwd = checkout
+    linux.pull()
+    landed = linux.claude / "projects" / folder / "memory"
+    assert not (landed / "a.md").exists()  # the deletion holds against the peer's copy
+    assert (landed / "b.md").read_text() == "b\n"  # and only that path is suppressed
