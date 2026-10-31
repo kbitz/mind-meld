@@ -1090,6 +1090,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "root_salt_drift",
     "sidecar",
     "storage_inventory",
+    "project_index",
     "sync_scope",
     "last_autorun",
     "last_attended_runs",

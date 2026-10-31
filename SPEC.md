@@ -192,6 +192,22 @@ The manifest is a **truth-based snapshot** of the selected local filesystem stat
 }
 ```
 
+**Shared Claude project names (Track 90A).** The `claude` entry of a manifest first-byte 0x03 carries `"wire_names": true` and its project folders appear under machine-independent names instead of the publisher's path encoding. A project with a network `origin` is `@git-<percent-encoded canonical remote>`, a folder at or under the publisher's home is `@home` / `@home-<rest>`, and anything else is literal:
+
+```json
+"claude": {
+  "base_path": "/Users/alice/.claude",
+  "wire_names": true,
+  "wire_folders": {"@git-github.com%2Facme%2Fmyapp": "-Users-alice-myapp"},
+  "files": {
+    "projects/@git-github.com%2Facme%2Fmyapp/memory/user_role.md": {"sha256": "e3b0c44298fc...", "size": 4096},
+    "projects/@home-scratch/memory/note.md": {"sha256": "ab12cd34ef56...", "size": 120}
+  }
+}
+```
+
+Tombstone keys use the same names (`claude:projects/@git-.../memory/x.md`). Each machine maps them back to the folder Claude uses for its own checkout; see docs/invariants/sync.md "Project identity on the wire".
+
 **Backward compatibility:**
 - v1 manifests (pre-v0.4 on-disk, top-level `files`, no `sources`) are auto-promoted to v2 shape by `normalize_manifest` on load: the files get wrapped as a `claude` source entry.
 - Pre-Track-1B v2 manifests emitted a redundant top-level `files` mirror of the claude source. `normalize_manifest` now strips that mirror unconditionally (both v1 promotion and v2 passthrough) so the single source of truth is `sources[<name>]["files"]`. Every manifest loaded from disk goes through `load_manifest`, which enforces this — callers may rely on `manifest["sources"]` being the only place file data lives.

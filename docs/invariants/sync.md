@@ -13,6 +13,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/storage/local.py` — `LocalBackend.put` / `_needs_fsync`
 - `src/mind_meld/lockedjson.py` — `locked_json_durable_rmw` / (see "Atomic write publication failures") / `locked_json_rmw` / `locked_json_snapshot` / (see "Shared JSON locking")
 - `src/mind_meld/storage/keys.py` — `manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / (see "Validated storage keys")
+- `src/mind_meld/projectid.py` / `src/mind_meld/manifest.py` — `manifest_to_wire` / `manifest_from_wire` (see "Project identity on the wire (Track 90A)")
 - `src/mind_meld/cli.py` — `_do_gc` / (see "Own-device blob collection (Track 71A)"; also read init-devices.md)
 - `src/mind_meld/cli.py` — `autopull` / `autopush` / `_auto_command_setup` / (see "Visible failures in automatic commands")
 - `src/mind_meld/host_usage.py` — `read_cursor_usage` / `configure_cursor_hook`
@@ -107,6 +108,127 @@ unavailable history/run evidence and actionable update faults. Automatic success
 are silent; existing automatic error/exit policies remain. The emitter census
 and isolated transcript are implementation artifacts, not live fleet acceptance.
 
+
+## Project identity on the wire (Track 90A)
+
+Claude keeps a project's memory in `~/.claude/projects/<folder>/`, where
+`<folder>` is the checkout's path with every non-alphanumeric character replaced
+by `-`. That name is machine-specific, so the same repository checked out at two
+paths, or on a Mac and a Linux box, was two projects. `projectid.py` (a leaf)
+and the codec in `manifest.py` publish a machine-independent name instead.
+
+**One codec, at the byte boundary.** In memory every manifest carries **local**
+folder names: walkers, tombstones, diffs, holds, freezes, uploads, apply,
+previews, status, history, `exclude_patterns`, `synclog` and the sidecar never
+see a wire name. `core.encode_manifest(local_manifest, *, wire_names, ...)` is
+the one production path to published bytes: it maps through
+`manifest.manifest_to_wire` (a copy, never a mutation) and stamps
+`"wire_names": true` and `wire_folders` on the local `claude` entry in place, so
+the sidecar keeps them. `load_manifest` ends with `manifest_from_wire`, once per
+decoded manifest, requiring the marker `is True` and never raising on shape. The
+sidecar is read through `normalize_manifest`, not `load_manifest`: it is already
+local. Only the source *named* `claude` is mapped; a renamed claude-type source
+keeps machine-specific names. `ProjectFormState` (`core.project_form_state`) is
+the one decision for push, its dry run and `mm status`, and reads no device record.
+
+**Names.** For a `projects/<folder>/...` key: (1) the folder owns an identity,
+`@git-<quote(identity, safe="")>`; (2) it equals the encoded home, `@home`;
+(3) it sits under it, `@home-<rest>`; (4) otherwise literal. No encoded name
+contains `@`, and percent-encoding removes `/` and `:`, so a wire name is one
+path segment that `_validate_rel_path` accepts (a hostile remote with `..`
+stays inside that segment). The identity is `projectid.project_identity`: the
+canonical `host/path` of a network `origin` (`https`, `http`, `git`, `ssh`, or
+scp with user `git` or none) with a non-default port kept (`host:port/path`),
+another ssh user kept (`user@host/path`) and no password, ever. Local paths,
+`file://`, host-only forms, control characters and bad ports have none. This
+name authorizes writes and deletions, so it is stricter than `retro-fleet`'s
+`canonicalize_remote_url`, which still groups loosely.
+
+**The index.** Built lazily, once per process, over every directory under the
+`claude` source's `projects/`, on a daemon worker with a 2 s wall-clock cap
+(about 60 ms measured at 361 folders). A folder owns an identity when decoding
+its name by descent from the filesystem root (never following a symlink, with a
+per-run listing memo) gives exactly one directory, that directory has a `.git`
+directory with `HEAD`, and its `.git/config` (`RawConfigParser`; a quoted or
+escaped value, an `include` or a parse failure asks git itself with a 2 s
+timeout) names a network `origin`. No git spawn on the common path, no
+transcript read, no walk of the home folder. `FileNotFoundError` and
+`NotADirectoryError` mean gone; any other `OSError`, and a timeout, mean
+*indeterminate*: the folder keeps the identity recorded for it in this machine's
+sidecar (`wire_folders`, injected by `core._configure_project_names` because
+`sidecar` imports `manifest`), so a stale mount or a hook with narrower disk
+permissions never flips a folder to home-relative. Each identity has one owner:
+folders holding `memory/` first, then the smallest encoded name; a retained
+identity competes only when nothing resolved; a linked worktree's nomination of
+its main checkout, and the current directory's main checkout (pull paths only,
+`projectid.allow_cwd_candidate()` at `_pull_core` entry), join only when the
+identity has no other candidate. Non-owners publish home-relative. Linked
+worktrees own nothing (Claude writes to the main checkout's folder); a
+submodule, a bare layout, no `origin` and a local-path remote are home-relative.
+`mm diag --json` reports the index as `project_index`.
+
+**Loading.** `@git-<x>` goes to the folder owning that identity, else stays
+literal and is **unplaced**. `@home` forms go to the encoded home unless that
+folder owns an identity (then they stay literal and are dropped as
+*superseded*: an identity-owned folder takes only identity names, so a stale
+copy can neither union into its memory nor delete from it). A literal that names
+an owned folder, or any entry whose local name another entry already holds,
+becomes `@lit-<folder>`: displaced entries move and never drop, so `mm gc`
+keeps every sha. An unmarked entry (a peer still on path names) whose
+`base_path` ends in `.claude` under a different home: a folder equal to or under
+the publisher's encoded home becomes `@old-<folder>`. Tombstone keys follow the
+same rules; one whose source has no entry passes through both ways.
+`projectid.unplaceable_reason(folder)` reads the name only: `@git-` unplaced,
+`@old-` old form, `@home` / `@lit-` superseded. `core._filter_excluded_paths`
+drops those in files and tombstones of `claude` at its existing pull, push, diff
+and status sites, including on its fast path, so such an entry is never applied,
+never tombstoned and never reaches the omission proof. Pull writes one
+`excluded` history row per peer per run for them. `walk_claude_source` skips a
+project directory starting with `@`.
+
+**A moved checkout mints nothing.** A publisher records
+`wire_folders: {"@git-<x>": "<its local folder>"}`. On load, when the recorded
+folder differs from the identity's current owner here, the owner joins an
+in-memory `moved_folders` (kept by `_merge_manifests`, never serialized, and
+applied to recovered priors by `core.reconcile_recovered_prior`).
+`generate_tombstones` skips paths under it, and `core.content_counts` /
+`iter_content_diffs` do not count a prior entry under a moved or unplaceable
+name as deleted, or a local file with the same sha and subpath as new. A remote
+change therefore republishes once (`Push: project names updated.`) and mints
+nothing; `republish_due` refreshes `wire_folders` on a push with no other change.
+
+**Unplaced memory** stays encrypted in its publisher's `data/<id>/`, referenced
+by its manifest; nothing is written locally. `mm status` prints
+`Not placed here: N files in M projects ...` (once per `(identity, rel path)`
+across peers, from `core.project_name_report`), `mm pull --dry-run --verbose`
+lists them with a clone hint, and a join adds the line once. It is not
+`waiting`, not `degraded`, changes no exit code and prints nothing on push or a
+default pull. Unplaced and old-form counts are not "pending" for O3.2's 24 h
+warning; Track 92A owns honouring that. A peer still on path names shows as
+`PullResult.old_form_peers` (`312 files from Mac B wait until it publishes
+shared names (mm status)`), kept apart from `WaitingPeer` because it waits on a
+person.
+
+**The first push.** `switch_due` (codec on, own prior not marked) and
+`republish_due` join push's no-op check with their own wording
+(`Would refresh manifest (shared project names)`), upload no content blob outside
+`mm-events`, mint no tombstone, are not content changes and run no GC. The marker
+is set exactly when the envelope byte is 0x03. A machine with no readable prior
+publishes the new form at its next push and mints nothing; one with no resolvable
+home publishes the old form. Rollback past the switch is unsupported.
+
+**Limits (accepted, owner-visible).** Linux's folder encoding is unmeasured
+(L1 in the plan); a long name Claude might shorten and a non-BMP character
+(Node encodes it as two UTF-16 units) are unverified; a fork, an SSH alias host,
+a different path case, or `ssh://` and `https://` on a non-default port is a
+different identity, visible as not placed on both sides; a checkout that is gone
+or on an unmounted disk flips that folder to home-relative until it returns
+(a peer on another layout may keep a duplicate home-relative copy that its
+identity-owned folders ignore); deleting a folder whose checkout is gone mints
+no tombstone, so peers keep their copies; a stale copy of a project under a path
+identity-owned elsewhere stays local and harmless; a literal outside-home name can
+reach an identity-owned folder at the same path; 14 of the 17 no-remote folders
+measured were dead paths; `autoMemoryDirectory` is unsupported.
 
 ## Shared JSON locking
 
