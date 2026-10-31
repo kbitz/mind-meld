@@ -182,10 +182,10 @@ resolves the folders with deletion records there that are gone from `projects/`.
 records then publish under both spellings (`core._spell_first_switch_records`), with no
 owner and no `wire_folders` entry: the local spelling binds this path while nothing owns
 the identity, and the identity spelling binds once a pull inside that checkout owns it. A
-marked sidecar never does this, and neither does an identity a folder already owns. A folder
-gone since the last old-form push has no such record: what the switching push mints stays
-home-relative, because that absence may be housekeeping and an identity-wide record would
-block the project fleet-wide.
+marked sidecar never does this, and neither does an identity a folder already owns. Only
+records the sidecar already held are spelled: what the switching push itself mints stays
+home-relative, even in a folder with an older record, because that absence may be
+housekeeping and an identity-wide record would block the project fleet-wide.
 
 **Loading.** `@git-<x>` goes to the folder owning that identity, else stays
 literal and is **unplaced**. `@home` forms go to the encoded home unless that
@@ -279,7 +279,8 @@ so peers keep their copies (a false tombstone would block the project fleet-wide
 first-switch deletion record binds whatever origin sits at that path then, so a path
 re-cloned from another repository inside the 30 days can suppress that project's same-named
 file until the record expires; a folder gone since the last old-form push can have its memory
-restored by a pull inside that checkout; a peer with a withheld name keeps all its conflict copies
+restored by a pull inside that checkout, unless a linked worktree's folder still nominates it
+as owner, when that push's records are identity-wide as after any switch; a peer with a withheld name keeps all its conflict copies
 until its next publishing push, so a dormant peer's copy can outlive a deletion's 30 days; a
 push while `projects/` is missing publishes those folders' removal, so a file deleted
 just before it mints nothing and can return, and an identity folder with no deletion
