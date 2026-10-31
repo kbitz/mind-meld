@@ -45,7 +45,7 @@ here by hand, use the H3 form.
 ## Unprocessed
 
 ### [review:severity=should] A missing `projects/` is silent, and a partial restore still reads as deletion
-- **Description:** `mm status` says in sync and a push says `project names updated` while `~/.claude/projects` is missing. Once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
+- **Description:** While `~/.claude/projects` is missing, `mm status` tells the owner to run `mm push`, then says in sync, and the push says `project names updated`; none of them names the missing folder. If no push ran during the outage, then once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
 - **Effort:** M
 - **Priority:** P3
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.

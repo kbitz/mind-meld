@@ -168,7 +168,10 @@ home-relative. One odd folder never stops the others. Each identity has one owne
 and a folder owns one identity: folders holding `memory/` first, then the smallest
 encoded name; a retained identity competes only when nothing resolved; next, a
 folder deleted from `projects/` whose recorded checkout still resolves to that
-identity, so deleting a project's folder is a real deletion; a linked worktree's
+identity, so deleting a project's folder is a real deletion. A removed folder named only
+by this machine's own deletion records (a sidecar from before the switch) resolves the
+same way, so the first switch publishes those records under the project's identity; a
+linked worktree's
 nomination of its main checkout, and the current directory's main checkout (pull
 paths only, `projectid.allow_cwd_candidate()` at `_pull_core` entry, probed on its
 own daemon thread under the same deadline), join only when the identity has no
@@ -199,7 +202,9 @@ never tombstoned and never reaches the omission proof. The one exception is push
 own prior (`own_prior=True`), which keeps its deletion records under `@git-` and
 `@home` names: the owner or home can come back, and dropping the record would undo
 the deletion on the next pull. Pull writes one
-`excluded` history row per peer per run for them. `walk_claude_source` skips a
+`excluded` history row per peer per run for them, and leaves that peer's conflict copies
+in place, because one may be the only manifest naming memory it did not apply and that
+peer's `mm gc` reads its manifests. `walk_claude_source` skips a
 project directory starting with `@`.
 
 **A moved checkout mints nothing.** A publisher records
@@ -265,11 +270,12 @@ repositories differing only by it share an identity; a project folder deleted du
 a push that cannot read its checkout, or whose index runs out of time, mints nothing,
 so peers keep their copies (a false tombstone would block the project fleet-wide); a
 push while `projects/` is missing publishes those folders' removal, so a file deleted
-just before it mints nothing and can return, a later pull restores only inside the
-checkout, and a first switch made then publishes its records home-relative; once
-`projects/` exists again, by a pull or by Claude, whatever is still absent reads as
-deleted at the next push, including a peer's blob not yet delivered, as every earlier
-release treated any absence; own
+just before it mints nothing and can return, an identity folder with no deletion
+record then restores only on a pull inside its checkout, and a first switch made then
+publishes its records home-relative; if no push ran during the outage, once `projects/`
+exists again, by a pull or by Claude, whatever is still absent reads as deleted at the
+next push, including a peer's blob not yet delivered, as every earlier release treated
+any absence; own
 manifest recovery combined with a home rename or a folder gaining a remote can leave
 one deletion record under the old spelling; a hand-edited `.git/config`
 with two spellings of `origin` can read differently from git; `mm diff` lists a renamed project's files
