@@ -22,6 +22,7 @@ docs/invariants/sync.md "Project identity on the wire".
 from __future__ import annotations
 
 import configparser
+import ipaddress
 import os
 import re
 import stat
@@ -228,6 +229,20 @@ _SCP_NO_USER = re.compile(r"^(?P<host>[^@:/\s]{2,}):(?P<path>[^\s:@][^\s@]*)$")
 _PATH_PARAMS = re.compile(r"[?;]")
 
 
+def _is_local_host(host: str) -> bool:
+    """A loopback or unspecified host: no two machines mean the same server by it."""
+    bare = host.strip("[]").rstrip(".")
+    if not bare or bare == "localhost" or bare.endswith(".localhost") or bare.isdigit():
+        return True
+    try:
+        address = ipaddress.ip_address(bare)
+    except ValueError:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    address = mapped or address
+    return address.is_loopback or address.is_unspecified
+
+
 def project_identity(url: object) -> str | None:
     """Machine-independent identity of a network git remote, or ``None``.
 
@@ -237,10 +252,12 @@ def project_identity(url: object) -> str | None:
     normalized, so ``git@host:foo/bar`` equals ``https://host/foo/bar``. An
     ``ssh`` or scp form with another user keeps only that user name,
     ``user@host/path`` with a leading ``/`` kept, so ``alice@host:repo``,
-    ``bob@host:repo`` and ``alice@host:/repo`` all differ; a password, a query
-    and path parameters never survive. Local paths, ``file://``, a loopback
-    host, a host-only form, a control character and a malformed URL or port
-    have no identity. This name authorizes writes and deletions, so two
+    ``bob@host:repo`` and ``alice@host:/repo`` all differ; a password, and a
+    query or parameters on the last path segment, never survive, and ``?`` or
+    ``;`` in an earlier segment means no identity. Local paths, ``file://``, a
+    loopback or unspecified host, a remote helper (``gcrypt::``), a host-only
+    form, a control character and a malformed URL or port have no identity.
+    This name authorizes writes and deletions, so two
     repositories on one host's different ports never merge; ``retro-fleet``'s
     grouping keeps using the looser ``canonicalize_remote_url``.
     """
@@ -264,8 +281,9 @@ def project_identity(url: object) -> str | None:
         host = (parts.hostname or "").lower()
         user = parts.username if scheme == "ssh" else None
         path = parts.path or ""
-        if parts.fragment and scheme in ("ssh", "git"):
-            path += f"#{parts.fragment}"  # a literal path character there
+        if scheme in ("ssh", "git"):  # literal path characters there
+            path += f"?{parts.query}" if parts.query else ""
+            path += f"#{parts.fragment}" if parts.fragment else ""
     else:
         m = _SCP_FORM.match(s) or _SCP_NO_USER.match(s)
         if m is None:
@@ -274,16 +292,13 @@ def project_identity(url: object) -> str | None:
         host = m.group("host").lower()
         user = m.groupdict().get("user")
         path = m.group("path")
-    bare_host = host.strip("[]").rstrip(".")
-    if (
-        not bare_host
-        or bare_host in ("localhost", "::1", "0.0.0.0")
-        or bare_host.startswith(("127.", "::ffff:127."))
-    ):
+    if not host or _is_local_host(host):
         return None
-    # Only the last segment can carry a query or parameters; `team/c#/a` and
-    # `team/c#/b` are different repositories.
+    # Only the last segment can carry a query or parameters. Anywhere else they
+    # could hide a token or tell two repositories apart, so there is no identity.
     head, slash, tail = path.rstrip("/").rpartition("/")
+    if _PATH_PARAMS.search(head):
+        return None
     path = (head + slash + _PATH_PARAMS.split(tail, maxsplit=1)[0]).rstrip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
@@ -444,6 +459,7 @@ class Index:
     claude_dir: Path
     claude_real: str
     home_enc: str | None
+    listed: bool = True  # False: `projects/` could not be listed, so absence proves nothing
 
     @property
     def owned(self) -> int:
@@ -545,6 +561,11 @@ def enabled() -> bool:
 
 def configured() -> bool:
     return _CTX.claude_dir is not None
+
+
+def claude_real() -> str | None:
+    """The resolved Claude folder, in the form a walker records as ``base_path``."""
+    return os.path.realpath(_CTX.claude_dir) if _CTX.claude_dir is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -673,9 +694,11 @@ def _read_origin(checkout: Path) -> str:
 def _git_origin(checkout: Path) -> str:
     try:
         result = subprocess.run(
-            # An explicit git dir: `-C` would walk up to a parent repository when
-            # this `.git` is not one git accepts, and name the wrong project.
-            ["git", f"--git-dir={checkout / '.git'}", "config", "--get", "remote.origin.url"],
+            # This file only: `-C` would walk up to a parent repository when this
+            # `.git` is not one git accepts, and name the wrong project.
+            ["git", "config", "--file", ".git/config", "--includes"]
+            + ["--get", "remote.origin.url"],
+            cwd=checkout,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -824,7 +847,8 @@ class _Worker:
             )
 
 
-def _list_project_folders(projects: Path) -> list[str]:
+def _list_project_folders(projects: Path) -> list[str] | None:
+    """The folders under ``projects/``, or ``None`` when it cannot be listed."""
     names: list[str] = []
     try:
         with os.scandir(projects) as it:
@@ -835,7 +859,7 @@ def _list_project_folders(projects: Path) -> list[str]:
                 except OSError:
                     continue
     except OSError:
-        return []
+        return None
     return sorted(names)
 
 
@@ -883,8 +907,9 @@ def _build_index(
 ) -> Index:
     root = _fs_root()
     projects = claude_dir / "projects"
-    listed = projects.is_dir()
-    folders = _list_project_folders(projects)
+    listing = _list_project_folders(projects)
+    listed = listing is not None
+    folders = listing or []
     # A folder deleted from `projects/` is still resolved when it published an
     # identity: its checkout may be alive, so the deletion is a real one. A
     # `projects/` that cannot be listed looks like an outage, not a reset.
@@ -932,13 +957,10 @@ def _build_index(
             nominated.setdefault(res.identity, set()).add(encode_path("/" + str(rel)))
     for folder in deleted:
         res = done.get(folder)
-        # Unreadable or out of time is not gone: the recorded identity stands.
-        if (
-            res is None
-            or res.kind == "unknown"
-            or (res.kind == "identity" and res.identity == retained[folder])
-        ):
-            kept.setdefault(retained[folder], []).append(folder)
+        # Only a checkout read now proves a deletion. Unreadable or out of time, a
+        # moved checkout may be behind it, and a false tombstone blocks the fleet.
+        if res is not None and res.kind == "identity" and res.identity == retained[folder]:
+            kept.setdefault(res.identity, []).append(folder)
 
     cwd_info: CwdInfo | None = None
     if cwd_candidate:
@@ -1009,6 +1031,7 @@ def _build_index(
         claude_dir=claude_dir,
         claude_real=os.path.realpath(claude_dir),
         home_enc=home,
+        listed=listed,
     )
 
 

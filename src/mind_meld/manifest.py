@@ -2615,10 +2615,9 @@ def _remap_keys(
             continue
         new_key = f"{prefix}projects/{mapping(parts[0])}/{parts[1]}"
         existing = new_tombstones.get(new_key)
-        if (
-            not isinstance(existing, dict)
-            or not isinstance(info, dict)
-            or str(info.get("deleted_at", "")) > str(existing.get("deleted_at", ""))
+        if not isinstance(existing, dict) or (
+            isinstance(info, dict)
+            and str(info.get("deleted_at", "")) > str(existing.get("deleted_at", ""))
         ):
             new_tombstones[new_key] = info
     return new_files, new_tombstones
@@ -2744,9 +2743,9 @@ def _from_wire_mapping(
                 if owner and isinstance(recorded, str) and recorded != owner:
                     moved.add(owner)
         # Published from another Claude folder (a peer, or this machine before
-        # its home or `claude` path changed): no name says what this folder should
-        # hold, so an absence here is never a deletion.
-        if isinstance(base, str) and base and base != idx.claude_real:
+        # its home or `claude` path changed), or `projects/` cannot be listed: no
+        # name says what this folder should hold, so an absence is never a deletion.
+        if not idx.listed or (isinstance(base, str) and base and base != idx.claude_real):
             moved.update(local for local in mapping.values() if not local.startswith("@"))
         return mapping, moved
     # Unmarked: path names, plus any `@` form carried on a deletion record, which
@@ -2754,6 +2753,10 @@ def _from_wire_mapping(
     mapping = {n: n for n in names}
     if carried and idx is not None and home is not None:
         mapping.update(_marked_mapping(carried, idx, home))
+    # The same rule for an own prior that has not switched yet.
+    real = projectid.claude_real()
+    if real is not None and isinstance(base, str) and base and base != real:
+        moved.update(name for name in names if not name.startswith("@"))
     if (
         not projectid.configured()
         or home is None

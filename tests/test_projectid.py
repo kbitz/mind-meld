@@ -227,6 +227,14 @@ def wire_keys(published: dict) -> list[str]:
         ("localhost.:repo", None),
         ("0.0.0.0:repo", None),
         ("ssh://[::ffff:127.0.0.1]/repo", None),
+        ("ssh://[0:0:0:0:0:0:0:1]/repo", None),
+        ("ssh://[::]/repo", None),
+        ("http://2130706433/repo", None),
+        ("dev.localhost:repo", None),
+        ("127.example.com:acme/widgets", "127.example.com/acme/widgets"),
+        ("https://host/org/repo;token=SEC/RET", None),
+        ("git@host:org/repo?token=SEC/RET", None),
+        ("ssh://git@host/team/a?b/c.git", None),
         ("gcrypt::/mnt/backup/repo.git", None),
         ("hg::/Users/kb/code/repo", None),
         ("ext::foo", None),
@@ -234,7 +242,7 @@ def wire_keys(published: dict) -> list[str]:
         ("x-access-token:ghp_TOK@github.com/acme/widgets.git", None),
         ("git@git.example.com:team/c#/alpha.git", "git.example.com/team/c#/alpha"),
         ("ssh://git@git.example.com/team/c#/beta.git", "git.example.com/team/c#/beta"),
-        ("https://host/a;x/b.git", "host/a;x/b"),
+        ("https://host/a;x/b.git", None),
         ("https://github.com", None),
         ("https://github.com/", None),
         ("https://host:notaport/acme/widgets", None),
@@ -2446,6 +2454,7 @@ def test_a_serialized_moved_folders_is_ignored_at_load(mac, value):
     data["sources"]["claude"]["wire_names"] = True
     data["sources"]["claude"]["moved_folders"] = value
     data["sources"]["claude"]["base_path"] = os.path.realpath(mac.claude)
+    mac.memory("-Users-kb-listed", text="x\n")  # `projects/` lists, and the base matches
     with mac.on():
         loaded = manifest.load_manifest(json.dumps(data).encode())
     assert "moved_folders" not in loaded["sources"]["claude"]
@@ -2517,6 +2526,121 @@ def test_mm_gc_keeps_both_shas_of_a_collision_and_collects_a_real_orphan(mac):
     assert backend.exists(blob_key(mac.device_id, identity_sha))
     assert backend.exists(blob_key(mac.device_id, literal_sha))
     assert not backend.exists(blob_key(mac.device_id, orphan))
+
+
+def test_an_unlistable_projects_folder_mints_nothing_and_owns_no_deleted_folder(mac):
+    mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    mac.memory(folder, "a.md", "a\n")
+    mac.push()
+    with mac.on(), pytest.MonkeyPatch.context() as mp:
+        mp.setattr(projectid, "_list_project_folders", lambda projects: None)
+        projectid.configure(mac.claude, retained={WIRE: folder})
+        idx = projectid.index()
+        assert idx.listed is False and idx.owners == {}
+        moved = manifest._from_wire_mapping(
+            {"-opt-shared", "@home-x"},
+            {"wire_names": True, "base_path": idx.claude_real},
+            idx,
+            set(),
+        )[1]
+    assert "-opt-shared" in moved
+
+
+def test_a_deleted_folder_past_the_deadline_owns_nothing(mac, monkeypatch):
+    """Out of time is no evidence: a live clone may be waiting behind the deadline."""
+    mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    other = mac.folder_for("/Users/kb/aaa")
+    mac.memory(other, "x.md", "x\n")
+    release = threading.Event()
+    real_resolve = projectid._resolve_folder
+
+    def slow(name, projects, root, memo):
+        if name == other:
+            release.wait(5)
+        return real_resolve(name, projects, root, memo)
+
+    monkeypatch.setattr(projectid, "INDEX_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(projectid, "_resolve_folder", slow)
+    with mac.on():
+        projectid.configure(mac.claude, retained={WIRE: folder})
+        idx = projectid.index()
+        release.set()
+    assert idx.timed_out and idx.owners == {}
+
+
+def test_recovery_from_a_sidecar_written_in_another_claude_folder_mints_nothing(mac):
+    mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    mac.memory(folder, "a.md", "a\n")
+    mac.memory("-Users-kb-loose", "b.md", "b\n")
+    mac.memory("-opt-shared", "c.md", "c\n")
+    mac.push()
+    elsewhere = mac.home / "other-claude"
+    (elsewhere / "projects/-Users-kb-unrelated/memory").mkdir(parents=True)
+    (elsewhere / "projects/-Users-kb-unrelated/memory/z.md").write_text("z\n")
+    mac.config["sync"]["sources"][0]["path"] = str(elsewhere)
+    mac.claude = elsewhere
+    _corrupt_own_manifest(mac)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+def test_recovery_moves_a_recorded_deletion_to_the_identitys_new_owner(mac):
+    import shutil
+
+    checkout = mac.checkout("/Users/kb/old/widgets")
+    old = mac.folder_for("/Users/kb/old/widgets")
+    mac.memory(old, "keep.md", "k\n")
+    doomed = mac.memory(old, "del.md", "d\n")
+    mac.push()
+    doomed.unlink()
+    mac.push()
+    new_checkout = mac.fs_root / "Users/kb/new/widgets"
+    new_checkout.parent.mkdir(parents=True)
+    shutil.move(checkout, new_checkout)
+    shutil.move(
+        mac.claude / "projects" / old,
+        mac.claude / "projects" / mac.folder_for("/Users/kb/new/widgets"),
+    )
+    _corrupt_own_manifest(mac)
+    mac.push()
+    assert list(mac.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/del.md"]
+
+
+def test_recovery_with_no_resolvable_home_leaves_the_prior_alone(mac, monkeypatch):
+    mac.memory("-Users-kb-loose", "a.md", "a\n")
+    mac.push()
+    _corrupt_own_manifest(mac)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(projectid, "_wire_home", lambda: None)
+        mac.push()
+    assert mac.first_byte() == crypto.FORMAT_VERSION
+
+
+def test_moving_the_claude_folder_before_the_first_switch_mints_nothing(mac):
+    mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    seed_old_form(mac, {f"{folder}/memory/a.md": "a\n", "-Users-kb-loose/memory/b.md": "b\n"})
+    elsewhere = mac.home / "other-claude"
+    (elsewhere / "projects/-Users-kb-unrelated/memory").mkdir(parents=True)
+    (elsewhere / "projects/-Users-kb-unrelated/memory/z.md").write_text("z\n")
+    mac.config["sync"]["sources"][0]["path"] = str(elsewhere)
+    mac.claude = elsewhere
+    mac.push()
+    assert mac.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert mac.published()["tombstones"] == {}
+
+
+def test_a_malformed_deletion_record_never_replaces_a_valid_one():
+    good = {"deleted_at": "2026-10-31T00:00:00+00:00"}
+    for tombstones in (
+        {"claude:projects/-a/memory/x.md": good, "claude:projects/-b/memory/x.md": "junk"},
+        {"claude:projects/-a/memory/x.md": "junk", "claude:projects/-b/memory/x.md": good},
+    ):
+        out = manifest._remap_keys({}, tombstones, lambda folder: "-same")[1]
+        assert out == {"claude:projects/-same/memory/x.md": good}
 
 
 def test_old_form_wording_for_several_files_and_several_peers(tmp_path, store, mac, linux):
@@ -2598,6 +2722,7 @@ def test_moving_the_claude_folder_mints_nothing_for_any_form(mac):
     folder = mac.folder_for("/Users/kb/proj")
     mac.memory(folder, "a.md", "a\n")
     mac.memory("-Users-kb-loose", "b.md", "b\n")
+    mac.memory("-opt-shared", "d.md", "d\n")
     mac.push()
     elsewhere = mac.home / "other-claude"
     (elsewhere / "projects/-Users-kb-unrelated/memory").mkdir(parents=True)
@@ -2615,6 +2740,8 @@ def test_a_missing_projects_folder_mints_nothing(mac, linux):
     checkout = mac.checkout("/Users/kb/proj")
     folder = mac.folder_for("/Users/kb/proj")
     first = mac.memory(folder, "a.md", "a\n")
+    mac.memory("-Users-kb-loose", "b.md", "b\n")
+    mac.memory("-opt-shared", "c.md", "c\n")
     mac.push()
     linux.cwd = linux.checkout("/home/kb/x/p")
     linux.pull()
@@ -2627,7 +2754,7 @@ def test_a_missing_projects_folder_mints_nothing(mac, linux):
     assert first.read_text() == "a\n"  # a pull in the checkout brings the memory back
 
 
-def test_tombstones_survive_a_home_that_stops_resolving_and_returns(mac, linux, monkeypatch):
+def test_tombstones_survive_a_home_that_stops_resolving_and_returns(mac, linux):
     mac.checkout("/Users/kb/proj")
     folder = mac.folder_for("/Users/kb/proj")
     mac.memory(folder, "keep.md", "k\n")
@@ -2669,7 +2796,7 @@ def test_a_carried_tombstone_over_name_max_does_not_stop_pushes(mac):
     assert len(mac.published()["tombstones"]) == 1
 
 
-def test_sidecar_recovery_respells_a_carried_tombstone(mac, linux):
+def test_sidecar_recovery_respells_a_carried_tombstone(mac):
     """The checkout was away at the last push, and is back when recovery runs."""
     import shutil
 
@@ -2729,10 +2856,10 @@ def test_git_fallback_never_reads_a_parent_repository(mac):
         fh.write(f'[remote "origin"]\n\turl = "{GIT_URL}"\n')
     folder = mac.folder_for("/Users/kb/parent/child")
     mac.memory(folder, text="x\n")
-    assert "github.com/acme/parent" not in index_for(mac).owners
+    assert index_for(mac).owners == {IDENTITY: folder}  # its own file, never the parent's
 
 
-def test_a_marked_sidecar_builds_the_index_once_without_reentering_it(mac, monkeypatch):
+def test_a_marked_sidecar_builds_the_index_once_with_its_retained_identity(mac, monkeypatch):
     mac.checkout("/Users/kb/proj")
     folder = mac.folder_for("/Users/kb/proj")
     mac.memory(folder, "a.md", "a\n")
@@ -2754,19 +2881,15 @@ def test_a_marked_sidecar_builds_the_index_once_without_reentering_it(mac, monke
     assert idx.owners == {IDENTITY: folder}
 
 
-def test_deleting_a_project_folder_while_its_checkout_cannot_be_read_stays_deleted(
-    mac, linux, monkeypatch
-):
+def test_a_deleted_folder_with_an_unreadable_checkout_mints_nothing(mac, linux):
+    """Unreadable may hide a moved checkout, and a false tombstone blocks the fleet."""
     import shutil
 
-    checkout = mac.checkout("/Users/kb/proj")
+    mac.checkout("/Users/kb/proj")
     folder = mac.folder_for("/Users/kb/proj")
-    first = mac.memory(folder, "a.md", "a\n")
+    mac.memory(folder, "a.md", "a\n")
     mac.memory("-Users-kb-loose", "other.md", "o\n")
     mac.push()
-    linux.cwd = linux.checkout("/home/kb/x/p")
-    linux.pull()
-    linux.push()
     shutil.rmtree(mac.claude / "projects" / folder)
     real_lstat = projectid._lstat
 
@@ -2778,8 +2901,5 @@ def test_deleting_a_project_folder_while_its_checkout_cannot_be_read_stays_delet
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(projectid, "_lstat", denied)
         pushed = mac.push()
-    assert pushed.total_deleted == 1 and not pushed.names_updated
-    assert list(mac.published()["tombstones"]) == [f"claude:projects/{WIRE}/memory/a.md"]
-    mac.cwd = checkout
-    mac.pull()
-    assert not first.exists()
+    assert pushed.total_deleted == 0
+    assert mac.published()["tombstones"] == {}
