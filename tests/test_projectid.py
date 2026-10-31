@@ -3289,3 +3289,31 @@ def test_a_first_switch_record_stays_home_relative_when_a_live_folder_owns_the_p
     tombstones = linux.published()["tombstones"]
     assert f"claude:projects/{WIRE}/memory/a.md" not in tombstones  # it would bind the live one
     assert f"projects/{WIRE}/memory/keep.md" in wire_keys(linux.published())
+
+
+def test_a_switching_push_spells_only_records_the_sidecar_already_held(linux):
+    """A fresh mint in a folder with one older record stays path-scoped, like any other."""
+    import shutil
+
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    gone = linux.memory(folder, "a.md", "a\n")
+    seed_old_form(linux, {f"{folder}/memory/b.md": "b\n", "-home-kb-other/memory/o.md": "o\n"})
+    gone.unlink()
+    seed_old_form(linux, {})  # the sidecar now holds a.md's record
+    path = Path(linux.store) / manifest_key(linux.device_id)
+    with linux.on():
+        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
+        data["sources"]["claude"]["base_path"] = os.path.realpath(linux.claude)
+        path.write_bytes(
+            crypto.encrypt_manifest(
+                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=False
+            )
+        )
+    shutil.rmtree(linux.claude / "projects" / folder)
+    linux.push()
+    assert set(linux.published()["tombstones"]) == {
+        f"claude:projects/{WIRE}/memory/a.md",
+        "claude:projects/@home-proj/memory/a.md",
+        "claude:projects/@home-proj/memory/b.md",  # minted by this push: never identity-wide
+    }
