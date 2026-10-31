@@ -202,14 +202,27 @@ def wire_keys(published: dict) -> list[str]:
         ("https://host/acme/widgets", "host/acme/widgets"),
         ("alice@host:repo.git", "alice@host/repo"),
         ("bob@host:repo.git", "bob@host/repo"),
-        ("ssh://alice:pw@host/srv/repo.git", "alice@host/srv/repo"),
+        ("alice@host:/srv/repo.git", "alice@host//srv/repo"),
+        ("ssh://alice:pw@host/srv/repo.git", "alice@host//srv/repo"),
+        ("github.com:acme/widgets", IDENTITY),
+        ("host:/srv/widgets.git", "host/srv/widgets"),
+        ("git@github.com:acme/widgets.git?token=abc", IDENTITY),
+        ("https://github.com/acme/widgets;token=abc", IDENTITY),
         ("https://github.com/acme/100%25.git", "github.com/acme/100%25"),
         ("", None),
         ("/srv/git/widgets.git", None),
         ("../widgets", None),
         ("file:///srv/git/widgets.git", None),
-        ("github.com:acme/widgets", None),
         ("github.com/acme/widgets", None),
+        ("C:/Users/kb/widgets", None),
+        ("host:", None),
+        ("https://[bad/foo", None),
+        ("https://[not-an-ip]/foo/bar", None),
+        ("https://ex\u2100mple.com/foo", None),
+        ("ssh://localhost/repo", None),
+        ("git@127.0.0.1:repo.git", None),
+        ("http://localhost:3000/me/app", None),
+        ("ssh://[::1]/repo", None),
         ("https://github.com", None),
         ("https://github.com/", None),
         ("https://host:notaport/acme/widgets", None),
@@ -314,7 +327,7 @@ def test_index_ambiguous_decode_owns_nothing(mac):
         (None, projectid.WHY_NO_ORIGIN),
         ("/srv/git/widgets.git", projectid.WHY_LOCAL_REMOTE),
         ("file:///srv/git/widgets.git", projectid.WHY_LOCAL_REMOTE),
-        ("github.com:acme/widgets", projectid.WHY_LOCAL_REMOTE),
+        ("git@localhost:acme/widgets", projectid.WHY_LOCAL_REMOTE),
     ],
 )
 def test_index_no_network_origin_publishes_home_relative(mac, url, why):
@@ -478,7 +491,7 @@ def test_index_blocking_scandir_returns_within_the_deadline_and_keeps_identity(m
         elapsed = time.monotonic() - start
         release.set()
     assert elapsed < 2.0
-    assert idx.timed_out and idx.timed_out_path
+    assert idx.timed_out
     assert idx.owners == {IDENTITY: folder}
     assert idx.to_wire(folder) == WIRE  # no flip to home-relative
     assert next(r for r in idx.rows if r.folder == folder).form == "git"
@@ -520,7 +533,6 @@ def test_home_unresolved_turns_the_codec_off(mac, monkeypatch):
         monkeypatch.setattr(projectid, "_wire_home", lambda: None)
         projectid.configure(mac.claude)
         assert not projectid.enabled() and projectid.index() is None
-        assert projectid.folder_to_wire("-Users-kb-x") == "-Users-kb-x"
     mac.push()
     assert mac.first_byte() == crypto.FORMAT_VERSION
 
@@ -738,6 +750,9 @@ def test_ac5_checkout_at_different_paths_under_mac_and_linux_homes(mac, linux):
     landed = linux.claude / "projects" / linux_folder / "memory"
     assert (landed / "MEMORY.md").read_text() == "- from the mac\n"
     assert not list((linux.claude / "projects").glob("*Users*"))
+    # AC4: the per-project change log lands in the local folder, never under a wire name.
+    assert (linux.claude / "projects" / linux_folder / ".mind-meld-log.md").exists()
+    assert not list((linux.claude / "projects").glob("@*"))
 
     # An edit on the Linux checkout returns to the Mac's folder; nothing conflicts.
     (landed / "MEMORY.md").write_text("- from the mac\n- edited on linux\n")
@@ -968,7 +983,7 @@ def test_dry_run_agrees_and_writes_nothing(mac, capsys):
 # ── deletions and tombstones (AC3) ───────────────────────────────────
 
 
-def test_a_deletion_on_one_home_suppresses_on_the_other(mac, linux):
+def test_a_deletion_on_one_home_suppresses_on_the_other(tmp_path, store, mac, linux):
     mac.checkout("/Users/kb/Dev/widgets")
     linux.checkout("/home/kb/src/widgets")
     mac_folder = mac.folder_for("/Users/kb/Dev/widgets")
@@ -983,10 +998,18 @@ def test_a_deletion_on_one_home_suppresses_on_the_other(mac, linux):
     tombstones = mac.published()["tombstones"]
     assert list(tombstones) == [f"claude:projects/{WIRE}/memory/doomed.md"]
     assert "-Users-" not in "".join(tombstones)
-    # Linux's copy is never re-downloaded because of the tombstone, and keep.md is untouched.
+    # A third machine still lists the file under the shared name. Without the
+    # tombstone decoding to Linux's own folder, this pull would bring it back.
+    other = Machine(tmp_path, store, "other", "/home/other", "dddddddd")
+    other.checkout("/home/other/w")
+    other_folder = other.folder_for("/home/other/w")
+    other.memory(other_folder, "doomed.md", "doomed\n")
+    other.memory(other_folder, "keep.md", "keep\n")
+    other.push()
     (linux.claude / "projects" / linux_folder / "memory/doomed.md").unlink()
     linux.pull()
     assert not (linux.claude / "projects" / linux_folder / "memory/doomed.md").exists()
+    assert (linux.claude / "projects" / linux_folder / "memory/keep.md").exists()
     assert keep.exists()
 
 
@@ -1150,8 +1173,6 @@ def test_collision_keeps_every_sha_and_applies_only_the_identity_entry(mac):
     )
     data["sources"]["claude"]["wire_names"] = True
     mac.config["sync"]["sources"][0]["path"] = str(mac.claude)
-    git_dir = mac.fs_root / "Users/kb/foo/.git/config"
-    git_dir.write_text(git_dir.read_text().replace("acme/widgets", "acme/widgets"))
     with mac.on():
         loaded = manifest.load_manifest(json.dumps(data).encode())
         files = loaded["sources"]["claude"]["files"]
@@ -1196,10 +1217,10 @@ def test_old_form_peer_on_another_home_applies_nothing_and_mints_nothing(mac, li
     assert linux.published()["tombstones"] == {}
     assert "-Users-" not in "".join(wire_keys(linux.published()))
     clause = pullflow.old_form_clause(result)
-    assert clause == "1 file from mac wait until it publishes shared names (mm status)"
+    assert clause == "1 file from mac waits until it publishes shared names (mm status)"
     assert "waiting for" not in clause
     assert (
-        pullflow.old_form_detail(result) == "1 file from mac wait until it publishes shared names"
+        pullflow.old_form_detail(result) == "1 file from mac waits until it publishes shared names"
     )
 
 
@@ -1225,10 +1246,21 @@ def test_an_old_form_tombstone_removes_no_local_bytes(tmp_path, store, mac):
     )
     twin.pull()
     local = twin.claude / "projects/-Users-kb-scratch/memory/note.md"
+    twin_gone = twin.claude / "projects/-Users-kb-scratch/memory/gone.md"
     (mac.claude / "projects/-Users-kb-scratch/memory/gone.md").unlink()
     seed_old_form(mac, {})
+    third = Machine(tmp_path, store, "third", "/Users/kb", "eeeeeeee")
+    seed_old_form(
+        third,
+        {"-Users-kb-scratch/memory/gone.md": "y\n", "-Users-kb-scratch/memory/more.md": "z\n"},
+    )
     twin.pull()
-    assert local.read_text() == "x\n"
+    # The tombstone removes no local bytes, and it suppresses only its own path.
+    assert twin_gone.read_text() == "y\n" and local.read_text() == "x\n"
+    twin_gone.unlink()
+    twin.pull()
+    assert not twin_gone.exists()
+    assert (twin.claude / "projects/-Users-kb-scratch/memory/more.md").read_text() == "z\n"
 
 
 # ── history: one row per peer ────────────────────────────────────────
@@ -1237,7 +1269,7 @@ def test_an_old_form_tombstone_removes_no_local_bytes(tmp_path, store, mac):
 def test_unplaceable_names_write_one_history_row_per_peer(mac, linux):
     mac.checkout("/Users/kb/Dev/widgets")
     folder = mac.folder_for("/Users/kb/Dev/widgets")
-    for i in range(30):
+    for i in range(300):
         mac.memory(folder, f"f{i}.md", f"{i}\n")
     mac.push()
     from mind_meld import pullhistory
@@ -1455,15 +1487,41 @@ def test_status_never_masks_a_conflict_or_content_counts_with_the_names_verdict(
         / "memory"
         / "x.sync-conflict-20260101-000000-v1-bbbbbbbb.md"
     ).write_text("c")
-    result = mac.cli("status")
-    assert "unresolved conflicts" in first_line(result) or "waiting to push" in first_line(result)
+    from mind_meld import statusflow
+
+    idle = {"selected": None, "unknown_reason": None, "unresolved": False}
+    verdict = lambda **kw: statusflow._status_verdict(  # noqa: E731
+        **{
+            "source": None,
+            "blocking": None,
+            "conflicts": 0,
+            "projection": {"pull": idle, "push": idle},
+            "counts": (0, 0, 0),
+            "metadata": True,
+            "first_push": False,
+            "names_ready": True,
+            **kw,
+        }
+    )
+    ready = "Project memory ready to publish under shared names. Run: mm push"
+    assert verdict() == ready
+    assert verdict(conflicts=1).startswith("1 unresolved conflicts")
+    assert "1 new" in verdict(counts=(1, 0, 0))
+    stuck = {"selected": {"cause": "degraded"}, "unknown_reason": None, "unresolved": True}
+    assert "needs attention" in verdict(projection={"pull": stuck, "push": idle})
 
 
 def test_status_source_other_prints_no_project_name_text(mac):
     mac.checkout("/Users/kb/Dev/widgets")
     folder = mac.folder_for("/Users/kb/Dev/widgets")
+    notes = mac.home / "notes-src"
+    notes.mkdir()
+    (notes / "n.md").write_text("n\n")
+    mac.config["sync"]["sources"].append({"name": "notes", "path": str(notes), "type": "generic"})
     seed_old_form(mac, {f"{folder}/memory/MEMORY.md": "a\n"})
     result = mac.cli("status", "--source", "notes")
+    assert result.exit_code == 0, result.output
+    assert first_line(result).startswith("Source 'notes'")
     assert "shared names" not in result.output and "Not placed here" not in result.output
 
 
@@ -1486,8 +1544,8 @@ def test_status_old_form_row_names_the_machine_and_its_remedy(mac, linux):
     seed_old_form(mac, {"-Users-kb-scratch/memory/note.md": "x\n"})
     result = linux.cli("status")
     lines = result.output.splitlines()
-    row = next(line for line in lines if "wait until it publishes shared names" in line)
-    assert row.startswith("1 file from mac wait until it publishes shared names. On mac (")
+    row = next(line for line in lines if "until it publishes shared names" in line)
+    assert row.startswith("1 file from mac waits until it publishes shared names. On mac (")
     assert "mm update, then mm push" in row
     assert any(line.startswith("If one of these machines is gone for good: ") for line in lines)
     assert "https://github.com/kbitz/mind-meld#retiring-a-dead-machine" in result.output
@@ -1502,17 +1560,13 @@ def test_status_old_form_row_below_1_3_0_or_unknown_names_the_install_command(ma
     record["last_seen_version"] = "0.12.13"
     backend.put(f"devices/{mac.device_id}.json", json.dumps(record).encode())
     row = next(
-        line
-        for line in linux.cli("status").output.splitlines()
-        if "wait until it publishes" in line
+        line for line in linux.cli("status").output.splitlines() if "until it publishes" in line
     )
     assert "(0.12.13, last push" in row and f"{upgrade.INSTALL_CMD}, then mm push" in row
     del record["last_seen_version"]
     backend.put(f"devices/{mac.device_id}.json", json.dumps(record).encode())
     row = next(
-        line
-        for line in linux.cli("status").output.splitlines()
-        if "wait until it publishes" in line
+        line for line in linux.cli("status").output.splitlines() if "until it publishes" in line
     )
     assert "On mac (version unknown): " + upgrade.INSTALL_CMD in row
 
@@ -1522,14 +1576,14 @@ def test_status_prints_no_row_for_a_same_home_older_peer_or_a_vanished_one(
 ):
     twin = Machine(tmp_path, store, "twin", "/Users/kb", "dddddddd")
     seed_old_form(mac, {"-Users-kb-scratch/memory/note.md": "x\n"})
-    assert "wait until" not in twin.cli("status").output
+    assert "until it publishes" not in twin.cli("status").output
     other = Machine(tmp_path, store, "far", "/home/far", "eeeeeeee")
     monkeypatch.setattr(
         core,
         "_fetch_remote_manifest",
         lambda *a, **k: core.ManifestFetch(status="missing", vanished=True),
     )
-    assert "wait until" not in other.cli("status").output
+    assert "until it publishes" not in other.cli("status").output
 
 
 def test_status_home_and_encoding_texts(mac, monkeypatch):
@@ -1546,7 +1600,7 @@ def test_status_home_and_encoding_texts(mac, monkeypatch):
         from mind_meld import statusflow
 
         lines = statusflow._project_name_lines(
-            LocalBackend(mac.store), [], mac.device_id, PASSPHRASE, MEMORY_KB, own_prior=None
+            LocalBackend(mac.store), [], mac.device_id, PASSPHRASE, MEMORY_KB
         )
     assert lines == [
         "Project memory syncs by path: could not resolve this machine's home folder "
@@ -1633,8 +1687,13 @@ def test_h1_the_new_form_publishes_beside_any_kind_of_peer(mac, entry):
     assert mac.first_byte() == crypto.MANIFEST_FORMAT_VERSION
 
 
-def test_h2_two_updated_machines_sync_while_an_older_one_stays_silent(mac, linux):
+def test_h2_two_updated_machines_sync_while_an_older_one_stays_silent(tmp_path, store, mac, linux):
     backend = LocalBackend(mac.store)
+    older = Machine(tmp_path, store, "old-mac", "/Users/old", "cccccccc")
+    seed_old_form(older, {"-Users-old-scratch/memory/note.md": "old\n"})
+    before = {k: backend.get(k) for k in backend.list_keys("manifests/cccccccc/")}
+    before |= {k: backend.get(k) for k in backend.list_keys("data/cccccccc/")}
+    assert before
     silent = {
         "device_id": "cccccccc",
         "device_name": "old-mac",
@@ -1656,8 +1715,9 @@ def test_h2_two_updated_machines_sync_while_an_older_one_stays_silent(mac, linux
     mac.pull()
     assert "- linux" in (mac.claude / "projects" / mac_folder / "memory/MEMORY.md").read_text()
     assert not mac.published()["tombstones"] and not linux.published()["tombstones"]
-    assert not [k for k in backend.list_keys("manifests/") if "cccccccc" in k]
-    assert not backend.list_keys("data/cccccccc/")
+    after = {k: backend.get(k) for k in backend.list_keys("manifests/cccccccc/")}
+    after |= {k: backend.get(k) for k in backend.list_keys("data/cccccccc/")}
+    assert after == before  # the silent machine's manifest and blobs are byte-identical
 
 
 def test_h3_one_machine_at_a_time(tmp_path, store, mac, linux):
@@ -1786,8 +1846,14 @@ def test_autopush_switch_leaves_a_breadcrumb_and_prints_nothing(mac):
     mac.checkout("/Users/kb/Dev/widgets")
     folder = mac.folder_for("/Users/kb/Dev/widgets")
     seed_old_form(mac, {f"{folder}/memory/MEMORY.md": "a\n"})
+    backend = LocalBackend(mac.store)
+    orphan = f"data/{mac.device_id}/" + "f" * 64
+    backend.put(orphan, b"an orphan a GC would collect")
+    blobs = sorted(backend.list_keys("data/"))
     result = mac.cli("autopush")
     assert result.exit_code == 0, result.output
+    assert mac.published()["tombstones"] == {}
+    assert sorted(backend.list_keys("data/")) == blobs  # no new blob, and no GC ran
     assert (result.output + (result.stderr or "")).strip() == ""
     crumb = json.loads((mac.sidecar_dir / "last-autorun.json").read_text())
     assert crumb["push"]["outcome"] == "success"
@@ -1803,7 +1869,7 @@ def test_autopull_breadcrumb_names_an_old_form_peer_without_a_pointer(mac, linux
     result = linux.cli("autopull")
     assert result.exit_code == 0, result.output
     detail = json.loads((linux.sidecar_dir / "last-autorun.json").read_text())["pull"]["detail"]
-    assert detail == "1 file from mac wait until it publishes shared names"
+    assert detail == "1 file from mac waits until it publishes shared names"
 
 
 def test_a_join_adds_the_not_placed_line_once(mac, linux):
@@ -1832,6 +1898,23 @@ def test_a_join_adds_the_not_placed_line_once(mac, linux):
         )
     text = out.getvalue()
     assert text.count("Not placed here: 1 file in 1 project with no known checkout") == 1
+    # A join run inside a checkout places it instead.
+    linux.cwd = linux.checkout("/home/kb/src/widgets")
+    with linux.on(), pytest.MonkeyPatch.context() as mp:
+        mp.setattr(config_module, "CONFIG_PATH", config_path)
+        mp.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        cli._attended_pull(
+            from_device=None,
+            source=None,
+            verbose=False,
+            dry_run=False,
+            conflict_mode="keep-both",
+            passphrase=PASSPHRASE,
+            join=True,
+        )
+    assert (
+        linux.claude / "projects" / linux.folder_for("/home/kb/src/widgets") / "memory/a.md"
+    ).read_text() == "x\n"
 
 
 def test_moving_a_device_entry_aside_stops_its_clause_and_moving_it_back_restores_it(mac, linux):
@@ -1841,9 +1924,12 @@ def test_moving_a_device_entry_aside_stops_its_clause_and_moving_it_back_restore
     entry.rename(aside)
     blobs = sorted(LocalBackend(mac.store).list_keys(f"data/{mac.device_id}/"))
     assert linux.pull().old_form_peers == []
-    assert "wait until" not in linux.cli("status").output
-    # The retired machine's blobs are untouched by this release's own-device GC.
-    linux.cli("gc")
+    assert "until it publishes" not in linux.cli("status").output
+    # The retired machine's blobs are untouched by this release's own-device GC,
+    # which really runs here: Linux has a manifest of its own.
+    linux.memory("-home-kb-mine", "own.md", "own\n")
+    linux.push()
+    assert linux.cli("gc").exit_code == 0
     assert sorted(LocalBackend(mac.store).list_keys(f"data/{mac.device_id}/")) == blobs
     aside.rename(entry)
     assert [p.device_name for p in linux.pull().old_form_peers] == ["mac"]
@@ -1998,3 +2084,415 @@ def test_status_shows_a_rename_as_ready_to_publish_not_as_deletions(mac):
     assert "deleted" not in first_line(result) and "- 1 deleted" not in result.output
     mac.push()
     assert first_line(mac.cli("status")) == "In sync with this device's last push."
+
+
+# ── review findings: what a real fleet does to the codec ─────────────
+
+
+def _worktree_of(machine: Machine, main: Path, rel: str) -> str:
+    """A linked worktree of ``main`` at ``rel``; returns its Claude folder name."""
+    wt_git = main / ".git" / "worktrees" / rel.replace("/", "_")
+    wt_git.mkdir(parents=True)
+    (wt_git / "HEAD").write_text("ref: refs/heads/feature\n")
+    (wt_git / "commondir").write_text("../..\n")
+    worktree = machine.fs_root / rel.strip("/")
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {wt_git}\n")
+    return machine.folder_for(rel)
+
+
+def _corrupt_own_manifest(machine: Machine) -> None:
+    (Path(machine.store) / manifest_key(machine.device_id)).write_bytes(b"corrupt")
+
+
+def test_a_malformed_origin_disturbs_no_other_folder(mac, capfd):
+    mac.checkout("/Users/kb/aaa", "https://[bad/foo")
+    mac.checkout("/Users/kb/zzz", "git@github.com:acme/zzz.git")
+    bad, good = mac.folder_for("/Users/kb/aaa"), mac.folder_for("/Users/kb/zzz")
+    mac.memory(bad, text="a\n")
+    mac.memory(good, text="z\n")
+    idx = index_for(mac)
+    assert idx.owners == {"github.com/acme/zzz": good}
+    assert not idx.timed_out
+    assert next(r for r in idx.rows if r.folder == bad).why == projectid.WHY_LOCAL_REMOTE
+    assert "Traceback" not in capfd.readouterr().err
+    mac.push()
+    assert "Traceback" not in capfd.readouterr().err
+    assert f"projects/{projectid.git_wire('github.com/acme/zzz')}/memory/MEMORY.md" in wire_keys(
+        mac.published()
+    )
+
+
+def test_an_unexpected_read_failure_marks_one_folder_unknown(mac, capfd):
+    """A NUL in a ``.git`` file raises ``ValueError``; the worker keeps going."""
+    (mac.fs_root / "Users/kb/aaa").mkdir(parents=True)
+    (mac.fs_root / "Users/kb/aaa/.git").write_bytes(b"gitdir: /nul\x00byte\n")
+    mac.checkout("/Users/kb/zzz", "git@github.com:acme/zzz.git")
+    bad, good = mac.folder_for("/Users/kb/aaa"), mac.folder_for("/Users/kb/zzz")
+    mac.memory(bad, text="a\n")
+    mac.memory(good, text="z\n")
+    idx = index_for(mac)
+    assert idx.owners == {"github.com/acme/zzz": good}
+    assert next(r for r in idx.rows if r.folder == bad).why == projectid.WHY_UNREADABLE
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_pull_inside_a_checkout_with_a_malformed_origin_succeeds(mac, linux):
+    linux.memory("-home-kb-scratch", "a.md", "a\n")
+    linux.push()
+    mac.cwd = mac.checkout("/Users/kb/aaa", "https://[bad/foo")
+    mac.memory(mac.folder_for("/Users/kb/aaa"), text="a\n")
+    mac.push()
+    result = mac.cli("pull")
+    assert result.exit_code == 0, result.output
+    assert "unexpected-error" not in result.output
+    assert (mac.claude / "projects/-Users-kb-scratch/memory/a.md").exists()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        f'[remote "origin"]\n\turl = {GIT_URL} # mirror\n',
+        f'[remote "origin"]\n\turl = {GIT_URL} ; mirror\n',
+        f"[remote.origin]\n\turl = {GIT_URL}\n",
+        f'[REMOTE "origin"]\n\turl = {GIT_URL}\n',
+        f'[remote  "origin"]\n\turl = {GIT_URL}\n',
+        f'[remote "origin"]\nurl = {GIT_URL}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
+    ],
+)
+def test_index_agrees_with_git_on_what_the_parser_misreads(mac, config):
+    import subprocess
+
+    path = mac.fs_root / "Users/kb/Dev/widgets"
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    with (path / ".git/config").open("a") as fh:
+        fh.write(config)
+    folder = mac.folder_for("/Users/kb/Dev/widgets")
+    mac.memory(folder, text="x\n")
+    assert index_for(mac).owners == {IDENTITY: folder}
+
+
+def test_a_fifo_git_config_is_unknown_not_a_hang(mac):
+    path = mac.checkout("/Users/kb/Dev/widgets")
+    folder = mac.folder_for("/Users/kb/Dev/widgets")
+    mac.memory(folder, text="x\n")
+    (path / ".git/config").unlink()
+    os.mkfifo(path / ".git/config")
+    with mac.on():
+        projectid.configure(mac.claude, retained={WIRE: folder})
+        idx = projectid.index()
+    assert not idx.timed_out
+    assert idx.owners == {IDENTITY: folder}  # unknown keeps the retained identity
+
+
+def test_the_current_directory_probe_is_bounded(mac, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(projectid, "INDEX_DEADLINE_SECONDS", 0.2)
+    monkeypatch.setattr(projectid, "_cwd_nomination", lambda root: release.wait(5))
+    with mac.on():
+        projectid.allow_cwd_candidate()
+        start = time.monotonic()
+        idx = projectid.index()
+        elapsed = time.monotonic() - start
+        release.set()
+    assert elapsed < 2.0
+    assert idx.timed_out and idx.cwd.why == projectid.WHY_TIMED_OUT
+
+
+def test_the_current_directory_needs_a_real_git_dir(mac):
+    fake = mac.fs_root / "Users/kb/fake"
+    (fake / ".git").mkdir(parents=True)
+    (fake / ".git/config").write_text(f'[remote "origin"]\n\turl = {GIT_URL}\n')
+    mac.cwd = fake
+    with mac.on():
+        projectid.allow_cwd_candidate()
+        idx = projectid.index()
+    assert idx.owners == {} and idx.cwd.identity is None
+
+
+def test_own_tombstones_survive_a_checkout_that_goes_away_and_returns(mac, linux):
+    import shutil
+
+    checkout = mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    mac.memory(folder, "keep.md", "k\n")
+    doomed = mac.memory(folder, "del.md", "d\n")
+    mac.push()
+    twin = linux.checkout("/home/kb/x/p")
+    linux.cwd = twin
+    linux.pull()
+    linux.push()
+    doomed.unlink()
+    mac.push()
+    key = f"claude:projects/{WIRE}/memory/del.md"
+    assert list(mac.published()["tombstones"]) == [key]
+
+    moved = checkout.with_name("proj-renamed")
+    shutil.move(checkout, moved)
+    result = mac.cli("autopush")
+    assert result.exit_code == 0, result.output
+    assert list(mac.published()["tombstones"]) == [key]  # not erased while the checkout is away
+
+    shutil.move(moved, checkout)
+    mac.push()
+    mac.pull()
+    assert not doomed.exists()  # the peer still lists it; the deletion holds
+    assert list(mac.published()["tombstones"]) == [key]
+
+
+def _with_second_source(machine: Machine) -> None:
+    notes = machine.home / "notes-src"
+    notes.mkdir(exist_ok=True)
+    (notes / "n.md").write_text("n\n")
+    machine.config["sync"]["sources"].append(
+        {"name": "notes", "path": str(notes), "type": "generic"}
+    )
+
+
+@pytest.mark.parametrize("push_after_enable", [False, True])
+def test_disabling_claude_keeps_its_deletion_records(mac, linux, push_after_enable):
+    mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    _with_second_source(mac)
+    mac.memory(folder, "keep.md", "k\n")
+    doomed = mac.memory(folder, "del.md", "d\n")
+    mac.memory("-Users-kb-loose", "gone.md", "g\n")
+    mac.memory("-Users-kb-loose", "stay.md", "s\n")
+    mac.push()
+    linux.cwd = linux.checkout("/home/kb/x/p")
+    linux.pull()
+    linux.push()
+    doomed.unlink()
+    (mac.claude / "projects/-Users-kb-loose/memory/gone.md").unlink()
+    mac.push()
+    keys = set(mac.published()["tombstones"])
+    assert keys == {
+        f"claude:projects/{WIRE}/memory/del.md",
+        "claude:projects/@home-loose/memory/gone.md",
+    }
+
+    mac.config["sync"]["disabled_sources"] = ["claude"]
+    (mac.home / "notes-src/n.md").write_text("changed\n")
+    mac.push()
+    assert set(mac.published()["tombstones"]) == keys  # disabling must not undo a deletion
+
+    mac.config["sync"]["disabled_sources"] = []
+    if push_after_enable:
+        mac.push()  # a carried @home name beside its folder must not collide
+        assert set(mac.published()["tombstones"]) == keys
+    mac.pull()
+    assert not doomed.exists()
+    assert not (mac.claude / "projects/-Users-kb-loose/memory/gone.md").exists()
+
+
+def test_deleting_a_project_folder_with_a_live_checkout_stays_deleted(mac, linux):
+    import shutil
+
+    checkout = mac.checkout("/Users/kb/proj")
+    folder = mac.folder_for("/Users/kb/proj")
+    first = mac.memory(folder, "a.md", "a\n")
+    mac.memory(folder, "b.md", "b\n")
+    mac.push()
+    linux.cwd = linux.checkout("/home/kb/x/p")
+    linux.pull()
+    linux.push()
+
+    shutil.rmtree(mac.claude / "projects" / folder)
+    result = mac.cli("status")
+    assert "0 new, 0 modified and 2 deleted waiting to push" in first_line(result)
+    pushed = mac.push()
+    assert pushed.total_deleted == 2 and not pushed.names_updated
+    assert set(mac.published()["tombstones"]) == {
+        f"claude:projects/{WIRE}/memory/a.md",
+        f"claude:projects/{WIRE}/memory/b.md",
+    }
+    mac.cwd = checkout
+    mac.pull()
+    assert not first.exists()  # a reset of a project's memory does not undo itself
+
+
+def test_a_changed_home_mints_no_tombstone_and_settles(mac):
+    import shutil
+
+    mac.memory("-Users-kb-loose", "a.md", "a\n")
+    mac.push()
+    assert wire_keys(mac.published()) == ["projects/@home-loose/memory/a.md"]
+    new_home = mac.fs_root / "Users/renamed"
+    shutil.move(mac.home, new_home)
+    mac.home = new_home
+    mac.claude = new_home / ".claude"
+    mac.config["sync"]["sources"][0]["path"] = str(mac.claude)
+
+    result = mac.push()
+    assert result is not None and not result.content_changed and result.names_updated
+    published = mac.published()
+    assert published["tombstones"] == {}
+    assert wire_keys(published) == ["projects/-Users-kb-loose/memory/a.md"]
+    assert mac.push() is None  # it settles
+
+
+def test_sidecar_recovery_after_a_folder_moved_with_its_checkout_mints_nothing(mac):
+    import shutil
+
+    checkout = mac.checkout("/Users/kb/old/widgets")
+    old = mac.folder_for("/Users/kb/old/widgets")
+    mac.memory(old, "a.md", "a\n")
+    mac.push()
+    new_checkout = mac.fs_root / "Users/kb/new/widgets"
+    new_checkout.parent.mkdir(parents=True)
+    shutil.move(checkout, new_checkout)
+    new = mac.folder_for("/Users/kb/new/widgets")
+    shutil.move(mac.claude / "projects" / old, mac.claude / "projects" / new)
+    _corrupt_own_manifest(mac)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    assert mac.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+
+
+def test_sidecar_recovery_when_the_identity_has_no_owner_mints_nothing(mac):
+    import shutil
+
+    mac.checkout("/Users/kb/old/widgets")
+    old = mac.folder_for("/Users/kb/old/widgets")
+    mac.memory(old, "a.md", "a\n")
+    mac.push()
+    shutil.rmtree(mac.fs_root / "Users/kb/old")
+    shutil.rmtree(mac.claude / "projects" / old)
+    _corrupt_own_manifest(mac)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+def test_a_peers_stale_0x02_copy_keeps_no_old_form_row(mac, linux):
+    mac.checkout("/Users/kb/Dev/widgets")
+    folder = mac.folder_for("/Users/kb/Dev/widgets")
+    mac.memory(folder, "a.md", "a\n")
+    seed_old_form(mac, {"-Users-kb-loose/memory/z.md": "z\n"})
+    stale = (Path(mac.store) / manifest_key(mac.device_id)).read_bytes()
+    assert mac.push() is not None
+    copy = Path(mac.store) / manifest_key(mac.device_id)
+    copy.with_name(copy.name.replace(".enc", " 2.enc")).write_bytes(stale)
+    assert mac.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    assert linux.pull().old_form_peers == []
+    assert "until it publishes" not in linux.cli("status").output
+
+
+def test_encoding_warning_is_silent_on_an_incomplete_index(mac, monkeypatch):
+    mac.memory("-Users-kb-ghost", "a.md", "x\n")
+    (mac.claude / "projects/-Users-kb-ghost/session.jsonl").write_text("{}\n")
+    real_decode = projectid._decode
+
+    def boom(*args, **kwargs):
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(projectid, "_decode", boom)
+    with mac.on():
+        assert projectid.encoding_suspect() is False
+    monkeypatch.setattr(projectid, "_decode", real_decode)
+    with mac.on():
+        assert projectid.encoding_suspect() is True
+
+
+def test_two_nominations_of_one_folder_keep_one_owner(mac):
+    """``a-b`` and ``a.b`` encode alike: only one of their identities may own that name."""
+    one = mac.checkout("/Users/kb/a-b", "git@github.com:acme/one.git")
+    two = mac.checkout("/Users/kb/a.b", "git@github.com:acme/two.git")
+    mac.memory(_worktree_of(mac, one, "/Users/kb/wt/one"), text="x\n")
+    mac.memory(_worktree_of(mac, two, "/Users/kb/wt/two"), text="y\n")
+    owners = index_for(mac).owners
+    assert len(owners) == 1 and len(set(owners.values())) == 1
+
+
+def test_two_spellings_of_one_identity_keep_both_shas(mac):
+    mac.checkout("/Users/kb/foo")
+    folder = mac.folder_for("/Users/kb/foo")
+    mac.memory(folder, "a.md", "x")
+    data = local_manifest(
+        {
+            "projects/@git-github.com%2Facme%2Fwidgets/memory/a.md": "1",
+            "projects/@git-github.com%2facme%2fwidgets/memory/a.md": "2",
+        }
+    )
+    data["sources"]["claude"]["wire_names"] = True
+    with mac.on():
+        files = manifest.load_manifest(json.dumps(data).encode())["sources"]["claude"]["files"]
+    assert {info["sha256"] for info in files.values()} == {"1", "2"}
+
+
+@pytest.mark.parametrize("value", [["-Users-kb-keep"], 5])
+def test_a_serialized_moved_folders_is_ignored_at_load(mac, value):
+    data = local_manifest({"projects/-opt-shared/memory/a.md": "1"})
+    data["sources"]["claude"]["wire_names"] = True
+    data["sources"]["claude"]["moved_folders"] = value
+    with mac.on():
+        loaded = manifest.load_manifest(json.dumps(data).encode())
+    assert "moved_folders" not in loaded["sources"]["claude"]
+
+
+def test_pull_of_another_source_reports_no_project_state(mac, linux):
+    seed_old_form(mac, {"-Users-kb-scratch/memory/note.md": "x\n"})
+    result = linux.pull(source_filter="notes")
+    assert result.old_form_peers == [] and result.not_placed_projects == 0
+
+
+def test_autopush_switch_keeps_its_trail_beside_other_details(mac, monkeypatch):
+    from mind_meld import cli as cli_module
+
+    def fake_push(*args, **kwargs):
+        return PushResult(wire_names_published=True, maintenance_failures=1)
+
+    monkeypatch.setattr(cli_module, "_push_core", fake_push)
+    mac.memory("-Users-kb-loose", "a.md", "a\n")
+    assert mac.cli("autopush").exit_code == 0
+    crumb = json.loads((mac.sidecar_dir / "last-autorun.json").read_text())["push"]
+    assert crumb["outcome"] == "degraded"
+    assert "published under shared names" in crumb["detail"]
+    assert "maintenance failure" in crumb["detail"]
+
+
+def test_the_sidecar_is_read_only_when_the_index_is_built(mac, monkeypatch):
+    calls = []
+    real_read = sidecar.read
+
+    def spy(device_id):
+        calls.append(device_id)
+        return real_read(device_id)
+
+    monkeypatch.setattr(sidecar, "read", spy)
+    with mac.on():
+        core._configure_project_names(mac.config)
+        assert calls == []
+        projectid.index()
+        assert calls == [mac.device_id]
+
+
+def test_mm_gc_keeps_both_shas_of_a_collision_and_collects_a_real_orphan(mac):
+    """(k), through `mm gc`'s real reference set: a displaced entry's blob stays."""
+    from mind_meld.storage.keys import blob_key
+
+    mac.checkout("/Users/kb/foo")
+    folder = mac.folder_for("/Users/kb/foo")
+    mac.memory(folder, "a.md", "x")
+    mac.push()
+    path = Path(mac.store) / manifest_key(mac.device_id)
+    with mac.on():
+        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
+    identity_sha, literal_sha, orphan = "1" * 64, "2" * 64, "3" * 64
+    data["sources"]["claude"]["files"] = {
+        f"projects/{WIRE}/memory/a.md": {"sha256": identity_sha, "size": 1, "mtime": None},
+        f"projects/{folder}/memory/a.md": {"sha256": literal_sha, "size": 1, "mtime": None},
+    }
+    with mac.on():
+        path.write_bytes(
+            crypto.encrypt_manifest(
+                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=True
+            )
+        )
+    backend = LocalBackend(mac.store)
+    for sha in (identity_sha, literal_sha, orphan):
+        backend.put(blob_key(mac.device_id, sha), b"blob")
+    assert mac.cli("gc").exit_code == 0
+    assert backend.exists(blob_key(mac.device_id, identity_sha))
+    assert backend.exists(blob_key(mac.device_id, literal_sha))
+    assert not backend.exists(blob_key(mac.device_id, orphan))

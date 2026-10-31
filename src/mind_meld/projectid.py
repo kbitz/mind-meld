@@ -27,9 +27,10 @@ import re
 import stat
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import quote, unquote, urlsplit
 
 from mind_meld import gitenv, safety
@@ -220,6 +221,10 @@ def _origin_remote_url(root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PORTS = {"https": 443, "http": 80, "git": 9418, "ssh": 22}
+# scp-form with no user: `host:path`. git treats a colon before any slash this
+# way; one letter before it is a drive, not a host.
+_SCP_NO_USER = re.compile(r"^(?P<host>[^@:/\s]{2,}):(?P<path>[^\s]+)$")
+_PATH_PARAMS = re.compile(r"[?#;]")
 
 
 def project_identity(url: object) -> str | None:
@@ -230,12 +235,13 @@ def project_identity(url: object) -> str | None:
     non-default port kept as ``host:port/path`` and a trailing ``.git/``
     normalized, so ``git@host:foo/bar`` equals ``https://host/foo/bar``. An
     ``ssh`` or scp form with another user keeps only that user name,
-    ``user@host/path``, so ``alice@host:repo`` and ``bob@host:repo`` differ;
-    a password never survives. Local paths, ``file://``, a host-only form, a
-    control character and a bad port have no identity. This name authorizes
-    writes and deletions, so two repositories on one host's different ports
-    never merge; ``retro-fleet``'s grouping keeps using the looser
-    ``canonicalize_remote_url``.
+    ``user@host/path`` with a leading ``/`` kept, so ``alice@host:repo``,
+    ``bob@host:repo`` and ``alice@host:/repo`` all differ; a password, a query
+    and path parameters never survive. Local paths, ``file://``, a loopback
+    host, a host-only form, a control character and a malformed URL or port
+    have no identity. This name authorizes writes and deletions, so two
+    repositories on one host's different ports never merge; ``retro-fleet``'s
+    grouping keeps using the looser ``canonicalize_remote_url``.
     """
     if not isinstance(url, str):
         return None
@@ -246,28 +252,28 @@ def project_identity(url: object) -> str | None:
     port: int | None = None
     scheme: str
     if "://" in s:
-        parts = urlsplit(s)
+        try:
+            parts = urlsplit(s)
+            port = parts.port
+        except ValueError:
+            return None
         scheme = parts.scheme.lower()
         if scheme not in _DEFAULT_PORTS:
             return None
         host = (parts.hostname or "").lower()
-        try:
-            port = parts.port
-        except ValueError:
-            return None
         user = parts.username if scheme == "ssh" else None
         path = parts.path or ""
     else:
-        m = _SCP_FORM.match(s)
+        m = _SCP_FORM.match(s) or _SCP_NO_USER.match(s)
         if m is None:
             return None
         scheme = "ssh"
         host = m.group("host").lower()
-        user = m.group("user")
+        user = m.groupdict().get("user")
         path = m.group("path")
-    if not host:
+    if not host or host == "localhost" or host == "::1" or host.startswith("127."):
         return None
-    path = path.rstrip("/")
+    path = _PATH_PARAMS.split(path, maxsplit=1)[0].rstrip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
     path = path.rstrip("/")
@@ -278,7 +284,7 @@ def project_identity(url: object) -> str | None:
         path = path.lstrip("/")
     port_part = f":{port}" if port is not None and port != _DEFAULT_PORTS[scheme] else ""
     if other_user:
-        return f"{user}@{host}{port_part}" + (path if path.startswith("/") else f"/{path}")
+        return f"{user}@{host}{port_part}/{path}"
     return f"{host}{port_part}/{path}"
 
 
@@ -316,9 +322,23 @@ def unplaceable_reason(folder: str) -> str | None:
         return "unplaced"
     if folder.startswith(OLD_PREFIX):
         return "old_form"
-    if folder == HOME_NAME or folder.startswith(HOME_NAME + "-") or folder.startswith(LIT_PREFIX):
+    if is_home_form(folder) or folder.startswith(LIT_PREFIX):
         return "superseded"
     return "unplaced"
+
+
+def is_home_form(folder: str) -> bool:
+    return folder == HOME_NAME or folder.startswith(HOME_NAME + "-")
+
+
+def carries_a_deletion(folder: str) -> bool:
+    """True for a wire name whose tombstones still mean something if it stays literal.
+
+    ``@git-`` and ``@home`` forms map back to a local folder when the owner or
+    home returns, so this machine's own deletion records under them are kept
+    while they stay literal. ``@old-`` and ``@lit-`` names never map back.
+    """
+    return folder.startswith(GIT_PREFIX) or is_home_form(folder)
 
 
 # ---------------------------------------------------------------------------
@@ -409,9 +429,9 @@ class Index:
     clones: tuple[Clone, ...]
     decoded: int
     timed_out: bool
-    timed_out_path: str | None
     cwd: CwdInfo | None
     claude_dir: Path
+    claude_real: str
     home_enc: str | None
 
     @property
@@ -432,10 +452,15 @@ class Index:
         return folder
 
 
+# The sidecar's ``wire_folders`` (wire name -> local folder), or a callable that
+# reads them when the index is built.
+Retained = Mapping[str, Any] | Callable[[], Mapping[str, Any] | None] | None
+
+
 @dataclass
 class _Context:
     claude_dir: Path | None = None
-    retained: dict[str, str] = field(default_factory=dict)  # folder -> identity
+    retained: Retained = None
     cwd_candidate: bool = False
     index: Index | None = None
     home_checked: bool = False
@@ -446,21 +471,31 @@ class _Context:
 _CTX = _Context()
 
 
-def configure(claude_dir: Path | str | None, *, retained: Mapping[str, Any] | None = None) -> None:
+def _retained_by_folder(retained: Retained) -> dict[str, str]:
+    """``folder -> identity`` from the sidecar's ``wire_folders``; never raises."""
+    try:
+        recorded = retained() if callable(retained) else retained
+        by_folder: dict[str, str] = {}
+        for wire, folder in (recorded or {}).items():
+            identity = wire_identity(wire) if isinstance(wire, str) else None
+            if identity is not None and isinstance(folder, str) and folder:
+                by_folder[folder] = identity
+        return by_folder
+    except Exception:
+        return {}
+
+
+def configure(claude_dir: Path | str | None, *, retained: Retained = None) -> None:
     """Set the process-wide context and drop any built index.
 
-    ``retained`` is the sidecar's ``wire_folders`` (wire name -> local folder):
-    a folder whose resolution later times out or cannot be read keeps the
-    identity recorded for it there.
+    ``retained`` is the sidecar's ``wire_folders`` (wire name -> local folder),
+    or a callable returning them, read only when the index is built: a folder
+    whose resolution later times out or cannot be read keeps the identity
+    recorded for it there, and so does a folder deleted while its checkout lives.
     """
-    by_folder: dict[str, str] = {}
-    for wire, folder in (retained or {}).items():
-        identity = wire_identity(wire) if isinstance(wire, str) else None
-        if identity is not None and isinstance(folder, str) and folder:
-            by_folder[folder] = identity
     with _CTX.lock:
         _CTX.claude_dir = Path(claude_dir) if claude_dir is not None else None
-        _CTX.retained = by_folder
+        _CTX.retained = retained
         _CTX.cwd_candidate = False
         _CTX.index = None
         _CTX.home_checked = False
@@ -468,7 +503,7 @@ def configure(claude_dir: Path | str | None, *, retained: Mapping[str, Any] | No
 
 
 def reset() -> None:
-    """Clear the context (tests, and a source that is no longer selected)."""
+    """Clear the context (tests)."""
     configure(None)
 
 
@@ -522,13 +557,11 @@ class _Memo:
 
     def __init__(self) -> None:
         self._listings: dict[Path, list[tuple[str, str]]] = {}
-        self.current: str | None = None
 
     def subdirs(self, directory: Path) -> list[tuple[str, str]]:
         cached = self._listings.get(directory)
         if cached is not None:
             return cached
-        self.current = str(directory)
         out: list[tuple[str, str]] = []
         try:
             with os.scandir(directory) as it:
@@ -588,6 +621,9 @@ def _lstat(path: Path) -> os.stat_result | None:
         raise _Unknown(WHY_UNREADABLE) from exc
 
 
+_NEEDS_GIT = re.compile(r'["\\\s#;]')
+
+
 def _read_origin(checkout: Path) -> str:
     """The ``origin`` URL of a main checkout, ``""`` when it has none.
 
@@ -597,6 +633,8 @@ def _read_origin(checkout: Path) -> str:
     """
     config_path = checkout / ".git" / "config"
     try:
+        if not stat.S_ISREG(os.stat(config_path).st_mode):
+            raise _Unknown(WHY_UNREADABLE)  # a FIFO would block the read forever
         text = config_path.read_text(encoding="utf-8")
     except _GONE:
         return ""
@@ -607,15 +645,17 @@ def _read_origin(checkout: Path) -> str:
     parser = configparser.RawConfigParser(strict=False, allow_no_value=True, delimiters=("=",))
     try:
         parser.read_string(text)
-    except configparser.Error:
+        if any(section.lower().startswith("include") for section in parser.sections()):
+            return _git_origin(checkout)
+        section = 'remote "origin"'
+        if not parser.has_section(section) or not parser.has_option(section, "url"):
+            # A spelling this parser does not see: `[remote.origin]`, another case.
+            return _git_origin(checkout) if "origin" in text.lower() else ""
+        value = (parser.get(section, "url") or "").strip()
+    except Exception:
         return _git_origin(checkout)
-    if any(section.lower().startswith("include") for section in parser.sections()):
-        return _git_origin(checkout)
-    section = 'remote "origin"'
-    if not parser.has_section(section) or not parser.has_option(section, "url"):
-        return ""
-    value = (parser.get(section, "url") or "").strip()
-    if '"' in value or "\\" in value:
+    # Quotes, escapes, an inline comment or a continued line: git decides.
+    if _NEEDS_GIT.search(value):
         return _git_origin(checkout)
     return value
 
@@ -746,7 +786,7 @@ def _resolve_folder(folder: str, projects: Path, root: Path, memo: _Memo) -> _Re
             res.decoded = True
     except _Unknown as exc:
         res = _Resolution("unknown", why=exc.why)
-    except RecursionError:
+    except Exception:  # one odd folder (a NUL in a .git file) never stops the others
         res = _Resolution("unknown", why=WHY_UNREADABLE)
     res.has_memory = has_memory
     return res
@@ -800,6 +840,9 @@ def _cwd_nomination(root: Path) -> tuple[CwdInfo, str | None, str | None]:
             if st is None:
                 continue
             if stat.S_ISDIR(st.st_mode):
+                head = _lstat(dot_git / "HEAD")
+                if head is None or not stat.S_ISREG(head.st_mode):
+                    return CwdInfo(None, None, WHY_NO_CHECKOUT), None, None
                 main: Path | None = candidate
             elif stat.S_ISREG(st.st_mode):
                 main = _linked_main_checkout(candidate)
@@ -818,6 +861,8 @@ def _cwd_nomination(root: Path) -> tuple[CwdInfo, str | None, str | None]:
             return CwdInfo(identity, None, None), identity, encode_path("/" + str(rel))
     except _Unknown as exc:
         return CwdInfo(None, None, exc.why), None, None
+    except Exception:
+        return CwdInfo(None, None, WHY_UNREADABLE), None, None
     return CwdInfo(None, None, WHY_NO_CHECKOUT), None, None
 
 
@@ -827,24 +872,38 @@ def _build_index(
     root = _fs_root()
     projects = claude_dir / "projects"
     folders = _list_project_folders(projects)
-    worker = _Worker(folders, projects, root)
+    # A folder deleted from `projects/` is still resolved when it published an
+    # identity: its checkout may be alive, so the deletion is a real one.
+    deleted = sorted(set(retained) - set(folders))
+    worker = _Worker([*folders, *deleted], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
+    deadline = time.monotonic() + INDEX_DEADLINE_SECONDS
     thread.start()
-    thread.join(INDEX_DEADLINE_SECONDS)
-    timed_out = thread.is_alive()
+    cwd_box: list[tuple[CwdInfo, str | None, str | None]] = []
+    cwd_thread: threading.Thread | None = None
+    if cwd_candidate:
+        cwd_thread = threading.Thread(
+            target=lambda: cwd_box.append(_cwd_nomination(root)), name="mm-project-cwd", daemon=True
+        )
+        cwd_thread.start()
+    thread.join(max(0.0, deadline - time.monotonic()))
+    if cwd_thread is not None:
+        cwd_thread.join(max(0.0, deadline - time.monotonic()))
+    timed_out = thread.is_alive() or (cwd_thread is not None and cwd_thread.is_alive())
     worker.cancelled = True
     # Freeze one immutable snapshot: a worker finishing late appends to a list
     # this function never reads again.
     done = dict(list(worker.results))
-    timed_out_path = worker.memo.current if timed_out else None
     resolutions: dict[str, _Resolution] = {
         f: done.get(f) or _Resolution("unknown", why=WHY_TIMED_OUT) for f in folders
     }
 
     # Candidate tiers per identity: resolved folders, then retained identities
-    # for folders that could not be read, then nominations.
+    # for folders that could not be read, then a folder deleted while its
+    # checkout lives, then nominations.
     resolved: dict[str, list[str]] = {}
     held: dict[str, list[str]] = {}
+    kept: dict[str, list[str]] = {}
     nominated: dict[str, set[str]] = {}
     for folder, res in resolutions.items():
         if res.kind == "identity" and res.identity:
@@ -857,28 +916,46 @@ def _build_index(
             except ValueError:
                 continue
             nominated.setdefault(res.identity, set()).add(encode_path("/" + str(rel)))
+    for folder in deleted:
+        res = done.get(folder)
+        if res is not None and res.kind == "identity" and res.identity == retained[folder]:
+            kept.setdefault(res.identity, []).append(folder)
 
     cwd_info: CwdInfo | None = None
     if cwd_candidate:
-        cwd_info, cwd_identity, cwd_folder = _cwd_nomination(root)
-        if cwd_identity is not None and cwd_folder is not None:
-            nominated.setdefault(cwd_identity, set()).add(cwd_folder)
+        if cwd_box:
+            cwd_info, cwd_identity, cwd_folder = cwd_box[0]
+            if cwd_identity is not None and cwd_folder is not None:
+                nominated.setdefault(cwd_identity, set()).add(cwd_folder)
+        else:
+            cwd_info = CwdInfo(None, None, WHY_TIMED_OUT)
 
     def rank(folder: str) -> tuple[bool, str]:
         return (not resolutions[folder].has_memory, folder)
 
     owners: dict[str, str] = {}
     clones: list[Clone] = []
-    for identity in sorted({*resolved, *held, *nominated}):
-        if resolved.get(identity):
-            cands = sorted(resolved[identity], key=rank)
-        elif held.get(identity):
-            cands = sorted(held[identity], key=rank)
-        else:
-            cands = sorted(nominated[identity])
+    taken: set[str] = set()
+
+    def own(identity: str, cands: list[str]) -> None:
         owners[identity] = cands[0]
+        taken.add(cands[0])
         if len(cands) > 1:
             clones.append(Clone(identity, cands[0], cands[1:]))
+
+    for identity in sorted({*resolved, *held, *kept}):
+        if resolved.get(identity):
+            own(identity, sorted(resolved[identity], key=rank))
+        elif held.get(identity):
+            own(identity, sorted(held[identity], key=rank))
+        else:
+            own(identity, sorted(kept[identity]))
+    # A nomination is an encoded path, which two checkouts can share (`a-b`,
+    # `a.b`): a folder has one owner, so the first identity keeps it.
+    for identity in sorted(set(nominated) - set(owners)):
+        cands = sorted(nominated[identity] - taken)
+        if cands:
+            own(identity, cands)
     folder_identity = {folder: identity for identity, folder in owners.items()}
     if cwd_info is not None and cwd_info.identity is not None:
         cwd_info.owner = owners.get(cwd_info.identity)
@@ -909,9 +986,9 @@ def _build_index(
         clones=tuple(clones),
         decoded=sum(1 for r in resolutions.values() if r.decoded),
         timed_out=timed_out,
-        timed_out_path=timed_out_path,
         cwd=cwd_info,
         claude_dir=claude_dir,
+        claude_real=os.path.realpath(claude_dir),
         home_enc=home,
     )
 
@@ -923,26 +1000,12 @@ def index() -> Index | None:
             if _CTX.claude_dir is None or _home_enc() is None:
                 return None
             _CTX.index = _build_index(
-                _CTX.claude_dir, _CTX.retained, _CTX.cwd_candidate, _CTX.home_enc
+                _CTX.claude_dir,
+                _retained_by_folder(_CTX.retained),
+                _CTX.cwd_candidate,
+                _CTX.home_enc,
             )
         return _CTX.index
-
-
-def owner_of_identity(identity: str) -> str | None:
-    idx = index()
-    return idx.owners.get(identity) if idx is not None else None
-
-
-def owned_identity(folder: str) -> str | None:
-    """The identity a local folder owns on this machine, else ``None``."""
-    idx = index()
-    return idx.folder_identity.get(folder) if idx is not None else None
-
-
-def folder_to_wire(folder: str) -> str:
-    """The wire name a local project folder publishes under."""
-    idx = index()
-    return folder if idx is None else idx.to_wire(folder)
 
 
 def encoding_suspect() -> bool:
@@ -950,9 +1013,12 @@ def encoding_suspect() -> bool:
 
     A folder is Claude-created when listing it shows a ``*.jsonl``; nothing is
     read. This is the sign that Claude's folder naming changed on this machine.
+    An index that could not finish proves nothing about the naming.
     """
     idx = index()
-    if idx is None or idx.decoded > 0 or not idx.folders:
+    if idx is None or idx.decoded > 0 or not idx.folders or idx.timed_out:
+        return False
+    if any(r.why in (WHY_TIMED_OUT, WHY_UNREADABLE) for r in idx.rows):
         return False
     projects = idx.claude_dir / "projects"
     for folder in idx.folders:

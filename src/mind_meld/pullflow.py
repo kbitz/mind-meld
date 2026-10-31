@@ -2119,8 +2119,10 @@ def _old_form_text(result: PullResult) -> str:
         f"{core._count(p.files, 'file', 'files')} from {safety.safe_terminal_str(p.device_name)}"
         for p in peers
     ]
-    who = "it publishes" if len(peers) == 1 else "they publish"
-    return f"{', '.join(items)} wait until {who} shared names"
+    if len(peers) == 1:
+        verb = "waits" if peers[0].files == 1 else "wait"
+        return f"{items[0]} {verb} until it publishes shared names"
+    return f"{', '.join(items)} wait until they publish shared names"
 
 
 def old_form_clause(result: PullResult) -> str:
@@ -2694,8 +2696,12 @@ def _pull_core(
         # Track 90A: what the peers hold that this machine cannot place, read
         # before the consumer filter drops it.
         target_ids = {d["device_id"] for d in pull_targets}
-        project_names = core.project_name_report(
-            {did: m for did, m in manifest_cache.items() if did in target_ids}
+        project_names = (
+            core.project_name_report(
+                {did: m for did, m in manifest_cache.items() if did in target_ids}
+            )
+            if source_filter in (None, "claude")
+            else core.ProjectNameReport()
         )
         device_labels = {d["device_id"]: d.get("device_name", d["device_id"]) for d in all_devices}
         old_form_peers = [

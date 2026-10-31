@@ -2649,6 +2649,8 @@ def manifest_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     wire_folders: dict[str, str] = {}
 
     def to_wire(folder: str) -> str:
+        if folder.startswith("@"):
+            return folder  # a carried deletion record under a wire name stays as it is
         wire = idx.to_wire(folder)
         other = owners_by_wire.setdefault(wire, folder)
         if other != folder:
@@ -2670,53 +2672,68 @@ def manifest_to_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _from_wire_mapping(
-    names: set[str], entry: dict[str, Any], idx: projectid.Index | None
-) -> tuple[dict[str, str], set[str]]:
-    """``(wire folder -> local folder, moved folders)`` for one decoded ``claude`` entry."""
+def _marked_mapping(names: set[str], idx: projectid.Index, home: str) -> dict[str, str]:
+    """``wire folder -> local folder`` under the rules of a marked ``claude`` entry."""
     mapping: dict[str, str] = {}
+    owned = idx.folder_identity
+    claimed: set[str] = set()
+
+    def displaced(local: str) -> str:
+        name = projectid.LIT_PREFIX + local
+        while name in names or name in claimed:
+            name += "-"
+        claimed.add(name)
+        return name
+
+    for wire in sorted(names):  # identity names take their owner's local name
+        if wire.startswith(projectid.GIT_PREFIX):
+            identity = projectid.wire_identity(wire)
+            owner = idx.owners.get(identity) if identity else None
+            if owner is None:
+                mapping[wire] = wire
+            elif owner in claimed:  # two spellings of one identity
+                mapping[wire] = displaced(owner)
+            else:
+                mapping[wire] = owner
+                claimed.add(owner)
+    for wire in sorted(names):
+        if projectid.is_home_form(wire):
+            local = home + wire[len(projectid.HOME_NAME) :]
+            if local in owned:
+                mapping[wire] = wire  # stale home-form copy of a project real here
+            elif local in claimed:
+                mapping[wire] = displaced(local)
+            else:
+                mapping[wire] = local
+                claimed.add(local)
+    for wire in sorted(names):
+        if wire in mapping:
+            continue
+        if wire.startswith("@"):
+            mapping[wire] = wire
+        elif wire in owned or wire in claimed:
+            mapping[wire] = displaced(wire)
+        else:
+            mapping[wire] = wire
+            claimed.add(wire)
+    return mapping
+
+
+def _from_wire_mapping(
+    names: set[str], entry: dict[str, Any], idx: projectid.Index | None, carried: set[str]
+) -> tuple[dict[str, str], set[str]]:
+    """``(wire folder -> local folder, moved folders)`` for one decoded ``claude`` entry.
+
+    ``carried`` holds the ``@`` names only deletion records use: a machine with
+    the source disabled or the codec off still publishes those, unmarked.
+    """
     moved: set[str] = set()
     home = projectid.encoded_home() if idx is None else idx.home_enc
+    base = entry.get("base_path")
     if entry.get("wire_names") is True:
         if idx is None or home is None:
             return {n: n for n in names}, moved
-        owned = idx.folder_identity
-        claimed: set[str] = set()
-
-        def displaced(local: str) -> str:
-            name = projectid.LIT_PREFIX + local
-            while name in names or name in claimed:
-                name += "-"
-            claimed.add(name)
-            return name
-
-        for wire in sorted(names):  # identity names take their owner's local name
-            if wire.startswith(projectid.GIT_PREFIX):
-                identity = projectid.wire_identity(wire)
-                owner = idx.owners.get(identity) if identity else None
-                mapping[wire] = owner or wire
-                if owner:
-                    claimed.add(owner)
-        for wire in sorted(names):
-            if wire == projectid.HOME_NAME or wire.startswith(projectid.HOME_NAME + "-"):
-                local = home + wire[len(projectid.HOME_NAME) :]
-                if local in owned:
-                    mapping[wire] = wire  # stale home-form copy of a project real here
-                elif local in claimed:
-                    mapping[wire] = displaced(local)
-                else:
-                    mapping[wire] = local
-                    claimed.add(local)
-        for wire in sorted(names):
-            if wire in mapping:
-                continue
-            if wire.startswith("@"):
-                mapping[wire] = wire
-            elif wire in owned or wire in claimed:
-                mapping[wire] = displaced(wire)
-            else:
-                mapping[wire] = wire
-                claimed.add(wire)
+        mapping = _marked_mapping(names, idx, home)
         folders = entry.get("wire_folders")
         if isinstance(folders, dict):
             for wire, recorded in folders.items():
@@ -2724,22 +2741,34 @@ def _from_wire_mapping(
                 owner = idx.owners.get(identity) if identity else None
                 if owner and isinstance(recorded, str) and recorded != owner:
                     moved.add(owner)
+        # Published from another Claude folder (a peer, or this machine before
+        # its home changed): a home-relative name says nothing about what this
+        # folder should hold, so its absence here is never a deletion.
+        if isinstance(base, str) and base and base != idx.claude_real:
+            moved.update(
+                local
+                for wire, local in mapping.items()
+                if projectid.is_home_form(wire) and not local.startswith("@")
+            )
         return mapping, moved
-    # Unmarked: path names. Another home's names are withheld as old form.
-    base = entry.get("base_path")
+    # Unmarked: path names, plus any `@` form carried on a deletion record, which
+    # names its own provenance and maps like a marked one.
+    mapping = {n: n for n in names}
+    if carried and idx is not None and home is not None:
+        mapping.update(_marked_mapping(carried, idx, home))
     if (
         not projectid.configured()
         or home is None
         or not isinstance(base, str)
         or Path(base).name != ".claude"
     ):
-        return {n: n for n in names}, moved
+        return mapping, moved
     publisher = projectid.encode_path(str(Path(base).parent))
     if publisher == home:
-        return {n: n for n in names}, moved
-    for name in names:
-        under = name == publisher or name.startswith(publisher + "-")
-        mapping[name] = projectid.OLD_PREFIX + name if under else name
+        return mapping, moved
+    for name in names - carried:
+        if name == publisher or name.startswith(publisher + "-"):
+            mapping[name] = projectid.OLD_PREFIX + name
     return mapping, moved
 
 
@@ -2756,34 +2785,46 @@ def manifest_from_wire(manifest: dict[str, Any]) -> dict[str, Any]:
     becomes ``@lit-<folder>``, so nothing is dropped and ``mm gc`` keeps every
     sha. Unmarked entries from another home: a folder equal to or under the
     publisher's encoded home becomes ``@old-<folder>``. Tombstone keys follow
-    the same rules; one whose source has no entry passes through. When
-    ``wire_folders`` names a different folder than the identity's current
-    owner, the owner joins an in-memory ``moved_folders`` list (never
-    serialized) so a moved checkout mints no deletion.
+    the same rules; one whose source has no entry passes through unless its
+    own ``@`` form names where it belongs. When ``wire_folders`` names a
+    different folder than the identity's current owner, or the entry was
+    published from another Claude folder, the affected folders join an
+    in-memory ``moved_folders`` list (never serialized) so a move mints no
+    deletion.
     """
     entry = _claude_entry(manifest)
-    if entry is None or not isinstance(entry.get("files"), dict):
-        return manifest
+    if entry is not None:
+        entry.pop("moved_folders", None)  # in-memory only; a serialized one means nothing
+    files = entry.get("files") if entry is not None else None
     tombstones = manifest.get("tombstones")
     if not isinstance(tombstones, dict):
         tombstones = {}
-    marked = entry.get("wire_names") is True
-    idx = projectid.index() if marked else None
+    if not isinstance(files, dict):
+        files = {}
+        entry = None
     prefix = f"{CLAUDE_SOURCE_NAME}:"
-    names: set[str] = set()
-    for rel in entry["files"]:
+    file_names: set[str] = set()
+    for rel in files:
         if isinstance(rel, str) and (parts := _split_project_key(rel)):
-            names.add(parts[0])
+            file_names.add(parts[0])
+    tomb_names: set[str] = set()
     for key in tombstones:
         if isinstance(key, str) and key.startswith(prefix):
             if parts := _split_project_key(key[len(prefix) :]):
-                names.add(parts[0])
-    mapping, moved = _from_wire_mapping(names, entry, idx)
+                tomb_names.add(parts[0])
+    carried = {name for name in tomb_names - file_names if name.startswith("@")}
+    marked = entry is not None and entry.get("wire_names") is True
+    idx = projectid.index() if marked or carried else None
+    mapping, moved = _from_wire_mapping(
+        file_names | tomb_names, entry if entry is not None else {}, idx, carried
+    )
     if any(old != new for old, new in mapping.items()):
-        entry["files"], manifest["tombstones"] = _remap_keys(
-            entry["files"], tombstones, lambda folder: mapping.get(folder, folder)
+        new_files, manifest["tombstones"] = _remap_keys(
+            files, tombstones, lambda folder: mapping.get(folder, folder)
         )
-    if moved:
+        if entry is not None:
+            entry["files"] = new_files
+    if moved and entry is not None:
         entry["moved_folders"] = sorted(moved)
     return manifest
 

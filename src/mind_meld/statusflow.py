@@ -110,8 +110,6 @@ def _project_name_lines(
     device_id: str,
     passphrase: str,
     memory_kb: int,
-    *,
-    own_prior: dict | None,
 ) -> list[str]:
     """The project-name lines `mm status` prints after its verdict (Track 90A).
 
@@ -162,7 +160,8 @@ def _project_name_lines(
         else:
             where = f"{name} (version unknown)"
         lines.append(
-            f"{core._count(files, 'file', 'files')} from {name} wait until it publishes "
+            f"{core._count(files, 'file', 'files')} from {name} "
+            f"{'waits' if files == 1 else 'wait'} until it publishes "
             f"shared names. On {where}: {_peer_version_remedy(version)}, then mm push"
         )
     if report.old_form:
@@ -375,10 +374,7 @@ def status(
         source_diffs = list(
             core.iter_content_diffs(local_manifest, remote_sources, source_filter=source)
         )
-        pending_counts = tuple(
-            sum(len(getattr(row[3], key)) for row in source_diffs)
-            for key in ("new", "modified", "deleted")
-        )
+        pending_counts = core.content_counts(local_manifest, remote_sources, source_filter=source)
         metadata_pending = comparison_complete and (
             core._has_mtime_only_changes_vs_remote(
                 local_manifest, remote_sources, source_filter=source
@@ -463,9 +459,7 @@ def status(
         # Devices
         devices = core._list_devices_warn(backend)
         if claude_selected and (source is None or source == "claude"):
-            for line in _project_name_lines(
-                backend, devices, device_id, passphrase, memory_kb, own_prior=remote_manifest
-            ):
+            for line in _project_name_lines(backend, devices, device_id, passphrase, memory_kb):
                 console.print(line, soft_wrap=True)
 
         console.print("\n[bold]Mind Meld Status[/bold]")

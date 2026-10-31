@@ -2071,7 +2071,7 @@ def _push_core(
     if remote_manifest is not None:
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = core._filter_excluded_paths(
-            remote_manifest, exclude_map, skip_prefixes, include_map
+            remote_manifest, exclude_map, skip_prefixes, include_map, own_prior=True
         )
         # Freeze before the symlink filter: entries below a checkout root are
         # kept as published without inspecting what replaced them on disk.
@@ -5842,16 +5842,18 @@ def autopush() -> None:
                 details.append(
                     f"{result.maintenance_failures} post-publication maintenance failure(s)"
                 )
-            switched = bool(result and result.wire_names_published)
+            # The first publish in the shared form leaves a trail (O8.3).
+            if result and result.wire_names_published:
+                details.append("published under shared names")
+            only_switched = details == ["published under shared names"]
             if held:
                 used = len("; ".join(details)) + (2 if details else 0)
                 budget = max(_HELD_BREADCRUMB_BUDGET - used, 0)
                 details.append(_held_breadcrumb_detail(held, budget))
-            if details:
+            if only_switched and not held:
+                _write_autorun_breadcrumb("push", "success", details[0])
+            elif details:
                 _write_autorun_breadcrumb("push", "degraded", "; ".join(details))
-            elif switched:
-                # The first publish in the shared form leaves a trail (O8.3).
-                _write_autorun_breadcrumb("push", "success", "published under shared names")
             else:
                 _write_autorun_breadcrumb("push", "success")
 

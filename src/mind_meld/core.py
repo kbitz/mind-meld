@@ -257,8 +257,10 @@ def _configure_project_names(config: dict) -> None:
 
     The sidecar's recorded ``wire_folders`` are injected as the identities a
     folder keeps when its resolution later times out or cannot be read
-    (`sidecar` imports `manifest`, so `projectid` cannot read it itself). A
-    config that does not resolve, or no `claude` source, turns the codec off.
+    (`sidecar` imports `manifest`, so `projectid` cannot read it itself), read
+    only when the index is built, so a hook with nothing to do never parses the
+    sidecar. A config that does not resolve, or no `claude` source, turns the
+    codec off.
     """
     try:
         claude = next((src for src in get_sources(config) if src.get("name") == "claude"), None)
@@ -267,14 +269,12 @@ def _configure_project_names(config: dict) -> None:
     if claude is None or claude.get("type") != "claude":
         projectid.configure(None)
         return
-    retained = None
-    try:
+
+    def retained() -> Any:
         prior = sidecar.read(config.get("device", {}).get("id", ""))
         entry = (prior or {}).get("sources", {}).get("claude")
-        if isinstance(entry, dict):
-            retained = entry.get("wire_folders")
-    except Exception:
-        retained = None
+        return entry.get("wire_folders") if isinstance(entry, dict) else None
+
     projectid.configure(Path(claude["path"]).expanduser(), retained=retained)
 
 
@@ -633,6 +633,8 @@ def _filter_excluded_paths(
     exclude_map: dict[str, list[str]],
     skip_prefixes: dict[str, list[str]] | None = None,
     include_map: dict[str, list[str]] | None = None,
+    *,
+    own_prior: bool = False,
 ) -> dict:
     """Return a shallow copy of `manifest` with excluded source-paths stripped.
 
@@ -660,6 +662,10 @@ def _filter_excluded_paths(
     Tombstone keys are `<source>:<rel_path>` post-Track-1B. Bare-path keys
     (legacy v1 manifests) default to the `claude` source per the same
     promotion rule `normalize_manifest` applies.
+
+    ``own_prior`` (push, on this device's own manifest) keeps a deletion record
+    under an ``@git-`` or ``@home`` name while it cannot be placed: the folder
+    can come back, and dropping the record would undo the deletion.
     """
 
     def _conflict_shaped(rel_path: str) -> bool:
@@ -684,10 +690,18 @@ def _filter_excluded_paths(
         parts = rel_path.split("/", 2)
         return len(parts) == 3 and projectid.unplaceable_reason(parts[1]) is not None
 
-    def _excluded(src_name: str, rel_path: str) -> bool:
+    def _kept_deletion(src_name: str, rel_path: str) -> bool:
+        if not own_prior or src_name != "claude":
+            return False
+        parts = rel_path.split("/", 2)
+        return len(parts) == 3 and parts[0] == "projects" and projectid.carries_a_deletion(parts[1])
+
+    def _excluded(src_name: str, rel_path: str, *, tombstone: bool = False) -> bool:
         if _conflict_shaped(rel_path):
             return True
-        if _unplaceable(src_name, rel_path):
+        if _unplaceable(src_name, rel_path) and not (
+            tombstone and _kept_deletion(src_name, rel_path)
+        ):
             return True
         if _under_skip_prefix(rel_path, (skip_prefixes or {}).get(src_name)):
             return True
@@ -712,7 +726,10 @@ def _filter_excluded_paths(
                     tomb_src, _, rel = key.partition(":")
                 else:
                     tomb_src, rel = "claude", key
-                if isinstance(rel, str) and (_conflict_shaped(rel) or _unplaceable(tomb_src, rel)):
+                if isinstance(rel, str) and (
+                    _conflict_shaped(rel)
+                    or (_unplaceable(tomb_src, rel) and not _kept_deletion(tomb_src, rel))
+                ):
                     has_conflict = True
                     break
         if not has_conflict:
@@ -736,7 +753,7 @@ def _filter_excluded_paths(
             src_name, rel = key.split(":", 1)
         else:
             src_name, rel = "claude", key  # legacy bare-path tombstones
-        if _excluded(src_name, rel):
+        if _excluded(src_name, rel, tombstone=True):
             continue
         new_tombstones[key] = info
     out["tombstones"] = new_tombstones
@@ -1335,8 +1352,10 @@ def encode_manifest(
 def reconcile_recovered_prior(prior: dict | None) -> dict | None:
     """Apply the moved-checkout rule to a prior recovered from a sidecar or a merge.
 
-    A folder whose recorded identity differs from its current owner joins the
-    in-memory ``moved_folders``, so recovery mints no deletion either.
+    A sidecar's files sit under the folder recorded at its push, and a merged
+    prior's also under the current owner: when those differ, or the identity has
+    no owner now, both join the in-memory ``moved_folders``, so recovery mints
+    no deletion either.
     """
     entry = ((prior or {}).get("sources") or {}).get("claude")
     if not isinstance(entry, dict) or not isinstance(entry.get("wire_folders"), dict):
@@ -1348,8 +1367,10 @@ def reconcile_recovered_prior(prior: dict | None) -> dict | None:
     for wire, recorded in entry["wire_folders"].items():
         identity = projectid.wire_identity(wire) if isinstance(wire, str) else None
         owner = idx.owners.get(identity) if identity else None
-        if owner and isinstance(recorded, str) and recorded != owner:
-            moved.add(owner)
+        if isinstance(recorded, str) and recorded != owner:
+            moved.add(recorded)
+            if owner:
+                moved.add(owner)
     if moved:
         entry["moved_folders"] = sorted(moved)
     return prior
@@ -1457,10 +1478,6 @@ class ProjectNameReport:
     def not_placed_projects(self) -> int:
         return len(self.not_placed)
 
-    @property
-    def superseded_files(self) -> int:
-        return self._once(self.superseded)
-
 
 def project_name_report(manifests: Mapping[str, dict | None]) -> ProjectNameReport:
     """Classify the ``claude`` project folders of decoded peer manifests by wire name."""
@@ -1475,7 +1492,10 @@ def project_name_report(manifests: Mapping[str, dict | None]) -> ProjectNameRepo
                 continue
             reason = projectid.unplaceable_reason(parts[0])
             if reason == "old_form":
-                report.old_form[device_id] = report.old_form.get(device_id, 0) + 1
+                # A marked entry has switched: these names come from its stale
+                # conflict copy, and no remedy on that machine would clear them.
+                if entry.get("wire_names") is not True:
+                    report.old_form[device_id] = report.old_form.get(device_id, 0) + 1
             elif reason in ("unplaced", "superseded"):
                 table = report.not_placed if reason == "unplaced" else report.superseded
                 table.setdefault(parts[0], {}).setdefault(device_id, set()).add(parts[1])
