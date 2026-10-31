@@ -189,6 +189,12 @@ immediately before publication, and GC revalidates its own manifest immediately
 before blob candidate listing/deletion. Manifest recovery also refuses
 before replacing this Mac's own newer manifest. Blobs only the unread copy could name are kept.
 
+Track 90A allocates 0x03 to **manifests** (shared Claude project names): a
+manifest copy whose first byte is 0x03 is readable (`crypto.decrypt_manifest`),
+0x04 to 0x0F are unreadable newer manifests (`crypto.newer_manifest_version`), and
+blobs and `mm-crypto-init` keep treating 0x03 as a newer format. `mm-crypto-init`
+is never written for it; see [Storage-format gates](auto-upgrade.md#storage-format-gates).
+
 iCloud does not order arrival. A format-changing MAJOR must write its new
 crypto-init **before** new-format manifests/blobs, and refuse on the newer side
 while any registered peer runs below 1.0.0 (0.14.x lacks this gate). A manifest

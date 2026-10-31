@@ -11,8 +11,10 @@ from collections.abc import Callable
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import typer
+from packaging.version import InvalidVersion, Version
 
 from mind_meld import (
     __version__,
@@ -23,6 +25,7 @@ from mind_meld import (
     events_tail,
     host_registry,
     manifest,
+    projectid,
     resolveflow,
     safety,
     seen_sources,
@@ -47,6 +50,7 @@ from mind_meld.devices import inventory_devices
 from mind_meld.errors import (
     CURSOR_SQLITE_URL,
     KEYRING_UNAVAILABLE_URL,
+    RETIRE_MACHINE_URL,
     SQLITE_UNAVAILABLE_REMEDY,
     MindMeldError,
     SnapshotError,
@@ -90,6 +94,87 @@ def _render_broken_skill_status(row: dict) -> str:
     return skill_link.render_skill_status(result)
 
 
+def _peer_version_remedy(version: object) -> str:
+    """The command that updates a peer, by the version it last pushed with."""
+    try:
+        if isinstance(version, str) and Version(version) >= Version("1.3.0"):
+            return "mm update"
+    except InvalidVersion:
+        pass
+    return upgrade.INSTALL_CMD
+
+
+def _project_name_lines(
+    backend: LocalBackend,
+    devices: list[dict],
+    device_id: str,
+    passphrase: str,
+    memory_kb: int,
+) -> list[str]:
+    """The project-name lines `mm status` prints after its verdict (Track 90A).
+
+    In table order: a home that does not resolve, a Claude folder naming that
+    stopped decoding, one row per peer whose another-home names are withheld
+    as old form, the retire pointer, and the projects with no checkout here.
+    Peer text goes through `safety`; an unreadable or vanished peer is skipped;
+    nothing is persisted. A same-home older peer has nothing withheld and
+    prints nothing.
+    """
+    lines: list[str] = []
+    failure = projectid.home_failure()
+    if failure is not None:
+        return [
+            "Project memory syncs by path: could not resolve this machine's home folder "
+            f"({safety.safe_terminal_str(failure)}). Sync continues. Check $HOME, then mm diag."
+        ]
+    if not projectid.enabled():
+        return lines
+    if projectid.encoding_suspect():
+        lines.append(
+            "Project memory syncs by path: no Claude project folder here matches a "
+            "directory on this machine, so Claude's folder naming may have changed. "
+            "Sync continues and nothing is lost. Run: mm update; if it stays, send the "
+            "output of ls ~/.claude/projects."
+        )
+    peers = [d for d in devices if d.get("device_id") != device_id]
+    manifests: dict[str, dict | None] = {}
+    for peer in peers:
+        try:
+            fetch = core._fetch_remote_manifest(backend, peer["device_id"], passphrase, memory_kb)
+        except (OSError, MindMeldError):
+            continue
+        if fetch.is_ok:
+            manifests[peer["device_id"]] = fetch.manifest
+    report = core.project_name_report(manifests)
+    by_id = {d["device_id"]: d for d in peers}
+    for did, files in sorted(report.old_form.items(), key=lambda item: str(item[0])):
+        device = by_id.get(did)
+        if device is None or not files:
+            continue
+        name = safety.safe_terminal_str(device.get("device_name", did))
+        version = device.get("last_seen_version")
+        last = device.get("last_seen")
+        if isinstance(version, str) and version:
+            seen = f", last push {safety.safe_terminal_str(str(last)[:10])}" if last else ""
+            where = f"{name} ({safety.safe_terminal_str(version)}{seen})"
+        else:
+            where = f"{name} (version unknown)"
+        lines.append(
+            f"{core._count(files, 'file', 'files')} from {name} "
+            f"{'waits' if files == 1 else 'wait'} until it publishes "
+            f"shared names. On {where}: {_peer_version_remedy(version)}, then mm push"
+        )
+    if report.old_form:
+        lines.append(f"If one of these machines is gone for good: {RETIRE_MACHINE_URL}")
+    if report.not_placed:
+        lines.append(
+            f"Not placed here: {core._count(report.not_placed_files, 'file', 'files')} in "
+            f"{core._count(report.not_placed_projects, 'project', 'projects')} with no known "
+            "checkout (list: mm pull --dry-run --verbose)."
+        )
+    return [safe_str(line) for line in lines]
+
+
 def _status_verdict(
     *,
     source: str | None,
@@ -101,6 +186,7 @@ def _status_verdict(
     first_push: bool,
     capture_action: str | None = None,
     manifest_arriving: bool = False,
+    names_ready: bool = False,
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
     scope = f"Source '{source}' — " if source is not None else ""
@@ -141,6 +227,8 @@ def _status_verdict(
                     f"{counts[0]} new, {counts[1]} modified and "
                     f"{counts[2]} deleted waiting to push. Run: mm push"
                 )
+            elif names_ready:
+                verdict = "Project memory ready to publish under shared names. Run: mm push"
             elif metadata:
                 verdict = "Metadata-only changes waiting to push. Run: mm push"
             else:
@@ -284,12 +372,9 @@ def status(
         remote_sources = remote_manifest.get("sources", {}) if remote_manifest else {}
         # Selection retirement is metadata too; disabled sources are deliberate.
         source_diffs = list(
-            core.iter_source_diffs(local_manifest, remote_sources, source_filter=source)
+            core.iter_content_diffs(local_manifest, remote_sources, source_filter=source)
         )
-        pending_counts = tuple(
-            sum(len(getattr(row[3], key)) for row in source_diffs)
-            for key in ("new", "modified", "deleted")
-        )
+        pending_counts = core.content_counts(local_manifest, remote_sources, source_filter=source)
         metadata_pending = comparison_complete and (
             core._has_mtime_only_changes_vs_remote(
                 local_manifest, remote_sources, source_filter=source
@@ -298,6 +383,18 @@ def status(
                 source is None
                 and fetch.is_ok
                 and set(remote_sources) != set(local_manifest["sources"])
+            )
+        )
+        # Track 90A: the first push in the shared project-name form, or a rename,
+        # is owed. Not under `--source other`, where it does not apply.
+        claude_selected = any(src["name"] == "claude" for src in sources_configs)
+        names_ready = bool(
+            comparison_complete
+            and claude_selected
+            and (source is None or source == "claude")
+            and (
+                core.project_form_state(local_manifest, remote_manifest).due
+                or core.names_only_change(local_manifest, remote_sources)
             )
         )
         try:
@@ -355,11 +452,15 @@ def status(
             first_push=fetch.status == "missing" and not fetch.vanished,
             capture_action=capture_action,
             manifest_arriving=fetch.status == "missing" and fetch.vanished,
+            names_ready=names_ready,
         )
         report["verdict"] = verdict
 
         # Devices
         devices = core._list_devices_warn(backend)
+        if claude_selected and (source is None or source == "claude"):
+            for line in _project_name_lines(backend, devices, device_id, passphrase, memory_kb):
+                console.print(line, soft_wrap=True)
 
         console.print("\n[bold]Mind Meld Status[/bold]")
         console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
@@ -769,6 +870,11 @@ def status(
             console.print("\n  [yellow]Overall pending push:[/yellow]")
             console.print(
                 f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
+            )
+        elif names_ready:
+            console.print(
+                "\n  [yellow]Project memory ready to publish under shared names[/yellow] "
+                "(run `mm push`)."
             )
         elif metadata_pending:
             # Symmetric with _push_core's mtime-only republish gate (v0.12.6).
@@ -1389,6 +1495,95 @@ def _collect_discovery_diag(config: dict) -> dict:
     }
 
 
+def _manifest_form(backend: LocalBackend, device_id: str) -> str | None:
+    """``shared`` / ``path`` from a manifest's first byte, ``None`` when unreadable."""
+    try:
+        raw = backend.get(manifest_key(device_id))
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if raw[0] == crypto.MANIFEST_FORMAT_VERSION:
+        return "shared"
+    return "path" if raw[0] == crypto.FORMAT_VERSION else None
+
+
+def _project_index_state(
+    cfg: dict,
+    config_state: str,
+    dev_id: str | None,
+    backend: LocalBackend,
+    resolved_sources: list[dict],
+    inventory: Any,
+) -> dict:
+    """`mm diag --json`'s ``project_index`` (Track 90A). Needs no passphrase and
+    names no peer device id: versions come from the plaintext registry and
+    ``form`` from each manifest's first byte."""
+    try:
+        base: dict = {
+            "state": None,
+            "reason": None,
+            "folders": 0,
+            "decoded": 0,
+            "owned": 0,
+            "timed_out": False,
+            "clones": [],
+            "rows": [],
+            "machines": [],
+        }
+        if config_state != "ok":
+            return {**base, "reason": "config_invalid"}
+        if not any(src.get("name") == "claude" for src in resolved_sources):
+            return base
+        core._configure_project_names(cfg)
+        snapshot = projectid.diag_state()
+        failure = projectid.home_failure()
+        if failure is not None:
+            snapshot["reason"] = "home_unresolved"
+        own_form = _manifest_form(backend, dev_id) if dev_id else None
+        snapshot["state"] = (
+            None
+            if snapshot["reason"] == "home_unresolved"
+            else "shared"
+            if own_form == "shared"
+            else "path"
+        )
+        machines = []
+        for device in getattr(inventory, "valid", []) or []:
+            did = device.get("device_id")
+            if not did or did == dev_id:
+                continue
+            version = device.get("last_seen_version")
+            machines.append(
+                {
+                    "name": safety.safe_terminal_str(device.get("device_name", "")),
+                    "version": version if isinstance(version, str) else None,
+                    "form": _manifest_form(backend, did),
+                }
+            )
+        snapshot["machines"] = machines
+        return {**base, **snapshot}
+    except Exception:
+        return {
+            "state": None,
+            "reason": None,
+            "folders": 0,
+            "decoded": 0,
+            "owned": 0,
+            "timed_out": False,
+            "clones": [],
+            "rows": [
+                {
+                    "folder": "(unavailable)",
+                    "form": "literal",
+                    "identity": None,
+                    "why": "unreadable",
+                }
+            ],
+            "machines": [],
+        }
+
+
 def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
 
@@ -1618,6 +1813,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
+        "project_index": _project_index_state(
+            cfg, config_state, dev_id, backend, resolved_sources, device_inventory
+        ),
         "sync_scope": {
             "skipped_nested_repositories": {
                 src["name"]: manifest.nested_repo_skip_prefixes(src) for src in resolved_sources
@@ -1696,6 +1894,17 @@ def diag(
                         + safety.safe_terminal_str(f"{name}:{root}")
                     )
                 )
+
+    pi = state["project_index"]
+    names_state = pi.get("state") or "n/a"
+    summary = (
+        f"{names_state}; {pi['folders']} folders, {pi['decoded']} decoded, {pi['owned']} owned"
+    )
+    if pi.get("reason"):
+        summary += f" ({pi['reason']})"
+    if pi.get("timed_out"):
+        summary += "; index timed out"
+    console.print(f"  project names: {safe_str(summary)}")
 
     ci = state["crypto_init"]
     console.print("\n[bold]mm-crypto-init[/bold]")

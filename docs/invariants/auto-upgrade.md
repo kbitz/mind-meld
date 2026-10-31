@@ -457,6 +457,53 @@ validators intentionally fold them into corruption. `TestNewerFormats66A`,
 `TestNewerStorage66A`, and [the init invariant](init-devices.md#newer-format-refusal-track-66a-v100)
 pin the gate, late-copy recheck and arrival windows.
 
+**Shared Claude project names (Track 90A, 0x03).** `crypto.MANIFEST_FORMAT_VERSION
+= 0x03` is allocated to **manifests**: a manifest whose Claude project folders use
+the shared wire names has first byte 0x03 and otherwise the same envelope as 0x02.
+Blobs and `mm-crypto-init` stay 0x02 and refuse 0x03 as a newer format; the next
+header or blob format takes 0x04. `crypto.encrypt_manifest` / `decrypt_manifest`
+and `newer_manifest_version` (0x04 to 0x0F) are the manifest API, and every
+manifest reader uses them (`core._fetch_remote_manifest`,
+`_make_manifest_validator`; `_do_gc`'s own-manifest recheck goes through the
+fetch). This format departs from the rule above in three named ways, each by
+decision of the owner:
+
+1. The older-side gate is the **manifest's own byte**, not the `mm-crypto-init`
+   byte. A header route needs a second writer of the fleet's key header, which
+   Track 89A forbids (`mm-crypto-init` is never written here), and it cannot reach
+   0.12.13 safely: that release reads a 0x03 header as corrupt, advises deleting
+   it, and can overwrite it with an older conflict copy.
+2. No new header is written first.
+3. There is **no newer-side fleet gate**. A machine on this release publishes the
+   new form at its first push (attended or auto) whatever version any other
+   machine runs. Karl, 2026-10-31: "we should not pause all machines until all
+   machines are updated (dumb), we should be able to go one at a time and sync the
+   updated ones without waiting for the entire fleet". Updated machines sync with
+   each other at once; older machines keep syncing with each other in the old form;
+   an updated machine keeps reading old-form manifests (same-home names apply,
+   another home's names are withheld as `@old-`).
+
+**AC6's gap, stated.** An older machine meets the new form at an updated peer's
+first push, so the refusal is the normal path, not an exception. From 1.0.0 on
+nothing is misapplied: pull skips the whole peer manifest, every source and not
+only Claude memory. It is still not literally "refuses and says to update": an
+already-shipped release's `pull` prints `manifest for device X is corrupt -
+skipping` (frozen text; this release's pull prints the update remedy for a format
+it cannot read). Only the GC refusal from 1.0.0 through 1.7.1 names `Upgrade with:`.
+
+| Older range, when it meets a 0x03 peer | Through 0.14.18 | 1.0.0 through 1.7.1 | 1.7.2 and later |
+|---|---|---|---|
+| `pull`, `autopull` | exit 0, peer skipped as corrupt | same | same |
+| `mm gc` | exit 1, `cannot GC safely` | exit 1, `Upgrade with:` | exit 0, own blobs only |
+| attended `mm push` with a content change | publishes, then the same error, exit 1 | same | exit 0 |
+| beside a valid 0x02 copy of that peer | **reads the copy with no warning; GC and attended push can delete blobs only the 0x03 manifest references (`[challenge]` C1, option A: no code; README says to upgrade first)** | pull skips, GC refuses | pull skips |
+
+Staying marked: "marked" is read from the own prior; `_merge_manifests` keeps the
+marker when any copy has it and the sidecar keeps it. Disabling the `claude` source
+drops the entry and its marker, which is harmless because nothing is left to
+misapply. Rollback past the switch is unsupported: an older mm refuses its own 0x03
+manifest, and a regression ships as a new release.
+
 **Peer snapshot compatibility:**
 Host usage snapshot records (`host-usage-snapshot`) validate known host families
 and model tokens. An un-upgraded peer that does not yet recognize `"muse"` or

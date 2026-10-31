@@ -44,6 +44,57 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:severity=should] A missing `projects/` is silent, and a partial restore still reads as deletion
+- **Description:** While `~/.claude/projects` is missing, `mm status` tells the owner to run `mm push`, then says in sync, and the push says `project names updated`; none of them names the missing folder. If no push ran during the outage, then once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
+
+### [review:severity=should] A first-switch record is identity-wide for a whole-folder removal and gets one chance to be spelled
+- **Description:** A folder removed by an old-form push in the 30 days before the switch, with its checkout alive and no owner, publishes identity-wide, so a peer in another layout silently stops receiving that project's same-named files until the record expires. A held record whose checkout or index is unavailable at the switching push stays home-relative for good, so a later pull can restore the deleted file. `docs/invariants/sync.md` states both.
+- **Why:** Narrowing the first reopens the deleted-file restore the cross-vendor review found, and retrying the second needs a persisted marker outside the plan. No bytes are destroyed. To reproduce the second: delete a file, push on the old form, remove its folder, move the checkout away, push with this release, move it back, then pull inside it.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Revisit if a machine in another layout joins within 30 days of a fleet machine's switch, or if deleted Claude memory returns after a switch.
+
+### [review:severity=should] `sidecar.read` validates less than `load_manifest`
+- **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.
+- **Why:** Predates Track 90A and needs a damaged sidecar plus a corrupt own manifest. With a healthy store the switching push was probed and does not crash.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit if `last-push.json` is ever reported damaged on a fleet machine; the fix applies `load_manifest`'s value-shape and `_validate_rel_path` checks in `sidecar.read`.
+
+### [review:severity=should] Own-manifest recovery can leave a deletion record under its old spelling
+- **Description:** With a corrupt own manifest plus a home rename, a folder that gained a remote, or a conflict copy older than a remote change, `core.reconcile_recovered_prior` can leave one tombstone under a name a healthy load would spell differently, so a deleted file can return. An own conflict copy from a previous home can also suppress one real deletion for one push through `moved_folders`.
+- **Why:** Each needs three rare conditions together; no bytes are lost. Deferred from Track 90A review (`docs/invariants/sync.md` limits).
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit if deleted Claude memory returns after a recovered push.
+
+### [review:severity=nit] `mm diff` lists a renamed project's files as `+ push`
+- **Description:** `mm status` and push report a remote change or moved checkout as names only (`core.iter_content_diffs`); `mm diff` compares against the filtered prior, so it still lists those files as new.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 90A review. Revisit when `mm diff` output next changes, or if the mismatch confuses the owner.
+
+### [review:severity=should] Bound the new peer manifest reads in `mm status` and `mm diag`
+- **Description:** `mm status` and `mm diag` now read each peer's whole manifest with no time bound. `pullflow.py` records `backend.get` blocking on iCloud placeholders (a 263 s first pull), so an evicted peer manifest can stall these triage commands on an existing iCloud store.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Track 90A review, read from code and not run. Revisit if either command stalls, or when the store moves off iCloud (retire this item then).
+
+### [review:severity=should] Measure the project index on a Mac hook with macOS privacy prompts
+- **Description:** The project index lists directories such as `~/Documents` and `~/Desktop` from `mm autopull` and `mm autopush`, which used to read only `~/.claude`. A privacy prompt could block a listing past the 2 s cap, flipping folders that have no retained identity to home-relative for that run.
+- **Effort:** S
+- **Priority:** P2
+- **Context:** Track 90A review, unmeasured. Revisit at this Mac's first real publish in the new form (`## Post-merge` in the plan).
+
+### [review:severity=nit] Shared helpers offered by Track 90A review
+- **Description:** Advisory, kept as written: the empty `project_index` literal appears three times; the `wire_folders` moved loop appears in `manifest._from_wire_mapping` and `core.reconcile_recovered_prior`; `pullflow._unplaceable_project` repeats `core._filter_excluded_paths._unplaceable`; `projectid._git_origin` repeats `_origin_remote_url`; `_linked_main_checkout` re-parses what `_resolve_git_dirs` parses.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit when any of these is next changed.
+
 ## Drain records
 
 ### Roadmap drain — 2026-10-27

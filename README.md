@@ -16,6 +16,58 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Shared Claude project memory (Track 90A):** Claude keeps a project's memory under a
+folder named for the checkout's absolute path, so the same repository at two paths, or
+on a Mac and a Linux box, was two projects. mm now publishes a project that has a
+network `origin` under that remote, and any other project under a home-relative name,
+and each machine maps the name back to the folder Claude uses for *its* checkout, wherever
+that checkout is. See [Project memory across machines](#project-memory-across-machines).
+
+**Every machine must update before its own first push in the new form, and it takes part
+in the new form only from then.** Go one machine at a time, in any order; nothing waits for
+the whole fleet. On each machine run the update command, then `mm push`. The first push
+after updating (attended or from a hook) republishes the manifest with shared names and
+prints `Push: project memory published under shared names.`; it uploads no content, deletes
+nothing and runs no GC. Confirm with `mm diag --json`: `project_index.state` is `shared`,
+and `project_index.machines` shows which other machines have switched.
+
+- Updated machines sync with each other at once. Older machines keep syncing with each
+  other in the old form. An updated machine reads an old-form peer's manifest too: files
+  under the same home folder keep applying, and another home's files wait, shown as
+  `312 files from Mac B wait until it publishes shared names`, until that peer updates.
+- An older machine skips an updated peer's **whole** manifest, every source and not only
+  Claude memory, so it receives nothing from that peer until it updates. Through 1.7.1, once
+  any peer has updated: `mm gc` refuses at exit 1; an attended `mm push` with a content
+  change publishes that content, prints `Push complete.`, then fails with `cannot GC
+  safely` at exit 1, every time until that machine updates; blob collection does not run
+  there, so orphaned blobs use disk until then; pull, autopull and autopush stay at exit 0.
+  Nothing is lost by that, and there is nothing to clean up: update the machine.
+- **Through 0.14.18**, run the update command *before* that machine's next attended
+  `mm push` or `mm gc`, or leave it off: beside a conflict copy of an updated machine's
+  manifest (for example `manifest.json 2.enc`), its GC can read the older copy as that
+  machine's whole manifest and delete blobs only the newer manifest references.
+- A file deleted on an updated machine keeps flowing among older machines until they update.
+- Rollback past the switch is unsupported: an older mm refuses its own new-form manifest, and
+  a regression ships as a new release.
+- Below v1.3.0 there is no `mm update`, and `pipx upgrade` leaves a tag-pinned install frozen,
+  so use `pipx install --force git+https://github.com/kbitz/mind-meld.git@latest`.
+
+A two-machine recipe (Mac A updates first, then Linux B):
+
+```bash
+# On Mac A
+mm update                      # then: mm --version
+mm push                        # Push: project memory published under shared names.
+mm status                      # nothing about names unless a peer still waits
+mm diag --json | jq .project_index.state   # "shared"
+
+# On Linux B, which keeps a different checkout path
+mm update && mm push
+git clone git@github.com:acme/widgets.git ~/code/widgets && cd ~/code/widgets
+mm pull                        # places the Mac's memory into the folder Claude uses here
+ls ~/.claude/projects/*widgets*/memory
+```
+
 **`mm init --new-fleet` and the new default storage path (Track 89A):** only
 `mm init --new-fleet` creates the fleet's key header (`mm-crypto-init`), and only
 in an empty folder; plain `mm init` joins, and when the header has not arrived
@@ -334,6 +386,8 @@ A fleet already stored on iCloud Drive stays there. On the new Mac, type that ex
 3. `mm init` — point it at the folder and enter the **same passphrase**. It verifies the passphrase against the fleet's key header, registers the new device against the existing roster, and pulls. If the folder is still syncing, run `mm pull` again when delivery finishes.
 4. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
 
+A project's Claude memory lands only where mm can place it: in a Claude project folder that already exists on this machine for the checkout, or in the checkout you run `mm pull` from. Either way `~/.claude` must exist: on a new machine, run Claude once first, or mm skips the `claude` source and places nothing. A project you have not opened here is listed as `Not placed here` (see [Project memory across machines](#project-memory-across-machines)); clone it and run `mm pull` inside it.
+
 Push and pull on each Mac to exchange changes according to each file's sync rules:
 
 - **`.jsonl` files** deep-merge by line-union (deduped). Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
@@ -343,6 +397,32 @@ Push and pull on each Mac to exchange changes according to each file's sync rule
 After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then confirm one selected file you edited on A is present on B.
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
+
+## Project memory across machines
+
+Clone a project anywhere. mm finds your checkout from the folder names Claude created
+under `~/.claude/projects` (each decodes to a directory on *this* machine) and from the
+directory you run `mm pull` in, and shares that project's memory under its `origin` URL.
+
+- The `origin` must match: `git remote set-url origin <canonical>` for a fork or an SSH
+  alias (`mm pull --dry-run --verbose` confirms what this directory resolves to). A fork,
+  an SSH alias host, a renamed repository, a different path case, or the same repository
+  over `ssh://host:2222` and `https://host` is a **different project**.
+- **Not placed here** means a peer published memory for a project with no checkout on this
+  machine. Nothing is written, nothing is lost, the bytes stay encrypted in the store.
+  `mm status` prints `Not placed here: N files in M projects with no known checkout`;
+  `mm pull --dry-run --verbose` lists them. Clone the project and run `mm pull` inside it.
+- Memory placed by `mm autopull` at session start may reach only the next session.
+- A second clone of one repository on one machine does not share memory: the first (the one
+  with `memory/`, then the smallest folder name) owns the project; the other keeps its own
+  files. A linked worktree uses the main checkout's folder, as Claude does.
+- A project with no `origin`, a local-path remote, a submodule or a bare layout is shared
+  by its home-relative path. The same `origin` on different projects (a template left as
+  `origin`) merges their memory. `mm pull` or `mm autopull` inside any directory whose
+  `.git/config` claims that origin places the project's memory there, and what Claude writes
+  there later publishes back under that project.
+- The default `claude` source is required. `mm devices` shows the mm version at each
+  machine's last push (`—` if it never pushed).
 
 ## Claude Code Integration
 
@@ -484,7 +564,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -1208,6 +1288,37 @@ pin a different keyring backend if discovery picks the wrong one;
 `mm diag` shows which backend and member were actually selected. After any
 fix, confirm with `mm diag`, then rerun `mm autopull` / `mm autopush`.
 
+### `manifest for device X is corrupt - skipping` after a peer updated
+
+Not corruption. A peer updated and now publishes shared project names (manifest byte
+0x03), which an older mm cannot read, so it skips that whole manifest. **Delete nothing.**
+Update this machine (`mm update`; below v1.3.0 use the `pipx install --force ...@latest`
+command above), then check `mm status`. See [Upgrading](#upgrading).
+
+### Retiring a dead machine
+
+Optional. Sharing never waits for a dead machine; retiring one only stops its old-form
+clause (`wait until it publishes shared names`) and its `mm status` row.
+
+1. Update any machine at 1.7.1 or older first: its GC deletes a moved-aside machine's blobs,
+   including the only copy of a file only that machine had.
+2. On a machine with the **same home folder** as the dead one, run `mm pull`, which puts
+   its memory on disk.
+3. Find its id with `mm devices` and the storage folder with `storage.path`
+   (`~/.config/mind-meld/config.toml`). If its `devices/<id>.json` is unreadable, move that
+   aside first: `mm pull` refuses while it exists. Then move it out of the folder:
+
+   ```bash
+   mkdir -p ~/mm-retired && mv "<storage.path>/devices/<id>.json" ~/mm-retired/
+   ```
+
+Moving the file back undoes it. Retiring removes that machine from `retro-fleet`, which reads
+only registered ids, so update a machine that still runs. With no machine sharing its home
+folder, its memory stays in the store where mm cannot read it. `manifests/<id>/` and
+`data/<id>/` stay and cost only disk; deleting them later is **final** and can remove the
+only stored copy of memory no machine has placed, and mm offers no check for that. A machine
+that returns must re-join.
+
 ### Newer or damaged storage format
 
 If mm reports a newer format, leave every `mm-crypto-init` copy in place and
@@ -1343,7 +1454,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
