@@ -222,9 +222,10 @@ def _origin_remote_url(root: Path) -> str:
 
 _DEFAULT_PORTS = {"https": 443, "http": 80, "git": 9418, "ssh": 22}
 # scp-form with no user: `host:path`. git treats a colon before any slash this
-# way; one letter before it is a drive, not a host.
-_SCP_NO_USER = re.compile(r"^(?P<host>[^@:/\s]{2,}):(?P<path>[^\s]+)$")
-_PATH_PARAMS = re.compile(r"[?#;]")
+# way; one letter before it is a drive, not a host, a second colon is a remote
+# helper (`ext::`, `gcrypt::`), and an `@` after the colon is a mistyped credential.
+_SCP_NO_USER = re.compile(r"^(?P<host>[^@:/\s]{2,}):(?P<path>[^\s:@][^\s@]*)$")
+_PATH_PARAMS = re.compile(r"[?;]")
 
 
 def project_identity(url: object) -> str | None:
@@ -263,6 +264,8 @@ def project_identity(url: object) -> str | None:
         host = (parts.hostname or "").lower()
         user = parts.username if scheme == "ssh" else None
         path = parts.path or ""
+        if parts.fragment and scheme in ("ssh", "git"):
+            path += f"#{parts.fragment}"  # a literal path character there
     else:
         m = _SCP_FORM.match(s) or _SCP_NO_USER.match(s)
         if m is None:
@@ -271,9 +274,17 @@ def project_identity(url: object) -> str | None:
         host = m.group("host").lower()
         user = m.groupdict().get("user")
         path = m.group("path")
-    if not host or host == "localhost" or host == "::1" or host.startswith("127."):
+    bare_host = host.strip("[]").rstrip(".")
+    if (
+        not bare_host
+        or bare_host in ("localhost", "::1", "0.0.0.0")
+        or bare_host.startswith(("127.", "::ffff:127."))
+    ):
         return None
-    path = _PATH_PARAMS.split(path, maxsplit=1)[0].rstrip("/")
+    # Only the last segment can carry a query or parameters; `team/c#/a` and
+    # `team/c#/b` are different repositories.
+    head, slash, tail = path.rstrip("/").rpartition("/")
+    path = (head + slash + _PATH_PARAMS.split(tail, maxsplit=1)[0]).rstrip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
     path = path.rstrip("/")
@@ -628,7 +639,8 @@ def _read_origin(checkout: Path) -> str:
     """The ``origin`` URL of a main checkout, ``""`` when it has none.
 
     Parses ``.git/config`` with the standard library (equal to ``git config
-    --get`` on every repository measured); a quoted or escaped value, an
+    --get`` on every repository measured); a quoted or escaped value, an inline
+    comment or continued line, a section spelling the parser does not see, an
     ``include`` or a parse failure asks git itself, with its 2 s timeout.
     """
     config_path = checkout / ".git" / "config"
@@ -645,17 +657,15 @@ def _read_origin(checkout: Path) -> str:
     parser = configparser.RawConfigParser(strict=False, allow_no_value=True, delimiters=("=",))
     try:
         parser.read_string(text)
-        if any(section.lower().startswith("include") for section in parser.sections()):
-            return _git_origin(checkout)
+        has_include = any(s.lower().startswith("include") for s in parser.sections())
         section = 'remote "origin"'
-        if not parser.has_section(section) or not parser.has_option(section, "url"):
-            # A spelling this parser does not see: `[remote.origin]`, another case.
-            return _git_origin(checkout) if "origin" in text.lower() else ""
-        value = (parser.get(section, "url") or "").strip()
+        found = parser.has_section(section) and parser.has_option(section, "url")
+        value = (parser.get(section, "url") or "").strip() if found else ""
     except Exception:
         return _git_origin(checkout)
-    # Quotes, escapes, an inline comment or a continued line: git decides.
-    if _NEEDS_GIT.search(value):
+    # Quotes, escapes, an inline comment or a continued line: git decides. So does
+    # a spelling this parser does not see: `[remote.origin]`, another case.
+    if has_include or _NEEDS_GIT.search(value) or (not found and "origin" in text.lower()):
         return _git_origin(checkout)
     return value
 
@@ -663,7 +673,9 @@ def _read_origin(checkout: Path) -> str:
 def _git_origin(checkout: Path) -> str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(checkout), "config", "--get", "remote.origin.url"],
+            # An explicit git dir: `-C` would walk up to a parent repository when
+            # this `.git` is not one git accepts, and name the wrong project.
+            ["git", f"--git-dir={checkout / '.git'}", "config", "--get", "remote.origin.url"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -871,10 +883,12 @@ def _build_index(
 ) -> Index:
     root = _fs_root()
     projects = claude_dir / "projects"
+    listed = projects.is_dir()
     folders = _list_project_folders(projects)
     # A folder deleted from `projects/` is still resolved when it published an
-    # identity: its checkout may be alive, so the deletion is a real one.
-    deleted = sorted(set(retained) - set(folders))
+    # identity: its checkout may be alive, so the deletion is a real one. A
+    # `projects/` that cannot be listed looks like an outage, not a reset.
+    deleted = sorted(set(retained) - set(folders)) if listed else []
     worker = _Worker([*folders, *deleted], projects, root)
     thread = threading.Thread(target=worker.run, name="mm-project-index", daemon=True)
     deadline = time.monotonic() + INDEX_DEADLINE_SECONDS
@@ -918,8 +932,13 @@ def _build_index(
             nominated.setdefault(res.identity, set()).add(encode_path("/" + str(rel)))
     for folder in deleted:
         res = done.get(folder)
-        if res is not None and res.kind == "identity" and res.identity == retained[folder]:
-            kept.setdefault(res.identity, []).append(folder)
+        # Unreadable or out of time is not gone: the recorded identity stands.
+        if (
+            res is None
+            or res.kind == "unknown"
+            or (res.kind == "identity" and res.identity == retained[folder])
+        ):
+            kept.setdefault(retained[folder], []).append(folder)
 
     cwd_info: CwdInfo | None = None
     if cwd_candidate:

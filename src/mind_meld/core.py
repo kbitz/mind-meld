@@ -790,6 +790,8 @@ def _filter_symlinked_paths(
         base_path = source_roots.get(source_name)
         if base_path is None or _under_skip_prefix(rel_path, exempt.get(source_name)):
             return False
+        if source_name == "claude" and rel_path.startswith("projects/@"):
+            return False  # a carried wire name is no path here (and can exceed NAME_MAX)
         try:
             _validate_rel_path(rel_path, where=f"{source_name}:{rel_path}")
         except ManifestError:
@@ -1355,24 +1357,46 @@ def reconcile_recovered_prior(prior: dict | None) -> dict | None:
     A sidecar's files sit under the folder recorded at its push, and a merged
     prior's also under the current owner: when those differ, or the identity has
     no owner now, both join the in-memory ``moved_folders``, so recovery mints
-    no deletion either.
+    no deletion either. So does every folder of a sidecar written from another
+    Claude folder. Its deletion records are respelled as a healthy load would
+    spell them: a recorded folder follows its identity, and a carried ``@`` name
+    goes to the local folder it names now.
     """
     entry = ((prior or {}).get("sources") or {}).get("claude")
-    if not isinstance(entry, dict) or not isinstance(entry.get("wire_folders"), dict):
+    if not isinstance(entry, dict):
         return prior
     idx = projectid.index()
-    if idx is None:
+    if idx is None or idx.home_enc is None:
         return prior
     moved = set(entry.get("moved_folders") or ())
-    for wire, recorded in entry["wire_folders"].items():
+    respelled: dict[str, str] = {}
+    recorded_folders = entry.get("wire_folders")
+    for wire, recorded in (recorded_folders if isinstance(recorded_folders, dict) else {}).items():
         identity = projectid.wire_identity(wire) if isinstance(wire, str) else None
         owner = idx.owners.get(identity) if identity else None
         if isinstance(recorded, str) and recorded != owner:
             moved.add(recorded)
             if owner:
                 moved.add(owner)
+            respelled[recorded] = owner or wire
+    base = entry.get("base_path")
+    if isinstance(base, str) and base and base != idx.claude_real:
+        for rel in entry.get("files") or ():
+            if isinstance(rel, str) and (parts := manifest._split_project_key(rel)):
+                moved.add(parts[0])
     if moved:
         entry["moved_folders"] = sorted(moved)
+
+    def local_name(folder: str) -> str:
+        if folder in respelled:
+            return respelled[folder]
+        if projectid.carries_a_deletion(folder):
+            return manifest._marked_mapping({folder}, idx, idx.home_enc)[folder]
+        return folder
+
+    tombstones = prior.get("tombstones")
+    if isinstance(tombstones, dict):
+        prior["tombstones"] = manifest._remap_keys({}, tombstones, local_name)[1]
     return prior
 
 

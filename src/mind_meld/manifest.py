@@ -2615,8 +2615,10 @@ def _remap_keys(
             continue
         new_key = f"{prefix}projects/{mapping(parts[0])}/{parts[1]}"
         existing = new_tombstones.get(new_key)
-        if existing is None or str(info.get("deleted_at", "")) > str(
-            existing.get("deleted_at", "")
+        if (
+            not isinstance(existing, dict)
+            or not isinstance(info, dict)
+            or str(info.get("deleted_at", "")) > str(existing.get("deleted_at", ""))
         ):
             new_tombstones[new_key] = info
     return new_files, new_tombstones
@@ -2742,14 +2744,10 @@ def _from_wire_mapping(
                 if owner and isinstance(recorded, str) and recorded != owner:
                     moved.add(owner)
         # Published from another Claude folder (a peer, or this machine before
-        # its home changed): a home-relative name says nothing about what this
-        # folder should hold, so its absence here is never a deletion.
+        # its home or `claude` path changed): no name says what this folder should
+        # hold, so an absence here is never a deletion.
         if isinstance(base, str) and base and base != idx.claude_real:
-            moved.update(
-                local
-                for wire, local in mapping.items()
-                if projectid.is_home_form(wire) and not local.startswith("@")
-            )
+            moved.update(local for local in mapping.values() if not local.startswith("@"))
         return mapping, moved
     # Unmarked: path names, plus any `@` form carried on a deletion record, which
     # names its own provenance and maps like a marked one.

@@ -5843,9 +5843,10 @@ def autopush() -> None:
                     f"{result.maintenance_failures} post-publication maintenance failure(s)"
                 )
             # The first publish in the shared form leaves a trail (O8.3).
-            if result and result.wire_names_published:
+            switched = bool(result and result.wire_names_published)
+            only_switched = switched and not details
+            if switched:
                 details.append("published under shared names")
-            only_switched = details == ["published under shared names"]
             if held:
                 used = len("; ".join(details)) + (2 if details else 0)
                 budget = max(_HELD_BREADCRUMB_BUDGET - used, 0)
