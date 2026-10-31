@@ -111,9 +111,11 @@ holds the same synced files.
 
 ### O2: A machine joins the fleet with one mm command after Syncthing pairing
 1. On a machine paired in Syncthing with the shared folder accepted, one mm
-   command joins the fleet: it waits for the fleet's key header to arrive,
-   never creates one, verifies the passphrase and pulls. Creating a new fleet
-   refuses on a folder that already holds one. Observed on the soak machines.
+   command joins the fleet: it never creates a key header, verifies the
+   passphrase and pulls. If the fleet's key header has not arrived, it stops
+   without writing anything and says to wait for Syncthing; the owner reruns
+   `mm init` once it has. Creating a new fleet refuses on a folder that
+   already holds one. Observed on the soak machines.
 2. `mm status` and `mm diag` read and report Syncthing's state (connected
    peers, the folder's sync state and the folder options mm relies on). mm
    never changes Syncthing's configuration.
