@@ -3310,7 +3310,7 @@ def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypa
     assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/x.md"}
 
 
-def test_a_held_switch_says_the_names_wait(linux):
+def test_a_held_switch_says_project_memory_waits(linux):
     from mind_meld.cli import _sync_success
 
     linux.checkout("/home/kb/proj")
@@ -3333,11 +3333,11 @@ def test_a_held_switch_says_the_names_wait(linux):
         )
     assert linux.first_byte() == crypto.FORMAT_VERSION
     assert _sync_success("push", result) == (
-        "Push: shared project names wait until Claude's projects folder can be listed."
+        "Push: project memory waits until Claude's projects folder can be listed."
     )
     assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == (
         "Push: 1 content change published; "
-        "shared project names wait until Claude's projects folder can be listed."
+        "project memory waits until Claude's projects folder can be listed."
     )
 
 
@@ -3502,20 +3502,44 @@ def _held_machine(linux: Machine) -> None:
     (linux.claude / "projects").rename(linux.claude / "projects.parked")
 
 
-def test_status_during_a_hold_says_the_names_wait_not_that_they_are_ready(linux):
+def test_status_during_a_hold_says_project_memory_waits_not_that_it_is_ready(linux):
     _held_machine(linux)
     status = linux.cli("status")
     assert status.exit_code == 0, status.output
     assert "ready to publish" not in status.output
-    assert "wait until Claude's projects folder can be listed" in status.output
+    assert "In sync with this device's last push" not in status.output
+    assert status.output.count("waits until Claude's projects folder can be listed") >= 1
 
 
-def test_a_second_held_push_still_says_the_names_wait(linux):
+def test_status_names_a_hold_beside_other_pending_changes(linux):
+    notes = _with_notes_source(linux)
     _held_machine(linux)
-    assert linux.cli("push").exit_code == 0
+    (notes / "d/n.md").write_text("changed\n")
+    status = linux.cli("status")
+    assert status.exit_code == 0, status.output
+    assert "Overall pending push" in status.output
+    assert "waits until Claude's projects folder can be listed" in status.output
+
+
+def test_a_second_held_push_still_says_project_memory_waits(linux):
+    _held_machine(linux)
+    first = linux.cli("push")
+    assert first.exit_code == 0, first.output
+    assert "waits until Claude's projects folder can be listed" in first.output
+    assert linux.published()["sources"]["claude"]["files"] == {}  # the held push dropped them
     second = linux.cli("push")
     assert second.exit_code == 0, second.output
-    assert "wait until Claude's projects folder can be listed" in second.output
+    assert "waits until Claude's projects folder can be listed" in second.output
+
+
+def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux):
+    from mind_meld import attemptlog
+
+    _held_machine(linux)
+    assert linux.cli("push").exit_code == 0
+    assert linux.cli("push").exit_code == 0
+    with linux.on():
+        assert attemptlog.read_runs()["runs"]["push"]["cause"] == "no-changes"
 
 
 def test_diag_names_a_hold(linux):

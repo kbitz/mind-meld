@@ -187,6 +187,7 @@ def _status_verdict(
     capture_action: str | None = None,
     manifest_arriving: bool = False,
     names_ready: bool = False,
+    names_held: bool = False,
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
     scope = f"Source '{source}' — " if source is not None else ""
@@ -229,6 +230,8 @@ def _status_verdict(
                 )
             elif names_ready:
                 verdict = "Project memory ready to publish under shared names. Run: mm push"
+            elif names_held:
+                verdict = "Project memory waits until Claude's projects folder can be listed."
             elif metadata:
                 verdict = "Metadata-only changes waiting to push. Run: mm push"
             else:
@@ -451,6 +454,7 @@ def status(
             capture_action=capture_action,
             manifest_arriving=fetch.status == "missing" and fetch.vanished,
             names_ready=names_ready,
+            names_held=names_held,
         )
         report["verdict"] = verdict
 
@@ -869,10 +873,6 @@ def status(
             console.print(
                 f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
             )
-        elif names_held:
-            console.print(
-                "\n  Shared project names wait until Claude's projects folder can be listed."
-            )
         elif names_ready:
             console.print(
                 "\n  [yellow]Project memory ready to publish under shared names[/yellow] "
@@ -889,8 +889,10 @@ def status(
                 "\n  [yellow]Metadata-only changes pending[/yellow] "
                 "(run `mm push` to publish updated mtimes)."
             )
-        elif not source:
+        elif not source and not names_held:
             console.print("\n  Local content matches this device's last push.")
+        if names_held:
+            console.print("\n  Project memory waits until Claude's projects folder can be listed.")
 
         if len(devices) > 1:
             console.print("\n  Other devices:")

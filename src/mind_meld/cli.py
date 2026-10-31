@@ -981,7 +981,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             lead = "project names updated"
         parts = [lead]
         if result.switch_held:
-            held_note = "shared project names wait until Claude's projects folder can be listed"
+            held_note = "project memory waits until Claude's projects folder can be listed"
             parts = [held_note] if lead == "no content changes" else [lead, held_note]
         if result.wire_names_published:
             if lead in ("no content changes", "project names updated"):
@@ -1270,7 +1270,13 @@ def _attended_sync_run(verb: str, *, dry_run: bool, scope: dict | None = None):
                 "result-degraded"
                 if degraded
                 else "ok"
-                if result is not None and not getattr(result, "no_sources", False)
+                if result is not None
+                and not getattr(result, "no_sources", False)
+                and not (
+                    getattr(result, "switch_held", False)
+                    and not getattr(result, "content_accepted", False)
+                    and not getattr(result, "host_usage_published", False)
+                )
                 else "no-changes"
             )
             outcome = "degraded" if degraded else "success"
@@ -1465,7 +1471,7 @@ def push(
                 # Usage-only publication leaves obsolete day-file blobs for the next
                 # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
                 # A push that could not list `projects/` dropped those references without
-                # seeing the files, so those blobs may be the last copy.
+                # seeing the files, so hold the sweep. A later listed push still collects them.
                 if (
                     not dry_run
                     and result
