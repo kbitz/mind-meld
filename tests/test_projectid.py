@@ -3532,9 +3532,11 @@ def test_a_second_held_push_still_says_project_memory_waits(linux):
     assert "waits until Claude's projects folder can be listed" in second.output
 
 
-def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux):
+def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux, monkeypatch):
     from mind_meld import attemptlog
 
+    # A skipped usage capture would read as degraded and hide the cause under test.
+    monkeypatch.setattr(config_module, "usage_capture_readiness", lambda *a, **k: "no-reader")
     _held_machine(linux)
     assert linux.cli("push").exit_code == 0
     assert linux.cli("push").exit_code == 0
