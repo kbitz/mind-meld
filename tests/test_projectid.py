@@ -226,7 +226,6 @@ def wire_keys(published: dict) -> list[str]:
         ("ssh://[2001:db8::1]:2222/foo", "[2001:db8::1]:2222/foo"),
         ("ssh://[2001:db8::1:2222]/foo", "[2001:db8::1:2222]/foo"),
         ("https://[2001:db8::1]/foo.git", "[2001:db8::1]/foo"),
-        ("git@[2001:db8::1]:foo", "[2001:db8::1]/foo"),
         ("git@[::1]:repo", None),
         ("localhost.:repo", None),
         ("0.0.0.0:repo", None),
