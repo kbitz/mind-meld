@@ -316,8 +316,8 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 ## Git subprocess environment (load-bearing, Track 55A)
 
 Filesystem discovery selects the repository; inherited Git environment must
-not redirect the later subprocess to another repository. All four Git calls
-(`events._walk_one_repo`, `events._origin_remote_url`,
+not redirect the later subprocess to another repository. All five Git calls
+(`events._walk_one_repo`, `projectid._origin_remote_url`, `projectid._git_origin`,
 `identity._gather_global_email`, `identity._gather_per_repo_emails`) pass
 `env=gitenv.scrubbed_git_env()` and explicit `encoding="utf-8"`. The helper is
 a leaf importing only `os` and `collections.abc`, returns a fresh dict, reads

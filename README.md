@@ -386,7 +386,7 @@ A fleet already stored on iCloud Drive stays there. On the new Mac, type that ex
 3. `mm init` — point it at the folder and enter the **same passphrase**. It verifies the passphrase against the fleet's key header, registers the new device against the existing roster, and pulls. If the folder is still syncing, run `mm pull` again when delivery finishes.
 4. `mm push` — publishes anything this machine has that the others don't; push is what shares this machine's own files.
 
-A project's Claude memory lands only where mm can place it: in a Claude project folder that already exists on this machine for the checkout, or in the checkout you run `mm pull` from. A project you have not opened here is listed as `Not placed here` (see [Project memory across machines](#project-memory-across-machines)); clone it and run `mm pull` inside it.
+A project's Claude memory lands only where mm can place it: in a Claude project folder that already exists on this machine for the checkout, or in the checkout you run `mm pull` from. Either way `~/.claude` must exist: on a new machine, run Claude once first, or mm skips the `claude` source and places nothing. A project you have not opened here is listed as `Not placed here` (see [Project memory across machines](#project-memory-across-machines)); clone it and run `mm pull` inside it.
 
 Push and pull on each Mac to exchange changes according to each file's sync rules:
 
@@ -418,8 +418,9 @@ directory you run `mm pull` in, and shares that project's memory under its `orig
   files. A linked worktree uses the main checkout's folder, as Claude does.
 - A project with no `origin`, a local-path remote, a submodule or a bare layout is shared
   by its home-relative path. The same `origin` on different projects (a template left as
-  `origin`) merges their memory, and `mm pull` inside any directory whose `.git/config`
-  claims that origin places the project's memory there.
+  `origin`) merges their memory. `mm pull` or `mm autopull` inside any directory whose
+  `.git/config` claims that origin places the project's memory there, and what Claude writes
+  there later publishes back under that project.
 - The default `claude` source is required. `mm devices` shows the mm version at each
   machine's last push (`—` if it never pushed).
 

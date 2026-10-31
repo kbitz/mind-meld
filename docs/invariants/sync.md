@@ -139,8 +139,10 @@ path segment that `_validate_rel_path` accepts (a hostile remote with `..`
 stays inside that segment). The identity is `projectid.project_identity`: the
 canonical `host/path` of a network `origin` (`https`, `http`, `git`, `ssh`, or
 scp with user `git` or none) with a non-default port kept (`host:port/path`),
-another ssh user kept (`user@host/path`) and no password, ever. Local paths,
-`file://`, host-only forms, control characters and bad ports have none. This
+another ssh user kept (`user@host/path`, with a leading `/` kept, so a path
+relative to that user's home differs from an absolute one) and no password,
+query or path parameters, ever. Local paths, `file://`, a loopback host,
+host-only forms, control characters and a malformed URL or port have none. This
 name authorizes writes and deletions, so it is stricter than `retro-fleet`'s
 `canonicalize_remote_url`, which still groups loosely.
 
@@ -150,19 +152,24 @@ name authorizes writes and deletions, so it is stricter than `retro-fleet`'s
 its name by descent from the filesystem root (never following a symlink, with a
 per-run listing memo) gives exactly one directory, that directory has a `.git`
 directory with `HEAD`, and its `.git/config` (`RawConfigParser`; a quoted or
-escaped value, an `include` or a parse failure asks git itself with a 2 s
-timeout) names a network `origin`. No git spawn on the common path, no
-transcript read, no walk of the home folder. `FileNotFoundError` and
-`NotADirectoryError` mean gone; any other `OSError`, and a timeout, mean
+escaped value, an inline comment or continued line, a section spelling the parser
+misses, an `include` or a parse failure asks git itself with a 2 s timeout) names
+a network `origin`. No git spawn on the common path, no transcript read, no walk
+of the home folder. `FileNotFoundError` and `NotADirectoryError` mean gone; any
+other failure, including a non-regular `.git/config`, and a timeout, mean
 *indeterminate*: the folder keeps the identity recorded for it in this machine's
 sidecar (`wire_folders`, injected by `core._configure_project_names` because
-`sidecar` imports `manifest`), so a stale mount or a hook with narrower disk
-permissions never flips a folder to home-relative. Each identity has one owner:
-folders holding `memory/` first, then the smallest encoded name; a retained
-identity competes only when nothing resolved; a linked worktree's nomination of
-its main checkout, and the current directory's main checkout (pull paths only,
-`projectid.allow_cwd_candidate()` at `_pull_core` entry), join only when the
-identity has no other candidate. Non-owners publish home-relative. Linked
+`sidecar` imports `manifest`, and read only when the index is built), so a stale
+mount or a hook with narrower disk permissions never flips a folder to
+home-relative. One odd folder never stops the others. Each identity has one owner,
+and a folder owns one identity: folders holding `memory/` first, then the smallest
+encoded name; a retained identity competes only when nothing resolved; next, a
+folder deleted from `projects/` whose recorded checkout still resolves to that
+identity, so deleting a project's folder is a real deletion; a linked worktree's
+nomination of its main checkout, and the current directory's main checkout (pull
+paths only, `projectid.allow_cwd_candidate()` at `_pull_core` entry, probed on its
+own daemon thread under the same deadline), join only when the identity has no
+other candidate. Non-owners publish home-relative. Linked
 worktrees own nothing (Claude writes to the main checkout's folder); a
 submodule, a bare layout, no `origin` and a local-path remote are home-relative.
 `mm diag --json` reports the index as `project_index`.
@@ -177,20 +184,31 @@ becomes `@lit-<folder>`: displaced entries move and never drop, so `mm gc`
 keeps every sha. An unmarked entry (a peer still on path names) whose
 `base_path` ends in `.claude` under a different home: a folder equal to or under
 the publisher's encoded home becomes `@old-<folder>`. Tombstone keys follow the
-same rules; one whose source has no entry passes through both ways.
+same rules; one whose source has no entry passes through both ways, except that an
+`@` name used only by deletion records (published with the source disabled or the
+codec off) maps by the marked rules in any entry, because it names its own
+provenance.
 `projectid.unplaceable_reason(folder)` reads the name only: `@git-` unplaced,
 `@old-` old form, `@home` / `@lit-` superseded. `core._filter_excluded_paths`
 drops those in files and tombstones of `claude` at its existing pull, push, diff
 and status sites, including on its fast path, so such an entry is never applied,
-never tombstoned and never reaches the omission proof. Pull writes one
+never tombstoned and never reaches the omission proof. The one exception is push's
+own prior (`own_prior=True`), which keeps its deletion records under `@git-` and
+`@home` names: the owner or home can come back, and dropping the record would undo
+the deletion on the next pull. Pull writes one
 `excluded` history row per peer per run for them. `walk_claude_source` skips a
 project directory starting with `@`.
 
 **A moved checkout mints nothing.** A publisher records
 `wire_folders: {"@git-<x>": "<its local folder>"}`. On load, when the recorded
 folder differs from the identity's current owner here, the owner joins an
-in-memory `moved_folders` (kept by `_merge_manifests`, never serialized, and
-applied to recovered priors by `core.reconcile_recovered_prior`).
+in-memory `moved_folders` (kept by `_merge_manifests`, never serialized and
+stripped if a manifest carries one). `core.reconcile_recovered_prior` does the
+same for a recovered prior, adding the recorded folder too, because a sidecar's
+files sit under it, and doing so when the identity has no owner now. A marked
+entry published from another Claude folder (`base_path` differs: a peer, or this
+machine before its home changed) adds the local folders of its `@home` names, so
+a changed home mints nothing either.
 `generate_tombstones` skips paths under it, and `core.content_counts` /
 `iter_content_diffs` do not count a prior entry under a moved or unplaceable
 name as deleted, or a local file with the same sha and subpath as new. A remote
@@ -207,7 +225,8 @@ default pull. Unplaced and old-form counts are not "pending" for O3.2's 24 h
 warning; Track 92A owns honouring that. A peer still on path names shows as
 `PullResult.old_form_peers` (`312 files from Mac B wait until it publishes
 shared names (mm status)`), kept apart from `WaitingPeer` because it waits on a
-person.
+person. A marked peer's stale 0x02 conflict copy adds no such row: that machine
+has switched, and no remedy on it would clear the copy.
 
 **The first push.** `switch_due` (codec on, own prior not marked) and
 `republish_due` join push's no-op check with their own wording
@@ -227,8 +246,17 @@ or on an unmounted disk flips that folder to home-relative until it returns
 identity-owned folders ignore); deleting a folder whose checkout is gone mints
 no tombstone, so peers keep their copies; a stale copy of a project under a path
 identity-owned elsewhere stays local and harmless; a literal outside-home name can
-reach an identity-owned folder at the same path; 14 of the 17 no-remote folders
-measured were dead paths; `autoMemoryDirectory` is unsupported.
+reach an identity-owned folder at the same path; folder names decode lossily, so a
+deleted `~/my_proj`'s folder resolves to a live `~/my-proj` and publishes under its
+identity (two live candidates are ambiguous and own nothing); the current-directory
+rule both places a project's memory in, and later publishes memory from, any
+directory whose `.git/config` claims that origin, unattended through `mm autopull`
+(decided in the plan); an ssh user name is kept as written, so a token used as one
+reaches the sidecar and `mm diag --json`; `mm diff` lists a renamed project's files
+as `+ push` where `mm status` reports only the rename; `mm status` and `mm diag`
+read each peer's whole manifest with no time bound, so an iCloud placeholder can
+delay them; 14 of the 17 no-remote folders measured were dead paths;
+`autoMemoryDirectory` is unsupported.
 
 ## Shared JSON locking
 
