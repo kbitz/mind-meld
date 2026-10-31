@@ -284,6 +284,8 @@ def project_identity(url: object) -> str | None:
         if scheme not in _DEFAULT_PORTS:
             return None
         host = (parts.hostname or "").lower()
+        if ":" in host:  # urlsplit strips an IPv6 host's brackets; a port would then merge in
+            host = f"[{host}]"
         user = parts.username if scheme == "ssh" else None
         path = parts.path or ""
         if scheme in ("ssh", "git"):  # literal path characters there
