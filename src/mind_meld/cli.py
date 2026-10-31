@@ -48,6 +48,7 @@ from mind_meld import (
     identity,
     initflow,
     manifest,
+    projectid,
     pullflow,
     pullhistory,
     pullplan,
@@ -980,7 +981,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             lead = "project names updated"
         parts = [lead]
         if result.switch_held:
-            held_note = "project memory not published (Claude's projects folder cannot be listed)"
+            held_note = "shared project names wait until Claude's projects folder can be listed"
             parts = [held_note] if lead == "no content changes" else [lead, held_note]
         if result.wire_names_published:
             if lead in ("no content changes", "project names updated"):
@@ -1463,7 +1464,14 @@ def push(
 
                 # Usage-only publication leaves obsolete day-file blobs for the next
                 # content-changing push or explicit mm gc, avoiding an own-blob sweep per refresh.
-                if not dry_run and result and result.content_changed:
+                # A push that could not list `projects/` dropped those references without
+                # seeing the files, so those blobs may be the last copy.
+                if (
+                    not dry_run
+                    and result
+                    and result.content_changed
+                    and projectid.projects_listed()
+                ):
                     try:
                         core._sync_progress_phase("Cleaning up orphaned blobs")
                         gc_count = _do_gc(
@@ -1584,10 +1592,18 @@ def _push_result_or_none(
     events_degradations: list[str],
     dry_run: bool,
     held: list[tuple[str, str, str]] | None = None,
+    *,
+    switch_held: bool = False,
 ) -> PushResult | None:
     """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
-    if (getattr(events_degradations, "total", len(events_degradations)) or held) and not dry_run:
-        return PushResult(events_degradations=events_degradations, held=list(held or []))
+    if (
+        getattr(events_degradations, "total", len(events_degradations)) or held or switch_held
+    ) and not dry_run:
+        return PushResult(
+            events_degradations=events_degradations,
+            held=list(held or []),
+            switch_held=switch_held,
+        )
     return None
 
 
@@ -2203,7 +2219,11 @@ def _push_core(
             # Attended outcome owner: the final line carries the count; verbose names them.
             _print_held_outcome(scan_held, verbose=verbose)
         if captured is not None and captured.appended is not None:
-            result = PushResult(events_degradations=events_degradations, held=scan_held)
+            result = PushResult(
+                events_degradations=events_degradations,
+                held=scan_held,
+                switch_held=form.switch_held,
+            )
             if result_observer is not None:
                 result_observer(result)
             try:
@@ -2229,7 +2249,9 @@ def _push_core(
                     file=sys.stderr,
                 )
             return result
-        return _push_result_or_none(events_degradations, dry_run, scan_held)
+        return _push_result_or_none(
+            events_degradations, dry_run, scan_held, switch_held=form.switch_held
+        )
 
     # OK, this push will upload bytes. Run the events tail now to capture
     # the cursor + git/sessions snapshots, then re-walk mm-events to fold

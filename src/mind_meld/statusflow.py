@@ -388,15 +388,13 @@ def status(
         # Track 90A: the first push in the shared project-name form, or a rename,
         # is owed. Not under `--source other`, where it does not apply.
         claude_selected = any(src["name"] == "claude" for src in sources_configs)
-        names_ready = bool(
-            comparison_complete
-            and claude_selected
-            and (source is None or source == "claude")
-            and (
-                core.project_form_state(local_manifest, remote_manifest).due
-                or core.names_only_change(local_manifest, remote_sources)
+        names_ready = names_held = False
+        if comparison_complete and claude_selected and (source is None or source == "claude"):
+            form = core.project_form_state(local_manifest, remote_manifest)
+            names_held = form.switch_held
+            names_ready = not names_held and bool(
+                form.due or core.names_only_change(local_manifest, remote_sources)
             )
-        )
         try:
             n_conflicts = sum(
                 source is None or hit[0] == source
@@ -870,6 +868,10 @@ def status(
             console.print("\n  [yellow]Overall pending push:[/yellow]")
             console.print(
                 f"    + {total_new} new, ~ {total_modified} modified, - {total_deleted} deleted"
+            )
+        elif names_held:
+            console.print(
+                "\n  Shared project names wait until Claude's projects folder can be listed."
             )
         elif names_ready:
             console.print(
@@ -1540,6 +1542,8 @@ def _project_index_state(
         failure = projectid.home_failure()
         if failure is not None:
             snapshot["reason"] = "home_unresolved"
+        elif not projectid.projects_listed():
+            snapshot["reason"] = "projects_unlisted"
         own_form = _manifest_form(backend, dev_id) if dev_id else None
         snapshot["state"] = (
             None

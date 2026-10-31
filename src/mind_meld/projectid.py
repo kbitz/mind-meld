@@ -575,8 +575,8 @@ def claude_real() -> str | None:
 
 def projects_listed() -> bool:
     """False when the Claude ``projects/`` folder cannot be listed right now."""
-    if _CTX.index is not None:
-        return _CTX.index.listed
+    if _CTX.index is not None and not _CTX.index.listed:
+        return False
     if _CTX.claude_dir is None:
         return True
     return _list_project_folders(_CTX.claude_dir / "projects") is not None

@@ -3310,7 +3310,7 @@ def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypa
     assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/x.md"}
 
 
-def test_a_held_switch_says_project_memory_was_not_published(linux):
+def test_a_held_switch_says_the_names_wait(linux):
     from mind_meld.cli import _sync_success
 
     linux.checkout("/home/kb/proj")
@@ -3333,7 +3333,11 @@ def test_a_held_switch_says_project_memory_was_not_published(linux):
         )
     assert linux.first_byte() == crypto.FORMAT_VERSION
     assert _sync_success("push", result) == (
-        "Push: project memory not published (Claude's projects folder cannot be listed)."
+        "Push: shared project names wait until Claude's projects folder can be listed."
+    )
+    assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == (
+        "Push: 1 content change published; "
+        "shared project names wait until Claude's projects folder can be listed."
     )
 
 
@@ -3422,3 +3426,102 @@ def test_only_the_first_switch_needs_a_listing(mac, prior, listed, due):
         form = core.project_form_state({"sources": {"claude": {"files": {}}}}, prior)
     assert (form.publish_new, form.switch_due) == due
     assert form.switch_held == (not listed and due == (False, False))
+
+
+def _with_notes_source(machine: Machine) -> Path:
+    """A second source, so a push has a content change while `projects/` is gone."""
+    notes = machine.home / "notes-src"
+    (notes / "d").mkdir(parents=True)
+    (notes / "d/n.md").write_text("n\n")
+    machine.config["sync"]["sources"].append(
+        {"name": "notes", "path": str(notes), "type": "generic", "include_dirs": ["d"]}
+    )
+    return notes
+
+
+def test_a_held_push_collects_no_blobs(linux):
+    notes = _with_notes_source(linux)
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "only copy\n"})
+    _claim_this_claude_folder(linux)
+    backend = LocalBackend(linux.store)
+    blobs = set(backend.list_keys("data/"))
+    (linux.claude / "projects").rename(linux.claude / "projects.parked")
+    (notes / "d/n.md").write_text("changed\n")
+    pushed = linux.cli("push")
+    assert pushed.exit_code == 0, pushed.output
+    assert linux.first_byte() == crypto.FORMAT_VERSION
+    assert blobs <= set(backend.list_keys("data/"))
+
+
+def test_a_switched_machine_that_cannot_list_projects_collects_no_blobs(linux):
+    notes = _with_notes_source(linux)
+    linux.checkout("/home/kb/proj")
+    linux.memory(linux.folder_for("/home/kb/proj"), "a.md", "only copy\n")
+    linux.push()
+    assert linux.first_byte() == crypto.MANIFEST_FORMAT_VERSION
+    backend = LocalBackend(linux.store)
+    blobs = set(backend.list_keys("data/"))
+    (linux.claude / "projects").rename(linux.claude / "projects.parked")
+    (notes / "d/n.md").write_text("changed\n")
+    pushed = linux.cli("push")
+    assert pushed.exit_code == 0, pushed.output
+    assert blobs <= set(backend.list_keys("data/"))
+
+
+def test_losing_projects_mid_push_collects_no_blobs(linux, monkeypatch):
+    """A switched machine's index was built at the load, while `projects/` was still there."""
+    from mind_meld import cli as cli_module
+
+    linux.checkout("/home/kb/proj")
+    linux.memory(linux.folder_for("/home/kb/proj"), "a.md", "only copy\n")
+    linux.push()
+    backend = LocalBackend(linux.store)
+    blobs = set(backend.list_keys("data/"))
+    projects = linux.claude / "projects"
+    real = cli_module.build_manifest_v2
+
+    def vanish_then_scan(*args, **kwargs):
+        if projects.exists():
+            projects.rename(linux.claude / "projects.parked")
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_module, "build_manifest_v2", vanish_then_scan)
+        pushed = linux.cli("push")
+    assert pushed.exit_code == 0, pushed.output
+    assert blobs <= set(backend.list_keys("data/"))
+
+
+def _held_machine(linux: Machine) -> None:
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "a\n"})
+    _claim_this_claude_folder(linux)
+    (linux.claude / "projects").rename(linux.claude / "projects.parked")
+
+
+def test_status_during_a_hold_says_the_names_wait_not_that_they_are_ready(linux):
+    _held_machine(linux)
+    status = linux.cli("status")
+    assert status.exit_code == 0, status.output
+    assert "ready to publish" not in status.output
+    assert "wait until Claude's projects folder can be listed" in status.output
+
+
+def test_a_second_held_push_still_says_the_names_wait(linux):
+    _held_machine(linux)
+    assert linux.cli("push").exit_code == 0
+    second = linux.cli("push")
+    assert second.exit_code == 0, second.output
+    assert "wait until Claude's projects folder can be listed" in second.output
+
+
+def test_diag_names_a_hold(linux):
+    _held_machine(linux)
+    diag = linux.cli("diag", "--json")
+    assert diag.exit_code == 0, diag.output
+    state = json.loads(diag.output)["project_index"]
+    assert state["state"] == "path"
+    assert state["reason"] == "projects_unlisted"
