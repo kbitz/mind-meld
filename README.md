@@ -26,7 +26,7 @@ that checkout is. See [Project memory across machines](#project-memory-across-ma
 **Every machine must update before its own first push in the new form, and it takes part
 in the new form only from then.** Go one machine at a time, in any order; nothing waits for
 the whole fleet. On each machine run the update command, then `mm push`. The first push
-after updating (attended or from a hook) republishes the manifest with shared names and
+after updating that can list `~/.claude/projects` (attended or from a hook) republishes the manifest with shared names and
 prints `Push: project memory published under shared names.`; it uploads no content, deletes
 nothing and runs no GC. Confirm with `mm diag --json`: `project_index.state` is `shared`,
 and `project_index.machines` shows which other machines have switched.
