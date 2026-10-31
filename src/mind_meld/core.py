@@ -1355,7 +1355,8 @@ def _spell_first_switch_records(local_manifest: dict) -> None:
     it is what binds this path, and once a folder does, the identity spelling binds.
     The sidecar keeps both, so recovery does not lose them. Only records the pre-switch
     sidecar already held are spelled: what this push mints may be housekeeping, and an
-    identity-wide record would block that project across the fleet.
+    identity-wide record would block that project across the fleet. The record must match,
+    not just its key: a sidecar whose last write failed can hold a key the store cleared.
     """
     idx = projectid.index()
     if idx is None or not idx.record_identity:
@@ -1364,7 +1365,7 @@ def _spell_first_switch_records(local_manifest: dict) -> None:
     held = (prior or {}).get("tombstones") or {}
     tombstones = local_manifest.get("tombstones") or {}
     for key, info in list(tombstones.items()):
-        if key not in held or not isinstance(key, str) or not key.startswith("claude:"):
+        if held.get(key) != info or not isinstance(key, str) or not key.startswith("claude:"):
             continue
         parts = manifest._split_project_key(key[len("claude:") :])
         identity = idx.record_identity.get(parts[0]) if parts else None

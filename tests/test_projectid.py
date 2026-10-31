@@ -3110,6 +3110,19 @@ def test_the_first_switch_keeps_a_removed_folders_deletion_under_its_identity(ma
     assert (landed / "b.md").read_text() == "b\n"  # and only that path is suppressed
 
 
+def _claim_this_claude_folder(machine: Machine) -> None:
+    """The store's old-form manifest was written from this very Claude folder."""
+    path = Path(machine.store) / manifest_key(machine.device_id)
+    with machine.on():
+        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
+        data["sources"]["claude"]["base_path"] = os.path.realpath(machine.claude)
+        path.write_bytes(
+            crypto.encrypt_manifest(
+                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=False
+            )
+        )
+
+
 def _old_form_with_removed_folder(linux: Machine) -> tuple[Path, str]:
     """A machine on the old form whose project folder is gone; its checkout is not."""
     import shutil
@@ -3117,16 +3130,7 @@ def _old_form_with_removed_folder(linux: Machine) -> tuple[Path, str]:
     checkout = linux.checkout("/home/kb/proj")
     folder = linux.folder_for("/home/kb/proj")
     seed_old_form(linux, {f"{folder}/memory/a.md": "a\n", "-home-kb-other/memory/o.md": "o\n"})
-    # This machine wrote that manifest from this very Claude folder.
-    path = Path(linux.store) / manifest_key(linux.device_id)
-    with linux.on():
-        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
-        data["sources"]["claude"]["base_path"] = os.path.realpath(linux.claude)
-        path.write_bytes(
-            crypto.encrypt_manifest(
-                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=False
-            )
-        )
+    _claim_this_claude_folder(linux)
     shutil.rmtree(linux.claude / "projects" / folder)
     return checkout, folder
 
@@ -3301,15 +3305,7 @@ def test_a_switching_push_spells_only_records_the_sidecar_already_held(linux):
     seed_old_form(linux, {f"{folder}/memory/b.md": "b\n", "-home-kb-other/memory/o.md": "o\n"})
     gone.unlink()
     seed_old_form(linux, {})  # the sidecar now holds a.md's record
-    path = Path(linux.store) / manifest_key(linux.device_id)
-    with linux.on():
-        data = json.loads(crypto.decrypt_manifest(path.read_bytes(), PASSPHRASE, MEMORY_KB))
-        data["sources"]["claude"]["base_path"] = os.path.realpath(linux.claude)
-        path.write_bytes(
-            crypto.encrypt_manifest(
-                json.dumps(data).encode(), PASSPHRASE, MEMORY_KB, wire_names=False
-            )
-        )
+    _claim_this_claude_folder(linux)
     shutil.rmtree(linux.claude / "projects" / folder)
     linux.push()
     assert set(linux.published()["tombstones"]) == {
@@ -3317,3 +3313,61 @@ def test_a_switching_push_spells_only_records_the_sidecar_already_held(linux):
         "claude:projects/@home-proj/memory/a.md",
         "claude:projects/@home-proj/memory/b.md",  # minted by this push: never identity-wide
     }
+
+
+def test_a_stale_sidecar_key_never_passes_a_fresh_mint_as_a_held_record(linux):
+    """A failed sidecar write leaves a key the store cleared; this push's mint is still new."""
+    import shutil
+
+    linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    gone = linux.memory(folder, "a.md", "a\n")
+    seed_old_form(linux, {f"{folder}/memory/b.md": "b\n", "-home-kb-other/memory/o.md": "o\n"})
+    gone.unlink()
+    seed_old_form(linux, {})  # the sidecar now holds a.md's record
+    with linux.on():
+        stale = sidecar.sidecar_path().read_bytes()
+    linux.memory(folder, "a.md", "a again\n")
+    seed_old_form(linux, {})  # the store clears that record, and this sidecar write fails
+    with linux.on():
+        sidecar.sidecar_path().write_bytes(stale)
+    _claim_this_claude_folder(linux)
+    shutil.rmtree(linux.claude / "projects" / folder)
+    linux.push()
+    assert set(linux.published()["tombstones"]) == {
+        "claude:projects/@home-proj/memory/a.md",
+        "claude:projects/@home-proj/memory/b.md",
+    }
+
+
+def test_an_unlisted_projects_folder_at_the_switch_spells_no_record(linux):
+    """Unlisted, a live second clone looks removed and nothing is known to own the project."""
+    linux.checkout("/home/kb/alive/proj")
+    linux.checkout("/home/kb/zclone/proj")
+    owner = linux.folder_for("/home/kb/alive/proj")
+    clone = linux.folder_for("/home/kb/zclone/proj")
+    gone = linux.memory(clone, "a.md", "a\n")
+    seed_old_form(linux, {f"{owner}/memory/keep.md": "k\n", f"{clone}/memory/c.md": "c\n"})
+    gone.unlink()
+    seed_old_form(linux, {})  # the sidecar now holds the clone's record
+    _claim_this_claude_folder(linux)
+    projects = linux.claude / "projects"
+    parked = linux.claude / "projects.parked"
+    projects.rename(parked)
+    linux.push()
+    parked.rename(projects)
+    assert set(linux.published()["tombstones"]) == {"claude:projects/@home-zclone-proj/memory/a.md"}
+
+
+def test_a_worktree_folder_owning_a_removed_folders_project_makes_its_records_identity_wide(linux):
+    """The limit `docs/invariants/sync.md` states: the nominated folder owns the identity."""
+    import shutil
+
+    main = linux.checkout("/home/kb/proj")
+    folder = linux.folder_for("/home/kb/proj")
+    worktree = _worktree_of(linux, main, "/home/kb/wt/feat")
+    seed_old_form(linux, {f"{folder}/memory/a.md": "a\n", f"{worktree}/memory/w.md": "w\n"})
+    _claim_this_claude_folder(linux)
+    shutil.rmtree(linux.claude / "projects" / folder)
+    linux.push()
+    assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/a.md"}
