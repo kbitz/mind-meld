@@ -240,7 +240,7 @@ def _is_local_host(host: str) -> bool:
     except ValueError:
         try:  # the short forms the C resolver takes: 127.1, 0x7f.0.0.1, 2130706433
             packed = socket.inet_aton(bare)
-        except OSError:
+        except (OSError, ValueError):
             return False
         return packed[0] == 127 or not any(packed)
     mapped = getattr(address, "ipv4_mapped", None)

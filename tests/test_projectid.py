@@ -237,6 +237,8 @@ def wire_keys(published: dict) -> list[str]:
         ("0177.0.0.1:repo", None),
         ("0x7f000001:repo", None),
         ("0.0:repo", None),
+        ("git@10.1:acme/p", "10.1/acme/p"),
+        ("127.0.0.1.nip.io:acme/p", "127.0.0.1.nip.io/acme/p"),
         ("https://host/org/repo;token=SEC/RET", None),
         ("git@host:org/repo?token=SEC/RET", None),
         ("ssh://git@host/team/a?b/c.git", None),
@@ -2614,6 +2616,11 @@ def test_an_unmarked_prior_with_a_missing_projects_folder_mints_nothing(mac):
             {"-Users-kb-loose"}, entry, None, set(), {"-Users-kb-loose"}
         )[1]
     assert moved == {"-Users-kb-loose"}  # `projects/` does not exist on this machine yet
+    with mac.on():
+        record_only = manifest._from_wire_mapping(
+            {"-Users-kb-loose", "-Users-kb-only-a-record"}, entry, None, set(), {"-Users-kb-loose"}
+        )[1]
+    assert record_only == {"-Users-kb-loose"}  # a record alone would republish forever
     mac.memory("-Users-kb-loose", "b.md", "b\n")
     with mac.on():
         moved = manifest._from_wire_mapping(
