@@ -50,6 +50,20 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
 
+### [review:severity=should] A first-switch record is identity-wide for a whole-folder removal and gets one chance to be spelled
+- **Description:** A folder removed by an old-form push in the 30 days before the switch, with its checkout alive and no owner, publishes identity-wide, so a peer in another layout silently stops receiving that project's same-named files until the record expires. A held record whose checkout, index or `projects/` listing is unavailable at the switching push stays home-relative for good, so a pull inside that checkout can restore the deleted file. `docs/invariants/sync.md` states both.
+- **Why:** Narrowing the first reopens the deleted-file restore the cross-vendor review found, and retrying the second needs a persisted marker outside the plan. Both are probed in the review evidence (`p7_first_switch.py` s4, s5); no bytes are destroyed.
+- **Effort:** M
+- **Priority:** P3
+- **Context:** Revisit if a machine in another layout joins within 30 days of a fleet machine's switch, or if deleted Claude memory returns after a switch.
+
+### [review:severity=should] `sidecar.read` validates less than `load_manifest`
+- **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.
+- **Why:** Predates Track 90A and needs a damaged sidecar plus a corrupt own manifest. With a healthy store the switching push was probed and does not crash.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit if `last-push.json` is ever reported damaged on a fleet machine; the fix applies `load_manifest`'s value-shape and `_validate_rel_path` checks in `sidecar.read`.
+
 ### [review:severity=should] Own-manifest recovery can leave a deletion record under its old spelling
 - **Description:** With a corrupt own manifest plus a home rename, a folder that gained a remote, or a conflict copy older than a remote change, `core.reconcile_recovered_prior` can leave one tombstone under a name a healthy load would spell differently, so a deleted file can return. An own conflict copy from a previous home can also suppress one real deletion for one push through `moved_folders`.
 - **Why:** Each needs three rare conditions together; no bytes are lost. Deferred from Track 90A review (`docs/invariants/sync.md` limits).
