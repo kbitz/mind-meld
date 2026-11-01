@@ -76,9 +76,13 @@ def cfg(tmp_path, monkeypatch):
         config_path,
     )
     monkeypatch.setattr(config, "CONFIG_PATH", config_path)
-    # Wide enough that no pinned line wraps.
+    # Private size fields, not the width property: the setter's undo pins
+    # the computed size for the rest of the worker. Rich ignores a
+    # width-only pin when TERM=dumb and wraps at 80 columns.
     monkeypatch.setattr(sourceflow.console, "_width", 240)
+    monkeypatch.setattr(sourceflow.console, "_height", 50)
     monkeypatch.setattr(sourceflow.stderr_console, "_width", 240)
+    monkeypatch.setattr(sourceflow.stderr_console, "_height", 50)
     return config_path
 
 
