@@ -14,6 +14,9 @@ Raise surface for direct callers:
   (Ctrl-C or typer.Abort mid-prompt) with nothing written.
 - write errors from patch_config_on_disk propagate; the success lines and the
   seen-sources record come after the write, so a failed write prints neither.
+- OSError from seen_sources.acknowledge (it cannot open the tracker file)
+  propagates after the config write has landed, so a nonzero exit does not
+  prove nothing changed.
 The `@app.command()` shells and the `--help` text stay in cli.py; this module
 never imports cli.
 """
