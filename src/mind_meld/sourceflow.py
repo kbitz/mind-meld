@@ -12,11 +12,10 @@ Raise surface for direct callers:
 - typer.Exit(1): a core._error refusal (config problem, unknown or retired
   source name, a Cursor hook that cannot be installed), or a reconfigure abort
   (Ctrl-C or typer.Abort mid-prompt) with nothing written.
-- write errors from patch_config_on_disk propagate; the success lines and the
-  seen-sources record come after the write, so a failed write prints neither.
-- OSError from seen_sources.acknowledge (it cannot open the tracker file)
-  propagates after the config write has landed, so a nonzero exit does not
-  prove nothing changed.
+- anything else propagates uncaught. A failed config write prints no success
+  line and records nothing as seen.
+A nonzero exit does not prove nothing changed: the steps around the config write
+can fail too (`_record_seen` after it, the Cursor hook before it).
 The `@app.command()` shells and the `--help` text stay in cli.py; this module
 never imports cli.
 """
@@ -213,9 +212,10 @@ def _record_seen(names: list[str]) -> None:
 
     Atomic under flock via `seen_sources.acknowledge` (codex 2026-04-25:
     the previous read+update+write split lost concurrent acknowledgments).
-    Best-effort: a write failure surfaces a stderr breadcrumb but does not
-    crash the calling command. The seen tracker drives the `mm status`
-    new-source hint; losing it just means a hint repeats.
+    A failed tracker write surfaces a stderr breadcrumb and the command goes
+    on; failing to re-read the config or to open or lock the tracker raises.
+    The seen tracker drives the `mm status` new-source hint; losing it just
+    means a hint repeats.
     """
     config = core._get_config(read_only=False)
     currently_resolved = [s["name"] for s in get_sources(config)]
