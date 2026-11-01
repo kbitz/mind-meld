@@ -1,6 +1,6 @@
 """The source commands' bodies and their source-only helpers, independent of command registration.
 
-`mm sources` lists every configured source and how many files each keeps.
+`mm sources` lists the configured sources and how many files each keeps.
 `mm enable-source` and `mm disable-source` toggle one source on this device
 (`[sync].disabled_sources`), validate the name against the known set, and give
 `cursor` its usage-only alias path. `mm reconfigure-sources` re-runs the picker

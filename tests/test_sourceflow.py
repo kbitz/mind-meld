@@ -232,26 +232,36 @@ def test_sources_lists_configured_sources(cfg):
     assert [rows[name][3] for name in ("claude", "gstack")] == ["Y", "N"]
 
 
-def test_sources_counts_files_kept_and_excluded_by_source_patterns(cfg):
+@pytest.mark.parametrize(
+    "patterns,expected",
+    [
+        ({"exclude_patterns": ["projects/*/repo-mode.json"]}, ["2", "1"]),
+        ({"include_patterns": ["projects/*/role.md"]}, ["1", "2"]),
+    ],
+)
+def test_sources_counts_files_kept_and_excluded_by_source_patterns(cfg, patterns, expected):
     # Value: protects=mm sources reports kept and per-source-excluded file counts;
-    # fails_when=the no-excludes recount walk is dropped or kept/excluded are swapped;
+    # fails_when=the no-patterns recount walk is dropped or kept/excluded are swapped;
     # why_new=existing tests only assert the Excluded header; seam=none;
     # no_claim=global junk-list exclusion counts
     on_disk = _on_disk(cfg)
-    root = next(s for s in on_disk["sync"]["sources"] if s["name"] == "gstack")
-    app_dir = Path(root["path"]) / "projects" / "app"
+    by_name = {s["name"]: s for s in on_disk["sync"]["sources"]}
+    app_dir = Path(by_name["gstack"]["path"]) / "projects" / "app"
     app_dir.mkdir(parents=True)
     for name in ("repo-mode.json", "role.md", "notes.md"):
         (app_dir / name).write_text("x")
-    root["include_dirs"] = ["projects"]
-    root["exclude_patterns"] = ["projects/*/repo-mode.json"]
+    memory = Path(by_name["claude"]["path"]) / "projects" / "-x" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "a.md").write_text("x")
+    by_name["gstack"]["include_dirs"] = ["projects"]
+    by_name["gstack"].update(patterns)
     config.save_config(on_disk, cfg)
 
     result = runner.invoke(app, ["sources"])
     assert result.exit_code == 0, result.output
     rows = _source_rows(result.stdout)
-    assert rows["gstack"][4:] == ["2", "1"]
-    assert rows["claude"][5] == "—"
+    assert rows["gstack"][4:] == expected
+    assert rows["claude"][4:] == ["1", "—"]
 
 
 # ── reconfigure-sources ───────────────────────────────────────────────
