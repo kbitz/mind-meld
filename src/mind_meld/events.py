@@ -112,6 +112,15 @@ only. Do not fork this regex — aggregator imports it from here."""
 RECAPTURE_WINDOW_MIN_DAYS = 1
 RECAPTURE_WINDOW_MAX_DAYS = 90  # CURSOR_SCAN_DAYS / events retention
 RECAPTURE_WINDOW_DEFAULT = "30d"
+RECAPTURE_PER_REPO_TIMEOUT_MS = 30_000
+RECAPTURE_WALK_BUDGET_MS = 120_000
+"""Git-walk limits for ``mm recapture`` and its preview, per repository and
+for the whole walk.
+
+Chosen floors, not measured at the 90-day window. The per-repository value
+is passed to ``walk_git_projects`` verbatim: no floor, no
+``PER_REPO_TIMEOUT_CAP_MS``, no division by repository count. Push,
+autopush and init pass no override and keep their own budgets."""
 
 GIT_SNAPSHOT_ORIGIN_RECAPTURE = "recapture"
 """Marker on git-snapshot rows written by ``mm recapture``.
@@ -1593,6 +1602,7 @@ def walk_git_projects(
     diagnostic=None,
     use_repo_cursors: bool = False,
     author_emails: Sequence[str] | None = None,
+    per_repo_timeout_ms: int | None = None,
 ) -> list[GitSnapshot]:
     """Capture commits since `since` across `roots`. Returns one
     GitSnapshot per push (a SINGLE row aggregating all projects), so the
@@ -1608,6 +1618,10 @@ def walk_git_projects(
         max(PER_REPO_TIMEOUT_FLOOR_MS,
             (total_budget_ms * MAX_GIT_WORKERS) // repos_remaining)
         capped at PER_REPO_TIMEOUT_CAP_MS
+    A caller-supplied ``per_repo_timeout_ms`` replaces that formula: every
+    repository gets the value verbatim, with no floor, cap or division by
+    repository count. Only ``mm recapture`` passes one; ``total_budget_ms``
+    still bounds the whole walk.
 
     Per-repo failures fold into the row's `skipped` field (A5). Whole-walk
     failure surfaces as `mm: notice:` and we return an empty/partial row.
@@ -1674,14 +1688,15 @@ def walk_git_projects(
         ]
         return [snapshot]
 
-    n_repos = len(roots)
-    per_repo_timeout_ms = min(
-        PER_REPO_TIMEOUT_CAP_MS,
-        max(
-            PER_REPO_TIMEOUT_FLOOR_MS,
-            (total_budget_ms * MAX_GIT_WORKERS) // n_repos,
-        ),
-    )
+    if per_repo_timeout_ms is None:
+        n_repos = len(roots)
+        per_repo_timeout_ms = min(
+            PER_REPO_TIMEOUT_CAP_MS,
+            max(
+                PER_REPO_TIMEOUT_FLOOR_MS,
+                (total_budget_ms * MAX_GIT_WORKERS) // n_repos,
+            ),
+        )
 
     deadline = time.monotonic() + (total_budget_ms / 1000.0)
     pass_emails = bool(effective_emails) and _accepts_fourth_arg(_walk_one_repo)

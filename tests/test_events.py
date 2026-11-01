@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -962,6 +963,30 @@ class TestWalkGitProjects:
         # Single repo, generous budget → would compute huge per-repo, cap wins
         events.walk_git_projects(roots, datetime.now(timezone.utc), 100_000)
         assert all(t == events.PER_REPO_TIMEOUT_CAP_MS for t in captured)
+
+    @pytest.mark.parametrize("n_roots", [1, 40])
+    def test_explicit_per_repo_timeout_skips_formula_and_cap(self, monkeypatch, n_roots):
+        """Recapture's override reaches every repository verbatim: no floor,
+        no PER_REPO_TIMEOUT_CAP_MS, no division by the repository count."""
+        captured = []
+
+        def _capture(root, since_iso, timeout_ms):
+            captured.append(timeout_ms)
+            return None, None
+
+        monkeypatch.setattr(events, "_walk_one_repo", _capture)
+        roots = [Path(f"/tmp/r{i}") for i in range(n_roots)]
+        events.walk_git_projects(
+            roots,
+            datetime.now(timezone.utc),
+            events.RECAPTURE_WALK_BUDGET_MS,
+            per_repo_timeout_ms=events.RECAPTURE_PER_REPO_TIMEOUT_MS,
+        )
+        # At 40 roots the budget formula alone would give (120000 * 8) // 40 = 24000.
+        assert captured == [events.RECAPTURE_PER_REPO_TIMEOUT_MS] * n_roots
+        assert events.RECAPTURE_PER_REPO_TIMEOUT_MS >= 30_000
+        assert events.RECAPTURE_PER_REPO_TIMEOUT_MS > events.PER_REPO_TIMEOUT_CAP_MS
+        assert events.RECAPTURE_WALK_BUDGET_MS >= 120_000
 
     def test_false_positive_candidate_yields_exactly_one_skipped_project(self, tmp_path):
         """A stray `.git` dir that slipped past the classifier costs one skip."""
@@ -4082,3 +4107,251 @@ def test_walk_captures_detached_worktree_commit_and_ignores_stash(tmp_path):
     assert row["skipped"] == []
     subjects = {c["subject"] for p in row["projects"] for c in p["commits"]}
     assert subjects == {"seed", "feat: detached-only commit"}
+
+
+# ---------------------------------------------------------------------------
+# Track 97A — recapture walks Git on its own budget
+# ---------------------------------------------------------------------------
+
+
+def _recapture_test_sources(tmp_path: Path) -> list[dict]:
+    (tmp_path / "mm-events" / "events").mkdir(parents=True, exist_ok=True)
+    return [
+        {
+            "name": "mm-events",
+            "type": "generic",
+            "path": str(tmp_path / "mm-events"),
+            "include_dirs": ["events"],
+        }
+    ]
+
+
+def _stub_discovery_to(monkeypatch, *repos: Path) -> None:
+    """Discovery returns exactly ``repos``, so its own 100 ms budget plays no part."""
+    monkeypatch.setattr(
+        events,
+        "discover_git_roots",
+        lambda _cfg, **_kw: events.GitRootDiscovery(
+            tuple(repos), (), False, (), (), (), ("claude",)
+        ),
+    )
+
+
+def _spy_on_walk(monkeypatch) -> list[tuple[int, dict]]:
+    """Record ``(total_budget_ms, keyword arguments)`` of every walk, then run it."""
+    real_walk = events.walk_git_projects
+    calls: list[tuple[int, dict]] = []
+
+    def spy(roots, since, total_budget_ms, **kw):
+        calls.append((total_budget_ms, dict(kw)))
+        return real_walk(roots, since, total_budget_ms, **kw)
+
+    monkeypatch.setattr(events, "walk_git_projects", spy)
+    return calls
+
+
+def _put_slow_git_first_on_path(tmp_path: Path, monkeypatch, seconds: float) -> None:
+    """Make ``git log`` take ``seconds`` longer; every other Git call is untouched.
+
+    The shim sleeps when one of its arguments is ``log``, then ``exec``s the
+    real git. ``scrubbed_git_env`` keeps ``PATH`` and ``subprocess`` resolves
+    ``git`` through it, so the time limit under test still reaches the process.
+    Commit the repository before calling this.
+    """
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "slow-git-bin"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        f'  if [ "$arg" = log ]; then sleep {seconds}; break; fi\n'
+        "done\n"
+        f'exec "{real_git}" "$@"\n'
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("argv", [["recapture", "--dry-run", "7d"], ["recapture", "7d"]])
+def test_recapture_walks_with_its_own_budget(tmp_path, monkeypatch, argv):
+    from typer.testing import CliRunner
+
+    from mind_meld.cli import app
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    repo = tmp_path / "busy-repo"
+    _init_git_repo(repo)
+    _seed_commit(repo)
+    _stub_discovery_to(monkeypatch, repo)
+    walks = _spy_on_walk(monkeypatch)
+
+    result = CliRunner().invoke(app, argv)
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert walks, "recapture never walked Git"
+    first_budget, first_kw = walks[0]
+    assert first_budget == events.RECAPTURE_WALK_BUDGET_MS
+    assert first_kw["per_repo_timeout_ms"] == events.RECAPTURE_PER_REPO_TIMEOUT_MS
+    # The ordinary push inside a real recapture keeps the push budgets.
+    for budget, kw in walks[1:]:
+        assert "per_repo_timeout_ms" not in kw
+        assert budget <= events.WALK_TIME_BUDGET_INTERACTIVE_MS
+
+
+@pytest.mark.parametrize("quiet, budget_ms", [(True, 250), (False, 500)])
+def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(
+    tmp_path, monkeypatch, quiet, budget_ms
+):
+    from mind_meld import events_tail
+
+    assert events.WALK_TIME_BUDGET_AUTOPUSH_MS == 250
+    assert events.WALK_TIME_BUDGET_INTERACTIVE_MS == 500
+    assert events.PER_REPO_TIMEOUT_FLOOR_MS == 200
+    assert events.PER_REPO_TIMEOUT_CAP_MS == 2000
+
+    sources = _recapture_test_sources(tmp_path)
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    _seed_commit(repo)
+    _stub_discovery_to(monkeypatch, repo)
+    # A one-hour-old interval keeps autopush at 250 ms; it escalates past one day.
+    monkeypatch.setattr(
+        events,
+        "effective_capture_since",
+        lambda _roots, _since: datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    walks = _spy_on_walk(monkeypatch)
+    timeouts: list[int] = []
+
+    def _capture(root, since_iso, timeout_ms):
+        timeouts.append(timeout_ms)
+        return None, None
+
+    monkeypatch.setattr(events, "_walk_one_repo", _capture)
+
+    events_tail._run_events_tail(
+        {}, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+    )
+
+    # One repository: (250 * 8) // 1 = 2000 and (500 * 8) // 1 = 4000, capped to 2000.
+    assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(budget_ms, False)]
+    assert timeouts == [2000]
+
+
+def test_repo_slower_than_old_cap_is_captured_by_recapture_and_skipped_by_push(
+    tmp_path, monkeypatch
+):
+    from mind_meld import events_tail
+
+    sources = _recapture_test_sources(tmp_path)
+    events_dir = tmp_path / "mm-events" / "events"
+    repo = tmp_path / "slow-repo"
+    _init_git_repo(repo)
+    _seed_commit(repo)
+    _stub_discovery_to(monkeypatch, repo)
+    # The old 2 s cap plus a margin chosen here: slower than push allows, far
+    # inside recapture's 30 s.
+    _put_slow_git_first_on_path(tmp_path, monkeypatch, events.PER_REPO_TIMEOUT_CAP_MS / 1000 + 0.5)
+
+    prepared = events_tail._prepare_recapture(
+        {}, sources, "dev-a", since=datetime.now(timezone.utc) - timedelta(days=7)
+    )
+    assert prepared is not None
+    assert prepared.walk_errors == 0
+    assert prepared.walk_budget_aborts == 0
+    row = prepared.git_rows[0]
+    assert row["skipped"] == []
+    assert [c["subject"] for p in row["projects"] for c in p["commits"]] == ["seed"]
+
+    for quiet in (False, True):
+        degradations = events_tail._run_events_tail(
+            {}, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+        )
+        assert any("git walk dropped 1 repositories" in d for d in degradations), degradations
+        snapshot = events.latest_event_rows(events_dir, "dev-a", {"git-snapshot"}).rows[
+            "git-snapshot"
+        ]
+        assert snapshot["projects"] == []
+        assert [Path(s["path"]).resolve() for s in snapshot["skipped"]] == [repo.resolve()]
+        # One repository hits the walk deadline first; a stalled host can land on the timeout.
+        assert snapshot["skipped"][0]["reason"] in {
+            events.WALK_SKIP_BUDGET_ABORT,
+            events.WALK_SKIP_TIMEOUT,
+        }
+
+
+@pytest.mark.parametrize(
+    "patched, reason, advice",
+    [
+        (
+            "RECAPTURE_PER_REPO_TIMEOUT_MS",
+            "timeout",
+            "Check current repository failures: mm recapture --dry-run",
+        ),
+        (
+            "RECAPTURE_WALK_BUDGET_MS",
+            "budget_abort",
+            "Retry a narrower window: mm recapture 1d",
+        ),
+    ],
+)
+def test_repo_over_recapture_budget_is_skipped_with_reason_and_exit_code(
+    tmp_path, monkeypatch, patched, reason, advice
+):
+    from typer.testing import CliRunner
+
+    from mind_meld import cli
+    from mind_meld.cli import app
+    from tests.test_silent_failure_contract import _setup_events_tail_config
+
+    _setup_events_tail_config(tmp_path, monkeypatch)
+    repo = tmp_path / "slow-repo"
+    _init_git_repo(repo)
+    _seed_commit(repo)
+    _stub_discovery_to(monkeypatch, repo)
+    _put_slow_git_first_on_path(tmp_path, monkeypatch, 1)
+    # 100 ms is chosen here: far under the 1 s shim sleep, far over a loaded host's jitter.
+    monkeypatch.setattr(events, patched, 100)
+    runner = CliRunner()
+
+    dry = runner.invoke(app, ["recapture", "--dry-run", "7d"])
+    dry_text = " ".join(((dry.stdout or "") + (dry.stderr or "")).split())
+    assert dry.exit_code == 0, dry_text
+    assert f"\u2014 {reason}" in dry_text
+    assert "Preview incomplete: 1 repositories could not be walked" in dry_text
+
+    real = runner.invoke(app, ["recapture", "7d"])
+    real_text = " ".join(((real.stdout or "") + (real.stderr or "")).split())
+    assert real.exit_code == cli.RECAPTURE_EXIT_PARTIAL == 4, real_text
+    assert "Recapture incomplete" in real_text
+    assert advice in real_text
+
+
+def test_recapture_budget_docs_match_the_constants():
+    root = Path(__file__).resolve().parents[1]
+
+    def section(path: str, heading: str, next_heading: str) -> str:
+        text = (root / path).read_text(encoding="utf-8")
+        start = text.index(heading)
+        end = text.find(next_heading, start + len(heading))
+        return " ".join(text[start : end if end != -1 else None].split())
+
+    sections = {
+        "README.md": section(
+            "README.md",
+            "### Dropped repositories and ignored git environment variables",
+            "\n### ",
+        ),
+        "docs/invariants/events-retro.md": section(
+            "docs/invariants/events-retro.md", "## Cursor gate + recapture", "\n## "
+        ),
+    }
+    per_repo = f"{events.RECAPTURE_PER_REPO_TIMEOUT_MS // 1000} s"
+    whole_walk = f"{events.RECAPTURE_WALK_BUDGET_MS // 1000} s"
+    for name, text in sections.items():
+        for limit in (per_repo, whole_walk):
+            assert re.search(rf"\b{limit}\b", text), f"{name} omits {limit}"
+        assert "interactive budgets" not in text, name
