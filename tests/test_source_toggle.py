@@ -23,13 +23,12 @@ from mind_meld import seen_sources
 from mind_meld.cli import (
     _filter_disabled_sources,
     _filter_unselected_sources,
-    _known_source_names,
-    _validate_source_name,
     app,
 )
 from mind_meld.config import get_default_source, save_config
 from mind_meld.core import _prompt_source_toggle
 from mind_meld.errors import ConfigError
+from mind_meld.sourceflow import _known_source_names, _validate_source_name
 
 runner = CliRunner()
 
@@ -1303,3 +1302,20 @@ class TestFilterDisabledSources:
         assert "claude" in out["sources"]
         assert "retired:old.md" in out["tombstones"]
         assert "claude:gone.md" in out["tombstones"]
+
+
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("sources", []),
+        ("disable-source", [("name", ["name"]), ("force", ["--force"])]),
+        ("enable-source", [("name", ["name"]), ("force", ["--force"])]),
+        ("reconfigure-sources", []),
+    ],
+)
+def test_source_command_shells_keep_their_parameters(command, expected):
+    """The bodies moved to sourceflow, whose contract test cannot import cli."""
+    import typer.main
+
+    params = typer.main.get_command(app).commands[command].params
+    assert [(p.name, p.opts) for p in params] == expected

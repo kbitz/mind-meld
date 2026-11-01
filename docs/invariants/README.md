@@ -17,6 +17,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `core.py` | (83A/86A) Shared setup, crypto-session and manifest helpers, source filtering and comparison, config migration, autorun breadcrumb normalization, shared sync-output state and the complete `_SyncProgress` family; (88A) the per-source prompt helpers shared by init and `reconfigure-sources`; (90A) the project-name decisions (`project_form_state`, `encode_manifest`, `reconcile_recovered_prior`, `content_counts`, `project_name_report`) |
 | `pullflow.py` | (86A) `_pull_core`, per-file download/apply and inline conflict helpers, `PullResult`, pull planning orchestration and summary rendering; the command shells stay in `cli.py` |
 | `initflow.py` | (88A) `mm init`'s body (`init`) and its init-only helpers: (89A) the folder classifier, `--new-fleet` bootstrap (`_bootstrap_new_fleet`, the only writer of the key header) and `.stignore` writer, the join's passphrase verify, the no-header stop and re-init guard, passphrase prompts, `_register_and_save`, source prompts; the command shell and the join's pull (`_attended_pull`) stay in `cli.py` |
+| `sourceflow.py` | (90B) The bodies of `mm sources`, `mm enable-source`, `mm disable-source` and `mm reconfigure-sources` (`sources`, `enable_source`, `disable_source`, `reconfigure_sources`) and the helpers only they call (`_known_source_names`, `_validate_source_name`, `_toggle_cursor_usage`, `_record_seen`); the command shells and `--help` text stay in `cli.py` |
 | `statusflow.py` | (83A) Status and diagnostic collection/rendering, host-usage and publication inspection, and autorun breadcrumb read/presentation helpers; command shells stay in `cli.py` |
 | `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
 | `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes; (90A) the project-name codec at the manifest byte boundary (`manifest_to_wire`, `manifest_from_wire`) and the moved-folder tombstone skip |
@@ -56,10 +57,10 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `storage/keys.py` | Validated storage-key construction (1.x namespace) |
 | `skills/retro_fleet/aggregator.py` | Fleet-retro aggregator and its `SKILL.md`; documented invocations use `mm retro-fleet` (`cli.py:retro_fleet_cmd`), and SKILL.md must never fall back to `python -m`. Store, installer and packaging rules: `docs/invariants/events-retro.md` |
 
-**Import direction (Tracks 16A/83A/84A/86A/88A, load-bearing).** `cli` imports `core`,
-`statusflow`, `pullflow`, `initflow` and the six Track 16A modules above; none of them imports
-`cli`, at module scope *or* function scope. `statusflow`, `pullflow` and `initflow` may import
-`core`; `core` never imports `statusflow`, `pullflow` or `initflow`. Host reader adapters under `hosts/` import only
+**Import direction (Tracks 16A/83A/84A/86A/88A/90B, load-bearing).** `cli` imports `core`,
+`statusflow`, `pullflow`, `initflow`, `sourceflow` and the six Track 16A modules above; none of them imports
+`cli`, at module scope *or* function scope. `statusflow`, `pullflow`, `initflow` and `sourceflow` may import
+`core`; `core` never imports `statusflow`, `pullflow`, `initflow` or `sourceflow`. Host reader adapters under `hosts/` import only
 stdlib and `host_usage`, `token_usage`, `lockedjson`, `fsutil`, and `errors`,
 calling shared `host_usage` helpers module-qualified (`host_usage._expired(...)`);
 `host_usage` never imports `hosts/*` or `host_registry`, and `host_registry`
@@ -76,7 +77,7 @@ test would not reach it — the dead-alias trap in reverse.
 
 The symbol-to-owner inventories, patch example and add/exempt/move procedure are
 in [the boundary gates](../../tests/test_module_boundaries.py) beside
-`PULL_CORE_DEFINITIONS`, `PULLFLOW_DEFINITIONS`, `INIT_CORE_DEFINITIONS` and `INITFLOW_DEFINITIONS`. New shared dependencies
+`PULL_CORE_DEFINITIONS`, `PULLFLOW_DEFINITIONS`, `INIT_CORE_DEFINITIONS`, `INITFLOW_DEFINITIONS` and `SOURCEFLOW_DEFINITIONS`. New shared dependencies
 follow AC1 to `core` to a fixed point; shells and tests follow their owner.
 
 ## Invariant pointer table
@@ -105,6 +106,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `storage/keys.py:manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / `_validate_component` / `_validate_hex_sha` | `docs/invariants/sync.md` (Validated storage keys) |
 | `manifest.py:walk_generic_source` / `walk_muse_source` / `MUSE_SYNCED_SUBDIRS` / `walk_claude_source` / `build_manifest_v2` / (`nested_roots` out-parameter) / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `_directory_is_git_repo` / `_collect_regular_files_scandir` / `SourceHolds` / `core.py:_prove_omitted_paths_absent` / `_require_published_source_root` / `cli.py:_warn_push_growth` / `core.py:_freeze_nested_checkout_entries` / `cli.py:_inject_held_entries` / `cli.py:_upload_changed_blobs` (held files, Track 75A) / `cli.py:_drop_unfrozen_checkout_files` / `core.py:_incoming_nested_roots` / `statusflow.py:_collect_diag_state` / (diag `sync_scope`) | `docs/invariants/sync.md` |
 | `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
+| `sourceflow.py:sources` / `disable_source` / `enable_source` / `reconfigure_sources` / `_known_source_names` / `_validate_source_name` / `_record_seen` (config patch write errors stop before success and acknowledgment; `has_explicit_sources` key presence) | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) / `statedb.py` / `cli.py:log_cmd` | `docs/invariants/sync.md` and `docs/invariants/auto-upgrade.md` |
 | `pullflow.py:_apply_write` / `pullflow.py:_apply_merge` / `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
@@ -147,7 +149,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `cli.py:install_skills_cmd` / `cli.py:retro_fleet_cmd` (typer shells, including pricing-refresh flag forwarding) | `docs/invariants/events-retro.md` |
 | `statusflow.py:status` / `diag` / `_collect_diag_state` (their `skill_link.diagnose_skill_links` consumers) | `docs/invariants/events-retro.md` |
 | `cli.py:refresh_identity_cmd` / `cli.py:devices` (its `--format json` path) | `docs/invariants/events-retro.md` |
-| `cli.py:cursor_agent` / `cli.py:capture_cursor_usage` / `cli.py:_toggle_cursor_usage` / `cli.py:_RawArgsCommand` / `cli.py:_forwarding_signals` / `host_usage.py:configure_cursor_hook` / `record_cursor_usage` / `cursor_cli_model` / `cursor_hook_state` / `_take_cursor_spool` / `_fold_cursor_spool` / `fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` | `docs/invariants/events-retro.md` (standalone Cursor capture) and `docs/invariants/sync.md` (atomic write publication failures) |
+| `cli.py:cursor_agent` / `cli.py:capture_cursor_usage` / `sourceflow.py:_toggle_cursor_usage` / `cli.py:_RawArgsCommand` / `cli.py:_forwarding_signals` / `host_usage.py:configure_cursor_hook` / `record_cursor_usage` / `cursor_cli_model` / `cursor_hook_state` / `_take_cursor_spool` / `_fold_cursor_spool` / `fsutil.py:append_rotatable_jsonl` / `rotate_jsonl` | `docs/invariants/events-retro.md` (standalone Cursor capture) and `docs/invariants/sync.md` (atomic write publication failures) |
 | `host_usage.py:_read_cursor_sqlite` / `_query_cursor_sqlite` / `_cursor_sqlite_select` / `_lstat_sqlite_files` / `_sqlite_identity` / `_sqlite_text` / `_sqlite_json` / `_cursor_store_counts` / `_stage_cursor_directory` / `_sqlite_run` / `_sqlite_model` / `_sqlite_day` / `_cursor_entry` / `_cursor_placeholder` / `_cursor_run` / `_cursor_rank` / `_iter_cursor_directories` / `read_cursor_usage` / `cursor_sqlite_stores` / `unread_sqlite_stores` / `cursor_usage_diag` / `_cursor_read_set` / `_cursor_reason_detail` / `_carry_reason_detail` / `_ReadFailure` / `CURSOR_SQLITE_CENSUS_CONDUCTOR_VERSION` / `CURSOR_SQLITE_READER_CAUSES` / `CURSOR_SQLITE_STORE_CAUSES` / `statusflow.py:_cursor_store_detail_clause` / `_cursor_unsupported_clause` / `errors.py:CURSOR_SQLITE_URL` | `tests/fixtures/host_sessions/cursor/CONTRACT.md` and `docs/invariants/events-retro.md` (Conductor SQLite stores) |
 | `cli.py:recapture` / `events_tail.py:_prepare_recapture` / `events.py:resolve_push_cursor` / `capture_advances_cursor` / `make_git_capture` | `docs/invariants/events-retro.md` (and `docs/invariants/sync.md` for recapture's history scope and hot-journal recovery) |
 | `retention.py:EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_is_live_conflict` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir` | `docs/invariants/events-retro.md` |

@@ -341,8 +341,8 @@ class TestFinalOutputSinks:
             "cached_upgrade_view",
             lambda _config: cli.upgrade.UpgradeCheckResult("current", "0.14.12", None, None),
         )
-        monkeypatch.setattr(cli.seen_sources, "read", lambda *, initial: set())
-        monkeypatch.setattr(cli.seen_sources, "compute_new_sources", lambda **kwargs: [])
+        monkeypatch.setattr(cli.statusflow.seen_sources, "read", lambda *, initial: set())
+        monkeypatch.setattr(cli.statusflow.seen_sources, "compute_new_sources", lambda **kwargs: [])
         monkeypatch.setattr(cli.core, "iter_source_diffs", lambda *args, **kwargs: iter(()))
         monkeypatch.setattr(
             cli.core, "_has_mtime_only_changes_vs_remote", lambda *args, **kwargs: False
