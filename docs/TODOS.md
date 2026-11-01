@@ -44,98 +44,115 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:severity=should] A missing `projects/` is silent, and a partial restore still reads as deletion
-- **Description:** While `~/.claude/projects` is missing on a machine that has switched, `mm status` tells the owner to run `mm push`, then says in sync, and the push says `project names updated`; only `mm diag` names the missing folder (`project_index.reason`). If no push ran during the outage, then once a pull or Claude recreates it, whatever is still absent, including a peer's blob not yet delivered, mints a tombstone at the next push. Every earlier release minted on any absence, so this narrows old behaviour. Closing it needs a durable marker that an outage was seen.
+### [investigate] The Muse usage reader has stopped on `unsupported` since 2026-10-21
+- **Symptom:** On this Mac at mm 1.12.1 with Muse Code 1.4.14, `mm diag --json` shows `muse.last_reason: unsupported` since 2026-10-21, last complete pass 2026-10-19, and 486 of 1,028 files cached. `retro-fleet`'s Muse row is frozen at what it had, and docs/SPEC.md O7.1 expects Muse tokens and cost.
+- **Why:** Observed in real use. Not carded: the cause is unread, a reader change needs a real corpus census in its CONTRACT.md, and the Muse reader still lives in `host_usage.py`, so core-and-extensions puts a move-only Track before it. Track 91B fixes only the wrong remedy.
+- **Effort:** M
+- **Priority:** P1
+- **Context:** Revisit before the owner accepts the complete-usage checkpoint or 2.0.0, both of which need O7 to hold.
+
+### [review:severity=should] `mm disable-source --force` with a control character leaves `config.toml` unparseable
+- **Description:** `config._toml_value` does not escape control characters. Reproduced in a temp HOME on v1.12.1: `mm disable-source $'a\x01b' --force` writes `disabled_sources = ["a^Ab"]`, and every later `mm` stops with `Illegal character '\x01'` naming the file. Fixing the line by hand recovers it.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #246 review receipt. Unobserved outside that crafted name. Revisit at the next change to the TOML writer, or sooner if a source name ever arrives from anything but the owner's own argv.
+
+### [review:severity=should] A source command can traceback after its config write landed
+- **Description:** In `sourceflow._record_seen`, a failure in `_get_config`, `get_sources` or `seen_sources.acknowledge`'s open or lock raises after the write, so the owner sees a traceback and no success line. The docstring at `sourceflow.py` says it raises, while `seen_sources.py`'s says it never crashes; `tests/test_seen_sources.py` makes the same claim. Short of O8.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #246 review receipt; read from code, not run. Revisit when Track 95A starts, since it changes `sourceflow`, or on any report of a traceback from a source command.
+
+### [review:severity=should] `mm sources` shows a raw traceback for a bad source path
+- **Description:** Reproduced in a temp HOME on v1.12.1: a source with path `~nosuchuser/x` gives `RuntimeError: Could not determine home directory.` as a traceback at exit 1. The receipt also names a symlink-loop source (`ConfigError`) and an unknown type (`ManifestError`), not re-run here.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #246 review receipt. Revisit before the owner accepts the quiet-output checkpoint (O8).
+
+### [review:severity=nit] `enable-source cursor` installs the hook before writing consent
+- **Description:** `sourceflow._toggle_cursor_usage` installs the hook, then writes consent, as its docstring says, so an unwritable config leaves the hook installed with consent off. The hook records nothing without consent.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #246 review receipt. Revisit at the next Cursor capture change.
+
+### [review:severity=nit] Stale comment and help text left by Track 90B
+- **Description:** The `tests/conftest.py` comment beside the `DEFAULT_SOURCES` isolation still names `cli.py` as an importer at module import time, and `cli.py` no longer imports it. `mm sources --help` in the `cli.py` shell says it shows ALL configured sources, though a missing root stays hidden.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** PR #246 review receipt and the 90B plan's declined list. A conftest edit widens `--affected` to the full run. Revisit at the next change to either file.
+
+### [plan-eng-review:track=89A] Two distinct valid key headers
+- **Description:** `crypto.fetch_crypto_init` picks the smallest `root_salt` among valid copies, and `mm diag` prints only the winner's fingerprint, so two machines that each ran `--new-fleet` before Syncthing delivered can coexist and a joiner binds the winner. Follow-up FU3 proposes: plain `mm init` refuses instead of picking, `mm diag` lists a fingerprint per copy, a machine with a recorded fingerprint selects it first, `--new-fleet` confirms when `.stfolder` is present, and a README recovery recipe.
 - **Effort:** M
 - **Priority:** P3
-- **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
+- **Context:** Track 89A review record FU3, challenge UC3, read from code at 2a101d6. Unobserved; the cutover moves one existing store and never runs `--new-fleet`. Revisit when a second distinct `mm-crypto-init` copy is seen in a store, or before anyone creates a new fleet on a Syncthing folder.
 
-### [review:severity=nit] A held machine with mtime drift reads as metadata-only
-- **Description:** On a held machine whose own prior still lists project files, a same-bytes mtime change makes `mm status` say `Metadata-only changes waiting to push`, though that push also drops the project references from its manifest. Without the drift, status says project memory is not published before the first held push has actually withdrawn it.
+### [plan-eng-review:track=89A] A corrupt prior manifest still suggests `mm init`
+- **Description:** `core.py`'s refusal says `Run 'mm status' to inspect storage state, then 'mm init' if storage is unrecoverable.` Since Track 89A that is no longer a re-key, but it no longer fixes storage either. The review cited `core.py:1556`; it is now near line 1915.
 - **Effort:** S
 - **Priority:** P3
-- **Context:** Revisit with the missing-`projects/` entry above; the hold line still prints beneath the verdict.
+- **Context:** Track 89A review record FU5. Revisit when the message is seen in real use, or before the owner accepts the quiet-output checkpoint (O8).
 
-### [review:severity=should] A file deleted on the old form can return on any machine after the first switch
-- **Description:** A file deleted on the old form, in a folder already gone when a machine switches, can come back on any machine that owns the project, on any pull, for the rest of its 30 days, and that machine's next push republishes it under the identity. The switching machine itself gets it on a pull inside that checkout or once anything recreates the folder. A live folder whose checkout or index is unavailable at the switching push has the same outcome on any later pull. `docs/invariants/sync.md` states all of this.
-- **Why:** Karl's accepted limit, 2026-10-31 ("Simplify", then "Finish" at this scope). Spelling those records under the project's identity took six attempts, and review found a false or lost deletion path in each. No bytes are destroyed, and restoring is the right result if the removal was housekeeping.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Revisit if deleted Claude memory returns after a fleet machine's switch. To reproduce: machine B deletes a file on the old form, then its folder goes; machine P still lists the file; B pushes with this release; machine S, which owns the project, pulls from anywhere.
-
-### [review:severity=should] An old-form record can still bind a project at the switch
-- **Description:** Two forms survive the removed spelling. A linked worktree's folder that nominates a removed main folder makes all that folder's records, earlier ones included, identity-wide. A live folder's old-form record publishes under whatever origin sits at that path at the switch, so a path re-cloned from another repository inside the 30 days suppresses that repository's same-named file across the fleet until the record expires. `docs/invariants/sync.md` states both.
-- **Why:** Karl's accepted limits, 2026-10-31. The old form records no provenance to tell them apart, and each needs a narrow sequence inside the 30 days. No bytes are destroyed.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Revisit if a project's memory stops arriving on a peer after a fleet machine's switch.
-
-### [review:severity=should] Losing `projects/` mid-push publishes false deletion records
-- **Description:** A push that loses `projects/` between the manifest load and the scan mints for every file it cannot see. On a switched machine, or one whose index was built at the load, those records are identity-wide: those names stop reaching the fleet until the files return and the next push clears them, or for up to 30 days. Earlier releases minted on the same absence path-scoped.
-- **Why:** Karl's accepted limit, 2026-10-31. The window is seconds and needs the folder to vanish inside it. A fix would re-list after the scan and treat every folder as moved. Post-push GC refuses only while the folder is still unlisted at its gate.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Re-check before Track 91A starts, when tombstones begin to delete. Track 91A starts only after this release has run on the owner's real store, and all the first-switch limits in `docs/invariants/sync.md` are re-checked then.
-
-### [review:severity=should] The post-push GC gate delays the sweep, and `mm gc` has no gate
-- **Description:** A push that could not list `projects/` drops those references, and its GC gate only delays the sweep: a later listed push without those files collects their blobs with no tombstone. After a mid-push loss the gate re-lists, so a folder recreated before it lets that push collect them too. Explicit `mm gc` during an outage collects them too. A machine with no `projects/` collects nothing post-push, so orphans accumulate until `mm gc`.
-- **Why:** The one-line gate is what Karl approved, 2026-10-31; earlier releases swept one push sooner. Real protection needs a persisted set of dropped blobs. The blobs matter only if `projects/` is truly lost and no peer lists them.
-- **Effort:** M
-- **Priority:** P2
-- **Context:** Re-check before Track 91A starts. Revisit if project memory is lost after an outage, or if a machine with no `projects/` shows store growth.
-
-### [review:severity=nit] The Git spawn gate cannot see a built argv
-- **Description:** `_git_spawn_violations` in `tests/test_gitenv.py` skips a non-literal argv outside `events.py` and `identity.py`, so `test_all_git_subprocesses_use_scrubbed_environment` does not cover `projectid._git_origin`, which builds its argv as `[...] + [...]`. That site passes `gitenv.scrubbed_git_env()` by reading. `docs/invariants/events-retro.md` still says "All five Git calls", and `identity.py` "both Git reads"; there are six spawn sites.
+### [manual] Deflake the load-sensitive tests
+- **Why:** One-second subprocess tests in `tests/test_self_update.py` fail under extreme host load (load average above 100), and pass when rerun serially.
 - **Effort:** S
 - **Priority:** P3
-- **Context:** Documentation audit of Track 90A. Revisit when a new Git read is added.
+- **Context:** Karl is undecided, so this is filed only. Revisit when Karl decides, or when a CI run fails from it.
 
-### [review:severity=nit] The project index lists `projects/` with no deadline
-- **Description:** `_build_index` lists `projects/` on the caller's thread before its worker and 2 s deadline start, and `projects_listed` lists it again, so a stalled mount under `~/.claude/projects` can hang `mm diag`, `mm status` or a push instead of timing out. The timeout tests block only later checkout reads.
-- **Why:** The design lists on the caller so every folder name is known if the worker times out. A stalled mount there has not been seen on this fleet. Greptile review of Track 90A.
+### [review:track=94A] Tidy `manifest._local_state_parent_prefix` and test its two untested branches
+- **Description:** PR #242's coverage audit left two branches untested: permissive continue past an unreadable ancestor, and the strict refusal on that read. `tests/test_manifest.py`'s browser-profile tests hold no `PermissionError` or `chmod` case at 2a101d6, and the loop nests several branches.
 - **Effort:** S
 - **Priority:** P3
-- **Context:** Revisit if any `mm` command hangs on a machine whose `~/.claude` is on a network or removable volume.
-
-### [review:severity=should] `sidecar.read` validates less than `load_manifest`
-- **Description:** A malformed sidecar value (`tombstones` or `files` entries of the wrong type, `sources.claude: 5`, deeply nested JSON raising `RecursionError`, a key containing `..`) escapes the own-manifest recovery chain as an exception or republishes a key peers reject, instead of falling through to the peer fallback.
-- **Why:** Predates Track 90A and needs a damaged sidecar plus a corrupt own manifest. With a healthy store the switching push was probed and does not crash.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Revisit if `last-push.json` is ever reported damaged on a fleet machine; the fix applies `load_manifest`'s value-shape and `_validate_rel_path` checks in `sidecar.read`.
-
-### [review:severity=should] Own-manifest recovery can leave a deletion record under its old spelling
-- **Description:** With a corrupt own manifest plus a home rename, a folder that gained a remote, or a conflict copy older than a remote change, `core.reconcile_recovered_prior` can leave one tombstone under a name a healthy load would spell differently, so a deleted file can return. An own conflict copy from a previous home can also suppress one real deletion for one push through `moved_folders`.
-- **Why:** Each needs three rare conditions together; no bytes are lost. Deferred from Track 90A review (`docs/invariants/sync.md` limits).
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Revisit if deleted Claude memory returns after a recovered push.
-
-### [review:severity=nit] `mm diff` lists a renamed project's files as `+ push`
-- **Description:** `mm status` and push report a remote change or moved checkout as names only (`core.iter_content_diffs`); `mm diff` compares against the filtered prior, so it still lists those files as new.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 90A review. Revisit when `mm diff` output next changes, or if the mismatch confuses the owner.
-
-### [review:severity=should] Bound the new peer manifest reads in `mm status` and `mm diag`
-- **Description:** `mm status` and `mm diag` now read each peer's whole manifest with no time bound. `pullflow.py` records `backend.get` blocking on iCloud placeholders (a 263 s first pull), so an evicted peer manifest can stall these triage commands on an existing iCloud store.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 90A review, read from code and not run. Revisit if either command stalls, or when the store moves off iCloud (retire this item then).
-
-### [review:severity=should] Measure the project index on a Mac hook with macOS privacy prompts
-- **Description:** The project index lists directories such as `~/Documents` and `~/Desktop` from `mm autopull` and `mm autopush`, which used to read only `~/.claude`. A privacy prompt could block a listing past the 2 s cap, flipping folders that have no retained identity to home-relative for that run.
-- **Effort:** S
-- **Priority:** P2
-- **Context:** Track 90A review, unmeasured. Revisit at this Mac's first real publish in the new form (`## Post-merge` in the plan).
-
-### [review:severity=nit] Shared helpers offered by Track 90A review
-- **Description:** Advisory, kept as written: the empty `project_index` literal appears three times; the `wire_folders` moved loop appears in `manifest._from_wire_mapping` and `core.reconcile_recovered_prior`; `pullflow._unplaceable_project` repeats `core._filter_excluded_paths._unplaceable`; `projectid._git_origin` repeats `_origin_remote_url`; `_linked_main_checkout` re-parses what `_resolve_git_dirs` parses.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Revisit when any of these is next changed.
+- **Context:** PR #242. Revisit at the next change to the browser-profile marker walk.
 
 ## Drain records
+
+### Roadmap drain — 2026-11-01
+
+Run from manager Ephesus 7's brief on Karl's "go". 14 inbox items: **5 placed, 0 deferred, 9 killed, 0 discharged**. Authored-false rate: 0 / (5 + 0) = 0%. Verification baseline: `2a101d6` (v1.12.1). Tracks 88A (v1.11.18, PR #240), 94A (v1.11.19, PR #242), 89A (v1.11.20, PR #243), 90A (v1.12.0, PR #245) and 90B (v1.12.1, PR #246) were recorded independently in shipped history against their verified completion matrices, with v1.11.15 and v1.11.16 under additional release history; Groups 88, 89, 90 and 94 are tombstoned. Track 97A is pinned in In Progress (factory item 9dd967eb). New Tracks: 98A (bootstrap), 91B (remedy on the newest release). Future stays at 16 items (byte-identical); 6 entries lack an inline revisit trigger, and the trigger migration was offered, not run.
+
+| Inbox item | Disposition |
+|---|---|
+| A missing `projects/` is silent, and a partial restore still reads as deletion | place → Track 91A re-check list |
+| A file deleted on the old form can return on any machine after the first switch | place → Track 91A re-check list |
+| An old-form record can still bind a project at the switch | place → Track 91A re-check list |
+| Losing `projects/` mid-push publishes false deletion records | place → Track 91A re-check list |
+| The post-push GC gate delays the sweep, and `mm gc` has no gate | place → Track 91A re-check list |
+| A held machine with mtime drift reads as metadata-only | kill: unobserved; inconsequential (a status wording; the hold line still prints); reopen if it manifests |
+| The Git spawn gate cannot see a built argv | kill: unobserved; inconsequential (`projectid._git_origin` passes the scrubbed env by reading, and the count in `events-retro.md` is a doc nit); reopen if it manifests |
+| The project index lists `projects/` with no deadline | kill: unobserved; reversible (a hang a rerun or a kill clears); reopen if a command hangs on a network or removable `~/.claude` |
+| `sidecar.read` validates less than `load_manifest` | kill: unobserved; reversible (needs a damaged sidecar plus a corrupt own manifest); reopen if `last-push.json` is reported damaged |
+| Own-manifest recovery can leave a deletion record under its old spelling | kill: unobserved; reversible (no bytes lost, three rare conditions together); the limit stays in `sync.md`; reopen if deleted memory returns after a recovered push |
+| `mm diff` lists a renamed project's files as `+ push` | kill: unobserved; inconsequential; reopen if it misleads the owner |
+| Bound the new peer manifest reads in `mm status` and `mm diag` | kill: unobserved; reversible, and the iCloud placeholder cause goes at cutover; reopen if either command stalls on Syncthing |
+| Measure the project index on a Mac hook with macOS privacy prompts | kill: unobserved; reversible. `mm diag --json` on this Mac on 2026-11-01 shows `project_index.state: shared`, `timed_out: false`; reopen if `timed_out` is ever true |
+| Shared helpers offered by Track 90A review | kill: advisory, no defect or outcome; reopen when one of them is next changed and the duplication costs something |
+
+**Brief backlog** (the manager's list; each claim checked at `2a101d6`):
+
+| Item | Disposition |
+|---|---|
+| PR #246 receipt: `_toml_value` control characters | file → inbox; reproduced in a temp HOME on v1.12.1 |
+| PR #246 receipt: `_record_seen` traceback, `mm sources` bare exceptions, `enable-source cursor` order | file → inbox; `~nosuchuser` reproduced, the rest read from code |
+| PR #246 receipt: stale docs (`SPEC.md` `mm sources` steps, `sync.md` config-patch row, "all configured sources", `has_explicit_sources`) | place → Track 93A |
+| PR #246 receipt and 90B plan: `cli.py` help text, `tests/conftest.py` comment | file → inbox; the 90B plan's line 569 still holds |
+| 90B plan: `_set_grok_host_usage` in `sync.md` (now line 457) | place → Track 93A; no definition in `src/` |
+| 90B plan: unread `tests/fixtures/cli_surface_1_x.json` | discharged@`fb0e12d`: PR #226 deleted the file, so the plan's claim was already false at its own base |
+| 90A Gate notes: 93A runbook items and the C1 line | place → Track 93A; README's "Retiring a dead machine" already holds the retire steps |
+| 90A Gate notes: O3.2's 24 h warning excludes unplaced and old-form counts | place → Track 92A; `sync.md` assigns it there |
+| 90A plan: older peer's tombstone can delete once 91A ships | place → Track 91A |
+| Plan note: guard for a device whose home changes | place → Track 91A, narrowed: PR #245 closed the push side (`test_a_changed_home_mints_no_tombstone_and_settles`), so 91A proves it through a peer's pull |
+| FU1, FU4, FU7 | place → Track 93A (FU1's diag half is already Track 92A's `.stignore` lint) |
+| FU3, FU5 | file → inbox |
+| VERSION and `pyproject.toml` drift check (Karl, "sure") | place → Track 93A, which already edits `pyproject.toml`; no such check exists today |
+| Deflake load-sensitive tests | file → inbox (Karl undecided) |
+| `_local_state_parent_prefix` tidy and its two untested branches | file → inbox |
+| `mm status` says `mm update` for an unsupported format on the newest release | place → Track 91B; observed. The reader's own failure is filed as a separate P1 item |
+| Addendum: a kept conflict is reported as applied on every pull, and existing conflicts do not clear under the no-base fallback | place → Track 91A; observed on 3771H-kb-ms by the manager, code path read at `2a101d6`. Decision on the card: the owner runs `mm resolve` on existing ones |
+
+**Also placed from this run's `git grep` of Track 8x and 9x:** Track 91A owes the `state.db` move-aside recovery README assigns it and `tests/test_pullflow.py`'s characterization tests; Track 92A owes the peer manifest and attended waiting count `sync.md` assigns it; Track 93A drops the soak wording at README's Linux section and `ci.yml`. References to shipped Tracks in code, tests and invariant docs are history and stay, and the `init-devices.md` line naming Track 80A goes with Track 93A's retirement of the old IDs there, moved from Track 91A to keep it inside the file cap.
+
+**Version:** documentation-only regeneration; no bump. Quiet output (O8) and complete usage (O7) remain unaccepted, so the next code release stays PATCH unless a checkpoint is accepted.
 
 ### Roadmap drain — 2026-10-27
 
