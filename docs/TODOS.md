@@ -50,6 +50,12 @@ here by hand, use the H3 form.
 - **Priority:** P3
 - **Context:** Track 90A repair review; accepted in `docs/invariants/sync.md` limits. Revisit if `projects/` ever goes missing on a fleet machine, or before Track 91A makes tombstones delete.
 
+### [review:severity=nit] A held machine with mtime drift reads as metadata-only
+- **Description:** On a held machine whose own prior still lists project files, a same-bytes mtime change makes `mm status` say `Metadata-only changes waiting to push`, though that push also drops the project references from its manifest. Without the drift, status says project memory is not published before the first held push has actually withdrawn it.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Revisit with the missing-`projects/` entry above; the hold line still prints beneath the verdict.
+
 ### [review:severity=should] A file deleted on the old form can return on any machine after the first switch
 - **Description:** A file deleted on the old form, in a folder already gone when a machine switches, can come back on any machine that owns the project, on any pull, for the rest of its 30 days, and that machine's next push republishes it under the identity. The switching machine itself gets it on a pull inside that checkout or once anything recreates the folder. A live folder whose checkout or index is unavailable at the switching push has the same outcome on any later pull. `docs/invariants/sync.md` states all of this.
 - **Why:** Karl's accepted limit, 2026-10-31 ("Simplify", then "Finish" at this scope). Spelling those records under the project's identity took six attempts, and review found a false or lost deletion path in each. No bytes are destroyed, and restoring is the right result if the removal was housekeeping.
