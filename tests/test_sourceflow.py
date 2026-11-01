@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tomllib
+from pathlib import Path
 
 import pytest
 import typer
@@ -229,6 +230,28 @@ def test_sources_lists_configured_sources(cfg):
     assert after.exit_code == 0, after.output
     rows = _source_rows(after.stdout)
     assert [rows[name][3] for name in ("claude", "gstack")] == ["Y", "N"]
+
+
+def test_sources_counts_files_kept_and_excluded_by_source_patterns(cfg):
+    # Value: protects=mm sources reports kept and per-source-excluded file counts;
+    # fails_when=the no-excludes recount walk is dropped or kept/excluded are swapped;
+    # why_new=existing tests only assert the Excluded header; seam=none;
+    # no_claim=global junk-list exclusion counts
+    on_disk = _on_disk(cfg)
+    root = next(s for s in on_disk["sync"]["sources"] if s["name"] == "gstack")
+    app_dir = Path(root["path"]) / "projects" / "app"
+    app_dir.mkdir(parents=True)
+    for name in ("repo-mode.json", "role.md", "notes.md"):
+        (app_dir / name).write_text("x")
+    root["include_dirs"] = ["projects"]
+    root["exclude_patterns"] = ["projects/*/repo-mode.json"]
+    config.save_config(on_disk, cfg)
+
+    result = runner.invoke(app, ["sources"])
+    assert result.exit_code == 0, result.output
+    rows = _source_rows(result.stdout)
+    assert rows["gstack"][4:] == ["2", "1"]
+    assert rows["claude"][5] == "—"
 
 
 # ── reconfigure-sources ───────────────────────────────────────────────
