@@ -2,6 +2,10 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.1] - 2026-11-01
+
+**`mm sources`, `mm enable-source`, `mm disable-source`, and `mm reconfigure-sources` behave the same.** Help text, flags, exit codes, and the files they write are unchanged.
+
 ## [1.12.0] - 2026-10-31
 
 **Claude project memory for one git repository is the same project on every machine.** A checkout with a network `origin` publishes under that remote, and any other project publishes under a home-relative name. Each machine maps the name back to the folder Claude uses for its own checkout. This is 1.12.0, a minor, because docs/SPEC.md:293-296 says a storage-format change that needs every machine upgraded before it syncs is at least a minor. README Upgrading carries that note.
