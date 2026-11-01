@@ -1094,12 +1094,14 @@ def _capture_git_rows(
     persist: bool = False,
     use_repo_cursors: bool = False,
     deadline_monotonic: float | None = None,
+    per_repo_timeout_ms: int | None = None,
 ) -> tuple[list[dict], events.GitRootDiscovery, int, int]:
     """Discover roots and walk git, optionally persisting the local project index.
 
     Shared by the push tail, init backfill, and recapture. ``origin`` marks
     non-push rows (init and recapture) so the aggregator can exclude them
-    from push counts.
+    from push counts. Only recapture passes ``per_repo_timeout_ms``; the
+    other callers keep the walker's budget-derived, capped limit.
     """
     discovery_deadline = time.monotonic() + root_discovery_budget_ms / 1000.0
     if deadline_monotonic is not None:
@@ -1117,6 +1119,8 @@ def _capture_git_rows(
     walk_kwargs = {} if _DIAGNOSTIC.get() is None else {"diagnostic": _diagnostic}
     if use_repo_cursors and roots:
         walk_kwargs["use_repo_cursors"] = True
+    if per_repo_timeout_ms is not None:
+        walk_kwargs["per_repo_timeout_ms"] = per_repo_timeout_ms
     if roots:
         author_emails = events.resolve_walk_author_emails(config, roots)
         author_emails = identity.union_checked_github_noreply(author_emails)
@@ -1625,7 +1629,10 @@ def _prepare_recapture(
     since: datetime,
     persist: bool = False,
 ) -> RecaptureCapture | None:
-    """Git-only capture at interactive budgets. ``None`` if mm-events is unresolved."""
+    """Git-only capture on recapture's own walk budget (``events.RECAPTURE_*``).
+
+    Repository discovery keeps its interactive budget. ``None`` if mm-events
+    is unresolved."""
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         return None
@@ -1637,10 +1644,11 @@ def _prepare_recapture(
         config,
         device_id,
         since=since,
-        walk_budget_ms=events.WALK_TIME_BUDGET_INTERACTIVE_MS,
+        walk_budget_ms=events.RECAPTURE_WALK_BUDGET_MS,
         root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
         origin=events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
         persist=persist,
+        per_repo_timeout_ms=events.RECAPTURE_PER_REPO_TIMEOUT_MS,
     )
     return RecaptureCapture(
         git_rows=git_rows,

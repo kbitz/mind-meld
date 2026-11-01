@@ -1503,10 +1503,13 @@ mm recapture --dry-run
 ```
 
 The preview names skipped paths and reasons: `git_error` (Git could not read
-the repository), `timeout`, `budget_abort`, or `raised` (an unexpected walk
-exception). `no commits yet (benign)` is an empty repository and needs no fix.
-The preview is a fresh scan at interactive budgets over the requested window
-(default 30d). A clean preview does not prove the earlier push was complete.
+the repository), `timeout` (one repository ran past 30 s), `budget_abort` (the
+walk ran past 120 s), or `raised` (an unexpected walk exception). `no commits
+yet (benign)` is an empty repository and needs no fix.
+The preview is a fresh scan over the requested window (default 30d). `mm
+recapture` and its preview walk Git on their own budget, 30 s per repository
+and 120 s for the walk; repository discovery keeps its 100 ms budget. A clean
+preview does not prove the earlier push was complete.
 
 For `git_error`, check for a broken checkout or ownership mismatch. If Git
 reports dubious ownership and you trust that specific repository, substitute
