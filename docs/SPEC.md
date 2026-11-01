@@ -17,7 +17,11 @@ constraint; outcomes, target and release policy are unchanged. Amended
 is planned after 2.0 as O9 with its own MINOR checkpoint; mmm-factory's
 durable state syncs through an opt-in source for single-Mac handover; and
 gstack's machine-local files leave the gstack source. The selected target is
-unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
+unchanged. Amended 2026-11-01 by `/project-spec` to correct three facts: the
+owner has two Linux machines, not one; Claude project memory is shared by git
+remote since 1.12.0; and auto-update does not reach every machine. Outcomes,
+target and release policy are unchanged. Earlier text lives in
+`git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -36,8 +40,8 @@ several machines:
 A command either succeeds, in one line, or says what broke and how to fix it.
 
 2.0 moves the transport from iCloud Drive to a Syncthing folder so the
-owner's Linux machine joins the fleet. It keeps the 1.x store (each machine's
-encrypted file list plus encrypted content) and fixes what breaks on
+owner's two Linux machines join the fleet. It keeps the 1.x store (each
+machine's encrypted file list plus encrypted content) and fixes what breaks on
 Syncthing.
 
 ## What mm syncs and reports
@@ -61,8 +65,8 @@ Grok models used through Cursor still appear in the Grok row.
 
 ## Audience and target
 - Current users: the owner only. Observed 2026-10-19: three registered Macs
-  (one inactive since 2026-08-11) and one Arch-based (Omarchy) Linux machine
-  that waits for 2.0 to join.
+  (one inactive since 2026-08-11). The owner stated on 2026-10-31 that they
+  have two Arch-based (Omarchy) Linux machines, which wait for 2.0 to join.
 - Audience ceiling: potentially-public. The repository is MIT and forkable and
   the README stays readable by a newcomer, but no alpha group or public stage
   is planned.
@@ -99,14 +103,16 @@ holds the same synced files.
    because a peer deleted it stays recoverable for 30 days. When two machines
    changed the same file, mm keeps both versions until `mm resolve`;
    `MEMORY.md` and `.jsonl` files merge automatically.
-2. Claude project memory for a project under the home folder lands in the
-   same project on macOS and on Linux.
+2. Claude project memory for a project with a network git `origin` lands in
+   the same project on macOS and on Linux, wherever each machine keeps its
+   checkout. A project without one lands by its home-relative path when it
+   sits under the home folder.
 3. A file another program is writing during a push keeps its previously
    published version and goes out with a later push; it never stops the rest
    of the push.
 4. Evidence: integration tests over a local folder that delivers files late
-   and out of order, and a one-week live soak with one Mac and the Linux
-   machine on the 2.0 release candidate with real hooks, recorded in
+   and out of order, and a one-week live soak with one Mac and both Linux
+   machines on the 2.0 release candidate with real hooks, recorded in
    PROGRESS.md `## Acceptance`.
 
 ### O2: A machine joins the fleet with one mm command after Syncthing pairing
@@ -214,8 +220,13 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
 - One user, no compatibility contract. mm refuses storage written in a format
   it cannot read, with an upgrade remedy; that is the only compatibility
   promise. Commands, flags, config keys, output and host families can change
-  in any release, with a README Upgrading note. Every machine stays current
-  through auto-update.
+  in any release, with a README Upgrading note. Auto-update upgrades a pipx
+  `@latest` install at the end of its next `push`, `pull`, `autopull` or
+  `autopush`, at most once a day. It does not reach a machine that runs none
+  of them, is pinned to a tag, has turned `auto_install` off, or is refused
+  for newer storage. `mm devices` shows each machine's version; the owner
+  runs `mm update` on any machine that lags, and every machine must be on the
+  release before cutover.
 - Core and extensions (owner, 2026-10-23). Host adapters (each agent's sync
   source and usage reader) and command groups are extensions to a small
   shared core, so a change is tested and reviewed against the piece it
@@ -244,11 +255,11 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   `mm resolve` for real conflicts; unlocking the Linux keyring before hooks
   run; re-joining a machine restored from backup or cloned; removing a dead
   machine from the fleet.
-- Known limits: paths outside the home folder stay machine-specific. mm does
-  not detect a restored or cloned machine, which can republish stale files
-  until it is re-joined. Content blob names are content hashes: they show
-  whether two machines hold identical bytes, not the bytes. iCloud Drive is
-  not supported after cutover.
+- Known limits: a project outside the home folder with no network git
+  `origin` stays machine-specific. mm does not detect a restored or cloned
+  machine, which can republish stale files until it is re-joined. Content blob
+  names are content hashes: they show whether two machines hold identical
+  bytes, not the bytes. iCloud Drive is not supported after cutover.
 
 ## Non-goals and later work
 - Windows and non-Arch Linux distributions. Revisit when such a machine needs
