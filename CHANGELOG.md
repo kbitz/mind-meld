@@ -2,6 +2,16 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.2] - 2026-11-01
+
+**`mm recapture` and its preview now give each repository 30 seconds and the Git walk 120 seconds.** A repository the ordinary 2 second push cap skips can still be captured. Push, autopush, and init keep their existing limits, and the push inside a real recapture is that ordinary push.
+
+### Changed
+
+- Recapture and `mm recapture --dry-run` pass those budgets through. Repository discovery stays at 100 ms.
+- A repository that runs past the recapture budget is skipped and named. The preview exits 0. A real recapture that comes back incomplete exits 4 and prints the remedy.
+- The recapture lock is released in the command's cleanup. Joining worker threads at interpreter exit is separate, so 150 seconds is not how long the lock is held.
+
 ## [1.12.1] - 2026-11-01
 
 **`mm sources`, `mm enable-source`, `mm disable-source`, and `mm reconfigure-sources` behave the same.** Help text, flags, exit codes, and the files they write are unchanged.
