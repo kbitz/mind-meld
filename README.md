@@ -1530,7 +1530,7 @@ cause fixed; narrowing the window cannot repair a checkout. `refresh-identity`
 lists the locally resolved emails and `+`/`-` changes versus a readable prior
 cache. A missing cache means the previous set is unknown, not empty.
 
-**Ignored Git environment.** mm's five Git reads select each discovered
+**Ignored Git environment.** mm's Git reads select each discovered
 repository even when a parent hook or shell exports repository-local state.
 They ignore GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_IMPLICIT_WORK_TREE,

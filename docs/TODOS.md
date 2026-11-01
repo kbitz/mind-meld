@@ -84,6 +84,12 @@ here by hand, use the H3 form.
 - **Priority:** P2
 - **Context:** Re-check before Track 91A starts. Revisit if project memory is lost after an outage, or if a machine with no `projects/` shows store growth.
 
+### [review:severity=nit] The Git spawn gate cannot see a built argv
+- **Description:** `_git_spawn_violations` in `tests/test_gitenv.py` skips a non-literal argv outside `events.py` and `identity.py`, so `test_all_git_subprocesses_use_scrubbed_environment` does not cover `projectid._git_origin`, which builds its argv as `[...] + [...]`. That site passes `gitenv.scrubbed_git_env()` by reading. `docs/invariants/events-retro.md` still says "All five Git calls", and `identity.py` "both Git reads"; there are six spawn sites.
+- **Effort:** S
+- **Priority:** P3
+- **Context:** Documentation audit of Track 90A. Revisit when a new Git read is added.
+
 ### [review:severity=nit] The project index lists `projects/` with no deadline
 - **Description:** `_build_index` lists `projects/` on the caller's thread before its worker and 2 s deadline start, and `projects_listed` lists it again, so a stalled mount under `~/.claude/projects` can hang `mm diag`, `mm status` or a push instead of timing out. The timeout tests block only later checkout reads.
 - **Why:** The design lists on the caller so every folder name is known if the worker times out. A stalled mount there has not been seen on this fleet. Greptile review of Track 90A.
