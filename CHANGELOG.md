@@ -2,6 +2,17 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.0] - 2026-10-31
+
+**Claude project memory for one git repository is the same project on every machine.** A checkout with a network `origin` publishes under that remote, and any other project publishes under a home-relative name. Each machine maps the name back to the folder Claude uses for its own checkout. This is 1.12.0, a minor, because docs/SPEC.md:293-296 says a storage-format change that needs every machine upgraded before it syncs is at least a minor. README Upgrading carries that note.
+
+### Changed
+
+- A project with a network `origin` publishes under that remote. A project without one publishes under a home-relative name. Pull maps the name back to the folder Claude uses on this machine, wherever that checkout sits.
+- The first push after an update that can list `~/.claude/projects` republishes project memory under those shared names. It uploads no file content, deletes nothing, and runs no GC. An attended push prints `Push: project memory published under shared names.` `mm autopush` stays quiet and records the same fact.
+- Go one machine at a time. Updated machines sync with each other at once. An older machine skips an updated peer's whole manifest until that machine updates. README Upgrading has the order, the hold when the project folder cannot be listed, and the warning for a machine still on 0.14.18 or older.
+- `mm diag --json` shows `project_index.state` and which other machines have switched.
+
 ## [1.11.20] - 2026-10-30
 
 **`mm init` creates a fleet only when you pass `--new-fleet`, and joining an existing folder waits for that fleet's key instead of starting a second one.** Plain `mm init` writes nothing until `mm-crypto-init` arrives, then checks the passphrase and pulls. New installs default to `~/Sync/mind-meld`. A store you already configured, including one on iCloud Drive, stays where it is.
