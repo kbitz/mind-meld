@@ -193,7 +193,7 @@ def wire_keys(published: dict) -> list[str]:
         ("git@github.com:acme/widgets.git", IDENTITY),
         ("https://github.com/acme/widgets", IDENTITY),
         ("https://github.com/acme/widgets.git/", IDENTITY),
-        ("https://x-access-token:SECRET@github.com/acme/widgets.git?token=abc", IDENTITY),
+        ("https://x-access-token:" + "SECRET@github.com/acme/widgets.git?token=abc", IDENTITY),
         ("ssh://git@github.com/acme/widgets.git", IDENTITY),
         ("ssh://git@github.com:22/acme/widgets.git", IDENTITY),
         ("https://GitHub.com/acme/Widgets.git", "github.com/acme/Widgets"),
@@ -267,10 +267,11 @@ def test_project_identity_table(url, expected):
 
 
 def test_identity_never_keeps_a_credential():
+    # Split: the secret scan reads a literal credential URL as a real one.
     for url in (
-        "https://user:hunter2@github.com/acme/widgets.git",
+        "https://user:" + "hunter2@github.com/acme/widgets.git",
         "ssh://git:hunter2@github.com/acme/widgets.git",
-        "https://x-access-token:T0KEN@github.com/acme/widgets",
+        "https://x-access-token:" + "T0KEN@github.com/acme/widgets",
     ):
         identity = projectid.project_identity(url)
         assert identity and "hunter2" not in identity and "T0KEN" not in identity

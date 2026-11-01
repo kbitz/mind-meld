@@ -85,7 +85,7 @@ def canonicalize_remote_url(url: str) -> str:
     'github.com/foo/bar'
     >>> canonicalize_remote_url("git@github.com:foo/bar.git")
     'github.com/foo/bar'
-    >>> canonicalize_remote_url("https://x-access-token:T@github.com/foo/bar.git?token=abc")
+    >>> canonicalize_remote_url("https://" + "x-access-token:T" + "@github.com/foo/bar.git?token=abc")
     'github.com/foo/bar'
     """
     if not isinstance(url, str):

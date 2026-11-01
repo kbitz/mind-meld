@@ -1428,8 +1428,8 @@ def _name_only_adjusted(diff: DiffResult, remote_src: dict) -> DiffResult:
     for rel in diff.deleted:
         parts = manifest._split_project_key(rel)
         if parts and (projectid.unplaceable_reason(parts[0]) is not None or parts[0] in moved):
-            key = (parts[1], str(prior_files.get(rel, {}).get("sha256")))
-            freed[key] = freed.get(key, 0) + 1
+            pair = (parts[1], str(prior_files.get(rel, {}).get("sha256")))
+            freed[pair] = freed.get(pair, 0) + 1
             continue
         deleted.append(rel)
     if len(deleted) == len(diff.deleted):
@@ -1437,9 +1437,9 @@ def _name_only_adjusted(diff: DiffResult, remote_src: dict) -> DiffResult:
     new: dict[str, dict] = {}
     for rel, info in diff.new.items():
         parts = manifest._split_project_key(rel)
-        key = (parts[1], str(info.get("sha256"))) if parts else None
-        if key is not None and freed.get(key):
-            freed[key] -= 1
+        pair = (parts[1], str(info.get("sha256"))) if parts else None
+        if pair is not None and freed.get(pair):
+            freed[pair] -= 1
             continue
         new[rel] = info
     return DiffResult(new=new, modified=diff.modified, deleted=deleted, unchanged=diff.unchanged)

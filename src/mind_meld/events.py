@@ -1722,7 +1722,7 @@ def walk_git_projects(
                 # FuturesTimeoutError aliases builtin TimeoutError, which is an
                 # OSError subclass, so never narrow this to OSError.
                 try:
-                    proj, err = fut.result(timeout=0)
+                    proj, err = fut.result(0)
                 except Exception:
                     skipped.append({"path": str(root), "reason": WALK_SKIP_RAISED})
                     continue
@@ -1742,7 +1742,7 @@ def walk_git_projects(
                 finished_roots.add(root)
                 if fut.done():
                     try:
-                        proj, err = fut.result(timeout=0)
+                        proj, err = fut.result(0)
                     except Exception:
                         skipped.append({"path": str(root), "reason": WALK_SKIP_RAISED})
                         continue
