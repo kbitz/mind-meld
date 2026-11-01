@@ -858,7 +858,6 @@ class TestExcludePatterns5C:
 
         with monkeypatch.context() as old_defaults:
             old_defaults.setattr(config_module, "DEFAULT_SOURCES", [previous])
-            old_defaults.setattr(cli_module, "DEFAULT_SOURCES", [previous])
             self._activate(monkeypatch, config_a)
             result = runner.invoke(app, ["push"])
             assert result.exit_code == 0, result.output
@@ -870,7 +869,6 @@ class TestExcludePatterns5C:
             assert result.exit_code == 0, result.output
 
         monkeypatch.setattr(config_module, "DEFAULT_SOURCES", [default])
-        monkeypatch.setattr(cli_module, "DEFAULT_SOURCES", [default])
         self._activate(monkeypatch, config_a)
         before = config_a.read_bytes()
         result = runner.invoke(app, ["autopush"])
@@ -9660,6 +9658,7 @@ def test_read_only_policy62():
         cli_module.statusflow,
         cli_module.pullflow,
         initflow,
+        cli_module.sourceflow,
     ):
         _check_read_only_policy62(Path(module.__file__).read_text())
     for function in (cli_module.core._get_config, core._maybe_prompt_migration):

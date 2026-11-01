@@ -41,6 +41,7 @@ EXTRACTED = [
     "statusflow",
     "pullflow",
     "initflow",
+    "sourceflow",
     "host_registry",
     *HOST_ADAPTER_MODULES,
 ]
@@ -827,6 +828,7 @@ def test_no_consumer_owned_agent_name_lists() -> None:
         SRC / "statusflow.py",
         SRC / "pullflow.py",
         SRC / "initflow.py",
+        SRC / "sourceflow.py",
         Path(__file__).resolve().parent / "conftest.py",
         Path(__file__).resolve().parent / "test_skill_link.py",
         Path(__file__),
@@ -1254,6 +1256,22 @@ INITFLOW_DEFINITIONS = frozenset(
     """.split()
 )
 
+# Track 90B: the four source commands' bodies and the helpers only they call
+# moved to sourceflow.py. The command shells (same four names) stay in cli.py.
+SOURCEFLOW_DEFINITIONS = frozenset(
+    """
+    _known_source_names
+    _record_seen
+    _toggle_cursor_usage
+    _validate_source_name
+    disable_source
+    enable_source
+    reconfigure_sources
+    sources
+    """.split()
+)
+SOURCE_SHELLS = frozenset("disable_source enable_source reconfigure_sources sources".split())
+
 
 def _top_level_definitions(source: str) -> set[str]:
     names = set()
@@ -1297,9 +1315,12 @@ def _unqualified_owner_calls(
         owners.update(dict.fromkeys(STATUSFLOW_DEFINITIONS, "statusflow"))
         owners.update(dict.fromkeys(INIT_CORE_DEFINITIONS, "core"))
         owners.update(dict.fromkeys(INITFLOW_DEFINITIONS, "initflow"))
+        owners.update(dict.fromkeys(SOURCEFLOW_DEFINITIONS, "sourceflow"))
     owners.update(dict.fromkeys(PULLFLOW_DEFINITIONS, "pullflow"))
     tree = ast.parse(source)
-    module_aliases = {name: name for name in ("core", "statusflow", "pullflow", "initflow")}
+    module_aliases = {
+        name: name for name in ("core", "statusflow", "pullflow", "initflow", "sourceflow")
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             module = (node.module or "").split(".")[-1]
@@ -1450,6 +1471,17 @@ def test_init_single_ownership_and_qualified_calls():
     assert len(INITFLOW_DEFINITIONS) == 26
 
 
+def test_sourceflow_single_ownership_and_qualified_calls():
+    inventories = {"cli": SOURCE_SHELLS, "sourceflow": SOURCEFLOW_DEFINITIONS}
+    for module, expected in inventories.items():
+        source = (SRC / f"{module}.py").read_text()
+        assert _top_level_definitions(source) & SOURCEFLOW_DEFINITIONS == expected, (
+            f"{module}: expected owner inventory {expected}"
+        )
+        assert _unqualified_owner_calls(source, module) == []
+    assert len(SOURCEFLOW_DEFINITIONS) == 8
+
+
 def test_pull_test_consumers_use_qualified_owner_names():
     offenders = {}
     for path in Path(__file__).resolve().parent.rglob("*.py"):
@@ -1480,13 +1512,16 @@ def test_pull_test_consumers_use_qualified_owner_names():
         ("def caller(): initflow._prompt_sources()", "cli", False),
         ("def caller(): _prompt_source_toggle({}, current_state=True)", "initflow", True),
         ("def caller(): core._prompt_source_toggle({}, current_state=True)", "initflow", False),
+        ("def caller(): _validate_source_name('x', {}, force=False)", "cli", True),
+        ("def caller(): sourceflow._validate_source_name('x', {}, force=False)", "cli", False),
+        ("def caller(): _record_seen([])", "sourceflow", False),
     ],
 )
 def test_owner_call_gate_rejects_dead_aliases(source, consumer, flags):
     assert bool(_unqualified_owner_calls(source, consumer)) is flags
 
 
-@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow", "initflow"])
+@pytest.mark.parametrize("forbidden", ["statusflow", "pullflow", "initflow", "sourceflow"])
 def test_core_does_not_import_statusflow(forbidden):
     tree = ast.parse((SRC / "core.py").read_text())
     for node in ast.walk(tree):
@@ -1525,6 +1560,20 @@ def test_initflow_import_does_not_register_cli():
     assert result.returncode == 0, result.stderr
 
 
+def test_sourceflow_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from mind_meld import sourceflow; "
+            "assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_core_sync_output_is_shared_with_cli():
     from mind_meld import cli, core
 
@@ -1538,6 +1587,22 @@ def test_init_bindings_have_one_owner():
     assert initflow.stderr_console is consoles.stderr_console
     assert initflow.safe_str is safety.safe_str
     for name in (INIT_CORE_DEFINITIONS | INITFLOW_DEFINITIONS) - {"init"}:
+        assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
+
+
+def test_source_bindings_have_one_owner():
+    from mind_meld import cli, consoles, safety, sourceflow
+
+    assert sourceflow.console is consoles.console
+    assert sourceflow.stderr_console is consoles.stderr_console
+    assert sourceflow.safe_str is safety.safe_str
+    # The helpers moved, and cli no longer reads the imports only they used.
+    for name in (SOURCEFLOW_DEFINITIONS - SOURCE_SHELLS) | {
+        "difflib",
+        "seen_sources",
+        "DEFAULT_SOURCES",
+        "walk_source",
+    }:
         assert not hasattr(cli, name), f"{name}: use its expected owner; no cli re-export"
 
 

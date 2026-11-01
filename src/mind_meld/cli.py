@@ -6,7 +6,6 @@ Commands: init, push, pull, status, devices, diff, gc, autopull, autopush,
 
 from __future__ import annotations
 
-import difflib
 import fcntl
 import hashlib
 import json
@@ -55,9 +54,9 @@ from mind_meld import (
     resolveflow,
     retention,
     safety,
-    seen_sources,
     sidecar,
     skill_link,
+    sourceflow,
     statedb,
     statusflow,
     updateprogress,
@@ -66,7 +65,6 @@ from mind_meld import (
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_MAX_FILE_SIZE,
-    DEFAULT_SOURCES,
     MM_INTERNAL_SOURCE_NAMES,
     SourceResolution,
     get_default_source,
@@ -153,7 +151,6 @@ from mind_meld.manifest import (
     mtime_from_manifest,
     parse_conflict_created_at,
     read_file_revision,
-    walk_source,
 )
 from mind_meld.manifest import (
     _FileTooLarge as _ManifestFileTooLarge,
@@ -3288,168 +3285,7 @@ def sources() -> None:
     allowlist left out on this scan; diagnostic only, used to sanity-check
     an over-broad glob or an under-broad allowlist.
     """
-    config = core._get_config(read_only=True)
-
-    src_list = core._resolve_all_configured_sources(config)
-    disabled_set = set(config.get("sync", {}).get("disabled_sources", []) or [])
-    max_file_size = config["sync"]["max_file_size"]
-
-    table = Table(title="Configured Sources")
-    table.add_column("Name")
-    table.add_column("Path")
-    table.add_column("Type")
-    table.add_column("Enabled")
-    table.add_column("Files")
-    table.add_column("Excluded")
-
-    for src in src_list:
-        # Walk WITHOUT exclude_patterns so we count what the per-source
-        # globs would have stripped. `all_files` is already post-EXCLUDED
-        # (the global junk list runs inside `_record_file`), so any match
-        # against `patterns` here is attributable to per-source globs only.
-        # Two passes is the cheapest accurate diagnostic — instrumenting
-        # the walker with a counter would leak diagnostic state into the
-        # hot path.
-        src_no_excludes = {
-            k: v for k, v in src.items() if k not in ("exclude_patterns", "include_patterns")
-        }
-        _, all_files = walk_source(src_no_excludes, max_file_size)
-        patterns = src.get("exclude_patterns") or []
-        includes = src.get("include_patterns") or []
-        if patterns or includes:
-            excluded_count = sum(
-                1
-                for rel in all_files
-                if _manifest_is_excluded(rel, patterns, None, includes or None)
-            )
-            kept = len(all_files) - excluded_count
-            excluded_display = str(excluded_count)
-        else:
-            kept = len(all_files)
-            excluded_display = "—"
-        is_disabled = src["name"] in disabled_set
-        enabled_display = "[red]N[/red]" if is_disabled else "[green]Y[/green]"
-        # Dim the row's data columns when disabled to make the state
-        # obvious at a glance.
-        wrap = (lambda s: f"[dim]{s}[/dim]") if is_disabled else (lambda s: s)
-        table.add_row(
-            wrap(src["name"]),
-            wrap(src["path"]),
-            wrap(src["type"]),
-            enabled_display,
-            wrap(str(kept)),
-            wrap(excluded_display),
-        )
-
-    console.print(table)
-
-
-# ── enable-source / disable-source / reconfigure-sources ──────────────
-
-
-def _known_source_names(config: dict) -> list[str]:
-    """Sorted union of file sources and usage-only toggle names.
-
-    The validation surface for `mm enable-source` / `mm disable-source`.
-    A name is "known" if the user configures its file source, mm ships a default
-    for it, or it has a usage-only consent alias. --force accepts unknown names.
-    """
-    explicit = [
-        s["name"]
-        for s in config.get("sync", {}).get("sources", []) or []
-        if s.get("name") not in _config_module.RETIRED_SOURCE_NAMES
-    ]
-    defaults = [s["name"] for s in DEFAULT_SOURCES]
-    return sorted(set(explicit) | set(defaults) | set(_config_module.HOST_USAGE_ONLY_CONSENT))
-
-
-def _validate_source_name(name: str, config: dict, *, force: bool) -> None:
-    """Raise ConfigError on unknown name unless --force.
-
-    Closest-match hint via difflib so a typo like `gstck` suggests `gstack`.
-    --force surfaces a stderr breadcrumb but accepts (forward-compat:
-    pre-disabling a not-yet-shipped source like codex).
-    """
-    if name in _config_module.RETIRED_SOURCE_NAMES:
-        raise ConfigError(
-            f"source '{name}' was retired; "
-            "run mm migrate-config to remove it from your configuration."
-        )
-    valid = _known_source_names(config)
-    if name in valid:
-        return
-    if force:
-        print(
-            f"mm: warning: '{name}' is not a known source "
-            f"(valid: {', '.join(valid)}); accepting via --force.",
-            file=sys.stderr,
-        )
-        return
-    matches = difflib.get_close_matches(name, valid, n=1, cutoff=0.6)
-    suggestion = f" Did you mean '{matches[0]}'?" if matches else ""
-    raise ConfigError(
-        f"unknown source '{name}' — valid: {', '.join(valid)}.{suggestion} "
-        "Use --force to accept a name not yet known to mm "
-        "(forward-compat for not-yet-shipped sources)."
-    )
-
-
-def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
-    """Handle the cursor usage alias without changing file-source selection.
-
-    An explicit custom source takes precedence over the alias so its existing
-    enable/disable behavior remains available and does not grant usage consent.
-    Enable installs the hook before granting consent; disable revokes consent
-    before touching hooks.json, so a hook file mm cannot edit never blocks
-    revocation (the leftover hook records nothing without consent).
-    """
-    key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
-    if name != "cursor" or key is None:
-        return False
-    if any(s["name"] == name for s in config.get("sync", {}).get("sources", []) or []):
-        return False
-    from mind_meld import host_usage
-
-    hook_errors = (OSError, ValueError, RuntimeError, StorageError)
-    already = config.get("retro", {}).get(key) is enabled
-    hook_changed = False
-    if enabled:
-        try:
-            hook_changed = host_usage.configure_cursor_hook(enabled=True)
-        except hook_errors as exc:
-            core._error("Could not install Cursor's completion hook: " + safe_str(str(exc)))
-    if not already:
-        patch_config_on_disk({"retro": {key: enabled}})
-    if not enabled:
-        try:
-            hook_changed = host_usage.configure_cursor_hook(enabled=False)
-        except hook_errors as exc:
-            stderr_console.print(
-                "[yellow]mm: warning:[/yellow] Cursor usage capture is disabled, but mm's "
-                f"completion hook could not be removed from {host_usage.CURSOR_HOOK_CONFIG_PATH}: "
-                + safe_str(str(exc))
-                + f". It records nothing while capture is disabled; remove its "
-                f"'{host_usage.CURSOR_HOOK_COMMAND}' stop entry to clean up."
-            )
-    state = "enabled" if enabled else "disabled"
-    if already:
-        repaired = ""
-        if hook_changed:
-            repaired = "; reinstalled its hook" if enabled else "; removed its hook"
-        console.print(f"[dim]Cursor usage capture is already {state}{repaired}.[/dim]")
-        return True
-    verb = "Enabled" if enabled else "Disabled"
-    console.print(f"[green]{verb} Cursor usage capture on this device.[/green]")
-    if enabled:
-        console.print(
-            "[dim]Standalone interactive sessions use the completion hook. "
-            "For --print runs, use 'mm cursor-agent' to record stdout usage. "
-            "Only usage aggregates are synced.[/dim]"
-        )
-        console.print("[dim]Run 'mm push' to refresh usage, then 'mm status' to verify.[/dim]")
-    opposite = "disable" if enabled else "enable"
-    console.print(f"[dim]Run 'mm {opposite}-source cursor' to change this setting.[/dim]")
-    return True
+    sourceflow.sources()
 
 
 _CURSOR_RECORD_WARNING = "mm: warning: Cursor usage could not be recorded; run mm diag."
@@ -3652,18 +3488,7 @@ def cursor_agent(ctx: typer.Context) -> None:
     raise typer.Exit(_cursor_exit_code(code))
 
 
-def _record_seen(names: list[str]) -> None:
-    """Mark `names` as acknowledged in the seen_sources tracker.
-
-    Atomic under flock via `seen_sources.acknowledge` (codex 2026-04-25:
-    the previous read+update+write split lost concurrent acknowledgments).
-    Best-effort: a write failure surfaces a stderr breadcrumb but does not
-    crash the calling command. The seen tracker drives the `mm status`
-    new-source hint; losing it just means a hint repeats.
-    """
-    config = core._get_config(read_only=False)
-    currently_resolved = [s["name"] for s in get_sources(config)]
-    seen_sources.acknowledge(names, initial=currently_resolved)
+# ── enable-source / disable-source / reconfigure-sources ──────────────
 
 
 @app.command(name="disable-source")
@@ -3690,27 +3515,7 @@ def disable_source(
     cursor): it revokes Cursor usage consent first, then removes mm's stop
     entry from ~/.cursor/hooks.json, warning if that file cannot be edited.
     """
-    config = core._get_config(read_only=False)
-    if _toggle_cursor_usage(name, config, enabled=False):
-        return
-    try:
-        _validate_source_name(name, config, force=force)
-    except ConfigError as e:
-        core._error(str(e))
-
-    sync = dict(config.get("sync", {}) or {})
-    disabled = list(sync.get("disabled_sources", []) or [])
-    if name in disabled:
-        console.print(f"[dim]Source '{name}' is already disabled.[/dim]")
-        return
-
-    disabled.append(name)
-    updates: dict[str, dict[str, Any]] = {"sync": {"disabled_sources": sorted(disabled)}}
-    patch_config_on_disk(updates)
-    _record_seen([name])
-
-    console.print(f"[green]Disabled source '{name}' on this device.[/green]")
-    console.print(f"[dim]Run 'mm enable-source {name}' to re-enable.[/dim]")
+    sourceflow.disable_source(name, force=force)
 
 
 @app.command(name="enable-source")
@@ -3744,83 +3549,7 @@ def enable_source(
     other hooks, then sets `[retro] cursor_host_usage = true`. No Cursor
     files sync; only usage aggregates are published.
     """
-    config = core._get_config(read_only=False)
-    if _toggle_cursor_usage(name, config, enabled=True):
-        return
-    try:
-        _validate_source_name(name, config, force=force)
-    except ConfigError as e:
-        core._error(str(e))
-
-    sync = dict(config.get("sync", {}) or {})
-    disabled = list(sync.get("disabled_sources", []) or [])
-    explicit_sources = list(sync.get("sources", []) or [])
-    has_explicit_sources = "sources" in sync
-    explicit_names = [s["name"] for s in explicit_sources]
-    default_names = [s["name"] for s in DEFAULT_SOURCES]
-
-    updates: dict[str, Any] = {}
-
-    if name in disabled:
-        disabled.remove(name)
-        updates["disabled_sources"] = sorted(disabled)
-
-    # Muse and Antigravity must be materialized even when their allowlisted
-    # trees are not present yet: explicit enable is consent.  In a legacy
-    # config, first preserve the resolved source set before writing
-    # sync.sources.  An explicit list takes priority over legacy
-    # claude_dir/default fallback; writing only the new host here would make the
-    # existing sources disappear and eventually produce their deletion
-    # tombstones.
-    if name in {"muse", "agy"} and not has_explicit_sources:
-        explicit_sources = get_sources(config)
-        explicit_names = [s["name"] for s in explicit_sources]
-        updates["sources"] = explicit_sources
-
-    # If the user has explicit sources and this name isn't among them,
-    # but it IS in DEFAULT_SOURCES, append the default so enable actually
-    # has effect (auto-detect doesn't fire when explicit sources are set).
-    needs_explicit_append = name not in explicit_names and (
-        name in {"muse", "agy"} or (has_explicit_sources and name in default_names)
-    )
-    if needs_explicit_append:
-        default = get_default_source(name)
-        if default is not None:
-            explicit_sources.append(default)
-            updates["sources"] = explicit_sources
-
-    if not updates:
-        # Already enabled and configured — no-op message.
-        if name in explicit_names or (not has_explicit_sources and name in default_names):
-            console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
-            return
-
-    if updates:
-        config_updates: dict[str, dict[str, Any]] = {"sync": updates}
-        patch_config_on_disk(config_updates)
-
-    _record_seen([name])
-    console.print(f"[green]Enabled source '{name}' on this device.[/green]")
-    if name == "muse":
-        console.print(
-            "[dim]Syncs ~/.local/share/muse memory/ only. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
-        )
-        console.print(
-            "[dim]Reads completed model-step token totals from local Muse session logs. "
-            "Session files are not synced. Prompts never leave the Mac.[/dim]"
-        )
-        console.print("[dim]Run 'mm disable-source muse' to turn this off.[/dim]")
-    elif name == "agy":
-        console.print(
-            "[dim]Syncs ~/.gemini/config skills/, rules/, AGENTS.md, and GEMINI.md. "
-            "Session databases and settings are not synced.[/dim]"
-        )
-        console.print(
-            "[dim]Reads completed model-step token totals from local Antigravity "
-            "session databases. Prompts never leave this device.[/dim]"
-        )
-        console.print("[dim]Run 'mm disable-source agy' to turn this off.[/dim]")
+    sourceflow.enable_source(name, force=force)
 
 
 @app.command(name="reconfigure-sources")
@@ -3836,100 +3565,7 @@ def reconfigure_sources() -> None:
     Atomicity: Ctrl-C mid-prompt aborts without writing. The whole
     reconfigured state is committed in a single patch_config_on_disk call.
     """
-    config = core._get_config(read_only=False)
-    sync = dict(config.get("sync", {}) or {})
-    explicit_sources = list(sync.get("sources", []) or [])
-    explicit_names = [s["name"] for s in explicit_sources]
-    has_explicit_sources = "sources" in sync
-    disabled = list(sync.get("disabled_sources", []) or [])
-    default_names = [s["name"] for s in DEFAULT_SOURCES]
-
-    # Unified ordered list: DEFAULT_SOURCES first (canonical surfacing
-    # order), then any user-customized names not in defaults. Prefer the
-    # user's existing entry for each name so customizations show in the
-    # picker context.
-    seen_names: set[str] = set()
-    ordered: list[dict[str, Any]] = []
-    for d in DEFAULT_SOURCES:
-        seen_names.add(d["name"])
-        existing = next((s for s in explicit_sources if s["name"] == d["name"]), None)
-        ordered.append(existing if existing is not None else d)
-    for s in explicit_sources:
-        if s["name"] in _config_module.RETIRED_SOURCE_NAMES:
-            continue
-        if s["name"] not in seen_names:
-            seen_names.add(s["name"])
-            ordered.append(s)
-
-    if not ordered:
-        console.print("[dim]No sources configured to reconfigure.[/dim]")
-        return
-
-    console.print("[bold]Reconfigure sources for this device.[/bold]")
-    console.print(
-        "[dim]Disabling marks the source in disabled_sources (per-machine, "
-        "not synced). Disabling does NOT delete the [[sync.sources]] entry — "
-        "re-enabling preserves customizations. Retired source blocks are removed.[/dim]\n"
-    )
-
-    new_explicit_sources: list[dict[str, Any]] = []
-    new_disabled = list(
-        set(core._explicit_retired_sources(explicit_sources))
-        | (set(disabled) & _config_module.RETIRED_SOURCE_NAMES)
-    )
-
-    try:
-        for item in ordered:
-            iname = item["name"]
-            detected = core._source_path_is_detected(item)
-            default_active = iname in default_names
-            if iname == "muse":
-                # Muse never defaults on: its memory/ tree is host-created, so
-                # even a detected root is not consent for sync or usage reads.
-                default_active = False
-            elif iname == "agy":
-                # Interactive enrollment follows init's detected-host default;
-                # background resolution still requires explicit consent.
-                default_active = detected
-            currently_active = (
-                iname in explicit_names or (not has_explicit_sources and default_active)
-            ) and iname not in disabled
-            answered = core._prompt_source_toggle(
-                item, current_state=currently_active, detected=detected
-            )
-            existing = next((s for s in explicit_sources if s["name"] == iname), None)
-            if answered:
-                # Source on: ensure in [[sync.sources]] (use existing for
-                # customizations, else default).
-                if existing is not None:
-                    new_explicit_sources.append(existing)
-                else:
-                    default = get_default_source(iname)
-                    if default is not None:
-                        new_explicit_sources.append(default)
-            else:
-                # Source off: keep [[sync.sources]] entry intact for re-enable
-                # to preserve customizations, plus mark disabled.
-                if existing is not None:
-                    new_explicit_sources.append(existing)
-                new_disabled.append(iname)
-    except (KeyboardInterrupt, typer.Abort):
-        console.print("\n[yellow]Reconfigure aborted; no changes written.[/yellow]")
-        raise typer.Exit(1) from None
-
-    updates: dict[str, Any] = {
-        "disabled_sources": sorted(new_disabled),
-        "sources": new_explicit_sources,
-    }
-
-    patch_config_on_disk({"sync": updates})
-
-    # Mark every name as seen — reconfigure is the explicit acknowledgment
-    # surface, so even sources the user re-confirmed should not surface as
-    # "new" hints next run.
-    _record_seen([item["name"] for item in ordered])
-
-    console.print("\n[green]Source configuration updated.[/green]")
+    sourceflow.reconfigure_sources()
 
 
 @app.command(name="migrate-config")

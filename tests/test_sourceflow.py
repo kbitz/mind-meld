@@ -1,0 +1,268 @@
+"""Source command contracts exercised through the source owner, without cli.
+
+Pins the outcome lines and exit codes of `sources`, `enable-source`,
+`disable-source` and `reconfigure-sources` over a tmp_path config. The shells'
+flags live in tests/test_source_toggle.py, which can import cli.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import tomllib
+
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from mind_meld import config, seen_sources, sourceflow
+
+app = typer.Typer()
+app.command("sources")(sourceflow.sources)
+app.command("disable-source")(sourceflow.disable_source)
+app.command("enable-source")(sourceflow.enable_source)
+app.command("reconfigure-sources")(sourceflow.reconfigure_sources)
+runner = CliRunner()
+
+DETAIL_LINES = {
+    "muse": [
+        "Syncs ~/.local/share/muse memory/ only. "
+        "Session files are not synced. Prompts never leave the Mac.",
+        "Reads completed model-step token totals from local Muse session logs. "
+        "Session files are not synced. Prompts never leave the Mac.",
+        "Run 'mm disable-source muse' to turn this off.",
+    ],
+    "agy": [
+        "Syncs ~/.gemini/config skills/, rules/, AGENTS.md, and GEMINI.md. "
+        "Session databases and settings are not synced.",
+        "Reads completed model-step token totals from local Antigravity "
+        "session databases. Prompts never leave this device.",
+        "Run 'mm disable-source agy' to turn this off.",
+    ],
+}
+
+
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
+    """Config with claude + gstack explicit sources over tmp_path; HOME is a tmp dir."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        "mind_meld.host_usage.AGY_CONVERSATIONS_PATH",
+        home / ".gemini/antigravity-cli/conversations",
+    )
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    gstack = tmp_path / ".gstack"
+    gstack.mkdir()
+    config_path = tmp_path / "config.toml"
+    config.save_config(
+        {
+            "device": {"id": "abc123", "name": "MacBook"},
+            "storage": {"path": str(storage)},
+            "sync": {
+                "max_file_size": 52_428_800,
+                "sources": [
+                    {"name": "claude", "path": str(claude), "type": "claude"},
+                    {"name": "gstack", "path": str(gstack), "type": "generic"},
+                ],
+            },
+            "crypto": {"argon2_memory_kb": 1024},
+        },
+        config_path,
+    )
+    monkeypatch.setattr(config, "CONFIG_PATH", config_path)
+    # Wide enough that no pinned line wraps.
+    monkeypatch.setattr(sourceflow.console, "_width", 240)
+    monkeypatch.setattr(sourceflow.stderr_console, "_width", 240)
+    return config_path
+
+
+def _on_disk(path):
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+
+def _disabled(path):
+    return _on_disk(path)["sync"].get("disabled_sources") or []
+
+
+def _lines(text):
+    return [line for line in text.splitlines() if line]
+
+
+# ── default source (gstack) ───────────────────────────────────────────
+
+
+def test_default_source_disable_enable_round_trip(cfg):
+    result = runner.invoke(app, ["disable-source", "gstack"])
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout) == [
+        "Disabled source 'gstack' on this device.",
+        "Run 'mm enable-source gstack' to re-enable.",
+    ]
+    assert _disabled(cfg) == ["gstack"]
+
+    before = cfg.read_bytes()
+    again = runner.invoke(app, ["disable-source", "gstack"])
+    assert again.exit_code == 0, again.output
+    assert _lines(again.stdout) == ["Source 'gstack' is already disabled."]
+    assert cfg.read_bytes() == before
+
+    result = runner.invoke(app, ["enable-source", "gstack"])
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout) == ["Enabled source 'gstack' on this device."]
+    assert _disabled(cfg) == []
+
+    again = runner.invoke(app, ["enable-source", "gstack"])
+    assert again.exit_code == 0, again.output
+    assert _lines(again.stdout) == ["Source 'gstack' is already enabled."]
+
+
+# ── opt-in sources (muse, agy) ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["muse", "agy"])
+def test_opt_in_source_enable_then_disable(cfg, name):
+    result = runner.invoke(app, ["enable-source", name])
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout) == [
+        f"Enabled source '{name}' on this device.",
+        *DETAIL_LINES[name],
+    ]
+    added = next(s for s in _on_disk(cfg)["sync"]["sources"] if s["name"] == name)
+    assert added == config.get_default_source(name)
+    assert name not in _disabled(cfg)
+
+    again = runner.invoke(app, ["enable-source", name])
+    assert again.exit_code == 0, again.output
+    assert _lines(again.stdout) == [f"Source '{name}' is already enabled."]
+
+    off = runner.invoke(app, ["disable-source", name])
+    assert off.exit_code == 0, off.output
+    assert _lines(off.stdout) == [
+        f"Disabled source '{name}' on this device.",
+        f"Run 'mm enable-source {name}' to re-enable.",
+    ]
+    on_disk = _on_disk(cfg)
+    assert name in _disabled(cfg)
+    assert any(s["name"] == name for s in on_disk["sync"]["sources"])
+
+
+# ── names that are not accepted ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("command", ["enable-source", "disable-source"])
+def test_unknown_source_name_exits_1_and_writes_nothing(cfg, command):
+    before = cfg.read_bytes()
+    result = runner.invoke(app, [command, "definitely-unknown"])
+    assert result.exit_code == 1, result.output
+    assert result.stderr.startswith("Error: unknown source 'definitely-unknown'")
+    assert result.stdout == ""
+    assert cfg.read_bytes() == before
+    assert not seen_sources.seen_path().exists()
+
+
+@pytest.mark.parametrize("command", ["enable-source", "disable-source"])
+def test_unknown_source_name_with_force_is_accepted(cfg, command):
+    result = runner.invoke(app, [command, "definitely-unknown", "--force"])
+    assert result.exit_code == 0, result.output
+    assert "accepting via --force" in result.stderr
+    assert "mm: warning: 'definitely-unknown' is not a known source" in result.stderr
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("command", ["enable-source", "disable-source"])
+def test_retired_source_exits_1_with_or_without_force(cfg, command, force):
+    before = cfg.read_bytes()
+    result = runner.invoke(app, [command, "grok", *(["--force"] if force else [])])
+    assert result.exit_code == 1, result.output
+    assert "source 'grok' was retired" in result.stderr
+    assert cfg.read_bytes() == before
+
+
+# ── failure behaviour ─────────────────────────────────────────────────
+
+
+def test_config_write_failure_stops_before_success_output(cfg, monkeypatch):
+    """A failed config write prints no outcome line and records nothing as seen."""
+
+    def boom(updates, path=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sourceflow, "patch_config_on_disk", boom)
+    before = cfg.read_bytes()
+    result = runner.invoke(app, ["disable-source", "gstack"])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, OSError)
+    assert "Disabled source" not in result.output
+    assert cfg.read_bytes() == before
+    assert not seen_sources.seen_path().exists()
+
+
+# ── sources ───────────────────────────────────────────────────────────
+
+
+def _source_rows(output):
+    """Table body rows keyed by source name: [name, path, type, enabled, files, excluded]."""
+    rows = {}
+    for line in output.splitlines():
+        cells = [cell.strip() for cell in line.strip("│").split("│")]
+        if line.startswith("│") and len(cells) == 6:
+            rows[cells[0]] = cells
+    return rows
+
+
+def test_sources_lists_configured_sources(cfg):
+    result = runner.invoke(app, ["sources"])
+    assert result.exit_code == 0, result.output
+    assert "Configured Sources" in result.stdout
+    rows = _source_rows(result.stdout)
+    assert [rows[name][2] for name in ("claude", "gstack")] == ["claude", "generic"]
+    assert [rows[name][3] for name in ("claude", "gstack")] == ["Y", "Y"]
+
+    runner.invoke(app, ["disable-source", "gstack"])
+    after = runner.invoke(app, ["sources"])
+    assert after.exit_code == 0, after.output
+    rows = _source_rows(after.stdout)
+    assert [rows[name][3] for name in ("claude", "gstack")] == ["Y", "N"]
+
+
+# ── reconfigure-sources ───────────────────────────────────────────────
+
+
+def test_reconfigure_abort_exits_1_and_writes_nothing(cfg, monkeypatch):
+    def abort(prompt, default):
+        raise typer.Abort()
+
+    monkeypatch.setattr(typer, "confirm", abort)
+    before = cfg.read_bytes()
+    result = runner.invoke(app, ["reconfigure-sources"])
+    assert result.exit_code == 1, result.output
+    assert "Reconfigure aborted; no changes written." in _lines(result.stdout)
+    assert cfg.read_bytes() == before
+
+
+def test_reconfigure_accepting_defaults_updates_the_configuration(cfg, monkeypatch):
+    monkeypatch.setattr(typer, "confirm", lambda prompt, default: default)
+    result = runner.invoke(app, ["reconfigure-sources"])
+    assert result.exit_code == 0, result.output
+    assert _lines(result.stdout)[0] == "Reconfigure sources for this device."
+    assert _lines(result.stdout)[-1] == "Source configuration updated."
+    assert seen_sources.seen_path().exists()
+
+
+def test_sourceflow_contract_import_does_not_register_cli():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import tests.test_sourceflow; import sys; assert 'mind_meld.cli' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
