@@ -19,9 +19,12 @@ durable state syncs through an opt-in source for single-Mac handover; and
 gstack's machine-local files leave the gstack source. The selected target is
 unchanged. Amended 2026-11-01 by `/project-spec` to correct three facts: the
 owner has two Linux machines, not one; Claude project memory is shared by git
-remote since 1.12.0; and auto-update does not reach every machine. Outcomes,
-target and release policy are unchanged. Earlier text lives in
-`git log -- docs/SPEC.md`.
+remote since 1.12.0; and auto-update does not reach every machine. Amended
+2026-11-01 by `/project-spec` to drop the timed live trial before 2.0.0, so
+problems are fixed as they appear, and to require a bootstrap script that
+installs Python, pipx, mm and the Syncthing package before 2.0.0. Outcomes and
+target are unchanged; the 2.0.0 release line's conditions follow. Earlier text
+lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -74,10 +77,11 @@ Grok models used through Cursor still appear in the Grok row.
   machines syncing over Syncthing, with complete usage reporting and quiet,
   honest output.
 - Supported conditions: macOS and Arch-based Linux (Omarchy); Syncthing 2.1 or
-  newer on every machine; Python 3.11+ and pipx; a desktop keyring (Keychain,
-  or an unlocked Secret Service collection); a handful of machines with no
-  always-on peer; sync sets of about 40k files and 1.3 GB; attended `mm push`
-  and `mm pull` plus the documented Claude Code and Codex hooks. Until
+  newer on every machine; Python 3.11+ and pipx, installed by the bootstrap
+  script if missing; a desktop keyring (Keychain, or an unlocked Secret
+  Service collection); a handful of machines with no always-on peer; sync sets
+  of about 40k files and 1.3 GB; attended `mm push` and `mm pull` plus the
+  documented Claude Code and Codex hooks. Until
   cutover, the Macs sync over iCloud Drive on 1.x.
 - Current achieved stage and evidence: see PROGRESS.md `## Acceptance`.
 
@@ -111,9 +115,9 @@ holds the same synced files.
    published version and goes out with a later push; it never stops the rest
    of the push.
 4. Evidence: integration tests over a local folder that delivers files late
-   and out of order, and a one-week live soak with one Mac and both Linux
-   machines on the 2.0 release candidate with real hooks, recorded in
-   PROGRESS.md `## Acceptance`.
+   and out of order, and the owner's own observation on one Mac and both
+   Linux machines with real hooks after following the cutover runbook,
+   recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear.
 
 ### O2: A machine joins the fleet with one mm command after Syncthing pairing
 1. On a machine paired in Syncthing with the shared folder accepted, one mm
@@ -121,7 +125,7 @@ holds the same synced files.
    passphrase and pulls. If the fleet's key header has not arrived, it stops
    without writing anything and says to wait for Syncthing; the owner reruns
    `mm init` once it has. Creating a new fleet refuses on a folder that
-   already holds one. Observed on the soak machines.
+   already holds one. Observed on the owner's machines.
 2. `mm status` and `mm diag` read and report Syncthing's state (connected
    peers, the folder's sync state and the folder options mm relies on). mm
    never changes Syncthing's configuration.
@@ -139,7 +143,7 @@ holds the same synced files.
    AES-256-GCM before they reach the folder. Only the fleet's key-derivation
    header (salt, KDF parameters, key check) and the device registry (machine
    names, mm versions, last-seen times) are plaintext. Proven by tests and by
-   inspecting the folder on the soak machines.
+   inspecting the folder on the owner's machines.
 
 O5 (restore, clone and fork safety) was removed on 2026-10-19 with the
 store-v2 design: re-joining a restored or cloned machine is an accepted
@@ -163,7 +167,7 @@ manual step.
    reports with its fix.
 3. Usage mm cannot read is named as a coverage gap in the retro and in
    `mm status`, never shown as a silent zero.
-4. Evidence: a `retro-fleet` run on the soak fleet showing complete capture
+4. Evidence: a `retro-fleet` run on the owner's fleet showing complete capture
    from every active machine, recorded in PROGRESS.md `## Acceptance`.
 
 ### O8: Every command reports one outcome
@@ -181,7 +185,7 @@ manual step.
 4. `mm status` opens with a one-line verdict (in sync, changes waiting, or
    the action needed) and shows only the latest run of each kind.
 5. Evidence: tests pin the success, failure and degraded-capture output, and
-   the owner's own pushes during the soak.
+   the owner's own pushes.
 
 ## Planned after 2.0
 
@@ -250,8 +254,11 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   handoffs, final messages and poll output), so that text reaches every
   machine with the source enabled. In-flight work does not transfer: finish
   or ship every item before handing over; the README says both.
-- Accepted manual steps: installing Syncthing, pairing machines and sharing
-  the folder with the README's options; running the cutover runbook once;
+- A bootstrap script installs Python, pipx, mm and the Syncthing package on
+  macOS and Arch-based Linux, stops with instructions if Homebrew is missing
+  on macOS, and ships before 2.0.0.
+- Accepted manual steps: pairing machines and sharing the folder with the
+  README's options; running the cutover runbook once;
   `mm resolve` for real conflicts; unlocking the Linux keyring before hooks
   run; re-joining a machine restored from backup or cloned; removing a dead
   machine from the fleet.
@@ -295,8 +302,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   **complete usage** (O7 criteria 1 to 3 on the owner's machines) and, after
   2.0, **cross-model memory** (O9 criteria 1, 2 and 4; owner, 2026-10-29).
 - Stage versions: MVP-1 on iCloud (macOS) = 1.0.0, achieved. MVP-1 on
-  Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted after the soak,
-  with O6 to O8 holding. MAJOR because the transport changes and every
+  Syncthing (macOS and Linux) = **2.0.0**: O1 to O4 accepted on the
+  owner's own observation after the cutover runbook, with O6 to O8 holding and
+  the bootstrap script shipped. MAJOR because the transport changes and every
   machine must upgrade before cutover.
 - Strict SemVer: not used. The 1.x compatibility contract that applied it
   from 1.0.0 is retired as of 2026-10-19. Strict SemVer would start at
