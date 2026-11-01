@@ -316,8 +316,8 @@ That stderr line is the *interactive* signal only. `_run_events_tail` runs from 
 ## Git subprocess environment (load-bearing, Track 55A)
 
 Filesystem discovery selects the repository; inherited Git environment must
-not redirect the later subprocess to another repository. All four Git calls
-(`events._walk_one_repo`, `events._origin_remote_url`,
+not redirect the later subprocess to another repository. All five Git calls
+(`events._walk_one_repo`, `projectid._origin_remote_url`, `projectid._git_origin`,
 `identity._gather_global_email`, `identity._gather_per_repo_emails`) pass
 `env=gitenv.scrubbed_git_env()` and explicit `encoding="utf-8"`. The helper is
 a leaf importing only `os` and `collections.abc`, returns a fresh dict, reads
@@ -1929,7 +1929,7 @@ enabled for every substantive push, including mm-events-only recovery, internal
 selection and internal mtime changes on a no-reader Mac. No capture means no
 usage-only mode line. When a row was appended, `capture_activity=content_changed or retro_catchup_pending` (Track 82A).
 `content_changed` comprises non-internal byte diffs from one materialization of
-`iter_source_diffs`, forward-only per-source mtime drift, and the symmetric
+`core.iter_content_diffs` (Claude name-only differences removed), forward-only per-source mtime drift, and the symmetric
 source-name selection difference minus `MM_INTERNAL_SOURCE_NAMES`. Removed user
 sources count. Mtime is independent of `has_mtime_only`, since the host row itself
 makes the substantive gate true. A missing/corrupt real manifest makes local

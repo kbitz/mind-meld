@@ -56,6 +56,7 @@ LEAVES = [
     "fsutil",
     "gitenv",
     "updateprogress",
+    "projectid",
 ]
 
 
@@ -197,6 +198,24 @@ def test_leaf_modules_import_nothing_from_cli(mod: str) -> None:
     """Leaves are the cycle-break. If one grows a cli import the break is gone."""
     hits = _imports_cli(SRC / f"{mod}.py")
     assert hits == [], f"leaf {mod}.py must not import cli (found {hits})"
+
+
+def test_projectid_leaf_imports_only_gitenv_safety_and_the_standard_library() -> None:
+    """Track 90A: the project-name leaf is importable from manifest/core/pullflow/statusflow."""
+    tree = ast.parse((SRC / "projectid.py").read_text(encoding="utf-8"))
+    package_imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "mind_meld":
+            package_imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mind_meld."):
+            package_imports.add((node.module or "").split(".", 1)[1])
+        elif isinstance(node, ast.Import):
+            package_imports.update(
+                alias.name.split(".", 1)[1]
+                for alias in node.names
+                if alias.name.startswith("mind_meld.")
+            )
+    assert package_imports == {"gitenv", "safety"}, package_imports
 
 
 _MAY_CREATE_CALLEES = {"_ensure_retro_skill_links", "_skill_links_check_due"}

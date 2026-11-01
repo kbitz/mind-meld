@@ -192,6 +192,22 @@ The manifest is a **truth-based snapshot** of the selected local filesystem stat
 }
 ```
 
+**Shared Claude project names (Track 90A).** The `claude` entry of a manifest first-byte 0x03 carries `"wire_names": true` and its project folders appear under machine-independent names instead of the publisher's path encoding. A project with a network `origin` is `@git-<percent-encoded canonical remote>`, a folder at or under the publisher's home is `@home` / `@home-<rest>`, and anything else is literal:
+
+```json
+"claude": {
+  "base_path": "/Users/alice/.claude",
+  "wire_names": true,
+  "wire_folders": {"@git-github.com%2Facme%2Fmyapp": "-Users-alice-myapp"},
+  "files": {
+    "projects/@git-github.com%2Facme%2Fmyapp/memory/user_role.md": {"sha256": "e3b0c44298fc...", "size": 4096},
+    "projects/@home-scratch/memory/note.md": {"sha256": "ab12cd34ef56...", "size": 120}
+  }
+}
+```
+
+Tombstone keys use the same names (`claude:projects/@git-.../memory/x.md`). Each machine maps them back to the folder Claude uses for its own checkout; see docs/invariants/sync.md "Project identity on the wire".
+
 **Backward compatibility:**
 - v1 manifests (pre-v0.4 on-disk, top-level `files`, no `sources`) are auto-promoted to v2 shape by `normalize_manifest` on load: the files get wrapped as a `claude` source entry.
 - Pre-Track-1B v2 manifests emitted a redundant top-level `files` mirror of the claude source. `normalize_manifest` now strips that mirror unconditionally (both v1 promotion and v2 passthrough) so the single source of truth is `sources[<name>]["files"]`. Every manifest loaded from disk goes through `load_manifest`, which enforces this — callers may rely on `manifest["sources"]` being the only place file data lives.
@@ -329,7 +345,7 @@ mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optiona
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, project_index, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -466,7 +482,7 @@ The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell
 ### `mm status [--source NAME]`
 
 1. Authenticate using the existing passphrase flow, then inspect selected local sources and this device's own manifest without uploading. Incomplete source observations cannot establish a healthy comparison.
-2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, metadata-only changes, this device's manifest still arriving from sync (it vanished mid-read; `Run: mm status`), first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
+2. Open the report with one plain verdict before preparatory notices or detail: the required action, exact changes waiting to push, project memory ready to publish under shared names, metadata-only changes, project memory held because Claude's projects folder cannot be listed, this device's manifest still arriving from sync (it vanished mid-read; `Run: mm status`), first push, or `In sync with this device's last push.` The comparison does not assess incoming peer changes or delivery.
 3. If `--source` is given, name it in the verdict and limit content counts to that source. Keep current capture/publication diagnostics independent of this content filter.
 4. Show local/own-manifest file counts and pending pushes by source. Summarize skipped nested repositories as an exact selected-source count; `mm diag` retains their paths.
 5. Show the selected latest auto or attended execution per push/pull verb. Strictly later valid completed success can resolve an earlier same-verb failure only with sufficient scope; skips, uncertain ordering and limited scope cannot prove recovery. Keep raw autorun and attended evidence plus their projection in `mm diag` and `mm diag --json`. A displayed `keyring-locked` or `keyring-no-collection` auto skip retains the existing keyring troubleshooting hint.
@@ -500,7 +516,7 @@ The `LocalBackend` detects these patterns via regex matching.
 1. `_fetch_remote_manifest` scans the canonical and recognized conflict copies.
 2. Validate and decrypt readable copies; an observed newer format refuses the result.
 3. Merge valid copies additively using the file and tombstone rules below.
-4. Pull cleans up manifest copies only after that peer has no failed or waiting files; push cleans up after publishing the canonical manifest.
+4. Pull cleans up manifest copies only after that peer has no failed or waiting files and no Claude project name withheld here (Track 90A); push cleans up after publishing the canonical manifest.
 5. If no copy remains readable, distinguish missing from corrupt and use the recovery rules below.
 
 Additive resolution for the multi-manifest case: when multiple conflict copies coexist, the union of referenced files is preserved so no device's entries are dropped before a losing copy is deleted.

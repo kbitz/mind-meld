@@ -27,7 +27,7 @@ from unittest import mock
 import pytest
 
 from mind_meld import config as mm_config
-from mind_meld import events
+from mind_meld import events, projectid
 
 # ---------------------------------------------------------------------------
 # T0/T3 — canonicalize_remote_url table + adversarial credentials
@@ -236,7 +236,7 @@ def test_git_environment_cannot_redirect_capture(tmp_path, monkeypatch, case, co
     assert project["local_path"] == str(target)
     assert project["remote"] == "example.com/target"
     assert [commit["sha"] for commit in project["commits"]] == [target_sha]
-    assert events._origin_remote_url(target) == "https://example.com/target.git"
+    assert projectid._origin_remote_url(target) == "https://example.com/target.git"
 
 
 def test_scrub_does_not_hide_a_broken_repository(tmp_path, monkeypatch):
@@ -274,7 +274,7 @@ def test_git_walk_replaces_undecodable_display_bytes(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(events, "_origin_remote_url", lambda root: "")
+    monkeypatch.setattr(projectid, "_origin_remote_url", lambda root: "")
     project, error = events._walk_one_repo(tmp_path, "2000-01-01T00:00:00+00:00", 5000)
     assert error is None
     assert project["commits"][0]["subject"] == "bad\ufffdsubject"
@@ -287,7 +287,7 @@ def test_git_remote_rejects_undecodable_identifier(monkeypatch, tmp_path):
         raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
 
     monkeypatch.setattr(subprocess, "run", run)
-    assert events._origin_remote_url(tmp_path) == ""
+    assert projectid._origin_remote_url(tmp_path) == ""
 
 
 def _make_submodule(tmp_path: Path) -> Path:

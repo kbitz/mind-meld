@@ -20,6 +20,7 @@ CURSOR_SQLITE_URL = "https://github.com/kbitz/mind-meld#cursor-sqlite-stores"
 NEWER_STORAGE_URL = "https://github.com/kbitz/mind-meld#newer-or-damaged-storage-format"
 KEY_HEADER_COPIES_URL = "https://github.com/kbitz/mind-meld#key-header-copies-differ"
 LOCK_HELD_URL = "https://github.com/kbitz/mind-meld#another-mm-operation-is-running"
+RETIRE_MACHINE_URL = "https://github.com/kbitz/mind-meld#retiring-a-dead-machine"
 KEYRING_UNAVAILABLE_URL = (
     "https://github.com/kbitz/mind-meld#auto-commands-skip-keyring-locked-or-unavailable"
 )

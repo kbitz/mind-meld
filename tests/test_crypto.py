@@ -40,6 +40,43 @@ PASSPHRASE = "test-passphrase-123"
 MEMORY_KB = 1024  # matches conftest autouse fixture
 
 
+class TestManifestFormat90A:
+    """0x03 is a manifest format; blobs and mm-crypto-init still refuse it."""
+
+    def test_constants_and_window(self):
+        assert crypto.MANIFEST_FORMAT_VERSION == 0x03
+        assert crypto.FORMAT_VERSION == 0x02
+        assert crypto.newer_manifest_version(b"\x02") is None
+        assert crypto.newer_manifest_version(b"\x03") is None
+        assert [crypto.newer_manifest_version(bytes([b])) for b in (0x04, 0x0F, 0x10)] == [
+            4,
+            15,
+            None,
+        ]
+        assert crypto.newer_manifest_version(b"") is None
+
+    @pytest.mark.parametrize("wire_names,byte", [(True, 0x03), (False, 0x02)])
+    def test_envelope_byte_follows_the_marker_and_round_trips(self, wire_names, byte):
+        blob = crypto.encrypt_manifest(b'{"a": 1}', PASSPHRASE, MEMORY_KB, wire_names=wire_names)
+        assert blob[0] == byte
+        assert crypto.decrypt_manifest(blob, PASSPHRASE, MEMORY_KB) == b'{"a": 1}'
+
+    def test_the_two_envelopes_differ_only_in_the_first_byte(self):
+        plain = crypto.encrypt(b"x", PASSPHRASE, MEMORY_KB)
+        assert crypto.decrypt_manifest(b"\x03" + plain[1:], PASSPHRASE, MEMORY_KB) == b"x"
+        assert crypto.decrypt_manifest(plain, PASSPHRASE, MEMORY_KB) == b"x"
+
+    def test_a_blob_refuses_0x03_and_a_manifest_refuses_0x04(self):
+        blob = crypto.encrypt(b"x", PASSPHRASE, MEMORY_KB)
+        with pytest.raises(NewerFormatError, match="0x03"):
+            crypto.decrypt(b"\x03" + blob[1:], PASSPHRASE, MEMORY_KB)
+        with pytest.raises(NewerFormatError, match="0x04"):
+            crypto.decrypt_manifest(b"\x04" + blob[1:], PASSPHRASE, MEMORY_KB)
+
+    def test_crypto_init_still_treats_0x03_as_newer(self):
+        assert crypto._parse_crypto_init(b"\x03" + bytes(30)).newer_version == 3
+
+
 class TestNewerFormats66A:
     @pytest.mark.parametrize("version", [0x03, 0x0F])
     @pytest.mark.parametrize("length", [1, 5, 100])

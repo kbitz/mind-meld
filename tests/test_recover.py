@@ -114,13 +114,13 @@ def test_recover_refuses_when_manifest_missing(tmp_path, monkeypatch):
 def test_recover_refuses_newer_manifest_without_quarantine(tmp_path, monkeypatch):
     storage, backend = _mk(tmp_path, monkeypatch)
     manifest_key = "manifests/mac-a/manifest.json.enc"
-    backend.put(manifest_key, b"\x03")
+    backend.put(manifest_key, b"\x04")
 
     result = runner.invoke(app, ["recover", "--abandon-manifest", "--yes"])
 
     assert result.exit_code != 0
-    assert "newer mm (format 0x03)" in " ".join(result.output.split())
-    assert backend.get(manifest_key) == b"\x03"
+    assert "newer mm (format 0x04)" in " ".join(result.output.split())
+    assert backend.get(manifest_key) == b"\x04"
     assert not list(storage.glob("**/*.corrupt-*"))
 
 

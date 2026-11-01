@@ -3594,7 +3594,7 @@ class TestGCSafety:
         backend.put(peer, b"peer")
         if peer_state != "missing":
             backend.put(
-                storage_keys.manifest_key("peer"), b"\x03" if peer_state == "newer" else b"bad"
+                storage_keys.manifest_key("peer"), b"\x04" if peer_state == "newer" else b"bad"
             )
         original = LocalBackend.get
 
@@ -11373,7 +11373,7 @@ class TestNewerStorage66A:
         backend = env["backend"]
         register_device(backend, "dev-peer", "Peer")
         peer_key = storage_keys.manifest_key("dev-peer")
-        backend.put(peer_key, b"\x03")
+        backend.put(peer_key, b"\x04")
         before = backend.get(peer_key)
         local_before = _preview_tree(env["claude"])
         result = runner.invoke(app, [command])
@@ -11387,7 +11387,10 @@ class TestNewerStorage66A:
                 peer_key,
             ]
         elif command == "pull":
-            assert "corrupt" in result.output.lower()
+            # Track 90A: this release's pull names the remedy for a format it cannot read.
+            flat = " ".join(result.output.split())
+            assert "newer mm (format 0x04)" in flat and "Upgrade with:" in flat
+            assert "is corrupt - skipping" not in flat
         else:
             assert "Blob collection was skipped" in " ".join(result.stderr.split())
 
@@ -11399,7 +11402,7 @@ class TestNewerStorage66A:
 
         env = push_preview56
         backend = env["backend"]
-        backend.put(storage_keys.manifest_key(env["config"]["device"]["id"]), b"\x03")
+        backend.put(storage_keys.manifest_key(env["config"]["device"]["id"]), b"\x04")
 
         result = runner.invoke(app, [command])
         text = " ".join((result.output + (result.stderr or "")).split())
@@ -11434,10 +11437,10 @@ class TestNewerStorage66A:
             MEMORY_KB,
         )
         if shape == "older-sibling":
-            backend.put(key, b"\x03")
+            backend.put(key, b"\x04")
             (parent / "manifest.json 2.enc").write_bytes(older)
         else:
-            (parent / "manifest.json 2.enc").write_bytes(b"\x03")
+            (parent / "manifest.json 2.enc").write_bytes(b"\x04")
         blob = storage_keys.blob_key(owner, "b" * 64)
         backend.put(blob, b"\x03newer-only")
         own_orphan = storage_keys.blob_key("dev-a", "e" * 64)
@@ -11490,7 +11493,7 @@ class TestNewerStorage66A:
             if storage_key == key:
                 reads["n"] += 1
                 if reads["n"] > 1:
-                    return b"\x03"
+                    return b"\x04"
             return data
 
         monkeypatch.setattr(type(backend), "get", get)
@@ -11530,13 +11533,13 @@ class TestNewerStorage66A:
             if path == conflict:
                 reads += 1
                 if reads == 2:
-                    return b"\x03"
+                    return b"\x04"
             return original(path)
 
         monkeypatch.setattr(Path, "read_bytes", read_bytes)
         fetched = cli_module._fetch_remote_manifest(backend, "dev-peer", PASSPHRASE, MEMORY_KB)
         assert fetched.status == "corrupt"
-        assert fetched.newer_version == 3
+        assert fetched.newer_version == 4
 
     def test_late_newer_manifest_blocks_publish_and_gc(self, push_preview56, monkeypatch):
         env = push_preview56
@@ -11553,14 +11556,14 @@ class TestNewerStorage66A:
                 return result
             phase["n"] += 1
             if phase["n"] > 1:
-                return cli_module.ManifestFetch(status="corrupt", newer_version=3)
+                return cli_module.ManifestFetch(status="corrupt", newer_version=4)
             return result
 
         monkeypatch.setattr(cli_module.core, "_fetch_remote_manifest", fetch)
         published = backend.get(key) if backend.exists(key) else None
         pushed = runner.invoke(app, ["push"])
         assert pushed.exit_code == 1, pushed.output
-        assert "newer mm (format 0x03)" in pushed.output
+        assert "newer mm (format 0x04)" in pushed.output
         assert (backend.get(key) if backend.exists(key) else None) == published
         phase["name"] = "gc"
         phase["n"] = 0
@@ -11575,11 +11578,11 @@ class TestNewerStorage66A:
         env = push_preview56
         backend = env["backend"]
         key = storage_keys.manifest_key(env["config"]["device"]["id"])
-        backend.put(key, b"\x03")
+        backend.put(key, b"\x04")
         result = runner.invoke(app, ["push"])
         assert result.exit_code == 1, result.output
-        assert "newer mm (format 0x03)" in result.output
-        assert backend.get(key) == b"\x03"
+        assert "newer mm (format 0x04)" in result.output
+        assert backend.get(key) == b"\x04"
 
     def test_autopull_newer_blob_names_upgrade(self, push_preview56):
         from mind_meld import sidecar, upgrade
@@ -11961,7 +11964,7 @@ def test_usage_only_skips_auto_gc_content_runs_it(capture61, monkeypatch, conten
 
 
 @pytest.mark.parametrize("capture_state", ["published", "failed", "no-reader"])
-@pytest.mark.parametrize("refusal", [b"corrupt", b"\x03"])
+@pytest.mark.parametrize("refusal", [b"corrupt", b"\x04"])
 def test_own_gc_refusal_preserves_post_publication_capture_state(
     capture61, monkeypatch, capture_state, refusal
 ):
@@ -12008,7 +12011,7 @@ def test_own_gc_refusal_preserves_post_publication_capture_state(
     assert env["backend"].get(storage_keys.manifest_key("dev-a")) == refusal
 
 
-@pytest.mark.parametrize("peer_manifest", [b"corrupt", b"\x03"])
+@pytest.mark.parametrize("peer_manifest", [b"corrupt", b"\x04"])
 def test_unreadable_peer_allows_post_push_own_collection(capture61, peer_manifest):
     env = capture61
     register_device(env["backend"], "peer", "Peer")
@@ -14078,7 +14081,7 @@ def test_status77_own_manifest_state_prevents_healthy(status77, state):
     if state == "missing":
         backend.delete(key)
     else:
-        backend.put(key, b"bad" if state == "corrupt" else b"\x03")
+        backend.put(key, b"bad" if state == "corrupt" else b"\x04")
     shown = runner.invoke(app, ["status"])
     assert shown.exit_code == 0, shown.output
     first = shown.output.splitlines()[0]

@@ -263,3 +263,34 @@ class TestParamRenameRegression:
                 modified_files=[],
                 deleted_files=[],
             )
+
+
+class TestSharedProjectNames90A:
+    def test_log_lands_in_the_local_folder_never_under_a_wire_name(self, tmp_path: Path) -> None:
+        """AC4: `write_sync_log` only ever receives local folder names, so a project
+        shared under `@git-...` still logs into the folder Claude uses on this machine."""
+        claude = _claude_tree(tmp_path, "-home-kb-src-widgets")
+        logs = write_sync_log(
+            claude_base=str(claude),
+            device_name="Mac A",
+            device_id="aaaaaaaa",
+            new_files=["projects/-home-kb-src-widgets/memory/MEMORY.md"],
+            modified_files=[],
+            deleted_files=[],
+        )
+        assert [log.parent.name for log in logs] == ["-home-kb-src-widgets"]
+        assert not list((claude / "projects").glob("@*"))
+
+    def test_a_wire_named_path_would_not_be_written_without_a_local_folder(
+        self, tmp_path: Path
+    ) -> None:
+        claude = _claude_tree(tmp_path, "-home-kb-src-widgets")
+        logs = write_sync_log(
+            claude_base=str(claude),
+            device_name="Mac A",
+            device_id="aaaaaaaa",
+            new_files=["projects/@git-github.com%2Facme%2Fwidgets/memory/MEMORY.md"],
+            modified_files=[],
+            deleted_files=[],
+        )
+        assert logs == []

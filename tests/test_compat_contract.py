@@ -70,6 +70,15 @@ def test_format_constants():
     }, FORMAT_FAILURE
 
 
+def test_manifest_format_byte_allocation():
+    """0x03 is a manifest format (Track 90A); the next header or blob format takes 0x04."""
+    assert crypto.MANIFEST_FORMAT_VERSION == 0x03, FORMAT_FAILURE
+    blob = crypto.encrypt_manifest(b"{}", PASSPHRASE, 1024, wire_names=True)
+    assert blob[0] == 0x03 and crypto.decrypt_manifest(blob, PASSPHRASE, 1024) == b"{}"
+    assert crypto.newer_manifest_version(b"\x03") is None
+    assert crypto.newer_manifest_version(b"\x04") == 0x04, FORMAT_FAILURE
+
+
 def test_device_registry_writer_fields(tmp_path):
     backend = LocalBackend(tmp_path / "storage")
     devices.register_device(backend, "compat", "Compat")

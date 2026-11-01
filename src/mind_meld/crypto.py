@@ -55,15 +55,19 @@ __all__ = [
     "KeyringUnavailableError",  # re-exported from mind_meld.errors
     "FORMAT_VERSION",
     "FORMAT_VERSION_LEGACY_V1",
+    "MANIFEST_FORMAT_VERSION",
     "bootstrap_crypto_init",
     "apply_crypto_init_repair",
     "crypto_init_repair_counts",
     "decrypt",
+    "decrypt_manifest",
     "derive_key",
     "encrypt",
+    "encrypt_manifest",
     "fetch_crypto_init",
     "get_passphrase",
     "load_master_key",
+    "newer_manifest_version",
     "root_salt_fingerprint",
     "set_crypto_session",
     "clear_crypto_session",
@@ -74,6 +78,11 @@ __all__ = [
 FORMAT_VERSION = 0x02
 FORMAT_VERSION_MAX = 0x0F  # reserved future versions; ASCII/garbage remains corrupt
 FORMAT_VERSION_LEGACY_V1 = 0x01  # recognized to fail loud; no back-compat decryption
+# Track 90A: a manifest whose Claude project folders use the shared wire names
+# is first byte 0x03; its envelope is otherwise identical to 0x02. 0x03 is
+# allocated to manifests: blobs and mm-crypto-init stay 0x02 and refuse 0x03 as
+# a newer format, and the next header or blob format takes 0x04.
+MANIFEST_FORMAT_VERSION = 0x03
 
 SALT_LEN = 16
 NONCE_LEN = 12
@@ -269,6 +278,34 @@ def decrypt(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
 def _newer_version(data: bytes) -> int | None:
     """Inspect the discriminator without assuming any current-format layout."""
     return data[0] if data and FORMAT_VERSION < data[0] <= FORMAT_VERSION_MAX else None
+
+
+def newer_manifest_version(data: bytes) -> int | None:
+    """The reserved newer byte (0x04 to 0x0F) of a manifest envelope, else ``None``.
+
+    0x03 is a readable manifest format; every other reserved byte is a newer
+    mm's manifest that this release must refuse to misread.
+    """
+    return data[0] if data and MANIFEST_FORMAT_VERSION < data[0] <= FORMAT_VERSION_MAX else None
+
+
+def encrypt_manifest(
+    plaintext: bytes, passphrase: str, memory_kb: int = 65_536, *, wire_names: bool
+) -> bytes:
+    """Encrypt a manifest: byte 0x03 with shared project names, else 0x02.
+
+    The envelope after the first byte is identical, so the byte is the older-side
+    gate: an mm that predates 0x03 sees a reserved newer byte and refuses it.
+    """
+    blob = encrypt(plaintext, passphrase, memory_kb)
+    return bytes([MANIFEST_FORMAT_VERSION]) + blob[1:] if wire_names else blob
+
+
+def decrypt_manifest(blob: bytes, passphrase: str, memory_kb: int = 65_536) -> bytes:
+    """Decrypt a manifest envelope of byte 0x02 or 0x03 (0x04 to 0x0F is newer)."""
+    if blob and blob[0] == MANIFEST_FORMAT_VERSION:
+        blob = bytes([FORMAT_VERSION]) + blob[1:]
+    return decrypt(blob, passphrase, memory_kb)
 
 
 def _decrypt_with_master_key(blob: bytes, master_key: bytes) -> bytes:
