@@ -161,8 +161,8 @@ Tests: `TestNonInteractiveSecretServiceRead`, `TestNonInteractiveOtherBackends`,
 
 ### Newer format refusal (Track 66A, v1.0.0)
 
-`crypto.FORMAT_VERSION_MAX` reserves 0x03–0x0F for future crypto-init and blob
-versions. Read the version byte before assuming a layout, even on a one-byte
+`crypto.FORMAT_VERSION_MAX` reserves 0x03–0x0F: crypto-init and blob readers
+refuse that window as newer, and the next such format takes 0x04. Read the version byte before assuming a layout, even on a one-byte
 envelope. A current-format init with a keycheck in that window is newer too.
 Empty/truncated v2 and bytes above 0x0F remain corrupt; a valid conflict copy
 can still be selected beside ASCII garbage, but cleanup never rewrites canonical.
@@ -179,7 +179,7 @@ never imports upgrade. Autorun keeps exit 0 and the `crypto-error` breadcrumb.
 Newer blobs raise the same typed `CryptoError` subclass; per-file pull warnings
 add the upgrade remedy. `_fetch_remote_manifest` and `_make_manifest_validator`
 deliberately fold that subclass into corrupt-manifest handling. A manifest
-copy whose first byte is in 0x03–0x0F is unreadable even when an older sibling
+copy whose first byte is in 0x04–0x0F is unreadable even when an older sibling
 still decrypts, and a newer conflict copy is not "missing". A read that sees
 that byte after the preliminary scan, including the conflict validator's own
 read, still returns corrupt instead of using the older sibling. Pull skips

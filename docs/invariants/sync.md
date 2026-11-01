@@ -175,7 +175,8 @@ own daemon thread under the same deadline), join only when the identity has no
 other candidate. Non-owners publish home-relative. Linked
 worktrees own nothing (Claude writes to the main checkout's folder); a
 submodule, a bare layout, no `origin` and a local-path remote are home-relative.
-`mm diag --json` reports the index as `project_index`.
+`mm diag --json` reports the index as `project_index`. Under pytest the codec stays off unless
+`MM_TEST_WIRE_HOME` (`projectid.WIRE_HOME_TEST_ENV`) is set, so existing fixtures behave as before.
 
 **Loading.** `@git-<x>` goes to the folder owning that identity, else stays
 literal and is **unplaced**. `@home` forms go to the encoded home unless that
@@ -1437,14 +1438,16 @@ After existing authentication, status emits one sanitized, unwrapped stdout
 line before notices, title or detail. `_status_verdict` is pure over explicit
 observations: blocking setup/storage/format/incomplete scan, conflicts, unresolved
 same-verb failure/actionable degradation or uncertain history, current capture
-prerequisite/reader blockers, own manifest still arriving, first push, pending content
-or forward-only metadata, then “In sync with this device's last push.” Missing own
+prerequisite/reader blockers, own manifest still arriving, first push, pending content,
+shared project names owed (`names_ready`), forward-only metadata, a held first switch
+(`names_held`), then “In sync with this device's last push.” Missing own
 metadata selects the first-push verdict unless a higher-priority action applies;
 missing with `ManifestFetch.vanished` (observed, then gone mid-read; Track 87A)
 selects “This device's manifest is still arriving from sync. Run: mm status”
 instead. No incoming peer convergence
-is measured. Every --source verdict names its source, and all counts use one
-materialized diff list. Selection, availability and previous publication must
+is measured. Every --source verdict names its source; verdict counts come from
+`core.content_counts` and the detail rows from `core.iter_content_diffs`, so both
+leave out Claude name-only differences. Selection, availability and previous publication must
 agree: missing previously published enabled roots, unavailable requested roots,
 unknown/disabled filters, zero usable sources and failed conflict inspection
 never fall through to healthy. Absent never-used optional sources and deliberate

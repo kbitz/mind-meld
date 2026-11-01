@@ -26,9 +26,10 @@ that checkout is. See [Project memory across machines](#project-memory-across-ma
 **Every machine must update before its own first push in the new form, and it takes part
 in the new form only from then.** Go one machine at a time, in any order; nothing waits for
 the whole fleet. On each machine run the update command, then `mm push`. The first push
-after updating that can list `~/.claude/projects` (attended or from a hook) republishes the manifest with shared names and
-prints `Push: project memory published under shared names.`; it uploads no content, deletes
-nothing and runs no GC. A push that cannot list the folder holds the switch: `mm status` and an
+after updating that can list `~/.claude/projects` (attended or from a hook) republishes the manifest with shared names;
+it uploads no content, deletes nothing and runs no GC. An attended push prints
+`Push: project memory published under shared names.`; `mm autopush` stays silent and records
+`published under shared names` in its breadcrumb. A push that cannot list the folder holds the switch: `mm status` and an
 attended push say project memory is not published, `project_index.reason` is `projects_unlisted`, and the next
 push that can list it switches and republishes that machine's project memory as content. A
 machine where Claude has not created the folder yet stays on the old form until it does.
@@ -616,7 +617,13 @@ Pull: 3 files applied (1 conflict copy); 2 skipped.
 Push counts accepted user-file changes, excluding captured usage rows and held
 files. Metadata-only, source-selection-only and repair-only publications say
 `Push: metadata updated.`, `Push: source selection updated.` and
-`Push: manifest repaired.` respectively. A held file keeps its previous
+`Push: manifest repaired.` respectively. For Claude project memory, the first
+publish under shared names says `Push: project memory published under shared names.`,
+a later project rename says `Push: project names updated.`, and a first switch held
+because `~/.claude/projects` cannot be listed says
+`Push: project memory not published until Claude's projects folder can be listed.`
+(see [Project memory across machines](#project-memory-across-machines)).
+A held file keeps its previous
 published version, if any; its paths/reasons appear with `--verbose`.
 Verified usage publication appends `; usage published` even without a user
 content change. Other explicit outcomes include `Push: no content changes.`,
@@ -630,7 +637,9 @@ gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
 device entry`), the exit stays 0, and the next pull retries. When a pull also
 failed, the waiting clause comes before `Run:`. `--verbose` lists the waiting
 paths. Attended runs do not record a waiting count; `mm autopull` records it in
-the `success` breadcrumb detail.
+the `success` breadcrumb detail. Another home's files from a peer still on path
+names add `; 312 files from Mac B wait until it publishes shared names (mm status)`:
+the exit stays 0, and they wait on that machine updating, not on delivery.
 
 ```text
 $ mm pull
@@ -681,7 +690,9 @@ Representative first lines:
 ```text
 In sync with this device's last push.
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
+Project memory ready to publish under shared names. Run: mm push
 Metadata-only changes waiting to push. Run: mm push
+Project memory not published until Claude's projects folder can be listed.
 This device has not pushed yet. Run: mm push
 This device's manifest is still arriving from sync. Run: mm status
 Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm push
@@ -1458,7 +1469,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -1519,7 +1530,7 @@ cause fixed; narrowing the window cannot repair a checkout. `refresh-identity`
 lists the locally resolved emails and `+`/`-` changes versus a readable prior
 cache. A missing cache means the previous set is unknown, not empty.
 
-**Ignored Git environment.** mm's four Git reads select each discovered
+**Ignored Git environment.** mm's five Git reads select each discovered
 repository even when a parent hook or shell exports repository-local state.
 They ignore GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_IMPLICIT_WORK_TREE,

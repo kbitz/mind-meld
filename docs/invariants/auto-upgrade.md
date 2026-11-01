@@ -438,15 +438,15 @@ in any release under the release policy in [docs/SPEC.md](../SPEC.md).
 **Both sides of a format-changing release must refuse safely.** The
 `mm-crypto-init` version byte is the older-side gate. Any release changing blob,
 manifest, mm-events row, or conflict-filename formats must bump that byte in
-the same release, within the reserved **0x03–0x0F** window. Future blob bytes
-must also stay in that window. Write new crypto-init before any new-format
+the same release, within the reserved **0x04–0x0F** window (0x03 went to
+manifests, below). Future blob bytes must also stay in that window. Write new crypto-init before any new-format
 manifest/blob. The newer-side fleet gate must refuse while any registered
 peer runs an older format.
 
 In 1.0+, any observed newer crypto-init copy refuses selection and repair;
 repair re-fetches before it unlinks anything (it never writes or replaces
 canonical; only `mm init --new-fleet` creates the file). Files can arrive out of order: with an older init still
-visible, a manifest byte in 0x03–0x0F is unreadable even beside an older
+visible, a manifest byte in 0x04–0x0F is unreadable even beside an older
 sibling, so pull skips that peer and GC leaves its namespace untouched. GC
 refuses only on this device's own manifest, when it is unreadable (including a
 late newer-format recheck) or held only by conflict copies; the shared
