@@ -249,6 +249,340 @@ def test_unsupported_reader_makes_all_ready_remedies_consistent(tmp_path, monkey
         assert "mm push" not in flat
 
 
+@pytest.mark.parametrize("cached", ["newer", "none", "newest"])
+def test_unsupported_remedy_follows_cached_newest_release(tmp_path, monkeypatch, cached):
+    """An update is only advised while one may read the format.
+
+    A cached newer release, or no known release, keeps `mm update`. When this
+    release is the newest the cache knows, status and diag name the reader, say
+    no newer mm can read its format yet, and give the stop step and `mm diag`.
+    Neither command refreshes the cache or touches the network.
+    """
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "muse"))
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {
+            "last_reason": "unsupported",
+            "complete_once": False,
+            "usage_less_skipped": 0,
+            "cache_state": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        codex_host,
+        "codex_usage_diag",
+        lambda: {
+            "last_reason": "deadline",
+            "state": "ready",
+            "files_pre_track": 0,
+            "cache_state": "ok",
+        },
+    )
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    monkeypatch.setattr(upgrade, "_fetch_tags", lambda *_a, **_kw: pytest.fail("network fetch"))
+    monkeypatch.setattr(upgrade, "check_for_upgrade", lambda *_a, **_kw: pytest.fail("refresh"))
+    if cached != "none":
+        upgrade.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "latest_version": "9.1.0" if cached == "newer" else "9.0.0",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+
+    def cache_state():
+        path = upgrade.CACHE_PATH
+        return (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+
+    before = cache_state()
+    clause = (
+        "Muse usage not captured: this mm can't read Muse's current record format, "
+        "and no newer mm can yet. See `mm diag`, or run `mm disable-source muse` "
+        "to stop retrying."
+    )
+    flats = {}
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flats[command] = " ".join(result.output.split())
+    # Criterion 4: neither command refreshed, wrote or created the cache.
+    assert cache_state() == before
+
+    for command, flat in flats.items():
+        assert "mm push" not in flat
+        assert "pipx upgrade" not in flat
+        if cached == "newest":
+            assert clause in flat
+            for gone in (
+                "Usage capture needs a newer mm",
+                "Run mm update; a consented reader",
+                "run mm update before refreshing usage.",
+                "A newer mm may read it",
+            ):
+                assert gone not in flat, (command, gone)
+        else:
+            assert "Run mm update; a consented reader has an unsupported record format." in flat
+            assert "no newer mm can yet" not in flat
+    # Value: protects=diag's deadline sibling follows the same cached view as status;
+    # fails_when=diag drops no_release_reads or upgrade_required on that blocker;
+    # why_new=the stub omitted cache_state, so diag never printed the codex line;
+    # seam=none; no_claim=live host records (reader diagnostics are stubbed).
+    deadline = "(codex deadline) — content sync and git/session capture unaffected. "
+    if cached == "newest":
+        status = flats["status"]
+        assert status.startswith(f"Usage not captured. {clause}")
+        # The deadline sibling's own line follows the same view.
+        assert (deadline + clause) in status
+        assert (deadline + clause) in flats["diag"]
+    else:
+        update_sibling = (
+            deadline + "A consented reader has an unsupported record format; "
+            "run mm update before refreshing usage."
+        )
+        assert flats["status"].startswith("Usage capture needs a newer mm. Run: mm update")
+        assert "run mm update before refreshing usage." in flats["status"]
+        assert update_sibling in flats["diag"]
+
+
+@pytest.mark.parametrize("state", ["disabled", "unavailable"])
+def test_current_cache_keeps_capture_prerequisite_over_no_release(tmp_path, monkeypatch, state):
+    # Value: protects=a current upgrade cache cannot replace an mm-events prerequisite;
+    # fails_when=disabled or unavailable status/diag leads with the no-release clause;
+    # why_new=the readiness matrix never installs a current upgrade cache; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    cfg = load_config()
+    missing = tmp_path / "missing-custom"
+    if state == "disabled":
+        cfg["sync"]["disabled_sources"] = ["mm-events"]
+    else:
+        next(s for s in cfg["sync"]["sources"] if s["name"] == "mm-events")["path"] = str(missing)
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    monkeypatch.setattr(upgrade, "_fetch_tags", lambda *_a, **_kw: pytest.fail("network fetch"))
+    monkeypatch.setattr(upgrade, "check_for_upgrade", lambda *_a, **_kw: pytest.fail("refresh"))
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "no newer mm can yet" not in flat
+        assert "Run mm update; a consented reader" not in flat
+        if state == "disabled":
+            assert "Run mm enable-source mm-events to enable usage publication." in flat
+        else:
+            assert "Restore access to the configured mm-events folder." in flat
+        if command == "status":
+            headline = result.output.splitlines()[0]
+            assert headline.startswith("Usage capture unavailable.")
+            if state == "disabled":
+                assert "mm enable-source mm-events" in headline
+            else:
+                assert headline.endswith("Run: mm diag")
+                assert "enable-source mm-events" not in headline
+    assert (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns) == before
+    if state == "unavailable":
+        assert not missing.exists()
+
+
+def test_diag_upgrade_view_failure_keeps_remedy_and_json_skips_view(tmp_path, monkeypatch):
+    # Value: protects=diag survives upgrade-view failures and JSON never reads that view;
+    # fails_when=the guard is removed or the view read moves before the JSON return;
+    # why_new=the three release-cache cases all return a successful view; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    calls = []
+
+    def broken_view(config):
+        calls.append(config)
+        raise RuntimeError("upgrade view unavailable")
+
+    monkeypatch.setattr(upgrade, "cached_upgrade_view", broken_view)
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "Run mm update; a consented reader has an unsupported record format." in flat
+    assert "no newer mm can yet" not in flat
+    assert len(calls) == 1
+
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["host_usage"]["muse"]["last_reason"] == "unsupported"
+    assert len(calls) == 1
+
+
+def test_unsupported_remedy_ignores_current_cache_when_checks_disabled(tmp_path, monkeypatch):
+    # Value: protects=disabled upgrade checks retain the update remedy despite a current cache;
+    # fails_when=status or diag ignores auto_check and uses the stale current-cache answer;
+    # why_new=existing integration cases cover current, newer and absent cache only; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    cfg = load_config()
+    cfg["upgrade"] = {"auto_check": False}
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "Run mm update; a consented reader has an unsupported record format." in flat
+        assert "no newer mm can yet" not in flat
+        assert (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns) == before
+
+
+def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypatch):
+    # Value: protects=multiple unsupported readers and Cursor retain their own stop remedies;
+    # fails_when=plural output loses a reader or one blocker keeps the obsolete update remedy;
+    # why_new=the newest-release integration test has one unsupported Muse reader; seam=none;
+    # no_claim=live host formats or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "muse", "agy"))
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    for spec in host_registry.HOST_READER_DIAGS.values():
+        monkeypatch.setattr(
+            spec.owner,
+            spec.function,
+            lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+        )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert (
+            "Codex and Cursor and Muse and Antigravity usage not captured: "
+            "this mm can't read their current record formats, and no newer mm can yet."
+        ) in flat
+        for reader, label in (
+            ("codex", "Codex"),
+            ("cursor", "Cursor"),
+            ("muse", "Muse"),
+            ("agy", "Antigravity"),
+        ):
+            assert (
+                f"({reader} unsupported) — content sync and git/session capture unaffected. "
+                f"{label} usage not captured: this mm can't read {label}'s current record format"
+            ) in flat
+            assert f"mm disable-source {reader}" in flat
+        assert "[retro] cursor_host_usage = false in config.toml" in flat
+        assert "mm update" not in flat
+        assert "mm push" not in flat
+
+
+@pytest.mark.parametrize("other", ["rebuild", "warming"])
+def test_newest_release_remedy_reaches_pending_reader_hints(tmp_path, monkeypatch, other):
+    # Value: protects=pending reader hints use the unsupported sibling's newest-release remedy;
+    # fails_when=rebuild or warming hints omit the cached view and advise updating;
+    # why_new=the newest-release integration cases exercise standing blockers only; seam=none;
+    # no_claim=live host scans or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "muse"))
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    monkeypatch.setattr(
+        codex_host,
+        "codex_usage_diag",
+        lambda: {
+            "state": "migrating" if other == "warming" else "ready",
+            "files_pre_track": int(other == "rebuild"),
+        },
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        if command == "status":
+            marker = "Codex usage capture: rebuilding" if other == "rebuild" else "warming"
+            hint = flat.partition(marker)[2]
+            assert hint, result.output
+            assert "Muse usage not captured" in hint
+        elif other == "rebuild":
+            assert "codex awaiting re-walk: 1 — Muse usage not captured" in flat
+        assert "no newer mm can yet" in flat
+        assert "mm update" not in flat
+        assert "mm push" not in flat
+
+
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_unconsented_cached_reader_does_not_deny_siblings_consent(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)

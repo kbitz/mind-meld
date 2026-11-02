@@ -917,7 +917,8 @@ push output. The closed catalog
 covers every reader-wide cause in `CURSOR_SQLITE_READER_CAUSES` or marks it
 explicitly clause-less (`hot_journal`, `identity_changed`: transient), and never
 advises deleting retained history or the spool. The shared "mm update" phrase
-also applies to reader-wide unsupported formats; store-scoped SQLite drift
+also applies to reader-wide unsupported formats, except on status and plain-text
+diag when the cached check is current (notice text below); store-scoped SQLite drift
 does not set that blocker.
 Retirement: on the next Conductor store change the adapter is retired by default
 (status reverts to "not counted"), unless Conductor Cursor runs fall on three or
@@ -1717,17 +1718,32 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
+`mm disable-source <reader>`. A retry alone is not a remedy. Status and plain-text diag,
+given a cached upgrade view that is `current` (this mm is the newest release
+the cached check knows; never refreshed from either command), replace the
+`mm update` remedy with `_no_release_reads_clause`: "<Reader> usage not
+captured: this mm can't read <Reader>'s current record format, and no newer mm
+can yet. See `mm diag`, or <stop step> to stop retrying." It names only reader
+display names, keeps the `mm diag` pointer on every surface including diag, and
+the status verdict reads `Usage not captured.` followed by it. A missing,
+malformed or skipped view, or a cached newer release, keeps `mm update`. Push,
+init and attempt-record phrases take the default and are unchanged. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 Background failures name attended `mm push` warming; an attended caller whose
-warm allowance also expired gets that fact and an `mm diag` diagnostic. Status and diag
-instead include the last allotted budget, last complete read and age, and
-cached/on-disk counts (unknown when unavailable). Their conditional remedy
+warm allowance also expired gets that fact and an `mm diag` diagnostic. When
+that line is not replaced by the unsupported-reader remedy above, status and
+diag include the last allotted budget, last complete read and age, and
+cached/on-disk counts (unknown when unavailable). That conditional remedy
 raises `[retro] host_usage_autopush_budget_ms` if the last complete read is
-over budget, otherwise requests a capture. Every deadline remedy links to
-`HOST_USAGE_CAPTURE_URL`; diag never sends the user back to `mm diag`. A
-deadline is not evidence that a cache is still warming. Attended push replaces the old
+over budget, otherwise requests a capture. That deadline remedy links to
+`HOST_USAGE_CAPTURE_URL`, and on diag it does not send the user back to `mm diag`.
+On status and plain-text diag, a ready capture with an unsupported reader
+replaces a non-permanent line, including a sibling deadline, with the
+no-release clause when the view is current, and otherwise with "A consented
+reader has an unsupported record format; run mm update before refreshing
+usage." The current-view replacement still says `mm diag`. A deadline
+is not evidence that a cache is still warming. Attended push replaces the old
 `mm recapture 1d` bridge on a converged Mac; it requires enabled, resolved
 mm-events and reader consent, but no Git roots. The phrase and the joined breadcrumb
 are prose, not a semicolon-delimited schema: the approved retry sentence
@@ -1836,6 +1852,8 @@ itself is a notice, not a persisted reason or a changed scan result.
 Status reports any standing reason for both readers; the Codex block requires
 its source enabled. Blocker, rebuilding, and warming are a strict `elif`
 chain, so a blocker never shares the status line with a count-based retry.
+The rebuilding and warming tails append `_usage_capture_remedy`, as does diag's
+`codex awaiting re-walk` line, so a current cache uses the no-release clause there.
 Healthy Codex stays silent. Diag labels inventory and blocker separately:
 `<reader> cache inventory:` and `<reader> usage read blocker:`; readable
 healthy caches say `none`, and a valid date renders
@@ -2150,7 +2168,7 @@ no lock, creation, normalization or permission changes. Validate aware timestamp
 and closed class/cause/reader vocabularies. Missing, unreadable and corrupt files
 remain distinct unknown states; there is no busy state.
 Missing-record advice preserves the existing readiness guards: append "run mm push"
-only when ready and no consented reader requires an upgrade. Present records show UTC
+only when ready and no consented reader has an unsupported record format. Present records show UTC
 timestamp/age (including `in the future`) and non-contributing reader outcomes.
 For a non-published attempt only, a capture newer than both `attempted_at` and
 `row_ts` adds "a later capture has since been recorded". JSON exposes that as

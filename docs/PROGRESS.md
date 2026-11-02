@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.4 | 2026-11-02 | **When this mm is already the newest release, status and plain-text diag say an unsupported host record has no newer reader yet.** They name the stop step and `mm diag`. A newer release, or a missing cache, still says to run `mm update`. |
 | 1.12.3 | 2026-11-02 | **A peer's edit to a file you have not changed now just applies, and a file deleted on one machine is deleted on the others, with a 30-day recovery copy.** Before this release, every peer edit to a file both machines held was a conflict, and a deletion only stopped the file from coming back. This is for one person handing work from machine to machine, one active machine at a time. |
 | 1.12.2 | 2026-11-01 | **`mm recapture` and its preview now give each repository 30 seconds and the Git walk 120 seconds.** A repository the ordinary 2 second push cap skips can still be captured. Push, autopush, and init keep their existing limits, and the push inside a real recapture is that ordinary push. |
 | 1.12.1 | 2026-11-01 | **`mm sources`, `mm enable-source`, `mm disable-source`, and `mm reconfigure-sources` behave the same.** Help text, flags, exit codes, and the files they write are unchanged. |
