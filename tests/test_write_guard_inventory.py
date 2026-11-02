@@ -239,6 +239,7 @@ REVIEWED = {
             "os.rename(local_path, copy_path)",
             "os.chmod(copy_path, 384, follow_symlinks=False)",
             "os.link(copy_path, local_path)",
+            "os.chmod(copy_path, stat.S_IMODE(moved.st_mode), follow_symlinks=False)",
         ],
     ),
     "retention.py:_deleted_folder_age": (

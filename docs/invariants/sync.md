@@ -36,7 +36,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullhistory.py`
 - `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner` / `totals` / (see "Fast-forward, propagated deletions and anchors (Track 91A)"; also read conflicts.md)
-- `src/mind_meld/pullflow.py` — `_deletion_candidates` / `_run_deletions` / `_move_into_copy` / `_make_copy_dirs` / `_copy_then_unlink` / `_classify_with_ledger` / `_apply_fast_forward` / `_ledger_verdict` / `_own_lookup` / `deleted_clause` / `ledger_notice`
+- `src/mind_meld/pullflow.py` — `_deletion_candidates` / `_run_deletions` / `_move_into_copy` / `_make_copy_dirs` / `_copy_then_unlink` / `_remove_owned_copy` / `_classify_with_ledger` / `_apply_fast_forward` / `_ledger_verdict` / `_own_lookup` / `deleted_clause` / `ledger_notice`
 - `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
 - `src/mind_meld/manifest.py` — `scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME`
 - `src/mind_meld/retention.py` — `_gc_deleted_copies`
@@ -452,7 +452,10 @@ would read as a local edit, be skipped, be published and fast-forward good copie
 peers. So before the commit the pull flushes (`core.flush_ledger_files`): plain
 `os.fsync` (`fsutil.fsync_file`, the same level as the database; `F_FULLFSYNC`
 per file would cost minutes on a first pull) of every written, merged or
-kept-conflict-copy file a recorded row describes. A file whose flush fails is dropped
+kept-conflict-copy file a recorded row describes. Matching canonical files and
+agreeing no-op applies or merges also flush their bytes and parent directory when
+they establish pending ledger rows; already-settled matches skip this work. A file
+whose flush fails is dropped
 from the batch (`Ledger.discard`) and the next pull re-derives it. A directory-fsync
 failure (`_fsync_touched_parents` warnings) skips the commit entirely, on the normal
 and the interrupted path. A busy, too-new, corrupt or full database records nothing,
@@ -539,11 +542,12 @@ Protocol (`pullflow._run_deletions`), in order:
    case aliases on that volume), then `os.rename` the file's own inode over only
    that private empty reservation into the folder,
    `chmod 0600`, hash the moved file. A matching hash completes the deletion. A
-   mismatch hard-links it back with no clobber (`os.link`) and removes the copy
+   mismatch hard-links it back with no clobber (`os.link`), restores the original
+   mode through the recovery path, and removes the owned copy
    (`restored`: the local file is kept and counts `failed`). If the link fails for
    any reason, including a re-created path or unavailable hard links, the moved
-   file stays in the recovery folder (`kept-copy`) and the warning names that
-   folder. Restoration never falls back to a rename over the canonical path.
+   file stays private (0600) in the recovery folder (`kept-copy`) and the warning
+   names that folder. Restoration never falls back to a rename over the canonical path.
    Moving the inode closes the check-then-unlink window: a writer that replaces
    the path afterwards creates a new file that survives; one holding the file
    open writes into the copy. On `EXDEV` (a source on another volume) it falls
@@ -1747,7 +1751,7 @@ with an inode-path search that can race the filesystem walk.
 
 The omission is tombstone-safe only because `_push_core` filters the recovered prior manifest through `_filter_symlinked_paths` before `generate_tombstones`. That filter removes matching file entries and tombstones using the current local source paths. It applies equally to normal fetches, sidecar recovery, and peer-fallback recovery, and protects existing explicit configurations that have not yet migrated to the default `exclude_patterns`. Never move it into `_fetch_remote_manifest`: `mm gc` must keep seeing raw manifests when retaining referenced blobs.
 
-On pull, `_download_and_apply` checks each destination before containment resolution. It returns `skipped` with a breadcrumb when the destination itself is a symlink (including dangling) or any component strictly below the source root is one. This prevents `atomic_write_bytes` from replacing a local link or following it outside the source. `_apply_incoming_file` repeats the leaf check for direct callers. A symlinked source root remains allowed. Skipping is intentional rather than a conflict: a conflict outcome would create a new `.sync-conflict-*` sidecar on every pull beside a link that can never become writable.
+On pull, `_classify_with_ledger` checks each destination before hashing or settling it, routing symlinked paths to the existing apply skip without queuing a ledger flush. `_download_and_apply` checks again before containment resolution. It returns `skipped` with a breadcrumb when the destination itself is a symlink (including dangling) or any component strictly below the source root is one. This prevents `atomic_write_bytes` from replacing a local link or following it outside the source. `_apply_incoming_file` repeats the leaf check for direct callers. A symlinked source root remains allowed. Skipping is intentional rather than a conflict: a conflict outcome would create a new `.sync-conflict-*` sidecar on every pull beside a link that can never become writable.
 
 Default Codex exclusions additionally cover the known generated skill namespaces (`skills/gstack-*`, `skills/log-work/*`, and `skills/retro-fleet/*`) while leaving hand-authored skill trees syncable. v0.12.51 extended that set: `skills/.system/*` (Codex only — its own bundled payload) and `config._GENERATED_HOST_SKILL_GLOBS` (gstack-extend's per-host renders; historically shared with the opencode source, which Track 44A retired). Track 91A adds `plugins/cache/*` and `plugins/.remote-plugin-install-staging/*` (Codex installs and removes plugin version folders there itself; a removal would otherwise read as a deletion and delete the same files on a peer). See "Generated files are not sync data" above for the counts and the reasoning. `manifest.GROK_EXCLUDE_PATTERNS` deliberately did NOT follow; the omission is a measured absence documented at that constant. These globs are migration-safe through the existing exclude consumer-boundary filter; dynamic symlink filtering remains the forward-compatible safety net for new installer layouts and explicit source configurations.
 

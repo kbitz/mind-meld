@@ -98,7 +98,7 @@ mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe
 mm push                        # Push: 1 content change published.
 
 # On Mac B: receive it
-mm pull                        # Pull: 1 file applied.
+mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 file applied.
 cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
 
 # On Mac A: delete it, preview, publish
@@ -121,6 +121,8 @@ mm push                        # Push: 1 content change published.
 # On Mac B: the file comes back
 mm pull                        # Pull: 1 file applied.
 ```
+
+Repeat the recipe with the Macs' roles reversed, and note the verbose flush time on each receiving Mac.
 
 **Shared Claude project memory (Track 90A):** Claude keeps a project's memory under a
 folder named for the checkout's absolute path, so the same repository at two paths, or
@@ -503,7 +505,7 @@ A project's Claude memory lands only where mm can place it: in a Claude project 
 
 Push and pull on each Mac to exchange changes according to each file's sync rules:
 
-- **`.jsonl` files** deep-merge by line-union (deduped). Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
+- **`.jsonl` files** deep-merge by line-union (deduped) when both sides changed or the no-base fallback applies; fast-forward takes the peer's bytes directly. Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate through these merges — this is why telemetry, learnings, and timeline files stay coherent across devices.
 - **Other files** follow what each Mac last synced. If only the peer changed a file, pull applies the peer's version (no merge, no conflict copy, no recovery copy of the bytes it replaces). If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) falls back to the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
 - **Deletions** propagate. A tombstone in the manifest carries the sha256 of the version that was deleted: it stops a missing file from being restored from an older peer snapshot, and a receiving Mac whose copy has exactly those bytes, last synced from the deleting Mac, moves it into `~/.config/mind-meld/deleted/` for at least 30 days instead of keeping it. A file you changed, or a record from a release before 91A (no hash), is never deleted. See [Recovering a deleted file](#recovering-a-deleted-file).
 
@@ -977,7 +979,7 @@ content-changing push's GC. [Measurement and matching caveats](docs/invariants/s
 Those directory names are skipped at any depth inside a project; removing a
 default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
 
-This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
+This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** divergent additions on pull (deduped; string `ts` first, then full-line lexical fallback), or fast-forward when only the peer changed them. Append-only telemetry from 3 machines converges cleanly into one timeline.
 
 **Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced. That includes an include that starts inside the profile, and a file selected when the source has no `include_dirs`. See [Upgrading](#upgrading) for removing copies that synced before.
 
