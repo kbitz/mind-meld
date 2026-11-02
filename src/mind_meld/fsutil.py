@@ -485,6 +485,20 @@ def _fsync_fd(fd: int) -> None:
     os.fsync(fd)
 
 
+def fsync_file(path: Path) -> None:
+    """Flush a file's data with a plain ``os.fsync``; read-only open, never follows a link.
+
+    Used by the pull ledger so a recorded base is never more durable than the
+    bytes it describes. Plain fsync, not F_FULLFSYNC: a first pull can touch
+    thousands of files.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def atomic_write_bytes(
     path: Path,
     data: bytes,

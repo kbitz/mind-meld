@@ -21,11 +21,19 @@ ROTATED_SUFFIX = ".1"
 HISTORY_CLASS_LIMIT = 20_000
 BATCH_SIZE = 1000
 Action = Literal[
-    "written", "merged", "merged-via-lcs", "skipped", "conflicted", "excluded", "uploaded", "failed"
+    "written",
+    "merged",
+    "merged-via-lcs",
+    "skipped",
+    "conflicted",
+    "excluded",
+    "uploaded",
+    "failed",
+    "deleted",
 ]
 Verb = Literal["pull", "push", "self-upgrade"]
 COLUMNS = ("ts", "verb", "device", "source", "rel_path", "action", "local_sha", "remote_sha")
-KNOWN_KEYS = frozenset((*COLUMNS, "old_version", "new_version"))
+KNOWN_KEYS = frozenset((*COLUMNS, "old_version", "new_version", "folder"))
 KNOWN_CLASSES = tuple((v, a) for v in ("pull", "push") for a in (*get_args(Action), None)) + (
     ("self-upgrade", None),
 )
@@ -73,8 +81,8 @@ def explain(exc) -> str:
     if isinstance(exc, HistoryNotRecorded):
         cause = explain(exc.cause).removeprefix("mm: error: ")
         return (
-            "mm: notice: history not recorded (sync unaffected; these rows are dropped and "
-            "not replayed): " + cause
+            "mm: notice: history not recorded (these rows are dropped and not replayed; "
+            "fast-forward and deletions pause too while state.db is unavailable): " + cause
         )
     if isinstance(exc, LegacyHistoryPending):
         prefix = "mm: notice: "
@@ -172,6 +180,7 @@ def row(
     local_sha: str | None = None,
     remote_sha: str | None = None,
     ts: datetime | None = None,
+    folder: str | None = None,
 ) -> dict[str, Any]:
     payload = dict(
         ts=(ts or datetime.now(timezone.utc)).isoformat(),
@@ -185,6 +194,8 @@ def row(
         payload["local_sha"] = local_sha
     if remote_sha is not None:
         payload["remote_sha"] = remote_sha
+    if folder is not None:
+        payload["folder"] = folder
     return payload
 
 
@@ -198,6 +209,7 @@ def append(
     local_sha: str | None = None,
     remote_sha: str | None = None,
     ts: datetime | None = None,
+    folder: str | None = None,
 ) -> None:
     _append_payload(
         row(
@@ -209,6 +221,7 @@ def append(
             local_sha=local_sha,
             remote_sha=remote_sha,
             ts=ts,
+            folder=folder,
         )
     )
 

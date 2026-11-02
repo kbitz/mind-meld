@@ -35,8 +35,13 @@ Read BEFORE editing any of these:
 - `src/mind_meld/sidecar.py`
 - `src/mind_meld/pullhistory.py`
 - `src/mind_meld/statedb.py` / `src/mind_meld/cli.py` — `log_cmd` / `recapture` (history scope) / (see "Pull/push history log (Track 73B)")
+- `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner` / `totals` / (see "Fast-forward, propagated deletions and anchors (Track 91A)"; also read conflicts.md)
+- `src/mind_meld/pullflow.py` — `_deletion_candidates` / `_run_deletions` / `_move_into_copy` / `_make_copy_dirs` / `_copy_then_unlink` / `_classify_with_ledger` / `_apply_fast_forward` / `_ledger_verdict` / `_own_lookup` / `deleted_clause` / `ledger_notice`
+- `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
+- `src/mind_meld/manifest.py` — `scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME`
+- `src/mind_meld/retention.py` — `_gc_deleted_copies`
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`.
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, and for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables).
 
 ---
 
@@ -75,7 +80,8 @@ facts distinguish accepted bytes, metadata, selection and repair. Usage is
 reported only with publication proof, never counted as user files. Held counts
 stay separate; paths/reasons are verbose. Pull uses total_applied with conflict
 copies included and distinct skipped/failed counts, across the selected scope,
-not as unique paths. No peers/no sources are explicit branch facts.
+not as unique paths; Track 91A adds a deleted clause and, when non-zero, an
+`older` clause (see "Fast-forward, propagated deletions and anchors (Track 91A)"). No peers/no sources are explicit branch facts.
 
 A positive failed-file count ends attended pull with
 `Pull incomplete [result-degraded]` and explicit exit 1 **after** writing its
@@ -104,7 +110,7 @@ encryption or schemas. In a real terminal (`not verbose and not dry_run and cons
 actual degradations reach existing status/diag evidence, including failures
 without a returned result. Actionable/data-at-risk warnings remain visible in
 all modes before the outcome: growth, migration, missing custom events root,
-unsafe/corrupt peer skips, kept conflict copies, apply/fsync/recovery failures,
+unsafe/corrupt peer skips, kept conflict copies, files deleted because a peer deleted them (autopull prints one `mm:` line), apply/fsync/recovery failures,
 unavailable history/run evidence and actionable update faults. Automatic successful changes and no-ops
 are silent; existing automatic error/exit policies remain. The emitter census
 and isolated transcript are implementation artifacts, not live fleet acceptance.
@@ -304,9 +310,8 @@ switched machine, or one whose index was built at the load, those records publis
 suppressing those names across the fleet until the files return and the next push clears them,
 or for up to 30 days; earlier releases minted on the same absence path-scoped, which a same-home
 fleet honours too. On an unswitched machine whose index is built later, the push holds and the
-records stay home-relative for a folder that does not return. These limits are re-checked before
-Track 91A starts, when tombstones begin to delete, and 91A starts only after this release has run
-on the owner's real store. A peer with a withheld name keeps all its conflict copies until its next publishing push, so a
+records stay home-relative for a folder that does not return. Track 91A re-checked these limits when
+tombstones began to delete; what each became follows this paragraph. A peer with a withheld name keeps all its conflict copies until its next publishing push, so a
 dormant peer's copy can outlive a deletion's 30 days; `mm pull` with `claude` disabled strips
 that source before the withheld check, so it can clean a peer's conflict copy that alone names
 unplaced memory, as it does for any disabled source; a
@@ -323,6 +328,363 @@ as `+ push` where `mm status` reports only the rename; `mm status` and `mm diag`
 read each peer's whole manifest with no time bound, so an iCloud placeholder can
 delay them; 14 of the 17 no-remote folders measured were dead paths;
 `autoMemoryDirectory` is unsupported.
+
+**What those limits became when tombstones began to delete (Track 91A).** A record
+now carries the sha256 of the version it deletes, and a peer deletes only identical
+bytes it last synced from that peer (see "Fast-forward, propagated deletions and
+anchors" below). Each limit above falls in one of these classes:
+
+- *No deleting effect: the name differs on each side, or no tombstone is minted.*
+  Unmeasured Linux encoding, long names, non-BMP names, a fork, an SSH alias host,
+  path case, port form, two spellings of `origin`; a checkout that is gone or on an
+  unmounted disk; deleting a folder whose checkout is gone; a stale copy under an
+  identity-owned path; an index that runs out of time; a dormant peer's conflict copy;
+  a pull with `claude` disabled cleaning a peer's conflict copy; the ssh-user token
+  (a privacy limit); `mm diff` and `mm status` reading each peer's whole manifest;
+  `autoMemoryDirectory`.
+- *Suppress only (hash-less).* Old-form records, including the live-folder origin
+  case and the unavailable-at-switch case, carry no hash. They never delete; they keep
+  their old effect of stopping re-download. A hash-less record is not retired, because
+  that would drop the suppression and the records age out in 30 days anyway: a file
+  can return, never be lost.
+- *Bounded by hash and base.* A literal name reaching an identity-owned folder, lossy
+  folder names, a query-only difference, the current-directory rule and a recovery
+  that leaves a record under an old spelling can now delete, but only bytes that
+  peer itself published to that same path and this machine last synced from it.
+  Unchanged suppression can still delay a same-named file for up to 30 days.
+- *Fixed.* A push that loses `projects/` between the manifest load and the scan, and
+  an outage with no push whose absent files used to mint at the next push: a returned
+  or recreated scan root has a new token, so nothing under it mints and a pull
+  restores (see "Anchors and the mint guard" below).
+- *Unchanged and safe.* A push while `projects/` is missing still drops those
+  folders' files with no tombstone, and they return by pull.
+- *New and named.* A folder moved away and returned during a single scan keeps its
+  token and can mint (out of reach); a lost database can let one machine mint a second
+  record, bounded by hash and base.
+
+The five items re-checked before this Track began, as they stand now:
+
+1. *Outage, no push.* Fixed. A returned scan root has a new token.
+2. *Loss between the manifest load and the scan.* Fixed. The token is read after the
+   scan, at the guard.
+3. *A file deleted on the old form, in a folder already gone at the switch, can return
+   on any machine owning the project.* Not retired: its record has no hash, so it
+   deletes nothing and only suppresses. Its effect stays: a file can return, never
+   be lost.
+4. *A linked worktree's folder nominating a removed main folder; a live folder's
+   old-form record under whatever origin sits at that path.* Old-form records carry
+   no hash, so they delete nothing. A new hashed record published identity-wide
+   deletes only bytes that peer itself published to that path. Suppression can delay
+   a same-named file for up to 30 days.
+5. *The post-push GC gate only delays the sweep.* It holds while `projects/` cannot be
+   listed and now also while the push left files out (`PushResult.left_out_files`);
+   explicit `mm gc` has no gate. Blob collection removes this device's store blobs,
+   never a local file, and tombstones do not drive it. The residual: a file only this
+   machine held, lost before any peer received it, loses its blob at a later push that
+   leaves nothing out or at `mm gc`. This is the same loss as before the Track and is
+   the owner's to accept or fix.
+
+## Fast-forward, propagated deletions and anchors (Track 91A)
+
+Until this Track a pull never deleted anything, and every peer edit to a file this
+machine had not touched was a conflict. Three pieces change that and only work
+together: the **ledger** (what this machine remembers about each path), the **pull
+rule** built on it (the table is in
+[conflicts.md](conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a)),
+and **propagated deletions**, which are safe only because a push mints a deletion
+record just for a file this machine held and can prove gone (**anchors**). Read all
+of them before touching any one.
+
+**The ledger.** Migration 2 in `statedb.py` adds two tables with no compat bump, so
+an older reader keeps working and ignores them:
+
+- `peer_base(peer, source, path, sha)`, key `(peer, source, path)`: the full sha256
+  this machine and that peer last agreed on for the path.
+- `seen_version(source, path, sha, time, kind, deleted_by)`, key
+  `(source, path, sha)`: `sha` is the 16-hex **prefix** (the spelling `from` uses);
+  `time` is integer microseconds, kept strictly increasing per path; `kind` is
+  `held` (this machine built, wrote or published that version) or `seen` (it only
+  saw the version as a peer's); `deleted_by` is a nullable device id, stamped when a
+  followed deletion removed that version. Rows older than 365 days are pruned in
+  the commit.
+
+Keys are local rel paths. `mm-events` keeps no rows (its tombstones never delete;
+its files use the peer base only and it publishes no `from`). `core.load_ledger`
+reads both tables read-only. An absent database, or a v1 database without the
+tables, is a normal empty ledger (a fresh machine) and is silent. Any other read
+failure gives an unreadable ledger (`Ledger(readable=False)`): nothing counts as
+held, nothing is committed, the pull rule falls to the no-base fallback and **no
+file is deleted**. The cause is reported and never fatal: `busy`, `too-new`,
+`corrupt`, `interrupted`, `unavailable` or `unreadable`. An attended pull prints
+`mm: notice: <cause>. Fast-forward and deletions are paused: ... See <README
+History database>`, autopull records `degraded: pull ledger unavailable (<cause>)`,
+and a push that cannot write the ledger prints `mm: notice: pull ledger
+unavailable (<cause>); deletions are paused. See <README History database>`
+(autopush: `pull ledger unavailable (<cause>)` in its `degraded` breadcrumb). A dry run reads with `connect(read_only=True)`
+and never creates the database. `pullplan.Ledger` is a pure in-memory overlay
+(`pullplan` is a leaf): bases, held versions and ancestry update in memory after each
+settled outcome, in apply and planner alike, so a later peer in the same pull
+sees them. The durable commit is once per pull, and once after a push.
+
+**Who writes it.** Only a pull (its deletion pass, and its `finally`) and a push
+after its manifest is accepted, all under the mm lock, each in one transaction that
+is the innermost lock
+(`core.commit_ledger` → `statedb.commit_ledger`, writing only rows that changed).
+A push records every published version as `held` (`core.record_published`) and
+clears any `deleted_by` stamp on a path it publishes again. A pull records an outcome
+only as the table in conflicts.md says; failed, waiting, symlink-skipped, `older`,
+`held` and `stale` files record nothing. On an aborted pull the inline keep-local
+rows are dropped from the batch (`Ledger.flush_deferred` runs only on the normal
+path).
+
+**Durability decision.** The two tables
+stay in the existing rollback journal (`journal_mode=DELETE`) with
+`synchronous=FULL` and no `fullfsync`: the same level as the file flush below. No
+WAL. The tables are rebuildable, so a corrupted database costs a rebuild, not data.
+No `incremental_vacuum` (rows are small and pages reuse) and no re-measurement
+receipt (no sync logic reads history). **A base is never more durable than the bytes
+it describes.** After a power loss, damaged bytes with a base equal to the remote
+would read as a local edit, be skipped, be published and fast-forward good copies on
+peers. So before the commit the pull flushes (`core.flush_ledger_files`): plain
+`os.fsync` (`fsutil.fsync_file`, the same level as the database; `F_FULLFSYNC`
+per file would cost minutes on a first pull) of every written, merged or
+kept-conflict-copy file a recorded row describes. A file whose flush fails is dropped
+from the batch (`Ledger.discard`) and the next pull re-derives it. A directory-fsync
+failure (`_fsync_touched_parents` warnings) skips the commit entirely, on the normal
+and the interrupted path. A busy, too-new, corrupt or full database records nothing,
+prints the notice above and fails no sync.
+
+**Lost-base recovery.** The base is rebuilt: the next pull records the base for every
+file whose bytes match a peer's. Until then the no-base fallback runs (today's
+mtime and union rule, where the peer published no ancestry), so a deleted line can
+return through the union, and **no file is deleted** (a deletion needs this
+peer's base to equal the record's hash). README's move-aside remedy is therefore
+safe, and the recovery copies of deleted files live outside `state.db` and survive
+it. One residual: the stamp that stops a follower minting a second record lives in
+the same database, so a lost database can let one machine mint a second record for a
+file it followed. The second record carries the same hash, so it deletes only
+identical bytes a peer's base names.
+
+**Provisional tables.** `ledger`, `cursors`, `own_log` and `displaced` still have no
+production reader. The schema table below names each as "no reader" and
+`expire_displaced` has no caller; whichever current Track first needs one decides
+whether to reuse or drop it.
+
+**Ancestry: the `from` field.** A manifest file entry gains `"from": [<16-hex sha
+prefix>, ...]`, newest first, at most 16, omitted when empty; an unchanged entry
+keeps the list it published before. `core.stamp_ancestry` builds it from the
+versions this machine held at that path (newest first) plus the prior entry's sha.
+Its only reader is the pull rule; a diff ignores it, so it never triggers a
+republish. Because a peer controls it, `pullplan.parse_from` reads any invalid
+shape (not a list, more than 16 entries, an item that is not 16 lowercase hex) as
+absent. Older peers publish none, and their files use the base-only rows
+(3, 6, 7). A conflict's remote sha is `seen`, never `held`, so it is never
+published in `from`; a union records both sides `held`. Limit: `from` holds 16
+entries, so an edit chain longer than that between two machines' syncs reads as both
+changed and shows a conflict.
+
+**Propagated deletions.** A peer's tombstone now deletes the local file, and only
+when every guard in `pullflow._deletion_candidates` holds. The pass runs after the
+device loop, over each pull target's **own** `tombstones` in the filtered per-peer
+manifest (not the merged fleet set, whose newest-wins can drop a hash). That filter
+already dropped excluded, nested-checkout and unplaced paths, so a deletion never
+reaches below a peer-side checkout or an unplaced project. A file is a candidate
+only when all of these hold; anything else leaves it untouched, and `mm pull
+--dry-run --verbose` prints `keep (<reason>)` for each active record whose file
+exists:
+
+1. the ledger is readable;
+2. the source is enabled here, passes `--source` and is not `mm-events`;
+3. that peer and source had no `failed` or `waiting` outcome this pull (a rename's
+   replacement may still be undelivered);
+4. the record is active (`manifest._is_active_tombstone`, within
+   `TOMBSTONE_TTL_DAYS` = 30), since load and the filters keep expired ones;
+5. the record's `device_id` is this peer's own (a recovery can carry another
+   machine's record whose origin has since restored the file);
+6. the record carries a valid content hash (64 lowercase hex). **A record with no
+   hash, which is every record from a release before this one, never deletes: it
+   keeps its old effect of stopping re-download;**
+7. this peer's base for the path equals that hash;
+8. the peer's manifest does not list the path (a merged manifest can hold both), and
+   on a case-insensitive volume lists no path equal to it after NFC and casefold
+   (a case-only rename on Linux must not delete the live file on a Mac);
+9. the local path has no symlink component, resolves inside the source root, is a
+   regular file, and its bytes hash to the record's hash.
+
+Two peers naming one file give one candidate. `is_tombstoned` suppression is
+unchanged: a different file on a third machine stays suppressed for up to 30 days
+and returns after; its bytes are untouched.
+
+Protocol (`pullflow._run_deletions`), in order:
+
+1. Create the recovery folder `~/.config/mind-meld/deleted/<UTC
+   YYYYMMDD-HHMMSS>-<rand4>/<source>/<rel_path>` (one per pull, 0700 folders,
+   `_make_copy_dirs`, guarded) and fsync every folder created. A failure deletes
+   nothing and counts each file `failed`.
+2. Flush written files and the directories, then commit **one** ledger
+   transaction: drop every peer's base for each path and stamp the deleted version
+   `deleted_by` with the origin's device id. If it fails, nothing is deleted.
+3. Per file, `_move_into_copy`: `os.rename` the file's own inode into the folder,
+   `chmod 0600`, hash the moved file. A matching hash completes the deletion. A
+   mismatch hard-links it back with no clobber (`os.link`) and removes the copy
+   (`restored`: the local file is kept and counts `failed`). If the link fails for
+   any reason, including a re-created path or unavailable hard links, the moved
+   file stays in the recovery folder (`kept-copy`) and the warning names that
+   folder. Restoration never falls back to a rename over the canonical path.
+   Moving the inode closes the check-then-unlink window: a writer that replaces
+   the path afterwards creates a new file that survives; one holding the file
+   open writes into the copy. On `EXDEV` (a source on another volume) it falls
+   back to copy, re-stat and unlink (`_copy_then_unlink`): a named window. The
+   writers call `fsutil.refuse_real_state_write_under_pytest` first.
+4. Fsync the recovery folders and the local parents.
+
+A move that fails or finds changed bytes undoes step 2 for that file (the base
+returns and the stamp clears), so the next pull may try it again. The one exception
+is an unlink that fails after the cross-volume copy was written: it is not retried.
+Step 2 already dropped the base, so the next pull keeps the file (`keep`: never
+synced from the peer), and because the deleted version is stamped this machine mints
+nothing until the file is published again. Delete it by hand, or keep it and this
+machine republishes it.
+
+**One deletion, one record.** The machine where a file was removed outside mm holds
+the only tombstone. A machine that deleted it because of that record mints
+nothing: `core.compute_mint_guard` skips every absent path whose newest
+`seen_version` row is stamped `deleted_by`, and the stamp clears when the path is
+published again. A second record would do harm: B deletes X, C follows, B restores X
+and its record clears, then C's push would mint a fresh record dated after the
+restore, B's copy would be deleted again, and the 30 days would restart. Instead a
+pull restores X on C, because the origin's restore is row 1's `write` (a peer that is
+the origin of the followed deletion is never "held"), even if `mv`, `cp -p` or
+Finder's Put Back kept an old mtime. A file put back on a follower from the recovery
+folder stays local until the record expires, because the origin's tombstone
+suppresses it there; recovery goes through the origin (README "Recovering a deleted
+file").
+
+**Recovery folder and reaper.** Copies are local (0600) and depend on no store blob,
+so blob collection never removes them and a lost `state.db` leaves them. `retention._gc_deleted_copies` reaps a whole
+folder older than `DELETED_COPY_DAYS` (30) by its **name's** date, never by mtime
+(mtimes lie after a restore); an unparseable name is never reaped. It runs in `mm gc`
+(previewed by `mm gc --dry-run`) and at the start of every real pull's deletion pass:
+hooks never run `mm gc`, and copies only grow when a pull deletes. So 30 days is a
+minimum. The reaper trusts the local clock: a clock set far ahead reaps copies early
+(a named limit). A failure stops nothing, prints one notice and leaves every folder.
+Folders emptied by a delete stay; mm never removes them. `mm recover` is the
+corrupt-manifest escape hatch and has nothing to do with these copies.
+
+**Reporting.** An attended pull ends `Pull: 3 files deleted because Mac B deleted
+them; copies in <folder> for 30 days; see <README#recovering-a-deleted-file>.` (the
+origin's sanitized device name, or `peers`; the clause leads when nothing else
+applied, joins `effects` on partial and interrupted runs, and `--verbose` lists the
+paths). Autopull prints that clause as one `mm:` stderr line (data at risk is never
+quiet-gated) and adds `N files deleted by <origin>; copies in <folder>` to its
+breadcrumb. History gains the `deleted` action (`mm log --action deleted`; the row's
+`extra` holds the folder) and `.mind-meld-log.md` lists deleted files.
+`mm pull --dry-run` predicts `delete` (`totals`: `N would be deleted`) and never
+reaps. `older` (a fast-forward whose remote mtime is older than the local file) adds
+`; N older peer edits not applied` to the outcome line, `mm pull --verbose` lists
+each `older peer edit not applied: <peer>/<source>/<path>`, and `--dry-run` predicts
+it.
+To accept such an edit, compare both versions, then `touch <file>` and `mm push` on
+the machine whose version should win: the mtime-only republish makes it newer. `mm
+diag` and `--json` gain a read-only `fast_forward` section (ledger state,
+`peer_base` rows per peer, `seen_version` rows, each scan root's token state); it
+cannot list `older` edits because they need peer manifests.
+
+**Anchors and the mint guard.** A tombstone is minted only for a file this machine
+held and can prove gone, so a removed or restored scan root can never read as a mass
+deletion. Each source's **scan roots** come from `manifest.scan_roots(src)`:
+`projects` for a claude-type source, `memory` for Muse, each `include_dirs` entry for
+a generic source, and the source root itself when it has `include_files`. `mm-events`
+has none. Each scan root holds a file `.mind-meld-anchor` with a random 32-hex token
+(0600, `manifest.write_anchor`, guarded, `atomic_write_bytes`). The name is in
+`EXCLUDED` and in `_filter_excluded_paths`' conflict-shaped test, so no source
+publishes it and no peer plants it.
+
+- **A token is a generation.** Every publishing push (`core.publish_anchors`)
+  writes a fresh random token into each existing, writable scan root and records
+  it as `sources[src]["root_ids"] = {"<scan root>": "<token>"}` (the generic root
+  `""` for `include_files`). Peers ignore the field; `_merge_manifests` keeps a token
+  only when every copy agrees. A scan root removed and recreated has no token; a
+  root restored in place by `rsync -a --delete` or a filesystem rollback brings an
+  older token back; both mismatch the recorded one, so nothing under them mints and
+  a pull restores. A crash between the write and the publish costs one push that
+  mints nothing. There is no inode, birth time or `st_dev`: a token dies with its
+  folder on every filesystem, `os.stat` exposes no birth time on Linux, and
+  `st_dev` can change across reboots. `read_anchor` opens with `O_NOFOLLOW` and
+  `O_NONBLOCK`, caps the size and checks the format, so a FIFO cannot hang
+  autopush and a symlink cannot publish a target's bytes.
+- **The guard** (`core.compute_mint_guard`) runs after the scan and the absence
+  proof and before all three `generate_tombstones` calls in `_push_core`; `mm status`
+  applies it too, so left-out files never show as pending deletions. An absent prior
+  path mints only when its scan root lists and still carries the token the prior entry
+  recorded. Everything else joins `skip` and mints nothing: a path whose root is
+  gone, new or unreadable; a path under no scan root; a path still on disk (an
+  omission only the hardcoded `EXCLUDED` list explains); a deletion this machine only
+  followed (`deleted_by`). A minted record carries `sha256`, the prior entry's digest
+  (valid only as 64 lowercase hex; any other value reads as no hash), which
+  survives `_remap_keys`, `_merge_manifests` and carry-forward because they copy the
+  info dict.
+- **`left_out`.** The skipped paths a gone, new or unreadable root explains join an
+  in-memory `left_out` set per source, attached to the prior manifest copies
+  (`core.stamp_left_out`) and never to the manifest that is published.
+  `iter_source_diffs` stops counting those paths as deleted, so `iter_content_diffs`
+  and `names_only_change`, which are built on it, do too, and a recreated folder does
+  not read as a rename.
+  It holds only prior paths absent from the scan, so a lost dotfile with every file
+  present reports nothing beyond `metadata updated`. The owner must act when it holds
+  files, so the outcome line adds `N files left out because <folder> is new; run mm
+  pull to restore them.` (`is missing`, or `cannot be read; restore read access.`),
+  and autopush carries it in its breadcrumb.
+  `anchor_pending` joins the no-op check, so a push whose only change is a token still
+  publishes (`metadata updated`) and the next push settles. A push with left-out
+  `@git-` paths keeps the prior's `wire_folders` entries for the folders it dropped
+  (`encode_manifest(..., kept_wire_folders=)`) so a pull outside the checkout still
+  restores them; those entries last one publish, and after a further content push
+  with no pull between, such a project restores only on a pull inside its checkout
+  (the existing limit under "Project identity on the wire").
+- **Quiet and unwritable cases.** The first push after upgrading (the prior records
+  no token) is silent: it mints nothing once, then the next push does. A scan root
+  that cannot be written has no token, so nothing under it mints; an attended push
+  prints `mm: notice: deletions under <folder> will not propagate; restore write
+  access, then mm push` and autopush records it as `degraded`. A missing or
+  non-directory scan root is never created. A scan root inside a nested checkout gets
+  no anchor (mm never writes into a checkout) and mints nothing. A recovered or merged
+  own prior mints nothing new, because it was never accepted as is.
+- **Named limits.** Anything removed *below* a live scan root is a real deletion on
+  every peer holding identical bytes, with a 30-day copy: one project folder (a
+  deleted folder with a live checkout is deliberately still a deletion), and also
+  `rm -rf ~/.claude/projects/*`, which leaves the token file and mints for every file.
+  No threshold or mass-deletion stop exists, by decision; the incident runbook in the
+  README is the answer. A folder moved away and returned during a single scan keeps
+  its token and can mint; this is treated as out of reach. A lost database can let one
+  machine mint a second record (above).
+
+**Host-managed trees.** The `codex` default excludes gain `plugins/cache/*` and
+`plugins/.remote-plugin-install-staging/*`. Codex installs and removes version
+folders there itself, and a removal would otherwise delete a peer's copy. Narrowing
+mints nothing.
+
+**More limits (Track 91A).**
+
+- A fast-forward overwrites local bytes with no recovery copy (an owner-accepted limit).
+- A line deleted on one side returns when both sides changed the file (an owner-accepted limit).
+- The mtime gate survives only as the `older` guard and the no-base fallback.
+- `mm-events` tombstones stay suppress-only (see events-retro.md).
+- A machine that catches up and deletes before its next push publishes the hash of
+  its last published version, which a peer that already moved to a newer version does
+  not hold; that peer keeps the file until the record expires. Nothing is lost.
+- When one machine deletes a file another has edited, a third machine still holding
+  the old bytes deletes its copy and the edit stays suppressed there for up to 30
+  days, then arrives (an owner-accepted limit).
+- A machine that never held a deleted file can still receive it from a dormant peer
+  after the record's 30 days (an owner-accepted limit). `docs/SPEC.md` keeps removing a dead machine as an
+  owner step.
+- `from` holds 16 entries (above).
+- The post-push GC gate holds while `projects/` cannot be listed
+  (`projectid.projects_listed()`) and while the push left files out; explicit `mm gc`
+  has no gate. A file only this machine held, whose scan root was recreated, can
+  still lose its store blob at a later push that leaves nothing out or at `mm gc`
+  (re-check item 5 below).
 
 ## Shared JSON locking
 
@@ -544,10 +906,10 @@ The mm-events rescan replaces its sources, so it takes their holds from its own 
 | **Held** (still changing, vanished or grew) | `PushResult.held`; the attended outcome names the count; paths and reasons are verbose-only as *not yet synced*; autopush records them in a `degraded` breadcrumb and prints nothing | Nothing: the prior version stays published and the file goes with a later push. A file held on every push is one something keeps writing; `exclude_patterns` ends it. |
 | **Frozen** (under a nested git checkout) | `skipped: nested git repository`; its published entries are kept | See [Nested git checkouts](#nested-git-checkouts-are-frozen-never-published) for resuming sync or excluding the subtree |
 | **Skipped / excluded** (oversized at the scan, glob, marker) | `skipped:` lines with `--verbose`; excluded paths silent | Raise `sync.max_file_size` or adjust the glob |
-| **Tombstoned** | The deletion record is published; a path with a tombstone is never frozen or held | Nothing: the tombstone suppresses restoration of a missing file; existing peer copies remain |
+| **Tombstoned** | The deletion record is published (with the deleted version's sha256); a path with a tombstone is never frozen or held | Nothing: the record suppresses restoration of the missing file, and a peer that last synced exactly those bytes from this machine deletes its copy with a 30-day recovery copy (see "Fast-forward, propagated deletions and anchors (Track 91A)"); a peer holding different bytes keeps its file |
 | **Refused** (could not read, enumeration, confinement, missing root, recovered prior with a changing file) | One four-part `Cannot publish: ...` reason in the final `Push refused [snapshot-refused]` line, exit 1, previous snapshot kept | The fix in the message; blobs uploaded before the stop remain as orphans for GC |
 
-Frozen checkout entries and held files are the **only** sanctioned exceptions to a complete snapshot. A third exception requires revisiting the manifest model, not another special case. Held-only exits: a scan that holds everything takes the existing no-substantive-change exit (no manifest put, sidecar, last_seen or events tail) but returns a `PushResult` carrying `held` and never claims "up to date"; an upload that holds everything still puts the manifest. `mm push --dry-run` applies the scan hold, shows the held count after the per-source summaries, and exits 0; upload re-reads stay unpreviewed. `mm recapture` takes its written-locally-but-not-synced exit when any held path is mm-internal. A file that is written continuously can be held on every push; the held count is visible each time (paths with `--verbose`), and escalation is deferred (docs/TODOS.md).
+Frozen checkout entries and held files are the **only** sanctioned exceptions to a complete snapshot. A third exception requires revisiting the manifest model, not another special case. Held-only exits: a scan that holds everything takes the existing no-substantive-change exit (no manifest put, sidecar, last_seen or events tail) but returns a `PushResult` carrying `held` and never claims "up to date"; an upload that holds everything still puts the manifest. `mm push --dry-run` applies the scan hold, shows the held count after the per-source summaries, and exits 0; upload re-reads stay unpreviewed. `mm recapture` takes its written-locally-but-not-synced exit when any held path is mm-internal. A file that is written continuously can be held on every push; the held count is visible each time (paths with `--verbose`), and `exclude_patterns` ends it.
 
 The autopush breadcrumb budgets about 300 characters for its combined detail.
 It prefers whole held paths, truncates a long first path when needed, and counts
@@ -791,7 +1153,8 @@ on disk. The push prior filter leaves those roots' tombstones in place, and a
 path with a prior tombstone is never frozen (merged conflict copies can carry
 both; reviving it would advertise a reaped blob). Adding `.git` over published
 files therefore uploads nothing, mints no tombstones and keeps peer copies;
-deleting the checkout later tombstones them like any deletion. Filtering the
+deleting the checkout later tombstones them like any deletion (with the deleted
+versions' hashes, so a peer holding identical bytes deletes its copy). Filtering the
 prior instead (exclusion) made deletion stop converging: peers kept republishing
 their plain copies and the next pull resurrected them. Upload skips every frozen
 path, so their changed local bytes are never read. With `fetch.is_ok` the prior
@@ -828,8 +1191,8 @@ is not a data-at-risk warning), and status summarizes the selected roots with an
 for path detail. Diag retains roots. Attended pull (not
 `--dry-run` or autopull, which write no `excluded` history) logs one `excluded`
 record per root and device manifest, not per file; a peer with only tombstones
-there is logged too (informational: pull is additive and never deletes local
-files). Pull's probe treats a peer path the filesystem cannot
+there is logged too (informational: pull never writes into a checkout, and a
+deletion record never reaches below one). Pull's probe treats a peer path the filesystem cannot
 encode as a stop, never an exception. Conflict-copy discovery (`resolveflow`)
 still walks inside checkouts; pull's no-write guarantee covers peer files.
 `marker_skip_globs` checks `nested_repo_root` and parent links before its first
@@ -987,8 +1350,10 @@ mirrored from exclude_patterns).
 pushing must NOT generate deletion tombstones for that source's files.
 Spurious tombstones suppress restoration and propagation of a missing path
 across upgraded and stale peers until expiry (`manifest.TOMBSTONE_TTL_DAYS
-= 30`, re-broadcast newest-wins by `collect_tombstones`). Existing local
-bytes are never removed. Re-enabling brings the source's files back as
+= 30`, re-broadcast newest-wins by `collect_tombstones`), and since Track 91A a
+hashed one also deletes identical bytes on a peer. Existing local
+bytes are never removed (a disabled source is not a local pull source, so no
+deletion record deletes under it either). Re-enabling brings the source's files back as
 fresh entries (not tombstones). Sidecar recovery filters too so a corrupt-
 manifest recovery on a freshly-disabled config doesn't re-introduce
 disabled-source paths via the sidecar. All five scenarios (push, re-enable,
@@ -1048,15 +1413,11 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 
 ## Pull/push history log (Track 73B)
 
-Track IDs 75A to 81A in this section and its subsections name the Tracks from
-before the 2026-10-19 spec rewrite, not the current roadmap's Tracks of the
-same number: 75A to 78A were killed, and 81A's read-only peer status became
-Track 92A while its retirement was killed. The four provisional tables below
-have no current reader; whichever current Track first needs per-peer state
-(91A's last-synced base or 92A's peer status) decides whether to reuse or drop
-them. Obligations this section gives those old Tracks bind whichever current
-Track first writes non-history `state.db` data; README's History database
-section already names Track 91A for the move-aside remedy.
+`state.db` holds the forensic `history` table (this section) and, since Track 91A,
+the rebuildable pull ledger (`peer_base`, `seen_version`; see "Fast-forward,
+propagated deletions and anchors (Track 91A)"). The four provisional tables below
+(`ledger`, `cursors`, `own_log`, `displaced`) have no reader. Obligations here bind
+whichever Track first writes non-history, non-rebuildable `state.db` data.
 
 `pullhistory` owns the forensic `history` table in the local, never-synced
 `~/.config/mind-meld/state.db` (0600; a directory statedb creates is 0700, an
@@ -1077,8 +1438,8 @@ wait is 5000 ms (`BUSY_TIMEOUT_MS`; contention tests use 100 ms).
 `synchronous=FULL`, without `fullfsync`, applies per writable connection.
 Only an empty new database gets persistent `auto_vacuum=INCREMENTAL` and
 `journal_mode=DELETE`, outside a transaction. Connect never resets journal
-mode: 75A may migrate it to WAL after measuring ledger durability. No foreign
-keys exist. 76A decides when to run incremental_vacuum.
+mode: the pull ledger stays in the rollback journal (Track 91A decided against
+WAL), and no `incremental_vacuum` runs. No foreign keys exist.
 
 Migrations are forward-only tuples of individual SQL statements, all pending
 steps and `user_version` changes in one transaction. The script execution API
@@ -1147,13 +1508,13 @@ shared 1 MB ring: excluded rows cannot evict conflicted rows. About 8,000
 excluded rows per attended pull means at least two complete exclusion audits;
 conflicted rows generally cover years. Measured ~263–400 bytes per row and
 roughly ten full classes suggest ~80 MB, a workload estimate, not a bound.
-Re-measure for 75A/77A receipts. History is forensic: receipts read by sync logic
-belong in their owner's table or a separately retained class. A SIGKILL or
+History is forensic: records that sync logic reads belong in their owner's table
+or a separately retained class (the pull ledger is its own pair of tables). A SIGKILL or
 power loss can drop up to 999 buffered rows; a failed flush drops its buffer.
 History makes no hard power-loss durability claim on macOS: rollback-journal
 corruption is possible. Measured 4,500 commits cost 1,640 ms versus 5.1 ms
-batched; eight 1000-row fullfsync commits cost 124 ms. 75A re-decides durability
-before ledger use.
+batched; eight 1000-row fullfsync commits cost 124 ms. The ledger's durability
+decision is under "Fast-forward, propagated deletions and anchors (Track 91A)".
 
 `read_records()` materializes insertion order; an explicit path stays the
 tolerant JSONL reader. `query` filters in SQL (ts_us for --since), orders
@@ -1168,32 +1529,36 @@ safe_str; jsonl keeps raw sorted-key legacy objects. Errors are one plain,
 sanitized stderr line, exit 1, empty stdout. `pullhistory.explain` owns pinned
 error/notice strings and errors.STATEDB_HELP_URL.
 
-**History-only remedy boundary:** the corrupt-database move-aside advice in
-README is valid only while the four provisional tables remain unused. 75A
-must replace it before writing the first ledger row; 76A owns authoritative
-recovery with pending publications and unexpired displaced content preserved.
+**Move-aside remedy boundary:** the corrupt-database move-aside advice in README is
+valid while every non-history table is rebuildable or unused. That holds for the
+pull ledger (the base is rebuilt on the next pull, until then today's mtime and
+union rule runs and no file is deleted) and for the four provisional tables. A
+Track that stores data the machine cannot rebuild in `state.db` must replace the
+advice first.
 
 ### Schema columns and readers
 
-All six tables and four indexes are migration 1's pinned DDL in statedb.py;
-tests assert table_info and index_list independently.
+Migration 1 pins six tables and four indexes; migration 2 adds `peer_base`,
+`seen_version` and two indexes (statedb.py). Tests assert table_info and
+index_list independently.
 
-| Table | Columns and readers / delivering Track |
+| Table | Columns and readers |
 |---|---|
 | meta | key/value: compat_version gates every connection; history_imported selects history; history_import_pending reports deferred import; legacy_jsonl_stat feeds the two-file stale-binary notice (73B). No other keys yet. |
 | history | id orders insertions/prune/ties, ts renders and sorts, ts_us filters --since, verb/device/source/rel_path/action/local_sha/remote_sha/extra reconstruct mm log rows (73B); old_version/new_version live in extra. |
-| ledger | source/path key; sha/vv/mtime/deleted/pending: 75A Publish: ledger authoring, commits and presence, and 78A Causal classification, symmetric resolution and displaced; size: no reader. vv is sorted compact canonical JSON; no content bytes. |
-| cursors | peer/applied_seq/hash/gap_seq/gap_since: 77A Apply cursors, gap rule and snapshot bootstrap; hash anchors chains, NULL after snapshot raise. 81A Delivery receipts, device projection and retirement reads status; 75A presence reads applied. |
-| own_log | seq/prev/hash/parts/bytes: 75A publish; hash chains prev. time: integer epoch seconds for 76A Snapshots, compaction and own-storage reconciliation (14-day compaction). No redundant created_at. |
-| displaced | id/source/path/sha/vv/size/mtime/deleted/content/reason/time/expired: 78A mm displaced and classification; 76A compaction expiry. size remains visible after expiry. |
+| peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
+| seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull and push (Track 91A). `mm diag` counts rows. |
+| ledger | No reader. Provisional and empty. |
+| cursors | No reader. Provisional and empty. |
+| own_log | No reader. Provisional and empty. |
+| displaced | No reader. Provisional and empty; `expire_displaced` has no caller. |
 
 ledger, cursors, own_log and displaced are **provisional and empty**, with no
-current reader (see the note at the top of this section). A Track that adopts
-one may DROP and re-CREATE it in a migration without raising compat_version:
-released binaries read only meta and history.
-`expire_displaced` is unit-tested only until 76A calls it inside its
-transaction: at 30 days it clears content and sets expired, never deletes rows
-or changes metadata.
+reader (each row above says so). A Track that adopts one may DROP and re-CREATE it in
+a migration without raising compat_version: released binaries read only meta and
+history. `expire_displaced` is unit-tested only and has no caller: at 30 days it
+clears content and sets expired, never deletes rows or changes metadata. Whichever
+Track first needs one of these decides whether to reuse or drop it.
 
 ### History API recipes
 
@@ -1216,12 +1581,12 @@ with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
     pullhistory.prune(conn)
 ```
 
-75A inserts receipts inside its publish transaction, closes the connection,
-then maintains separately. Best-effort maintenance cannot roll back publish:
+A writer that adds rows of its own to the same transaction closes the connection
+and then maintains separately. Best-effort maintenance cannot roll back the commit:
 
 ```python
 with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
-    # 75A's ledger and own_log updates belong in this transaction too.
+    # Another writer's rows may join this transaction.
     pullhistory.write_rows(conn, rows)
 pullhistory.maintain_best_effort()
 ```
@@ -1307,11 +1672,11 @@ totals count valid keys only.
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).
 
 ## Pull-time mtime preservation (load-bearing, v0.12.3)
-`_apply_write` and `_apply_conflict` (pullflow.py) MUST call `_restore_mtime_best_effort(path, remote_info.get("mtime"))` after a successful `atomic_write_bytes`. Without it, every pulled file lands with `st_mtime = now-of-pull`, and any downstream consumer that orders by mtime (e.g. gstack skill preambles' `ls -t` recency scan over `~/.gstack/projects/*/checkpoints/`) sees freshly-pulled-old files as "newer" than locally-authored newer ones. The keep-remote interactive branch in `_apply_incoming_file` does the same restore inline.
+`_apply_write` and `_apply_conflict` (pullflow.py) MUST call `_restore_mtime_best_effort(path, remote_info.get("mtime"))` after a successful `atomic_write_bytes`. Without it, every pulled file lands with `st_mtime = now-of-pull`, and any downstream consumer that orders by mtime (e.g. gstack skill preambles' `ls -t` recency scan over `~/.gstack/projects/*/checkpoints/`) sees freshly-pulled-old files as "newer" than locally-authored newer ones. `_apply_fast_forward` and the keep-remote interactive branch in `_apply_incoming_file` do the same restore.
 
-`_apply_merge` and the merge-via-LCS interactive branch deliberately do NOT restore — line-union merges produce locally-authored content, and backdating to the remote mtime would cause peers' next pull to see `local_mtime <= their remote_mtime` and skip the merged result, losing the union content fleet-wide.
+`_apply_merge` and the merge-via-LCS interactive branch deliberately do NOT restore — line-union merges produce locally-authored content, and backdating to the remote mtime would make the merged result look older than the peers' files, so the pull rule's `older` guard (or the no-base fallback's local-newer skip) would hold it back and lose the union content fleet-wide.
 
-**Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` skip at the `pullflow.py:_apply_incoming_file` mtime gate — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
+**Future-clamp invariant.** `conflictmtime.py:_restore_mtime_best_effort` caps the applied mtime at `now + _MTIME_RESTORE_MAX_SKEW_SECONDS` (60s). Without the clamp, a peer with a bad clock OR a passphrase-holding attacker minting a manifest dated in 2099 would poison the victim's local mtime into a permanent `local_mtime > remote_mtime` hold (the `older` guard, or the no-base fallback's skip in `pullflow.py:_apply_incoming_file`) — silently locking the victim out of all future legitimate updates to that path. The 60s window absorbs normal NTP drift between Macs without admitting year-2099 abuse.
 
 **Defensive parsing.** `_restore_mtime_best_effort`, the apply mtime gate, and `pullplan._predict_pull_outcome` catch `TypeError | ValueError | OverflowError | OSError`, including comparison of a timezone-less remote timestamp with the timezone-aware local mtime. `mtime_from_manifest` rejects timezone-less strings. `load_manifest` rejects non-dict file values and missing/non-string `sha256` with `ManifestError` before coercing any non-string `mtime` to `None`. A malformed entry degrades to the existing corrupt-peer warning; other peers continue. An existing divergent file with `mtime=None` takes the conflict path. Consumer guards also protect direct callers and local-clock overflow. `_upload_changed_blobs` takes freshly scanned local revisions, never loaded peer metadata.
 
@@ -1319,7 +1684,7 @@ Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(by
 
 `_download_and_apply` contains exactly `(OSError, MindMeldError)` around `_apply_incoming_file`. An unrecorded apply becomes `failed` and later files, sources, and peers continue. `typer.Abort`, `SystemExit`, `KeyboardInterrupt`, programming errors, and every other exception propagate. Never widen this boundary to `except Exception` (Abort is a RuntimeError subclass).
 
-A per-source `_ApplyReporter` owns outcomes, byte accounting, deferred-bump invalidation, and touched parents. Each file starts with `begin`; all five publication sites call `published` immediately after successful `atomic_write_bytes`, before mtime restore, cleanup, or output. Publication and normal return must agree; different words raise `RuntimeError`. Unchanged/skipped/failed and deduplicated conflict returns are recorded at the boundary if nothing was published. No disk reconcile: matching bytes cannot prove this attempt wrote them. Direct helper calls default to diagnostics without a ledger.
+A per-source `_ApplyReporter` owns outcomes, byte accounting, deferred-bump invalidation, and touched parents. Each file starts with `begin`; every publication site (write, merge, fast-forward, sidecar, inline keep-remote and inline LCS merge) calls `published` immediately after successful `atomic_write_bytes`, before mtime restore, cleanup, or output. Publication and normal return must agree; different words raise `RuntimeError`. Unchanged/skipped/failed and `kept` (a deduplicated conflict) returns are recorded at the boundary if nothing was published. The reporter also owns the pull ledger settlement for each recorded word (conflicts.md, "The pull rule"); a deletion is recorded by `_run_deletions` as `deleted` and is not an apply of an incoming file. No disk reconcile: matching bytes cannot prove this attempt wrote them. Direct helper calls default to diagnostics without a ledger.
 
 Every apply failure uses `_warn_apply_failure`, on stderr in quiet and interactive modes. Interactive progress is constructed with `redirect_stderr=False` so those lines stay on the real stderr while the widget runs. Every dynamic field uses `safety.safe_terminal_str` to enforce one physical line, including device/source/path, operation, preservation text, and exception. Errno comes from the exception or its cause (atomic writes wrap OSError in StorageError). The actual first existing non-directory ancestor is named as a folder/file conflict with the peer. `_print_apply_warning` swallows only output `OSError`. A contained exception after publication preserves the outcome and prints a notice naming the publication and failed follow-up; stale-sidecar cleanup warnings and unreadable-sidecar scan warnings use the same non-raising printer. Directory creation is one component at a time so a later mkdir failure still registers every directory that landed. iCloud/Dropbox/Syncthing manifest conflict-copy cleanup waits until that device had no contained apply failures or waiting files.
 
@@ -1355,7 +1720,7 @@ The omission is tombstone-safe only because `_push_core` filters the recovered p
 
 On pull, `_download_and_apply` checks each destination before containment resolution. It returns `skipped` with a breadcrumb when the destination itself is a symlink (including dangling) or any component strictly below the source root is one. This prevents `atomic_write_bytes` from replacing a local link or following it outside the source. `_apply_incoming_file` repeats the leaf check for direct callers. A symlinked source root remains allowed. Skipping is intentional rather than a conflict: a conflict outcome would create a new `.sync-conflict-*` sidecar on every pull beside a link that can never become writable.
 
-Default Codex exclusions additionally cover the known generated skill namespaces (`skills/gstack-*`, `skills/log-work/*`, and `skills/retro-fleet/*`) while leaving hand-authored skill trees syncable. v0.12.51 extended that set: `skills/.system/*` (Codex only — its own bundled payload) and `config._GENERATED_HOST_SKILL_GLOBS` (gstack-extend's per-host renders; historically shared with the opencode source, which Track 44A retired). See "Generated files are not sync data" above for the counts and the reasoning. `manifest.GROK_EXCLUDE_PATTERNS` deliberately did NOT follow; the omission is a measured absence documented at that constant. These globs are migration-safe through the existing exclude consumer-boundary filter; dynamic symlink filtering remains the forward-compatible safety net for new installer layouts and explicit source configurations.
+Default Codex exclusions additionally cover the known generated skill namespaces (`skills/gstack-*`, `skills/log-work/*`, and `skills/retro-fleet/*`) while leaving hand-authored skill trees syncable. v0.12.51 extended that set: `skills/.system/*` (Codex only — its own bundled payload) and `config._GENERATED_HOST_SKILL_GLOBS` (gstack-extend's per-host renders; historically shared with the opencode source, which Track 44A retired). Track 91A adds `plugins/cache/*` and `plugins/.remote-plugin-install-staging/*` (Codex installs and removes plugin version folders there itself; a removal would otherwise read as a deletion and delete the same files on a peer). See "Generated files are not sync data" above for the counts and the reasoning. `manifest.GROK_EXCLUDE_PATTERNS` deliberately did NOT follow; the omission is a measured absence documented at that constant. These globs are migration-safe through the existing exclude consumer-boundary filter; dynamic symlink filtering remains the forward-compatible safety net for new installer layouts and explicit source configurations.
 
 Honest writers (`manifest.walk_*`) build rel keys via `path.relative_to(base)` which by construction NEVER produces `..` segments or absolute paths, so the validator only fires on attacker-crafted manifests; legitimate sync is unaffected. Mirrors `storage/keys.py:_validate_component`'s sibling defense for the sha256 component (sha is hex-bounded, rel_path is free-form, so rel_path is strictly the more reachable surface). Pinned by `tests/test_manifest.py::TestLoadManifestRelPathTraversal` (load-boundary rejection: 11 cases) and `tests/test_pull_helpers.py::TestDownloadAndApplyPathTraversalGuard` (apply-site belt-and-braces: 3 cases). Fuzz strategies in `tests/test_manifest_fuzz.py` were narrowed to the new `valid_rel_path_strategy` for round-trip tests; the wild-input invariant (normalize tolerates garbage) remains covered by `arbitrary_dict_strategy` because `normalize_manifest` itself is unchanged.
 
@@ -1416,16 +1781,27 @@ planned outcomes and prints corrupt-peer and unknown-source warnings before
 refusing.
 
 After exclusions/tombstones, decision order is descendant symlink → structural
-file/directory collision → absent → unreadable → known digest equality →
-mergeable → newer local mtime → conflict. Virtual state tracks files and
-directories along ancestors. Write sets the remote digest and future-clamped
-mtime; merge sets an UNKNOWN digest; skip/conflict/unchanged leave canonical
+file/directory collision → unreadable → `pullplan.decide` (the same eight rows as
+the real pull: absent, matched, skip, fast-forward, `older`, `stale`, the no-base
+fallback of mergeable → newer local mtime → conflict, and both-changed; see
+conflicts.md). The planner works on a private copy of the ledger overlay
+(`Ledger.copy`, so a dry run never touches real state) and settles virtual
+outcomes into it, so a later peer sees them. It also predicts `delete` (via
+`predict_delete`, with `keep (<reason>)` lines under `--verbose`), `older` and
+`kept`, and `totals` names them only when non-zero; `delete` and `kept` are not
+fail-mode refusals. `_plan_pull`, `--conflict-mode fail` and `mm diff --from DEVICE`
+pass the peer's ledger; the own-manifest diff passes none. `pullplan` stays a leaf:
+`_plan_pull` injects the callables that answer whether a sidecar already holds the
+remote sha and whether the own manifest lists a path. Virtual state tracks files and
+directories along ancestors. Write and fast-forward set the remote digest and
+future-clamped mtime; merge sets an UNKNOWN digest; skip/conflict/unchanged leave canonical
 state untouched. UNKNOWN never compares equal, so merges are an upper bound.
 Fail mode refuses conflicts and possible local failures with exit 3, while
 mergeable changes from multiple peers no longer cause false conflicts.
 
 Preview omits blob download/decrypt errors, history, sync logs, manifest
-conflict-copy cleanup and old conflict renames. The missing default mm-events
+conflict-copy cleanup, old conflict renames, the ledger commit, recovery
+folders and the recovery-copy reaper (a dry run never reaps). The missing default mm-events
 folder note reports its creation without creating it. Pull prints an
 incomplete-preview line only for corrupt manifests; unknown sources remain
 warnings. No output or exit-code change applies to autopull. Twin-tree parity
@@ -1513,6 +1889,6 @@ not lost work. Keep auto hook-age meaning in diag; attended age is not hook
 liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
 both diag formats. Status shows only selected summaries plus current capture
 facts; only existing latest_attempt_superseded proof hides a capture row.
-No history engine, hold escalation, future capture counters or Track 92A
+No history engine, future capture counters or Track 92A
 peer-state assessment is introduced. Track 78A changes exits/tails only as
 described above.

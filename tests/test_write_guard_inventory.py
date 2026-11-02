@@ -202,6 +202,77 @@ REVIEWED = {
             "replace(resolution, selected=selected, available=list(resolution.available))",
         ],
     ),
+    "core.py:iter_source_diffs": (
+        *_READ_ONLY,
+        [
+            "replace(diff, deleted=[p for p in diff.deleted if p not in left_out])",
+        ],
+    ),
+    "core.py:MintGuard.clause": (
+        *_READ_ONLY,
+        [
+            (
+                "(f\"{_count(self.left_out_files, 'file', 'files')} left out because "
+                "{safe_str(folder)} is {reason}; \" + ('run mm pull to restore them.' if reason "
+                "!= 'unreadable' else 'restore read access.')).replace('is unreadable', "
+                "'cannot be read')"
+            ),
+        ],
+    ),
+    "pullflow.py:_make_copy_dirs": (
+        *_GUARDED,
+        [
+            "directory.mkdir(mode=448)",
+            "os.chmod(directory, 448)",
+        ],
+    ),
+    "pullflow.py:_remove_copy_dirs": (
+        *_GUARDED,
+        [
+            "directory.rmdir()",
+        ],
+    ),
+    "pullflow.py:_copy_then_unlink": (
+        *_GUARDED,
+        [
+            "copy_path.unlink()",
+            "local_path.unlink()",
+        ],
+    ),
+    "pullflow.py:_move_into_copy": (
+        *_GUARDED,
+        [
+            "os.rename(local_path, copy_path)",
+            "os.chmod(copy_path, 384)",
+            "os.link(copy_path, local_path)",
+            "os.rename(copy_path, local_path)",
+            "os.unlink(copy_path)",
+        ],
+    ),
+    "retention.py:_deleted_folder_age": (
+        *_READ_ONLY,
+        [
+            "made.replace(tzinfo=timezone.utc)",
+        ],
+    ),
+    "retention.py:_gc_deleted_copies": (
+        *_GUARDED,
+        [
+            "shutil.rmtree(entry)",
+        ],
+    ),
+    "fsutil.py:fsync_file": (
+        *_READ_ONLY,
+        [
+            "os.open(path, os.O_RDONLY | os.O_NOFOLLOW)",
+        ],
+    ),
+    "manifest.py:read_anchor": (
+        *_READ_ONLY,
+        [
+            "os.open(anchor_path(base, root), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
+        ],
+    ),
     "pullflow.py:_apply_conflict": (
         "residual",
         "stale sidecar cleanup; creation guarded, raw unlink outside frozen inventory",

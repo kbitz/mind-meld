@@ -1,8 +1,12 @@
-"""Tests for additive sync model: tombstones, conflict resolution, no-delete pull.
+"""Tests for the additive sync model: tombstones, conflict resolution, guarded deletion.
 
-These tests cover the behavioral changes in the additive-only sync model:
-- Pull never deletes local files
-- Tombstones propagate intentional deletes with 30-day expiry
+These tests cover the behavioral rules of the additive model:
+- Pull deletes a local file only when a peer's tombstone carries the hash of exactly the
+  bytes it holds and this machine last synced them from that peer (Track 91A); a record
+  with no hash, or a file with no recorded base, never deletes (the pull-side cases live
+  in test_projectid.py and test_integration.py)
+- Tombstones propagate intentional deletes with 30-day expiry and record the sha256 of the
+  version that was deleted
 - Conflict manifest copies are merged additively
 - Auto GC runs on interactive push only
 """
@@ -10,6 +14,8 @@ These tests cover the behavioral changes in the additive-only sync model:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from mind_meld import core
 from mind_meld.crypto import encrypt
@@ -122,6 +128,77 @@ class TestGenerateTombstones:
         }
         tombstones = generate_tombstones(local, None, "dev1")
         assert tombstones == {}
+
+    def test_tombstone_carries_the_sha256_of_the_deleted_version(self):
+        sha = "ab" * 32
+        local = {"sources": {"claude": {"files": {}}}, "tombstones": {}}
+        remote = {
+            "sources": {"claude": {"files": {"b.md": {"sha256": sha}}}},
+            "tombstones": {},
+        }
+        record = generate_tombstones(local, remote, "dev1")["claude:b.md"]
+        assert record["sha256"] == sha
+        assert set(record) == {"deleted_at", "device_id", "sha256"}
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["aaa", "AB" * 32, "ab" * 31, "ab" * 33, "g" * 64, "", None, 7, ["ab" * 32]],
+        ids=[
+            "short",
+            "uppercase",
+            "63-hex",
+            "65-hex",
+            "not-hex",
+            "empty",
+            "none",
+            "int",
+            "list",
+        ],
+    )
+    def test_tombstone_omits_a_hash_that_is_not_a_64_char_lowercase_hex_string(self, bad):
+        local = {"sources": {"claude": {"files": {}}}, "tombstones": {}}
+        remote = {
+            "sources": {"claude": {"files": {"b.md": {"sha256": bad}}}},
+            "tombstones": {},
+        }
+        assert "sha256" not in generate_tombstones(local, remote, "dev1")["claude:b.md"]
+
+    def test_skip_mint_skips_only_the_listed_source_and_path(self):
+        local = {"sources": {"claude": {"files": {}}, "gstack": {"files": {}}}, "tombstones": {}}
+        remote = {
+            "sources": {
+                "claude": {"files": {"a.md": {"sha256": "aaa"}, "b.md": {"sha256": "bbb"}}},
+                "gstack": {"files": {"a.md": {"sha256": "ccc"}}},
+            },
+            "tombstones": {},
+        }
+        skipped = generate_tombstones(local, remote, "dev1", skip_mint={("claude", "a.md")})
+        assert set(skipped) == {"claude:b.md", "gstack:a.md"}
+        assert set(generate_tombstones(local, remote, "dev1")) == {
+            "claude:a.md",
+            "claude:b.md",
+            "gstack:a.md",
+        }
+
+    def test_skip_mint_does_not_drop_a_carried_record(self):
+        recent = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        carried = {"deleted_at": recent, "device_id": "dev2", "sha256": "ab" * 32}
+        local = {"sources": {"claude": {"files": {}}}, "tombstones": {}}
+        remote = {
+            "sources": {"claude": {"files": {"a.md": {"sha256": "aaa"}}}},
+            "tombstones": {"claude:old.md": carried},
+        }
+        out = generate_tombstones(local, remote, "dev1", skip_mint={("claude", "a.md")})
+        assert out == {"claude:old.md": carried}  # the hash rides along unchanged
+
+    def test_the_hash_survives_the_project_name_remap(self):
+        from mind_meld import manifest as manifest_module
+
+        record = {"deleted_at": "2026-11-01T00:00:00+00:00", "device_id": "d", "sha256": "ab" * 32}
+        _, remapped = manifest_module._remap_keys(
+            {}, {"claude:projects/-Users-kb-x/memory/a.md": record}, lambda folder: "@home-x"
+        )
+        assert remapped == {"claude:projects/@home-x/memory/a.md": record}
 
 
 class TestCollectTombstones:
@@ -465,6 +542,71 @@ class TestMergeManifestsAfterLoadRefactor:
         assert merged_ab["device_name"] == winner["device_name"]
 
 
+class TestMergeManifestsKeepsTrack91AFields:
+    """The tombstone hash, a scan root's token and a file's `from` list ride through a merge."""
+
+    @staticmethod
+    def _copy(files, tombstones=None, root_ids=None, stamp="2026-11-01T10:00:00+00:00"):
+        entry = {"base_path": "", "files": files}
+        if root_ids is not None:
+            entry["root_ids"] = root_ids
+        return {
+            "device_id": "peer1",
+            "device_name": "host",
+            "timestamp": stamp,
+            "sources": {"claude": entry},
+            "tombstones": tombstones or {},
+        }
+
+    def test_a_token_survives_only_when_every_copy_agrees(self):
+        a = "0" * 32
+        b = "1" * 32
+        same = core._merge_manifests(
+            [
+                self._copy({}, root_ids={"projects": a}),
+                self._copy({}, root_ids={"projects": a}, stamp="2026-11-01T11:00:00+00:00"),
+            ]
+        )
+        assert same["sources"]["claude"]["root_ids"] == {"projects": a}
+        differ = core._merge_manifests(
+            [
+                self._copy({}, root_ids={"projects": a}),
+                self._copy({}, root_ids={"projects": b}, stamp="2026-11-01T11:00:00+00:00"),
+            ]
+        )
+        assert "root_ids" not in differ["sources"]["claude"]  # disagreement means no id
+        one_silent = core._merge_manifests(
+            [
+                self._copy({}, root_ids={"projects": a}),
+                self._copy({}, stamp="2026-11-01T11:00:00+00:00"),
+            ]
+        )
+        assert "root_ids" not in one_silent["sources"]["claude"]
+
+    def test_each_root_is_judged_alone(self):
+        a, b = "0" * 32, "1" * 32
+        merged = core._merge_manifests(
+            [
+                self._copy({}, root_ids={"d": a, "e": a}),
+                self._copy({}, root_ids={"d": a, "e": b}, stamp="2026-11-01T11:00:00+00:00"),
+            ]
+        )
+        assert merged["sources"]["claude"]["root_ids"] == {"d": a}
+
+    def test_from_and_the_tombstone_hash_survive(self):
+        entry = {"sha256": "ab" * 32, "size": 1, "mtime": "2026-11-01T10:00:00+00:00"}
+        entry["from"] = ["0123456789abcdef", "fedcba9876543210"]
+        record = {"deleted_at": "2026-11-01T10:00:00+00:00", "device_id": "d", "sha256": "cd" * 32}
+        merged = core._merge_manifests(
+            [
+                self._copy({"a.md": entry}, {"claude:gone.md": record}),
+                self._copy({}, stamp="2026-11-01T11:00:00+00:00"),
+            ]
+        )
+        assert merged["sources"]["claude"]["files"]["a.md"]["from"] == entry["from"]
+        assert merged["tombstones"]["claude:gone.md"]["sha256"] == "cd" * 32
+
+
 # ── Conflict manifest resolution ─────────────────────────────────
 
 
@@ -590,9 +732,50 @@ class TestAdditivePull:
         assert len(diff.deleted) == 1
         assert "b.md" in diff.deleted
 
-        # The pull code uses only diff.new and diff.modified, NOT diff.deleted
+        # The pull code downloads only diff.new and diff.modified, and diff.deleted never
+        # deletes: only a peer's tombstone does, under its guards (hash, base, regular file).
         to_download = {**diff.new, **diff.modified}
         assert len(to_download) == 0  # nothing to download, everything in sync
+
+    def test_without_a_recorded_base_a_changed_file_keeps_todays_rule(self):
+        """No base and no ancestry: the fallback runs (union, local-newer skip, conflict)."""
+        from mind_meld import pullplan
+
+        local = pullplan.LocalFile(True, "a" * 64, None)
+        assert (
+            pullplan.decide(None, "peer", "claude", "a.md", local, "b" * 64, None, []) == "fallback"
+        )
+        empty = pullplan.Ledger()
+        assert pullplan.decide(empty, "peer", "claude", "a.md", local, "b" * 64, None, []) == (
+            "fallback"
+        )
+        unreadable = pullplan.Ledger(readable=False)
+        assert pullplan.decide(unreadable, "peer", "claude", "a.md", local, "b" * 64, None, []) == (
+            "fallback"
+        )
+
+    def test_with_a_recorded_base_an_untouched_file_fast_forwards_and_a_current_one_skips(self):
+        from mind_meld import pullplan
+
+        ledger = pullplan.Ledger({("peer", "claude", "a.md"): "a" * 64})
+        untouched = pullplan.LocalFile(True, "a" * 64, None)
+        assert pullplan.decide(ledger, "peer", "claude", "a.md", untouched, "b" * 64, None, []) == (
+            "fast-forward"
+        )
+        assert pullplan.decide(
+            ledger,
+            "peer",
+            "claude",
+            "a.md",
+            pullplan.LocalFile(True, "c" * 64, None),
+            "a" * 64,
+            None,
+            [],
+        ) == ("skip")  # the remote equals the base: nothing to do
+        edited = pullplan.LocalFile(True, "c" * 64, None)
+        assert pullplan.decide(ledger, "peer", "claude", "a.md", edited, "b" * 64, None, []) == (
+            "both"
+        )
 
 
 # ── Auto GC ──────────────────────────────────────────────────────

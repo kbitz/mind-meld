@@ -22,13 +22,16 @@ import copy
 import difflib
 import errno
 import hashlib
+import os
 import secrets
+import stat
 import sys
 import time
+import unicodedata
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -45,7 +48,9 @@ from mind_meld import (
     pullhistory,
     pullplan,
     resolveflow,
+    retention,
     safety,
+    statedb,
 )
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES, resolve_sources
 from mind_meld.conflictdiff import (
@@ -68,6 +73,8 @@ from mind_meld.devices import (
     lookup_device_by_short_id,
 )
 from mind_meld.errors import (
+    DELETED_FILES_URL,
+    LEDGER_URL,
     PULL_FAILURES_URL,
     SNAPSHOT_FAILURES_URL,
     CryptoError,
@@ -107,6 +114,8 @@ ApplyOutcome = Literal[
     "unchanged",
     "failed",
     "waiting",
+    "kept",
+    "deleted",
 ]
 
 
@@ -121,8 +130,16 @@ ApplyOutcome = Literal[
 # "skipped" / "unchanged" leave canonical untouched, so the prior decision
 # also stands.
 _CANONICAL_WRITE_OUTCOMES: frozenset[ApplyOutcome] = frozenset(
-    {"written", "merged", "merged-via-lcs", "conflicted"}
+    {"written", "merged", "merged-via-lcs", "conflicted", "kept", "deleted"}
 )
+
+# Outcomes that settle a remote version into the pull ledger. ``hold`` marks the
+# local file as built on that version; a conflict or kept copy only saw it.
+_SETTLING_OUTCOMES: frozenset[ApplyOutcome] = frozenset(
+    {"written", "merged", "merged-via-lcs", "conflicted", "kept", "unchanged"}
+)
+_SEEN_ONLY_OUTCOMES: frozenset[ApplyOutcome] = frozenset({"conflicted", "kept"})
+_UNION_OUTCOMES: frozenset[ApplyOutcome] = frozenset({"merged", "merged-via-lcs"})
 
 
 # Track 5E (v0.9.2 BREAKING): minimum peer version required for safe pull.
@@ -165,16 +182,32 @@ class OldFormPeer:
 
 
 @dataclass
+class OlderEdit:
+    """A peer's edit built on this machine's version but with an older timestamp."""
+
+    device_name: str
+    src_name: str
+    rel_path: str
+
+
+@dataclass
 class PullResult:
     """Result of a pull operation.
 
     Outcomes are split per the _apply_incoming_file decision tree:
       written    — local had no copy; remote written to canonical path
       merged     — .jsonl or MEMORY.md union-merged with local
-      skipped    — local is newer than remote (no write)
-      conflicted — hashes differed and remote newer/equal: local canonical
-                   preserved, remote written to .sync-conflict-*
-      unchanged  — apply-time re-read showed local already matches remote
+      skipped    — local is newer than remote in the no-base fallback, or the
+                   user kept local at the inline prompt (no write)
+      conflicted — both sides changed (or, in the fallback, remote newer/equal):
+                   local canonical preserved, remote written to
+                   .sync-conflict-*
+      kept       — a conflict copy already holds the peer's bytes; nothing
+                   written, counted or reported (Track 91A)
+      deleted    — a peer's hashed tombstone removed this file; its bytes are
+                   in the 30-day recovery folder (Track 91A)
+      unchanged  — apply-time re-read showed local already matches remote,
+                   or the pull rule skipped, held or found it stale
       failed     — rename/write error; local preserved, no change applied
       waiting    — the blob has not been delivered by the sync tool yet
                    (Track 87A); nothing was applied and nothing failed. It
@@ -217,11 +250,23 @@ class PullResult:
     old_form_peers: list[OldFormPeer] = field(default_factory=list)
     not_placed_files: int = 0
     not_placed_projects: int = 0
+    # Track 91A: files this pull deleted because a peer deleted them, who did,
+    # the 30-day copy folder, peer edits held back by their older timestamp, and
+    # the cause when the fast-forward ledger could not be read or written.
+    total_deleted: int = 0
+    deleted_origins: list[str] = field(default_factory=list)
+    deleted_folder: str | None = None
+    older: list[OlderEdit] = field(default_factory=list)
+    ledger_cause: str | None = None
 
     @property
     def total_applied(self) -> int:
         """Files actually changed on disk (written + merged + conflicted)."""
         return self.total_written + self.total_merged + self.total_conflicted
+
+    @property
+    def total_older(self) -> int:
+        return len(self.older)
 
 
 PULL_NOT_PREVIEWED = (
@@ -455,10 +500,12 @@ def _prompt_conflict_choice(
     # renders "unknown". The remote side has NO on-disk file at this inline
     # site, so its created/birthtime is genuinely unavailable -- only the
     # manifest's modified time (passed in as ``remote_mtime``) is shown.
-    # NOTE: no ``(n)ewer`` shortcut here -- _apply_incoming_file already
-    # skipped before prompting when local is newer (cli.py mtime gate), so
-    # at this prompt remote is always newer-or-equal and "(n)ewer" would be
-    # a redundant alias of (r). Display + verdict only.
+    # NOTE: no ``(n)ewer`` shortcut here. Under the no-base fallback
+    # _apply_incoming_file already skips before prompting when local is
+    # newer, so remote is newer-or-equal there and "(n)ewer" would be a
+    # redundant alias of (r); a both-changed file with a base can reach this
+    # prompt with a newer local file, and the verdict line says so.
+    # Display + verdict only.
     local_mtime_ts, local_btime_ts = _stat_mtime_btime(local_path)
     remote_mtime_ts = remote_mtime.timestamp() if remote_mtime is not None else None
 
@@ -582,17 +629,32 @@ def _prompt_conflict_choice(
 # \u2500\u2500 _apply_incoming_file decision tree \u2500\u2500\u2500
 #
 #   Re-read local state at apply time (user may have edited since _pull_core
-#   snapshotted). Decide outcome:
+#   snapshotted), then ask pullplan.decide (Track 91A; the full table is in
+#   docs/invariants/conflicts.md, "The pull rule"). First match wins:
 #
-#   local missing                           -> WRITE     (remote -> canonical)
-#   local hash == remote hash               -> UNCHANGED
-#   should_merge(rel_path)                  -> MERGED    (jsonl / MEMORY.md)
-#   local mtime > remote mtime              -> SKIPPED   (local newer)
-#   local mtime <= remote mtime + (m)erge   -> MERGED-VIA-LCS  (user confirmed)
+#   local missing                           -> WRITE     (remote -> canonical),
+#                                              or HELD (removed here on purpose)
+#   local hash == remote hash               -> UNCHANGED (settles the base)
+#   remote == this peer's base              -> SKIP      (silent, no download)
+#   clean local, peer built on it           -> FAST-FORWARD (write remote, no
+#                                              union, no recovery copy); OLDER
+#                                              (not applied) if remote mtime <
+#                                              local mtime
+#   remote already seen/held here           -> STALE     (silent)
+#   no base and no peer ancestry            -> FALLBACK  (today's rule below)
+#   otherwise both changed:
+#     should_merge(rel_path)                -> MERGED    (jsonl / MEMORY.md)
+#     (m)erge chosen inline                 -> MERGED-VIA-LCS  (user confirmed)
 #                                              write merged_bytes -> canonical
-#   local mtime <= remote mtime             -> CONFLICTED  (v0.9.2 INVERTED)
+#     else                                  -> CONFLICTED  (v0.9.2 INVERTED)
 #        keep canonical at LOCAL bytes (no rename, no rollback)
 #        write REMOTE bytes -> .sync-conflict-<ts>-<device>.<ext>
+#        (a sidecar already holding the peer's bytes -> KEPT: no write)
+#
+#   FALLBACK (no base for this peer and the peer published no ancestry) is
+#   the pre-91A rule: should_merge -> MERGED; local mtime > remote mtime ->
+#   SKIPPED (local newer); else CONFLICTED. A both-changed file with a base
+#   never takes the local-newer skip.
 #
 #   Pre-v0.9.2 did the opposite (canonical = remote, sidecar = local). The
 #   inversion makes the visible `.sync-conflict-*` file hold the surprising
@@ -772,11 +834,34 @@ class _ApplyReporter:
     resolved_local: Path | None = None
     recorded: ApplyOutcome | None = None
     follow_up: str = "follow-up step"
+    # Track 91A: the pull ledger. ``record`` settles the remote version into it
+    # on the outcomes that agree with the peer; failed and waiting never do.
+    ledger: pullplan.Ledger | None = None
+    peer_id: str | None = None
+    own: pullplan.OwnLookup | None = None
+    older: list[str] = field(default_factory=list)
+    remote_sha: str | None = None
+    remote_from: list[str] = field(default_factory=list)
+    local_sha: str | None = None
+    copy_path: Path | None = None
+    # True when "unchanged" means this machine and the peer really agree (a
+    # byte-equal file or a no-op merge), as opposed to a silent hold.
+    agree: bool = False
 
-    def begin(self, rel_path: str, local_path: Path, resolved_local: Path | None) -> None:
+    def begin(
+        self,
+        rel_path: str,
+        local_path: Path,
+        resolved_local: Path | None,
+        remote_sha: str | None = None,
+        remote_from: list[str] | None = None,
+    ) -> None:
         self.rel_path, self.local_path, self.resolved_local = rel_path, local_path, resolved_local
         self.recorded = None
         self.follow_up = "follow-up step"
+        self.remote_sha, self.local_sha, self.copy_path = remote_sha, None, None
+        self.remote_from = list(remote_from or [])
+        self.agree = False
 
     def record(self, outcome: ApplyOutcome) -> None:
         if self.outcomes is None:
@@ -790,6 +875,42 @@ class _ApplyReporter:
             _invalidate_inline_bump(self.pending_inline_bumps, self.resolved_local)
             self.touched_parents.add(self.local_path.parent)
         self.recorded = outcome
+        self._settle(outcome)
+
+    def _settle(self, outcome: ApplyOutcome) -> None:
+        ledger = self.ledger
+        if ledger is None or self.peer_id is None or outcome not in _SETTLING_OUTCOMES:
+            return
+        if outcome == "unchanged" and not self.agree:
+            return
+        if not self.remote_sha or self.src_name is None:
+            return
+        also = (self.local_sha,) if outcome in _UNION_OUTCOMES and self.local_sha else ()
+        ledger.settle(
+            self.peer_id,
+            self.src_name,
+            self.rel_path,
+            self.remote_sha,
+            hold=outcome not in _SEEN_ONLY_OUTCOMES,
+            also_hold=also,
+            ancestors=self.remote_from,
+        )
+        written = self.copy_path if outcome == "conflicted" else self.local_path
+        if outcome in {"written", "merged", "merged-via-lcs", "conflicted"} and written:
+            ledger.flush_paths.setdefault((self.src_name, self.rel_path), []).append(written)
+
+    def defer_settle(self) -> None:
+        """Inline keep-local: settle only if the whole pull is not aborted."""
+        if self.ledger is not None and self.peer_id and self.remote_sha and self.src_name:
+            self.ledger.deferred.append(
+                (
+                    self.peer_id,
+                    self.src_name,
+                    self.rel_path,
+                    self.remote_sha,
+                    tuple(self.remote_from),
+                )
+            )
 
     def published(self, outcome: ApplyOutcome) -> None:
         self.record(outcome)
@@ -816,6 +937,7 @@ class _ApplyReporter:
             "merged": "file merged",
             "merged-via-lcs": "file merged",
             "conflicted": "conflict copy saved",
+            "deleted": "file deleted",
         }.get(self.recorded, self.recorded)
         safe = safety.safe_terminal_str
         core._print_apply_warning(
@@ -961,10 +1083,10 @@ def _apply_conflict(
     default for two reasons: (1) asymmetric blast radius \u2014 local is the
     known-working version on this machine, remote is the unknown-from-
     elsewhere version; (2) the visible `.sync-conflict-*` should hold the
-    *surprising* version, not the working one. Mtime-skip already
-    handles "local newer," so the conflict path only fires when remote
-    is newer or mtimes are equal \u2014 but "remote newer" never meant "remote
-    correct for this machine."
+    *surprising* version, not the working one. Under the pull rule the
+    conflict path fires only when both sides changed the file (or, in the
+    no-base fallback, when the local mtime is not newer), and "remote newer"
+    never meant "remote correct for this machine."
 
     Per-peer dedup (post-v0.11.4, publish-then-cleanup as of Track 48A):
     scan existing post-inversion sidecars from this peer for the same
@@ -1021,7 +1143,7 @@ def _apply_conflict(
                         f"{safe_str(rel_path)} "
                         f"(existing sidecar {safe_str(sidecar.name)})"
                     )
-                return "conflicted"
+                return "kept"
             stale.append(sidecar)
 
     try:
@@ -1050,6 +1172,7 @@ def _apply_conflict(
             "sidecar write failed", e, preserved="local and prior conflict copies preserved"
         )
         return "failed"
+    reporter.copy_path = conflict_path
     reporter.published("conflicted")
     reporter.follow_up = "conflict-copy mtime restore"
     _restore_mtime_best_effort(conflict_path, remote_mtime_iso)
@@ -1075,6 +1198,74 @@ def _apply_conflict(
             f"(remote saved as {safe_str(conflict_path.name)})"
         )
     return "conflicted"
+
+
+def _ledger_verdict(
+    local_path: Path,
+    local_hash: str,
+    remote_info: dict,
+    remote_device_id: str,
+    reporter: _ApplyReporter,
+) -> str:
+    """The pull rule's verdict for one existing local file; "fallback" without a ledger."""
+    ledger = reporter.ledger
+    if ledger is None or not ledger.readable or not reporter.peer_id or not reporter.src_name:
+        return "fallback"
+    try:
+        remote_mtime = mtime_from_manifest(remote_info.get("mtime"))
+    except (TypeError, ValueError, OverflowError, OSError):
+        remote_mtime = None
+    try:
+        local_mtime = mtime_from_path(local_path)
+    except (TypeError, ValueError, OverflowError, OSError):
+        local_mtime = None
+    return pullplan.decide(
+        ledger,
+        reporter.peer_id,
+        reporter.src_name,
+        reporter.rel_path,
+        pullplan.LocalFile(True, local_hash, local_mtime),
+        remote_info["sha256"],
+        remote_mtime,
+        pullplan.parse_from(remote_info),
+    )
+
+
+def _apply_fast_forward(
+    local_path: Path,
+    rel_path: str,
+    plain_data: bytes,
+    before: Any,
+    remote_mtime_iso: str | None,
+    *,
+    verbose: bool,
+    reporter: _ApplyReporter,
+) -> ApplyOutcome | None:
+    """[F] local equals the version the peer built on: write remote, no union.
+
+    Returns None when the file changed between the hash and the replace; the
+    caller then treats it as both changed. The remaining milliseconds between the
+    re-check and the replace are the same exposure as ``_apply_merge``.
+    """
+    try:
+        now = local_path.lstat()
+        if (now.st_size, now.st_mtime_ns, now.st_ino) != (
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ino,
+        ):
+            return None
+        fsutil.atomic_write_bytes(local_path, plain_data, fsync=False)
+    except (OSError, StorageError) as e:
+        reporter.failed("write failed", e, preserved="local preserved")
+        return "failed"
+    reporter.published("written")
+    reporter.follow_up = "mtime restore"
+    _restore_mtime_best_effort(local_path, remote_mtime_iso)
+    reporter.follow_up = "output"
+    if verbose:
+        console.print(f"  [green]\u2193[/green] {safe_str(rel_path)} (fast-forward)")
+    return "written"
 
 
 def _apply_incoming_file(
@@ -1150,18 +1341,52 @@ def _apply_incoming_file(
     # Re-read local state. Precomputed snapshot can be stale if the user
     # edited the file after _pull_core built its diff.
     try:
+        before = local_path.lstat()
         local_hash = hash_file(local_path)
     except (PermissionError, OSError) as e:
         reporter.failed("read failed", e, preserved="local preserved")
         return "failed"
+    reporter.local_sha = local_hash
 
     if local_hash == remote_info.get("sha256"):
+        reporter.agree = True
         return "unchanged"
 
+    # Track 91A: the pull rule. Without a readable ledger (direct callers, a
+    # missing or unreadable database) the verdict is "fallback": today's rule.
+    verdict = _ledger_verdict(local_path, local_hash, remote_info, remote_device_id, reporter)
+    if verdict in ("skip", "stale", "held", "matched"):
+        reporter.agree = verdict == "matched"
+        return "unchanged"
+    if verdict == "older":
+        reporter.older.append(rel_path)
+        return "unchanged"
+    if verdict in ("fast-forward", "write"):
+        forwarded = _apply_fast_forward(
+            local_path,
+            rel_path,
+            plain_data,
+            before,
+            remote_mtime_iso,
+            verbose=verbose,
+            reporter=reporter,
+        )
+        if forwarded is not None:
+            return forwarded
+        # The file changed under us between the read and the replace: both changed.
+        verdict = "both"
+
     if should_merge(rel_path):
-        return _apply_merge(local_path, rel_path, plain_data, verbose=verbose, reporter=reporter)
+        merged_outcome = _apply_merge(
+            local_path, rel_path, plain_data, verbose=verbose, reporter=reporter
+        )
+        reporter.agree = merged_outcome == "unchanged"
+        return merged_outcome
 
     # [S] local is newer. Keep local at canonical path \u2014 next push propagates it.
+    # Only today's rule (no base, no ancestry) keeps a newer local file; once the
+    # ledger says both sides changed, the peer holding the older edit gets the
+    # conflict, never a silent skip.
     remote_mtime_str = remote_mtime_iso
     local_mtime: datetime | None = None
     remote_mtime: datetime | None = None
@@ -1182,7 +1407,7 @@ def _apply_incoming_file(
             )
         local_mtime = None
         remote_mtime = None
-    if local_newer:
+    if local_newer and verdict == "fallback":
         if verbose:
             try:
                 console.print(f"  [dim]= {safe_str(rel_path)} (local newer, kept)[/dim]")
@@ -1233,6 +1458,7 @@ def _apply_incoming_file(
             # mtime-bearing peer.
             peer_ts = remote_mtime.timestamp() if remote_mtime else 0.0
             _record_inline_bump(pending_inline_bumps, resolved_local, peer_ts)
+            reporter.defer_settle()
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (kept local by user)[/dim]")
             return "skipped"
@@ -1496,7 +1722,9 @@ def _download_and_apply(
                 _advance()
                 continue
 
-            reporter.begin(rel_path, local_path, resolved_local)
+            reporter.begin(
+                rel_path, local_path, resolved_local, info.get("sha256"), pullplan.parse_from(info)
+            )
             try:
                 outcome = _apply_incoming_file(
                     local_path=local_path,
@@ -1532,6 +1760,393 @@ def _download_and_apply(
                 pass
 
     return reporter.bytes_transferred, outcomes
+
+
+# ── propagated deletions (Track 91A) ─────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _Deletion:
+    """A local file a peer's tombstone deletes: same bytes the peer published and deleted."""
+
+    peer_id: str
+    peer_name: str
+    src_name: str
+    rel_path: str
+    base_path: Path
+    local_path: Path
+    sha: str
+    src_type: str = ""
+
+
+def _folded(path: str) -> str:
+    return unicodedata.normalize("NFC", path).casefold()
+
+
+def _own_lookup(
+    own_manifest: dict | None,
+    sources_cfg: dict[str, dict],
+    local_sources_map: dict[str, dict[str, Any]],
+) -> pullplan.OwnLookup:
+    """Per path: does this device's own manifest list or name it, and is its scan root unchanged.
+
+    A root is unchanged when the token in its ``.mind-meld-anchor`` is the one the
+    own manifest published for it. A missing token, or a manifest that records
+    none (published before anchors existed), reads as changed.
+    """
+    tokens: dict[tuple[str, str], str | None] = {}
+
+    def lookup(src_name: str, rel_path: str) -> tuple[bool, bool]:
+        entry = ((own_manifest or {}).get("sources") or {}).get(src_name)
+        cfg = sources_cfg.get(src_name)
+        if entry is None or cfg is None or src_name not in local_sources_map:
+            return False, False
+        lists = rel_path in (entry.get("files") or {}) or f"{src_name}:{rel_path}" in (
+            (own_manifest or {}).get("tombstones") or {}
+        )
+        root = manifest.scan_root_for(cfg, rel_path)
+        recorded = (entry.get("root_ids") or {}).get(root) if root is not None else None
+        if root is None or not isinstance(recorded, str):
+            return lists, False
+        key = (src_name, root)
+        if key not in tokens:
+            tokens[key] = manifest.read_anchor(local_sources_map[src_name]["path"], root)
+        return lists, tokens[key] is not None and tokens[key] == recorded
+
+    return lookup
+
+
+def _sidecar_holds(local_sources_map: dict[str, dict[str, Any]]) -> pullplan.SidecarHolds:
+    """Does a conflict copy from this peer already hold the remote bytes?"""
+
+    def holds(src_name: str, rel_path: str, peer_id: str, sha: str) -> bool:
+        info = local_sources_map.get(src_name)
+        if info is None or not peer_id:
+            return False
+        canonical = info["path"] / rel_path
+        for sidecar in _existing_post_inversion_sidecars_from_peer(canonical, peer_id[:8]):
+            try:
+                if hash_file(sidecar) == sha:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    return holds
+
+
+def _deletion_candidates(
+    *,
+    pull_targets: list[dict],
+    manifest_cache: dict,
+    local_sources_map: dict[str, dict[str, Any]],
+    source_filter: str | None,
+    ledger: pullplan.Ledger,
+    my_device_id: str,
+    blocked: set[tuple[str, str]] | None = None,
+    keeps: list[tuple[str, str, str, str]] | None = None,
+) -> list[_Deletion]:
+    """The files this pull deletes because a peer deleted them.
+
+    Each pull target's OWN tombstones count (the filtered per-peer manifest, not
+    the merged fleet set, whose newest-wins can drop a hash). A file is deleted
+    only when every guard holds: an active record this peer minted, carrying a
+    valid content hash, that peer's last-synced base for the path is that hash,
+    the peer no longer lists the path, and the local file is a regular file
+    below a real folder whose bytes hash to it. Anything else stays untouched.
+
+    ``keeps`` collects ``(peer, source, path, reason)`` for a file that exists
+    and stays, so a preview can say why.
+    """
+    if not ledger.readable:
+        return []
+    blocked = blocked or set()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=manifest.TOMBSTONE_TTL_DAYS)
+    insensitive: dict[str, bool] = {}
+    taken: set[tuple[str, str]] = set()
+    out: list[_Deletion] = []
+    for device in pull_targets:
+        did, dname = device["device_id"], device["device_name"]
+        remote = manifest_cache.get(did)
+        if remote is None or did == my_device_id:
+            continue
+        for key, info in (remote.get("tombstones") or {}).items():
+            if not isinstance(key, str) or not isinstance(info, dict):
+                continue
+            src_name, rel_path = key.split(":", 1) if ":" in key else ("claude", key)
+            if (
+                src_name not in local_sources_map
+                or src_name in MM_INTERNAL_SOURCE_NAMES
+                or (source_filter and src_name != source_filter)
+                or (did, src_name) in blocked
+                or (src_name, rel_path) in taken
+            ):
+                continue
+            sha = info.get("sha256")
+            base_path = local_sources_map[src_name]["path"]
+            local_path = base_path / rel_path
+
+            def keep(reason: str) -> None:
+                if keeps is not None and os.path.lexists(local_path):
+                    keeps.append((dname, src_name, rel_path, reason))
+
+            if not manifest._is_active_tombstone(info, cutoff):
+                continue
+            if info.get("device_id") != did:
+                keep("the record names another machine")
+                continue
+            if not pullplan.valid_hash(sha):
+                keep("the record has no content hash (written by an older release)")
+                continue
+            if ledger.base(did, src_name, rel_path) != sha:
+                keep("this machine never synced that version from the peer")
+                continue
+            peer_files = ((remote.get("sources") or {}).get(src_name) or {}).get("files") or {}
+            if rel_path in peer_files:
+                keep("the peer lists it again")
+                continue
+            if src_name not in insensitive:
+                insensitive[src_name] = _detect_case_insensitive_fs(base_path)
+            if insensitive[src_name] and _folded(rel_path) in {_folded(p) for p in peer_files}:
+                keep("the peer lists a name that differs only in case")
+                continue
+            try:
+                if pullplan._has_symlinked_component(local_path, base_path, strict=True):
+                    keep("a folder on the way is a symlink")
+                    continue
+                if not local_path.resolve(strict=False).is_relative_to(
+                    base_path.resolve(strict=False)
+                ):
+                    keep("the path leaves the source folder")
+                    continue
+                if not stat.S_ISREG(local_path.lstat().st_mode):
+                    keep("it is not a regular file")
+                    continue
+                if hash_file(local_path) != sha:
+                    keep("its bytes differ from the deleted version")
+                    continue
+            except (OSError, ValueError, MindMeldError):
+                keep("it could not be read")
+                continue
+            taken.add((src_name, rel_path))
+            out.append(
+                _Deletion(
+                    did,
+                    dname,
+                    src_name,
+                    rel_path,
+                    base_path,
+                    local_path,
+                    sha,
+                    local_sources_map[src_name].get("type", ""),
+                )
+            )
+    return out
+
+
+def _copy_folder_name(now: datetime) -> str:
+    return f"{now:%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+
+
+def _make_copy_dirs(folder: Path, deletions: list[_Deletion]) -> list[Path]:
+    """Create the 0700 recovery folders for one pull; return every folder created."""
+    fsutil.refuse_real_state_write_under_pytest(folder)
+    created: list[Path] = []
+    wanted = {folder}
+    for d in deletions:
+        wanted.add((folder / d.src_name / d.rel_path).parent)
+    for target in sorted(wanted, key=lambda p: len(p.parts)):
+        missing: list[Path] = []
+        current = target
+        while not current.exists():
+            missing.append(current)
+            current = current.parent
+        for directory in reversed(missing):
+            directory.mkdir(mode=0o700)
+            os.chmod(directory, 0o700)
+            created.append(directory)
+    return created
+
+
+def _remove_copy_dirs(created: list[Path]) -> None:
+    """Remove the (still empty) recovery folders an abandoned deletion pass made."""
+    for directory in sorted(created, key=lambda p: len(p.parts), reverse=True):
+        fsutil.refuse_real_state_write_under_pytest(directory)
+        with suppress(OSError):
+            directory.rmdir()
+
+
+class _UnlinkFailed(OSError):
+    """The recovery copy was written but the original could not be removed (another volume)."""
+
+
+def _copy_then_unlink(local_path: Path, copy_path: Path, sha: str) -> str:
+    """A source on another volume cannot be renamed: copy, re-check, unlink (a named window)."""
+    fsutil.refuse_real_state_write_under_pytest(copy_path)
+    fsutil.refuse_real_state_write_under_pytest(local_path)
+    before = local_path.lstat()
+    data = local_path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        return "restored"
+    fsutil.atomic_write_bytes(copy_path, data, fsync=True, mode=0o600)
+    now = local_path.lstat()
+    if (now.st_size, now.st_mtime_ns, now.st_ino) != (
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ino,
+    ):
+        copy_path.unlink()
+        return "restored"
+    try:
+        local_path.unlink()
+    except OSError as exc:
+        raise _UnlinkFailed(exc.errno, exc.strerror or "unlink failed", str(local_path)) from exc
+    return "deleted"
+
+
+def _move_into_copy(local_path: Path, copy_path: Path, sha: str) -> str:
+    """Move the file's own inode into the recovery folder, then verify what moved.
+
+    Returns ``deleted``, ``restored`` (the bytes were not the ones deleted, so the
+    file went back) or ``kept-copy`` (restoration could not link it back; the moved
+    file stays in the recovery folder). A writer that replaces the path after the
+    move creates a new file that survives; one holding the file open writes into
+    the copy. Raises OSError when nothing moved.
+    """
+    fsutil.refuse_real_state_write_under_pytest(copy_path)
+    fsutil.refuse_real_state_write_under_pytest(local_path)
+    try:
+        os.rename(local_path, copy_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        return _copy_then_unlink(local_path, copy_path, sha)
+    os.chmod(copy_path, 0o600)
+    if hash_file(copy_path) == sha:
+        return "deleted"
+    try:
+        os.link(copy_path, local_path)
+    except OSError:
+        # A rename fallback could overwrite a file created after an absence check.
+        # Preserve the moved bytes here whenever no-clobber restoration fails.
+        return "kept-copy"
+    os.unlink(copy_path)
+    return "restored"
+
+
+@dataclass
+class _DeletionRun:
+    folder: Path | None = None
+    ledger_exc: BaseException | None = None
+
+
+def _run_deletions(
+    deletions: list[_Deletion],
+    *,
+    ledger: pullplan.Ledger,
+    touched_parents: set[Path],
+    per_source_results: list[_PerSourceResult],
+    quiet: bool,
+    verbose: bool,
+) -> _DeletionRun:
+    """Follow peer deletions: recovery folders, one ledger commit, then move each file.
+
+    Nothing is deleted unless every recovery folder exists and is flushed and the
+    ledger transaction (clear the bases, stamp the deleted versions) committed.
+    """
+    run = _DeletionRun()
+    now = datetime.now(timezone.utc)
+    folder = statedb.deleted_copies_dir() / _copy_folder_name(now)
+    by_key: dict[tuple[str, str], _PerSourceResult] = {}
+    for d in deletions:
+        key = (d.peer_id, d.src_name)
+        if key not in by_key:
+            result = _PerSourceResult(
+                src_name=d.src_name,
+                device_name=d.peer_name,
+                device_id=d.peer_id,
+                outcomes=_empty_outcomes(),
+                bytes_transferred=0,
+                touched_parents=set(),
+                claude_sync_base=str(d.base_path) if d.src_type == "claude" else None,
+                deleted_folder=str(folder),
+            )
+            by_key[key] = result
+            per_source_results.append(result)
+
+    def fail(d: _Deletion, operation: str, exc: BaseException, preserved: str) -> None:
+        by_key[(d.peer_id, d.src_name)].outcomes["failed"].append(d.rel_path)
+        _warn_apply_failure(
+            d.peer_name, d.src_name, d.rel_path, d.local_path, operation, exc, preserved=preserved
+        )
+
+    try:
+        created = _make_copy_dirs(folder, deletions)
+        for directory in created:
+            fsutil.fsync_dir(directory)
+        if created:
+            fsutil.fsync_dir(created[0].parent)
+    except (OSError, StorageError) as exc:
+        for d in deletions:
+            fail(d, "cannot create recovery folder", exc, "local preserved")
+        return run
+    run.folder = folder
+    for d in deletions:
+        ledger.drop(d.src_name, d.rel_path)
+        ledger.stamp_deleted(d.src_name, d.rel_path, d.sha, d.peer_id)
+    core.flush_ledger_files(ledger)
+    warnings = _fsync_touched_parents(touched_parents)
+    exc = RuntimeError("directory flush failed") if warnings else core.commit_ledger(ledger)
+    if exc is not None:
+        run.ledger_exc = exc
+        run.folder = None
+        _remove_copy_dirs(created)
+        for d in deletions:
+            ledger.undelete(d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=True)
+            fail(d, "deletion not recorded", exc, "local preserved")
+        return run
+    for d in deletions:
+        result = by_key[(d.peer_id, d.src_name)]
+        copy_path = folder / d.src_name / d.rel_path
+        try:
+            outcome = _move_into_copy(d.local_path, copy_path, d.sha)
+        except _UnlinkFailed as e:
+            # The copy exists but the original stays: not retried. Delete it by hand,
+            # or keep it and this machine republishes it (its next push clears the stamp).
+            fail(
+                d,
+                "delete failed; not retried: delete the file by hand, or keep it and "
+                "this machine republishes it",
+                e,
+                "local file and recovery copy preserved",
+            )
+            continue
+        except (OSError, StorageError) as e:
+            ledger.undelete(d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=True)
+            fail(d, "delete failed", e, "local and recovery copy preserved")
+            continue
+        if outcome == "deleted":
+            result.outcomes["deleted"].append(d.rel_path)
+            result.touched_parents.add(d.local_path.parent)
+            touched_parents.add(d.local_path.parent)
+            if verbose and not quiet:
+                console.print(f"  [red]deleted[/red] {safe_str(d.rel_path)} (a peer deleted it)")
+        else:
+            ledger.undelete(
+                d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=outcome == "restored"
+            )
+            fail(
+                d,
+                "delete skipped; the file changed while it was being deleted",
+                RuntimeError(outcome),
+                "local file kept"
+                if outcome == "restored"
+                else f"moved file kept in recovery folder {folder}",
+            )
+    with suppress(OSError, StorageError):
+        for directory in {(folder / d.src_name / d.rel_path).parent for d in deletions}:
+            fsutil.fsync_dir(directory)
+    return run
 
 
 # ── pull ──────────────────────────────────────────────────────────────
@@ -1597,6 +2212,10 @@ class _PerSourceResult:
     # write is attempted once; replaying the whole block would duplicate rows.
     history_recorded: set[tuple[str, str]] = field(default_factory=set, repr=False)
     sync_log_attempted: bool = field(default=False, repr=False)
+    # Track 91A: peer edits held back because their timestamp is older than the
+    # local file they were built on (reported, never applied).
+    older: list[str] = field(default_factory=list)
+    deleted_folder: str | None = None
 
     @property
     def had_changes(self) -> bool:
@@ -1616,7 +2235,9 @@ class _PerSourceResult:
         the cleanup back for it (a kept conflict copy may be the only holder
         of the manifest those blobs belong to).
         """
-        return any(self.outcomes[k] for k in self.outcomes if k != "unchanged")
+        return bool(self.older) or any(
+            self.outcomes[k] for k in self.outcomes if k not in ("unchanged", "kept")
+        )
 
 
 def _check_fleet_version_or_refuse(
@@ -1796,8 +2417,11 @@ def _plan_pull(
     local_sources_map: dict,
     source_filter: str | None,
     all_tombstones: dict,
+    ledger: pullplan.Ledger | None = None,
+    own: pullplan.OwnLookup | None = None,
+    my_device_id: str = "",
 ) -> tuple[pullplan.PullPlanner, list[_UnknownSourceWarning]]:
-    planner = pullplan.PullPlanner()
+    planner = pullplan.PullPlanner(ledger, own, _sidecar_holds(local_sources_map))
     unknown = []
     for device in pull_targets:
         did, dname = device["device_id"], device["device_name"]
@@ -1815,6 +2439,17 @@ def _plan_pull(
                     planner.predict(
                         did, dname, src_name, path, info, local_sources_map[src_name]["path"]
                     )
+    if ledger is not None and ledger.readable:
+        for d in _deletion_candidates(
+            pull_targets=pull_targets,
+            manifest_cache=manifest_cache,
+            local_sources_map=local_sources_map,
+            source_filter=source_filter,
+            ledger=ledger,
+            my_device_id=my_device_id,
+            keeps=planner.keeps,
+        ):
+            planner.predict_delete(d.peer_id, d.peer_name, d.src_name, d.rel_path)
     return planner, unknown
 
 
@@ -1840,7 +2475,7 @@ def _preflight_conflicts(
     return _fail_mode_refusals(planner.predictions)
 
 
-_UNAPPLIED = frozenset({"unchanged", "waiting"})
+_UNAPPLIED = frozenset({"unchanged", "waiting", "kept"})
 
 
 def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
@@ -1853,7 +2488,72 @@ def _empty_outcomes() -> dict[ApplyOutcome, list[str]]:
         "unchanged": [],
         "failed": [],
         "waiting": [],
+        "kept": [],
+        "deleted": [],
     }
+
+
+def _classify_with_ledger(
+    remote_files: dict[str, dict],
+    base_path: Path,
+    src_name: str,
+    did: str,
+    all_tombstones: dict,
+    reporter: _ApplyReporter,
+) -> dict[str, dict]:
+    """The files that need a download under the pull rule.
+
+    A file the rule skips, holds or already matches reads no blob and is never
+    reported as waiting. Matches settle into the ledger; an ``older`` edit is
+    reported and not applied. Everything else is handed to the apply path, which
+    re-reads the local file and runs the same rule again.
+    """
+    ledger = reporter.ledger
+    assert ledger is not None
+    to_download: dict[str, dict] = {}
+    for rel_path, info in remote_files.items():
+        if is_tombstoned(src_name, rel_path, all_tombstones):
+            continue
+        local_path = base_path / rel_path
+        local = pullplan.LocalFile()
+        try:
+            if local_path.exists():
+                local = pullplan.LocalFile(True, hash_file(local_path), None)
+        except (PermissionError, OSError):
+            # Exists but unreadable: a read failure, never missing. The apply path reports it.
+            to_download[rel_path] = info
+            continue
+        try:
+            remote_mtime = mtime_from_manifest(info.get("mtime"))
+        except (TypeError, ValueError, OverflowError, OSError):
+            remote_mtime = None
+        if local.exists:
+            try:
+                local = pullplan.LocalFile(True, local.sha, mtime_from_path(local_path))
+            except (TypeError, ValueError, OverflowError, OSError):
+                pass
+        own_lists, anchor_ok = reporter.own(src_name, rel_path) if reporter.own else (False, False)
+        verdict = pullplan.decide(
+            ledger,
+            did,
+            src_name,
+            rel_path,
+            local,
+            info["sha256"],
+            remote_mtime,
+            pullplan.parse_from(info),
+            own_lists=own_lists,
+            anchor_ok=anchor_ok,
+        )
+        if verdict == "matched":
+            ledger.settle(
+                did, src_name, rel_path, info["sha256"], ancestors=pullplan.parse_from(info)
+            )
+        elif verdict == "older":
+            reporter.older.append(rel_path)
+        elif verdict in ("write", "fast-forward", "fallback", "both"):
+            to_download[rel_path] = info
+    return to_download
 
 
 def _pull_one_source(
@@ -1920,29 +2620,36 @@ def _pull_one_source(
     if not remote_files:
         return base_result
 
-    # Build local state for diff. mtime is re-read at apply time so it
-    # reflects what the file actually looks like when we act on it.
-    local_files: dict[str, dict] = {}
-    for rel_path in remote_files:
-        local_path = base_path / rel_path
-        try:
-            if local_path.exists():
-                sha = hash_file(local_path)
-                local_files[rel_path] = {"sha256": sha}
-        except (PermissionError, OSError):
-            pass
+    if reporter.ledger is not None and reporter.ledger.readable:
+        to_download = _classify_with_ledger(
+            remote_files, base_path, src_name, did, all_tombstones, reporter
+        )
+    else:
+        # Build local state for diff. mtime is re-read at apply time so it
+        # reflects what the file actually looks like when we act on it.
+        local_files: dict[str, dict] = {}
+        for rel_path in remote_files:
+            local_path = base_path / rel_path
+            try:
+                if local_path.exists():
+                    sha = hash_file(local_path)
+                    local_files[rel_path] = {"sha256": sha}
+            except (PermissionError, OSError):
+                pass
 
-    # Arg-swap: this is the additive pull path. See diff_files docstring
-    # — `new`/`modified` are files to download; `deleted` is ignored.
-    diff = diff_files(remote_files, local_files)
+        # Arg-swap: this is the pull-side download diff (the no-ledger path). See
+        # diff_files docstring — `new`/`modified` are files to download; `deleted`
+        # is ignored, since absence never deletes (deletions come from tombstones).
+        diff = diff_files(remote_files, local_files)
 
-    to_download = {**diff.new, **diff.modified}
-    to_download = {
-        path: info
-        for path, info in to_download.items()
-        if not is_tombstoned(src_name, path, all_tombstones)
-    }
+        to_download = {**diff.new, **diff.modified}
+        to_download = {
+            path: info
+            for path, info in to_download.items()
+            if not is_tombstoned(src_name, path, all_tombstones)
+        }
     if not to_download:
+        base_result.older = reporter.older
         return base_result
 
     if src_name in MM_INTERNAL_SOURCE_NAMES:
@@ -1978,6 +2685,7 @@ def _pull_one_source(
         bytes_transferred=bt,
         touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
+        older=reporter.older,
     )
 
 
@@ -1997,6 +2705,7 @@ def _record_source_bookkeeping(
         "skipped",
         "conflicted",
         "failed",
+        "deleted",
     ):
         for rel_path in per_source.outcomes.get(action_key, []):
             key = (action_key, rel_path)
@@ -2011,6 +2720,7 @@ def _record_source_bookkeeping(
                 rel_path=rel_path,
                 action=action_key,
                 remote_sha=remote_info.get("sha256"),
+                folder=per_source.deleted_folder if action_key == "deleted" else None,
             )
 
     # Claude sync log is best-effort: log file is cosmetic
@@ -2029,7 +2739,7 @@ def _record_source_bookkeeping(
                 modified_files=(
                     per_source.outcomes["merged"] + per_source.outcomes["merged-via-lcs"]
                 ),
-                deleted_files=[],
+                deleted_files=per_source.outcomes.get("deleted", []),
                 conflicted_files=per_source.outcomes["conflicted"],
                 skipped_files=per_source.outcomes["skipped"],
             )
@@ -2123,6 +2833,66 @@ def _old_form_text(result: PullResult) -> str:
         verb = "waits" if peers[0].files == 1 else "wait"
         return f"{items[0]} {verb} until it publishes shared names"
     return f"{', '.join(items)} wait until they publish shared names"
+
+
+_LEDGER_NOTICES = {
+    "busy": "another mm command is using state.db; retry in a moment",
+    "too-new": "state.db is from a newer mm; run mm update",
+    "corrupt": "state.db is damaged; move it aside as the README describes",
+    "interrupted": "an interrupted mm left an unfinished write in state.db; run mm status",
+    "unavailable": "this Python cannot load sqlite3",
+    "unreadable": "state.db could not be read",
+}
+
+
+def ledger_notice(result: PullResult) -> str:
+    """The one line for an unreadable or unwritable pull ledger, or "" when fine."""
+    cause = result.ledger_cause
+    if cause is None:
+        return ""
+    text = _LEDGER_NOTICES.get(cause, _LEDGER_NOTICES["unreadable"])
+    return (
+        f"mm: notice: {text}. Fast-forward and deletions are paused: this pull used "
+        f"the old mtime rule and deleted nothing. See {LEDGER_URL}."
+    )
+
+
+def _origin_text(result: PullResult) -> str:
+    names = [safety.safe_terminal_str(n) for n in result.deleted_origins]
+    return names[0] if len(names) == 1 else "peers"
+
+
+def deleted_clause(result: PullResult) -> str:
+    """``3 files deleted because Mac B deleted them; copies in <folder> for 30 days; see <URL>``."""
+    if not result.total_deleted:
+        return ""
+    where = (
+        f"copies in {safety.safe_terminal_str(result.deleted_folder)} for 30 days"
+        if result.deleted_folder
+        else "copies kept for 30 days"
+    )
+    return (
+        f"{core._count(result.total_deleted, 'file', 'files')} deleted because "
+        f"{_origin_text(result)} deleted {'it' if result.total_deleted == 1 else 'them'}; "
+        f"{where}; see {DELETED_FILES_URL}"
+    )
+
+
+def deleted_detail(result: PullResult) -> str:
+    """The autopull breadcrumb detail for deletions, or ""."""
+    if not result.total_deleted:
+        return ""
+    return (
+        f"{core._count(result.total_deleted, 'file', 'files')} deleted by "
+        f"{_origin_text(result)}; copies in {safety.safe_terminal_str(result.deleted_folder)}"
+    )
+
+
+def older_clause(result: PullResult) -> str:
+    if not result.older:
+        return ""
+    count = core._count(len(result.older), "older peer edit", "older peer edits")
+    return f"{count} not applied (mm pull --verbose)"
 
 
 def old_form_clause(result: PullResult) -> str:
@@ -2233,6 +3003,8 @@ def _conflict_review_notice(result: PullResult) -> None:
             f"mm: {core._count(result.total_conflicted, 'conflict copy', 'conflict copies')} kept; "
             "run mm conflicts to review, mm resolve to pick a winner"
         )
+    if notice := ledger_notice(result):
+        core._sync_warning(notice)
 
 
 def _print_pull_summary(
@@ -2424,6 +3196,8 @@ def _print_pull_summary(
         parts.append(f"[yellow]{result.total_conflicted} conflicts[/yellow]")
     if result.total_failed:
         parts.append(f"[red]{result.total_failed} failed[/red]")
+    if result.total_deleted:
+        parts.append(f"[red]{result.total_deleted} deleted[/red]")
     if result.total_waiting:
         parts.append(f"[yellow]{result.total_waiting} waiting[/yellow]")
     if result.total_skipped_unknown_source:
@@ -2443,6 +3217,8 @@ def _print_pull_summary(
         mb = result.bytes_transferred / (1024 * 1024)
         console.print(f"  {mb:.1f}MB transferred")
     console.print(f"  Completed in {result.elapsed:.1f}s")
+    if result.total_deleted:
+        console.print(f"  [yellow]{safe_str(deleted_clause(result))}[/yellow]")
     if result.total_conflicted:
         console.print(
             "  [yellow]Run [bold]mm conflicts[/bold] to review, "
@@ -2545,10 +3321,15 @@ def _pull_core(
 ) -> PullResult:
     """Core pull logic shared by pull and autopull.
 
-    Additive-only: downloads new and modified files, never deletes local
-    files. Tombstoned files are skipped. JSONL files are merged. MEMORY.md
-    files are line-merged. Non-mergeable files with divergent local edits
-    follow the _apply_incoming_file decision tree.
+    Downloads new and modified files and, only when a peer's own hashed
+    tombstone names a file whose local bytes equal the deleted version and
+    whose last-synced base for that peer equals it, moves that file into the
+    30-day recovery folder (Track 91A; see `_deletion_candidates`). Absence
+    from a peer manifest never deletes anything. Tombstoned files are not
+    downloaded. A file changed on only one side fast-forwards; JSONL files
+    and MEMORY.md files changed on both sides are unioned; other both-changed
+    files follow `pullplan.decide` (see the rule comment above
+    `_apply_incoming_file`).
 
     `conflict_mode`:
       - "keep-both": default; auto keep-both on conflict.
@@ -2821,6 +3602,12 @@ def _pull_core(
             lambda did: manifest_cache.get(did),
         )
 
+        # Track 91A: the fast-forward ledger. Unreadable means today's rule and no
+        # deletion; the cause is reported, never fatal.
+        ledger, ledger_exc = core.load_ledger(target_ids)
+        sources_cfg = {src["name"]: src for src in pull_sources}
+        own_lookup = _own_lookup(manifest_cache.get(my_device_id), sources_cfg, local_sources_map)
+
         if dry_run and not quiet and (not source_filter or source_filter == "mm-events"):
             for src in pull_resolution.selected:
                 if src["name"] in pull_resolution.would_create and any(
@@ -2845,6 +3632,9 @@ def _pull_core(
                 local_sources_map,
                 source_filter,
                 all_tombstones,
+                ledger,
+                own_lookup,
+                my_device_id,
             )
         if conflict_mode == "fail":
             assert planner is not None
@@ -2880,6 +3670,7 @@ def _pull_core(
         total_written = total_merged = total_skipped = total_conflicted = 0
         total_failed = total_skipped_unknown_source = bytes_transferred = 0
         total_waiting = 0
+        deleted_folder: str | None = None
 
         in_flight: _ApplyReporter | None = None
         per_source: _PerSourceResult | None = None
@@ -2942,6 +3733,9 @@ def _pull_core(
                         src_name=src_name,
                         outcomes=_empty_outcomes(),
                         pending_inline_bumps=pending_inline_bumps,
+                        ledger=None if dry_run else ledger,
+                        peer_id=did,
+                        own=own_lookup,
                     )
                     per_source = None
                     accounted = False
@@ -3031,6 +3825,40 @@ def _pull_core(
                                 else:
                                     console.print(f"  [yellow]warning:[/yellow] {msg}")
 
+            if not dry_run:
+                # Hooks never run `mm gc`; copies only grow when a pull deletes.
+                with suppress(Exception):
+                    retention._gc_deleted_copies(False, False, quiet=True)
+                blocked = {
+                    (r.device_id, r.src_name)
+                    for r in per_source_results
+                    if r.outcomes["failed"] or r.outcomes.get("waiting")
+                }
+                deletions = _deletion_candidates(
+                    pull_targets=pull_targets,
+                    manifest_cache=manifest_cache,
+                    local_sources_map=local_sources_map,
+                    source_filter=source_filter,
+                    ledger=ledger,
+                    my_device_id=my_device_id,
+                    blocked=blocked,
+                )
+                if deletions:
+                    run = _run_deletions(
+                        deletions,
+                        ledger=ledger,
+                        touched_parents=touched_parents,
+                        per_source_results=per_source_results,
+                        quiet=quiet,
+                        verbose=verbose,
+                    )
+                    deleted_folder = str(run.folder) if run.folder else None
+                    if run.ledger_exc is not None:
+                        ledger_exc = run.ledger_exc
+                    for r in per_source_results:
+                        if r.deleted_folder is not None:
+                            _record_source_bookkeeping(r, {}, quiet=quiet, verbose=verbose)
+
             fsync_warnings = _fsync_touched_parents(touched_parents)
 
             # Track 12A: end-of-pull-batch drain. Every peer has been walked, so
@@ -3040,6 +3868,7 @@ def _pull_core(
             # abort means the user does not trust this pull, so half-made
             # keep-canonical decisions are not broadcast to the fleet.
             _drain_inline_bumps(pending_inline_bumps)
+            ledger.flush_deferred()
         except BaseException as exc:
             # A finally-with-access-to-the-error: preserve completed publications
             # for every exception class, then re-raise the ORIGINAL exception.
@@ -3072,7 +3901,29 @@ def _pull_core(
             # emit accumulated load-bearing warnings to stderr. The v0.8.1
             # contract requires corrupt-peer / unknown-source / fsync-failure
             # warnings to survive quiet mode AND partial pulls.
+            if not dry_run and ledger.dirty:
+                flushed_files = sum(len(v) for v in ledger.flush_paths.values())
+                flush_seconds = core.flush_ledger_files(ledger)
+                if verbose and not quiet and flushed_files:
+                    with suppress(Exception):
+                        console.print(
+                            f"  [dim]flushed {flushed_files} files in {flush_seconds:.2f}s[/dim]"
+                        )
+                if not fsync_warnings:
+                    commit_exc = core.commit_ledger(ledger)
+                    if commit_exc is not None:
+                        ledger_exc = commit_exc
+            deleted_results = [r for r in per_source_results if r.outcomes.get("deleted")]
             _partial_result = PullResult(
+                total_deleted=sum(len(r.outcomes["deleted"]) for r in deleted_results),
+                deleted_origins=list(dict.fromkeys(r.device_name for r in deleted_results)),
+                deleted_folder=deleted_folder if deleted_results else None,
+                older=[
+                    OlderEdit(r.device_name, r.src_name, p)
+                    for r in per_source_results
+                    for p in r.older
+                ],
+                ledger_cause=core.ledger_cause(ledger_exc),
                 old_form_peers=old_form_peers,
                 not_placed_files=project_names.not_placed_files,
                 not_placed_projects=project_names.not_placed_projects,
@@ -3081,7 +3932,8 @@ def _pull_core(
                 total_merged=total_merged,
                 total_skipped=total_skipped,
                 total_conflicted=total_conflicted,
-                total_failed=total_failed,
+                total_failed=total_failed
+                + sum(len(r.outcomes["failed"]) for r in per_source_results if r.deleted_folder),
                 total_skipped_unknown_source=total_skipped_unknown_source,
                 bytes_transferred=bytes_transferred,
                 device_names=device_names,
@@ -3112,10 +3964,20 @@ def _pull_core(
                 if not exception_in_flight:
                     raise
 
+        if verbose and not quiet and _partial_result.older:
+            for edit in _partial_result.older:
+                console.print(
+                    f"  older peer edit not applied: {safe_str(edit.device_name)}/"
+                    f"{safe_str(edit.src_name)}/{safe_str(edit.rel_path)} (compare both "
+                    "versions; to keep the peer's, run touch on its file and mm push there)"
+                )
         if dry_run and not quiet:
             assert planner is not None
             console.print(pullplan.totals(planner.predictions))
             if verbose:
+                for peer, src, rel, why in planner.keeps:
+                    where = f"{safe_str(peer)}/{safe_str(src)}/{safe_str(rel)}"
+                    console.print(f"  keep ({safe_str(why)}): {where}")
                 _print_project_lists(project_names, device_labels)
             if corrupt_peers:
                 console.print(

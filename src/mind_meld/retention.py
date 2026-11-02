@@ -31,12 +31,13 @@ summary for each reaper that actually runs.
 from __future__ import annotations
 
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import resolveflow, token_usage
+from mind_meld import fsutil, resolveflow, statedb, token_usage
 from mind_meld.config import get_sources
 from mind_meld.consoles import console
 from mind_meld.manifest import (
@@ -48,6 +49,11 @@ from mind_meld.safety import safe_str, safe_terminal_str
 from mind_meld.storage.local import LocalBackend
 
 CONFLICT_AGE_DAYS = 30
+# Track 91A: a file a pull deleted because a peer deleted it is kept this long in
+# ``~/.config/mind-meld/deleted/<UTC stamp>-<rand>/``. Thirty days is a minimum:
+# hooks never run `mm gc`, so a pull's own deletion pass also reaps.
+DELETED_COPY_DAYS = 30
+_DELETED_FOLDER_RE = re.compile(r"^(\d{8})-(\d{6})-[0-9a-f]{4}$")
 # Track 7B (v0.10.3): per-device daily JSONL events files older than this
 # are reaped at every `mm gc`. The retention is fleet policy, not per-
 # device opt-in: a stale device's old events would otherwise pin storage
@@ -308,6 +314,74 @@ def _gc_old_event_files(
     return outcome
 
 
+def _deleted_folder_age(name: str, now: datetime) -> timedelta | None:
+    """Age from the folder NAME (UTC); mtimes lie after a restore. None if unparseable."""
+    match = _DELETED_FOLDER_RE.match(name)
+    if match is None:
+        return None
+    try:
+        made = datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return now - made.replace(tzinfo=timezone.utc)
+
+
+def _gc_deleted_copies(
+    dry_run: bool,
+    verbose: bool,
+    *,
+    now: datetime | None = None,
+    quiet: bool = False,
+) -> ReapOutcome:
+    """Reap recovery folders older than DELETED_COPY_DAYS, whole folder at a time.
+
+    An unparseable folder name is never reaped. A failure stops nothing: it prints
+    one notice and leaves every folder in place.
+    """
+    now = now or datetime.now(timezone.utc)
+    root = statedb.deleted_copies_dir()
+    candidates = deleted = failed = skipped = 0
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
+    except FileNotFoundError:
+        entries = []
+    except OSError as e:
+        if not quiet:
+            console.print(
+                f"[yellow]Deleted-file copies could not be listed: {safe_str(e)}[/yellow]"
+            )
+        return ReapOutcome(failed=1)
+    for entry in entries:
+        age = _deleted_folder_age(entry.name, now)
+        if age is None:
+            skipped += 1
+            continue
+        if age <= timedelta(days=DELETED_COPY_DAYS):
+            continue
+        candidates += 1
+        if dry_run:
+            if not quiet:
+                console.print(f"  would delete recovery folder {safe_str(entry)}")
+            continue
+        fsutil.refuse_real_state_write_under_pytest(entry)
+        try:
+            shutil.rmtree(entry)
+        except OSError as e:
+            failed += 1
+            if not quiet:
+                console.print(
+                    f"  [yellow]could not delete {safe_str(entry)}: {safe_str(e)}[/yellow]"
+                )
+        else:
+            deleted += 1
+            if verbose and not quiet:
+                console.print(f"  deleted recovery folder {safe_str(entry)}")
+    outcome = ReapOutcome(candidates=candidates, deleted=deleted, failed=failed, skipped=skipped)
+    if not quiet:
+        _render_reap_outcome("Deleted-file copies", outcome, dry_run=dry_run)
+    return outcome
+
+
 def _gc_old_conflict_files(
     config: dict,
     dry_run: bool,
@@ -521,7 +595,9 @@ __all__ = [
     "DEFAULT_RETROS_DIR",
     "EVENTS_RETENTION_DAYS",
     "ReapOutcome",
+    "DELETED_COPY_DAYS",
     "_SNAPSHOT_FILENAME_RE",
+    "_gc_deleted_copies",
     "_gc_old_conflict_files",
     "_gc_old_event_files",
     "_gc_orphan_retros_dir",

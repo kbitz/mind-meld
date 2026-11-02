@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from rich.console import Console
+from typer.testing import CliRunner
 
-from mind_meld.cli import _do_gc
+from mind_meld import statedb
+from mind_meld.cli import _do_gc, app
+from mind_meld.config import save_config
+from mind_meld.crypto import bootstrap_crypto_init
+from mind_meld.devices import register_device
 from mind_meld.retention import (
     _SNAPSHOT_FILENAME_RE,
+    _gc_deleted_copies,
     _gc_old_event_files,
     _gc_orphan_retros_dir,
     _gc_token_cache,
@@ -249,3 +256,251 @@ class TestTokenCacheGcFailureNotice:
         assert "skipped=1" in summary
         if dry_run:
             assert "dry-run" in summary
+
+
+# ── Track 91A: recovery copies of files a pull deleted ────────────────
+
+NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _folder(age: timedelta, suffix: str = "ab12") -> Path:
+    """A recovery folder named for the moment `age` before NOW, holding one copy."""
+    name = f"{(NOW - age):%Y%m%d-%H%M%S}-{suffix}"
+    folder = statedb.deleted_copies_dir() / name
+    (folder / "notes").mkdir(parents=True)
+    (folder / "notes" / "gone.md").write_bytes(b"recoverable\n")
+    return folder
+
+
+class TestDeletedCopiesReaper:
+    def test_reaps_a_31_day_old_folder_by_its_name_and_keeps_a_29_day_old_one(self, capsys):
+        old, fresh = _folder(timedelta(days=31)), _folder(timedelta(days=29), "cd34")
+
+        outcome = _gc_deleted_copies(False, False, now=NOW)
+
+        assert not old.exists() and fresh.exists()
+        assert (outcome.candidates, outcome.deleted, outcome.failed) == (1, 1, 0)
+        assert "Deleted-file copies: candidates=1 deleted=1 failed=0" in capsys.readouterr().out
+
+    def test_the_boundary_is_thirty_days_exactly(self):
+        edge = _folder(timedelta(days=30))
+        just_over = _folder(timedelta(days=30, seconds=1), "cd34")
+        _gc_deleted_copies(False, False, now=NOW, quiet=True)
+        assert edge.exists() and not just_over.exists()
+
+    def test_age_comes_from_the_folder_name_never_from_the_modified_time(self):
+        # A restore from backup rewrites mtimes: a recent mtime must not save an old folder,
+        # and an ancient mtime must not doom a recent one.
+        old, fresh = _folder(timedelta(days=45)), _folder(timedelta(days=2), "cd34")
+        now = NOW.timestamp()
+        os.utime(old, (now, now))
+        os.utime(fresh, (1_000_000_000, 1_000_000_000))
+        _gc_deleted_copies(False, False, now=NOW, quiet=True)
+        assert not old.exists() and fresh.exists()
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "backup",
+            "20200101-000000",  # no random suffix
+            "20200101-000000-ABCD",  # not the lowercase hex mm writes
+            "20200101-000000-abcde",
+            "20200230-000000-abcd",  # not a date
+            "2020010-000000-abcd",
+            "x20200101-000000-abcd",
+            "20200101-000000-abcd.bak",
+        ],
+    )
+    def test_an_unparseable_name_is_never_reaped_however_old_its_files(self, name, capsys):
+        folder = statedb.deleted_copies_dir() / name
+        folder.mkdir(parents=True)
+        (folder / "keep.md").write_bytes(b"x")
+        os.utime(folder, (1_000_000_000, 1_000_000_000))
+        outcome = _gc_deleted_copies(False, False, now=NOW)
+        assert (folder / "keep.md").exists()
+        assert (outcome.candidates, outcome.deleted, outcome.skipped) == (0, 0, 1)
+
+    def test_a_dry_run_deletes_nothing_and_names_what_it_would(self, capsys):
+        old = _folder(timedelta(days=40))
+        outcome = _gc_deleted_copies(True, False, now=NOW)
+        assert (old / "notes" / "gone.md").read_bytes() == b"recoverable\n"
+        assert outcome.candidates == 1 and outcome.deleted == 0
+        out = capsys.readouterr().out
+        assert "would delete recovery folder" in out and "Deleted-file copies dry-run" in out
+
+    def test_a_missing_recovery_root_is_just_empty(self, capsys):
+        assert not statedb.deleted_copies_dir().exists()
+        outcome = _gc_deleted_copies(False, False, now=NOW)
+        assert (outcome.candidates, outcome.deleted, outcome.failed) == (0, 0, 0)
+        assert not statedb.deleted_copies_dir().exists()  # the reaper creates nothing
+
+    def test_symlinks_and_plain_files_are_not_recovery_folders(self, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "precious.md").write_bytes(b"x")
+        root = statedb.deleted_copies_dir()
+        root.mkdir(parents=True)
+        name = f"{(NOW - timedelta(days=90)):%Y%m%d-%H%M%S}-ab12"
+        (root / name).symlink_to(elsewhere)
+        (root / f"{(NOW - timedelta(days=91)):%Y%m%d-%H%M%S}-cd34").write_bytes(b"a file")
+        outcome = _gc_deleted_copies(False, False, now=NOW, quiet=True)
+        assert (elsewhere / "precious.md").exists() and (root / name).is_symlink()
+        assert outcome.candidates == 0
+
+    def test_a_removal_failure_prints_one_notice_and_leaves_the_folder(self, monkeypatch, capsys):
+        old = _folder(timedelta(days=40))
+        other = _folder(timedelta(days=50), "cd34")
+
+        def refuse(path, *args, **kwargs):
+            raise OSError("Permission denied")
+
+        monkeypatch.setattr("mind_meld.retention.shutil.rmtree", refuse)
+        outcome = _gc_deleted_copies(False, False, now=NOW)
+
+        assert (outcome.candidates, outcome.deleted, outcome.failed) == (2, 0, 2)
+        assert (old / "notes" / "gone.md").exists() and (other / "notes" / "gone.md").exists()
+        out = capsys.readouterr().out
+        assert out.count("could not delete") == 2  # one notice per folder, nothing raised
+        assert "Retention cleanup was incomplete" in out
+
+    def test_a_listing_failure_prints_one_notice_and_changes_nothing(self, monkeypatch, capsys):
+        old = _folder(timedelta(days=40))
+        real_iterdir = Path.iterdir
+
+        def refuse(self):
+            if self == statedb.deleted_copies_dir():
+                raise PermissionError("Permission denied")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", refuse)
+        outcome = _gc_deleted_copies(False, False, now=NOW)
+        assert outcome.failed == 1 and outcome.deleted == 0
+        assert (old / "notes" / "gone.md").exists()
+        assert capsys.readouterr().out.count("could not be listed") == 1
+
+    def test_quiet_prints_nothing_even_when_it_fails(self, monkeypatch, capsys):
+        _folder(timedelta(days=40))
+        monkeypatch.setattr(
+            "mind_meld.retention.shutil.rmtree", lambda *a, **k: (_ for _ in ()).throw(OSError("x"))
+        )
+        _gc_deleted_copies(False, False, now=NOW, quiet=True)
+        assert capsys.readouterr().out == ""
+
+    def test_the_reaper_refuses_to_touch_real_account_state_under_pytest(
+        self, synthetic_account_home, monkeypatch
+    ):
+        from mind_meld import fsutil
+
+        real = synthetic_account_home / ".config" / "mind-meld" / "deleted"
+        stale = real / f"{(NOW - timedelta(days=90)):%Y%m%d-%H%M%S}-ab12"
+        stale.mkdir(parents=True)
+        monkeypatch.setattr(statedb, "DB_DIR", real.parent)
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            _gc_deleted_copies(False, False, now=NOW, quiet=True)
+        assert stale.exists()
+
+
+PASSPHRASE = "retention-copies-test"
+MEMORY_KB = 1024
+runner = CliRunner()
+
+
+class TestMmGcAndRecoveryCopies:
+    def _store(self, tmp_path, monkeypatch):
+        storage_dir = tmp_path / "storage"
+        notes = tmp_path / "notes"
+        notes.mkdir()
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "dev-a", "A")
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(storage_dir)},
+                "sync": {
+                    "max_file_size": 52_428_800,
+                    "sources": [
+                        {
+                            "name": "notes",
+                            "path": str(notes),
+                            "type": "generic",
+                            "include_dirs": ["."],
+                        }
+                    ],
+                },
+                "crypto": {"argon2_memory_kb": MEMORY_KB},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        return storage_dir, notes
+
+    def test_gc_collects_store_blobs_and_leaves_the_recovery_copy_intact(
+        self, tmp_path, monkeypatch
+    ):
+        import hashlib
+
+        storage_dir, notes = self._store(tmp_path, monkeypatch)
+        (notes / "doc.md").write_bytes(b"first version\n")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        first = hashlib.sha256(b"first version\n").hexdigest()
+        blob = storage_dir / "data" / "dev-a" / f"{first}.enc"
+        assert blob.exists()
+        # A recovery copy of that same version, as a pull that followed a deletion keeps it.
+        copy_dir = statedb.deleted_copies_dir() / f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-ab12"
+        (copy_dir / "notes").mkdir(parents=True)
+        (copy_dir / "notes" / "doc.md").write_bytes(b"first version\n")
+        # The store stops referencing the blob: the file changes and is pushed again.
+        (notes / "doc.md").write_bytes(b"second version\n")
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        result = runner.invoke(app, ["gc"])
+
+        assert result.exit_code == 0, result.output
+        assert not blob.exists(), "setup: gc must have collected the store blob"
+        # The copy depends on no store blob.
+        assert (copy_dir / "notes" / "doc.md").read_bytes() == b"first version\n"
+        assert "Deleted-file copies: candidates=0" in result.output
+
+    def test_gc_reaps_an_old_folder_and_its_dry_run_only_previews_it(self, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch)
+        old_name = f"{(datetime.now(timezone.utc) - timedelta(days=45)):%Y%m%d-%H%M%S}-ab12"
+        old = statedb.deleted_copies_dir() / old_name
+        (old / "notes").mkdir(parents=True)
+        (old / "notes" / "doc.md").write_bytes(b"old")
+        recent = _folder_now("cd34")
+
+        preview = runner.invoke(app, ["gc", "--dry-run"])
+        assert preview.exit_code == 0, preview.output
+        assert "would delete recovery folder" in preview.output
+        assert (old / "notes" / "doc.md").exists()
+
+        applied = runner.invoke(app, ["gc"])
+        assert applied.exit_code == 0, applied.output
+        assert not old.exists() and (recent / "notes" / "doc.md").exists()
+        assert "Deleted-file copies: candidates=1 deleted=1" in applied.output
+
+    def test_a_reaper_failure_does_not_fail_gc_or_remove_anything(self, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch)
+        old_name = f"{(datetime.now(timezone.utc) - timedelta(days=45)):%Y%m%d-%H%M%S}-ab12"
+        old = statedb.deleted_copies_dir() / old_name
+        (old / "notes").mkdir(parents=True)
+        (old / "notes" / "doc.md").write_bytes(b"old")
+        monkeypatch.setattr(
+            "mind_meld.retention.shutil.rmtree",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("Permission denied")),
+        )
+        result = runner.invoke(app, ["gc"])
+        assert result.exit_code == 0, result.output
+        assert (old / "notes" / "doc.md").exists()
+        assert "could not delete" in result.output
+
+
+def _folder_now(suffix: str) -> Path:
+    name = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{suffix}"
+    folder = statedb.deleted_copies_dir() / name
+    (folder / "notes").mkdir(parents=True)
+    (folder / "notes" / "doc.md").write_bytes(b"recent")
+    return folder

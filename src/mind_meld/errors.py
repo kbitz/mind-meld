@@ -12,6 +12,8 @@ from mind_meld.safety import safe_str
 
 SNAPSHOT_FAILURES_URL = "https://github.com/kbitz/mind-meld#snapshot-failures"
 PULL_FAILURES_URL = "https://github.com/kbitz/mind-meld#pull-incomplete--could-not-pull-a-file"
+DELETED_FILES_URL = "https://github.com/kbitz/mind-meld#recovering-a-deleted-file"
+LEDGER_URL = "https://github.com/kbitz/mind-meld#history-database"
 GIT_WALK_FAILURES_URL = (
     "https://github.com/kbitz/mind-meld#dropped-repositories-and-ignored-git-environment-variables"
 )

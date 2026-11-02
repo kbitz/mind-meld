@@ -126,8 +126,10 @@ from mind_meld.devices import (
     update_last_seen,
 )
 from mind_meld.errors import (
+    DELETED_FILES_URL,
     GIT_WALK_FAILURES_URL,
     HOST_USAGE_CAPTURE_URL,
+    LEDGER_URL,
     ConfigError,
     CryptoError,
     KeyringUnavailableError,
@@ -256,6 +258,15 @@ class PushResult:
     # grew. A never-published file is left out. Every displayed count is
     # `len(held)`; autopush records it in its `degraded` breadcrumb.
     held: list[tuple[str, str, str]] = field(default_factory=list)
+    # Track 91A: a scan token was renewed (metadata-only publish); files a gone,
+    # new or unreadable scan root hid from this push (named in one outcome clause);
+    # scan roots whose token could not be written, so nothing under them mints;
+    # why the pull ledger could not be read or written.
+    anchor_updated: bool = False
+    left_out_clause: str = ""
+    left_out_files: int = 0
+    unwritable_roots: list[str] = field(default_factory=list)
+    ledger_cause: str | None = None
 
 
 app = typer.Typer(
@@ -967,7 +978,7 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             else f"{core._count(published_files, 'content change', 'content changes')} published"
             if published_files
             else "metadata updated"
-            if result.metadata_updated
+            if result.metadata_updated or result.anchor_updated
             else "source selection updated"
             if result.selection_updated
             else "manifest repaired"
@@ -989,8 +1000,11 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             parts.append("usage published")
         if result.held:
             parts.append(f"{len(result.held)} held")
+        if result.left_out_clause:
+            parts.append(result.left_out_clause.rstrip("."))
         return "Push: " + "; ".join(parts) + "."
     assert isinstance(result, pullflow.PullResult)
+    deleted = pullflow.deleted_clause(result)
     lead = (
         "no enabled sources"
         if result.no_sources
@@ -998,6 +1012,8 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         if result.no_peers
         else f"{core._count(result.total_applied, 'file', 'files')} applied"
         if result.total_applied
+        else deleted
+        if deleted
         else "no changes"
     )
     if result.total_conflicted:
@@ -1005,6 +1021,10 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
         lead += f" ({result.total_conflicted} conflict {word})"
     if result.total_skipped:
         lead += f"; {result.total_skipped} skipped"
+    if deleted and result.total_applied:
+        lead += f"; {deleted}"
+    if clause := pullflow.older_clause(result):
+        lead += f"; {clause}"
     if clause := pullflow.waiting_clause(result):
         lead += f"; {clause}"
     if clause := pullflow.old_form_clause(result):
@@ -1113,6 +1133,8 @@ def _sync_failure(verb: str, state: dict, error: BaseException | None) -> str:
         )
         if partial:
             effects = "completed changes remain; repair the reported failures before one retry"
+        if clause := pullflow.deleted_clause(result):
+            effects += f"; {clause}"
         if clause := pullflow.waiting_clause(result):
             effects += f"; {clause}"
     elif isinstance(result, PushResult) and result.content_accepted:
@@ -1474,6 +1496,10 @@ def push(
                     and result
                     and result.content_changed
                     and projectid.projects_listed()
+                    # Files a gone or new scan root hid were dropped from the
+                    # manifest unseen: their blobs may be the only copy until a
+                    # pull restores them.
+                    and not result.left_out_files
                 ):
                     try:
                         core._sync_progress_phase("Cleaning up orphaned blobs")
@@ -1597,15 +1623,22 @@ def _push_result_or_none(
     held: list[tuple[str, str, str]] | None = None,
     *,
     switch_held: bool = False,
+    left_out_clause: str = "",
+    left_out_files: int = 0,
 ) -> PushResult | None:
     """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
     if (
-        getattr(events_degradations, "total", len(events_degradations)) or held or switch_held
+        getattr(events_degradations, "total", len(events_degradations))
+        or held
+        or switch_held
+        or left_out_clause
     ) and not dry_run:
         return PushResult(
             events_degradations=events_degradations,
             held=list(held or []),
             switch_held=switch_held,
+            left_out_clause=left_out_clause,
+            left_out_files=left_out_files,
         )
     return None
 
@@ -2092,6 +2125,7 @@ def _push_core(
     exclude_map, skip_prefixes = core._build_exclude_map(config, sources, strict=True)
     include_map = core._build_include_map(config, sources)
     frozen: dict[str, set[str]] = {}
+    still_present: set[tuple[str, str]] = set()
     if remote_manifest is not None:
         remote_manifest = _filter_unselected_sources(remote_manifest, intended_names)
         remote_manifest = core._filter_excluded_paths(
@@ -2133,7 +2167,11 @@ def _push_core(
             # Missing default roots truthfully preview deletions.
             proof_sources = [s for s in sources if s["name"] not in resolution.would_create]
         core._prove_omitted_paths_absent(
-            local_manifest, remote_manifest, proof_sources, max_file_size=max_file_size
+            local_manifest,
+            remote_manifest,
+            proof_sources,
+            max_file_size=max_file_size,
+            still_present=still_present,
         )
     elif held is not None and held_candidates is not None:
         # First push: no prior entry to keep, so a held file is simply left out.
@@ -2148,8 +2186,19 @@ def _push_core(
             include_map=include_map,
         )
 
+    # Track 91A: a push mints a tombstone only for a file this machine held and can
+    # prove gone: the scan root is the folder it last published, the file is not
+    # still on disk, and this machine did not merely follow a peer's deletion.
+    ledger, ledger_exc = core.load_ledger(())
+    guard = core.compute_mint_guard(
+        local_manifest, remote_manifest, sources, ledger, still_present=still_present
+    )
+    core.stamp_left_out(guard, remote_manifest, fetch.manifest if fetch.is_ok else None)
+
     # Generate tombstones for files that disappeared since last push
-    tombstones = generate_tombstones(local_manifest, remote_manifest, device_id)
+    tombstones = generate_tombstones(
+        local_manifest, remote_manifest, device_id, skip_mint=guard.skip
+    )
     local_manifest["tombstones"] = tombstones
 
     # Only the REAL remote manifest drives the diff (avoid re-uploading every
@@ -2170,6 +2219,7 @@ def _push_core(
     # A project renamed on the wire (remote change, moved checkout) differs only
     # in names: no content change, but the manifest is republished once.
     names_pending = core.names_only_change(local_manifest, remote_sources)
+    anchor_is_pending = core.anchor_pending(remote_manifest, sources, nested_roots)
     if fetch.is_ok:
         # Without an accepted manifest of our own, everything (including
         # content already fleet-wide) counts as new.
@@ -2206,8 +2256,12 @@ def _push_core(
         and not retro_catchup_pending
         and not form.due
         and not names_pending
+        and not anchor_is_pending
     ):
         scan_held = _held_list(held_files)
+        left_out_note = guard.clause()
+        if show and left_out_note and (dry_run or result_observer is None):
+            console.print(f"[yellow]{safe_str(left_out_note)}[/yellow]")
         if show and (dry_run or result_observer is None):
             if scan_held:
                 lead = "Nothing would be pushed" if dry_run else "Nothing pushed"
@@ -2226,6 +2280,8 @@ def _push_core(
                 events_degradations=events_degradations,
                 held=scan_held,
                 switch_held=form.switch_held,
+                left_out_clause=left_out_note,
+                left_out_files=guard.left_out_files,
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2253,7 +2309,12 @@ def _push_core(
                 )
             return result
         return _push_result_or_none(
-            events_degradations, dry_run, scan_held, switch_held=form.switch_held
+            events_degradations,
+            dry_run,
+            scan_held,
+            switch_held=form.switch_held,
+            left_out_clause=left_out_note,
+            left_out_files=guard.left_out_files,
         )
 
     # OK, this push will upload bytes. Run the events tail now to capture
@@ -2330,11 +2391,15 @@ def _push_core(
             local_manifest["sources"].update(events_manifest["sources"])
             if remote_manifest is not None:
                 core._prove_omitted_paths_absent(
-                    local_manifest, remote_manifest, sources, max_file_size=max_file_size
+                    local_manifest,
+                    remote_manifest,
+                    sources,
+                    max_file_size=max_file_size,
+                    still_present=still_present,
                 )
             # mm-events file count may have rolled (new daily file); regenerate.
             local_manifest["tombstones"] = generate_tombstones(
-                local_manifest, remote_manifest, device_id
+                local_manifest, remote_manifest, device_id, skip_mint=guard.skip | still_present
             )
 
     source_by_name = {src["name"]: src for src in sources}
@@ -2424,6 +2489,8 @@ def _push_core(
     if dry_run:
         if show:
             elapsed = time.time() - start
+            if clause := guard.clause():
+                console.print(f"\n[yellow]{safe_str(clause)}[/yellow]")
             if has_selection_change and not (total_new or total_modified or total_deleted):
                 console.print("\n[bold]Would refresh manifest[/bold] (source selection changed).")
             elif has_mtime_only and not (total_new or total_modified or total_deleted):
@@ -2453,7 +2520,7 @@ def _push_core(
         # upload then held and removed. Reconcile against the final entries so
         # that accepted deletion survives until replacement bytes are published.
         local_manifest["tombstones"] = generate_tombstones(
-            local_manifest, remote_manifest, device_id
+            local_manifest, remote_manifest, device_id, skip_mint=guard.skip | still_present
         )
 
     # Upload manifest (includes tombstones)
@@ -2480,11 +2547,29 @@ def _push_core(
         else:
             console.print(f"\n[bold]Uploading {total_new + total_modified} files...[/bold]")
     core._sync_progress_phase("Saving manifest")
+    unwritable_roots = core.publish_anchors(local_manifest, sources, nested_roots)
+    core.stamp_ancestry(local_manifest, remote_manifest, ledger)
+    kept_wire_folders: dict[str, str] = {}
+    if form.publish_new and guard.left_out.get("claude") and remote_manifest is not None:
+        dropped = {
+            parts[1]
+            for rel in guard.left_out["claude"]
+            if len(parts := rel.split("/", 2)) == 3 and parts[0] == "projects"
+        }
+        prior_folders = ((remote_manifest.get("sources") or {}).get("claude") or {}).get(
+            "wire_folders"
+        )
+        kept_wire_folders = {
+            wire: folder
+            for wire, folder in (prior_folders if isinstance(prior_folders, dict) else {}).items()
+            if folder in dropped
+        }
     enc_manifest = core.encode_manifest(
         local_manifest,
         wire_names=form.publish_new,
         passphrase=passphrase,
         memory_kb=memory_kb,
+        kept_wire_folders=kept_wire_folders,
     )
     mkey = manifest_key(device_id)
     fresh_manifest = core._fetch_remote_manifest(backend, device_id, passphrase, memory_kb)
@@ -2532,9 +2617,33 @@ def _push_core(
         wire_names_published=form.switch_due,
         names_updated=(names_pending or form.republish_due) and not form.switch_held,
         switch_held=form.switch_held,
+        anchor_updated=anchor_is_pending,
+        left_out_clause=guard.clause(),
+        left_out_files=guard.left_out_files,
+        unwritable_roots=unwritable_roots,
     )
     backend.put(mkey, enc_manifest)
     result.content_accepted = True
+    # The published versions are the ones this machine now holds; later pulls
+    # fast-forward from them. A ledger that cannot be written degrades, never fails.
+    core.record_published(ledger, local_manifest)
+    ledger_exc = core.commit_ledger(ledger) or ledger_exc
+    result.ledger_cause = core.ledger_cause(ledger_exc)
+    if unwritable_roots and attended:
+        with core._pause_sync_progress():
+            for folder in unwritable_roots[:3]:
+                print(
+                    f"mm: notice: deletions under {safety.safe_terminal_str(folder)} will not "
+                    "propagate; restore write access, then mm push",
+                    file=sys.stderr,
+                )
+    if result.ledger_cause and attended:
+        with core._pause_sync_progress():
+            print(
+                f"mm: notice: pull ledger unavailable ({result.ledger_cause}); "
+                f"deletions are paused. See {LEDGER_URL}.",
+                file=sys.stderr,
+            )
     if attempt is not None:
         attempt.content_accepted = True
     if result_observer is not None:
@@ -2632,7 +2741,8 @@ def pull(
         False,
         "--dry-run",
         help=(
-            "Preview what mm pull would write, merge or conflict. Changes nothing except "
+            "Preview what mm pull would write, merge, conflict, delete (because a peer "
+            "deleted a file) or hold as an older peer edit. Changes nothing except "
             "the local lock file: no file writes or renames, config writes, pull-history "
             "rows or upgrade checks. Exits 1 if the preview stops, 3 if --conflict-mode "
             "fail predicts conflicts."
@@ -2652,6 +2762,10 @@ def pull(
     ),
 ) -> None:
     """Pull selected context from other Macs.
+
+    A file a peer deleted is deleted here too when it is exactly the version this
+    Mac last synced from that peer; the bytes are kept for 30 days (see README,
+    "Recovering a deleted file").
 
     keep-both preserves local files and saves divergent remote bytes in
     .sync-conflict-* copies. prompt asks per file; with --dry-run it only
@@ -3021,6 +3135,8 @@ def diff_cmd(
         s["name"]: Path(s["path"]).expanduser().resolve() for s in sources_configs
     }
 
+    # `--from DEVICE` previews with that peer's ledger, as the pull itself would.
+    diff_planner = pullplan.PullPlanner(core.load_ledger([target_id])[0]) if from_device else None
     any_changes = False
     for src_name, src_data, remote_src, diff in core.iter_source_diffs(
         local_manifest, remote_sources, source_filter=source, skip_unchanged=True
@@ -3039,7 +3155,13 @@ def diff_cmd(
             remote_info = remote_files.get(path, {})
             base_path = src_base_paths.get(src_name)
             if base_path is not None and remote_info:
-                outcome = pullplan._predict_pull_outcome(path, remote_info, base_path)
+                outcome = (
+                    diff_planner.predict(
+                        target_id, "", src_name, path, remote_info, base_path
+                    ).outcome
+                    if diff_planner is not None
+                    else pullplan._predict_pull_outcome(path, remote_info, base_path)
+                )
                 console.print(
                     f"    [yellow]~ push  [/yellow] {safe_str(path)} (pull would: {outcome})"
                 )
@@ -3118,6 +3240,7 @@ def gc(
             retention._gc_old_conflict_files(
                 config, dry_run, verbose, deletion_requires_flag=dry_run and not prune_conflicts
             )
+        retention._gc_deleted_copies(dry_run, verbose)
         if dry_run:
             console.print(core.DRY_RUN_COMPLETE)
     except MindMeldError as e:
@@ -4548,6 +4671,7 @@ _LogAction = Literal[
     "excluded",
     "uploaded",
     "failed",
+    "deleted",
 ]
 _LogVerb = Literal["pull", "push", "self-upgrade"]
 
@@ -4817,7 +4941,8 @@ def recover(
         core._error(
             "mm recover requires a recovery mode flag. Today the only mode "
             "is --abandon-manifest (quarantine a corrupt manifest and allow "
-            "the next push to start fresh)."
+            "the next push to start fresh). To get back a file a pull deleted, see "
+            f"{DELETED_FILES_URL}."
         )
 
     config = core._get_config(read_only=False)
@@ -4944,9 +5069,10 @@ def resolve(
     (a)bort exits the resolve walk; previously-resolved conflicts stay
     resolved.
 
-    Canonical deletions and renames propagate on the next `mm push` via
-    the existing tombstone / additive-sync machinery when the path is
-    in source scope. Sidecar deletion is local.
+    Canonical deletions and renames propagate on the next `mm push` as
+    deletion records (and the next pull on a peer deletes its identical copy,
+    keeping the bytes for 30 days) when the path is in source scope. Sidecar
+    deletion is local.
 
     Acquires the mm lockfile so an autopull running in parallel can't
     race with our rename/unlink operations on the synced files.
@@ -5351,6 +5477,9 @@ def _auto_command_scope(
 def autopull() -> None:
     """Pull changes silently. Designed for Claude Code -- no prompts, minimal output.
 
+    Prints one `mm:` line when it deleted files because a peer deleted them, and
+    one for conflicts or failures; everything else stays quiet.
+
     Never prompts (`get_passphrase(non_interactive=True)`). Silent exit on:
     missing config, missing passphrase, lock contention. Loud exit (one-line
     stderr + traceback to `~/.config/mind-meld/autopull.log`) on: corrupt
@@ -5384,6 +5513,13 @@ def autopull() -> None:
                 print(
                     f"mm: skipped {result.total_skipped_unknown_source} unknown "
                     "source(s) - run 'mm sources' to reconcile config",
+                    file=sys.stderr,
+                )
+            if result.total_deleted:
+                # Data at risk is never quiet-gated: say what was deleted and where
+                # the copies are, even though the hook prints nothing else.
+                print(
+                    f"mm: {pullflow.deleted_clause(result)}",
                     file=sys.stderr,
                 )
             if result.total_failed:
@@ -5420,6 +5556,8 @@ def autopull() -> None:
                 degradations.append(f"{result.total_skipped_unknown_source} unknown source(s)")
             if result.total_failed:
                 degradations.append(f"{result.total_failed} file(s) failed")
+            if result.ledger_cause:
+                degradations.append(f"pull ledger unavailable ({result.ledger_cause})")
 
             if degradations:
                 _write_autorun_breadcrumb("pull", "degraded", "; ".join(degradations))
@@ -5431,7 +5569,12 @@ def autopull() -> None:
                     "success",
                     "; ".join(
                         d
-                        for d in (pullflow.waiting_detail(result), pullflow.old_form_detail(result))
+                        for d in (
+                            pullflow.deleted_detail(result),
+                            pullflow.older_clause(result),
+                            pullflow.waiting_detail(result),
+                            pullflow.old_form_detail(result),
+                        )
                         if d
                     ),
                 )
@@ -5521,6 +5664,18 @@ def autopush() -> None:
                 details.append(
                     f"{result.maintenance_failures} post-publication maintenance failure(s)"
                 )
+            # Track 91A: a pull ledger that could not be written, scan roots whose
+            # token could not be written (their deletions will not propagate) and
+            # files a gone or new scan root hid are all at-risk facts for `mm status`.
+            if result and result.ledger_cause:
+                details.append(f"pull ledger unavailable ({result.ledger_cause})")
+            if result and result.unwritable_roots:
+                details.append(
+                    f"deletions under {len(result.unwritable_roots)} folder(s) will not "
+                    "propagate: restore write access, then mm push"
+                )
+            if result and result.left_out_clause:
+                details.append(result.left_out_clause.rstrip("."))
             # The first publish in the shared form leaves a trail (O8.3).
             switched = bool(result and result.wire_names_published)
             only_switched = switched and not details

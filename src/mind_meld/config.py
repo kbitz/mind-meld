@@ -441,6 +441,11 @@ DEFAULT_SOURCES: list[dict[str, Any]] = [
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
+            # Host-managed plugin trees: Codex installs and removes version
+            # folders itself. A removal would otherwise read as a deletion and
+            # delete the same files on a peer (Track 91A).
+            "plugins/cache/*",
+            "plugins/.remote-plugin-install-staging/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ],
     },

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -31,12 +32,14 @@ from mind_meld import (
     seen_sources,
     sidecar,
     skill_link,
+    statedb,
     upgrade,
 )
 from mind_meld import config as _config_module
 from mind_meld.config import (
     DEFAULT_SOURCES,
     DEFAULT_STORAGE_PATH,
+    MM_INTERNAL_SOURCE_NAMES,
     get_sources,
     load_config,
     resolve_sources,
@@ -188,6 +191,7 @@ def _status_verdict(
     manifest_arriving: bool = False,
     names_ready: bool = False,
     names_held: bool = False,
+    left_out: str = "",
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
     scope = f"Source '{source}' — " if source is not None else ""
@@ -236,6 +240,8 @@ def _status_verdict(
                 verdict = (
                     "Project memory not published until Claude's projects folder can be listed."
                 )
+            elif left_out:
+                verdict = f"Not everything is published: {left_out}"
             else:
                 verdict = "In sync with this device's last push."
     return safety.safe_terminal_str(scope + verdict)
@@ -337,6 +343,7 @@ def status(
         # Strict enumeration/hash failures cannot manufacture a healthy empty scan.
         # This may reread event bytes; it does not add another EventScan parse.
         comparison_complete = True
+        left_out_clause = ""
         try:
             local_manifest = build_manifest_v2(
                 device_id,
@@ -361,12 +368,25 @@ def status(
                     strict=True,
                     exempt_roots=nested_roots,
                 )
+                still_present: set[tuple[str, str]] = set()
                 core._prove_omitted_paths_absent(
                     local_manifest,
                     comparison_prior,
                     comparison_sources,
                     max_file_size=max_file_size,
+                    still_present=still_present,
                 )
+                # Track 91A: files a gone or new scan root hides are not deletions.
+                mint_ledger, _ = core.load_ledger(())
+                mint_guard = core.compute_mint_guard(
+                    local_manifest,
+                    comparison_prior,
+                    comparison_sources,
+                    mint_ledger,
+                    still_present=still_present,
+                )
+                core.stamp_left_out(mint_guard, remote_manifest)
+                left_out_clause = mint_guard.clause()
         except SnapshotError as exc:
             comparison_complete = False
             blocking = (
@@ -457,6 +477,7 @@ def status(
             manifest_arriving=fetch.status == "missing" and fetch.vanished,
             names_ready=names_ready,
             names_held=names_held,
+            left_out=left_out_clause,
         )
         report["verdict"] = verdict
 
@@ -1594,6 +1615,47 @@ def _project_index_state(
         }
 
 
+def _fast_forward_state(sources: list[dict]) -> dict:
+    """Read-only Track 91A state: pull-ledger health, rows per peer, scan-root tokens.
+
+    Never writes. The ``older`` edits a pull held back need peer manifests, which
+    this passphrase-free report cannot read: ``mm pull --dry-run --verbose`` lists them.
+    """
+    ledger_state, peers, seen = "ok", {}, 0
+    try:
+        with statedb.connect(read_only=True) as conn:
+            if conn is None:
+                ledger_state = "absent"
+            else:
+                peers, seen = statedb.ledger_counts(conn)
+    except (statedb.StateDBError, OSError) as exc:
+        ledger_state = core.ledger_cause(exc) or "unreadable"
+    anchors: dict[str, dict[str, str]] = {}
+    for src in sources:
+        if src.get("name") in MM_INTERNAL_SOURCE_NAMES:
+            continue
+        base = Path(src["path"]).expanduser()
+        roots: dict[str, str] = {}
+        for root in manifest.scan_roots(src):
+            folder = base / root if root else base
+            try:
+                present = stat.S_ISDIR(folder.lstat().st_mode)
+            except OSError:
+                present = False
+            token = manifest.read_anchor(base, root) if present else None
+            roots[root or "."] = (
+                "missing folder" if not present else "token present" if token else "no token"
+            )
+        if roots:
+            anchors[src["name"]] = roots
+    return {
+        "ledger": ledger_state,
+        "peer_base_rows": peers,
+        "seen_version_rows": seen,
+        "anchors": anchors,
+    }
+
+
 def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
 
@@ -1833,6 +1895,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             if config_state == "ok"
             else None,
         },
+        "fast_forward": _fast_forward_state(resolved_sources if config_state == "ok" else []),
         "last_autorun": breadcrumb,
         "last_attended_runs": attended_evidence,
         "sync_run_projection": run_projection,
@@ -1904,6 +1967,16 @@ def diag(
                         + safety.safe_terminal_str(f"{name}:{root}")
                     )
                 )
+
+    ff = state["fast_forward"]
+    console.print("\n[bold]Fast-forward ledger[/bold]")
+    console.print(f"  state:         {ff['ledger']}")
+    console.print(f"  seen versions: {ff['seen_version_rows']}")
+    for peer, count in sorted(ff["peer_base_rows"].items()):
+        console.print(f"  last-synced files from {safe_str(peer)}: {count}")
+    for name, roots in ff["anchors"].items():
+        for root, status in roots.items():
+            console.print(safe_str(f"  scan root {name}:{root}: {status}"))
 
     pi = state["project_index"]
     names_state = pi.get("state") or "n/a"

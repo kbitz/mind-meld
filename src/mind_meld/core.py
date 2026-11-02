@@ -6,6 +6,8 @@ import errno
 import fnmatch
 import hashlib
 import json
+import os
+import secrets
 import stat
 import sys
 import threading
@@ -23,16 +25,19 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from mind_meld import (
     __version__,
     crypto,
+    fsutil,
     manifest,
     projectid,
     pullplan,
     safety,
     sidecar,
+    statedb,
     updateprogress,
     upgrade,
 )
 from mind_meld import config as _config_module
 from mind_meld.config import (
+    MM_INTERNAL_SOURCE_NAMES,
     SourceResolution,
     get_default_source,
     get_sources,
@@ -67,12 +72,14 @@ from mind_meld.errors import (
     MindMeldError,
     NewerFormatError,
     SnapshotError,
+    StorageError,
     StorageNotFound,
     os_error_cause,
     snapshot_refusal,
 )
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
+    ANCHOR_NAME,
     MARKER_SKIP_NAME,
     MUSE_EXCLUDE_PATTERNS,
     DiffResult,
@@ -678,6 +685,7 @@ def _filter_excluded_paths(
         return (
             is_conflict_filename(parts[-1])
             or parts[-1] == MARKER_SKIP_NAME
+            or parts[-1] == ANCHOR_NAME
             or any(part.casefold() == ".git" or part in ("", ".") for part in parts)
         )
 
@@ -848,9 +856,13 @@ def _filter_disabled_sources(manifest: dict, disabled: list[str]) -> dict:
     via get_sources's filter). Spurious tombstones suppress restoration
     and propagation of a missing path across upgraded and stale peers
     until expiry (`manifest.TOMBSTONE_TTL_DAYS = 30`, re-broadcast
-    newest-wins by `collect_tombstones`). Existing local bytes are never
-    removed. The consumer-boundary filter is still required: a 30-day
-    fleet-wide propagation freeze is the failure it prevents.
+    newest-wins by `collect_tombstones`), and a hashed one also deletes
+    identical bytes on a peer that last synced them from this machine
+    (Track 91A). Disabling never removes local bytes here: a disabled
+    source is not a pull source, so no deletion record deletes under it
+    either. The consumer-boundary filter is still required: a 30-day
+    fleet-wide propagation freeze, or a peer-side deletion, is the failure
+    it prevents.
 
     **Asymmetric filter — sources stripped, tombstones preserved.** Codex
     adversarial review 2026-04-25 caught this: if A deletes `gstack:x`,
@@ -950,8 +962,13 @@ def _prove_omitted_paths_absent(
     sources: list[dict[str, Any]],
     *,
     max_file_size: int,
+    still_present: set[tuple[str, str]] | None = None,
 ) -> None:
     """Refuse if an omitted prior path is still present or its root is unreadable.
+
+    ``still_present`` collects ``(source, path)`` pairs that a pattern omitted from
+    the snapshot but that still exist as regular files: they are not deleted, so
+    they must not mint a tombstone.
 
     ``generate_tombstones`` stays a pure comparison. This bounded probe uses
     the trusted local source map only — never a recovered ``base_path``.
@@ -986,6 +1003,10 @@ def _prove_omitted_paths_absent(
             if _manifest_is_excluded(
                 rel_path, extra, None, list(src_cfg.get("include_patterns") or []) or None
             ):
+                if still_present is not None:
+                    with suppress(OSError):
+                        if stat.S_ISREG((base / rel_path).lstat().st_mode):
+                            still_present.add((src_name, rel_path))
                 continue
             path = base / rel_path
             try:
@@ -1151,6 +1172,24 @@ def _merge_manifests(manifests: list[dict]) -> dict:
                         {*dst.get("moved_folders", ()), *src_data["moved_folders"]}
                     )
 
+    # Track 91A: a scan root's token survives a merge only when every copy that
+    # names the source agrees on it; a disagreement means no id (nothing mints).
+    for src_name, dst in merged_sources.items():
+        copies = [
+            m["sources"][src_name].get("root_ids") or {}
+            for m in sorted_manifests
+            if src_name in m.get("sources", {})
+            and isinstance(m["sources"][src_name].get("root_ids", {}), dict)
+        ]
+        roots = set().union(*copies) if copies else set()
+        agreed = {
+            root: values.pop()
+            for root in roots
+            if len(values := {c.get(root) for c in copies}) == 1 and None not in values
+        }
+        if agreed:
+            dst["root_ids"] = agreed
+
     merged["sources"] = merged_sources
     # Track 1B: the redundant top-level "files" mirror is not written by
     # this code (and `normalize_manifest` strips it on v2 passthrough), so
@@ -1286,9 +1325,239 @@ def iter_source_diffs(
             continue
         remote_src = remote_sources.get(src_name, {"files": {}})
         diff = diff_files(src_data["files"], remote_src.get("files", {}))
+        # Paths a gone or recreated scan root hides are not deletions (Track 91A).
+        left_out = remote_src.get("left_out")
+        if left_out and diff.deleted:
+            diff = replace(diff, deleted=[p for p in diff.deleted if p not in left_out])
         if skip_unchanged and not diff.has_changes:
             continue
         yield src_name, src_data, remote_src, diff
+
+
+@dataclass
+class MintGuard:
+    """What a push must not read as deleted (Track 91A).
+
+    ``skip`` is every ``(source, path)`` that mints nothing. ``left_out`` is the
+    part a gone, new or unreadable scan root explains, per source; ``reasons``
+    names that root and why. A prior that recorded no token for a root (the first
+    push after upgrading) is skipped silently.
+    """
+
+    skip: set[tuple[str, str]] = field(default_factory=set)
+    left_out: dict[str, set[str]] = field(default_factory=dict)
+    reasons: dict[str, dict[str, str]] = field(default_factory=dict)
+    folders: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    @property
+    def left_out_files(self) -> int:
+        return sum(len(v) for v in self.left_out.values())
+
+    def clause(self) -> str:
+        """``3 files left out because /home/kb/.claude/projects is new; run mm pull ...``."""
+        if not self.left_out_files:
+            return ""
+        (src, root), folder = next(iter(self.folders.items()))
+        reason = self.reasons[src][root]
+        return (
+            f"{_count(self.left_out_files, 'file', 'files')} left out because "
+            f"{safe_str(folder)} is {reason}; "
+            + ("run mm pull to restore them." if reason != "unreadable" else "restore read access.")
+        ).replace("is unreadable", "cannot be read")
+
+
+def compute_mint_guard(
+    local_manifest: dict,
+    prior: dict | None,
+    sources: list[dict[str, Any]],
+    ledger: pullplan.Ledger | None,
+    *,
+    still_present: set[tuple[str, str]] | None = None,
+) -> MintGuard:
+    """Decide which absent prior paths are real deletions.
+
+    A path mints only when the file's scan root is the same folder this machine
+    last published (its token is unchanged) and the scan listed that folder.
+    Anything below a gone, recreated, restored or unreadable root, a path under
+    no scan root, a file still on disk, and a deletion this machine only
+    followed all mint nothing.
+    """
+    guard = MintGuard(skip=set(still_present or ()))
+    if prior is None:
+        return guard
+    for cfg in sources:
+        name = cfg.get("name")
+        if not name or name in MM_INTERNAL_SOURCE_NAMES:
+            continue
+        entry = (prior.get("sources") or {}).get(name)
+        if not isinstance(entry, dict) or not entry.get("files"):
+            continue
+        local_files = (local_manifest.get("sources") or {}).get(name, {}).get("files", {})
+        absent = [p for p in entry["files"] if p not in local_files]
+        if not absent:
+            continue
+        base = Path(cfg["path"]).expanduser()
+        ids = entry.get("root_ids") if isinstance(entry.get("root_ids"), dict) else {}
+        status: dict[str, str] = {}
+        for rel in absent:
+            if ledger is not None and ledger.newest_stamp(name, rel) is not None:
+                guard.skip.add((name, rel))
+                continue
+            root = manifest.scan_root_for(cfg, rel)
+            if root is None:
+                guard.skip.add((name, rel))
+                continue
+            if root not in status:
+                status[root] = _root_status(base, root, ids.get(root))
+            if status[root] == "unchanged":
+                continue
+            guard.skip.add((name, rel))
+            if status[root] != "unanchored":
+                guard.left_out.setdefault(name, set()).add(rel)
+                guard.reasons.setdefault(name, {})[root] = status[root]
+                guard.folders.setdefault((name, root), str(base / root if root else base))
+    return guard
+
+
+def _root_status(base: Path, root: str, recorded: object) -> str:
+    """One of unchanged, unanchored (no token published), missing, unreadable or new."""
+    if not isinstance(recorded, str):
+        return "unanchored"
+    folder = base / root if root else base
+    try:
+        info = folder.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISDIR(info.st_mode):
+        return "missing"
+    if not os.access(folder, os.R_OK | os.X_OK):
+        return "unreadable"
+    return "unchanged" if manifest.read_anchor(base, root) == recorded else "new"
+
+
+def stamp_left_out(guard: MintGuard, *manifests: dict | None) -> None:
+    """Attach the in-memory ``left_out`` sets (never serialized) the diffs read."""
+    for m in manifests:
+        if not m:
+            continue
+        for src, paths in guard.left_out.items():
+            entry = (m.get("sources") or {}).get(src)
+            if isinstance(entry, dict):
+                entry["left_out"] = set(paths)
+
+
+def anchor_pending(
+    prior: dict | None,
+    sources: list[dict[str, Any]],
+    nested_roots: Mapping[str, Iterable[str]],
+) -> bool:
+    """True when a writable scan root's token differs from the one last published."""
+    for cfg in sources:
+        name = cfg.get("name")
+        if not name or name in MM_INTERNAL_SOURCE_NAMES:
+            continue
+        entry = ((prior or {}).get("sources") or {}).get(name) or {}
+        ids = entry.get("root_ids") if isinstance(entry.get("root_ids"), dict) else {}
+        base = Path(cfg["path"]).expanduser()
+        for root in manifest.scan_roots(cfg):
+            folder = base / root if root else base
+            try:
+                if not stat.S_ISDIR(folder.lstat().st_mode) or not os.access(folder, os.W_OK):
+                    continue
+            except OSError:
+                continue
+            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
+                continue
+            if manifest.read_anchor(base, root) != ids.get(root):
+                return True
+    return False
+
+
+def publish_anchors(
+    local_manifest: dict,
+    sources: list[dict[str, Any]],
+    nested_roots: Mapping[str, Iterable[str]],
+) -> list[str]:
+    """Write a fresh token into each scan root and record it; return unwritable folders.
+
+    A publishing push renews every token, so a root restored from backup (which
+    brings an older token back) mismatches. A missing or non-directory root is
+    never created, and mm never writes into a nested checkout. A root that cannot
+    be written has no id, so nothing under it mints.
+    """
+    unwritable: list[str] = []
+    for cfg in sources:
+        name = cfg.get("name")
+        if not name or name in MM_INTERNAL_SOURCE_NAMES:
+            continue
+        entry = (local_manifest.get("sources") or {}).get(name)
+        if not isinstance(entry, dict):
+            continue
+        base = Path(cfg["path"]).expanduser()
+        ids: dict[str, str] = {}
+        for root in manifest.scan_roots(cfg):
+            folder = base / root if root else base
+            try:
+                if not stat.S_ISDIR(folder.lstat().st_mode):
+                    continue
+            except OSError:
+                continue
+            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
+                continue
+            token = secrets.token_hex(16)
+            try:
+                manifest.write_anchor(base, root, token)
+            except (OSError, StorageError):
+                unwritable.append(str(folder))
+                continue
+            ids[root] = token
+        if ids:
+            entry["root_ids"] = ids
+        else:
+            entry.pop("root_ids", None)
+    return unwritable
+
+
+def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Ledger) -> None:
+    """Add each changed file's ``from`` list: the versions this machine built it on.
+
+    Newest first, at most 16 prefixes. An unchanged entry keeps the list it
+    published before. ``mm-events`` publishes none.
+    """
+    if not ledger.readable:
+        return
+    for name, entry in (local_manifest.get("sources") or {}).items():
+        if name in ledger.untracked:
+            continue
+        prior_files = (((prior or {}).get("sources") or {}).get(name) or {}).get("files") or {}
+        for rel, info in (entry.get("files") or {}).items():
+            head = pullplan.prefix(info.get("sha256"))
+            old = prior_files.get(rel)
+            if isinstance(old, dict) and old.get("sha256") == info.get("sha256"):
+                kept = pullplan.parse_from(old)
+                if kept:
+                    info["from"] = kept
+                continue
+            chain = [h for h in ledger.held_newest_first(name, rel) if h != head]
+            old_head = pullplan.prefix(old.get("sha256")) if isinstance(old, dict) else None
+            if old_head and old_head != head and old_head not in chain:
+                chain.insert(0, old_head)
+            if chain:
+                info["from"] = chain[: pullplan.FROM_MAX]
+
+
+def record_published(ledger: pullplan.Ledger, local_manifest: dict) -> None:
+    """After a push, every published version is one this machine held; stamps clear."""
+    if not ledger.readable:
+        return
+    for name, entry in (local_manifest.get("sources") or {}).items():
+        for rel, info in (entry.get("files") or {}).items():
+            sha = info.get("sha256")
+            if isinstance(sha, str):
+                ledger.hold(name, rel, sha)
+                ledger.clear_stamps(name, rel)
 
 
 @dataclass(frozen=True)
@@ -1343,7 +1612,12 @@ def project_form_state(local_manifest: dict, own_prior: dict | None) -> ProjectF
 
 
 def encode_manifest(
-    local_manifest: dict, *, wire_names: bool, passphrase: str, memory_kb: int
+    local_manifest: dict,
+    *,
+    wire_names: bool,
+    passphrase: str,
+    memory_kb: int,
+    kept_wire_folders: Mapping[str, str] | None = None,
 ) -> bytes:
     """The one production path from a local manifest to its published bytes.
 
@@ -1357,7 +1631,13 @@ def encode_manifest(
         entry = local_manifest["sources"]["claude"]
         entry["wire_names"] = True
         wire_manifest = manifest.manifest_to_wire(local_manifest)
-        entry["wire_folders"] = dict(wire_manifest["sources"]["claude"].get("wire_folders", {}))
+        published = dict(wire_manifest["sources"]["claude"].get("wire_folders", {}))
+        # A push that left files out keeps the folder owners it would drop, so a
+        # ``@git-`` project still restores from a pull outside its checkout.
+        for wire, folder in (kept_wire_folders or {}).items():
+            published.setdefault(wire, folder)
+        entry["wire_folders"] = published
+        wire_manifest["sources"]["claude"]["wire_folders"] = dict(published)
         data = serialize_manifest(wire_manifest)
     else:
         data = serialize_manifest(local_manifest)
@@ -1958,6 +2238,97 @@ def _collect_peer_tombstones(
         list(peer_manifests.keys()),
         lambda did: peer_manifests.get(did),
     )
+
+
+def load_ledger(peer_ids: Iterable[str]) -> tuple[pullplan.Ledger, BaseException | None]:
+    """Read the pull ledger. An unreadable table gives an unreadable ledger.
+
+    An absent database, or a v1 database without the tables, is a normal empty
+    ledger: that is a fresh machine. Anything else means nothing counts as held,
+    so today's rule runs and nothing deletes; the caller reports the cause.
+    """
+    untracked = frozenset(_config_module.MM_INTERNAL_SOURCE_NAMES)
+    try:
+        with statedb.connect(read_only=True) as conn:
+            bases: dict[tuple[str, str, str], str] = {}
+            for peer in peer_ids:
+                for (source, path), sha in statedb.read_peer_bases(conn, peer).items():
+                    bases[(peer, source, path)] = sha
+            seen = statedb.read_seen(conn)
+    except (statedb.StateDBError, OSError) as exc:
+        return pullplan.Ledger(readable=False, untracked=untracked), exc
+    return pullplan.Ledger(bases, seen, untracked=untracked), None
+
+
+# Above this many files one pull flushes with a single os.sync() on Linux, where
+# a per-file fsync is a real device flush. [estimated threshold]
+LINUX_SYNC_THRESHOLD = 500
+
+
+def flush_ledger_files(ledger: pullplan.Ledger) -> float:
+    """Flush each file a settled row describes; a row whose file cannot be flushed is dropped.
+
+    A base must never be more durable than its bytes: after a power loss, damaged
+    bytes with a base equal to the remote would read as a local edit. Returns the
+    seconds spent (``--verbose`` prints it).
+    """
+    started = time.monotonic()
+    total = sum(len(paths) for paths in ledger.flush_paths.values())
+    if sys.platform != "darwin" and total > LINUX_SYNC_THRESHOLD:
+        os.sync()
+        return time.monotonic() - started
+    for key, paths in list(ledger.flush_paths.items()):
+        for path in paths:
+            try:
+                fsutil.fsync_file(path)
+            except OSError:
+                ledger.discard(*key)
+                break
+    return time.monotonic() - started
+
+
+def commit_ledger(ledger: pullplan.Ledger) -> BaseException | None:
+    """Write the ledger's uncommitted rows in one transaction; return the failure, if any.
+
+    A busy, too-new, corrupt or full database records nothing and fails no sync;
+    the next pull re-derives what was dropped.
+    """
+    if not ledger.readable or not ledger.dirty:
+        return None
+    seen = [
+        (source, path, head, kind, when, by)
+        for (source, path, head), (kind, when, by) in ledger.new_seen.items()
+    ]
+    try:
+        with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+            statedb.commit_ledger(
+                conn,
+                bases=ledger.new_bases,
+                drop_bases=ledger.drop_bases,
+                seen=seen,
+                unstamp=ledger.unstamp,
+                now_us=ledger.now_us,
+            )
+    except (statedb.StateDBError, OSError) as exc:
+        return exc
+    ledger.mark_committed()
+    return None
+
+
+def ledger_cause(exc: BaseException | None) -> str | None:
+    """A stable word for why the ledger could not be read or written."""
+    if exc is None:
+        return None
+    for cls, word in (
+        (statedb.StateDBBusy, "busy"),
+        (statedb.StateDBTooNew, "too-new"),
+        (statedb.StateDBCorrupt, "corrupt"),
+        (statedb.StateDBHotJournal, "interrupted"),
+        (statedb.StateDBUnavailable, "unavailable"),
+    ):
+        if isinstance(exc, cls):
+            return word
+    return "unreadable"
 
 
 def _cleanup_conflict_copies(

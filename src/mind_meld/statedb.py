@@ -1,7 +1,10 @@
 """Private local SQLite state. Write transactions are always the innermost lock.
 
-History alone lives here today; the four provisional store tables have no
-production readers yet. No connection is cached and sqlite3 is loaded lazily.
+Live tables: ``history`` (forensic log), ``peer_base`` and ``seen_version`` (pull
+fast-forward ledger, rebuildable). The provisional store tables ``ledger``,
+``cursors``, ``own_log`` and ``displaced`` have no production reader by design;
+``sync.md``'s schema table says so for each. No connection is cached and sqlite3
+is loaded lazily.
 """
 
 from __future__ import annotations
@@ -53,6 +56,11 @@ class StateDBTooNew(StateDBError):
         self.version = version
         self.known_version = SCHEMA_VERSION
         super().__init__("incompatible schema", path)
+
+
+def deleted_copies_dir() -> Path:
+    """Where a pull keeps the bytes of a file it deleted because a peer did."""
+    return DB_DIR / "deleted"
 
 
 def db_path() -> Path:
@@ -127,6 +135,24 @@ MIGRATIONS = (
             "CREATE INDEX displaced_time ON displaced (time)",
         ),
         1,
+    ),
+    # Migration 2 adds rebuildable pull-ledger tables; no compat bump, so an
+    # older reader keeps working and ignores them.
+    (
+        (
+            (
+                "CREATE TABLE peer_base (peer TEXT NOT NULL, source TEXT NOT NULL, path TEXT "
+                "NOT NULL, sha TEXT NOT NULL, PRIMARY KEY (peer, source, path)) WITHOUT ROWID"
+            ),
+            "CREATE INDEX peer_base_path ON peer_base (source, path)",
+            (
+                "CREATE TABLE seen_version (source TEXT NOT NULL, path TEXT NOT NULL, sha TEXT "
+                "NOT NULL, time INTEGER NOT NULL, kind TEXT NOT NULL, deleted_by TEXT, "
+                "PRIMARY KEY (source, path, sha)) WITHOUT ROWID"
+            ),
+            "CREATE INDEX seen_version_time ON seen_version (time)",
+        ),
+        None,
     ),
 )
 
@@ -245,7 +271,10 @@ def recover_if_needed():
 
 
 def expire_displaced(conn, now, *, max_age=DISPLACED_MAX_AGE):
-    """76A's caller owns the transaction; expiry retains all forensic metadata."""
+    """The caller owns the transaction; expiry retains all forensic metadata.
+
+    No production caller: the ``displaced`` table has no reader.
+    """
     if not conn.in_transaction:
         raise StateDBError("expiry requires a transaction")
     with translate():
@@ -253,3 +282,104 @@ def expire_displaced(conn, now, *, max_age=DISPLACED_MAX_AGE):
             "UPDATE displaced SET content=NULL, expired=1 WHERE time <= ?",
             (now - max_age,),
         )
+
+
+SEEN_MAX_AGE_US = 365 * 24 * 60 * 60 * 1_000_000
+
+BaseKey = tuple[str, str, str]  # (peer, source, path)
+SeenRow = tuple[str, str, int, "str | None"]  # (sha prefix, kind, time_us, deleted_by)
+
+
+def _need_read_tables(conn) -> bool:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return "peer_base" in tables and "seen_version" in tables
+
+
+def read_peer_bases(conn, peer: str) -> dict[tuple[str, str], str]:
+    """One peer's last-synced shas keyed ``(source, path)``; empty without the table."""
+    if conn is None:
+        return {}
+    with translate():
+        if not _need_read_tables(conn):
+            return {}
+        rows = conn.execute("SELECT source, path, sha FROM peer_base WHERE peer = ?", (peer,))
+        return {(r[0], r[1]): r[2] for r in rows}
+
+
+def read_seen(conn) -> dict[tuple[str, str], list[SeenRow]]:
+    """Every held/seen version this machine has recorded, keyed ``(source, path)``."""
+    out: dict[tuple[str, str], list[SeenRow]] = {}
+    if conn is None:
+        return out
+    with translate():
+        if not _need_read_tables(conn):
+            return out
+        rows = conn.execute(
+            "SELECT source, path, sha, kind, time, deleted_by FROM seen_version "
+            "ORDER BY source, path, time"
+        )
+        for source, path, sha, kind, when, deleted_by in rows:
+            out.setdefault((source, path), []).append((sha, kind, int(when), deleted_by))
+    return out
+
+
+def ledger_counts(conn) -> tuple[dict[str, int], int]:
+    """Per-peer ``peer_base`` row counts and the ``seen_version`` row count (diag)."""
+    if conn is None:
+        return {}, 0
+    with translate():
+        if not _need_read_tables(conn):
+            return {}, 0
+        peers = {
+            r[0]: r[1] for r in conn.execute("SELECT peer, COUNT(*) FROM peer_base GROUP BY peer")
+        }
+        seen = conn.execute("SELECT COUNT(*) FROM seen_version").fetchone()[0]
+    return peers, int(seen)
+
+
+def commit_ledger(
+    conn,
+    *,
+    bases: dict[BaseKey, str],
+    drop_bases: set[tuple[str, str]],
+    seen: list[tuple[str, str, str, str, int, str | None]],
+    unstamp: set[tuple[str, str]],
+    now_us: int,
+) -> None:
+    """Write one pull's (or push's) ledger changes in the caller's transaction.
+
+    Rows are written only when they changed. ``seen`` entries are
+    ``(source, path, sha, kind, time_us, deleted_by)``; ``held`` outranks
+    ``seen`` and moves the row's time, and a stamp is never overwritten by ``None``. Rows older than
+    ``SEEN_MAX_AGE_US`` are pruned.
+    """
+    if not conn.in_transaction:
+        raise StateDBError("ledger commit requires a transaction")
+    with translate():
+        for source, path in drop_bases:
+            conn.execute("DELETE FROM peer_base WHERE source = ? AND path = ?", (source, path))
+        for (peer, source, path), sha in bases.items():
+            conn.execute(
+                "INSERT INTO peer_base (peer, source, path, sha) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (peer, source, path) DO UPDATE SET sha = excluded.sha "
+                "WHERE sha != excluded.sha",
+                (peer, source, path, sha),
+            )
+        for source, path in unstamp:
+            conn.execute(
+                "UPDATE seen_version SET deleted_by = NULL WHERE source = ? AND path = ? "
+                "AND deleted_by IS NOT NULL",
+                (source, path),
+            )
+        for source, path, sha, kind, when, deleted_by in seen:
+            conn.execute(
+                "INSERT INTO seen_version (source, path, sha, time, kind, deleted_by) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (source, path, sha) DO UPDATE SET "
+                "time = CASE WHEN excluded.kind = 'held' THEN excluded.time ELSE time END, "
+                "kind = CASE WHEN excluded.kind = 'held' THEN 'held' ELSE kind END, "
+                "deleted_by = COALESCE(excluded.deleted_by, deleted_by) "
+                "WHERE excluded.kind = 'held' "
+                "OR (excluded.deleted_by IS NOT NULL AND deleted_by IS NOT excluded.deleted_by)",
+                (source, path, sha, when, kind, deleted_by),
+            )
+        conn.execute("DELETE FROM seen_version WHERE time < ?", (now_us - SEEN_MAX_AGE_US,))

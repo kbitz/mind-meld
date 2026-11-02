@@ -626,8 +626,25 @@ class TestDefaultSources:
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
+            # Track 91A: Codex installs and removes plugin version folders itself; a
+            # removal there would read as a deletion and delete a peer's copy.
+            "plugins/cache/*",
+            "plugins/.remote-plugin-install-staging/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ]
+
+    def test_host_managed_plugin_trees_are_excluded_but_authored_plugins_are_not(self):
+        import fnmatch
+
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        patterns = codex["exclude_patterns"]
+
+        def excluded(path):
+            return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+        assert excluded("plugins/cache/openai-curated/gmail/1.2.0/SKILL.md")
+        assert excluded("plugins/.remote-plugin-install-staging/abc123/manifest.json")
+        assert not excluded("plugins/my-team-plugin/.codex-plugin/plugin.json")
 
     def test_generated_skill_excludes_preserve_hand_authored_skills(self):
         import fnmatch

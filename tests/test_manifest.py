@@ -12,8 +12,9 @@ from typing import Any
 import pytest
 
 from mind_meld.config import get_default_source
-from mind_meld.errors import ManifestError, SnapshotChanged, SnapshotError
+from mind_meld.errors import ManifestError, SnapshotChanged, SnapshotError, StorageError
 from mind_meld.manifest import (
+    ANCHOR_NAME,
     BROWSER_PROFILE_MARKER,
     CONFLICT_PATTERN,
     MARKER_SKIP_NAME,
@@ -41,13 +42,17 @@ from mind_meld.manifest import (
     normalize_manifest,
     parse_conflict_created_at,
     parse_conflict_device_short,
+    read_anchor,
     read_and_hash,
     read_file_revision,
+    scan_root_for,
+    scan_roots,
     serialize_manifest,
     walk_claude_source,
     walk_generic_source,
     walk_muse_source,
     walk_source,
+    write_anchor,
 )
 from tests.test_config import (
     GSTACK_ARTIFACT_DIRS94A,
@@ -3903,3 +3908,127 @@ class TestWalkGenericIncludePatterns:
         files = walk_generic_source(cfg, strict=True, holds=None)
         assert "projects/demo/checkpoints/20261022-save.md" in files
         assert "projects/demo/review-and-prep/run-1/scratch.md" not in files
+
+
+# ── Track 91A: scan-root anchors ───────────────────────────────────────
+
+
+class TestScanRootsAnchors91A:
+    TOKEN = "0123456789abcdef0123456789abcdef"
+
+    @pytest.mark.parametrize(
+        "src,expected",
+        [
+            ({"type": "claude"}, ["projects"]),
+            ({"type": "muse"}, ["memory"]),
+            ({"type": "generic", "include_dirs": ["projects", "skills/"]}, ["projects", "skills"]),
+            ({"type": "generic", "include_dirs": ["a", "a", ".", ""]}, ["a"]),
+            ({"type": "generic", "include_files": ["AGENTS.md"]}, [""]),
+            (
+                {"type": "generic", "include_dirs": ["skills"], "include_files": ["AGENTS.md"]},
+                ["skills", ""],
+            ),
+            ({"type": "generic"}, []),
+        ],
+    )
+    def test_scan_roots_name_every_folder_the_walker_lists(self, src, expected):
+        assert scan_roots(src) == expected
+
+    def test_a_path_belongs_to_the_scan_root_that_lists_it(self):
+        src = {
+            "type": "generic",
+            "include_dirs": ["skills", "plugins"],
+            "include_files": ["AGENTS.md"],
+        }
+        assert scan_root_for(src, "skills/a/SKILL.md") == "skills"
+        assert scan_root_for(src, "plugins/x.json") == "plugins"
+        assert scan_root_for(src, "AGENTS.md") == ""
+        assert scan_root_for(src, "skills") == "skills"
+        assert scan_root_for(src, "skillset/x.md") is None  # a prefix is not a folder
+        assert scan_root_for(src, "README.md") is None  # under no scan root
+        assert scan_root_for({"type": "claude"}, "projects/p/memory/a.md") == "projects"
+
+    def test_write_then_read_round_trips_with_a_private_mode(self, tmp_path):
+        (tmp_path / "scan").mkdir()
+        write_anchor(tmp_path, "scan", self.TOKEN)
+        written = tmp_path / "scan" / ANCHOR_NAME
+        assert written.stat().st_mode & 0o777 == 0o600
+        assert read_anchor(tmp_path, "scan") == self.TOKEN
+        write_anchor(tmp_path, "scan", "f" * 32)
+        assert read_anchor(tmp_path, "scan") == "f" * 32
+
+    def test_the_source_root_itself_can_hold_the_anchor(self, tmp_path):
+        write_anchor(tmp_path, "", self.TOKEN)
+        assert (tmp_path / ANCHOR_NAME).read_text().strip() == self.TOKEN
+        assert read_anchor(tmp_path, "") == self.TOKEN
+
+    def test_a_scan_root_that_is_not_there_is_never_created(self, tmp_path):
+        with pytest.raises(StorageError):
+            write_anchor(tmp_path, "missing", self.TOKEN)
+        assert not (tmp_path / "missing").exists()
+        assert read_anchor(tmp_path, "missing") is None
+
+    @pytest.mark.parametrize(
+        "content",
+        ["", "short\n", "G" * 32 + "\n", "a" * 31 + "\n", "a" * 33 + "\n", "a" * 32 + "\nextra\n"],
+        ids=["empty", "short", "not-hex", "31", "33", "trailing-text"],
+    )
+    def test_a_malformed_token_reads_as_none(self, tmp_path, content):
+        (tmp_path / "scan").mkdir()
+        (tmp_path / "scan" / ANCHOR_NAME).write_text(content)
+        assert read_anchor(tmp_path, "scan") is None
+
+    def test_the_walker_never_publishes_the_anchor(self, tmp_path):
+        claude = tmp_path / ".claude"
+        memory = claude / "projects" / "-Users-kb-p" / "memory"
+        memory.mkdir(parents=True)
+        (memory / "a.md").write_text("a")
+        (memory / ANCHOR_NAME).write_text(self.TOKEN + "\n")  # even inside a project folder
+        write_anchor(claude, "projects", self.TOKEN)
+        assert set(walk_claude_source(claude)) == {"projects/-Users-kb-p/memory/a.md"}
+
+        base = tmp_path / "gen"
+        (base / "d").mkdir(parents=True)
+        (base / "d" / "n.md").write_text("n")
+        write_anchor(base, "d", self.TOKEN)
+        write_anchor(base, "", self.TOKEN)
+        (base / "AGENTS.md").write_text("agents")
+        config = {
+            "name": "g",
+            "path": str(base),
+            "type": "generic",
+            "include_dirs": ["d"],
+            "include_files": ["AGENTS.md"],
+        }
+        assert set(walk_generic_source(config)) == {"d/n.md", "AGENTS.md"}
+
+    def test_the_name_is_excluded_by_the_hardcoded_list(self):
+        assert _is_excluded(f"projects/p/memory/{ANCHOR_NAME}")
+        assert _is_excluded(ANCHOR_NAME)
+
+
+class TestGenerateTombstonesHash91A:
+    @staticmethod
+    def _pair(prior_sha):
+        local = {"sources": {"claude": {"files": {}}}, "tombstones": {}}
+        prior = {
+            "sources": {"claude": {"files": {"a.md": {"sha256": prior_sha}}}},
+            "tombstones": {},
+        }
+        return local, prior
+
+    def test_a_record_names_the_priors_hash(self):
+        local, prior = self._pair("ab" * 32)
+        record = generate_tombstones(local, prior, "dev")["claude:a.md"]
+        assert record["sha256"] == "ab" * 32
+
+    def test_a_hash_that_is_not_lowercase_hex_is_left_off(self):
+        for bad in ("AB" * 32, "ab" * 31, "zz" * 32, None):
+            local, prior = self._pair(bad)
+            assert "sha256" not in generate_tombstones(local, prior, "dev")["claude:a.md"]
+
+    def test_skip_mint_is_exact_on_source_and_path(self):
+        local, prior = self._pair("ab" * 32)
+        assert generate_tombstones(local, prior, "dev", skip_mint={("claude", "a.md")}) == {}
+        other = generate_tombstones(local, prior, "dev", skip_mint={("gstack", "a.md")})
+        assert set(other) == {"claude:a.md"}

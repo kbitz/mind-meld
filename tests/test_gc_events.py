@@ -6,8 +6,11 @@ back to "now" while the filename's YYYY-MM-DD is intrinsic to the
 event-day boundary.
 
 Fleet retention via tombstone propagation: this device unlinks → next
-push generates a tombstone → all peers drop their copy on pull. Offline
-peers see the tombstone too, suppressing resurrection.
+push generates a tombstone (with the hash of the reaped file) → peers do
+not download that file again. The tombstone only suppresses: a pull never
+deletes an ``mm-events`` file (Track 91A leaves Track 59A's rule alone), so
+each machine's own reaper removes its copies at the same 90-day mark.
+Offline peers see the tombstone too, suppressing resurrection.
 """
 
 from __future__ import annotations
@@ -201,9 +204,12 @@ class TestGcOldEventFiles:
 
 class TestGcEventsIronRule:
     """IRON RULE: reaper unlink → next push generates a tombstone for
-    the dropped path. Tombstone propagation IS the fleet retention
-    mechanism — without this pin, a 90-day reaper that didn't tombstone
-    would leave fleet peers with stale day files forever."""
+    the dropped path. Tombstone propagation keeps a reaped day file from
+    coming back from a stale peer — without this pin, a 90-day reaper that
+    didn't tombstone would let fleet peers re-publish files the fleet
+    retired. The tombstone is suppress-only: no peer deletes a copy of it.
+    ``mm-events`` is exempt from the scan-root anchor, so a reaper unlink
+    still mints."""
 
     def test_reap_triggers_tombstone_on_next_push(self, tmp_path, monkeypatch):
         storage_dir = tmp_path / "storage"
@@ -275,6 +281,8 @@ class TestGcEventsIronRule:
         assert any(old_file.name in path for path in tombstones.keys()), (
             f"reaper-driven tombstone missing; tombstones={list(tombstones.keys())}"
         )
+        [record] = [t for path, t in tombstones.items() if old_file.name in path]
+        assert len(record["sha256"]) == 64  # the hash of the version that was reaped
 
 
 class TestGcDryRunRetentionReport:
@@ -340,8 +348,9 @@ class TestGcDryRunRetentionReport:
 
 class TestGcEventsOfflinePeerSuppression:
     """An offline peer that comes back online sees the tombstone
-    (propagated above) and drops its own copy on pull. Without this,
-    the peer's stale 120-day-old events file would resurrect on the
+    (propagated above), so it neither re-downloads the file nor has its own
+    copy deleted by the pull: retention is each machine's own reaper. Without
+    the tombstone, a stale 120-day-old events file would resurrect on the
     next round of pushes."""
 
     def test_tombstone_visible_to_pulling_peer(self, tmp_path, monkeypatch):
@@ -385,3 +394,72 @@ class TestGcEventsOfflinePeerSuppression:
         assert any("events/dev-a-2026-01-01.jsonl" in k for k in tomb_keys), (
             f"tombstone for reaped events path missing: {tomb_keys}"
         )
+
+    def test_a_pull_never_deletes_a_peers_reaped_events_file(self, tmp_path, monkeypatch):
+        """Track 59A's rule stands under Track 91A: an ``mm-events`` tombstone suppresses
+        and never deletes, even though this copy is the exact version that was reaped."""
+        storage_dir = tmp_path / "storage"
+        backend = LocalBackend(storage_dir)
+        bootstrap_crypto_init(backend, PASSPHRASE, argon2_memory_kb=MEMORY_KB)
+        register_device(backend, "aaaaaaaa", "A")
+        register_device(backend, "bbbbbbbb", "B")
+        roots = {"aaaaaaaa": tmp_path / "events_a", "bbbbbbbb": tmp_path / "events_b"}
+        configs = {}
+        for device, root in roots.items():
+            claude = tmp_path / f"claude-{device}"
+            (root / "events").mkdir(parents=True)
+            (claude / "projects" / "-Users-kb-p" / "memory").mkdir(parents=True)
+            (claude / "projects" / "-Users-kb-p" / "memory" / "x.md").write_text(device)
+            configs[device] = tmp_path / f"config-{device}.toml"
+            save_config(
+                {
+                    "device": {"id": device, "name": device[0].upper()},
+                    "storage": {"path": str(storage_dir)},
+                    "sync": {
+                        "max_file_size": 52_428_800,
+                        "sources": [
+                            {"name": "claude", "path": str(claude), "type": "claude"},
+                            {
+                                "name": "mm-events",
+                                "path": str(root),
+                                "type": "generic",
+                                "include_dirs": ["events"],
+                                "exclude_patterns": [],
+                            },
+                        ],
+                    },
+                    "crypto": {"argon2_memory_kb": MEMORY_KB},
+                },
+                configs[device],
+            )
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        old = datetime.now(timezone.utc) - timedelta(days=120)
+        old_a = _make_events_file(roots["aaaaaaaa"] / "events", "shared", old)
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", configs["aaaaaaaa"])
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", configs["bbbbbbbb"])
+        first = runner.invoke(app, ["pull"])
+        assert first.exit_code == 0, first.output + (first.stderr or "")
+        copy_b = roots["bbbbbbbb"] / "events" / old_a.name
+        assert copy_b.read_bytes() == old_a.read_bytes()  # B holds the exact version
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", configs["aaaaaaaa"])
+        assert runner.invoke(app, ["gc"]).exit_code == 0
+        assert not old_a.exists()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        from mind_meld.crypto import decrypt
+        from mind_meld.manifest import load_manifest
+        from mind_meld.storage.keys import manifest_key
+
+        published = load_manifest(
+            decrypt(backend.get(manifest_key("aaaaaaaa")), PASSPHRASE, memory_kb=MEMORY_KB)
+        )
+        [record] = [t for k, t in published["tombstones"].items() if old_a.name in k]
+        assert len(record["sha256"]) == 64  # a hashed record that still deletes nothing
+
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", configs["bbbbbbbb"])
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert "deleted" not in pulled.output
+        assert copy_b.exists()  # only B's own reaper retires it
