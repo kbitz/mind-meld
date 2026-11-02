@@ -2054,7 +2054,11 @@ Status and diag share a read-only prerequisite check: enable an unselected
 mm-events source, restore an unavailable custom folder, or consent a reader
 before refreshing. An unreadable config produces an unknown verdict and no
 refresh/enable recommendation. An unsupported reader format calls for an upgrade,
-including in the publication block.
+including in the publication block, unless this release is the newest the cached
+release check knows. Then the verdict reads `Usage not captured.` and status and
+diag say, for example, "Muse usage not captured: this mm can't read Muse's current
+record format, and no newer mm can yet. See `mm diag`, or run `mm disable-source
+muse` to stop retrying." Neither command refreshes that cache.
 
 Upgrade **both producing and rendering Macs** for corrected init counts. Init
 now marks its Git rows as `origin: init`; older renderers still count that unknown
@@ -2181,7 +2185,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status` and `mm diag` say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |

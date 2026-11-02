@@ -737,38 +737,80 @@ def host_read_age(timestamp: str | None) -> str:
     return f"{int(seconds)} s ago"
 
 
+_HOST_DISPLAY_NAMES = {
+    "codex": "Codex",
+    "muse": "Muse",
+    "agy": "Antigravity",
+    "cursor": "Cursor",
+}
+"""Closed display names for the no-release clause; an unknown reader shows its id."""
+
+
+def _host_stop_remedy(reader: str) -> str:
+    """The step that stops mm retrying a reader, lower-cased to follow ``or``."""
+    if HOST_READER_SOURCE_GATE.get(reader) is None:
+        return mm_config.host_usage_consent_remedy(reader, enabled=False).removesuffix(".").lower()
+    return f"run `mm disable-source {reader}`"
+
+
+def _no_release_reads_clause(readers: Sequence[str]) -> str:
+    """What to say when this mm is the newest known and still cannot read a format.
+
+    Names only closed-vocabulary readers, carries no ``; `` (the notice is prose,
+    not a delimited schema) and never the token ``mm update``: updating cannot
+    help until a release reads the format.
+    """
+    names = " and ".join(_HOST_DISPLAY_NAMES.get(reader, reader) for reader in readers)
+    if len(readers) == 1:
+        owned = f"{_HOST_DISPLAY_NAMES.get(readers[0], readers[0])}'s current record format"
+        reads = f"this mm can't read {owned}"
+    else:
+        reads = "this mm can't read their current record formats"
+    stop = ", or ".join(_host_stop_remedy(reader) for reader in readers)
+    return (
+        f"{names} usage not captured: {reads}, and no newer mm can yet. "
+        f"See `mm diag`, or {stop} to stop retrying."
+    )
+
+
 def _host_skip_phrase(
     reader: str,
     reason: str,
     *,
     readiness: mm_config.UsageCaptureReadiness,
     upgrade_required: bool = False,
+    no_release_reads: Sequence[str] = (),
     verb: Literal["push", "init"] = "push",
     evidence: HostReadEvidence | None = None,
     in_diag: bool = False,
     attended: bool = False,
 ) -> str:
-    """Closed-vocabulary reader remedy; callers escape at their display sink."""
+    """Closed-vocabulary reader remedy; callers escape at their display sink.
+
+    ``no_release_reads`` names the unsupported readers whose format no release
+    reads yet, decided by the status/diag caller from the cached upgrade view;
+    push, init and attempt-record callers keep the default and their text.
+    """
     phrase = (
         f"host-usage snapshot skipped ({reader} {reason}) — "
         "content sync and git/session capture unaffected"
     )
     if readiness != "ready":
         return f"{phrase}. {mm_config.usage_capture_remedy(readiness, reader=reader)}"
+    if no_release_reads and reason not in _HOST_PERMANENT_REASONS:
+        return f"{phrase}. {_no_release_reads_clause(no_release_reads)}"
     if upgrade_required and reason not in _HOST_PERMANENT_REASONS:
         return (
             f"{phrase}. A consented reader has an unsupported record format; "
             "run mm update before refreshing usage."
         )
     if reason in _HOST_PERMANENT_REASONS:
-        stop = (
-            mm_config.host_usage_consent_remedy(reader, enabled=False).removesuffix(".").lower()
-            if HOST_READER_SOURCE_GATE.get(reader) is None
-            else f"run `mm disable-source {reader}`"
-        )
+        if reader in no_release_reads:
+            return f"{phrase}. {_no_release_reads_clause((reader,))}"
         return (
             f"{phrase}. {reader} wrote a record this version cannot read. "
-            f"A newer mm may read it: run `mm update`, or {stop} to stop retrying."
+            f"A newer mm may read it: run `mm update`, or {_host_stop_remedy(reader)} "
+            "to stop retrying."
         )
     if reason == "deadline":
         if attended:

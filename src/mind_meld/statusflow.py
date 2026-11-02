@@ -8,7 +8,7 @@ import re
 import stat
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -453,15 +453,23 @@ def status(
                 # Only deadline progress uses on-disk counts. Healthy status
                 # stays cache-only instead of walking the host's full history.
                 reader_states[name] = host_registry.reader_usage_diag(name, count_logs=True)
+        # One cached read per command, never a refresh: the verdict, the blocker
+        # lines and the Seam 3 display below all follow the same view.
+        upgrade_result = upgrade.cached_upgrade_view(config)
+        no_release = _no_release_readers(publication, reader_states, upgrade_result)
         capture_action = None
         if publication["readers"] and publication["readiness"] in ("disabled", "unavailable"):
             capture_action = "Usage capture unavailable. " + _usage_capture_remedy(
-                publication, reader_states
+                publication, reader_states, upgrade_result
             )
             if publication["readiness"] == "unavailable":
                 capture_action += " Run: mm diag"
-        elif _usage_capture_needs_upgrade(publication, reader_states):
+        elif _usage_capture_needs_upgrade(publication, reader_states, upgrade_result):
             capture_action = "Usage capture needs a newer mm. Run: mm update"
+        elif no_release:
+            capture_action = "Usage not captured. " + _usage_capture_remedy(
+                publication, reader_states, upgrade_result
+            )
         elif publication["readiness"] == "ready" and any(
             state.get("last_reason") not in (None, "locked") for state in reader_states.values()
         ):
@@ -651,8 +659,8 @@ def status(
                 rendered = f"{rendered}, then restart the agent so it reloads SKILL.md"
             console.print(f"  [yellow]Skill links broken:[/yellow] {rendered}")
 
-        # Seam 3 — status inspects cached upgrade knowledge without refreshing it.
-        upgrade_result = upgrade.cached_upgrade_view(config)
+        # Seam 3 — status inspects cached upgrade knowledge without refreshing it
+        # (the view was read once, before the usage-capture verdict).
         if upgrade_result.state == "upgrade-available" and upgrade_result.latest:
             console.print(
                 f"  [yellow]Upgrade available:[/yellow] "
@@ -711,9 +719,14 @@ def status(
                 f"or [bold]mm disable-source {safe_str(name)}[/bold] to dismiss."
             )
 
-        capture_remedy = _usage_capture_remedy(publication, reader_states)
-        upgrade_required = _usage_capture_needs_upgrade(publication, reader_states)
-        _print_host_publication(publication, reader_states=reader_states, hide_superseded=True)
+        capture_remedy = _usage_capture_remedy(publication, reader_states, upgrade_result)
+        upgrade_required = _usage_capture_needs_upgrade(publication, reader_states, upgrade_result)
+        _print_host_publication(
+            publication,
+            reader_states=reader_states,
+            hide_superseded=True,
+            upgrade_view=upgrade_result,
+        )
 
         # Enabling the Codex source is consent. A standing blocker takes priority
         # over inventory-based remedies; healthy Codex capture stays quiet here.
@@ -727,6 +740,7 @@ def status(
                         codex_diag,
                         readiness=_reader_capture_readiness(publication, "codex"),
                         upgrade_required=upgrade_required,
+                        no_release_reads=no_release,
                     )
                 )
             elif codex_diag.get("files_pre_track"):
@@ -761,6 +775,7 @@ def status(
                             muse_diag,
                             readiness=_reader_capture_readiness(publication, "muse"),
                             upgrade_required=upgrade_required,
+                            no_release_reads=no_release,
                         )
                     )
                 elif muse_diag.get("complete_once") is True:
@@ -798,6 +813,7 @@ def status(
                             agy_diag,
                             readiness=_reader_capture_readiness(publication, "agy"),
                             upgrade_required=upgrade_required,
+                            no_release_reads=no_release,
                         )
                     )
                 elif agy_diag.get("complete_once") is True:
@@ -824,6 +840,7 @@ def status(
                     cursor_diag,
                     readiness=_reader_capture_readiness(publication, "cursor"),
                     upgrade_required=upgrade_required,
+                    no_release_reads=no_release,
                 )
                 detail_clause = _cursor_store_detail_clause(cursor_diag.get("last_reason_detail"))
                 if detail_clause:
@@ -1058,6 +1075,7 @@ def _host_usage_blocker(
     *,
     readiness: _config_module.UsageCaptureReadiness,
     upgrade_required: bool = False,
+    no_release_reads: Sequence[str] = (),
     in_diag: bool = False,
 ) -> str:
     """Render cache-validated blocker metadata for both diagnostic surfaces."""
@@ -1080,6 +1098,7 @@ def _host_usage_blocker(
         evidence=evidence,
         in_diag=in_diag,
         upgrade_required=upgrade_required,
+        no_release_reads=no_release_reads,
     )
     since = state.get("last_reason_since")
     if since is not None:
@@ -1244,7 +1263,11 @@ def _host_publication(
 
 
 def _print_host_publication(
-    state: dict, *, reader_states: dict[str, dict], hide_superseded: bool = False
+    state: dict,
+    *,
+    reader_states: dict[str, dict],
+    hide_superseded: bool = False,
+    upgrade_view: upgrade.UpgradeCheckResult | None = None,
 ) -> None:
     """Keep recorded coverage, publication evidence and attempts distinct."""
     if state["state"] == "absent":
@@ -1274,7 +1297,7 @@ def _print_host_publication(
             age=events_tail.host_read_age(state.get("latest_attempt_at")),
             path=core._home_relative_path(attemptlog.record_path()),
             refresh_ready=state["readiness"] == "ready"
-            and not _usage_capture_needs_upgrade(state, reader_states),
+            and not _unsupported_readers(state, reader_states),
         )
     ):
         console.print(f"    {safe_str(line)}")
@@ -1289,21 +1312,59 @@ def _print_host_publication(
             or any(v != "contributed" for v in state["readers"].values())
         )
     ):
-        remedy = _usage_capture_remedy(state, reader_states)
+        remedy = _usage_capture_remedy(state, reader_states, upgrade_view)
         label = "Usage refresh" if state["readiness"] == "ready" else "Usage capture unavailable"
         console.print(f"    {label}: {safe_str(remedy)}")
 
 
-def _usage_capture_needs_upgrade(publication: dict, reader_states: dict[str, dict]) -> bool:
-    return publication["readiness"] == "ready" and any(
-        reader_states.get(reader, {}).get("last_reason") in events_tail._HOST_PERMANENT_REASONS
+def _unsupported_readers(publication: dict, reader_states: dict[str, dict]) -> tuple[str, ...]:
+    """Consented readers whose standing blocker is a record format mm cannot read."""
+    if publication["readiness"] != "ready":
+        return ()
+    return tuple(
+        reader
         for reader in publication["readers"]
+        if reader_states.get(reader, {}).get("last_reason") in events_tail._HOST_PERMANENT_REASONS
     )
 
 
-def _usage_capture_remedy(publication: dict, reader_states: dict[str, dict]) -> str:
+def _no_release_readers(
+    publication: dict,
+    reader_states: dict[str, dict],
+    upgrade_view: upgrade.UpgradeCheckResult | None,
+) -> tuple[str, ...]:
+    """Unsupported readers when this release is the newest the cached check knows.
+
+    Only a ``current`` view counts. ``unknown`` (no usable cache), ``skip`` and a
+    cached newer release keep ``mm update`` as the remedy; the view is never
+    refreshed here.
+    """
+    if upgrade_view is None or upgrade_view.state != "current":
+        return ()
+    return _unsupported_readers(publication, reader_states)
+
+
+def _usage_capture_needs_upgrade(
+    publication: dict,
+    reader_states: dict[str, dict],
+    upgrade_view: upgrade.UpgradeCheckResult | None = None,
+) -> bool:
+    """True when an unsupported format is present and an update may still read it."""
+    return bool(_unsupported_readers(publication, reader_states)) and not _no_release_readers(
+        publication, reader_states, upgrade_view
+    )
+
+
+def _usage_capture_remedy(
+    publication: dict,
+    reader_states: dict[str, dict],
+    upgrade_view: upgrade.UpgradeCheckResult | None = None,
+) -> str:
     """Pair the shared prerequisite verdict with currently consented reader blockers."""
-    if _usage_capture_needs_upgrade(publication, reader_states):
+    no_release = _no_release_readers(publication, reader_states, upgrade_view)
+    if no_release:
+        return events_tail._no_release_reads_clause(no_release)
+    if _unsupported_readers(publication, reader_states):
         return "Run mm update; a consented reader has an unsupported record format."
     return _config_module.usage_capture_remedy(publication["readiness"])
 
@@ -1931,6 +1992,7 @@ def diag(
     # Resolve storage path WITHOUT a valid config: diag has to run even
     # when config is broken (that's literally one of the things users run
     # it to debug). Fall back to the default storage path.
+    cfg = None
     try:
         cfg = load_config()
         storage_path = cfg["storage"]["path"]
@@ -2124,8 +2186,17 @@ def diag(
 
     console.print("\n[bold]Host usage[/bold]")
     publication = state["host_publication"]
-    upgrade_required = _usage_capture_needs_upgrade(publication, state["host_usage"])
-    _print_host_publication(publication, reader_states=state["host_usage"])
+    try:
+        # The cached view only: no fetch, no cache write. diag runs on broken
+        # state, so any failure keeps the `mm update` remedy.
+        upgrade_view = upgrade.cached_upgrade_view(cfg)
+    except Exception:
+        upgrade_view = None
+    no_release = _no_release_readers(publication, state["host_usage"], upgrade_view)
+    upgrade_required = _usage_capture_needs_upgrade(publication, state["host_usage"], upgrade_view)
+    _print_host_publication(
+        publication, reader_states=state["host_usage"], upgrade_view=upgrade_view
+    )
     budgets = state["host_read_budgets"]
     if budgets["autopush_ms"] is None:
         budget_line = "unknown (config unavailable)"
@@ -2162,6 +2233,7 @@ def diag(
                 in_diag=True,
                 readiness=_reader_capture_readiness(publication, "muse"),
                 upgrade_required=upgrade_required,
+                no_release_reads=no_release,
             )
         )
     mu_cached = mu_state.get("files_cached")
@@ -2197,6 +2269,7 @@ def diag(
                 in_diag=True,
                 readiness=_reader_capture_readiness(publication, "agy"),
                 upgrade_required=upgrade_required,
+                no_release_reads=no_release,
             )
         )
     agy_cached = agy_state.get("files_cached")
@@ -2220,6 +2293,7 @@ def diag(
                 in_diag=True,
                 readiness=_reader_capture_readiness(publication, "codex"),
                 upgrade_required=upgrade_required,
+                no_release_reads=no_release,
             )
         )
     cx_disk = cx_state.get("files_on_disk")
@@ -2237,7 +2311,7 @@ def diag(
             f"  codex awaiting re-walk:  {cx_state['files_pre_track']}"
             " — "
             + safe_str(
-                _usage_capture_remedy(publication, state["host_usage"])
+                _usage_capture_remedy(publication, state["host_usage"], upgrade_view)
                 if "codex" in publication["readers"]
                 else _config_module.usage_capture_remedy(
                     _reader_capture_readiness(publication, "codex"), reader="codex"
@@ -2275,6 +2349,7 @@ def diag(
                 in_diag=True,
                 readiness=_reader_capture_readiness(publication, "cursor"),
                 upgrade_required=upgrade_required,
+                no_release_reads=no_release,
             )
         )
         detail_clause = _cursor_store_detail_clause(cursor_state.get("last_reason_detail"))

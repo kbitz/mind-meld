@@ -1717,7 +1717,16 @@ reader and the reason class — never a path, transcript, SQL, model id, or
 exception string. Reasons outside `host_usage.Reason` normalize to
 `unavailable`. `unsupported` says the reader wrote a record this mm cannot
 read; a newer mm **may** read it (`mm update`), or the user can
-`mm disable-source <reader>`. A retry alone is not a remedy. `partial` takes
+`mm disable-source <reader>`. A retry alone is not a remedy. Status and diag,
+given a cached upgrade view that is `current` (this mm is the newest release
+the cached check knows; never refreshed from either command), replace the
+`mm update` remedy with `_no_release_reads_clause`: "<Reader> usage not
+captured: this mm can't read <Reader>'s current record format, and no newer mm
+can yet. See `mm diag`, or <stop step> to stop retrying." It names only reader
+display names, keeps the `mm diag` pointer on every surface including diag, and
+the status verdict reads `Usage not captured.` followed by it. A missing,
+malformed or skipped view, or a cached newer release, keeps `mm update`. Push,
+init and attempt-record phrases take the default and are unchanged. `partial` takes
 the generic retry sentence naming `mm push` and `mm diag`.
 `deadline` states that this push/init's read did not finish inside its budget.
 Background failures name attended `mm push` warming; an attended caller whose
