@@ -1649,7 +1649,7 @@ def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Le
                 continue
             if not ledger.readable:
                 continue
-            chain = [h for h in ledger.held_newest_first(name, rel) if h != head]
+            chain = [h for h in ledger.ancestry_newest_first(name, rel) if h != head]
             old_head = pullplan.prefix(old.get("sha256")) if isinstance(old, dict) else None
             if old_head and old_head != head and old_head not in chain:
                 chain.insert(0, old_head)

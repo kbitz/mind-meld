@@ -1210,6 +1210,19 @@ def test_a_conflict_is_seen_not_held_so_it_is_never_published_in_from():
     assert pullplan.prefix(digest(b"x\ny\nb\n")) not in pullplan.parse_from(a.pub)
 
 
+def test_learning_ancestry_on_a_match_keeps_the_held_baseline_before_the_cap():
+    ledger = pullplan.Ledger()
+    ledger.hold(SRC, REL, V0)
+    ancestors = [digest(f"ancestor {n}".encode())[:16] for n in range(pullplan.FROM_MAX)]
+    ledger.settle(PEER, SRC, REL, V0, ancestors=ancestors)
+    outgoing = {"sources": {SRC: {"files": {REL: {"sha256": V1}}}}}
+    core.stamp_ancestry(outgoing, None, ledger)
+    chain = pullplan.parse_from(outgoing["sources"][SRC]["files"][REL])
+    assert chain == [P0, *ancestors[:15]]
+    assert ledger.newest_held(SRC, REL) == P0
+    assert ledger.held_newest_first(SRC, REL) == [P0]
+
+
 def test_a_union_holds_both_sides():
     m = fleet("AB", MEMORY)
     a, b = m["A"], m["B"]

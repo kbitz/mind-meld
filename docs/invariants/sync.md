@@ -405,8 +405,10 @@ an older reader keeps working and ignores them:
 - `seen_version(source, path, sha, time, kind, deleted_by)`, key
   `(source, path, sha)`: `sha` is the 16-hex **prefix** (the spelling `from` uses);
   `time` is integer microseconds, kept strictly increasing per path; `kind` is
-  `held` (this machine built, wrote or published that version) or `seen` (it only
-  saw the version as a peer's); `deleted_by` is a nullable device id, stamped when a
+  `held` (this machine built, wrote or published that version), `ancestor`
+  (inherited provenance of a version it held), or `seen` (a conflict-only
+  observation). Only `held` can be the local baseline; inherited provenance is
+  never evidence of having held those bytes. `deleted_by` is a nullable device id, stamped when a
   followed deletion removed that version. Rows older than 365 days are pruned in
   the commit.
 
@@ -483,14 +485,22 @@ keeps the list it published before only when the newest held baseline is absent
 or still equals those bytes. Pulling another version and then reverting to the
 last published bytes rebuilds the list, even without publishing the intermediate
 version. An unreadable ledger preserves prior ancestry for unchanged bytes.
-`core.stamp_ancestry` builds it from the
-versions this machine held at that path (newest first) plus the prior entry's sha.
+`core.stamp_ancestry` builds it from the versions this machine held at that path,
+their inherited ancestry, and the prior entry's sha. The newest held baseline
+comes before inherited rows learned by a later byte-equal match, so the 16-entry
+cap cannot drop that immediate parent. Other rows are newest first. Ancestors of
+a held version persist as `ancestor` in the existing unrestricted `kind` column;
+no schema or compatibility migration is needed. `held` outranks `ancestor`,
+which outranks `seen`; a later held version may promote earlier conflict-only
+observations to inherited ancestry. This lets A → B → C → A handoffs fast-forward
+even when C never held A's intermediate bytes.
 Its only reader is the pull rule; a diff ignores it, so it never triggers a
 republish. Because a peer controls it, `pullplan.parse_from` reads any invalid
 shape (not a list, more than 16 entries, an item that is not 16 lowercase hex) as
 absent. Older peers publish none, and their files use the base-only rows
 (3, 6, 7). A conflict's remote sha is `seen`, never `held`, so it is never
-published in `from`; a union records both sides `held`. Limit: `from` holds 16
+published in `from`, and neither is its conflict-only ancestry; a union records
+both sides `held` and inherits their ancestry. Limit: `from` holds 16
 entries, so an edit chain longer than that between two machines' syncs reads as both
 changed and shows a conflict.
 
@@ -518,7 +528,9 @@ exists:
 7. this peer's base for the path equals that hash;
 8. the peer's manifest does not list the path (a merged manifest can hold both), and
    on a case-insensitive volume lists no path equal to it after NFC and casefold
-   (a case-only rename on Linux must not delete the live file on a Mac);
+   (a case-only rename on Linux must not delete the live file on a Mac). Both
+   preview and apply use the live-name inventory from before case-collision
+   write filtering; skipping a colliding write is not evidence of absence;
 9. the local path has no symlink component below the source root (the root itself
    may be a symlink), resolves inside the source root, is a
    regular file, and its bytes hash to the record's hash.

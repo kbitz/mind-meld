@@ -1121,6 +1121,30 @@ def test_a_case_only_rename_on_a_case_insensitive_volume_survives(fleet, monkeyp
     assert len(found) == 1
 
 
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "apply"])
+def test_a_case_only_replacement_survives_collision_filtering(fleet, monkeypatch, dry_run):
+    """The local publication wins collision selection, but cannot authorize deletion."""
+    local = _put_local(fleet, "README.md", SHARED, 1_600_000_000)
+    own = manifest.build_manifest_v2(LOCAL, "Local A", fleet.config["sync"]["sources"])
+    fleet.backend.put(
+        manifest_key(LOCAL),
+        crypto.encrypt(manifest.serialize_manifest(own), PASSPHRASE, MEMORY_KB),
+    )
+    _record(("README.md", SHARED))
+    _seed(fleet, {"readme.md": SHARED}, tombstones={"notes:README.md": _tombstone(SHARED)})
+    monkeypatch.setattr(pullflow, "_detect_case_insensitive_fs", lambda path: True)
+
+    result, _, output = _run(fleet, monkeypatch, "attended", dry_run=dry_run, verbose=True)
+
+    assert "case-collision" in output[1]  # The replacement really was filtered out.
+    assert local.exists(), "a Linux case-only rename must not delete the Mac's live file"
+    assert local.read_bytes() == SHARED and result.total_deleted == 0
+    assert _copies() == {}
+    assert _committed().base(PEER, NOTES, "README.md") == _sha(SHARED)
+    if dry_run:
+        assert "differs only in case" in output[0]
+
+
 def test_a_waiting_or_failed_peer_source_blocks_its_deletions(fleet):
     _, tombs = _deletable(fleet)
     assert _candidates(fleet, tombs, blocked={(PEER, NOTES)})[0] == []

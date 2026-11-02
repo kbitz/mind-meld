@@ -2683,6 +2683,7 @@ def _plan_pull(
     ledger: pullplan.Ledger | None = None,
     own: pullplan.OwnLookup | None = None,
     my_device_id: str = "",
+    deletion_manifests: dict | None = None,
 ) -> tuple[pullplan.PullPlanner, list[_UnknownSourceWarning]]:
     planner = pullplan.PullPlanner(ledger, own, _sidecar_holds(local_sources_map))
     unknown = []
@@ -2705,7 +2706,7 @@ def _plan_pull(
     if ledger is not None and ledger.readable:
         for d in _deletion_candidates(
             pull_targets=pull_targets,
-            manifest_cache=manifest_cache,
+            manifest_cache=manifest_cache if deletion_manifests is None else deletion_manifests,
             local_sources_map=local_sources_map,
             source_filter=source_filter,
             ledger=ledger,
@@ -3877,6 +3878,10 @@ def _pull_core(
         # globally — we only skip the duplicate WRITE on case-insensitive
         # consumers. The raw manifest stays intact for future cross-platform
         # peers.
+        # Collision selection suppresses writes, not evidence that a peer still
+        # lists a live replacement. Keep the filtered pre-collision manifests
+        # for deletion authorization (the collision helper returns new copies).
+        deletion_manifests = manifest_cache
         case_collisions = _detect_pull_case_collisions(manifest_cache, local_sources_map)
         if case_collisions:
             with core._pause_sync_progress():
@@ -3933,6 +3938,7 @@ def _pull_core(
                 ledger,
                 own_lookup,
                 my_device_id,
+                deletion_manifests,
             )
         if conflict_mode == "fail":
             assert planner is not None
@@ -4155,7 +4161,7 @@ def _pull_core(
                 }
                 deletions = _deletion_candidates(
                     pull_targets=pull_targets,
-                    manifest_cache=manifest_cache,
+                    manifest_cache=deletion_manifests,
                     local_sources_map=local_sources_map,
                     source_filter=source_filter,
                     ledger=ledger,

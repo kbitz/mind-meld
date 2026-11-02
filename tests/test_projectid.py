@@ -5198,6 +5198,36 @@ def test_an_exact_revert_with_a_fresh_mtime_propagates(trio):
     assert trio.text(b) == "good\n"
 
 
+@pytest.mark.parametrize("name", ["topic.md", "MEMORY.md"])
+def test_inherited_ancestry_survives_two_sequential_handoffs(trio, name):
+    """C never held A's V1; its inherited provenance must still reach A via V3."""
+    a, b, c = trio.mac, trio.linux2, trio.linux  # A encounters C before B.
+    spread(trio, name, "- base\n")
+    for machine in (b, c):
+        machine.push()
+    a.pull()
+    trio.write(a, name, "- base\n- removed\n")  # V1
+    a.push()
+    b.pull(from_device=a.device_id)
+    assert trio.text(b, name) == "- base\n- removed\n"
+    trio.write(b, name, "- base\n- middle\n")  # V2 removes a line from V1.
+    b.push()
+    c.pull(from_device=b.device_id)  # C misses A entirely, and only writes V2.
+    assert trio.text(c, name) == "- base\n- middle\n"
+    trio.write(c, name, "- base\n- final\n")  # V3
+    c.push()  # Reloads C's committed database, so an in-memory fix is insufficient.
+
+    preview = a.cli("pull", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    result = a.pull()
+    assert (result.total_written, result.total_merged, result.total_conflicted) == (1, 0, 0)
+    assert trio.text(a, name) == "- base\n- final\n"
+    assert "Would write 1, merge up to 0, conflict 0" in preview.output, preview.output
+    assert not list(a.claude.rglob("*sync-conflict*"))
+    assert a.pull().total_applied == 0
+    assert trio.text(a, name) == "- base\n- final\n"
+
+
 @pytest.mark.parametrize("peer_base_known", [False, True])
 @pytest.mark.parametrize("publish_intermediate", [False, True])
 def test_a_handoff_exact_revert_propagates_when_the_origin_missed_the_intermediate_push(

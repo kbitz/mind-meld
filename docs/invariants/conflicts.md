@@ -46,7 +46,9 @@ It reads the local ledger (`pullplan.Ledger`; tables and durability in
 - **this peer's base**: the full sha256 this machine and that peer last agreed on
   for the path (`peer_base`);
 - **ancestry**: every version this machine has `held` (it built, wrote or published
-  that file) or `seen` (it only saw the version as a peer's; `seen_version`);
+  that file), inherited as an `ancestor` of held bytes, or only `seen` as a
+  conflict observation (`seen_version`). Only held and inherited versions go
+  into a later publication's `from`;
 - **baseline**: the newest `held` version; with no `held` row, this peer's base.
   The local file is **clean** when it equals the baseline: it carries no edit made
   here that the peer could not have built on;
@@ -109,12 +111,15 @@ with the separate pre-deletion commit described in sync.md):
 
 - written, fast-forward, keep-remote, matched, and an `unchanged` that really
   agrees (byte-equal file or a no-op merge): the base becomes the remote sha and
-  the version is `held`;
+  the version is `held`, and its `from` prefixes become inherited `ancestor`
+  rows so sequential handoffs can carry them through machines that never held
+  the intermediate bytes;
 - merged, merged via LCS: the base becomes the remote sha and both the remote sha
   and the pre-merge local sha become `held` (the merge is built on both);
 - conflicted and kept: the base becomes the remote sha but the version is only
-  `seen`, never `held`: the local file was not built on it, so it is never published
-  in `from`, and a later pull of the same sha is row 3;
+  `seen`, never `held`: the local file was not built on it, so neither it nor its
+  conflict-only ancestry is published in `from`, and a later pull of the same sha
+  is row 3. Existing inherited or held rows are never demoted;
 - inline `(l)ocal` (keep-canonical, outcome word `skipped`): deferred, see below;
 - failed, waiting, symlink skip, `older`, `held`, `stale`: nothing is recorded.
 

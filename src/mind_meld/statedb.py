@@ -362,7 +362,8 @@ def commit_ledger(
 
     Rows are written only when they changed. ``seen`` entries are
     ``(source, path, sha, kind, time_us, deleted_by)``; ``held`` outranks
-    ``seen`` and moves the row's time, and a stamp is never overwritten by ``None``. Rows older than
+    ``ancestor``, which outranks conflict-only ``seen``. A promotion moves the
+    row's time, and a stamp is never overwritten by ``None``. Rows older than
     ``SEEN_MAX_AGE_US`` are pruned.
     """
     if not conn.in_transaction:
@@ -389,10 +390,14 @@ def commit_ledger(
             conn.execute(
                 "INSERT INTO seen_version (source, path, sha, time, kind, deleted_by) "
                 "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (source, path, sha) DO UPDATE SET "
-                "time = CASE WHEN excluded.kind = 'held' THEN excluded.time ELSE time END, "
-                "kind = CASE WHEN excluded.kind = 'held' THEN 'held' ELSE kind END, "
+                "time = CASE WHEN excluded.kind = 'held' "
+                "OR (excluded.kind = 'ancestor' AND kind = 'seen') "
+                "THEN excluded.time ELSE time END, "
+                "kind = CASE WHEN excluded.kind = 'held' THEN 'held' "
+                "WHEN excluded.kind = 'ancestor' AND kind = 'seen' THEN 'ancestor' ELSE kind END, "
                 "deleted_by = COALESCE(excluded.deleted_by, deleted_by) "
                 "WHERE excluded.kind = 'held' "
+                "OR (excluded.kind = 'ancestor' AND kind = 'seen') "
                 "OR (excluded.deleted_by IS NOT NULL AND deleted_by IS NOT excluded.deleted_by)",
                 (source, path, sha, when, kind, deleted_by),
             )

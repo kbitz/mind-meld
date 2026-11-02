@@ -33,6 +33,7 @@ from mind_meld.merge import should_merge
 
 HELD = "held"
 SEEN = "seen"
+ANCESTOR = "ancestor"
 PREFIX_LEN = 16
 FROM_MAX = 16
 _PREFIX_RE = re.compile(r"[0-9a-f]{16}\Z")
@@ -168,6 +169,22 @@ class Ledger:
         held = [(e.time, sha) for sha, e in self.entries(source, path).items() if e.kind == HELD]
         return [sha for _, sha in sorted(held, reverse=True)]
 
+    def ancestry_newest_first(self, source: str, path: str) -> list[str]:
+        """Publish held versions and their inherited ancestry, never conflict-only observations."""
+        built_on = [
+            (e.time, sha)
+            for sha, e in self.entries(source, path).items()
+            if e.kind in {HELD, ANCESTOR}
+        ]
+        chain = [sha for _, sha in sorted(built_on, reverse=True)]
+        baseline = self.newest_held(source, path)
+        if baseline is not None:
+            # A matching peer can teach us ancestors after we held its bytes.
+            # Keep the immediate baseline ahead of those newly learned rows.
+            chain.remove(baseline)
+            chain.insert(0, baseline)
+        return chain
+
     def newest_stamp(self, source: str, path: str) -> str | None:
         """The ``deleted_by`` of the path's newest row, if that row is stamped."""
         rows = self.entries(source, path)
@@ -197,16 +214,18 @@ class Ledger:
         self.seen.setdefault((source, path), {})[head] = entry
         self.new_seen[(source, path, head)] = (HELD, entry.time, None)
 
-    def see(self, source: str, path: str, sha: str) -> None:
+    def see(self, source: str, path: str, sha: str, *, inherited: bool = False) -> None:
         head = prefix(sha)
         if head is None or not self._tracked(source):
             return
         rows = self.seen.setdefault((source, path), {})
-        if head in rows:
+        existing = rows.get(head)
+        if existing is not None and (not inherited or existing.kind != SEEN):
             return
-        entry = SeenEntry(SEEN, self._next_time(source, path))
+        kind = ANCESTOR if inherited else SEEN
+        entry = SeenEntry(kind, self._next_time(source, path))
         rows[head] = entry
-        self.new_seen[(source, path, head)] = (SEEN, entry.time, None)
+        self.new_seen[(source, path, head)] = (kind, entry.time, None)
 
     def settle(
         self,
@@ -222,8 +241,9 @@ class Ledger:
         """Record that this machine and ``peer`` now agree about ``remote_sha``.
 
         ``ancestors`` are the remote entry's ``from`` prefixes: versions the
-        remote was built on. They are seen (never held), so a lagging peer that
-        still advertises one of them reads as stale instead of as a rival edit.
+        remote was built on. A held remote makes them inherited ancestors (never
+        held), which a later push carries forward. Conflict-only observations
+        remain seen: they suppress stale peers but never authorize a fast-forward.
         """
         if not self.readable:
             return
@@ -231,14 +251,14 @@ class Ledger:
         if self.bases.get(key) != remote_sha:
             self.bases[key] = remote_sha
             self.new_bases[key] = remote_sha
+        for ancestor in reversed(ancestors):
+            self.see(source, path, ancestor, inherited=hold)
         for extra in also_hold:
             self.hold(source, path, extra)
         if hold:
             self.hold(source, path, remote_sha)
         else:
             self.see(source, path, remote_sha)
-        for ancestor in ancestors:
-            self.see(source, path, ancestor)
 
     def stamp_deleted(self, source: str, path: str, sha: str, device_id: str) -> None:
         """Mark ``sha`` as the version a followed deletion removed (origin ``device_id``)."""

@@ -765,6 +765,44 @@ def test_deletion_stamp_stays_newest_after_ancestry_and_database_reload():
     assert again.newest_stamp("notes", "a.md") == "peerpeer"
 
 
+def test_inherited_ancestry_round_trips_without_promoting_conflict_only_observations():
+    from mind_meld import core, pullplan
+
+    def reload():
+        result, exc = core.load_ledger(["peerpeer"])
+        assert exc is None
+        return result
+
+    def published_from(ledger):
+        outgoing = {"sources": {"notes": {"files": {"a.md": {"sha256": "e" * 64}}}}}
+        core.stamp_ancestry(outgoing, None, ledger)
+        return outgoing["sources"]["notes"]["files"]["a.md"].get("from", [])
+
+    ledger = pullplan.Ledger()
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_B,))
+    ledger.settle("peerpeer", "notes", "a.md", "d" * 64, hold=False, ancestors=(SHA_A,))
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert published_from(ledger) == [FULL[:16], SHA_B]
+    assert ledger.newest_held("notes", "a.md") == FULL[:16]
+
+    # Later canonical agreement can promote a previously conflict-only ancestor.
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_A, SHA_B))
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert published_from(ledger) == [FULL[:16], SHA_A, SHA_B]
+    assert ledger.entries("notes", "a.md")[SHA_A].kind == pullplan.ANCESTOR
+    assert "d" * 16 not in published_from(ledger)
+
+    # Subsequent seen/ancestor writes cannot demote held or inherited rows.
+    ledger.settle("peerpeer", "notes", "a.md", "d" * 64, hold=False, ancestors=(SHA_A,))
+    ledger.see("notes", "a.md", FULL, inherited=True)
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert ledger.newest_held("notes", "a.md") == FULL[:16]
+    assert published_from(ledger) == [FULL[:16], SHA_A, SHA_B]
+
+
 def test_core_load_ledger_is_unreadable_for_a_damaged_database():
     from mind_meld import core
 
