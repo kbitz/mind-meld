@@ -910,8 +910,15 @@ class _ApplyReporter:
             ancestors=self.remote_from,
         )
         written = self.copy_path if outcome in {"conflicted", "kept"} else self.local_path
-        if outcome in {"written", "merged", "merged-via-lcs", "conflicted", "kept"} and written:
+        # Agreement can retry a previous failed flush without writing any bytes.
+        # Already-settled matches need no repeat flush, even if another path is dirty.
+        pending = (self.peer_id, self.src_name, self.rel_path) in ledger.new_bases or any(
+            (self.src_name, self.rel_path, sha[:16]) in ledger.new_seen
+            for sha in (self.remote_sha, *also, *self.remote_from)
+        )
+        if written and (outcome != "unchanged" or pending):
             ledger.flush_paths.setdefault((self.src_name, self.rel_path), []).append(written)
+            self.touched_parents.add(written.parent)
 
     def defer_settle(self) -> None:
         """Inline keep-local: settle only if the whole pull is not aborted."""
@@ -2163,6 +2170,9 @@ def _move_into_copy(local_path: Path, copy_path: Path, sha: str) -> str:
         # Preserve the moved bytes here whenever no-clobber restoration fails.
         return "kept-copy"
     try:
+        # The hard link restores the moved inode, including its pre-recovery mode.
+        # Use our private copy path so a new canonical replacement is never chmodded.
+        os.chmod(copy_path, stat.S_IMODE(moved.st_mode), follow_symlinks=False)
         _remove_owned_copy(copy_path, moved)
     except OSError as exc:
         raise _RestoredCopyError(str(exc)) from exc
@@ -2770,6 +2780,11 @@ def _classify_with_ledger(
         local_path = base_path / rel_path
         local = pullplan.LocalFile()
         try:
+            if pullplan._has_symlinked_component(local_path, base_path):
+                # Let the apply boundary report its existing local-routing skip;
+                # matching through a link must never settle or queue a flush.
+                to_download[rel_path] = info
+                continue
             if local_path.exists():
                 local = pullplan.LocalFile(True, hash_file(local_path), None)
         except (PermissionError, OSError):
@@ -2799,9 +2814,9 @@ def _classify_with_ledger(
             anchor_ok=anchor_ok,
         )
         if verdict == "matched":
-            ledger.settle(
-                did, src_name, rel_path, info["sha256"], ancestors=pullplan.parse_from(info)
-            )
+            reporter.begin(rel_path, local_path, None, info["sha256"], pullplan.parse_from(info))
+            reporter.agree = True
+            reporter._settle("unchanged")
         elif verdict == "older":
             reporter.note_older(rel_path, local.mtime, remote_mtime)
         elif verdict in ("write", "fast-forward", "fallback", "both"):
@@ -4062,6 +4077,9 @@ def _pull_core(
                         in_flight = None
                         continue
 
+                    # Durability work is independent of visible changes: matched,
+                    # agreeing no-ops and kept sidecars can all establish a new base.
+                    touched_parents |= per_source.touched_parents
                     if not per_source.had_changes:
                         in_flight = None
                         if verbose and not quiet:

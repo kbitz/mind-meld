@@ -1398,6 +1398,7 @@ def test_a_rename_that_fails_for_lack_of_space_keeps_the_file_and_counts_failed(
 
 def test_a_write_before_the_move_puts_the_edited_file_back(fleet, monkeypatch):
     path = _setup_deletion(fleet)
+    path.chmod(0o755)
 
     def edit_then_move(real, src, dst, *args, **kwargs):
         path.write_bytes(b"typed after the check\n")
@@ -1407,6 +1408,7 @@ def test_a_write_before_the_move_puts_the_edited_file_back(fleet, monkeypatch):
     result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
     # The moved inode held the edit, not the deleted version: it is linked back.
     assert path.read_bytes() == b"typed after the check\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o755
     assert (result.total_deleted, result.total_failed) == (0, 1)
     assert "changed while it was being deleted" in err and "local file kept" in err
     assert _copies() == {}
@@ -1699,6 +1701,52 @@ def _case_symlink(fleet):
 def _case_local_newer(fleet):
     _seed(fleet, {"note.md": b"peer content\n"})
     _put_local(fleet, "note.md", b"local content\n", 1_800_000_000)
+
+
+@pytest.mark.parametrize("link_at", ["leaf", "descendant", "source-root"])
+def test_matching_local_symlink_is_skipped_but_source_root_link_can_settle(
+    fleet, monkeypatch, link_at
+):
+    name = "skills/AGENTS.md" if link_at == "descendant" else "AGENTS.md"
+    data = b"shared agent instructions\n"
+    _seed(fleet, {name: data})
+    shared = fleet.root / "shared-config"
+    shared.mkdir()
+    target = shared / "AGENTS.md"
+    target.write_bytes(data)
+    if link_at == "source-root":
+        fleet.config["sync"]["sources"][0]["path"] = str(fleet.local / "linked-root")
+        link = fleet.local / "linked-root"
+        link.symlink_to(shared, target_is_directory=True)
+    elif link_at == "descendant":
+        link = fleet.local / "skills"
+        link.symlink_to(shared, target_is_directory=True)
+    else:
+        link = fleet.local / name
+        link.symlink_to(target)
+    real_flush, flushed = pullflow.fsutil.fsync_file, []
+
+    def flush_file(path):
+        flushed.append(Path(path).resolve())
+        return real_flush(path)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_file", flush_file)
+    for attempt in range(2):
+        flushed.clear()
+        result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+        assert result.durability_fsync_failures == 0
+        assert result.total_failed == result.total_applied == 0
+        assert err == "" and link.is_symlink() and target.read_bytes() == data
+        ledger = _committed()
+        if link_at == "source-root":
+            assert result.total_skipped == 0
+            assert ledger.base(PEER, NOTES, name) == _sha(data)
+            assert flushed == ([target] if attempt == 0 else [])
+        else:
+            assert result.total_skipped == 1
+            assert ledger.base(PEER, NOTES, name) is None
+            assert _row_kinds(ledger, name) == {}
+            assert flushed == []
 
 
 def _case_stale(fleet):
@@ -2143,9 +2191,12 @@ def test_a_file_that_cannot_be_flushed_loses_its_base_but_the_others_keep_theirs
 
     _seed(fleet, {"bad.md": b"will not flush\n", "good.md": b"flushes fine\n"})
     real = fsutil.fsync_file
+    flushed = []
+    fail = True
 
     def flaky(path):
-        if Path(path).name == "bad.md":
+        flushed.append(Path(path))
+        if fail and Path(path).name == "bad.md":
             raise OSError(errno.EIO, "Input/output error")
         return real(path)
 
@@ -2159,10 +2210,123 @@ def test_a_file_that_cannot_be_flushed_loses_its_base_but_the_others_keep_theirs
     assert ledger.base(PEER, NOTES, "bad.md") is None  # re-derived by the next pull
     assert _row_kinds(ledger, "bad.md") == {}
     assert ledger.base(PEER, NOTES, "good.md") == _sha(b"flushes fine\n")
-    # The next pull settles it: the bytes match the remote, so the base is recorded again.
-    monkeypatch.setattr(fsutil, "fsync_file", real)
-    _run(fleet, monkeypatch, "quiet")
+    # Matching bytes on retry do not prove the failed flush became durable.
+    flushed.clear()
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    assert flushed == [fleet.local / "bad.md"]  # good.md is already settled
+    _counts(result, durability_fsync_failures=1)
+    assert "durability fsync failed" in err
+    assert _committed().base(PEER, NOTES, "bad.md") is None
+    assert _row_kinds(_committed(), "bad.md") == {}
+
+    flushed.clear()
+    fail = False
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    _counts(result)
+    assert flushed == [fleet.local / "bad.md"]
     assert _committed().base(PEER, NOTES, "bad.md") == _sha(b"will not flush\n")
+
+
+def test_kept_only_retry_retries_failed_directory_flush(fleet, monkeypatch):
+    _seed(fleet, {"note.md": b"peer bytes\n"})
+    local = _put_local(fleet, "note.md", b"my bytes\n", 1_600_000_000)
+    real_file, real_dir = pullflow.fsutil.fsync_file, pullflow.fsutil.fsync_dir
+    files, parents = [], []
+    fail = True
+
+    def flush_file(path):
+        files.append(Path(path))
+        return real_file(path)
+
+    def flush_dir(path):
+        parents.append(Path(path))
+        if fail and Path(path) == fleet.local:
+            raise errors.StorageError("simulated directory flush failure")
+        return real_dir(path)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_file", flush_file)
+    monkeypatch.setattr(pullflow.fsutil, "fsync_dir", flush_dir)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert result.total_conflicted == result.durability_fsync_failures == 1
+    assert _committed().base(PEER, NOTES, "note.md") is None
+    kept = next(fleet.local.glob("note.sync-conflict-*.md"))
+    history = list(pullhistory.read_records())
+
+    files.clear()
+    parents.clear()
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    _counts(result, durability_fsync_failures=1)
+    assert files == [kept] and fleet.local in parents
+    assert "durability fsync failed" in err
+    assert _committed().base(PEER, NOTES, "note.md") is None
+    assert _row_kinds(_committed(), "note.md") == {}
+
+    fail = False
+    files.clear()
+    parents.clear()
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    _counts(result)
+    assert files == [kept] and fleet.local in parents
+    assert _committed().base(PEER, NOTES, "note.md") == _sha(b"peer bytes\n")
+    assert list(pullhistory.read_records()) == history
+    assert local.read_bytes() == b"my bytes\n" and kept.read_bytes() == b"peer bytes\n"
+    assert list(fleet.local.glob("note.sync-conflict-*.md")) == [kept]
+
+
+@pytest.mark.parametrize("agreement", ["apply-time-equality", "merge-no-op"])
+@pytest.mark.parametrize("failed_flush", ["file", "directory"])
+def test_agreeing_apply_flushes_before_settling(fleet, monkeypatch, agreement, failed_flush):
+    remote = b'{"id":1}\n'
+    union = remote + b'{"id":2}\n'
+    name = "note.md" if agreement == "apply-time-equality" else "notes.jsonl"
+    _seed(fleet, {name: remote})
+    local = _put_local(fleet, name, union, 1_600_000_000)
+    real_apply = pullflow._apply_incoming_file
+    applied = []
+
+    def apply(*args, **kwargs):
+        if agreement == "apply-time-equality":
+            # An agent makes the file equal after classification selected a download.
+            local.write_bytes(remote)
+        outcome = real_apply(*args, **kwargs)
+        applied.append(outcome)
+        return outcome
+
+    real_file, real_dir = pullflow.fsutil.fsync_file, pullflow.fsutil.fsync_dir
+    files, parents = [], []
+    fail = True
+
+    def flush_file(path):
+        files.append(Path(path))
+        if fail and failed_flush == "file" and Path(path) == local:
+            raise OSError(errno.EIO, "simulated file flush failure")
+        return real_file(path)
+
+    def flush_dir(path):
+        parents.append(Path(path))
+        if fail and failed_flush == "directory" and Path(path) == local.parent:
+            raise errors.StorageError("simulated directory flush failure")
+        return real_dir(path)
+
+    monkeypatch.setattr(pullflow, "_apply_incoming_file", apply)
+    monkeypatch.setattr(pullflow.fsutil, "fsync_file", flush_file)
+    monkeypatch.setattr(pullflow.fsutil, "fsync_dir", flush_dir)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert applied == ["unchanged"]
+    _counts(result, durability_fsync_failures=1)
+    assert files == [local] and local.parent in parents
+    assert _committed().base(PEER, NOTES, name) is None
+    assert _row_kinds(_committed(), name) == {}
+
+    fail = False
+    files.clear()
+    parents.clear()
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    _counts(result)
+    assert files == [local] and local.parent in parents
+    assert _committed().base(PEER, NOTES, name) == _sha(remote)
+    assert local.read_bytes() == (remote if agreement == "apply-time-equality" else union)
+    assert not list(pullhistory.read_records())
 
 
 def test_an_interrupted_pull_still_commits_what_it_settled(fleet, monkeypatch):
