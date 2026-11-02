@@ -138,7 +138,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `attemptlog.py:write` | [Test write guard](README.md#test-write-guard); `test_attemptlog_write_refuses_protected_root` |
 | `resolveflow.py:_ensure_inversion_marker` | [Test write guard](README.md#test-write-guard); `test_inversion_marker_refuses_protected_root` |
 | `crypto.py:apply_crypto_init_repair` / `CryptoInitCandidate` / `crypto_init_repair_counts` / `storage/local.py:_needs_fsync` (crypto-init durability) | `docs/invariants/init-devices.md` |
-| `upgrade.py:cached_upgrade_view` / `statusflow.py:status` (cached upgrade view) | `docs/invariants/auto-upgrade.md` |
+| `upgrade.py:cached_upgrade_view` / `statusflow.py:status` / `diag` (cached upgrade view; plain-text diag only) | `docs/invariants/auto-upgrade.md` |
 | `pullflow.py:_detect_case_insensitive_fs` / `pullflow.py:_detect_pull_case_collisions` | `docs/invariants/sync.md` |
 | `core.py:_get_config` / `_init_crypto_session` / `core.py:_maybe_prompt_migration` (`read_only=` / `dry_run=` gates) / `crypto.py:fetch_crypto_init` / `CryptoInitRepairPlan` (pure fetch and bound repair plan) | `docs/invariants/sync.md` and `docs/invariants/init-devices.md` |
 | `events_tail.py:_run_events_tail` / `_run_events_backfill` / `_prepare_recapture` / `_decide_token_walk_policy` / `_enabled_claude_paths` | `docs/invariants/events-retro.md` |

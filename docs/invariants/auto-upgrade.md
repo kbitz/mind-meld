@@ -7,7 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/core.py` — `_get_config` / (read-only transition gate)
 - `src/mind_meld/initflow.py` — `init` / (transition seam)
 - `src/mind_meld/cli.py` — `_auto_command_setup` / `push` / `pull` / `autopull` / `autopush` / `recapture` / `update` / `_run_update_with_progress` / (transition and update/nudge seams)
-- `src/mind_meld/statusflow.py` — `status` / (cached upgrade surfacing)
+- `src/mind_meld/statusflow.py` — `status` / `diag` / (cached upgrade surfacing)
 - `src/mind_meld/config.py` — the `[upgrade]` defaults in `_apply_defaults` (`auto_check`, `auto_install`)
 - `src/mind_meld/pullhistory.py` — `append_self_upgrade` and `verb: "self-upgrade"` row class
 - `pyproject.toml` — version source of truth; bumping triggers the next-tag release
@@ -15,7 +15,7 @@ Read BEFORE editing any of these:
 - `README.md` — Install / Upgrading sections (must stay `@latest`, never `@vX.Y.Z`)
 - `src/mind_meld/lockfile.py` — `acquire_lock` / `release_lock`
 
-Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class), `tests/test_lockfile.py`.
+Tests: `tests/test_upgrade.py`, `tests/test_self_update.py`, `tests/test_updateprogress.py`, `tests/test_pullhistory.py` (self-upgrade row class), `tests/test_lockfile.py`, `tests/test_diag.py` (cached reader remedies).
 
 
 ## Sync tail output and eligibility (Track 78A)
@@ -361,11 +361,14 @@ HEAD may be mid-bump or contain WIP that hasn't been tagged for release.
    sync latency. Interactive `mm push` calls it from the command's `finally`
    block after `release_lock()`, so a failed attended attempt still updates or
    nudges (64A); `--dry-run` never does either.
-3. **Status surfacing** in `mm status` — calls `cached_upgrade_view`, reading
+3. **Read-only surfacing** in `mm status` and plain-text `mm diag` — each calls
+   `cached_upgrade_view` once, reading
    `locked_json_snapshot(blocking=False)` with no HTTP request or cache write.
    It honors dev-build, `--no-check-version`, and `auto_check = false` skips.
-   Missing, malformed, or contended caches are unknown; stale results show
-   the age of `checked_at`. Push, pull, autopull, and autopush keep the
+   Missing, malformed, or contended caches are unknown; status shows the age
+   of stale results. Both commands use the view for unsupported-reader remedies.
+   Diag guards the read and keeps the update remedy if it fails; `diag --json`
+   does not read the view. Push, pull, autopull, and autopush keep the
    refreshing `check_for_upgrade` path.
 
 **Lock-order invariants (load-bearing):** NEVER acquire mm lockfile while holding
@@ -393,7 +396,7 @@ column showing `OLD → NEW` for self-upgrade rows; pull/push rows leave it empt
 
 ## Read-only callers (Tracks 56A/62A)
 
-`core._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `update_or_nudge` at its CLI call site: no cache creation/rewrite, HTTP request or pipx run, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view. A pending transition is recorded by a following mutating command; every preview and inspection preserves it. See the [README Previews table](../../README.md#previews) and `COMMAND_INTENTS62` for the complete command contract. `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
+`core._get_config(read_only=True)` skips **all** of `run_transition_hook`; skipping only `append_self_upgrade` would consume `last_seen_self_version` and lose the transition. Push dry-run loads once and gates `update_or_nudge` at its CLI call site: no cache creation/rewrite, HTTP request or pipx run, even when absent, stale, or due. Status also loads config read-only and uses the cached upgrade view; plain-text diag reads the same view without refreshing it. A pending transition is recorded by a following mutating command; every preview and inspection preserves it. See the [README Previews table](../../README.md#previews) and `COMMAND_INTENTS62` for the complete command contract. `TestPushPreviewNoMutation56A.test_s4b_transition_survives_preview_and_status_then_push_records_once` resets process guards, uses a non-dev version, and proves that preview and status preserve the pending transition before a real push records it exactly once.
 
 ## Release discipline (enforced by mm auto-upgrade)
 
