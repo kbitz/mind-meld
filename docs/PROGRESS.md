@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.3 | 2026-11-02 | **A peer's edit to a file you have not changed now just applies, and a file deleted on one machine is deleted on the others, with a 30-day recovery copy.** Before this release, every peer edit to a file both machines held was a conflict, and a deletion only stopped the file from coming back. This is for one person handing work from machine to machine, one active machine at a time. |
 | 1.12.2 | 2026-11-01 | **`mm recapture` and its preview now give each repository 30 seconds and the Git walk 120 seconds.** A repository the ordinary 2 second push cap skips can still be captured. Push, autopush, and init keep their existing limits, and the push inside a real recapture is that ordinary push. |
 | 1.12.1 | 2026-11-01 | **`mm sources`, `mm enable-source`, `mm disable-source`, and `mm reconfigure-sources` behave the same.** Help text, flags, exit codes, and the files they write are unchanged. |
 | 1.12.0 | 2026-10-31 | **Claude project memory for one git repository is the same project on every machine.** A checkout with a network `origin` publishes under that remote, and any other project publishes under a home-relative name. Each machine maps the name back to the folder Claude uses for its own checkout. This is 1.12.0, a minor, because docs/SPEC.md:293-296 says a storage-format change that needs every machine upgraded before it syncs is at least a minor. README Upgrading carries that note. |
