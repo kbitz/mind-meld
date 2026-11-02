@@ -59,7 +59,7 @@ First match wins. `older` compares file mtimes; an unparseable mtime is never ol
 |---|---|---|
 | 1 | local file missing | `held`: leave it missing, silently, when the remote sha is in ancestry, its mtime is not newer than when that row was recorded, the scan root's anchor is unchanged against this machine's own published manifest, this peer is not the origin of a deletion this machine followed, and this machine's own manifest lists the path or names it in a record (or the row carries `deleted_by`). Otherwise `write` |
 | 2 | local == remote | `matched` (settles the remote as the base) |
-| 3 | remote == this peer's base | `skip`: no download, no union, no prompt |
+| 3 | remote == this peer's base | `skip`: no download, no union, no prompt; except when local is clean, its sha is in `remote.from`, and the remote mtime is strictly newer than local (continue to row 4) |
 | 4 | clean, and the local sha is in `remote.from` | fast-forward |
 | 5 | remote sha is in ancestry | `stale`: a version this machine already moved past; silent, no write, no base |
 | 6 | clean, and the local file equals this peer's base | fast-forward |
@@ -68,7 +68,12 @@ First match wins. `older` compares file mtimes; an unparseable mtime is never ol
 
 Rows 4 and 6 end in `older`, not a write, when the remote mtime is strictly older
 than the local mtime: a restored machine's older bytes must not roll this one back.
-Row 4 before row 5 lets an exact revert with a fresh mtime propagate. Equal to an
+The row 3 exception and row 4 before row 5 let an exact revert with a fresh mtime
+propagate, including when this machine missed the peer's intermediate publication.
+The same-base exception requires a strictly newer comparable mtime: older, equal,
+missing or incomparable timestamps keep the acknowledged version silent. This
+avoids treating an acknowledged stale cycle as an `older` edit requiring action.
+Equal to an
 old peer base is not clean on its own (row 6 needs the baseline too), so a deliberate
 revert stays an edit. Why `from` exists: a per-peer base cannot see a handoff. A
 edits and pushes V1; B pulls it, edits and pushes V2 without ever publishing V1;

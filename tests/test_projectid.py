@@ -5196,3 +5196,38 @@ def test_an_exact_revert_with_a_fresh_mtime_propagates(trio):
     result = b.pull()
     assert result.total_written == 1 and result.total_conflicted == 0, result
     assert trio.text(b) == "good\n"
+
+
+@pytest.mark.parametrize("peer_base_known", [False, True])
+@pytest.mark.parametrize("publish_intermediate", [False, True])
+def test_a_handoff_exact_revert_propagates_when_the_origin_missed_the_intermediate_push(
+    trio, peer_base_known, publish_intermediate
+):
+    a, b = trio.mac, trio.linux
+    spread(trio, "x.md", "good\n")
+    b.push()
+    if peer_base_known:
+        a.pull()  # A's base for B stays at V0 throughout B's later work.
+    trio.write(a, "x.md", "bad edit\n")
+    a.push()
+    b.pull()
+    assert trio.text(b) == "bad edit\n"
+    if publish_intermediate:
+        b.push()  # A does not pull this publication.
+    trio.write(b, "x.md", "good\n")
+    b.push()
+
+    files = b.published()["sources"]["claude"]["files"]
+    entry = next(info for rel, info in files.items() if rel.endswith("/memory/x.md"))
+    assert prefix16("bad edit\n") in entry.get("from", [])
+    preview = a.cli("pull", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    assert "Would write 1, merge up to 0, conflict 0" in preview.output, preview.output
+    result = a.pull()
+    assert result.total_written == 1 and result.total_conflicted == 0, result
+    assert trio.text(a) == trio.text(b) == "good\n"
+    a.push()
+    for machine in (a, b):
+        again = machine.pull()
+        assert again.total_written == again.total_merged == again.total_conflicted == 0, again
+        assert trio.text(machine) == "good\n"

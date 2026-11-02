@@ -1628,7 +1628,7 @@ def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Le
     """Add each changed file's ``from`` list: the versions this machine built it on.
 
     Newest first, at most 16 prefixes. An unchanged entry keeps the list it
-    published before. ``mm-events`` publishes none.
+    published before unless the held baseline moved since. ``mm-events`` publishes none.
     """
     for name, entry in (local_manifest.get("sources") or {}).items():
         if name in ledger.untracked:
@@ -1637,7 +1637,12 @@ def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Le
         for rel, info in (entry.get("files") or {}).items():
             head = pullplan.prefix(info.get("sha256"))
             old = prior_files.get(rel)
-            if isinstance(old, dict) and old.get("sha256") == info.get("sha256"):
+            baseline = ledger.newest_held(name, rel) if ledger.readable else None
+            if (
+                isinstance(old, dict)
+                and old.get("sha256") == info.get("sha256")
+                and baseline in (None, head)
+            ):
                 kept = pullplan.parse_from(old)
                 if kept:
                     info["from"] = kept

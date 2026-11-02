@@ -479,7 +479,11 @@ whether to reuse or drop it.
 
 **Ancestry: the `from` field.** A manifest file entry gains `"from": [<16-hex sha
 prefix>, ...]`, newest first, at most 16, omitted when empty; an unchanged entry
-keeps the list it published before. `core.stamp_ancestry` builds it from the
+keeps the list it published before only when the newest held baseline is absent
+or still equals those bytes. Pulling another version and then reverting to the
+last published bytes rebuilds the list, even without publishing the intermediate
+version. An unreadable ledger preserves prior ancestry for unchanged bytes.
+`core.stamp_ancestry` builds it from the
 versions this machine held at that path (newest first) plus the prior entry's sha.
 Its only reader is the pull rule; a diff ignores it, so it never triggers a
 republish. Because a peer controls it, `pullplan.parse_from` reads any invalid

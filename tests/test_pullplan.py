@@ -10,7 +10,7 @@ The rule table (docs/invariants/conflicts.md), in order:
 
   1. local missing        -> held (removed here on purpose) or write
   2. local == remote      -> matched
-  3. remote == peer base  -> skip
+  3. remote == peer base  -> skip, except a clean, strictly newer successor (row 4)
   4. local clean and in remote.from -> fast-forward (older when the remote mtime is older)
   5. remote in ancestry   -> stale
   6. local clean and == peer base   -> fast-forward (older)
@@ -581,8 +581,10 @@ def test_an_unknown_local_digest_is_never_equal():
 def test_row3_remote_equal_to_the_peers_base_is_skipped():
     ledger = make_ledger(bases=base(V1), rows=[held(P0)])
     assert verdict(ledger, local(V0, hours(1)), V1) == "skip"
-    # Even when a fast-forward would otherwise apply (rows 3 before 4).
-    assert verdict(ledger, local(V0, hours(1)), V1, remote_from=[P0]) == "skip"
+    # An acknowledged version with no new timestamp still skips before row 4.
+    assert (
+        verdict(ledger, local(V0, hours(1)), V1, remote_from=[P0], remote_mtime=hours(1)) == "skip"
+    )
     # And before staleness (row 3 before 5).
     both = make_ledger(bases=base(V1), rows=[held(P0), held(P1)])
     assert verdict(both, local(V0, hours(1)), V1) == "skip"
@@ -591,6 +593,26 @@ def test_row3_remote_equal_to_the_peers_base_is_skipped():
 def test_row3_is_per_peer():
     ledger = make_ledger(bases=base(V1, peer=OTHER), rows=[held(P0)])
     assert verdict(ledger, local(V0, hours(1)), V1, peer=PEER, remote_from=[P0]) == "fast-forward"
+
+
+def test_a_fresh_exact_revert_can_succeed_even_when_it_equals_this_peers_base():
+    ledger = make_ledger(bases=base(V0), rows=[held(P0), held(P1, NOW_US + 1)])
+    assert verdict(ledger, local(V1, hours(5)), V0, remote_from=[P1]) == "skip"
+    assert verdict(ledger, local(V1, hours(4)), V0, remote_from=[P1]) == "fast-forward"
+
+
+@pytest.mark.parametrize("remote_mtime", [hours(1), hours(5), None, datetime(2026, 1, 1)])
+def test_an_acknowledged_cycle_stays_silent_without_a_strictly_newer_remote(remote_mtime):
+    ledger = make_ledger(bases=base(V0), rows=[held(P0), held(P1, NOW_US + 1)])
+    assert (
+        verdict(ledger, local(V1, hours(5)), V0, remote_from=[P1], remote_mtime=remote_mtime)
+        == "skip"
+    )
+
+
+def test_a_same_base_revert_never_overwrites_a_local_edit():
+    ledger = make_ledger(bases=base(V0), rows=[held(P0), held(P2, NOW_US + 1)])
+    assert verdict(ledger, local(V1, hours(4)), V0, remote_from=[P1]) == "skip"
 
 
 # ── decide: rows 4 and 6, fast-forward and the older hold ─────────────

@@ -322,6 +322,14 @@ def _remote_is_older(local: LocalFile, remote_mtime: datetime | None) -> bool:
         return False
 
 
+def _remote_is_newer(local: LocalFile, remote_mtime: datetime | None) -> bool:
+    """A same-base revert needs positive freshness, not merely 'not older'."""
+    try:
+        return remote_mtime is not None and local.mtime is not None and remote_mtime > local.mtime
+    except TypeError:
+        return False
+
+
 def _held_missing(
     ledger: Ledger,
     peer_id: str,
@@ -361,7 +369,7 @@ def decide(
     """The pull rule for one remote file; one of
 
     ``write`` (absent here), ``held`` (absent here on purpose), ``matched``,
-    ``skip`` (remote equals this peer's base), ``fast-forward``, ``older``
+    ``skip`` (remote equals this peer's base without a fresh successor), ``fast-forward``, ``older``
     (a fast-forward whose remote mtime is older than the local file),
     ``stale`` (a version this machine already moved past), ``fallback``
     (no base and no ancestry: today's rule) and ``both`` (both sides changed).
@@ -378,19 +386,23 @@ def decide(
     if ledger is None or not ledger.readable:
         return "fallback"
     base = ledger.base(peer_id, source, path)
-    if base is not None and base == remote_sha:
-        return "skip"
     held = ledger.newest_held(source, path)
     local_head = prefix(local.sha)
     if held is not None:
         clean = local_head is not None and local_head == held
     else:
         clean = base is not None and local.sha is not None and local.sha == base
+    built_on_local = clean and local_head is not None and local_head in remote_from
+    if base is not None and base == remote_sha:
+        # The peer can return to exactly its old bytes after building on ours.
+        # Keep acknowledged stale cycles silent unless this is a fresh successor.
+        if not (built_on_local and _remote_is_newer(local, remote_mtime)):
+            return "skip"
 
     def forward() -> str:
         return "older" if _remote_is_older(local, remote_mtime) else "fast-forward"
 
-    if clean and local_head is not None and local_head in remote_from:
+    if built_on_local:
         return forward()
     remote_head = prefix(remote_sha)
     if remote_head is not None and remote_head in ledger.entries(source, path):
