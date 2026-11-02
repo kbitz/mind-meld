@@ -21,13 +21,13 @@ Standing constraints are admission criteria for new Tracks. Apply the [planning 
 
 ## In Progress
 
-Declared active (manager, 2026-11-02): Track 91B is in flight as factory item 53b6eda2, with no PR yet. Its ID, its owning Group 91 and its card are pinned. Track 91C (the bootstrap script, Track 98A until this regeneration) shares Group 91's launch bin, so it takes the next free letter there.
+Declared active (manager, 2026-11-02): Track 91B is in flight as factory item 53b6eda2, with no PR yet. Its ID, its owning Group 91 and its card are pinned. The bootstrap script (Track 91C until this regeneration) now waits for the Muse reader fix, so it leaves Group 91 and takes back its earlier ID, Track 98A.
 
-#### Group 91: Honest usage remedy ∥ Bootstrap script
+#### Group 91: Honest usage remedy
 
 _Depends on: none_
 
-**This group delivers:** `mm status` stops prescribing an update that cannot help, and one script readies a fresh Mac or Arch-based machine with Python, pipx, mm and the Syncthing package.
+**This group delivers:** `mm status` stops prescribing an update that cannot help.
 
 ##### Track 91B: Stop telling the owner to update when the newest mm cannot read a host's records
 _1 task . ~90 LOC . low risk . 3 files_
@@ -43,13 +43,73 @@ _Source: observed 2026-11-01 on this Mac at mm 1.12.1, the newest tag, with Muse
 
 - **Remedy follows the cached newest release** -- _src/mind_meld/statusflow.py, src/mind_meld/events_tail.py, tests/test_diag.py, ~90 lines._ (S)
 
-##### Track 91C: Add a bootstrap script that readies a machine for mm and Syncthing
+## Current Plan
+
+_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 94, 97_
+
+### Phase 5: mm 2.0 on Syncthing
+
+**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, Muse usage read again, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
+**Groups:** 91, 99, 100, 98, 92, 95, 93
+
+#### Group 99: Muse reader move
+
+_Depends on: Group 91_
+
+**This group delivers:** The Muse usage reader lives in its own adapter module, with no change in what it reads or reports, so the fix that follows touches one module.
+
+##### Track 99A: Move the Muse usage reader into its own adapter module
+_1 task . ~900 LOC . medium risk . 8 files_
+**Outcome:** The Muse reader sits in `hosts/muse.py` behind the same adapter contract as the Codex reader, so Track 100A can change how Muse records are read without editing `host_usage.py`; nothing the owner sees changes.
+**Supports:** MVP-1, docs/SPEC.md O7.1 (Muse usage), through the core-and-extensions constraint (a move-only Track just before a Track that changes a host adapter in `host_usage.py`).
+**Done when:** `read_muse_usage`, `muse_usage_diag`, `muse_sessions_root`, `MUSE_SESSIONS_PATH`, `MUSE_CACHE_PATH`, `MUSE_USAGE_CENSUS_HOST_VERSION` and the Muse-only helpers (`_scan_muse_root`, `_freeze_muse_day`, `_validated_muse_frozen`, `_iter_muse_day_dirs`, `_muse_day_logs`, `_muse_now`, `_muse_turn_from_record`, `_validate_muse_counters` and the `_MUSE_*` constants) live in `src/mind_meld/hosts/muse.py`; callers in `host_registry.py`, `statusflow.py`, `events_tail.py` and the tests call them module-qualified; `tests/test_host_adapter_contract.py` runs its parametrized contract over Muse; `tests/test_module_boundaries.py` keeps `hosts/` modules importing neither `cli` nor each other; the Muse cache file, its format marker and every Muse total are unchanged, and `test_muse_contract_census_pin_matches_src_constant` reads the moved constant; the routing README and `events-retro.md` name the new module; `./bin/check` passes.
+_touches: src/mind_meld/host_usage.py, src/mind_meld/hosts/muse.py (new), src/mind_meld/host_registry.py, src/mind_meld/statusflow.py, src/mind_meld/events_tail.py, tests/, docs/invariants/README.md, docs/invariants/events-retro.md_
+_blocked-by: Track 91B_
+_out: 100A_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/fixtures/host_sessions/muse/CONTRACT.md_
+_produces: `hosts/muse.py` owns the Muse reader; `host_usage.py` keeps only shared helpers and the other readers._
+_session: fresh · effort: medium · verify: ./bin/check_
+
+_Source: the Future entry "Read Muse Code 1.4.14's usage records" (filed 2026-11-01, P1; deferred by PR #252 because the reader still lives in `host_usage.py`), promoted by Karl on 2026-11-02 ("ok sounds good"). Re-checked at 927d84a: the Muse reader is `host_usage.py`'s "Muse reader" section (lines 2334 to 3182, about 850 lines); `host_usage.`-qualified Muse symbols appear in `host_registry.py`, `statusflow.py`, `events_tail.py`, `tests/conftest.py` and eleven test files (`test_host_adapter_contract.py`, `test_module_boundaries.py`, `test_muse_usage.py`, `test_diag.py`, `test_host_usage.py`, `test_host_usage_snapshot.py`, `test_integration.py`, `test_silent_failure_contract.py`, `test_source_toggle.py`, `test_init_events_backfill.py` and `conftest.py`), so the card touches `tests/` as a directory to stay within the file cap. Pattern: Track 84A's Codex move (PR #232). Blocked by Track 91B because both edit `statusflow.py`, `events_tail.py` and `tests/test_diag.py`._
+
+- **Move the reader behind the adapter contract** -- _src/mind_meld/hosts/muse.py, src/mind_meld/host_usage.py, callers and tests, ~900 lines._ (L)
+
+#### Group 100: Muse usage read again
+
+_Depends on: Group 99_
+
+**This group delivers:** `retro-fleet`'s Muse row moves again, because the reader reads the records Muse Code writes now.
+
+##### Track 100A: Find why the Muse reader refuses this Mac's records, re-census and fix it
+_3 tasks . ~250 LOC . medium risk . 4 files_
+**Outcome:** Attended pushes on this Mac read Muse Code's current usage records again, so `retro-fleet`'s Muse row is no longer frozen at 2026-10-19 and the cause of the refusal is written down.
+**Supports:** MVP-1, docs/SPEC.md O7.1 (each consented host's usage is read) and the 2.0.0 release line, which needs O7 (O7.4: complete capture from every active machine).
+**Done when:** the first task names, from a read-only run of the reader against this Mac's real `~/.local/share/muse/sessions` (mm caches and state untouched: a temporary `HOME` pointed at the real sessions tree, or an in-process call with a throwaway cache path), which refusal in `hosts/muse.py` fires and on which record shape, using key names, counts and dates only, never record content, and records the Muse Code version observed; `tests/fixtures/host_sessions/muse/CONTRACT.md` gains a new census of this Mac's corpus (file, envelope and `model_completed` counts, key sets, counter relations, models, duplicate-id count and span) with that host version, and `MUSE_USAGE_CENSUS_HOST_VERSION` matches it; the reader accepts the shape the census found, with synthetic tests that pin it and keep the existing refusals for malformed records; if the cause is a genuine contradiction between logs rather than a new shape, the Track stops before changing a counting rule and writes the finding up for the owner in the PR; the PR records a live run on this Mac after the fix where `mm diag --json` shows `muse.last_reason` cleared and `files_cached` equal to `files_on_disk`, across as many attended pushes or `mm recapture` runs as the capture budget needs; `./bin/check --affected` passes.
+_touches: src/mind_meld/hosts/muse.py, tests/test_muse_usage.py, tests/fixtures/host_sessions/muse/, docs/invariants/events-retro.md_
+_blocked-by: Track 99A_
+_out: 98A_
+_read-first: tests/fixtures/host_sessions/muse/CONTRACT.md, docs/invariants/events-retro.md_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: the same Future entry (observed 2026-11-01 on this Mac at mm 1.12.1 with Muse Code 1.4.14). Re-observed 2026-11-02 at mm 1.12.3: `mm diag --json` shows `muse.last_reason: unsupported` since 2026-10-21T18:25:41Z, `last_complete_at` 2026-10-19, 486 of 1,036 files cached, and the latest attempt `dropped:deadline`. CONTRACT.md was rewritten for Muse 1.4.14 shapes on 2026-10-28 (PR #237, v1.11.16) from synthetic cases only; its census is still the 2026-10-14 Muse 1.4.7 corpus. Muse refusals carry no cause today (`_incomplete("unsupported")` on a cross-log disagreement and `_ReadFailure("unsupported")` in record validation), so the cause is unread._
+
+- **Read the cause on this Mac (read-only)** -- _no repository change; findings go into the census, ~0 lines._ (S)
+- **Re-census the corpus into CONTRACT.md** -- _tests/fixtures/host_sessions/muse/CONTRACT.md, ~60 lines._ (S)
+- **Teach the reader the census shape** -- _src/mind_meld/hosts/muse.py, tests/test_muse_usage.py, docs/invariants/events-retro.md, ~190 lines._ (M)
+
+#### Group 98: Bootstrap script
+
+_Depends on: Group 100_
+
+**This group delivers:** One script readies a fresh Mac or Arch-based machine with Python, pipx, mm and the Syncthing package.
+
+##### Track 98A: Add a bootstrap script that readies a machine for mm and Syncthing
 _2 tasks . ~250 LOC . medium risk . 3 files_
 **Outcome:** On a fresh Mac or Arch-based Linux machine, the owner runs one script and has Python, pipx, mm and the Syncthing package installed, then follows its printed next steps to pair machines, share the folder and run `mm init`.
 **Supports:** MVP-1, docs/SPEC.md Constraints (the bootstrap script) and the 2.0.0 release line; Track 93A's runbook uses it.
 **Done when:** `bin/bootstrap` on macOS stops with Homebrew's install instructions and a non-zero exit when `brew` is missing, and otherwise installs what is missing through Homebrew; on Arch-based Linux it installs what is missing with `pacman -S --needed`; any other system stops and names what is supported; it confirms Python 3.11 or newer and Syncthing 2.1 or newer, installs mm through pipx from `@latest` unless pipx already has it, and stops with the fix when `mm` on `PATH` is not pipx's copy; a rerun changes nothing and says so; it pairs no machine, shares no folder and writes no Syncthing configuration; success ends with those next steps, and a failure's last line says what broke and the one command that fixes it (O8); tests run it with fake `brew`, `pacman`, `pipx`, `python3`, `syncthing` and `mm` on `PATH` under a `tmp_path` home and cover macOS without Homebrew, macOS, Arch, an unsupported system, a rerun, a too-old Python or Syncthing and a shadowed `mm`; README's install section gives the one command that fetches and runs the script from the `latest` tag and says pairing and sharing stay manual; `./bin/check --affected` passes.
 _touches: bin/bootstrap (new), tests/test_bootstrap.py (new), README.md_
-_blocked-by: Track 97A_
+_blocked-by: Track 97A, Track 100A_
 _out: 92A, 93A_
 _read-first: docs/SPEC.md, README.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
@@ -59,18 +119,9 @@ _Source: Karl, 2026-11-01: "we need a bootstrap script before 2.0, so we should 
 - **Bootstrap script and its tests** -- _bin/bootstrap, tests/test_bootstrap.py, ~200 lines._ (M)
 - **README install path** -- _README.md, ~50 lines._ (S)
 
-## Current Plan
-
-_tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 94, 97_
-
-### Phase 5: mm 2.0 on Syncthing
-
-**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
-**Groups:** 91, 92, 93, 95
-
 #### Group 92: Syncthing status
 
-_Depends on: Group 91_
+_Depends on: Group 98_
 
 **This group delivers:** Status shows Syncthing's state and each machine's latest push.
 
@@ -80,7 +131,7 @@ _2 tasks . ~370 LOC . medium risk . 10 files_
 **Supports:** MVP-1, docs/SPEC.md O2.2 and O3.2.
 **Done when:** a new `syncthing.py` finds the local Syncthing configuration and reads its REST API read-only with timeouts (connected peers, folder state, and the folder options README lists); mm never writes Syncthing's configuration; pull records each peer's applied manifest time, and status shows each peer's last push and whether it is applied, warning in every mode when something has waited more than 24 h, not counting unplaced or old-form files, which are not pending; a published peer's manifest that has not arrived and an attended waiting count show in status; diag lints the folder options and `.stignore`; a missing or unreachable Syncthing is reported, not an error; tests use a fake REST server; `./bin/check` passes.
 _touches: src/mind_meld/syncthing.py (new), src/mind_meld/statusflow.py, src/mind_meld/pullflow.py, src/mind_meld/statedb.py, tests/test_syncthing.py (new), tests/test_diag.py, tests/test_module_boundaries.py, README.md, docs/invariants/README.md, docs/invariants/sync.md_
-_blocked-by: Track 77A, Track 91A, Track 91C_
+_blocked-by: Track 77A, Track 91A, Track 98A_
 _out: 93A, 95A_
 _read-first: docs/invariants/README.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_syncthing.py tests/test_diag.py tests/test_module_boundaries.py_
@@ -116,7 +167,7 @@ _Open questions for planning (mmm-factory's manager, 2026-11-02; record only, th
 
 #### Group 93: Cutover runbook
 
-_Depends on: Group 91, Group 92, Group 95_
+_Depends on: Group 98, Group 92, Group 95_
 
 **This group delivers:** A runbook and agent docs for moving the fleet onto Syncthing.
 
@@ -126,7 +177,7 @@ _3 tasks . ~450 LOC . low risk . 11 files_
 **Supports:** MVP-1, docs/SPEC.md O1 to O4 (the cutover, and the owner's observation after it).
 **Done when:** README covers installing on macOS and Arch with the bootstrap script, pairing, the folder options mm relies on, how `~/Sync/mind-meld` relates to Syncthing's Default Folder at `~/Sync`, and a cutover runbook: update every machine in any order (there is no fleet order since 1.12.0), except that a machine at 0.14.18 or older upgrades before its next attended `mm push` or `mm gc`, or stays off; stop hooks; move the store folder from iCloud Drive into the Syncthing folder; point `storage.path` at it; put mm's temporary-file line in `.stignore` on every machine, because the cutover never runs `mm init --new-fleet` and Syncthing does not sync that file; bring in each of the two Linux machines one at a time (bootstrap, pair, accept the folder, unlock the keyring before hooks run, `mm init`); retire a dead machine by moving its device entry aside as README's "Retiring a dead machine" says, never by deleting its directories and never while a machine at 1.7.1 or older can run; delete the iCloud folder as the runbook's last step, once every machine has joined and reports in sync; and an optional time-boxed rehearsal between a Linux machine and a Mac with a throwaway folder, temp `HOME` and throwaway passphrase, running `mm init` before and after delivery; the runbook carries Track 91A's waived manual check as an owner step at cutover: README's deletion-preview and recovery recipe on both active Macs, recovering a deleted file on its origin Mac, and `--verbose` flush timing, with what to record; AGENTS.md Key Principles and root SPEC.md's storage sections describe the Syncthing folder; `sync.md` and `init-devices.md` drop iCloud-only rules; the pre-2026-10-19 Track IDs in the routing README, `init-devices.md` and `tests/test_pullhistory.py` are retired; root SPEC.md's `mm sources` steps and `sync.md`'s config-patch row (`_set_grok_host_usage` no longer exists), "all configured sources" sentence and `has_explicit_sources` wording match the code; README and `.github/workflows/ci.yml` stop citing a soak; `pyproject.toml` description and keywords drop iCloud; `tests/test_version.py` fails when `VERSION` and `pyproject.toml` differ; docs/SPEC.md's superseded-history entry for the store design names §13 (cutover) as evidence alongside §7, §10 and §11; `./bin/check` passes.
 _touches: README.md, AGENTS.md, SPEC.md, docs/SPEC.md, docs/invariants/sync.md, docs/invariants/init-devices.md, docs/invariants/README.md, pyproject.toml, tests/test_version.py, tests/test_pullhistory.py, .github/workflows/ci.yml_
-_blocked-by: Track 89A, Track 91A, Track 92A, Track 95A, Track 91C_
+_blocked-by: Track 89A, Track 91A, Track 92A, Track 95A, Track 98A_
 _out: 96A_
 _read-first: docs/SPEC.md, docs/archive/store-v2.md_
 _session: fresh · effort: medium · verify: ./bin/check tests/test_docs_routing.py tests/test_version.py_
@@ -166,18 +217,26 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
 - Group 91 ← {}
-- Group 92 ← {91}
+- Group 99 ← {91}
+- Group 100 ← {99}
+- Group 98 ← {100}
+- Group 92 ← {98}
 - Group 95 ← {92}
-- Group 93 ← {91, 92, 95}
+- Group 93 ← {98, 92, 95}
 - Group 96 ← {93}
 ```
 
 Track detail per group:
 
 ```
-Group 91: Honest usage remedy ∥ Bootstrap script          (in progress)
+Group 91: Honest usage remedy          (in progress)
   +-- Track 91B ........... ~S . 1 task
-  +-- Track 91C ........... ~M . 2 tasks
+Group 99: Muse reader move
+  +-- Track 99A ........... ~L . 1 task
+Group 100: Muse usage read again
+  +-- Track 100A .......... ~L . 3 tasks
+Group 98: Bootstrap script
+  +-- Track 98A ........... ~M . 2 tasks
 Group 92: Syncthing status
   +-- Track 92A ........... ~L . 2 tasks
 Group 95: Factory handover
@@ -188,9 +247,9 @@ Group 96: Cross-model memory qualification
   +-- Track 96A ........... ~M . 1 task
 ```
 
-**Total: 5 groups . 6 tracks remaining.**
+**Total: 8 groups . 8 tracks remaining.**
 
-Track 91A has shipped, so the bootstrap script no longer waits on it for `README.md` and packs beside Track 91B; it was Track 98A and is now Track 91C (the ID 98A was never used outside this file). Track 92A shares `statusflow.py` and `tests/test_diag.py` with Track 91B, so Group 92 follows Group 91. Tracks 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 91C lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
+The owner put the Muse usage reader ahead of the bootstrap script on 2026-11-02, because Muse usage is frozen and 2.0.0 needs O7. Track 99A moves the reader out of `host_usage.py` first, as the core-and-extensions constraint requires, and waits for Track 91B because both edit `statusflow.py`, `events_tail.py` and `tests/test_diag.py`; Track 100A then reads the cause, re-censuses and fixes the reader in the moved module. The bootstrap script carries `_blocked-by: Track 100A` to hold that order (it shares no file with the Muse Tracks), so it leaves Group 91 and takes back Track 98A, its ID before PR #252. Tracks 98A, 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 98A lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on their own observation on one Mac and both Linux machines after following Group 93's runbook, with O6 to O8 holding, the bootstrap script shipped and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
 
@@ -198,7 +257,7 @@ The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (18 items)
+Deferred: docs/roadmap-future.md (17 items)
 
 ## Shipped
 
