@@ -44,68 +44,28 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [investigate] The Muse usage reader has stopped on `unsupported` since 2026-10-21
-- **Symptom:** On this Mac at mm 1.12.1 with Muse Code 1.4.14, `mm diag --json` shows `muse.last_reason: unsupported` since 2026-10-21, last complete pass 2026-10-19, and 486 of 1,028 files cached. `retro-fleet`'s Muse row is frozen at what it had, and docs/SPEC.md O7.1 expects Muse tokens and cost.
-- **Why:** Observed in real use. Not carded: the cause is unread, a reader change needs a real corpus census in its CONTRACT.md, and the Muse reader still lives in `host_usage.py`, so core-and-extensions puts a move-only Track before it. Track 91B fixes only the wrong remedy.
-- **Effort:** M
-- **Priority:** P1
-- **Context:** Revisit before the owner accepts the complete-usage checkpoint or 2.0.0, both of which need O7 to hold.
-
-### [review:severity=should] `mm disable-source --force` with a control character leaves `config.toml` unparseable
-- **Description:** `config._toml_value` does not escape control characters. Reproduced in a temp HOME on v1.12.1: `mm disable-source $'a\x01b' --force` writes `disabled_sources = ["a^Ab"]`, and every later `mm` stops with `Illegal character '\x01'` naming the file. Fixing the line by hand recovers it.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #246 review receipt. Unobserved outside that crafted name. Revisit at the next change to the TOML writer, or sooner if a source name ever arrives from anything but the owner's own argv.
-
-### [review:severity=should] A source command can traceback after its config write landed
-- **Description:** In `sourceflow._record_seen`, a failure in `_get_config`, `get_sources` or `seen_sources.acknowledge`'s open or lock raises after the write, so the owner sees a traceback and no success line. The docstring at `sourceflow.py` says it raises, while `seen_sources.py`'s says it never crashes; `tests/test_seen_sources.py` makes the same claim. Short of O8.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #246 review receipt; read from code, not run. Revisit when Track 95A starts, since it changes `sourceflow`, or on any report of a traceback from a source command.
-
-### [review:severity=should] `mm sources` shows a raw traceback for a bad source path
-- **Description:** Reproduced in a temp HOME on v1.12.1: a source with path `~nosuchuser/x` gives `RuntimeError: Could not determine home directory.` as a traceback at exit 1. The receipt also names a symlink-loop source (`ConfigError`) and an unknown type (`ManifestError`), not re-run here.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #246 review receipt. Revisit before the owner accepts the quiet-output checkpoint (O8).
-
-### [review:severity=nit] `enable-source cursor` installs the hook before writing consent
-- **Description:** `sourceflow._toggle_cursor_usage` installs the hook, then writes consent, as its docstring says, so an unwritable config leaves the hook installed with consent off. The hook records nothing without consent.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #246 review receipt. Revisit at the next Cursor capture change.
-
-### [review:severity=nit] Stale comment and help text left by Track 90B
-- **Description:** The `tests/conftest.py` comment beside the `DEFAULT_SOURCES` isolation still names `cli.py` as an importer at module import time, and `cli.py` no longer imports it. `mm sources --help` in the `cli.py` shell says it shows ALL configured sources, though a missing root stays hidden.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #246 review receipt and the 90B plan's declined list. A conftest edit widens `--affected` to the full run. Revisit at the next change to either file.
-
-### [plan-eng-review:track=89A] Two distinct valid key headers
-- **Description:** `crypto.fetch_crypto_init` picks the smallest `root_salt` among valid copies, and `mm diag` prints only the winner's fingerprint, so two machines that each ran `--new-fleet` before Syncthing delivered can coexist and a joiner binds the winner. Follow-up FU3 proposes: plain `mm init` refuses instead of picking, `mm diag` lists a fingerprint per copy, a machine with a recorded fingerprint selects it first, `--new-fleet` confirms when `.stfolder` is present, and a README recovery recipe.
-- **Effort:** M
-- **Priority:** P3
-- **Context:** Track 89A review record FU3, challenge UC3, read from code at 2a101d6. Unobserved; the cutover moves one existing store and never runs `--new-fleet`. Revisit when a second distinct `mm-crypto-init` copy is seen in a store, or before anyone creates a new fleet on a Syncthing folder.
-
-### [plan-eng-review:track=89A] A corrupt prior manifest still suggests `mm init`
-- **Description:** `core.py`'s refusal says `Run 'mm status' to inspect storage state, then 'mm init' if storage is unrecoverable.` Since Track 89A that is no longer a re-key, but it no longer fixes storage either. The review cited `core.py:1556`; it is now near line 1915.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Track 89A review record FU5. Revisit when the message is seen in real use, or before the owner accepts the quiet-output checkpoint (O8).
-
-### [manual] Deflake the load-sensitive tests
-- **Why:** One-second subprocess tests in `tests/test_self_update.py` fail under extreme host load (load average above 100), and pass when rerun serially.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** Karl is undecided, so this is filed only. Revisit when Karl decides, or when a CI run fails from it.
-
-### [review:track=94A] Tidy `manifest._local_state_parent_prefix` and test its two untested branches
-- **Description:** PR #242's coverage audit left two branches untested: permissive continue past an unreadable ancestor, and the strict refusal on that read. `tests/test_manifest.py`'s browser-profile tests hold no `PermissionError` or `chmod` case at 2a101d6, and the loop nests several branches.
-- **Effort:** S
-- **Priority:** P3
-- **Context:** PR #242. Revisit at the next change to the browser-profile marker walk.
-
 ## Drain records
+
+### Roadmap drain — 2026-11-02
+
+Run from manager Ephesus 8's brief on Karl's "go for it" after Track 91A merged. 10 inbox items: **0 placed, 2 deferred, 8 killed, 0 discharged**. Authored-false rate: 0 / (0 + 0), no placements. Verification baseline: `5a814c3` (v1.12.3). Tracks 97A (v1.12.2, PR #249) and 91A (v1.12.3, PR #251) were recorded independently in shipped history against their verified completion matrices; Group 97 is tombstoned, and Group 91 stays active for Track 91B (factory item 53b6eda2). Track 98A packs beside 91B now that 91A no longer holds `README.md`, so it is Track 91C. Track 91A's deferred manual check (matrix row D1) is placed on Track 93A's runbook. mmm-factory's open questions are recorded on Track 95A's card. Future grows from 16 to 18; 6 entries still lack an inline revisit trigger, and the trigger migration was offered, not run.
+
+| Inbox item | Disposition |
+|---|---|
+| The Muse usage reader has stopped on `unsupported` since 2026-10-21 | defer → Future, with the trigger "before the complete-usage checkpoint or 2.0.0, or when a probe reads the cause"; observed, but the cause is unread and a fix needs a census and a move-only Track first |
+| `mm disable-source --force` with a control character leaves `config.toml` unparseable | kill: unobserved outside a crafted name; reversible (the error names the file and a hand edit recovers it); reopen if a source name ever arrives from anything but the owner's own argv |
+| A source command can traceback after its config write landed | kill: unobserved (read from code); reversible (the write landed, a rerun shows it); reopen on any report of a traceback from a source command |
+| `mm sources` shows a raw traceback for a bad source path | kill: unobserved in real use (`~nosuchuser` was crafted); reversible (a crash with a clear error); reopen if the owner hits it |
+| `enable-source cursor` installs the hook before writing consent | kill: unobserved; inconsequential (the hook records nothing without consent); reopen at the next Cursor capture change if it manifests |
+| Stale comment and help text left by Track 90B | kill: docs nit, no defect; reopen at the next change to either file |
+| Two distinct valid key headers | kill: unobserved; the cutover moves one existing store and never runs `--new-fleet`; reopen when a second distinct `mm-crypto-init` copy is seen in a store, or before anyone creates a new fleet on a Syncthing folder |
+| A corrupt prior manifest still suggests `mm init` | kill: unobserved wording; reversible; reopen when the message is seen in real use |
+| Deflake the load-sensitive tests | defer → Future; Karl undecided; trigger: Karl decides, or a CI run fails from it |
+| Tidy `manifest._local_state_parent_prefix` and test its two untested branches | kill: advisory, no defect or outcome; reopen at the next change to the browser-profile marker walk |
+
+**Also checked:** every `git grep -nE 'Track (8|9)[0-9][AB]'` hit outside `docs/ROADMAP.md` and `docs/archive` names a shipped Track (82A to 91A, 94A, 97A), a live card (91B, 92A, 93A, 95A, 96A), or, in this file's dated drain records, a pre-2026-10-19 ID kept as history. The one live pre-2026-10-19 reference, Track 80A in `docs/invariants/init-devices.md`, is already on Track 93A's retirement list.
+
+**Version:** documentation-only regeneration; no bump.
 
 ### Roadmap drain — 2026-11-01
 
