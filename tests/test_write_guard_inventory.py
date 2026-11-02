@@ -202,6 +202,70 @@ REVIEWED = {
             "replace(resolution, selected=selected, available=list(resolution.available))",
         ],
     ),
+    "core.py:iter_source_diffs": (
+        *_READ_ONLY,
+        [
+            "replace(diff, deleted=[p for p in diff.deleted if p not in left_out])",
+        ],
+    ),
+    "pullflow.py:_make_copy_dirs": (
+        *_GUARDED,
+        [
+            "directory.mkdir(mode=448)",
+            "os.chmod(directory, 448)",
+        ],
+    ),
+    "pullflow.py:_remove_copy_dirs": (
+        *_GUARDED,
+        [
+            "directory.rmdir()",
+        ],
+    ),
+    "pullflow.py:_remove_owned_copy": (
+        *_GUARDED,
+        ["copy_path.unlink()"],
+    ),
+    "pullflow.py:_copy_then_unlink": (
+        *_GUARDED,
+        [
+            "os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384)",
+            "local_path.unlink()",
+        ],
+    ),
+    "pullflow.py:_move_into_copy": (
+        *_GUARDED,
+        [
+            "os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384)",
+            "os.rename(local_path, copy_path)",
+            "os.chmod(copy_path, 384, follow_symlinks=False)",
+            "os.link(copy_path, local_path)",
+            "os.chmod(copy_path, stat.S_IMODE(moved.st_mode), follow_symlinks=False)",
+        ],
+    ),
+    "retention.py:_deleted_folder_age": (
+        *_READ_ONLY,
+        [
+            "made.replace(tzinfo=timezone.utc)",
+        ],
+    ),
+    "retention.py:_gc_deleted_copies": (
+        *_GUARDED,
+        [
+            "shutil.rmtree(entry)",
+        ],
+    ),
+    "fsutil.py:fsync_file": (
+        *_READ_ONLY,
+        [
+            "os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
+        ],
+    ),
+    "manifest.py:read_anchor": (
+        *_READ_ONLY,
+        [
+            "os.open(anchor_path(base, root), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
+        ],
+    ),
     "pullflow.py:_apply_conflict": (
         "residual",
         "stale sidecar cleanup; creation guarded, raw unlink outside frozen inventory",

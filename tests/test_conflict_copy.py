@@ -287,8 +287,9 @@ class TestApplyIncomingFile:
 
         Post-fix: `_apply_conflict` scans existing sidecars from this
         peer for this canonical and skips the write when bytes match.
-        Outcome is still "conflicted" (the conflict still exists on
-        disk) -- we just don't add a duplicate.
+        Track 91A: that dedup outcome is "kept" -- the copy is already
+        saved and visible in `mm conflicts`, so it is neither a new
+        applied file nor a new conflict (no count, no warning).
         """
         rel = "memory/user_role.md"
         local = tmp_path / rel
@@ -315,9 +316,9 @@ class TestApplyIncomingFile:
             remote_info=info,
             remote_device_id="devA1234",
         )
-        # Outcome is still "conflicted" -- the conflict state persists on
-        # disk, we just didn't write a duplicate sidecar.
-        assert second == "conflicted"
+        # The conflict state persists on disk (the sidecar is still there),
+        # but nothing new happened: "kept", not another "conflicted".
+        assert second == "kept"
         conflicts = list(local.parent.glob(f"*{CONFLICT_INFIX}*"))
         assert len(conflicts) == 1
         assert conflicts[0].read_bytes() == b"remote content"
@@ -4371,7 +4372,7 @@ class TestConflictPublishThenCleanup:
         monkeypatch.setattr(fsutil_mod, "atomic_write_bytes", spy_write)
         monkeypatch.setattr(Path, "unlink", spy_unlink)
         second = pullflow._apply_conflict(local, "doc.md", b"peer R2", "devA1234")
-        assert second == "conflicted"
+        assert second == "kept"
         assert writes == []
         assert unlinks == []
         assert old.exists()
@@ -4559,3 +4560,526 @@ class TestUnreadableCandidateNotCleaned:
         monkeypatch.setattr(Path, "read_bytes", orig_read)
         assert old.exists()
         assert old.read_bytes() == b"peer R1"
+
+
+# ── Track 91A: the apply path under the pull ledger ─────────────────────
+
+PEER91 = "devA1234"
+SRC91 = "notes"
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _ledger_with(*rows: tuple[str, bytes], peer: str = PEER91) -> pullplan.Ledger:
+    """A ledger that has synced each `(path, data)` from `peer`: its base and a held version."""
+    ledger = pullplan.Ledger()
+    for path, data in rows:
+        ledger.settle(peer, SRC91, path, _sha(data))
+    ledger.mark_committed()  # as if loaded from the database
+    return ledger
+
+
+def _apply91(
+    tmp_path: Path,
+    rel: str,
+    remote: bytes,
+    mtime: datetime,
+    ledger: pullplan.Ledger | None,
+    *,
+    peer: str = PEER91,
+    interactive: bool = False,
+    pending: dict | None = None,
+    **info_extra: object,
+):
+    """`_download_and_apply`'s per-file steps: begin, apply, then record the returned word."""
+    local = tmp_path / rel
+    info = {"sha256": _sha(remote), "size": len(remote), "mtime": mtime.isoformat()} | info_extra
+    reporter = pullflow._ApplyReporter(
+        device_name="Peer",
+        src_name=SRC91,
+        outcomes=pullflow._empty_outcomes(),
+        pending_inline_bumps=pending,
+        ledger=ledger,
+        peer_id=peer,
+    )
+    reporter.begin(rel, local, local.resolve(), info["sha256"])
+    outcome = pullflow._apply_incoming_file(
+        local_path=local,
+        rel_path=rel,
+        plain_data=remote,
+        remote_info=info,
+        remote_device_id=peer,
+        interactive_resolve=interactive,
+        pending_inline_bumps=pending,
+        resolved_local=local.resolve(),
+        reporter=reporter,
+    )
+    reporter.record(outcome)
+    return outcome, reporter
+
+
+def _put(path: Path, data: bytes, when: datetime) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    _set_mtime(path, when)
+    return path
+
+
+LOCAL_T = datetime(2026, 4, 21, 10, 0, tzinfo=timezone.utc)
+REMOTE_T = datetime(2026, 4, 21, 12, 0, tzinfo=timezone.utc)
+
+
+class TestFastForward91A:
+    @pytest.mark.parametrize("rel", ["notes.md", "projects/p/memory/MEMORY.md"])
+    def test_writes_remote_without_union_and_restores_its_mtime(self, tmp_path, rel):
+        local = _put(tmp_path / rel, b"- a\n- b\n", LOCAL_T)
+        ledger = _ledger_with((rel, b"- a\n- b\n"))
+
+        outcome, reporter = _apply91(tmp_path, rel, b"- a\n", REMOTE_T, ledger)
+
+        assert outcome == "written"
+        assert local.read_bytes() == b"- a\n"  # the deleted line stays deleted: no union
+        assert mtime_from_path(local) == REMOTE_T
+        assert list(tmp_path.rglob(f"*{CONFLICT_INFIX}*")) == []
+        assert ledger.base(PEER91, SRC91, rel) == _sha(b"- a\n")
+        assert ledger.newest_held(SRC91, rel) == _sha(b"- a\n")[:16]
+        assert reporter.outcomes["written"] == [rel]
+
+    def test_a_forward_edit_chain_applies_without_any_base_for_the_peer(self, tmp_path):
+        # The peer's `from` names the version this machine holds: the handoff case.
+        rel = "memory/MEMORY.md"
+        local = _put(tmp_path / rel, b"- a\n- b\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        ledger.hold(SRC91, rel, _sha(b"- a\n- b\n"))  # held, but this peer has no base
+        outcome, _ = _apply91(
+            tmp_path,
+            rel,
+            b"- a\n",
+            REMOTE_T,
+            ledger,
+            **{"from": [_sha(b"- a\n- b\n")[:16]]},
+        )
+        assert outcome == "written" and local.read_bytes() == b"- a\n"
+
+    @pytest.mark.parametrize("rel", ["note.md", "events/log.jsonl"])
+    def test_a_file_written_between_the_hash_and_the_replace_is_both_changed(
+        self, tmp_path, monkeypatch, rel
+    ):
+        local = _put(tmp_path / rel, b'{"base":1}\n', LOCAL_T)
+        ledger = _ledger_with((rel, b'{"base":1}\n'))
+        real_verdict = pullflow._ledger_verdict
+
+        def verdict_then_write(*args, **kwargs):
+            word = real_verdict(*args, **kwargs)
+            local.write_bytes(b'{"typed":1}\n')  # the owner saves while the pull decides
+            return word
+
+        monkeypatch.setattr(pullflow, "_ledger_verdict", verdict_then_write)
+
+        outcome, _ = _apply91(tmp_path, rel, b'{"remote":1}\n', REMOTE_T, ledger)
+
+        # Never overwritten: a conflict copy for a plain file, a union for a mergeable one.
+        if rel.endswith(".jsonl"):
+            assert outcome == "merged"
+            assert set(local.read_bytes().split()) == {b'{"typed":1}', b'{"remote":1}'}
+        else:
+            assert outcome == "conflicted"
+            assert local.read_bytes() == b'{"typed":1}\n'
+            (copy,) = tmp_path.glob(f"*{CONFLICT_INFIX}*")
+            assert copy.read_bytes() == b'{"remote":1}\n'
+
+    @pytest.mark.parametrize("how", ["size", "mtime", "inode"])
+    def test_every_part_of_the_lstat_fingerprint_is_checked(self, tmp_path, monkeypatch, how):
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"base!\n", LOCAL_T)
+        ledger = _ledger_with((rel, b"base!\n"))
+        real_verdict = pullflow._ledger_verdict
+
+        def change(*args, **kwargs):
+            word = real_verdict(*args, **kwargs)
+            if how == "size":
+                local.write_bytes(b"base!! longer\n")
+                _set_mtime(local, LOCAL_T)
+            elif how == "mtime":
+                local.write_bytes(b"typed\n")  # same length as "base!\n"
+                _set_mtime(local, LOCAL_T + timedelta(seconds=7))
+            else:
+                replacement = tmp_path / "swap.tmp"
+                replacement.write_bytes(b"typed\n")
+                before = local.stat()
+                os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                os.replace(replacement, local)  # same size, same mtime, new inode
+            return word
+
+        monkeypatch.setattr(pullflow, "_ledger_verdict", change)
+        outcome, _ = _apply91(tmp_path, rel, b"remote\n", REMOTE_T, ledger)
+        assert outcome == "conflicted"
+        assert local.read_bytes() != b"remote\n"
+
+    def test_an_unreadable_local_file_is_a_read_failure_never_missing(self, tmp_path, capsys):
+        if os.geteuid() == 0:
+            pytest.skip("root can read anything")
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        ledger = _ledger_with((rel, b"mine\n"))
+        local.chmod(0)
+        try:
+            outcome, reporter = _apply91(tmp_path, rel, b"remote\n", REMOTE_T, ledger)
+        finally:
+            local.chmod(0o600)
+        assert outcome == "failed"
+        assert local.read_bytes() == b"mine\n"
+        assert reporter.outcomes["failed"] == [rel]
+        assert not ledger.dirty  # a failed word never settles
+        assert "read failed" in capsys.readouterr().err
+
+    def test_the_prefilter_sends_an_unreadable_file_to_the_apply_path_not_to_write(self, tmp_path):
+        if os.geteuid() == 0:
+            pytest.skip("root can read anything")
+        local = _put(tmp_path / "note.md", b"mine\n", LOCAL_T)
+        ledger = _ledger_with(("note.md", b"mine\n"))
+        reporter = pullflow._ApplyReporter(
+            src_name=SRC91, outcomes=pullflow._empty_outcomes(), ledger=ledger, peer_id=PEER91
+        )
+        info = {"sha256": _sha(b"remote\n"), "size": 7, "mtime": REMOTE_T.isoformat()}
+        local.chmod(0)
+        try:
+            queued = pullflow._classify_with_ledger(
+                {"note.md": info}, tmp_path, SRC91, PEER91, {}, reporter
+            )
+        finally:
+            local.chmod(0o600)
+        assert list(queued) == ["note.md"]
+        assert reporter.older == [] and not ledger.dirty
+
+    @pytest.mark.parametrize(
+        "bad", ["not a date", "", "2026-04-21T12:00:00", "2026-13-45T99:00:00Z"]
+    )
+    def test_an_unparseable_mtime_is_never_older(self, tmp_path, bad):
+        rel = "note.md"
+        newer_local = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        local = _put(tmp_path / rel, b"base\n", newer_local)
+        ledger = _ledger_with((rel, b"base\n"))
+        info = {"sha256": _sha(b"remote\n"), "size": 7, "mtime": bad}
+        reporter = pullflow._ApplyReporter(
+            src_name=SRC91, outcomes=pullflow._empty_outcomes(), ledger=ledger, peer_id=PEER91
+        )
+        reporter.begin(rel, local, local.resolve(), info["sha256"])
+        outcome = pullflow._apply_incoming_file(
+            local_path=local,
+            rel_path=rel,
+            plain_data=b"remote\n",
+            remote_info=info,
+            remote_device_id=PEER91,
+            reporter=reporter,
+        )
+        assert outcome == "written" and local.read_bytes() == b"remote\n"
+        assert reporter.older == []
+
+    def test_an_unparseable_mtime_never_counts_as_not_newer_for_a_removed_file(self, tmp_path):
+        # Row 1 holds a removed file only when the remote is provably not newer.
+        ledger = _ledger_with(("note.md", b"remote\n"))
+        reporter = pullflow._ApplyReporter(
+            src_name=SRC91,
+            outcomes=pullflow._empty_outcomes(),
+            ledger=ledger,
+            peer_id=PEER91,
+            own=lambda src, rel: (True, True),
+        )
+        parseable = {"sha256": _sha(b"remote\n"), "size": 7, "mtime": REMOTE_T.isoformat()}
+        broken = dict(parseable, mtime="garbage")
+        # A parseable mtime older than the row's moment: held (not downloaded).
+        old = dict(parseable, mtime=datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat())
+        queued = pullflow._classify_with_ledger(
+            {"note.md": old}, tmp_path, SRC91, PEER91, {}, reporter
+        )
+        assert queued == {}
+        queued = pullflow._classify_with_ledger(
+            {"note.md": broken}, tmp_path, SRC91, PEER91, {}, reporter
+        )
+        assert list(queued) == ["note.md"]
+
+
+class TestOlderHold91A:
+    def _newer_local(self, tmp_path):
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"base\n", datetime(2026, 4, 21, 18, 0, tzinfo=timezone.utc))
+        return rel, local, _ledger_with((rel, b"base\n"))
+
+    def test_records_the_path_writes_nothing_and_records_no_base(self, tmp_path):
+        rel, local, ledger = self._newer_local(tmp_path)
+        mtime_before = local.stat().st_mtime_ns
+
+        outcome, reporter = _apply91(tmp_path, rel, b"restored\n", REMOTE_T, ledger)
+
+        assert outcome == "unchanged"
+        assert reporter.older == [rel]
+        assert local.read_bytes() == b"base\n" and local.stat().st_mtime_ns == mtime_before
+        assert list(tmp_path.glob(f"*{CONFLICT_INFIX}*")) == []
+        assert ledger.base(PEER91, SRC91, rel) == _sha(b"base\n")  # unchanged
+        assert not ledger.dirty  # nothing recorded for the held version
+        assert _sha(b"restored\n")[:16] not in ledger.entries(SRC91, rel)
+
+    def test_the_prefilter_holds_it_without_reading_a_blob(self, tmp_path):
+        rel, _, ledger = self._newer_local(tmp_path)
+        reporter = pullflow._ApplyReporter(
+            src_name=SRC91, outcomes=pullflow._empty_outcomes(), ledger=ledger, peer_id=PEER91
+        )
+        info = {"sha256": _sha(b"restored\n"), "size": 9, "mtime": REMOTE_T.isoformat()}
+        queued = pullflow._classify_with_ledger({rel: info}, tmp_path, SRC91, PEER91, {}, reporter)
+        assert queued == {} and reporter.older == [rel]
+
+    def test_touch_and_push_ends_the_hold_on_the_next_pull(self, tmp_path):
+        # The owner of the held-back edit runs `touch` and pushes: same bytes, newer mtime.
+        rel, local, ledger = self._newer_local(tmp_path)
+        held, _ = _apply91(tmp_path, rel, b"restored\n", REMOTE_T, ledger)
+        assert held == "unchanged" and local.read_bytes() == b"base\n"
+
+        touched = datetime(2026, 4, 22, 9, 0, tzinfo=timezone.utc)
+        outcome, reporter = _apply91(tmp_path, rel, b"restored\n", touched, ledger)
+
+        assert outcome == "written" and local.read_bytes() == b"restored\n"
+        assert reporter.older == []
+        assert ledger.base(PEER91, SRC91, rel) == _sha(b"restored\n")
+
+
+class TestSettleRules91A:
+    """The remote version is settled after outcomes that agree with the peer, never otherwise."""
+
+    def _base_and_kind(self, ledger, rel, remote):
+        row = ledger.entries(SRC91, rel).get(_sha(remote)[:16])
+        return ledger.base(PEER91, SRC91, rel), row.kind if row else None
+
+    def test_written_records_base_and_holds(self, tmp_path):
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, "new.md", b"remote\n", REMOTE_T, ledger)
+        assert outcome == "written"
+        assert self._base_and_kind(ledger, "new.md", b"remote\n") == (_sha(b"remote\n"), "held")
+
+    def test_merged_records_base_and_holds_both_sides(self, tmp_path):
+        rel = "memory/MEMORY.md"
+        _put(tmp_path / rel, b"- mine\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, rel, b"- theirs\n", REMOTE_T, ledger)
+        assert outcome == "merged"
+        assert self._base_and_kind(ledger, rel, b"- theirs\n") == (_sha(b"- theirs\n"), "held")
+        assert ledger.entries(SRC91, rel)[_sha(b"- mine\n")[:16]].kind == "held"
+
+    def test_merged_via_lcs_records_base_and_holds_both_sides(self, tmp_path, monkeypatch):
+        rel = "note.md"
+        _put(tmp_path / rel, b"one\ntwo\nlocal\n", LOCAL_T)
+        monkeypatch.setattr(
+            pullflow, "_prompt_conflict_choice", lambda *a, **k: ("merge", b"one\ntwo\nboth\n")
+        )
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(
+            tmp_path, rel, b"one\ntwo\nremote\n", REMOTE_T, ledger, interactive=True
+        )
+        assert outcome == "merged-via-lcs"
+        assert self._base_and_kind(ledger, rel, b"one\ntwo\nremote\n") == (
+            _sha(b"one\ntwo\nremote\n"),
+            "held",
+        )
+        assert ledger.entries(SRC91, rel)[_sha(b"one\ntwo\nlocal\n")[:16]].kind == "held"
+
+    def test_conflicted_records_base_and_only_sees_the_remote(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger)
+        assert outcome == "conflicted"
+        assert self._base_and_kind(ledger, rel, b"theirs\n") == (_sha(b"theirs\n"), "seen")
+        assert ledger.newest_held(SRC91, rel) is None
+
+    def test_kept_records_base_and_only_sees_the_remote(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        _v1_sidecar(tmp_path / rel, PEER91, b"theirs\n")
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger)
+        assert outcome == "kept"
+        assert self._base_and_kind(ledger, rel, b"theirs\n") == (_sha(b"theirs\n"), "seen")
+
+    def test_matched_records_base_and_holds(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"same\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, rel, b"same\n", REMOTE_T, ledger)
+        assert outcome == "unchanged"
+        assert self._base_and_kind(ledger, rel, b"same\n") == (_sha(b"same\n"), "held")
+
+    def test_a_no_op_union_settles_as_agreement(self, tmp_path):
+        rel = "memory/MEMORY.md"
+        _put(tmp_path / rel, b"- a\n- b\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, rel, b"- a\n", REMOTE_T, ledger)
+        assert outcome == "unchanged"  # local already covers the remote
+        assert ledger.base(PEER91, SRC91, rel) == _sha(b"- a\n")
+
+    def test_failed_never_settles(self, tmp_path, monkeypatch):
+        from mind_meld import fsutil
+
+        rel = "new.md"
+        monkeypatch.setattr(
+            fsutil, "atomic_write_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("full"))
+        )
+        ledger = pullplan.Ledger()
+        outcome, reporter = _apply91(tmp_path, rel, b"remote\n", REMOTE_T, ledger)
+        assert outcome == "failed" and reporter.outcomes["failed"] == [rel]
+        assert not ledger.dirty and ledger.base(PEER91, SRC91, rel) is None
+
+    def test_a_local_symlink_skip_never_settles(self, tmp_path):
+        target = _put(tmp_path / "target.md", b"outside\n", LOCAL_T)
+        (tmp_path / "note.md").symlink_to(target)
+        ledger = pullplan.Ledger()
+        outcome, _ = _apply91(tmp_path, "note.md", b"remote\n", REMOTE_T, ledger)
+        assert outcome == "skipped" and not ledger.dirty
+        assert target.read_bytes() == b"outside\n"
+
+    def test_todays_local_newer_skip_never_settles(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"mine\n", datetime(2026, 4, 21, 18, 0, tzinfo=timezone.utc))
+        ledger = pullplan.Ledger()  # no base: the fallback rule
+        outcome, _ = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger)
+        assert outcome == "skipped" and not ledger.dirty
+
+    def test_a_stale_version_never_settles(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"newest\n", LOCAL_T)
+        ledger = pullplan.Ledger()
+        ledger.hold(SRC91, rel, _sha(b"old\n"))
+        ledger.hold(SRC91, rel, _sha(b"newest\n"))
+        ledger.mark_committed()
+        outcome, _ = _apply91(tmp_path, rel, b"old\n", REMOTE_T, ledger)
+        assert outcome == "unchanged" and not ledger.dirty
+        assert ledger.base(PEER91, SRC91, rel) is None
+
+    @pytest.mark.parametrize("word", ["failed", "waiting", "skipped", "deleted"])
+    def test_these_outcome_words_never_settle(self, tmp_path, word):
+        ledger = pullplan.Ledger()
+        reporter = pullflow._ApplyReporter(
+            src_name=SRC91, outcomes=pullflow._empty_outcomes(), ledger=ledger, peer_id=PEER91
+        )
+        reporter.begin("note.md", tmp_path / "note.md", None, _sha(b"x"))
+        reporter.record(word)
+        assert not ledger.dirty
+
+    def test_without_a_ledger_nothing_changes(self, tmp_path):
+        rel = "note.md"
+        _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        outcome, _ = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, None)
+        assert outcome == "conflicted"
+
+    def test_an_unreadable_ledger_runs_todays_rule_and_records_nothing(self, tmp_path):
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"base\n", LOCAL_T)
+        ledger = pullplan.Ledger(readable=False)
+        outcome, _ = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger)
+        assert outcome == "conflicted" and local.read_bytes() == b"base\n"
+        assert not ledger.dirty
+
+    def test_inline_keep_local_is_deferred_until_the_pull_is_not_aborted(
+        self, tmp_path, monkeypatch
+    ):
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        monkeypatch.setattr(
+            pullflow, "_prompt_conflict_choice", lambda *a, **k: ("keep-canonical", None)
+        )
+        ledger = pullplan.Ledger()
+        pending: dict = {}
+        outcome, _ = _apply91(
+            tmp_path, rel, b"theirs\n", REMOTE_T, ledger, interactive=True, pending=pending
+        )
+        assert outcome == "skipped" and local.read_bytes() == b"mine\n"
+        assert ledger.base(PEER91, SRC91, rel) is None and not ledger.dirty  # not yet
+        assert ledger.deferred == [(PEER91, SRC91, rel, _sha(b"theirs\n"), ())]
+        ledger.flush_deferred()  # the pull finished without an abort
+        assert ledger.base(PEER91, SRC91, rel) == _sha(b"theirs\n")
+        assert ledger.entries(SRC91, rel)[_sha(b"theirs\n")[:16]].kind == "seen"
+
+    def test_an_abort_queues_nothing(self, tmp_path, monkeypatch):
+        rel = "note.md"
+        _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        monkeypatch.setattr(pullflow, "_prompt_conflict_choice", lambda *a, **k: ("abort", None))
+        ledger = pullplan.Ledger()
+        with pytest.raises(typer.Abort):
+            _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger, interactive=True, pending={})
+        assert ledger.deferred == [] and not ledger.dirty
+
+
+class TestKeptOutcome91A:
+    def test_a_second_pull_with_the_copy_already_holding_the_peers_bytes_counts_nothing(
+        self, tmp_path, capsys
+    ):
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        copy = _v1_sidecar(tmp_path / rel, PEER91, b"theirs\n")
+        ledger = pullplan.Ledger()
+
+        outcome, reporter = _apply91(tmp_path, rel, b"theirs\n", REMOTE_T, ledger, **{})
+
+        assert outcome == "kept"
+        assert reporter.outcomes["kept"] == [rel]
+        assert reporter.outcomes["conflicted"] == [] and reporter.outcomes["written"] == []
+        assert capsys.readouterr().err == ""  # no warning repeated
+        assert local.read_bytes() == b"mine\n" and copy.read_bytes() == b"theirs\n"
+        assert list(tmp_path.glob(f"*{CONFLICT_INFIX}*")) == [copy]  # no second sidecar
+        # Still a conflict the owner can resolve.
+        config = {
+            "sync": {
+                "sources": [
+                    {"name": SRC91, "path": str(tmp_path), "type": "generic", "include_dirs": ["."]}
+                ]
+            }
+        }
+        assert [(n, p) for n, p, _ in _find_conflict_files(config)] == [(SRC91, copy)]
+
+    def test_kept_is_unapplied_and_is_not_a_change_for_the_per_source_result(self):
+        assert "kept" in pullflow._UNAPPLIED
+        result = pullflow._PerSourceResult(
+            src_name=SRC91,
+            device_name="Peer",
+            device_id=PEER91,
+            outcomes=pullflow._empty_outcomes() | {"kept": ["a.md"]},
+            bytes_transferred=0,
+            touched_parents=set(),
+        )
+        assert result.had_changes is False
+        result.older = ["b.md"]
+        assert result.had_changes is True  # an older edit is news
+
+    def test_kept_adds_to_no_total(self):
+        result = pullflow.PullResult()
+        assert result.total_applied == 0 and result.total_conflicted == 0
+
+    def test_a_kept_conflict_voids_a_pending_inline_bump_like_the_conflict_it_replaced(
+        self, tmp_path, monkeypatch
+    ):
+        # Track 12A: a keep-local decision is void once a copy of the same file exists
+        # that the owner has not seen. The dedup return used to be "conflicted", which voided it.
+        rel = "note.md"
+        local = _put(tmp_path / rel, b"mine\n", LOCAL_T)
+        _v1_sidecar(tmp_path / rel, "devB5678", b"theirs from B\n")
+        pending: dict = {}
+        choices = iter([("keep-canonical", None), ("keep-both", None)])
+        monkeypatch.setattr(pullflow, "_prompt_conflict_choice", lambda *a, **k: next(choices))
+        ledger = pullplan.Ledger()
+        first, _ = _apply91(
+            tmp_path, rel, b"theirs from A\n", REMOTE_T, ledger, interactive=True, pending=pending
+        )
+        assert first == "skipped" and local.resolve() in pending
+        second, _ = _apply91(
+            tmp_path,
+            rel,
+            b"theirs from B\n",
+            REMOTE_T,
+            ledger,
+            peer="devB5678",
+            interactive=True,
+            pending=pending,
+        )
+        assert second == "kept"
+        assert pending == {}

@@ -626,8 +626,71 @@ class TestDefaultSources:
             "skills/log-work/*",
             "skills/retro-fleet/*",
             "skills/.system/*",
+            # Track 91A: Codex installs and removes plugin version folders itself; a
+            # removal there would read as a deletion and delete a peer's copy.
+            "plugins/cache/*",
+            "plugins/.remote-plugin-install-staging/*",
             *_GENERATED_HOST_SKILL_GLOBS,
         ]
+
+    def test_host_managed_plugin_trees_are_excluded_but_authored_plugins_are_not(self):
+        import fnmatch
+
+        codex = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        patterns = codex["exclude_patterns"]
+
+        def excluded(path):
+            return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+        assert excluded("plugins/cache/openai-curated/gmail/1.2.0/SKILL.md")
+        assert excluded("plugins/.remote-plugin-install-staging/abc123/manifest.json")
+        assert not excluded("plugins/my-team-plugin/.codex-plugin/plugin.json")
+
+    def test_explicit_codex_config_migrates_plugin_excludes_without_tombstones(
+        self, tmp_path, monkeypatch
+    ):
+        from mind_meld import config, manifest
+
+        added = {"plugins/cache/*", "plugins/.remote-plugin-install-staging/*"}
+        default = next(s for s in DEFAULT_SOURCES if s["name"] == "codex")
+        source = {
+            **default,
+            "path": str(tmp_path / "codex"),
+            "exclude_patterns": [p for p in default["exclude_patterns"] if p not in added]
+            + ["custom/*"],
+        }
+        for rel in (
+            "plugins/cache/vendor/SKILL.md",
+            "plugins/.remote-plugin-install-staging/vendor.json",
+            "plugins/team/plugin.json",
+        ):
+            path = Path(source["path"]) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(rel)
+        path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "abc123", "name": "review"},
+                "storage": {"path": str(tmp_path / "store")},
+                "sync": {"sources": [source]},
+            },
+            path,
+        )
+        monkeypatch.setattr(config, "CONFIG_PATH", path)
+        prior = manifest.build_manifest_v2("abc123", "review", [source])
+        assert len(prior["sources"]["codex"]["files"]) == 3
+        before = path.read_bytes()
+        assert core._migrate_config_core(yes=True, dry_run=True) is False
+        assert path.read_bytes() == before
+        assert core._migrate_config_core(yes=True, dry_run=False) is True
+        migrated = load_config(path)["sync"]["sources"][0]
+        assert added <= set(migrated["exclude_patterns"])
+        assert "custom/*" in migrated["exclude_patterns"]
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        local = manifest.build_manifest_v2("abc123", "review", [migrated])
+        filtered = core._filter_excluded_paths(prior, {"codex": migrated["exclude_patterns"]})
+        assert set(local["sources"]["codex"]["files"]) == {"plugins/team/plugin.json"}
+        assert manifest.generate_tombstones(local, filtered, "abc123") == {}
 
     def test_generated_skill_excludes_preserve_hand_authored_skills(self):
         import fnmatch

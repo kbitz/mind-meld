@@ -29,6 +29,7 @@ loop across the fleet.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import secrets
 import sys
@@ -39,7 +40,7 @@ from typing import Any, Literal
 
 import typer
 
-from mind_meld import fsutil, manifest, sidecar
+from mind_meld import core, fsutil, manifest, pullplan, sidecar
 from mind_meld.config import get_sources
 from mind_meld.conflictdiff import (
     count_divergent_lines,
@@ -55,7 +56,7 @@ from mind_meld.conflictdiff import (
 from mind_meld.conflictmtime import _bump_canonical_mtime_post_resolve, _stat_mtime_btime
 from mind_meld.consoles import console, stderr_console
 from mind_meld.devices import lookup_device_by_short_id
-from mind_meld.errors import StorageError
+from mind_meld.errors import LEDGER_URL, StorageError
 from mind_meld.manifest import (
     CONFLICT_INFIX,
     CONFLICT_V0_PREFIX,
@@ -495,6 +496,65 @@ def _promote_target_will_sync(src_cfg: dict, target: Path) -> bool:
     )
 
 
+def _record_resolution(
+    ledger: pullplan.Ledger | None,
+    ledger_error: BaseException | None,
+    peer_id: str | None,
+    src_name: str,
+    src_cfg: dict | None,
+    canonical: Path,
+    remote_bytes: bytes,
+    local_bytes: bytes,
+    choice: str,
+) -> None:
+    """Keep a successful explicit decision from conflicting again after a lost base.
+
+    The filename must identify exactly one registered peer. Each completed
+    decision commits independently, so aborting a later prompt retains it.
+    Never make the base more durable than the chosen canonical bytes.
+    """
+    if ledger is None or src_cfg is None:
+        return
+
+    def notice(cause: str) -> None:
+        core._print_apply_warning(
+            f"mm: notice: resolution kept; settled base not recorded ({cause}); "
+            f"a later pull may conflict again. See {LEDGER_URL}."
+        )
+
+    if not peer_id:
+        notice("peer could not be identified")
+        return
+    if not ledger.readable:
+        notice(core.ledger_cause(ledger_error) or "unreadable")
+        return
+    try:
+        base = Path(src_cfg["path"]).expanduser().resolve()
+        rel_path = canonical.relative_to(base).as_posix()
+        if manifest.path_has_descendant_symlink(canonical, base):
+            notice("path is a symlink")
+            return
+        fsutil.fsync_file(canonical)
+        fsutil.fsync_dir(canonical.parent)
+    except (OSError, StorageError, ValueError):
+        notice("chosen file could not be flushed")
+        return
+
+    remote_sha = hashlib.sha256(remote_bytes).hexdigest()
+    merged = choice in ("m", "merge")
+    ledger.settle(
+        peer_id,
+        src_name,
+        rel_path,
+        remote_sha,
+        hold=choice not in ("l", "local"),
+        also_hold=(hashlib.sha256(local_bytes).hexdigest(),) if merged else (),
+    )
+    if error := core.commit_ledger(ledger):
+        ledger.discard(src_name, rel_path)
+        notice(core.ledger_cause(error) or "unreadable")
+
+
 def _resolve_interactive_loop(
     hits: list[tuple[str, Path, Path | None]],
     devices: list[dict[str, Any]] | None = None,
@@ -524,6 +584,11 @@ def _resolve_interactive_loop(
 
     devices = devices or []
     sources_by_name = sources_by_name or {}
+    ledger, ledger_error = (
+        core.load_ledger([d["device_id"] for d in devices if d.get("device_id")])
+        if sources_by_name
+        else (None, None)
+    )
     resolved = 0
     failed = 0
     for src_name, cpath, canonical in hits:
@@ -637,11 +702,13 @@ def _resolve_interactive_loop(
         # filename and look it up against the cached devices list.
         short = parse_conflict_device_short(cpath.name)
         peer_name: str | None = None
+        peer_id: str | None = None
         ambiguous_count = 0
         if short is not None:
             match, count = lookup_device_by_short_id(devices, short)
             if match is not None:
                 peer_name = match.get("device_name")
+                peer_id = match.get("device_id")
             elif count > 1:
                 ambiguous_count = count
 
@@ -828,6 +895,7 @@ def _resolve_interactive_loop(
         # not silently keep local; "retry" / "remove" must not silently
         # delete the conflict file. (codex /review v0.9.0 — caught a real
         # silent-data-loss footgun the eng review missed.)
+        resolved_before = resolved
         if choice in ("l", "local"):
             # Capture peer's mtime BEFORE the rename/unlink so we can bump
             # canonical past it afterward -- see _bump_canonical_mtime_post_resolve
@@ -981,6 +1049,19 @@ def _resolve_interactive_loop(
             # unrecognized input. Both files stay on disk; user can run
             # `mm resolve` later or delete the .sync-conflict-* manually.
             console.print("  [dim]skipped; both files left on disk[/dim]")
+
+        if resolved > resolved_before and choice in ("l", "local", "r", "remote", "m", "merge"):
+            _record_resolution(
+                ledger,
+                ledger_error,
+                peer_id,
+                src_name,
+                sources_by_name.get(src_name),
+                canonical,
+                canonical_bytes if is_pre_inversion else cpath_bytes,
+                cpath_bytes if is_pre_inversion else canonical_bytes,
+                choice,
+            )
 
     if failed:
         console.print(f"\n[bold]Resolved {resolved} of {len(hits)}; {failed} failed.[/bold]")

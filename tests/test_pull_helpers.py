@@ -1565,6 +1565,8 @@ class TestDownloadAndApplyQuietAndProgress:
             "unchanged": [],
             "failed": [],
             "waiting": [],
+            "kept": [],
+            "deleted": [],
         }
 
     @staticmethod
@@ -4178,3 +4180,269 @@ def test_deferred_upload_privacy_loss_refuses(tmp_path, monkeypatch, kind):
     assert calls["reads"] == 2
     assert not isinstance(caught.value, SnapshotChanged)
     backend.put.assert_not_called()
+
+
+# ── Track 91A: helpers under the deletion pass ──────────────────────────
+
+
+class TestDeletionHelpers91A:
+    SHA = _sha(b"shared\n")
+
+    @staticmethod
+    def _deletion(base: Path, rel: str = "note.md", sha: str | None = None):
+        return pullflow._Deletion(
+            "peerpeer1",
+            "Peer B",
+            "notes",
+            rel,
+            base,
+            base / rel,
+            sha or _sha(b"shared\n"),
+        )
+
+    def test_outcomes_gain_kept_and_deleted(self):
+        outcomes = pullflow._empty_outcomes()
+        assert outcomes["kept"] == [] and outcomes["deleted"] == []
+        assert set(outcomes) == {
+            "written",
+            "merged",
+            "merged-via-lcs",
+            "skipped",
+            "conflicted",
+            "unchanged",
+            "failed",
+            "waiting",
+            "kept",
+            "deleted",
+        }
+        # Separate lists: appending to one outcome never shows in another.
+        outcomes["kept"].append("a")
+        assert outcomes["deleted"] == [] and pullflow._empty_outcomes()["kept"] == []
+
+    def test_a_copy_folder_is_named_for_the_utc_moment_and_a_random_suffix(self):
+        now = datetime(2026, 11, 1, 12, 30, 45, tzinfo=timezone.utc)
+        name = pullflow._copy_folder_name(now)
+        assert name.startswith("20261101-123045-") and len(name) == len("20261101-123045-ab12")
+        from mind_meld import retention
+
+        assert retention._deleted_folder_age(name, now) == timedelta(0)  # the reaper parses it
+
+    def test_make_copy_dirs_builds_private_folders_once(self, tmp_path):
+        base = tmp_path / "src"
+        folder = tmp_path / "state" / "deleted" / "20261101-123045-ab12"
+        deletions = [
+            self._deletion(base, "a/b/one.md"),
+            self._deletion(base, "a/b/two.md"),
+            self._deletion(base, "c.md"),
+        ]
+        created = pullflow._make_copy_dirs(folder, deletions)
+        assert (folder / "notes" / "a" / "b").is_dir() and (folder / "notes").is_dir()
+        assert len(created) == len(set(created))  # every directory created exactly once
+        assert folder in created
+        for directory in created:
+            assert directory.stat().st_mode & 0o777 == 0o700, directory
+        assert pullflow._make_copy_dirs(folder, deletions) == []  # nothing left to create
+
+    def test_make_copy_dirs_refuses_real_account_state_before_creating_anything(
+        self, synthetic_account_home
+    ):
+        from mind_meld import fsutil
+
+        folder = synthetic_account_home / ".config" / "mind-meld" / "deleted" / "x"
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            pullflow._make_copy_dirs(folder, [self._deletion(synthetic_account_home)])
+        assert not (synthetic_account_home / ".config").exists()
+
+    def test_move_into_copy_moves_the_inode_and_makes_the_copy_private(self, tmp_path):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"shared\n")
+        source.chmod(0o644)
+        inode = source.stat().st_ino
+        copy = tmp_path / "state" / "note.md"
+        copy.parent.mkdir()
+        assert pullflow._move_into_copy(source, copy, self.SHA) == "deleted"
+        assert not source.exists() and copy.read_bytes() == b"shared\n"
+        assert copy.stat().st_ino == inode  # the very file, not a copy of its bytes
+        assert copy.stat().st_mode & 0o777 == 0o600
+
+    def test_move_into_copy_links_back_what_it_moved_when_the_bytes_were_not_the_deleted_ones(
+        self, tmp_path
+    ):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"edited meanwhile\n")
+        copy = tmp_path / "state" / "note.md"
+        copy.parent.mkdir()
+        assert pullflow._move_into_copy(source, copy, self.SHA) == "restored"
+        assert source.read_bytes() == b"edited meanwhile\n" and not copy.exists()
+
+    def test_move_into_copy_never_clobbers_a_path_re_created_after_the_move(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"edited meanwhile\n")
+        copy = tmp_path / "state" / "note.md"
+        copy.parent.mkdir()
+        real_rename = os.rename
+
+        def rename_then_recreate(src, dst, *a, **k):
+            real_rename(src, dst, *a, **k)
+            Path(src).write_bytes(b"new owner\n")
+
+        monkeypatch.setattr(os, "rename", rename_then_recreate)
+        assert pullflow._move_into_copy(source, copy, self.SHA) == "kept-copy"
+        assert source.read_bytes() == b"new owner\n"
+        assert copy.read_bytes() == b"edited meanwhile\n"
+
+    def test_move_into_copy_raises_when_nothing_moved(self, tmp_path, monkeypatch):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"shared\n")
+
+        def full(*a, **k):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(os, "rename", full)
+        with pytest.raises(OSError):
+            pullflow._move_into_copy(source, tmp_path / "copy.md", self.SHA)
+        assert source.read_bytes() == b"shared\n"
+
+    def test_cross_volume_fallback_copies_then_unlinks(self, tmp_path, monkeypatch):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"shared\n")
+        copy = tmp_path / "state" / "note.md"
+        copy.parent.mkdir()
+
+        def other_volume(*a, **k):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+        monkeypatch.setattr(os, "rename", other_volume)
+        assert pullflow._move_into_copy(source, copy, self.SHA) == "deleted"
+        assert not source.exists() and copy.read_bytes() == b"shared\n"
+        assert copy.stat().st_mode & 0o777 == 0o600
+
+    def test_cross_volume_fallback_declines_bytes_that_are_not_the_deleted_ones(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "note.md"
+        source.write_bytes(b"edited\n")
+        copy = tmp_path / "state" / "note.md"
+        copy.parent.mkdir()
+        monkeypatch.setattr(
+            os, "rename", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EXDEV, "x"))
+        )
+        assert pullflow._move_into_copy(source, copy, self.SHA) == "restored"
+        assert source.read_bytes() == b"edited\n" and not copy.exists()
+
+    def test_move_into_copy_refuses_real_account_state(self, synthetic_account_home, tmp_path):
+        from mind_meld import fsutil
+
+        source = tmp_path / "note.md"
+        source.write_bytes(b"shared\n")
+        copy = synthetic_account_home / ".config" / "mind-meld" / "deleted" / "x" / "note.md"
+        with pytest.raises(fsutil.PytestRealStateWriteError):
+            pullflow._move_into_copy(source, copy, self.SHA)
+        assert source.read_bytes() == b"shared\n"
+
+
+class TestOwnLookup91A:
+    """Does this device's own manifest list a path, and is its scan root the one it published?"""
+
+    ANCHOR_VALUE = "0123456789abcdef0123456789abcdef"
+
+    def _setup(self, tmp_path):
+        base = tmp_path / "docs"
+        (base / "sub").mkdir(parents=True)
+        cfg = {"name": "notes", "type": "generic", "path": str(base), "include_dirs": ["sub"]}
+        own = {
+            "sources": {
+                "notes": {"files": {"sub/a.md": {}}, "root_ids": {"sub": self.ANCHOR_VALUE}},
+            },
+            "tombstones": {"notes:sub/gone.md": {}},
+        }
+        sources = {"notes": {"path": base, "type": "generic"}}
+        return base, cfg, own, sources
+
+    def test_listed_and_recorded_paths_with_an_unchanged_scan_root(self, tmp_path):
+        from mind_meld import manifest
+
+        base, cfg, own, sources = self._setup(tmp_path)
+        manifest.write_anchor(base, "sub", self.ANCHOR_VALUE)
+        lookup = pullflow._own_lookup(own, {"notes": cfg}, sources)
+        assert lookup("notes", "sub/a.md") == (True, True)
+        assert lookup("notes", "sub/gone.md") == (True, True)  # a record names it
+        assert lookup("notes", "sub/never-listed.md") == (False, True)
+
+    def test_a_changed_missing_or_malformed_token_reads_as_a_changed_root(self, tmp_path):
+        from mind_meld import manifest
+
+        base, cfg, own, sources = self._setup(tmp_path)
+        lookup = pullflow._own_lookup(own, {"notes": cfg}, sources)
+        assert lookup("notes", "sub/a.md") == (True, False)  # no token on disk
+        manifest.write_anchor(base, "sub", "f" * 32)
+        assert pullflow._own_lookup(own, {"notes": cfg}, sources)("notes", "sub/a.md") == (
+            True,
+            False,
+        )  # a different generation
+        (base / "sub" / manifest.ANCHOR_NAME).write_text("not a token")
+        assert pullflow._own_lookup(own, {"notes": cfg}, sources)("notes", "sub/a.md") == (
+            True,
+            False,
+        )
+
+    def test_a_manifest_that_recorded_no_token_reads_as_changed(self, tmp_path):
+        from mind_meld import manifest
+
+        base, cfg, own, sources = self._setup(tmp_path)
+        manifest.write_anchor(base, "sub", self.ANCHOR_VALUE)
+        del own["sources"]["notes"]["root_ids"]
+        assert pullflow._own_lookup(own, {"notes": cfg}, sources)("notes", "sub/a.md") == (
+            True,
+            False,
+        )
+
+    def test_unknown_source_no_manifest_and_paths_under_no_scan_root(self, tmp_path):
+        base, cfg, own, sources = self._setup(tmp_path)
+        lookup = pullflow._own_lookup(own, {"notes": cfg}, sources)
+        assert lookup("elsewhere", "sub/a.md") == (False, False)
+        assert lookup("notes", "outside/a.md") == (False, False)
+        assert pullflow._own_lookup(None, {"notes": cfg}, sources)("notes", "sub/a.md") == (
+            False,
+            False,
+        )
+        assert pullflow._own_lookup(own, {"notes": cfg}, {})("notes", "sub/a.md") == (False, False)
+
+    def test_a_token_that_is_a_symlink_or_fifo_is_not_read(self, tmp_path):
+        from mind_meld import manifest
+
+        base, cfg, own, sources = self._setup(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.write_text(self.ANCHOR_VALUE + "\n")
+        (base / "sub" / manifest.ANCHOR_NAME).symlink_to(target)
+        assert manifest.read_anchor(base, "sub") is None
+        (base / "sub" / manifest.ANCHOR_NAME).unlink()
+        os.mkfifo(base / "sub" / manifest.ANCHOR_NAME)
+        assert manifest.read_anchor(base, "sub") is None  # returns at once, no hang
+        assert pullflow._own_lookup(own, {"notes": cfg}, sources)("notes", "sub/a.md") == (
+            True,
+            False,
+        )
+
+
+class TestSidecarHolds91A:
+    def test_only_a_copy_from_this_peer_holding_these_bytes_counts(self, tmp_path):
+        canonical = tmp_path / "note.md"
+        canonical.write_bytes(b"mine\n")
+        sidecar = tmp_path / "note.sync-conflict-20260421-120000-v1-bbbbbbbb.md"
+        sidecar.write_bytes(b"theirs\n")
+        holds = pullflow._sidecar_holds({"notes": {"path": tmp_path, "type": "generic"}})
+        sha = _sha(b"theirs\n")
+        assert holds("notes", "note.md", "bbbbbbbb-peer", sha)
+        assert not holds("notes", "note.md", "bbbbbbbb-peer", _sha(b"other bytes\n"))
+        assert not holds("notes", "note.md", "cccccccc-peer", sha)  # another peer's copy
+        assert not holds("notes", "note.md", "", sha)
+        assert not holds("elsewhere", "note.md", "bbbbbbbb-peer", sha)
+        sidecar.chmod(0)
+        try:
+            if os.geteuid() != 0:
+                assert not holds("notes", "note.md", "bbbbbbbb-peer", sha)  # unreadable: no
+        finally:
+            sidecar.chmod(0o600)

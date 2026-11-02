@@ -3010,3 +3010,123 @@ def test_attended77_accepted_content_survives_later_gc_failure(tmp_path, monkeyp
     assert record["counts"]["maintenance_failures"] == 1
     cli_module.acquire_lock()
     cli_module.release_lock()
+
+
+# ─── Track 91A: deletions are data at risk, never quiet-gated ────────────
+
+
+LEFT_OUT = "3 files left out because projects is missing; run mm pull to restore them"
+
+
+def _stub_pull(monkeypatch, tmp_path, result):
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setattr("mind_meld.pullflow._pull_core", lambda *a, **kw: result)
+    return iso
+
+
+def test_autopull_prints_one_stderr_line_for_files_it_deleted(tmp_path, monkeypatch):
+    """Hooks print nothing else, but a deletion says what went and where the copies are."""
+    folder = "/state/deleted/20261101-120000-ab12"
+    iso = _stub_pull(
+        monkeypatch,
+        tmp_path,
+        pullflow.PullResult(
+            total_deleted=3, deleted_origins=["Mac B"], deleted_folder=folder, elapsed=0.1
+        ),
+    )
+
+    r = runner.invoke(app, ["autopull"])
+
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    assert r.stdout == ""
+    assert r.stderr.strip().splitlines() == [
+        f"mm: 3 files deleted because Mac B deleted them; copies in {folder} for 30 days; "
+        "see https://github.com/kbitz/mind-meld#recovering-a-deleted-file"
+    ]
+    crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    # Deleting is the intended effect, not a degradation; `mm status` gets the recovery route.
+    assert crumb["outcome"] == "success"
+    assert crumb["detail"] == f"3 files deleted by Mac B; copies in {folder}"
+
+
+def test_autopull_stays_silent_when_it_deleted_nothing(tmp_path, monkeypatch):
+    _stub_pull(monkeypatch, tmp_path, pullflow.PullResult(elapsed=0.1))
+    r = runner.invoke(app, ["autopull"])
+    assert (r.stdout, r.stderr) == ("", "")
+
+
+def test_autopull_sanitizes_a_peer_name_in_the_deletion_line(tmp_path, monkeypatch):
+    _stub_pull(
+        monkeypatch,
+        tmp_path,
+        pullflow.PullResult(
+            total_deleted=1,
+            deleted_origins=["Mac\x1b]0;owned\x07 B"],
+            deleted_folder="/state/deleted/x",
+            elapsed=0.1,
+        ),
+    )
+    r = runner.invoke(app, ["autopull"])
+    assert "\x1b" not in r.stderr and "\x07" not in r.stderr
+    assert "1 file deleted because" in r.stderr
+
+
+def test_autopull_reports_older_peer_edits_in_the_breadcrumb_not_on_stderr(tmp_path, monkeypatch):
+    iso = _stub_pull(
+        monkeypatch,
+        tmp_path,
+        pullflow.PullResult(older=[pullflow.OlderEdit("Mac B", "notes", "a.md")] * 2, elapsed=0.1),
+    )
+    r = runner.invoke(app, ["autopull"])
+    assert (r.stdout, r.stderr) == ("", "")
+    crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert crumb["outcome"] == "success"
+    assert crumb["detail"] == "2 older peer edits not applied (mm pull --verbose)"
+
+
+def test_autopull_ledger_cause_degrades_without_failing_the_hook(tmp_path, monkeypatch):
+    iso = _stub_pull(
+        monkeypatch,
+        tmp_path,
+        pullflow.PullResult(total_written=1, ledger_cause="too-new", elapsed=0.1),
+    )
+    r = runner.invoke(app, ["autopull"])
+    assert r.exit_code == 0
+    crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "pull")
+    assert crumb["outcome"] == "degraded"
+    assert crumb["detail"] == "pull ledger unavailable (too-new)"
+    # `mm status` points at it like any other degradation; `mm diag` carries the cause.
+    status = runner.invoke(app, ["status"])
+    assert "Latest pull needs attention" in status.output
+    diag = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert diag["last_autorun"]["pull"]["detail"] == "pull ledger unavailable (too-new)"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"ledger_cause": "busy"}, "pull ledger unavailable (busy)"),
+        (
+            {"unwritable_roots": ["projects", "memory"]},
+            "deletions under 2 folder(s) will not propagate: restore write access, then mm push",
+        ),
+        (
+            {"left_out_clause": f"{LEFT_OUT}."},
+            LEFT_OUT,
+        ),
+    ],
+)
+def test_autopush_degrades_when_deletions_cannot_propagate_or_files_were_left_out(
+    tmp_path, monkeypatch, fields, expected
+):
+    _setup_real_config(tmp_path, monkeypatch)
+    iso = _redirect_sidecar(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli_module, "_push_core", lambda *a, **kw: cli_module.PushResult(**fields))
+
+    r = runner.invoke(app, ["autopush"])
+
+    assert r.exit_code == 0, (r.stdout, r.stderr)
+    crumb = _verb_crumb(json.loads((iso / "last-autorun.json").read_text()), "push")
+    assert crumb["outcome"] == "degraded"
+    assert crumb["detail"] == expected

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 
+import pytest
 from typer.testing import CliRunner
 
 from mind_meld import core, pullflow
@@ -305,7 +306,7 @@ class TestAutopullDegradedBreadcrumb:
         assert crumb["pull"]["outcome"] == "degraded"
         detail = crumb["pull"]["detail"]
         # Every signal appears with its count.
-        assert "fsync failed on 1 parent dir(s)" in detail
+        assert "fsync failed on 1 path(s)" in detail
         assert "2 corrupt peer manifest(s)" in detail
         assert "3 unknown source(s)" in detail
         assert "4 file(s) failed" in detail
@@ -518,3 +519,167 @@ class TestAutopullFleetRefusalBreadcrumb:
             "autopull.log should be empty for a fleet-refusal — "
             "_log_unexpected was called by mistake."
         )
+
+
+# ─── Track 91A: deletions, older edits and the ledger in the result ───────
+
+FOLDER = "/state/deleted/20261101-120000-ab12"
+URL = "https://github.com/kbitz/mind-meld#recovering-a-deleted-file"
+
+
+def _deleted(n=3, origins=("Mac B",), folder=FOLDER, **fields):
+    return pullflow.PullResult(
+        total_deleted=n, deleted_origins=list(origins), deleted_folder=folder, **fields
+    )
+
+
+class TestPullResultDeletionFields:
+    def test_defaults_report_nothing(self):
+        r = pullflow.PullResult()
+        assert (r.total_deleted, r.deleted_origins, r.deleted_folder) == (0, [], None)
+        assert (r.older, r.total_older, r.ledger_cause) == ([], 0, None)
+
+    def test_a_deletion_is_not_an_applied_file_a_conflict_or_an_older_edit(self):
+        r = _deleted(older=[pullflow.OlderEdit("Mac B", "notes", "a.md")], total_written=1)
+        assert r.total_applied == 1  # written only: deleted and older never count as applied
+        assert r.total_older == 1
+
+    def test_the_older_edits_count_is_the_list_length(self):
+        edits = [pullflow.OlderEdit("Mac B", "notes", f"{i}.md") for i in range(3)]
+        assert pullflow.PullResult(older=edits).total_older == 3
+
+
+class TestDeletionWording:
+    def test_the_clause_says_how_many_who_where_for_how_long_and_how_to_recover(self):
+        assert pullflow.deleted_clause(_deleted(3)) == (
+            f"3 files deleted because Mac B deleted them; copies in {FOLDER} for 30 days; see {URL}"
+        )
+
+    def test_singular_and_plural(self):
+        one = pullflow.deleted_clause(_deleted(1))
+        assert one.startswith("1 file deleted because Mac B deleted it; ")
+        many = pullflow.deleted_clause(_deleted(2))
+        assert many.startswith("2 files deleted because Mac B deleted them; ")
+
+    def test_several_origins_read_as_peers(self):
+        clause = pullflow.deleted_clause(_deleted(4, origins=("Mac B", "Linux C")))
+        assert clause.startswith("4 files deleted because peers deleted them; ")
+        assert "Mac B" not in clause and "Linux C" not in clause
+
+    def test_a_missing_folder_still_promises_the_copies(self):
+        clause = pullflow.deleted_clause(_deleted(2, folder=None))
+        assert "copies kept for 30 days; see " in clause and "None" not in clause
+
+    def test_peer_and_folder_text_is_sanitized(self):
+        result = _deleted(1, origins=("Mac\x1b[2J B\n",), folder="/s/\x1b[31mdeleted/x")
+        for text in (pullflow.deleted_clause(result), pullflow.deleted_detail(result)):
+            assert "\x1b" not in text and "\n" not in text
+
+    def test_nothing_deleted_has_no_clause_and_no_detail(self):
+        assert pullflow.deleted_clause(pullflow.PullResult()) == ""
+        assert pullflow.deleted_detail(pullflow.PullResult()) == ""
+
+    def test_the_breadcrumb_detail_names_the_count_the_origin_and_the_folder(self):
+        assert (
+            pullflow.deleted_detail(_deleted(3)) == f"3 files deleted by Mac B; copies in {FOLDER}"
+        )
+        assert pullflow.deleted_detail(_deleted(1, origins=("A", "B"))).startswith(
+            "1 file deleted by peers; "
+        )
+
+    def test_older_edits_clause(self):
+        one = pullflow.PullResult(older=[pullflow.OlderEdit("Mac B", "notes", "a.md")])
+        two = pullflow.PullResult(
+            older=[pullflow.OlderEdit("Mac B", "notes", p) for p in ("a.md", "b.md")]
+        )
+        assert pullflow.older_clause(one) == "1 older peer edit not applied (mm pull --verbose)"
+        assert pullflow.older_clause(two) == "2 older peer edits not applied (mm pull --verbose)"
+        assert pullflow.older_clause(pullflow.PullResult()) == ""
+
+
+class TestSyncSuccessLine:
+    def test_a_deletion_only_pull_leads_with_the_deletion(self):
+        from mind_meld.cli import _sync_success
+
+        assert _sync_success("pull", _deleted(3)) == (
+            f"Pull: 3 files deleted because Mac B deleted them; copies in {FOLDER} for 30 days; "
+            f"see {URL}."
+        )
+
+    def test_an_applied_file_leads_and_the_deletion_follows(self):
+        from mind_meld.cli import _sync_success
+
+        line = _sync_success("pull", _deleted(2, total_written=2))
+        assert line == (
+            f"Pull: 2 files applied; 2 files deleted because Mac B deleted them; copies in "
+            f"{FOLDER} for 30 days; see {URL}."
+        )
+
+    def test_older_edits_and_waiting_follow_in_order(self):
+        from mind_meld.cli import _sync_success
+
+        older = [pullflow.OlderEdit("Mac B", "notes", "a.md")]
+        waiting = [pullflow.WaitingPeer("a", "Mac C", files=2)]
+        line = _sync_success(
+            "pull", pullflow.PullResult(older=older, total_waiting=2, waiting=waiting)
+        )
+        assert line == (
+            "Pull: no changes; 1 older peer edit not applied (mm pull --verbose); "
+            "waiting for 2 files from Mac C."
+        )
+
+    def test_nothing_to_report_is_still_no_changes(self):
+        from mind_meld.cli import _sync_success
+
+        assert _sync_success("pull", pullflow.PullResult()) == "Pull: no changes."
+
+    def test_a_partial_pull_that_deleted_says_so_in_what_remains(self, tmp_path, monkeypatch):
+        _setup_real_config(tmp_path, monkeypatch)
+        _redirect_sidecar(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            pullflow,
+            "_pull_core",
+            lambda *a, **kw: _deleted(2, total_failed=1, elapsed=0.1),
+        )
+
+        r = runner.invoke(app, ["pull"])
+
+        assert r.exit_code == 1
+        line = r.stderr.strip().splitlines()[-1]
+        assert "2 files deleted because Mac B deleted them" in line, line
+        assert line.index("completed changes remain") < line.index("2 files deleted")
+
+
+class TestLedgerCauseInTheAutopullBreadcrumb:
+    @staticmethod
+    def _crumb(tmp_path, monkeypatch, result):
+        _setup_real_config(tmp_path, monkeypatch)
+        iso = _redirect_sidecar(monkeypatch, tmp_path)
+        monkeypatch.setattr(pullflow, "_pull_core", lambda *a, **kw: result)
+        r = runner.invoke(app, ["autopull"])
+        assert r.exit_code == 0, (r.stdout, r.stderr)
+        return r, json.loads((iso / "last-autorun.json").read_text())["pull"]
+
+    @pytest.mark.parametrize("cause", ["busy", "too-new", "corrupt", "interrupted", "unavailable"])
+    def test_an_unavailable_ledger_degrades_the_pull(self, tmp_path, monkeypatch, cause):
+        result = pullflow.PullResult(ledger_cause=cause, elapsed=0.1)
+        r, crumb = self._crumb(tmp_path, monkeypatch, result)
+        assert crumb["outcome"] == "degraded"
+        assert crumb["detail"] == f"pull ledger unavailable ({cause})"
+        assert r.stdout == ""  # the hook stays quiet; `mm status` carries the cause
+
+    def test_the_cause_joins_the_other_degradations(self, tmp_path, monkeypatch):
+        result = pullflow.PullResult(ledger_cause="busy", total_failed=2, elapsed=0.1)
+        _, crumb = self._crumb(tmp_path, monkeypatch, result)
+        assert crumb["outcome"] == "degraded"
+        assert crumb["detail"] == "2 file(s) failed; pull ledger unavailable (busy)"
+
+    def test_recovery_cleanup_failure_degrades_the_pull(self, tmp_path, monkeypatch):
+        result = pullflow.PullResult(maintenance_failures=2, elapsed=0.1)
+        _, crumb = self._crumb(tmp_path, monkeypatch, result)
+        assert crumb["outcome"] == "degraded"
+        assert crumb["detail"] == "2 follow-up failure(s)"
+
+    def test_a_healthy_ledger_adds_nothing(self, tmp_path, monkeypatch):
+        _, crumb = self._crumb(tmp_path, monkeypatch, pullflow.PullResult(elapsed=0.1))
+        assert crumb["outcome"] == "success" and "detail" not in crumb

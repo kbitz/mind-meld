@@ -620,8 +620,8 @@ def test_exact_message_table(kind, body):
     assert pullhistory.explain(exceptions[kind]) == prefix + body + suffix
     if kind not in ("pending", "stale"):
         expected = (
-            "mm: notice: history not recorded (sync unaffected; these rows are dropped "
-            "and not replayed): " + body + suffix
+            "mm: notice: history not recorded (these rows are dropped and not replayed; "
+            "fast-forward and deletions pause too while state.db is unavailable): " + body + suffix
         )
         assert pullhistory.explain(pullhistory.HistoryNotRecorded(exceptions[kind])) == expected
 
@@ -891,3 +891,66 @@ def test_writers_recheck_compat_inside_their_transaction(monkeypatch, writer):
         assert conn.execute("SELECT rel_path FROM history").fetchall() == [("before",)]
     conn.close()
     assert statedb.db_path().stat().st_size == len(before)
+
+
+# ── Track 91A: the `deleted` action and its recovery folder ───────────
+
+FOLDER = "/state/deleted/20261101-120000-ab12"
+
+
+def test_a_deleted_row_carries_its_recovery_folder_in_extra():
+    pullhistory.append(
+        verb="pull",
+        device="dev-b",
+        source="notes",
+        rel_path="old/note.md",
+        action="deleted",
+        remote_sha="a" * 64,
+        folder=FOLDER,
+    )
+    (rec,) = pullhistory.read_records()
+    assert (rec["verb"], rec["action"], rec["rel_path"]) == ("pull", "deleted", "old/note.md")
+    assert rec["folder"] == FOLDER
+    with statedb.connect(read_only=True) as conn:
+        action, extra = conn.execute("SELECT action, extra FROM history").fetchone()
+    assert action == "deleted" and json.loads(extra) == {"folder": FOLDER}
+
+
+def test_deleted_rows_are_found_by_action_and_rows_without_a_folder_omit_the_key():
+    pullhistory.append(
+        verb="pull", device="d", source="notes", rel_path="a.md", action="deleted", folder=FOLDER
+    )
+    pullhistory.append(verb="pull", device="d", source="notes", rel_path="b.md", action="written")
+    found = pullhistory.query(action="deleted")
+    assert [r["rel_path"] for r in found] == ["a.md"] and found[0]["folder"] == FOLDER
+    written = pullhistory.query(action="written")
+    assert "folder" not in written[0]
+    assert "folder" not in pullhistory.row(
+        verb="pull", device="d", source="notes", rel_path="x", action="deleted"
+    )
+
+
+def test_deleted_is_a_known_class_and_folder_a_known_key():
+    assert ("pull", "deleted") in pullhistory.KNOWN_CLASSES
+    assert "folder" in pullhistory.KNOWN_KEYS
+    payload = pullhistory.row(
+        verb="pull", device="d", source="s", rel_path="p", action="deleted", folder=FOLDER
+    )
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        pullhistory.write_rows(conn, [payload])  # accepted, not rejected as an unknown key
+    # An unrelated key is still rejected.
+    with statedb.connect(read_only=False) as conn:
+        with pytest.raises(ValueError), statedb.transaction(conn):
+            pullhistory.write_rows(conn, [payload | {"surprise": "x"}])
+
+
+def test_deleted_rows_are_pruned_per_class_like_every_other_action():
+    with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+        conn.executemany(
+            "INSERT INTO history (verb,action) VALUES (?,?)", [("pull", "deleted")] * 20001
+        )
+    pullhistory.maintain_best_effort()
+    with statedb.connect(read_only=True) as conn:
+        assert conn.execute("SELECT count(*) FROM history WHERE action='deleted'").fetchone() == (
+            20000,
+        )

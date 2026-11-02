@@ -3,8 +3,10 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/pullflow.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename`
+- `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` (see "The pull rule" below)
+- `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
@@ -17,13 +19,145 @@ Tests: `tests/test_conflict_copy.py`, `tests/test_conflictdiff.py`, `tests/test_
 ---
 
 ## Conflict-direction inversion + fleet-version refusal (load-bearing, v0.9.2 BREAKING)
-`_apply_conflict` keeps LOCAL bytes at canonical; REMOTE bytes go to `.sync-conflict-*` sidecar. No rename + rollback dance — local is never overwritten in the conflict path. Pull skips the entire discovery/migration sweep under `--dry-run`: no inversion marker is created and no old conflict is renamed. Those renames are named in “Not previewed”; real pull and resolve keep the sweep. See the [README Previews table](../../README.md#previews).
+`_apply_conflict` keeps LOCAL bytes at canonical; REMOTE bytes go to `.sync-conflict-*` sidecar. No rename + rollback dance — local is never overwritten in the conflict path. (A fast-forward is not the conflict path: it overwrites a file this machine had not changed; see "The pull rule" below.) Pull skips the entire discovery/migration sweep under `--dry-run`: no inversion marker is created and no old conflict is renamed. Those renames are named in “Not previewed”; real pull and resolve keep the sweep. See the [README Previews table](../../README.md#previews).
 
 Pre-v0.9.2 produced the opposite mapping; pre-existing files migrate to a `v0-` prefix on first lock-protected discovery in `mm pull` / `mm resolve` (NEVER from `mm conflicts` — lockless, would race autopull, codex-2 #5).
 
 **Track 5E reads one device inventory (Track 87A).** `_check_fleet_version_or_refuse` takes the pull's single `devices.inventory_devices` result. Only a key-named entry (`devices/<id>.json` holding that id) is a device: a conflict copy of one (`<id>.sync-conflict-...json`, `<id> 2.json`, `(conflicted copy)`), a misnamed file and a body whose id is not its file name are foreign, so a stale copy of a peer's record can neither refuse the pull nor appear as a second device. A key-named entry that is unreadable or shape-invalid still refuses by storage key (we cannot read its `last_seen_version`). One that vanished mid-read is waiting, not corrupt, and does not refuse. Conflict-name rules: `find_conflict_copies` recognizes iCloud, Dropbox and Syncthing names (`manifest.json.sync-conflict-20260101-101010-ABCDEFG.enc`, stacked, or extensionless); `mm-crypto-init.preserved-*` never matches; a candidate gone at validation is skipped silently. See [sync.md](sync.md#syncthing-tolerant-reads-and-waiting-track-87a).
 
 `_resolve_interactive_loop` is dual-mode dispatched BY FILENAME PREFIX (not timestamp — sound, since post-v0.9.2 code never produces a `v0-` file directly). `v0-` files: `(l)ocal` renames sidecar over canonical, `(r)emote` unlinks sidecar. No-prefix (and `v1`) files: `(l)ocal` unlinks sidecar, `(r)emote` renames sidecar over canonical. Diff fromfile/tofile labels flip per row to match.
+
+## The pull rule: last-synced base, ancestry and the mtime guard (load-bearing, Track 91A)
+
+Before Track 91A every update of a file both machines held was either unioned
+(`.jsonl`, `MEMORY.md`), skipped because the local mtime was newer, or written as a
+conflict copy, so a peer's edit to a file this machine had not touched was a
+conflict. `pullplan.decide` replaces that guess with what this machine
+remembers. It is one pure function, used by the real pull
+(`pullflow._classify_with_ledger` before any blob is read, and
+`pullflow._ledger_verdict` inside `_apply_incoming_file`, which re-reads the local
+file and decides again) and by the planner (`PullPlanner.predict`, so `mm pull
+--dry-run`, `--conflict-mode fail` and `mm diff --from` predict the same outcome).
+Never add a second copy of the rule.
+
+It reads the local ledger (`pullplan.Ledger`; tables and durability in
+[sync.md](sync.md#fast-forward-propagated-deletions-and-anchors-track-91a)):
+
+- **this peer's base**: the full sha256 this machine and that peer last agreed on
+  for the path (`peer_base`);
+- **ancestry**: every version this machine has `held` (it built, wrote or published
+  that file), inherited as an `ancestor` of held bytes, or only `seen` as a
+  conflict observation (`seen_version`). Only held and inherited versions go
+  into a later publication's `from`;
+- **baseline**: the newest `held` version; with no `held` row, this peer's base.
+  The local file is **clean** when it equals the baseline: it carries no edit made
+  here that the peer could not have built on;
+- **`remote.from`**: the peer's manifest entry lists up to 16 sha prefixes it built
+  that file on, newest first (a hostile or malformed list reads as absent).
+
+First match wins. `older` compares file mtimes; an unparseable mtime is never older.
+
+| # | Condition | Outcome |
+|---|---|---|
+| 1 | local file missing | `held`: leave it missing, silently, when the remote sha is in ancestry, its mtime is not newer than when that row was recorded, the scan root's anchor is unchanged against this machine's own published manifest, this peer is not the origin of a deletion this machine followed, and this machine's own manifest lists the path or names it in a record (or the row carries `deleted_by`). Otherwise `write` |
+| 2 | local == remote | `matched` (settles the remote as the base) |
+| 3 | remote == this peer's base | `skip`: no download, no union, no prompt; except when local is clean, its sha is in `remote.from`, and the remote mtime is strictly newer than local (continue to row 4) |
+| 4 | clean, and the local sha is in `remote.from` | fast-forward |
+| 5 | remote sha is in ancestry | `stale`: a version this machine already moved past; silent, no write, no base |
+| 6 | clean, and the local file equals this peer's base | fast-forward |
+| 7 | no base for this peer and `remote.from` empty | `fallback`: today's rule exactly (below) |
+| 8 | otherwise | both changed: union if `should_merge`, else conflict copy |
+
+Rows 4 and 6 end in `older`, not a write, when the remote mtime is strictly older
+than the local mtime: a restored machine's older bytes must not roll this one back.
+The row 3 exception and row 4 before row 5 let an exact revert with a fresh mtime
+propagate, including when this machine missed the peer's intermediate publication.
+The same-base exception requires a strictly newer comparable mtime: older, equal,
+missing or incomparable timestamps keep the acknowledged version silent. This
+avoids treating an acknowledged stale cycle as an `older` edit requiring action.
+Equal to an
+old peer base is not clean on its own (row 6 needs the baseline too), so a deliberate
+revert stays an edit. Why `from` exists: a per-peer base cannot see a handoff. A
+edits and pushes V1; B pulls it, edits and pushes V2 without ever publishing V1;
+A's base for B is still V0, so A would read both changed and a line B deleted
+would return. `from` tells A that V2 was built on V1.
+
+**Fast-forward** (`_apply_fast_forward`) writes the remote bytes and restores its
+mtime with no union. It captures the file's `lstat` with its hash and re-checks
+size, `mtime_ns`, `ctime_ns` and inode right before the replace; a change in between is treated
+as both changed. The few milliseconds left are the same exposure as `_apply_merge`.
+**A fast-forward overwrites local bytes with no recovery copy** (owner item a): those
+bytes equal a version the same peer published and built on, so a bad edit made on
+one machine spreads to the others by design. This is a named limit, not a bug.
+
+**Both changed** (row 8) unions a mergeable file (`.jsonl`, `MEMORY.md`) and writes a
+conflict copy for anything else. It no longer skips because the local file is
+newer. **The mtime gate survives in two places only**: the `older` guard on rows 4
+and 6, and row 7, the no-base fallback, where the old rule runs unchanged (union,
+then skip when the local mtime is newer, then conflict copy). A file with no base for
+that peer whose peer publishes no ancestry (a peer on an older release, a lost
+database, a file never synced) falls to row 7. The future-clamp in
+`_restore_mtime_best_effort` still matters for both.
+
+**Line-deletion limit.** A line deleted on one machine stays deleted on the others
+when they did not change that file (rows 4 and 6 overwrite, no union). When both
+sides changed the file, the union has no base bytes to tell a deleted line from an
+added one, so the deleted line returns. Nothing is lost; delete it again. The base
+is a hash, not the bytes, so this is not fixable here.
+
+**Base and ancestry after each outcome** (`_ApplyReporter.record`, in memory at
+once so a later peer in the same pull sees them; settlement commits at pull end,
+with the separate pre-deletion commit described in sync.md):
+
+- written, fast-forward, keep-remote, matched, and an `unchanged` that really
+  agrees (byte-equal file or a no-op merge): the base becomes the remote sha and
+  the version is `held`, and its `from` prefixes become inherited `ancestor`
+  rows so sequential handoffs can carry them through machines that never held
+  the intermediate bytes;
+- merged, merged via LCS: the base becomes the remote sha and both the remote sha
+  and the pre-merge local sha become `held` (the merge is built on both);
+- conflicted and kept: the base becomes the remote sha but the version is only
+  `seen`, never `held`: the local file was not built on it, so neither it nor its
+  conflict-only ancestry is published in `from`, and a later pull of the same sha
+  is row 3. Existing inherited or held rows are never demoted;
+- inline `(l)ocal` (keep-canonical, outcome word `skipped`): deferred, see below;
+- failed, waiting, symlink skip, `older`, `held`, `stale`: nothing is recorded.
+
+**`kept` (criterion 10).** When `_apply_conflict` finds a sidecar from this peer
+that already holds the peer's bytes, it returns `kept`, not `conflicted`: not
+counted as applied or conflicted, no history row, no warning, no sync-log line, not
+a change (`_UNAPPLIED`). The sidecar stays, so `mm conflicts` still lists the file.
+`kept` is in `_CANONICAL_WRITE_OUTCOMES`, as the old dedup return `conflicted` was: a
+copy of the file that the owner has not seen voids a pending inline keep-local bump.
+A second pull of the same state prints `Pull: no changes.`
+
+**Existing conflicts do not clear by themselves.** A conflict copy that exists when
+a machine upgrades has no base behind it. The first pull afterwards finds the
+sidecar already holds the peer's bytes (`kept`: silent) and records the peer's sha
+as this peer's base, but `mm conflicts` keeps listing the file until the owner runs
+`mm resolve` on each (it needs a terminal). After `(l)ocal`, `(r)emote` or `(m)erge`
+a later pull writes nothing and reports no conflict: the peer's sha is the base
+(row 3) until the peer publishes something new. `resolveflow._record_resolution`
+records that base after each successful explicit choice, including after a lost
+base. It requires one identifiable peer, flushes the chosen canonical file and
+its parent, then commits; `(r)emote` holds the remote version and `(m)erge` holds
+both inputs, while `(l)ocal` records the remote as seen. Aborting a later prompt
+keeps completed settlements. An unidentified peer, flush failure or unavailable
+ledger leaves the chosen bytes intact and warns that a later pull may conflict
+again. The local-choice mtime bump remains a propagation hint.
+
+**Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
+`_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
+applied by `ledger.flush_deferred()` right after `_drain_inline_bumps`, inside
+`_pull_core`'s `try`. An `(a)bort` raises past both, so a keep-local decision under
+an aborted pull records no base and the next pull asks again. A later write, merge
+or conflict outcome for the same path still voids the pending mtime bump (see
+"Deferred inline `keep-canonical` mtime bump").
+
+Tests: the Track 91A rule and fleet sequences live in `tests/test_projectid.py`
+(`Machine`), with the branch tests in `tests/test_pullflow.py`,
+`tests/test_additive_sync.py`, `tests/test_conflict_copy.py` and
+`tests/test_statedb.py`.
 
 ## Clock separation (load-bearing, v0.14.0)
 
@@ -95,7 +229,7 @@ fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1
 
 `mind_meld.merge.lcs_merge(local_bytes, remote_bytes) -> tuple[bytes, int]` runs at BOTH conflict-prompt sites BEFORE the prompt renders: `_resolve_interactive_loop` (post-pull) and `_prompt_conflict_choice` (inline pull-time). Returns `(merged_bytes, conflict_count)` where `conflict_count == -1` means "binary input, do not offer the option," `0` means "clean merge, offer (m) but keep the default at `s`," and `> 0` means "merged candidate contains git-style `<<<<<<<` markers; offer (m) and keep the default at `s` so the user must affirmatively pick it."
 
-**Algorithm.** `difflib.SequenceMatcher(autojunk=False).get_opcodes()` over `local.splitlines()` and `remote.splitlines()`. Implicitly treats the longest common subsequence as the shared ancestor: `equal` runs are kept; `delete` (lines in local-only) and `insert` (lines in remote-only) are kept under the lossless additive interpretation; `replace` runs become `<<<<<<< local / ======= / >>>>>>> remote` markers. Without a stored last-synced hash (the deferred Future TODO "Three-way merge base") this is the conservative interpretation that never silently loses content — the only data-loss vector is misalignment on pathological inputs (lots of repeated short lines), and that surfaces as visible markers the user rejects.
+**Algorithm.** `difflib.SequenceMatcher(autojunk=False).get_opcodes()` over `local.splitlines()` and `remote.splitlines()`. Implicitly treats the longest common subsequence as the shared ancestor: `equal` runs are kept; `delete` (lines in local-only) and `insert` (lines in remote-only) are kept under the lossless additive interpretation; `replace` runs become `<<<<<<< local / ======= / >>>>>>> remote` markers. The ledger (Track 91A) stores last-synced hashes, never base bytes, so there is still no real ancestor to merge against and this stays the conservative interpretation that never silently loses content — the only data-loss vector is misalignment on pathological inputs (lots of repeated short lines), and that surfaces as visible markers the user rejects.
 
 **Inversion-aware argument order.** `_resolve_interactive_loop` walks `v0-` (pre-inversion) and post-inversion sidecars in the same loop. Pre-inversion: canonical = remote bytes, cpath = local bytes; the call is `lcs_merge(cpath_bytes, canonical_bytes)`. Post-inversion: canonical = local bytes; the call is `lcs_merge(canonical_bytes, cpath_bytes)`. Marker labels (`<<<<<<< local`, `>>>>>>> remote`) stay accurate either way because the first arg is always the local side. The inline pull-time prompt is post-inversion only and passes `lcs_merge(local_bytes, remote_data)`.
 
@@ -131,7 +265,7 @@ fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1
 
 ## `resolve(local)` mtime bump (load-bearing, v0.12.5)
 
-`_resolve_interactive_loop`'s `(l)ocal` branch MUST stamp the canonical with an mtime strictly greater than the peer's mtime via `_bump_canonical_mtime_post_resolve(canonical, peer_mtime)`. Without the bump, the user's "I picked local" decision is silent on disk: canonical keeps its old mtime (which `_apply_incoming_file`'s mtime gate just classified as `<=` peer's, else the conflict path wouldn't have fired), the sidecar dedup signal from `_existing_post_inversion_sidecars_from_peer` is gone (just unlinked), and the next pull from the same peer re-runs the conflict path and writes a fresh sidecar. Users hit a `resolve → pull → resolve → pull` loop with no on-disk signal that they keep choosing local.
+`_resolve_interactive_loop`'s `(l)ocal` branch MUST stamp the canonical with an mtime strictly greater than the peer's mtime via `_bump_canonical_mtime_post_resolve(canonical, peer_mtime)`. Without the bump, the user's "I picked local" decision is silent on disk: canonical keeps its old mtime (which the no-base fallback's mtime gate just classified as `<=` peer's, else the conflict path wouldn't have fired), the sidecar dedup signal from `_existing_post_inversion_sidecars_from_peer` is gone (just unlinked), and the next pull from the same peer re-runs the conflict path and writes a fresh sidecar. Users hit a `resolve → pull → resolve → pull` loop with no on-disk signal that they keep choosing local. Since Track 91A a conflict also records the peer's sha as this peer's base, so the same sha is skipped (row 3 of "The pull rule") until the peer publishes something new; the bump stays because it is the only carrier when there is no base (row 7), it is what the `older` guard compares, and it is what a third machine sees.
 
 `peer_mtime` is read BEFORE the unlink/rename: post-inversion from the sidecar (whose mtime was restored from the peer's manifest by `_restore_mtime_best_effort` during the producing pull); pre-inversion from the original canonical (which held peer/remote bytes before the v0- sidecar promotion). Stat failure degrades to `peer_mtime = 0.0` so the bump still happens — worst case the canonical's mtime is `now`, which is still > any peer's past mtime in practice.
 
@@ -143,16 +277,16 @@ Best-effort `os.utime`. `OSError` / `OverflowError` is swallowed: the bump is a 
 
 ## Deferred inline `keep-canonical` mtime bump (load-bearing, Track 12A v0.12.7)
 
-`mm pull --conflict-mode prompt` choosing `(l)ocal` at the inline conflict prompt now propagates the decision across the fleet — symmetric with `mm resolve` — but the bump is **deferred to end-of-pull-batch**, not applied inline. The v0.12.6 release reverted an inline bump because mutating canonical's mtime mid-walk makes a LATER peer's `_apply_incoming_file` mis-classify on the `local_mtime > remote_mtime` gate (`pullflow.py`'s mtime-skip branch) and silently skip — hiding a peer whose mtime falls between original-local and the bump value.
+`mm pull --conflict-mode prompt` choosing `(l)ocal` at the inline conflict prompt now propagates the decision across the fleet — symmetric with `mm resolve` — but the bump is **deferred to end-of-pull-batch**, not applied inline. The v0.12.6 release reverted an inline bump because mutating canonical's mtime mid-walk makes a LATER peer's `_apply_incoming_file` mis-classify on the `local_mtime > remote_mtime` gate (`pullflow.py`'s mtime-skip branch) and silently skip — hiding a peer whose mtime falls between original-local and the bump value. The same hazard now reaches the `older` guard of the pull rule, which compares the same two mtimes.
 
 **Mechanism.** `_pull_core` allocates `pending_inline_bumps: dict[Path, float]` — but **only in interactive (`prompt`) mode**; non-interactive pulls (default `keep-both`, autopull) pass `None` and the whole machinery is a guarded no-op down the call chain (`_pull_one_source` → `_download_and_apply` → `_apply_incoming_file`). The dict is keyed on the **resolved** path (`_download_and_apply` already computes `resolved_local` for its escape check) so a symlinked source root or path-spelling alias can't leave a stale entry that a later write fails to invalidate.
 
 - **RECORD** lives in `_apply_incoming_file`'s `keep-canonical` branch: `_record_inline_bump(pending, resolved_local, peer_ts)` where `peer_ts = remote_mtime.timestamp() if remote_mtime else 0.0`. `max()` over repeated records so that when several peers conflict on the same path in one walk, the bump beats every peer walked regardless of walk order.
-- **INVALIDATION** lives in `_ApplyReporter.record`, keyed on the outcome via the `_CANONICAL_WRITE_OUTCOMES = frozenset({"written", "merged", "merged-via-lcs", "conflicted"})` constant. At publication, or at a non-publishing return such as sidecar dedup, it pops the corresponding entry when `outcome in _CANONICAL_WRITE_OUTCOMES`. The other outcomes (`"failed"`, `"skipped"`, `"unchanged"`) leave canonical untouched and intentionally do NOT invalidate.
+- **INVALIDATION** lives in `_ApplyReporter.record`, keyed on the outcome via the `_CANONICAL_WRITE_OUTCOMES = frozenset({"written", "merged", "merged-via-lcs", "conflicted", "kept", "deleted"})` constant (`kept` is Track 91A's sidecar-dedup return: it writes nothing, but it still voids a pending bump like the `conflicted` it replaced). At publication it pops the corresponding entry when `outcome in _CANONICAL_WRITE_OUTCOMES`. The other outcomes (`"failed"`, `"skipped"`, `"unchanged"`) leave canonical untouched and intentionally do NOT invalidate.
 
 **The eligibility invariant.** A path is drain-eligible iff EVERY successful canonical mutation on it this batch was a keep-canonical "skipped". Any write / merge / conflicted-sidecar outcome for the same path voids the pending bump.
 
-**Why centralize in `_ApplyReporter.record`, not per-branch in `_apply_incoming_file`.** ONE site keyed on the outcome enum covers every canonical-mutating path uniformly: keep-remote, inline merge, the keep-both → `_apply_conflict` sidecar, AND the `_apply_write` branch that fires when canonical vanished mid-walk (user `rm`'d the file while the blocking prompt waited, or an autopull race deleted it). Publication-time recording also voids the bump before a fallible restore/cleanup/print can raise. A per-branch approach missed `_apply_write` entirely — it would silently bump a LATER peer's REMOTE bytes as locally-authored when the file was deleted between peer A's prompt and peer B's apply (Codex adversarial HIGH 2026-05-14). It was also not success-only for keep-both — popping before the `_apply_conflict` call would drop the keep-canonical decision even when the sidecar write failed. Both holes were closed by routing through the outcome enum. The deterministic `_apply_merge` path (`should_merge` true) is ALSO covered: it returns `"merged"`, which is in `_CANONICAL_WRITE_OUTCOMES`, so the gate fires uniformly there too. Unrecorded canonical-write returns such as sidecar dedup still invalidate at the `_download_and_apply` boundary.
+**Why centralize in `_ApplyReporter.record`, not per-branch in `_apply_incoming_file`.** ONE site keyed on the outcome enum covers every canonical-mutating path uniformly: keep-remote, inline merge, the keep-both → `_apply_conflict` sidecar, AND the `_apply_write` branch that fires when canonical vanished mid-walk (user `rm`'d the file while the blocking prompt waited, or an autopull race deleted it). Publication-time recording also voids the bump before a fallible restore/cleanup/print can raise. A per-branch approach missed `_apply_write` entirely — it would silently bump a LATER peer's REMOTE bytes as locally-authored when the file was deleted between peer A's prompt and peer B's apply (Codex adversarial HIGH 2026-05-14). It was also not success-only for keep-both — popping before the `_apply_conflict` call would drop the keep-canonical decision even when the sidecar write failed. Both holes were closed by routing through the outcome enum. The deterministic `_apply_merge` path (`should_merge` true) is ALSO covered: it returns `"merged"`, which is in `_CANONICAL_WRITE_OUTCOMES`, so the gate fires uniformly there too. Before Track 91A an unrecorded canonical-write return such as sidecar dedup invalidated at the `_download_and_apply` boundary; dedup is now the recorded `kept` outcome, which invalidates through the same set.
 
 **Success-only by construction.** `_apply_incoming_file` returns the canonical-write outcomes ONLY on successful canonical mutation; any failure (atomic_write_bytes raise, sidecar write error) returns `"failed"`, which is intentionally absent from the gate set. No per-branch try/except gymnastics required.
 
@@ -219,11 +353,11 @@ Both prompt sites render created/modified timestamps per side plus a recency ver
 
 **Timestamp source differs by site (load-bearing).** `_resolve_interactive_loop`: both files on disk → `stat()` both via `_stat_mtime_btime`, statting the BANNER paths (`local_path_for_banner` / `remote_path_for_banner`) so LOCAL/REMOTE stay correct across inversion modes. `_prompt_conflict_choice`: the remote file is NOT on disk → `stat()` LOCAL only; the remote modified time comes from the manifest via a NEW keyword-only `remote_mtime: datetime | None` param threaded from `_apply_incoming_file` (`remote_mtime` already parsed at the mtime gate). The param is keyword-only/trailing so it never shifts the positional `peer_name` / `ambiguous_count` binding at the call site.
 
-**Birthtime labeling (load-bearing honesty).** A restored sidecar's `st_birthtime` is the LOCAL iCloud-drop time, NOT the peer's real creation. So the remote side is rendered with a `pulled` label (resolve site only), never `created`. The local side shows genuine `created`. The inline remote side shows `modified` only (no on-disk file → no birthtime). The manifest carries only `{sha256, size, mtime}` — there is no creation time on the wire, by design.
+**Birthtime labeling (load-bearing honesty).** A restored sidecar's `st_birthtime` is the LOCAL iCloud-drop time, NOT the peer's real creation. So the remote side is rendered with a `pulled` label (resolve site only), never `created`. The local side shows genuine `created`. The inline remote side shows `modified` only (no on-disk file → no birthtime). A manifest file entry carries `{sha256, size, mtime}` and optional `from` ancestry — there is no creation time on the wire, by design.
 
 **Verdict delta is file-vs-file, not wall-clock.** `render_verdict` computes `local_mtime - remote_mtime`, never vs `now`. This makes it deterministic in tests and stable across runs.
 
-**`(n)ewer` is `mm resolve`-ONLY and remaps to existing dispatch (load-bearing).** Offering it inline is degenerate: `_apply_incoming_file` already skips before the inline prompt when `local_mtime > remote_mtime` (the mtime gate), so at the inline prompt remote is always newer-or-equal — an inline `(n)ewer` could only ever pick remote (= `(r)`). So `_prompt_conflict_choice` gets NO `(n)ewer`; it is display + verdict only. In `_resolve_interactive_loop`, `(n)ewer` resolves the typed `n`/`newer` to the letter `"l"` or `"r"` (via `newer_side` over the banner-path mtimes) and falls into the EXISTING `(l)`/`(r)` dispatch unchanged — so the per-inversion-mode keep-local/keep-remote semantics AND the v0.12.6 `_bump_canonical_mtime_post_resolve` are reused verbatim with no new apply branch.
+**`(n)ewer` is `mm resolve`-ONLY and remaps to existing dispatch (load-bearing).** Offering it inline stays off: under the no-base fallback `_apply_incoming_file` skips before the inline prompt when `local_mtime > remote_mtime`, so remote is newer-or-equal there and an inline `(n)ewer` could only ever pick remote (= `(r)`). Since Track 91A the both-changed row has no such skip, so a newer local file can reach the prompt; the verdict line shows which side is newer, and `(n)ewer` is still not offered here (a decision, not a limit of the rule). `_prompt_conflict_choice` therefore gets NO `(n)ewer`; it is display + verdict only. In `_resolve_interactive_loop`, `(n)ewer` resolves the typed `n`/`newer` to the letter `"l"` or `"r"` (via `newer_side` over the banner-path mtimes) and falls into the EXISTING `(l)`/`(r)` dispatch unchanged — so the per-inversion-mode keep-local/keep-remote semantics AND the v0.12.6 `_bump_canonical_mtime_post_resolve` are reused verbatim with no new apply branch.
 
 **Loop the parse, not the dispatch (load-bearing — Codex eng-review #3).** The `(n)ewer` re-prompt-on-tie behavior wraps ONLY the input read (`typer.prompt` + alias/remap) in a `while True`. The existing if/elif dispatch stays OUTSIDE the loop because its `continue` (e.g. the merge-write-failure path) advances the OUTER per-conflict `for`; wrapping the dispatch would re-prompt a partially-applied conflict. `(n)ewer` is offered (`newer_available`) only when both mtimes are readable (`newer_side != "unknown"`), including a tie; pressing it on a tie prints `equal mtime — choose manually` and `continue`s (re-prompts); a typed `n` while suppressed prints an `unavailable` note and `continue`s. Neither advances the conflict on an action keystroke. The separate `canonical is None` prompt (promote/delete/skip) does NOT offer `(n)ewer` and is not wrapped — typed `n` there stays skip.
 

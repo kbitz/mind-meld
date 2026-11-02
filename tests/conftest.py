@@ -517,11 +517,43 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_sync_observations(monkeypatch, tmp_path) -> None:
+    """Give every simulated machine a local observation cache, never the account's."""
+    from mind_meld import config, syncdiag
+
+    configs: dict[str, int] = {}
+
+    def cache_path():
+        index = configs.setdefault(str(config.CONFIG_PATH), len(configs))
+        name = "sync-observations.json" if index == 0 else f"sync-observations-{index}.json"
+        return tmp_path / name
+
+    monkeypatch.setattr(syncdiag, "cache_path", cache_path)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_statedb(monkeypatch, tmp_path) -> None:
     """Every test database stays beside its isolated legacy history."""
+    from mind_meld import config as _config
     from mind_meld import statedb
 
     monkeypatch.setattr(statedb, "DB_DIR", tmp_path / "mm_state")
+
+    # Track 91A: the pull ledger lives in state.db and is per machine. A test that
+    # runs two "machines" in one process switches `config.CONFIG_PATH` between
+    # them; each distinct config gets its own database, the first keeping the
+    # usual name. Without this the second machine would read the first one's
+    # held versions and treat every peer edit as already seen.
+    configs: dict[str, int] = {}
+
+    def db_path():
+        bound = statedb._bound_path.get()
+        if bound is not None:
+            return bound
+        index = configs.setdefault(str(_config.CONFIG_PATH), len(configs))
+        return statedb.DB_DIR / ("state.db" if index == 0 else f"state-{index}.db")
+
+    monkeypatch.setattr(statedb, "db_path", db_path)
 
 
 @pytest.fixture(autouse=True)

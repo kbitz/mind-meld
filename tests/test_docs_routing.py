@@ -1101,6 +1101,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "host_publication",
     "discovery",
     "git_capture",
+    "fast_forward",
 )
 _SKILL_LINKS_ROW_FIELDS = (
     "key",
@@ -1381,3 +1382,49 @@ def test_pre_1_1_notes_semantics_survive_as_health_entries():
     absent = _blob(health(agg.format_retro(presentation_data("absent"))))
     assert agg.ATTENDED_USAGE_MIN_VERSION in absent
     assert "verify with `mm --version`" in absent
+
+
+_RETIRED_NO_DELETE_CLAIMS = (
+    "pull is additive-only",
+    "additive-only pull",
+    "does not itself delete a file",
+    "it does not actively delete",
+    "pull is additive and never deletes",
+    "pull never deletes local files",
+    "tombstone suppresses restoration of a missing file; existing peer copies remain",
+)
+
+
+def test_no_document_still_says_a_pull_never_deletes_a_file():
+    """Track 91A: a tombstone with the hash of the bytes this Mac last synced from its
+    publisher deletes the file (with a recovery copy). The documents that said a pull
+    never deletes, or that a tombstone only suppresses, were corrected; none may say it
+    again. `mm-events` is the one place a tombstone stays suppress-only, and its wording
+    does not match these phrases."""
+    docs = [
+        ROOT / "README.md",
+        ROOT / "SPEC.md",
+        ROOT / "docs" / "SPEC.md",
+        *sorted((ROOT / "docs" / "invariants").glob("*.md")),
+    ]
+    stale = [
+        f"{doc.relative_to(ROOT)}: {claim!r}"
+        for doc in docs
+        if doc.is_file()
+        for claim in _RETIRED_NO_DELETE_CLAIMS
+        if claim in doc.read_text(encoding="utf-8").lower()
+    ]
+    assert stale == []
+
+
+def test_readme_names_every_history_action_the_log_command_accepts():
+    from typing import get_args
+
+    from mind_meld import cli
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    row = next(line for line in readme.splitlines() if line.startswith("| `mm log` |"))
+    documented = set(re.search(r"--action \{([^}]*)\}", row).group(1).replace("\\", "").split("|"))
+    assert documented == set(get_args(cli._LogAction)), (
+        f"README's mm log --action list {sorted(documented)} != the accepted values"
+    )

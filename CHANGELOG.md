@@ -2,6 +2,24 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.3] - 2026-11-02
+
+**A peer's edit to a file you have not changed now just applies, and a file deleted on one machine is deleted on the others, with a 30-day recovery copy.** Before this release, every peer edit to a file both machines held was a conflict, and a deletion only stopped the file from coming back. This is for one person handing work from machine to machine, one active machine at a time.
+
+### Changed
+
+- `mm pull` applies a peer's edit when your copy is unchanged since you last synced it. There is no conflict copy and no recovery copy, so a bad edit on one machine spreads to the others. When both machines changed a file, `.jsonl` files and `MEMORY.md` are still unioned and any other file still gets a conflict copy.
+- A peer edit built on yours but carrying an older timestamp, such as from a machine restored from backup, is held. The pull line says `N older peer edits not applied`, and `mm pull --verbose` lists them. `mm diag` shows both timestamps.
+- A pull deletes your copy of a file only when its bytes match the version the other machine deleted and you last synced exactly that version from it. A file you changed stays. The deleted file moves to `~/.config/mind-meld/deleted/` and is kept at least 30 days. The pull's last line names the folder.
+- A deletion record carries the sha256 of the deleted version. If this machine does not know the full hash, no record is published. A record from an older release still stops a re-download, and it never deletes.
+- A pull no longer restores a file this machine held and removed by hand. Your next push publishes that removal, so copy the file back from a recovery folder first if it was an accident.
+- mm keeps a small `.mind-meld-anchor` file in each folder it scans and never syncs it. A folder that is new, recreated or restored from backup publishes no deletions, and the push says `N files left out because <folder> is new; run mm pull to restore them`.
+- `mm diag` shows the last pull's observations, labeled as possibly stale. It does not fetch the peer's current files.
+
+### Upgrading
+
+Update every machine, then run `mm push` and `mm pull` on each, before deleting a file you care about. Deletions propagate only after a push on this release has published each folder's marker and a pull on this release has recorded what each peer holds. If your config has an explicit `codex` source, run `mm migrate-config --dry-run` and then `mm migrate-config` on each machine first. README Upgrading has the order, the rollback commands and a two-machine recipe.
+
 ## [1.12.2] - 2026-11-01
 
 **`mm recapture` and its preview now give each repository 30 seconds and the Git walk 120 seconds.** A repository the ordinary 2 second push cap skips can still be captured. Push, autopush, and init keep their existing limits, and the push inside a real recapture is that ordinary push.

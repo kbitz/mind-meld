@@ -77,6 +77,21 @@ SCHEMA = {
             "extra",
         )
     ],
+    # Track 91A migration 2: rebuildable pull-ledger tables.
+    "peer_base": [
+        ("peer", "TEXT", 1, None, 1),
+        ("source", "TEXT", 1, None, 2),
+        ("path", "TEXT", 1, None, 3),
+        ("sha", "TEXT", 1, None, 0),
+    ],
+    "seen_version": [
+        ("source", "TEXT", 1, None, 1),
+        ("path", "TEXT", 1, None, 2),
+        ("sha", "TEXT", 1, None, 3),
+        ("time", "INTEGER", 1, None, 0),
+        ("kind", "TEXT", 1, None, 0),
+        ("deleted_by", "TEXT", 0, None, 0),
+    ],
 }
 INDEXES = {
     "meta": [("sqlite_autoindex_meta_1", 1, "pk", 0)],
@@ -89,13 +104,18 @@ INDEXES = {
         ("history_order", 0, "c", 0),
         ("history_since", 0, "c", 0),
     ],
+    "peer_base": [("sqlite_autoindex_peer_base_1", 1, "pk", 0), ("peer_base_path", 0, "c", 0)],
+    "seen_version": [
+        ("sqlite_autoindex_seen_version_1", 1, "pk", 0),
+        ("seen_version_time", 0, "c", 0),
+    ],
 }
 
 
 def test_schema_settings_and_reopen():
     for _ in range(2):
         with statedb.connect(read_only=False) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (1,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (2,)
             assert conn.execute("PRAGMA auto_vacuum").fetchone() == (2,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
             assert conn.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -109,7 +129,14 @@ def test_schema_settings_and_reopen():
                 assert sorted(r[1:] for r in conn.execute(f"PRAGMA index_list({table})")) == sorted(
                     INDEXES[table]
                 )
-            for table in ("ledger", "cursors", "own_log", "displaced"):
+            for table in (
+                "ledger",
+                "cursors",
+                "own_log",
+                "displaced",
+                "peer_base",
+                "seen_version",
+            ):
                 assert conn.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
     assert stat.S_IMODE(statedb.db_path().stat().st_mode) == 0o600
     assert stat.S_IMODE(statedb.DB_DIR.stat().st_mode) == 0o700
@@ -123,7 +150,7 @@ def test_read_only_absent_populated_and_closes():
         pass
     before = {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()}
     with statedb.connect(read_only=True) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (1,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
     assert {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()} == before
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
@@ -210,12 +237,12 @@ def test_displaced_expiry_preserves_metadata():
 def test_compatible_future_and_wal_then_incompatible_untouched():
     with statedb.connect(read_only=False) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA user_version=2")
+        conn.execute("PRAGMA user_version=3")  # newer than this build (2) but compatible
         conn.execute("DROP TABLE ledger")
         conn.execute("CREATE TABLE ledger (future TEXT)")
     for read_only in (True, False):
         with statedb.connect(read_only=read_only) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (3,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     with sqlite3.connect(statedb.db_path()) as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -306,7 +333,7 @@ import sys
 from mind_meld import statedb
 statedb.DB_DIR = Path(sys.argv[1])
 with statedb.connect(read_only=False) as conn:
-    assert conn.execute('PRAGMA user_version').fetchone() == (1,)
+    assert conn.execute('PRAGMA user_version').fetchone() == (2,)
 """
     children = [
         subprocess.Popen(
@@ -402,7 +429,7 @@ def test_racing_opener_migrates_before_our_begin(monkeypatch):
 
     monkeypatch.setattr(statedb, "transaction", transaction)
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (1,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
         assert conn.execute("SELECT count(*) FROM meta").fetchone() == (1,)
     assert raced == [1]
 
@@ -428,7 +455,7 @@ def test_writer_refuses_compat_raised_before_its_transaction(monkeypatch):
             newer = sqlite3.connect(statedb.db_path())
             with newer:  # the newer mm migrates after our gate, before our BEGIN
                 newer.execute("UPDATE meta SET value='2' WHERE key='compat_version'")
-                newer.execute("PRAGMA user_version = 2")
+                newer.execute("PRAGMA user_version = 3")
             newer.close()
             raced.append(statedb.db_path().read_bytes())
         with original(conn):
@@ -455,3 +482,335 @@ def test_cli_starts_without_sqlite3(tmp_path):
         [sys.executable, "-c", code], env=_child_env(tmp_path), capture_output=True, text=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# ── Track 91A: the pull ledger tables ─────────────────────────────────
+
+SHA_A = "a" * 16
+SHA_B = "b" * 16
+FULL = "c" * 64
+
+
+def _commit(conn, *, bases=None, drop_bases=(), seen=(), unstamp=(), now_us=10_000):
+    with statedb.transaction(conn):
+        statedb.commit_ledger(
+            conn,
+            bases=bases or {},
+            drop_bases=set(drop_bases),
+            seen=list(seen),
+            unstamp=set(unstamp),
+            now_us=now_us,
+        )
+
+
+def _seen_rows(conn):
+    return conn.execute(
+        "SELECT source, path, sha, time, kind, deleted_by FROM seen_version ORDER BY path, sha"
+    ).fetchall()
+
+
+def test_migration_two_keeps_compat_and_a_v1_database_reads_silently():
+    # A v1 database (migration 1 only), as written by every earlier release.
+    statedb.DB_DIR.mkdir(parents=True)
+    raw = sqlite3.connect(statedb.db_path())
+    for statement in statedb.MIGRATIONS[0][0]:
+        raw.execute(statement)
+    raw.execute("INSERT INTO meta (key, value) VALUES ('compat_version', '1')")
+    raw.execute("INSERT INTO history (verb, action) VALUES ('pull', 'written')")
+    raw.execute("PRAGMA user_version = 1")
+    raw.commit()
+    raw.close()
+    before = statedb.db_path().read_bytes()
+
+    # Inspection never migrates and reads "no base, nothing seen" without a notice.
+    with statedb.connect(read_only=True) as conn:
+        assert statedb.read_peer_bases(conn, "peerpeer") == {}
+        assert statedb.read_seen(conn) == {}
+        assert statedb.ledger_counts(conn) == ({}, 0)
+    assert statedb.db_path().read_bytes() == before
+
+    with statedb.connect(read_only=False) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        # No compat bump: a release that only knows version 1 keeps working.
+        assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
+            "1",
+        )
+        assert conn.execute("SELECT count(*) FROM history").fetchone() == (1,)
+        assert conn.execute("SELECT count(*) FROM peer_base").fetchone() == (0,)
+
+
+def test_absent_database_reads_as_no_ledger_and_creates_nothing():
+    with statedb.connect(read_only=True) as conn:
+        assert conn is None
+        assert statedb.read_peer_bases(conn, "peerpeer") == {}
+        assert statedb.read_seen(conn) == {}
+        assert statedb.ledger_counts(conn) == ({}, 0)
+    assert not statedb.DB_DIR.exists()
+
+
+def test_deleted_copies_dir_sits_beside_the_database():
+    assert statedb.deleted_copies_dir() == statedb.DB_DIR / "deleted"
+
+
+def test_commit_requires_the_callers_transaction():
+    with statedb.connect(read_only=False) as conn:
+        with pytest.raises(statedb.StateDBError, match="requires a transaction"):
+            statedb.commit_ledger(
+                conn, bases={}, drop_bases=set(), seen=[], unstamp=set(), now_us=1
+            )
+
+
+def test_bases_round_trip_per_peer_and_write_only_changed_rows():
+    with statedb.connect(read_only=False) as conn:
+        _commit(
+            conn,
+            bases={("peer1", "notes", "a.md"): FULL, ("peer2", "notes", "a.md"): "d" * 64},
+        )
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): FULL}
+        assert statedb.read_peer_bases(conn, "peer2") == {("notes", "a.md"): "d" * 64}
+        assert statedb.read_peer_bases(conn, "nobody") == {}
+
+        # Re-committing identical rows changes no row (a no-change pull writes nothing).
+        before = conn.total_changes
+        _commit(conn, bases={("peer1", "notes", "a.md"): FULL})
+        assert conn.total_changes == before
+
+        _commit(conn, bases={("peer1", "notes", "a.md"): "e" * 64})
+        assert conn.total_changes == before + 1
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): "e" * 64}
+
+
+def test_drop_bases_clears_a_path_across_every_peer_only():
+    with statedb.connect(read_only=False) as conn:
+        _commit(
+            conn,
+            bases={
+                ("peer1", "notes", "a.md"): FULL,
+                ("peer2", "notes", "a.md"): FULL,
+                ("peer1", "notes", "b.md"): FULL,
+                ("peer1", "other", "a.md"): FULL,
+            },
+        )
+        _commit(conn, drop_bases={("notes", "a.md")})
+        assert statedb.read_peer_bases(conn, "peer1") == {
+            ("notes", "b.md"): FULL,
+            ("other", "a.md"): FULL,
+        }
+        assert statedb.read_peer_bases(conn, "peer2") == {}
+
+
+def test_drop_and_new_base_in_one_commit_keeps_the_new_one():
+    with statedb.connect(read_only=False) as conn:
+        _commit(conn, bases={("peer1", "notes", "a.md"): FULL})
+        _commit(conn, drop_bases={("notes", "a.md")}, bases={("peer1", "notes", "a.md"): "e" * 64})
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): "e" * 64}
+
+
+def test_held_outranks_seen_and_never_goes_back():
+    with statedb.connect(read_only=False) as conn:
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "seen", 100, None)], now_us=200)
+        assert _seen_rows(conn) == [("notes", "a.md", SHA_A, 100, "seen", None)]
+        # held outranks seen and moves the row's time.
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "held", 150, None)], now_us=200)
+        assert _seen_rows(conn) == [("notes", "a.md", SHA_A, 150, "held", None)]
+        # A later "seen" for a held version changes nothing.
+        before = conn.total_changes
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "seen", 190, None)], now_us=200)
+        assert conn.total_changes == before
+        assert _seen_rows(conn) == [("notes", "a.md", SHA_A, 150, "held", None)]
+        # A repeated "seen" for a seen version keeps its first time.
+        _commit(conn, seen=[("notes", "a.md", SHA_B, "seen", 120, None)], now_us=200)
+        _commit(conn, seen=[("notes", "a.md", SHA_B, "seen", 180, None)], now_us=200)
+        assert _seen_rows(conn)[1] == ("notes", "a.md", SHA_B, 120, "seen", None)
+
+
+def test_a_stamp_is_never_overwritten_by_none_and_unstamp_clears_it():
+    with statedb.connect(read_only=False) as conn:
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "held", 100, "origin01")], now_us=200)
+        assert _seen_rows(conn)[0][5] == "origin01"
+        # Re-holding the same version without a stamp keeps the stamp.
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "held", 150, None)], now_us=200)
+        assert _seen_rows(conn)[0] == ("notes", "a.md", SHA_A, 150, "held", "origin01")
+        # Another origin stamps it: the stamp changes even for a "seen" row.
+        _commit(conn, seen=[("notes", "a.md", SHA_A, "seen", 160, "origin02")], now_us=200)
+        assert _seen_rows(conn)[0][5] == "origin02"
+        _commit(conn, unstamp={("notes", "a.md")}, now_us=200)
+        assert _seen_rows(conn)[0][5] is None
+        # Unstamp touches only that path.
+        _commit(
+            conn,
+            seen=[("notes", "b.md", SHA_A, "held", 100, "origin01")],
+            now_us=200,
+        )
+        _commit(conn, unstamp={("notes", "a.md")}, now_us=200)
+        assert [r[5] for r in _seen_rows(conn)] == [None, "origin01"]
+
+
+def test_rows_older_than_a_year_are_pruned_at_commit():
+    year = statedb.SEEN_MAX_AGE_US
+    now = year * 3
+    with statedb.connect(read_only=False) as conn:
+        _commit(
+            conn,
+            seen=[
+                ("notes", "old.md", SHA_A, "held", now - year - 1, None),
+                ("notes", "new.md", SHA_A, "held", now - year + 1, None),
+            ],
+            now_us=now,
+        )
+        assert [r[1] for r in _seen_rows(conn)] == ["new.md"]
+
+
+def test_read_seen_and_counts_group_by_path_oldest_first():
+    with statedb.connect(read_only=False) as conn:
+        _commit(
+            conn,
+            bases={("peer1", "notes", "a.md"): FULL, ("peer1", "notes", "b.md"): FULL},
+            seen=[
+                ("notes", "a.md", SHA_B, "held", 300, None),
+                ("notes", "a.md", SHA_A, "seen", 200, "origin01"),
+            ],
+            now_us=400,
+        )
+        assert statedb.read_seen(conn) == {
+            ("notes", "a.md"): [(SHA_A, "seen", 200, "origin01"), (SHA_B, "held", 300, None)]
+        }
+        assert statedb.ledger_counts(conn) == ({"peer1": 2}, 2)
+
+
+def test_a_failed_commit_rolls_every_part_back():
+    with statedb.connect(read_only=False) as conn:
+        _commit(conn, bases={("peer1", "notes", "a.md"): FULL})
+        with pytest.raises(statedb.StateDBError):
+            # A NULL sha violates NOT NULL after the earlier statements ran.
+            _commit(
+                conn,
+                drop_bases={("notes", "a.md")},
+                bases={("peer1", "notes", "b.md"): None},
+            )
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): FULL}
+
+
+# `core` wraps the table API: these pin the failure classes a pull reports.
+
+
+def test_core_load_and_commit_report_each_database_failure_class(monkeypatch):
+    from contextlib import contextmanager
+
+    from mind_meld import core, pullplan
+
+    ledger, exc = core.load_ledger(["peerpeer"])
+    assert exc is None and ledger.readable  # absent database: a fresh machine
+    assert core.ledger_cause(None) is None
+
+    for read_only_exc, word in (
+        (statedb.StateDBBusy("SQLITE_BUSY"), "busy"),
+        (statedb.StateDBTooNew(9), "too-new"),
+        (statedb.StateDBCorrupt("SQLITE_CORRUPT"), "corrupt"),
+        (statedb.StateDBHotJournal("SQLITE_READONLY_ROLLBACK"), "interrupted"),
+        (statedb.StateDBUnavailable("sqlite_unavailable"), "unavailable"),
+        (statedb.StateDBError("SQLITE_IOERR"), "unreadable"),
+        (OSError("disk"), "unreadable"),
+    ):
+
+        @contextmanager
+        def broken(*, read_only, _exc=read_only_exc):
+            raise _exc
+            yield
+
+        with monkeypatch.context() as patch:
+            patch.setattr(statedb, "connect", broken)
+            ledger, exc = core.load_ledger(["peerpeer"])
+            assert not ledger.readable and exc is read_only_exc
+            assert core.ledger_cause(exc) == word
+            # An unreadable ledger commits nothing and is not an error to report twice.
+            assert core.commit_ledger(ledger) is None
+            fresh = pullplan.Ledger()
+            fresh.settle("peerpeer", "notes", "a.md", FULL)
+            failure = core.commit_ledger(fresh)
+            assert core.ledger_cause(failure) == word
+            assert fresh.dirty  # nothing was recorded, so the next pull re-derives it
+
+
+def test_core_commit_persists_dirty_rows_once_and_marks_them_committed():
+    from mind_meld import core, pullplan
+
+    ledger, _ = core.load_ledger(["peerpeer"])
+    ledger.settle("peerpeer", "notes", "a.md", FULL)
+    assert ledger.dirty
+    assert core.commit_ledger(ledger) is None
+    assert not ledger.dirty
+    again, exc = core.load_ledger(["peerpeer"])
+    assert exc is None
+    assert again.base("peerpeer", "notes", "a.md") == FULL
+    assert again.newest_held("notes", "a.md") == FULL[:16]
+    assert isinstance(again, pullplan.Ledger)
+
+
+def test_deletion_stamp_stays_newest_after_ancestry_and_database_reload():
+    from mind_meld import core, pullplan
+
+    ledger = pullplan.Ledger()
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_B,))
+    assert core.commit_ledger(ledger) is None
+    ledger, exc = core.load_ledger(["peerpeer"])
+    assert exc is None
+    ledger.drop("notes", "a.md")
+    ledger.stamp_deleted("notes", "a.md", FULL, "peerpeer")
+    assert core.commit_ledger(ledger) is None
+
+    again, exc = core.load_ledger(["peerpeer"])
+    assert exc is None
+    assert again.base("peerpeer", "notes", "a.md") is None
+    assert again.newest_stamp("notes", "a.md") == "peerpeer"
+
+
+def test_inherited_ancestry_round_trips_without_promoting_conflict_only_observations():
+    from mind_meld import core, pullplan
+
+    def reload():
+        result, exc = core.load_ledger(["peerpeer"])
+        assert exc is None
+        return result
+
+    def published_from(ledger):
+        outgoing = {"sources": {"notes": {"files": {"a.md": {"sha256": "e" * 64}}}}}
+        core.stamp_ancestry(outgoing, None, ledger)
+        return outgoing["sources"]["notes"]["files"]["a.md"].get("from", [])
+
+    ledger = pullplan.Ledger()
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_B,))
+    ledger.settle("peerpeer", "notes", "a.md", "d" * 64, hold=False, ancestors=(SHA_A,))
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert published_from(ledger) == [FULL[:16], SHA_B]
+    assert ledger.newest_held("notes", "a.md") == FULL[:16]
+
+    # Later canonical agreement can promote a previously conflict-only ancestor.
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_A, SHA_B))
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert published_from(ledger) == [FULL[:16], SHA_A, SHA_B]
+    assert ledger.entries("notes", "a.md")[SHA_A].kind == pullplan.ANCESTOR
+    assert "d" * 16 not in published_from(ledger)
+
+    # Subsequent seen/ancestor writes cannot demote held or inherited rows.
+    ledger.settle("peerpeer", "notes", "a.md", "d" * 64, hold=False, ancestors=(SHA_A,))
+    ledger.see("notes", "a.md", FULL, inherited=True)
+    assert core.commit_ledger(ledger) is None
+    ledger = reload()
+    assert ledger.newest_held("notes", "a.md") == FULL[:16]
+    assert published_from(ledger) == [FULL[:16], SHA_A, SHA_B]
+
+
+def test_core_load_ledger_is_unreadable_for_a_damaged_database():
+    from mind_meld import core
+
+    statedb.DB_DIR.mkdir(parents=True)
+    statedb.db_path().write_bytes(b"not a database")
+    ledger, exc = core.load_ledger(["peerpeer"])
+    assert not ledger.readable
+    assert core.ledger_cause(exc) == "corrupt"
+    # An unreadable ledger answers "no base, nothing seen": today's rule runs.
+    assert ledger.base("peerpeer", "notes", "a.md") is None
+    assert ledger.entries("notes", "a.md") == {}

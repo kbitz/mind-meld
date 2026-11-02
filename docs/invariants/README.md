@@ -14,13 +14,13 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | Module | Owns |
 |---|---|
 | `cli.py` | Every `@app.command()` shell, `_push_core`, (64A) attended host-usage capture inside the push lock (`_capture_attended_usage`) and its publication reporting, the `init` shell, and the `autopull`/`autopush` shells |
-| `core.py` | (83A/86A) Shared setup, crypto-session and manifest helpers, source filtering and comparison, config migration, autorun breadcrumb normalization, shared sync-output state and the complete `_SyncProgress` family; (88A) the per-source prompt helpers shared by init and `reconfigure-sources`; (90A) the project-name decisions (`project_form_state`, `encode_manifest`, `reconcile_recovered_prior`, `content_counts`, `project_name_report`) |
-| `pullflow.py` | (86A) `_pull_core`, per-file download/apply and inline conflict helpers, `PullResult`, pull planning orchestration and summary rendering; the command shells stay in `cli.py` |
+| `core.py` | (83A/86A) Shared setup, crypto-session and manifest helpers, source filtering and comparison, config migration, autorun breadcrumb normalization, shared sync-output state and the complete `_SyncProgress` family; (88A) the per-source prompt helpers shared by init and `reconfigure-sources`; (90A) the project-name decisions (`project_form_state`, `encode_manifest`, `reconcile_recovered_prior`, `content_counts`, `project_name_report`); (91A) the push-side mint guard and anchors (`MintGuard`, `compute_mint_guard`, `stamp_left_out`, `anchor_pending`, `publish_anchors`), the `from` ancestry stamp (`stamp_ancestry`) and the pull-ledger load/flush/commit helpers (`load_ledger`, `flush_ledger_files`, `commit_ledger`, `record_published`, `ledger_cause`) |
+| `pullflow.py` | (86A) `_pull_core`, per-file download/apply and inline conflict helpers, `PullResult`, pull planning orchestration and summary rendering; (91A) the ledger-driven apply (`_classify_with_ledger`, `_ledger_verdict`, `_apply_fast_forward`), propagated deletions (`_deletion_candidates`, `_run_deletions`, `_make_copy_dirs`, `_move_into_copy`, `_copy_then_unlink`, `_remove_owned_copy`) and their output clauses (`deleted_clause`, `ledger_notice`); the command shells stay in `cli.py` |
 | `initflow.py` | (88A) `mm init`'s body (`init`) and its init-only helpers: (89A) the folder classifier, `--new-fleet` bootstrap (`_bootstrap_new_fleet`, the only writer of the key header) and `.stignore` writer, the join's passphrase verify, the no-header stop and re-init guard, passphrase prompts, `_register_and_save`, source prompts; the command shell and the join's pull (`_attended_pull`) stay in `cli.py` |
 | `sourceflow.py` | (90B) The bodies of `mm sources`, `mm enable-source`, `mm disable-source` and `mm reconfigure-sources` (`sources`, `enable_source`, `disable_source`, `reconfigure_sources`) and the helpers only they call (`_known_source_names`, `_validate_source_name`, `_toggle_cursor_usage`, `_record_seen`); the command shells and `--help` text stay in `cli.py` |
 | `statusflow.py` | (83A) Status and diagnostic collection/rendering, host-usage and publication inspection, and autorun breadcrumb read/presentation helpers; command shells stay in `cli.py` |
-| `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads |
-| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes; (90A) the project-name codec at the manifest byte boundary (`manifest_to_wire`, `manifest_from_wire`) and the moved-folder tombstone skip |
+| `pullplan.py` | (62A) Read-only virtual local state, pull predictions across peers, symlink/collision/mtime decisions and preview totals; never selects real downloads; (91A) the pull rule itself (`decide`, used by apply and planner alike) and the pure in-memory ledger overlay (`Ledger`, `parse_from`) |
+| `manifest.py` | Manifest build/load/diff, rel-path validation, conflict-filename predicates, `_canonical_for_conflict`, tombstones, nested-checkout detection and skip prefixes; (90A) the project-name codec at the manifest byte boundary (`manifest_to_wire`, `manifest_from_wire`) and the moved-folder tombstone skip; (91A) scan roots and the `.mind-meld-anchor` token file (`scan_roots`, `scan_root_for`, `write_anchor`, `read_anchor`) and the hashed, `skip_mint`-aware `generate_tombstones` |
 | `projectid.py` | (90A) Leaf: Claude project identity from the canonical git remote, the home-relative form, the bounded project index, the process-wide codec context, wire-name helpers and `unplaceable_reason`; the git-remote helpers moved here from `events.py` |
 | `crypto.py` | AES-256-GCM envelope, argon2 KDF, keyring, (73A) the prompt-free hook keyring read and the `mm diag` keyring probe, crypto-init bootstrap; (90A) the manifest format API (`MANIFEST_FORMAT_VERSION` 0x03, `encrypt_manifest`, `decrypt_manifest`, `newer_manifest_version`) |
 | `config.py` | `config.toml` load/validate/save, `DEFAULT_SOURCES`, exclude patterns, (64A) the five-state `usage_capture_readiness` verdict and its shared `usage_capture_remedy` text |
@@ -36,21 +36,22 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `upgrade.py` | Release check, nudge, transition hook; (v1.3.0) self-update: install classification (`detect_install`), the two pipx subprocess seams, the one-attempt-per-release gate, `update_or_nudge`; `mm update` progress capture: the private PTY for the in-place upgrade (`_PipxOutputStream`), the best-effort `_ProgressRelay`, the foreground hangup guard and `_final_frames` |
 | `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
 | `pullhistory.py` | Forensic table-backed pull/push/self-upgrade history, legacy import, batching and mm log queries |
-| `statedb.py` | Local state.db connections, forward migrations, translated errors, transactions and displaced expiry; standard library + fsutil leaf |
+| `statedb.py` | Local state.db connections, forward migrations, translated errors, transactions and displaced expiry; (91A) the pull-ledger tables (`peer_base`, `seen_version`: `read_peer_bases`, `read_seen`, `ledger_counts`, `commit_ledger`) and the recovery-copy folder (`deleted_copies_dir`); standard library + fsutil leaf |
+| `syncdiag.py` | (91A) Local historical pull/anchor observations for passphrase-free diagnostics; bounded `sync-observations.json` through `lockedjson`, never sync authorization |
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |
 | `sidecar.py` | Manifest sidecar read/write |
 | `attemptlog.py` | (65A) Local attended-capture outcome holder, atomic private record, closed-vocabulary validation, and write-free attempt projection/render states |
 | `lockfile.py` | The mm lockfile |
 | `lockedjson.py` | Single-file flock read/modify/write primitive |
-| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), the rotatable spool pair `append_rotatable_jsonl` / `rotate_jsonl` (identity-checked append, rename-aside rotation), `fsync_dir`, the shared pytest account-state write guard |
+| `fsutil.py` | Atomic write, flock-append (61A opt-in strict outcome; (64A) whole-batch size ceiling, torn-row separator, regular-files-only), the rotatable spool pair `append_rotatable_jsonl` / `rotate_jsonl` (identity-checked append, rename-aside rotation), `fsync_dir`, (91A) `fsync_file` (plain data flush behind a recorded ledger base), the shared pytest account-state write guard |
 | `errors.py` | Exception hierarchy |
 | **`consoles.py`** | **(16A)** The two shared Rich `Console` singletons |
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
 | **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
 | **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the host-usage capture, (61A) shared host-only capture/warm helper, (31A) reader-scoped failure isolation, (30A) git-only recapture, and (57A) the later-reader grace floor with full-reader warm/retry |
-| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
-| **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep |
+| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk and durable per-choice ledger settlement (`_record_resolution`) |
+| **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep; (91A) the deleted-file recovery-copy reaper (`_gc_deleted_copies`) |
 | `safety.py` | Peer-controlled string sanitization |
 | `conflictdiff.py` | Pure leaf renderers for the conflict prompts |
 | `storage/local.py` | Local backend |
@@ -89,7 +90,7 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `crypto.py:derive_key` | `docs/invariants/init-devices.md`; the default time_cost and parallelism derive every existing fleet's master key, so never change them |
 | `attemptlog.py` / `events.py:host_reader_outcomes` / `empty_host_readers` / `host_reader_label` / `EventScan` / `RowRevision` / `cli.py:_usage_publication_verdict` / `cli.py:_publication_remedy` / `cli.py:push` (attempt finally) / `aggregator.py:_AcceptedHostRow.empty_sources` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `config.py:UsageCaptureReadiness` / `usage_capture_readiness` / `usage_capture_remedy` / `statusflow.py:_reader_capture_readiness` / `_usage_capture_needs_upgrade` / `_usage_capture_remedy` / `cli.py:_print_usage_push_mode` / `cli.py:_push_result_or_none` / `PushResult.content_changed` / `PushResult.content_files` / `PushResult.content_accepted` / `PushResult.host_usage_published` / `events.py:GIT_SNAPSHOT_ORIGIN_INIT` / `write_push_event` (batch origin guard) / `events_tail.py:_capture_event_snapshots` (`origin`) / `_run_events_tail` (`capture_activity`) / `cli.py:_push_core` (`attended`, `host_row_appended`, `capture_activity`, content gate) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
-| `pullplan.py` / `pullflow.py:_plan_pull` / `pullflow.py:_preflight_conflicts` / `pullflow.py:_print_pull_prediction` / preview completion/refusal constants / `cli.py:diff_cmd` exclude filtering | `docs/invariants/sync.md` |
+| `pullplan.py` / `pullflow.py:_plan_pull` / `pullflow.py:_preflight_conflicts` / `pullflow.py:_print_pull_prediction` / preview completion/refusal constants / `cli.py:diff_cmd` exclude filtering | `docs/invariants/sync.md` and `docs/invariants/conflicts.md` (the pull rule) |
 | `seen_sources.py:read` / `_read_under_lock` / status seed recovery and exemptions | `docs/invariants/sync.md` |
 | `cli.py:_capture_attended_usage` / `cli.py:_report_usage_publication` / `statusflow.py:_read_capture_rows` / `_host_publication` / `_print_host_publication` / `cli.py:_notice_recapture_host_usage` / `events.py:latest_event_rows` / `project_host_publication` / `capture_revision_in_manifest` / `recorded_row_revision` / `events_tail.py:_capture_host_snapshot` / `skills/retro_fleet/aggregator.py:ATTENDED_USAGE_MIN_VERSION` / `_attended_usage_remedy` / `local_host_capture_candidate` / `_host_row_order_key` / `_accept_host_row_at` | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
 | `fsutil.py:flock_append_jsonl` / `AppendSizeLimit` / `events.py:write_push_event` (strict append, `EventAppendSkipped`, size guard) / `cli.py:_push_core` (inline manifest acceptance) | `docs/invariants/events-retro.md` and `docs/invariants/sync.md` |
@@ -109,10 +110,13 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `sourceflow.py:sources` / `disable_source` / `enable_source` / `reconfigure_sources` / `_known_source_names` / `_validate_source_name` / `_record_seen` (config patch write errors stop before success and acknowledgment; `has_explicit_sources` key presence) | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) / `statedb.py` / `cli.py:log_cmd` | `docs/invariants/sync.md` and `docs/invariants/auto-upgrade.md` |
-| `pullflow.py:_apply_write` / `pullflow.py:_apply_merge` / `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
+| `pullflow.py:_apply_write` / `pullflow.py:_apply_merge` / `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` / `pullflow.py:_apply_fast_forward` (mtime restore + future-clamp) | `docs/invariants/sync.md` |
 | `conflictmtime.py:_restore_mtime_best_effort` / `_MTIME_RESTORE_MAX_SKEW_SECONDS` (future-clamp) | `docs/invariants/sync.md` |
-| `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` / `pullflow.py:_prompt_conflict_choice` / `pullflow.py:_check_fleet_version_or_refuse` / `pullflow.py:conflict_filename` / `core.py:_filter_excluded_paths` | `docs/invariants/conflicts.md` |
+| `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` / `pullflow.py:_apply_fast_forward` / `pullflow.py:_ledger_verdict` / `pullflow.py:_classify_with_ledger` / `pullflow.py:_prompt_conflict_choice` / `pullflow.py:_check_fleet_version_or_refuse` / `pullflow.py:conflict_filename` / `core.py:_filter_excluded_paths` / `pullplan.py:decide` / `Ledger` / `parse_from` / `PullPlanner` | `docs/invariants/conflicts.md` and `docs/invariants/sync.md` (Fast-forward, propagated deletions and anchors) |
 | `retention.py:_gc_old_conflict_files` / `_is_live_conflict` | `docs/invariants/conflicts.md` |
+| `pullflow.py:_deletion_candidates` / `_run_deletions` / `_make_copy_dirs` / `_move_into_copy` / `_copy_then_unlink` / `_remove_owned_copy` / `_own_lookup` / `deleted_clause` / `deleted_detail` / `older_clause` / `ledger_notice` / `retention.py:_gc_deleted_copies` / `DELETED_COPY_DAYS` / `statedb.py:deleted_copies_dir` / `commit_ledger` / `read_peer_bases` / `read_seen` / `ledger_counts` / `core.py:MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause` / `manifest.py:scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME` / `fsutil.py:fsync_file` | `docs/invariants/sync.md` (Fast-forward, propagated deletions and anchors) and `docs/invariants/conflicts.md` (the pull rule) |
+| `syncdiag.py` / `statusflow.py:_fast_forward_state` / (historical sync observations and root diagnostics) | `docs/invariants/sync.md` |
+| `resolveflow.py:_record_resolution` | `docs/invariants/sync.md` and `docs/invariants/conflicts.md` |
 | `resolveflow.py:_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
 | `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
 | `pullflow.py:_record_inline_bump` / `pullflow.py:_invalidate_inline_bump` / `pullflow.py:_drain_inline_bumps` / `pullflow.py:_CANONICAL_WRITE_OUTCOMES` / `pullflow.py:_pull_core` / `pullflow.py:_pull_one_source` / `pullflow.py:_download_and_apply` / (`pending_inline_bumps` plumbing and outcome-gated invalidation) | `docs/invariants/conflicts.md` |
@@ -288,6 +292,22 @@ file and directory creation (including TemporaryFile and mkstemp), `shutil` copy
 direct method aliases, and rejects writable os flags in reviewed read-only opens. It supplements behavioral
 tests; it is not control-flow or sandbox proof.
 
+Track 91A adds writers under the same convention, outside the frozen
+inventory above; each calls the guard on its destination before its first
+mutation, and the static census reviews them:
+
+| Writer | Guard destination and placement | No-op / read edge |
+|---|---|---|
+| `pullflow.py:_make_copy_dirs` | the recovery folder (`~/.config/mind-meld/deleted/<stamp>/`) before the first mkdir | creates only missing components, 0700 |
+| `pullflow.py:_move_into_copy` / `pullflow.py:_copy_then_unlink` | the recovery copy path and the local path, both before the rename; the cross-volume copy fallback runs under the same two guards | `_move_into_copy` reserves the destination with `O_EXCL` before renaming the file's own inode; `_copy_then_unlink` creates its copy with `O_EXCL`, writes and flushes it before re-checking and unlinking the source |
+| `pullflow.py:_remove_owned_copy` | the recovery copy path before `lstat` and `unlink` | unlinks only the owned device/inode; `empty=True` also requires zero size, refusing a replacement or filled reservation |
+| `retention.py:_gc_deleted_copies` | each recovery folder before its `shutil.rmtree` | a preview, an empty listing and an unparseable folder name never guard or remove |
+| `manifest.py:write_anchor` | the `.mind-meld-anchor` path before `atomic_write_bytes` | `read_anchor`, and a root that is not a directory, never guard |
+
+`fsutil.fsync_file` opens read-only with `O_NOFOLLOW | O_NONBLOCK`, requires a
+regular descriptor and mutates nothing.
+`core.commit_ledger` writes through `statedb.connect(read_only=False)`, already guarded.
+
 Copy this pattern for a new writer. Guard the written file (logs/config/
 sidecars), lock file, backend key path, apply local_path, or init storage path;
 bootstrap guards the root p only on branches that create or tighten it:
@@ -362,7 +382,7 @@ inventory; future writers that skip the call, which the census flags for its
 listed primitives. Module-level test code can run
 before a marker exists. A same-size, same-mtime config rewrite can retain the
 cached raw strings. A refusal in a worker thread need not fail its parent test.
-Raw retention unlinks and empty-directory rmdir, crypto conflict-copy,
+Raw retention unlinks and empty-directory rmdir (the recovery-copy reaper's `rmtree` is guarded above), crypto conflict-copy,
 host_usage spool, and cli stale-copy/quarantine/migration-cleanup deletes stay
 outside this frozen inventory (P3 TODO, revisit on an observed deletion or
 near-miss). So do resolveflow's promotion links and migration/resolution

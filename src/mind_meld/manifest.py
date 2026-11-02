@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, NoReturn
 
-from mind_meld import projectid
+from mind_meld import fsutil, projectid
 from mind_meld.errors import (
     ManifestError,
     SnapshotChanged,
@@ -78,6 +78,11 @@ CONFLICT_PATTERN_V0 = f"*{CONFLICT_INFIX}{CONFLICT_V0_PREFIX}{_DIGITS_8}-{_DIGIT
 # gstack-extend drops this file in every directory it renders. The walker
 # skips the containing directory; see marker_skip_globs.
 MARKER_SKIP_NAME = ".extend-root"
+# Track 91A: a random token mm keeps in each scan root. A root that was removed
+# and recreated, or restored from backup, has a different token, so a push never
+# reads the files it cannot see as deleted. Never a sync file.
+ANCHOR_NAME = ".mind-meld-anchor"
+_ANCHOR_RE = re.compile(r"[0-9a-f]{32}\n?\Z")
 # Chromium and Electron write this file at the root of every user-data
 # directory, and the directory's name varies (`chrome-profile`,
 # `signed-profile`, `.dev/user-data`), so detection is by marker, never by
@@ -262,6 +267,80 @@ def _canonical_for_conflict(conflict_path: Path) -> Path | None:
     return conflict_path.with_name(reconstructed)
 
 
+def scan_roots(src: dict) -> list[str]:
+    """The folders a source's walker lists, relative to its base ("" is the base itself).
+
+    Claude lists ``projects``; Muse lists ``memory``; a generic source lists each
+    ``include_dirs`` entry, and its base when it names ``include_files``.
+    """
+    kind = src.get("type")
+    if kind == "claude":
+        return ["projects"]
+    if kind == "muse":
+        return ["memory"]
+    roots: list[str] = []
+    for entry in src.get("include_dirs") or []:
+        root = str(entry).strip("/")
+        if not root:
+            continue
+        root = "" if Path(root) == Path(".") else str(Path(root))
+        if root not in roots:
+            roots.append(root)
+    if src.get("include_files") and "" not in roots:
+        roots.append("")
+    return roots
+
+
+def scan_root_for(src: dict, rel_path: str) -> str | None:
+    """The scan root a manifest path lives under, or None when it is under none."""
+    files = set(src.get("include_files") or [])
+    whole_root = any(Path(entry) == Path(".") for entry in src.get("include_dirs") or [])
+    for root in scan_roots(src):
+        if root == "":
+            if whole_root or rel_path in files:
+                return root
+        elif rel_path == root or rel_path.startswith(root + "/"):
+            return root
+    return None
+
+
+def anchor_path(base: Path, root: str) -> Path:
+    return (base / root if root else base) / ANCHOR_NAME
+
+
+def write_anchor(base: Path, root: str, token: str) -> None:
+    """Write the scan root's token (0600). The root must already exist; it is never created."""
+    path = anchor_path(base, root)
+    fsutil.refuse_real_state_write_under_pytest(path)
+    fsutil.atomic_write_bytes(path, (token + "\n").encode("ascii"), mode=0o600)
+
+
+def read_anchor(base: Path, root: str) -> str | None:
+    """The scan root's token, or None if absent, unreadable or malformed.
+
+    Opens without following a link and without blocking (a FIFO at the path must
+    not hang a hook), reads at most a few bytes, and checks the format.
+    """
+    try:
+        fd = os.open(anchor_path(base, root), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 64:
+            return None
+        data = os.read(fd, 65)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return text.strip() if _ANCHOR_RE.match(text) else None
+
+
 EXCLUDED = [
     "node_modules/",
     ".git/",
@@ -279,6 +358,7 @@ EXCLUDED = [
     "*.pyc",
     ".mind-meld-log.md",
     MARKER_SKIP_NAME,  # gstack-extend render marker; never a sync file
+    ANCHOR_NAME,  # per-scan-root generation token; local state
 ]
 
 # Only sync these subdirectories within each project.
@@ -2891,10 +2971,11 @@ def load_manifest(data: bytes) -> dict[str, Any]:
         if not isinstance(info, dict):
             raise ManifestError(f"manifest: tombstones[{key!r}] must be an object")
         # Tombstone keys are `<src>:<rel_path>` post-normalize. Validate the
-        # path part — a tombstone with `..` doesn't drive deletion (pull is
-        # additive-only), but a malformed key shouldn't survive the load
-        # boundary either, and a tombstone keyed on `..` could otherwise
-        # mask legitimate files in `is_tombstoned` checks.
+        # path part — a tombstone keyed with `..` must never name a file
+        # outside its source (pull deletes a local file only when a hashed
+        # record names a path inside its source root), and a tombstone keyed
+        # on `..` could otherwise mask legitimate files in `is_tombstoned`
+        # checks, so a malformed key shouldn't survive the load boundary.
         if isinstance(key, str) and ":" in key:
             _, _, rel = key.partition(":")
             if rel:
@@ -2949,9 +3030,11 @@ def diff_files(
 
     Arg-swap convention: the pull path (cli.py, `_pull_core`) intentionally
     calls `diff_files(remote_files, local_files)` with arguments swapped.
-    Under the additive-pull model, that call's `new`/`modified` are files
+    In that call `new`/`modified` are files
     the puller should DOWNLOAD (present on remote, missing or stale locally)
-    and `deleted` is ignored (additive pull never deletes local files).
+    and `deleted` is ignored: absence from a remote manifest never deletes a
+    local file. Peer deletions come only from a peer's own hashed tombstones
+    (`pullflow._deletion_candidates`).
     See also `test_additive_sync.py::TestAdditivePull`.
     """
     if remote_files is None:
@@ -3009,10 +3092,19 @@ def _is_active_tombstone(info: dict[str, Any], cutoff: datetime) -> bool:
     return ts > cutoff
 
 
+def _is_content_hash(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
 def generate_tombstones(
     local_manifest: dict[str, Any],
     remote_manifest: dict[str, Any] | None,
     device_id: str,
+    *,
+    skip_mint: set[tuple[str, str]] | None = None,
+    deleted_hashes: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Generate tombstones for files that disappeared since last push.
 
@@ -3037,8 +3129,15 @@ def generate_tombstones(
     / `sidecar.read`) or hand-builds v2 shape, so a v1-shaped input is a
     bug at the call site, not something to silently paper over.
 
+    ``skip_mint`` is a set of ``(source, path)`` pairs that mint nothing: paths a
+    gone or recreated scan root hides, files still on disk, and deletions this
+    machine only followed. ``deleted_hashes`` supplies the newest held version's
+    full digest, resolved by the caller; without one the prior entry's hash is
+    used. A peer deletes only identical bytes.
+
     Returns:
-        Dict mapping relative paths to {"deleted_at": ISO timestamp, "device_id": str}.
+        Dict mapping relative paths to {"deleted_at": ISO timestamp, "device_id": str,
+        "sha256": str}; ``sha256`` is omitted when the prior entry has no valid hash.
 
     Raises:
         ManifestError: if `remote_manifest` is non-None and lacks a
@@ -3085,11 +3184,15 @@ def generate_tombstones(
                 key = f"{src_name}:{path}"
                 if moved and (parts := _split_project_key(path)) and parts[0] in moved:
                     continue
+                if skip_mint and (src_name, path) in skip_mint:
+                    continue
                 if path not in local_files and key not in tombstones:
-                    tombstones[key] = {
-                        "deleted_at": now_iso,
-                        "device_id": device_id,
-                    }
+                    record = {"deleted_at": now_iso, "device_id": device_id}
+                    prior_sha = (remote_files.get(path) or {}).get("sha256")
+                    deleted_sha = (deleted_hashes or {}).get((src_name, path), prior_sha)
+                    if _is_content_hash(deleted_sha):
+                        record["sha256"] = deleted_sha
+                    tombstones[key] = record
 
     # Remove tombstones for files that exist locally again (un-delete)
     all_local_keys: set[str] = set()
@@ -3135,5 +3238,10 @@ def collect_tombstones(
 
 
 def is_tombstoned(source: str, rel_path: str, tombstones: dict[str, dict[str, str]]) -> bool:
-    """Check if a source:path has an active tombstone."""
+    """Check if a source:path has an active tombstone.
+
+    This only suppresses re-download. Deleting a local file because of a
+    tombstone is `pullflow._deletion_candidates`'s job and needs the record's
+    content hash.
+    """
     return f"{source}:{rel_path}" in tombstones

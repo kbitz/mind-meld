@@ -29,6 +29,7 @@ from mind_meld import crypto as crypto_module
 from mind_meld import events as _mm_events
 from mind_meld import host_registry as _mm_host_registry
 from mind_meld import host_usage as _mm_host_usage
+from mind_meld import manifest as _manifest_module
 from mind_meld.cli import app
 from mind_meld.config import save_config
 from mind_meld.crypto import (
@@ -134,6 +135,17 @@ def claude_dir_b(tmp_path):
     d = tmp_path / "machine_b" / ".claude"
     d.mkdir(parents=True)
     return d
+
+
+def _move_state_db_aside():
+    """Lose this machine's pull base, as README's `state.db` move-aside remedy does."""
+    from mind_meld import statedb
+
+    path = statedb.db_path()
+    for suffix in ("", "-journal"):
+        sibling = path.with_name(path.name + suffix)
+        if sibling.exists():
+            sibling.rename(sibling.with_name(sibling.name + ".aside"))
 
 
 class TestPushPullRoundTrip:
@@ -405,8 +417,8 @@ class TestPushPullRoundTrip:
         assert "is missing after it was previously published" in refused.output
         assert backend.get("manifests/dev-a/manifest.json.enc") == published
 
-    def test_deletion_not_propagated_in_additive_model(self, tmp_path, monkeypatch):
-        """Delete on A, push, pull to B — B preserves its local copy (additive model)."""
+    def _two_machines_with_a_deletion(self, tmp_path, monkeypatch):
+        """A pushes two files, B pulls them, then A deletes user_role.md and pushes."""
         storage_dir = tmp_path / "storage"
         claude_a = tmp_path / "machine_a" / ".claude"
         claude_b = tmp_path / "machine_b" / ".claude"
@@ -421,25 +433,67 @@ class TestPushPullRoundTrip:
         config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
         monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
 
-        # A pushes full state; B pulls and now has both files.
         self._activate(monkeypatch, config_a)
         assert runner.invoke(app, ["push"]).exit_code == 0
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
-        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
-        assert role_b.exists()
+        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
+        assert (memory_b / "user_role.md").exists()
+        return config_a, config_b, claude_a, memory_b
 
-        # A deletes user_role.md and pushes again. In the additive model, the
-        # re-push records a tombstone (not blocking), but pull doesn't act on
-        # tombstones from other devices in the default flow.
+    def test_deletion_not_propagated_in_additive_model(self, tmp_path, monkeypatch):
+        """Delete on A, push, pull to B with no recorded base: B preserves its copy.
+
+        A tombstone deletes only a file this machine synced from the peer and still holds
+        unchanged (Track 91A). With the pull base lost the deletion is not followed, and
+        the file stays; the pull also deletes nothing else and makes no recovery copy.
+        """
+        from mind_meld import statedb
+
+        config_a, config_b, claude_a, memory_b = self._two_machines_with_a_deletion(
+            tmp_path, monkeypatch
+        )
+        role_b = memory_b / "user_role.md"
+        _move_state_db_aside()  # B's base for the file is gone
+
         self._activate(monkeypatch, config_a)
         (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
 
-        # B pulls again. Its local user_role.md must still be there.
         self._activate(monkeypatch, config_b)
-        assert runner.invoke(app, ["pull"]).exit_code == 0
-        assert role_b.exists(), "Additive pull must preserve local-only files"
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert role_b.exists(), "A pull with no base must preserve local files"
+        assert "deleted" not in pulled.output
+        assert not statedb.deleted_copies_dir().exists()
+
+    def test_deletion_propagates_when_the_pull_base_matches_and_leaves_a_copy(
+        self, tmp_path, monkeypatch
+    ):
+        """The with-base counterpart: B synced the file from A, so A's deletion follows."""
+        from mind_meld import statedb
+
+        config_a, config_b, claude_a, memory_b = self._two_machines_with_a_deletion(
+            tmp_path, monkeypatch
+        )
+        role_b = memory_b / "user_role.md"
+        before = role_b.read_bytes()
+
+        self._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert not role_b.exists()
+        assert (memory_b / "feedback.md").exists()
+        flat = " ".join(pulled.output.split())
+        assert "Pull: 1 file deleted because A deleted it; copies in " in flat
+        assert "for 30 days" in flat and "#recovering-a-deleted-file" in flat
+        copies = list(statedb.deleted_copies_dir().glob("*/claude/**/user_role.md"))
+        assert len(copies) == 1 and copies[0].read_bytes() == before
+        assert copies[0].stat().st_mode & 0o777 == 0o600
 
     def test_push_pull_conflict_tombstone_combined(self, tmp_path, monkeypatch):
         """End-to-end push → pull → conflict → tombstone in one run.
@@ -499,9 +553,10 @@ class TestPushPullRoundTrip:
         assert conflict_siblings[0].read_text() == "---\nname: role\n---\nPrincipal engineer"
 
         # Phase 3: A deletes feedback.md and pushes. Tombstone is recorded in
-        # A's manifest. B pulls; B's local feedback.md is preserved (additive),
-        # but the tombstone lives in storage and is visible to any future
-        # correctness sweep.
+        # A's manifest. B has lost its pull base (state.db moved aside), so it does
+        # not follow the deletion: B's local feedback.md is preserved, but the
+        # tombstone lives in storage and is visible to any future correctness sweep.
+        _move_state_db_aside()
         self._activate(monkeypatch, config_a)
         (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md").unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
@@ -509,7 +564,7 @@ class TestPushPullRoundTrip:
         self._activate(monkeypatch, config_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
         feedback_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md"
-        assert feedback_b.exists(), "Additive pull must preserve file locally"
+        assert feedback_b.exists(), "A pull with no base must preserve the file locally"
 
         # Verify A's pushed manifest contains the tombstone for feedback.md.
         manifest_key_a = "manifests/dev-a/manifest.json.enc"
@@ -522,6 +577,62 @@ class TestPushPullRoundTrip:
 
         # Sanity: B's modified content is what's now at canonical (post-inversion).
         assert original_role != role_b.read_text()
+
+    def test_push_pull_conflict_then_propagated_deletion(self, tmp_path, monkeypatch):
+        """The with-base counterpart: a conflict copy and a followed deletion in one pull.
+
+        B edited user_role.md (the conflict keeps B's bytes and saves A's beside them) and
+        left feedback.md alone, so A's deletion of feedback.md follows with a recovery
+        copy. The conflict copy is still listed afterwards.
+        """
+        from mind_meld import statedb
+
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        self._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
+        backend = self._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "A")
+        register_device(backend, "dev-b", "B")
+        config_a = self._make_config(tmp_path, storage_dir, claude_a, "dev-a", "A")
+        config_b = self._make_config(tmp_path, storage_dir, claude_b, "dev-b", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        self._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        self._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        memory_b = claude_b / "projects" / "-Users-kb-myapp" / "memory"
+        role_b, feedback_b = memory_b / "user_role.md", memory_b / "feedback.md"
+        feedback_bytes = feedback_b.read_bytes()
+
+        self._activate(monkeypatch, config_a)
+        memory_a = claude_a / "projects" / "-Users-kb-myapp" / "memory"
+        (memory_a / "user_role.md").write_text("---\nname: role\n---\nPrincipal engineer")
+        (memory_a / "feedback.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+
+        self._activate(monkeypatch, config_b)
+        role_b.write_text("---\nname: role\n---\nSomething else entirely")
+        old = time.time() - 3600
+        os.utime(role_b, (old, old))
+        pulled = runner.invoke(app, ["pull", "--conflict-mode", "keep-both"])
+        assert pulled.exit_code == 0, pulled.output
+        assert role_b.read_text() == "---\nname: role\n---\nSomething else entirely"
+        sidecars = list(memory_b.glob("user_role.sync-conflict-*.md"))
+        assert [p.read_text() for p in sidecars] == ["---\nname: role\n---\nPrincipal engineer"]
+        assert not feedback_b.exists()
+        copies = list(statedb.deleted_copies_dir().glob("*/claude/**/feedback.md"))
+        assert [c.read_bytes() for c in copies] == [feedback_bytes]
+        listed = runner.invoke(app, ["conflicts"])
+        assert listed.exit_code == 0, listed.output
+        assert "Conflict files (1)" in listed.output
+
+        # The next pull has nothing left to say.
+        again = runner.invoke(app, ["pull", "--conflict-mode", "keep-both"])
+        assert again.exit_code == 0, again.output
+        assert " ".join(again.output.split()).startswith("Pull: no changes.")
 
 
 class TestConflictClockSeparation:
@@ -617,14 +728,32 @@ class TestConflictClockSeparation:
         assert v0 == []
 
     def test_unlinked_sidecar_returns_on_repull(self, tmp_path, monkeypatch):
-        """F2 / W2 self-heal."""
+        """F2 / W2 self-heal, now only when this machine has lost its pull base.
+
+        With a base the conflict is settled: the peer's version was kept once and the pull
+        recorded it, so a removed sidecar is a decision and never resurrected (Track 91A;
+        the old rule re-created it on every pull). Without a base the old rule runs.
+        """
         config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
         sidecar.unlink()
+        _move_state_db_aside()  # B's base is gone: today's rule applies
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
         assert runner.invoke(app, ["pull", "--conflict-mode", "keep-both"]).exit_code == 0
         sidecars = list(role_b.parent.glob("user_role.sync-conflict-*.md"))
         assert len(sidecars) == 1
         assert sidecars[0].read_text() == "---\nname: role\n---\nEven newer from A"
+
+    def test_unlinked_sidecar_stays_gone_while_the_base_holds(self, tmp_path, monkeypatch):
+        """The with-base counterpart: removing a settled conflict copy resolves it."""
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
+        kept = role_b.read_bytes()
+        sidecar.unlink()
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        pulled = runner.invoke(app, ["pull", "--conflict-mode", "keep-both"])
+        assert pulled.exit_code == 0, pulled.output
+        assert list(role_b.parent.glob("user_role.sync-conflict-*.md")) == []
+        assert role_b.read_bytes() == kept
+        assert " ".join(pulled.output.split()).startswith("Pull: no changes.")
 
     def test_status_mentions_unresolved_conflicts(self, tmp_path, monkeypatch):
         config_b, _role, _sidecar = self._conflict_on_b(tmp_path, monkeypatch, wipe_marker=False)
@@ -632,6 +761,345 @@ class TestConflictClockSeparation:
         result = runner.invoke(app, ["status"])
         assert result.exit_code == 0, result.output
         assert "Unresolved conflicts: 1" in result.output
+
+
+class TestFastForwardCli91A:
+    """Track 91A through the real CLI: kept conflicts, `mm resolve`, a lost ledger, recovery.
+
+    Two machines (A and B) share a store; each has its own config, and so its own
+    state.db. B always holds the conflict.
+    """
+
+    @staticmethod
+    def _conflict_on_b(tmp_path, monkeypatch, *, old_peer=False):
+        """A and B edit user_role.md; B pulls with keep-both. Returns (B's config, B's
+        canonical file, the conflict copy). Device ids are 8 hex characters, as real ones
+        are: a conflict copy's name carries the first eight characters of its peer's id.
+        ``old_peer`` publishes A's edit as a release before this Track would: no `from`."""
+        helper = TestPushPullRoundTrip()
+        storage_dir = tmp_path / "storage"
+        claude_a = tmp_path / "machine_a" / ".claude"
+        claude_b = tmp_path / "machine_b" / ".claude"
+        helper._populate_claude(claude_a, role="Principal engineer")
+        claude_b.mkdir(parents=True)
+        backend = helper._bootstrap(storage_dir)
+        register_device(backend, "aaaaaaaa", "A")
+        register_device(backend, "bbbbbbbb", "B")
+        config_a = helper._make_config(tmp_path, storage_dir, claude_a, "aaaaaaaa", "A")
+        config_b = helper._make_config(tmp_path, storage_dir, claude_b, "bbbbbbbb", "B")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+        helper._activate(monkeypatch, config_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        helper._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        role_b = claude_b / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        role_b.write_text("---\nname: role\n---\nSomething else entirely")
+        old = time.time() - 3600
+        os.utime(role_b, (old, old))
+        helper._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").write_text(
+            "---\nname: role\n---\nEven newer from A"
+        )
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        if old_peer:
+            key = storage_keys.manifest_key("aaaaaaaa")
+            published = load_manifest(decrypt(backend.get(key), PASSPHRASE, MEMORY_KB))
+            for entry in published["sources"].values():
+                for info in entry["files"].values():
+                    info.pop("from", None)
+            backend.put(key, encrypt(serialize_manifest(published), PASSPHRASE, MEMORY_KB))
+        helper._activate(monkeypatch, config_b)
+        pulled = runner.invoke(app, ["pull", "--conflict-mode", "keep-both"])
+        assert pulled.exit_code == 0, pulled.output
+        [sidecar] = role_b.parent.glob("user_role.sync-conflict-*.md")
+        assert sidecar.read_text() == "---\nname: role\n---\nEven newer from A"
+        return config_b, role_b, sidecar
+
+    @staticmethod
+    def _quiet(result) -> bool:
+        return result.output.strip() == "" and (result.stderr or "").strip() == ""
+
+    @pytest.mark.parametrize("lost_base", [False, True], ids=["base-recorded", "base-lost"])
+    def test_a_conflict_copy_already_kept_is_no_new_outcome(self, tmp_path, monkeypatch, lost_base):
+        """Criterion 10: a sidecar already holds the peer's bytes. The pull counts no applied
+        file and no conflict, warns nothing, and prints one outcome line; the file stays
+        listed. With the base lost the sidecar is what recognises the bytes."""
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        kept = sidecar.read_bytes()
+        for _round in range(2):  # and again: the line is the same every time
+            if lost_base:
+                _move_state_db_aside()
+            pulled = runner.invoke(app, ["pull"])
+            assert pulled.exit_code == 0, pulled.output
+            assert pulled.output.strip() == "Pull: no changes."
+            assert (pulled.stderr or "") == ""
+            listed = runner.invoke(app, ["conflicts"])
+            assert listed.exit_code == 0 and "Conflict files (1)" in listed.output
+            assert sidecar.read_bytes() == kept
+            assert len(list(role_b.parent.glob("user_role.sync-conflict-*.md"))) == 1
+        if lost_base:
+            _move_state_db_aside()
+        auto = runner.invoke(app, ["autopull"])
+        assert auto.exit_code == 0, auto.output
+        assert self._quiet(auto)  # a hook prints no conflict count
+
+    @pytest.mark.parametrize("choice", ["l", "r", "m"])
+    @pytest.mark.parametrize("old_peer", [True, False], ids=["old-peer", "peer-with-ancestry"])
+    def test_after_resolve_an_existing_conflict_stops_conflicting(
+        self, tmp_path, monkeypatch, choice, old_peer
+    ):
+        """Criterion 11: resolving directly after losing the base must settle the peer,
+        including peers publishing ancestry; no preparatory pull is required."""
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, old_peer=old_peer)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        _move_state_db_aside()  # the conflict predates the base table
+        remote_sha = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
+        resolved = runner.invoke(app, ["resolve"])
+        assert resolved.exit_code == 0, resolved.output
+        assert not sidecar.exists()
+        settled = role_b.read_bytes()
+        ledger, exc = core.load_ledger(["aaaaaaaa"])
+        assert exc is None
+        resolved_base = ledger.base(
+            "aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md"
+        )
+
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert "conflict" not in " ".join(pulled.output.split()).lower()
+        assert list(role_b.parent.glob("user_role.sync-conflict-*.md")) == []
+        assert role_b.read_bytes() == settled
+        assert "sync-conflict" not in runner.invoke(app, ["conflicts"]).output
+        assert resolved_base == remote_sha
+
+    @pytest.mark.parametrize("failure_at", ["file-flush", "directory-flush", "ledger-commit"])
+    def test_resolve_retains_the_decision_but_records_no_base_after_durability_failure(
+        self, tmp_path, monkeypatch, failure_at
+    ):
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        _move_state_db_aside()
+        canonical = role_b.read_bytes()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+
+        def fail_flush(path):
+            raise OSError(errno.EIO, "flush failed")
+
+        with monkeypatch.context() as patch:
+            if failure_at == "file-flush":
+                patch.setattr(fsutil, "fsync_file", fail_flush)
+            elif failure_at == "directory-flush":
+                patch.setattr(fsutil, "fsync_dir", fail_flush)
+            else:
+                patch.setattr(core, "commit_ledger", lambda ledger: OSError(errno.EIO, "database"))
+            resolved = runner.invoke(app, ["resolve"])
+
+        assert resolved.exit_code == 0, resolved.output
+        assert "resolution kept" in resolved.stderr
+        assert "may conflict again" in resolved.stderr
+        assert role_b.read_bytes() == canonical and not sidecar.exists()
+        ledger, exc = core.load_ledger(["aaaaaaaa"])
+        assert exc is None
+        assert (
+            ledger.base("aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md")
+            is None
+        )
+
+    def test_resolve_does_not_guess_the_peer_when_the_sidecar_prefix_is_ambiguous(
+        self, tmp_path, monkeypatch
+    ):
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        _move_state_db_aside()
+        canonical = role_b.read_bytes()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        monkeypatch.setattr(
+            cli_module,
+            "list_devices",
+            lambda backend: [
+                {"device_id": "aaaaaaaa1", "device_name": "A1"},
+                {"device_id": "aaaaaaaa2", "device_name": "A2"},
+            ],
+        )
+
+        resolved = runner.invoke(app, ["resolve"])
+
+        assert resolved.exit_code == 0, resolved.output
+        assert role_b.read_bytes() == canonical and not sidecar.exists()
+        ledger, exc = core.load_ledger(["aaaaaaaa1", "aaaaaaaa2"])
+        assert exc is None and ledger.bases == {}
+
+    def test_moving_state_db_aside_rebuilds_the_rows_and_deletes_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        """Criterion 13: the ledger is rebuildable. A pull after losing it deletes nothing and
+        fails nothing; every file both sides still hold gets its base back."""
+        helper = TestPushPullRoundTrip()
+        config_a, config_b, claude_a, memory_b = helper._two_machines_with_a_deletion(
+            tmp_path, monkeypatch
+        )
+        _move_state_db_aside()
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert (pulled.stderr or "") == "" and "deleted" not in pulled.output
+        assert (memory_b / "user_role.md").exists() and (memory_b / "feedback.md").exists()
+        ledger, exc = core.load_ledger(["dev-a"])
+        assert exc is None
+        rows = {path for (_peer, _source, path) in ledger.bases}
+        assert {
+            "projects/-Users-kb-myapp/memory/user_role.md",
+            "projects/-Users-kb-myapp/memory/feedback.md",
+        } <= rows
+
+        # And the rebuilt rows work: a deletion made now is followed.
+        helper._activate(monkeypatch, config_a)
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "feedback.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        helper._activate(monkeypatch, config_b)
+        followed = runner.invoke(app, ["pull"])
+        assert followed.exit_code == 0, followed.output
+        assert not (memory_b / "feedback.md").exists()
+
+    def test_the_recovery_copy_survives_mm_gc_and_only_old_folders_go(self, tmp_path, monkeypatch):
+        """Criterion 22: the copy is local and depends on no store blob. A real `mm gc` on
+        both machines collects the deleted file's blob and leaves the copy; a folder older
+        than 30 days goes, one with an unreadable name stays."""
+        from mind_meld import statedb
+
+        helper = TestPushPullRoundTrip()
+        config_a, config_b, claude_a, memory_b = helper._two_machines_with_a_deletion(
+            tmp_path, monkeypatch
+        )
+        before = (memory_b / "user_role.md").read_bytes()
+        helper._activate(monkeypatch, config_a)
+        backend = LocalBackend(tmp_path / "storage")
+        blobs_before = set(backend.list_keys("data/dev-a/"))
+        (claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md").unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0  # its post-push sweep runs
+        assert runner.invoke(app, ["gc"]).exit_code == 0
+        assert set(backend.list_keys("data/dev-a/")) < blobs_before  # the blob is collected
+
+        helper._activate(monkeypatch, config_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        [copy] = statedb.deleted_copies_dir().glob("*/claude/**/user_role.md")
+        assert copy.read_bytes() == before
+        old = statedb.deleted_copies_dir() / "20260101-000000-abcd"
+        (old / "claude").mkdir(parents=True)
+        (old / "claude" / "stale.md").write_text("thirty-one days old and more")
+        odd = statedb.deleted_copies_dir() / "keep-me-by-hand"
+        odd.mkdir()
+        (odd / "note.md").write_text("a name mm cannot date")
+        assert runner.invoke(app, ["gc", "--dry-run"]).exit_code == 0
+        assert old.exists()  # a preview deletes nothing
+        reaped = runner.invoke(app, ["gc"])
+        assert reaped.exit_code == 0, reaped.output
+        assert copy.read_bytes() == before
+        assert not old.exists() and (odd / "note.md").exists()
+
+    def test_the_readme_recovery_recipe_puts_the_file_back_on_the_origin(
+        self, tmp_path, monkeypatch, wire_home
+    ):
+        """The commands in README's "Recovering a deleted file" block, run against fixtures:
+        Linux follows a Mac's deletion; its differently named copy returns to the Mac's
+        canonical project with `cp -n`, then the Mac pushes and Linux restores its path."""
+        import re
+        import subprocess
+
+        from mind_meld import projectid, sidecar, statedb
+
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### Recovering a deleted file", 1)[1].split("\n### ", 1)[0]
+        recipe = re.search(r"```bash\n(.*?)```", section, re.S)
+        assert recipe is not None, "the recovery section has no bash recipe"
+
+        helper = TestPushPullRoundTrip()
+        filesystem = tmp_path / "fs"
+        home_a = filesystem / "Users" / "kb"
+        home_b = filesystem / "home" / "kb"
+        claude_a, claude_b = home_a / ".claude", home_b / ".claude"
+        helper._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
+        monkeypatch.setattr(projectid, "_fs_root", lambda: filesystem)
+        storage_dir = tmp_path / "storage"
+        backend = helper._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "Mac")
+        register_device(backend, "dev-b", "Linux")
+        config_a = helper._make_config(tmp_path, storage_dir, claude_a, "dev-a", "Mac")
+        config_b = helper._make_config(tmp_path, storage_dir, claude_b, "dev-b", "Linux")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        def activate(config_path, home):
+            helper._activate(monkeypatch, config_path)
+            monkeypatch.setenv("HOME", str(home))
+            monkeypatch.setattr(sidecar, "SIDECAR_DIR", home / ".config" / "mind-meld")
+            monkeypatch.chdir(home)
+
+        activate(config_a, home_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        activate(config_b, home_b)
+        received = runner.invoke(app, ["pull"])
+        assert received.exit_code == 0, received.output
+        memory_b = claude_b / "projects" / "-home-kb-myapp" / "memory"
+        assert (memory_b / "user_role.md").exists()
+
+        activate(config_a, home_a)
+        origin_file = claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
+        before = origin_file.read_bytes()
+        origin_file.unlink()
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        activate(config_b, home_b)
+        assert runner.invoke(app, ["pull"]).exit_code == 0
+        [copy] = statedb.deleted_copies_dir().glob("*/claude/**/user_role.md")
+        folder = copy.relative_to(statedb.deleted_copies_dir()).parts[0]
+        assert (memory_b / "user_role.md").exists() is False
+        copy_path = copy.relative_to(statedb.deleted_copies_dir() / folder / "claude")
+        origin_path = origin_file.relative_to(claude_a)
+        assert copy_path.as_posix() == "projects/-home-kb-myapp/memory/user_role.md"
+        assert copy_path != origin_path
+
+        # Transfer the follower's folder intact, then run the extracted recipe on the origin.
+        received_copies = home_a / f"mm-recovery-{folder}"
+        shutil.copytree(statedb.deleted_copies_dir() / folder, received_copies)
+        activate(config_a, home_a)
+        fixtures = {
+            "copies": str(received_copies),
+            "source_name": "claude",
+            "source_dir": str(claude_a),
+            "copy_path": copy_path.as_posix(),
+            "origin_path": origin_path.as_posix(),
+        }
+        lines = []
+        for raw in recipe.group(1).splitlines():
+            name = raw.split("=", 1)[0]
+            if name in fixtures and "=" in raw:
+                lines.append(f'{name}="{fixtures[name]}"')
+            elif raw.strip() == "mm push":
+                continue  # the push below is run through the CLI
+            else:
+                lines.append(raw)
+        done = subprocess.run(
+            ["bash", "-ec", "\n".join(lines)], capture_output=True, text=True, timeout=30
+        )
+        assert done.returncode == 0, done.stderr
+        assert origin_file.read_bytes() == before
+        assert not (claude_a / copy_path).exists()
+        # `cp -n` never overwrites: a newer file at the destination survives a second run.
+        origin_file.write_text("a newer file")
+        again = subprocess.run(
+            ["bash", "-ec", "\n".join(lines)], capture_output=True, text=True, timeout=30
+        )
+        assert again.returncode == 0 or origin_file.read_text() == "a newer file"
+        assert origin_file.read_text() == "a newer file"
+        origin_file.write_bytes(before)
+
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        activate(config_b, home_b)
+        pulled = runner.invoke(app, ["pull"])
+        assert pulled.exit_code == 0, pulled.output
+        assert (memory_b / "user_role.md").read_bytes() == before
+        assert not (claude_b / origin_path).exists()
 
 
 class TestExcludePatterns5C:
@@ -2591,6 +3059,19 @@ class TestMmLogCommand:
         from mind_meld import pullhistory
 
         monkeypatch.setattr("mind_meld.pullhistory.HISTORY_DIR", tmp_path / "mm_state")
+        # The machine's config is selected before anything is recorded: state.db is
+        # per machine, so history written under one config is not another's.
+        config_path = tmp_path / "config.toml"
+        save_config(
+            {
+                "device": {"id": "dev-a", "name": "A"},
+                "storage": {"path": str(tmp_path / "storage")},
+                "sync": {"max_file_size": 52_428_800, "claude_dir": str(tmp_path / ".claude")},
+                "crypto": {"argon2_memory_kb": 1024},
+            },
+            config_path,
+        )
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
         for i in range(3):
             pullhistory.append(
                 verb="pull",
@@ -2607,18 +3088,6 @@ class TestMmLogCommand:
                 rel_path=f"e-{i}.json",
                 action="excluded",
             )
-
-        config_path = tmp_path / "config.toml"
-        save_config(
-            {
-                "device": {"id": "dev-a", "name": "A"},
-                "storage": {"path": str(tmp_path / "storage")},
-                "sync": {"max_file_size": 52_428_800, "claude_dir": str(tmp_path / ".claude")},
-                "crypto": {"argon2_memory_kb": 1024},
-            },
-            config_path,
-        )
-        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_path)
 
         result = runner.invoke(app, ["log", "--action", "excluded", "--format", "jsonl"])
         assert result.exit_code == 0, result.output
@@ -9536,6 +10005,9 @@ def _seed_preview_prior(env, *, event_files=()):
     )
     sources = config_module.get_sources(cfg, bootstrap=False)
     prior = cli_module.build_manifest_v2("dev-a", "Mac A", sources)
+    # Seed a completed current-release push, including its scan-root tokens.
+    # An old manifest with no anchors correctly owes a metadata bootstrap.
+    assert core.publish_anchors(prior, sources, {}) == []
     for rel in event_files:
         prior["sources"]["mm-events"]["files"][rel] = {
             "sha256": hashlib.sha256(b"prior event").hexdigest(),
@@ -10248,7 +10720,13 @@ def test_pull_two_peer_parity62(preview62, tmp_path, monkeypatch, directory_firs
         assert len(expected["may fail"]) == 3
         assert len(expected["skip"]) == 2
         assert ("dev-c", "payload", "canonical-match.md") not in actual["conflicted"]
-        assert ("dev-c", "payload", "remote-match.md") in actual["conflicted"]
+        # dev-b's "remote" bytes become a conflict copy; dev-c then offers the same bytes in
+        # the same pull, a version this machine has already seen: stale and silent, never a
+        # second conflict copy.
+        assert ("dev-b", "payload", "remote-match.md") in actual["conflicted"]
+        assert ("dev-c", "payload", "remote-match.md") not in actual["conflicted"]
+        assert ("dev-c", "payload", "remote-match.md") not in actual.get("failed", set())
+        assert len(list(applied.glob("remote-match.sync-conflict-*.md"))) == 1
         assert not any(
             key[2] in {"tombstoned.md", "excluded.md"}
             for paths in [*expected.values(), *actual.values()]
@@ -11374,12 +11852,16 @@ class TestNewerStorage66A:
         peer_key = storage_keys.manifest_key("dev-peer")
         backend.put(peer_key, b"\x04")
         before = backend.get(peer_key)
-        local_before = _preview_tree(env["claude"])
+        # A publishing push renews the scan root's anchor token (Track 91A); it is the only
+        # local file any of these commands may write, and never a synced one.
+        anchor = env["claude"] / "projects" / _manifest_module.ANCHOR_NAME
+        local_before = _preview_tree(env["claude"], exemptions=(anchor,))
         result = runner.invoke(app, [command])
         # Pull skips unreadable peers; neither explicit nor post-push GC reads them.
         assert result.exit_code == 0, result.output
         assert backend.get(peer_key) == before
-        assert _preview_tree(env["claude"]) == local_before
+        assert _preview_tree(env["claude"], exemptions=(anchor,)) == local_before
+        assert anchor.exists() == (command == "push")
         if command == "push":
             assert sorted(backend.list_keys("manifests/")) == [
                 storage_keys.manifest_key("dev-a"),
@@ -12812,30 +13294,36 @@ def test_nested_checkout_freezes_published_entries_and_converges_on_delete(captu
 
 
 def test_corrupt_manifest_recovery_keeps_frozen_entries_that_have_blobs(capture61):
+    # The scan root is `projects`; the folder deleted at the end sits one level below it.
+    # A deleted scan root itself mints nothing (Track 91A), so only a real deletion below a
+    # live root can tombstone the frozen entry.
     root = capture61["path"].parent / "gstack"
-    (root / "proj").mkdir(parents=True)
-    (root / "proj" / "note.md").write_text("published")
-    src = {"name": "gstack", "type": "generic", "path": str(root), "include_dirs": ["proj"]}
+    (root / "projects" / "proj").mkdir(parents=True)
+    (root / "projects" / "proj" / "note.md").write_text("published")
+    src = {"name": "gstack", "type": "generic", "path": str(root), "include_dirs": ["projects"]}
     capture61["cfg"]["sync"]["sources"].append(src)
     save_config(capture61["cfg"], capture61["path"])
     assert runner.invoke(app, ["push"]).exit_code == 0
     key = storage_keys.manifest_key("dev-a")
     published = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
-    (root / "proj" / ".git").mkdir()
-    (root / "proj" / "note.md").write_text("edited inside the checkout")
+    (root / "projects" / "proj" / ".git").mkdir()
+    (root / "projects" / "proj" / "note.md").write_text("edited inside the checkout")
     capture61["backend"].put(key, b"not a manifest")
     result = runner.invoke(app, ["push"])
     assert result.exit_code == 0, result.output
     assert "still present but was omitted" not in " ".join(result.output.split())
     healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
     files = healed["sources"]["gstack"]["files"]
+    rel = "projects/proj/note.md"
     # Recovery freezes the stored entry and never re-reads the edited file.
-    assert files["proj/note.md"] == published["sources"]["gstack"]["files"]["proj/note.md"]
-    assert "gstack:proj/note.md" not in healed["tombstones"]
-    shutil.rmtree(root / "proj")
+    assert files[rel] == published["sources"]["gstack"]["files"][rel]
+    assert f"gstack:{rel}" not in healed["tombstones"]
+    shutil.rmtree(root / "projects" / "proj")
     assert runner.invoke(app, ["push"]).exit_code == 0
     healed = load_manifest(decrypt(capture61["backend"].get(key), PASSPHRASE, MEMORY_KB))
-    assert "gstack:proj/note.md" in healed["tombstones"]
+    tombstone = healed["tombstones"][f"gstack:{rel}"]
+    # The record carries the hash of the version that was deleted: the frozen entry's.
+    assert tombstone["sha256"] == published["sources"]["gstack"]["files"][rel]["sha256"]
 
 
 def test_corrupt_manifest_recovery_excludes_checkout_entries_without_blobs(capture61):

@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import stat
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from mind_meld import fsutil, pullflow
+from mind_meld import fsutil, manifest, pullflow, retention
 from mind_meld.errors import StorageError
 
 
@@ -1570,10 +1572,12 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         resolveflow,
         seen_sources,
         sidecar,
+        statedb,
         upgrade,
     )
     from mind_meld.storage.local import LocalBackend
 
+    monkeypatch.setattr(statedb, "DB_DIR", base)  # the recovery folders live under it
     monkeypatch.setattr(sidecar, "SIDECAR_DIR", base)
     monkeypatch.setattr(seen_sources, "SEEN_DIR", base)
     monkeypatch.setattr(upgrade, "CACHE_DIR", base)
@@ -1608,12 +1612,33 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
         "sidecar_write": "last-push.json",
         "attemptlog_write": "last-attended-capture.json",
         "inversion_marker": "inversion-installed-at",
+        # Track 91A: the scan-root anchor and the recovery-copy writers.
+        "anchor_write": "scan/.mind-meld-anchor",
+        "copy_dirs": "deleted/20260101-000000-abcd",
+        "move_local": "nested/note.md",
+        "move_copy": "deleted/20260101-000000-abcd/claude/note.md",
+        "unlink_local": "nested/note.md",
+        "unlink_copy": "deleted/20260101-000000-abcd/claude/note.md",
+        "reap_deleted": "deleted/20260101-000000-abcd",
     }
     path = base / ("data/sentinel" if writer.startswith("local_") else names[writer])
+    # The other side of a move: an ordinary tmp_path destination or source that is never
+    # protected, so the protected side alone decides whether the writer must refuse.
+    other_dir = tmp_path / "unprotected"
+    other_dir.mkdir(exist_ok=True)
+    other = other_dir / "note.md"
+    if writer in ("move_copy", "unlink_copy"):
+        other.write_bytes(b"new")  # the local file being deleted; its copy goes under `base`
+    if writer in ("anchor_write", "move_copy", "unlink_copy"):
+        # The scan root and the copy's folder exist already: neither writer creates them.
+        path.parent.mkdir(parents=True, exist_ok=True)
     if exists:
-        if writer in ("init_storage", "events_bootstrap"):
+        if writer in ("init_storage", "events_bootstrap", "copy_dirs", "reap_deleted"):
             path.mkdir(parents=True, exist_ok=True, mode=0o755)
             path.chmod(0o755)
+            if writer == "reap_deleted":
+                (path / "claude").mkdir()
+                (path / "claude" / "note.md").write_bytes(b"keep")
         else:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
             path.write_bytes(b"keep")
@@ -1672,6 +1697,25 @@ def _raw_writer_case(writer, base, monkeypatch, tmp_path, exists=False):
             return attemptlog.write(attemptlog.CaptureOutcome(kind="no-row"))
         if writer == "inversion_marker":
             return resolveflow._ensure_inversion_marker()
+        if writer == "anchor_write":
+            return manifest.write_anchor(base, "scan", "0123456789abcdef0123456789abcdef")
+        if writer == "copy_dirs":
+            deletion = pullflow._Deletion(
+                "peer", "Peer", "claude", "nested/note.md", base, base / "nested/note.md", "ab" * 32
+            )
+            return pullflow._make_copy_dirs(path, [deletion])
+        if writer == "move_local":  # the file being deleted is under the protected root
+            return pullflow._move_into_copy(path, other, hashlib.sha256(b"keep").hexdigest())
+        if writer == "move_copy":  # the recovery copy is under the protected root
+            return pullflow._move_into_copy(other, path, hashlib.sha256(b"new").hexdigest())
+        if writer == "unlink_local":
+            return pullflow._copy_then_unlink(path, other, hashlib.sha256(b"keep").hexdigest())
+        if writer == "unlink_copy":
+            return pullflow._copy_then_unlink(other, path, hashlib.sha256(b"new").hexdigest())
+        if writer == "reap_deleted":
+            return retention._gc_deleted_copies(
+                False, False, now=datetime(2026, 11, 1, tzinfo=timezone.utc), quiet=True
+            )
         raise AssertionError(writer)
 
     return path, invoke
@@ -1730,6 +1774,44 @@ def raw_writer_control(tmp_path, monkeypatch):
         elif writer == "inversion_marker" and exists:
             assert invoke() is None  # invalid existing marker: native read/parse no-op
             assert path.read_bytes() == b"keep"
+        elif writer in ("move_local", "unlink_local") and not exists:
+            with pytest.raises(OSError):  # nothing to delete: nothing is written either
+                invoke()
+            assert not (tmp_path / "unprotected/note.md").exists()
+        elif writer in ("move_local", "unlink_local"):
+            assert invoke() == "deleted"
+            assert not path.exists()  # the file is gone from where it was
+            moved = tmp_path / "unprotected/note.md"
+            assert moved.read_bytes() == b"keep" and stat.S_IMODE(moved.stat().st_mode) == 0o600
+        elif writer in ("move_copy", "unlink_copy") and exists:
+            with pytest.raises(FileExistsError):
+                invoke()
+            assert path.read_bytes() == b"keep"
+            assert (tmp_path / "unprotected/note.md").read_bytes() == b"new"
+        elif writer in ("move_copy", "unlink_copy"):
+            assert invoke() == "deleted"
+            assert path.read_bytes() == b"new" and stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert not (tmp_path / "unprotected/note.md").exists()
+        elif writer == "copy_dirs":
+            created = invoke()
+            assert (path / "claude" / "nested").is_dir()
+            assert stat.S_IMODE((path / "claude" / "nested").stat().st_mode) == 0o700
+            if exists:
+                assert path not in created and stat.S_IMODE(path.stat().st_mode) == 0o755
+            else:
+                assert path in created and stat.S_IMODE(path.stat().st_mode) == 0o700
+                assert created == sorted(created, key=lambda d: len(d.parts))  # shallowest first
+                assert all(stat.S_IMODE(d.stat().st_mode) == 0o700 for d in created)
+        elif writer == "reap_deleted":
+            outcome = invoke()
+            if exists:
+                assert outcome.deleted == 1 and not path.exists()
+            else:
+                assert outcome.candidates == 0 and not path.exists()
+        elif writer == "anchor_write":
+            invoke()
+            assert path.read_text() == "0123456789abcdef0123456789abcdef\n"
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
         else:
             result = invoke()
             if writer in ("local_delete", "migration_unlink"):
@@ -1960,6 +2042,124 @@ def test_inversion_marker_refuses_protected_root(raw_writer_refusal):
 
 def test_inversion_marker_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("inversion_marker", raw_writer_exists)
+
+
+def test_anchor_write_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("anchor_write", raw_writer_exists)
+
+
+def test_anchor_write_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("anchor_write", raw_writer_exists)
+
+
+def test_deleted_copy_dirs_refuses_protected_root(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("copy_dirs", raw_writer_exists)
+
+
+def test_deleted_copy_dirs_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("copy_dirs", raw_writer_exists)
+
+
+def test_move_into_copy_refuses_a_protected_local_file(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("move_local", raw_writer_exists)
+
+
+def test_move_into_copy_refuses_a_protected_recovery_copy(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("move_copy", raw_writer_exists)
+
+
+def test_move_into_copy_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("move_local", raw_writer_exists)
+    raw_writer_control("move_copy", raw_writer_exists)
+
+
+def test_copy_then_unlink_refuses_a_protected_local_file(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("unlink_local", raw_writer_exists)
+
+
+def test_copy_then_unlink_refuses_a_protected_recovery_copy(raw_writer_refusal, raw_writer_exists):
+    raw_writer_refusal("unlink_copy", raw_writer_exists)
+
+
+def test_copy_then_unlink_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("unlink_local", raw_writer_exists)
+    raw_writer_control("unlink_copy", raw_writer_exists)
+
+
+def test_deleted_copies_reaper_refuses_protected_root(raw_writer_refusal):
+    raw_writer_refusal("reap_deleted", True)  # with no old folder there is nothing to guard
+
+
+def test_deleted_copies_reaper_tmp_control(raw_writer_control, raw_writer_exists):
+    raw_writer_control("reap_deleted", raw_writer_exists)
+
+
+def test_fsync_file_refuses_a_fifo_without_waiting_for_a_writer(tmp_path):
+    fifo = tmp_path / "replaced-by-fifo"
+    os.mkfifo(fifo)
+    script = textwrap.dedent(
+        """\
+        import errno
+        import sys
+        from pathlib import Path
+        from mind_meld import fsutil
+
+        try:
+            fsutil.fsync_file(Path(sys.argv[1]))
+        except OSError as exc:
+            assert exc.errno == errno.EINVAL, repr(exc)
+        else:
+            raise AssertionError("FIFO was accepted as a regular file")
+        """
+    )
+    # A regression must fail within this timeout, never strand a pytest worker.
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(fifo)], capture_output=True, text=True, timeout=3
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_fsync_file_refuses_a_directory_and_closes_the_descriptor(tmp_path, monkeypatch):
+    opened = []
+    real_open = os.open
+
+    def record_open(path, flags):
+        fd = real_open(path, flags)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(fsutil.os, "open", record_open)
+    monkeypatch.setattr(fsutil.os, "fsync", lambda fd: pytest.fail("non-file reached fsync"))
+    with pytest.raises(OSError, match="regular file"):
+        fsutil.fsync_file(tmp_path)
+    assert len(opened) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[0])
+    assert closed.value.errno == errno.EBADF
+
+
+def test_fsync_file_and_read_anchor_are_pure_reads(
+    synthetic_account_home, monkeypatch, forbid_fs_mutations, tmp_path
+):
+    root = synthetic_account_home / ".claude"
+    (root / "projects").mkdir(parents=True)
+    anchor_value = "0123456789abcdef0123456789abcdef"
+    (root / "projects" / manifest.ANCHOR_NAME).write_text(anchor_value + "\n")
+    target = root / "projects" / "note.md"
+    target.write_bytes(b"data")
+    link = root / "projects" / "link.md"
+    link.symlink_to(target)
+    monkeypatch.setattr(
+        fsutil,
+        "refuse_real_state_write_under_pytest",
+        lambda path: pytest.fail("a pure read called the guard"),
+    )
+    calls = forbid_fs_mutations()
+    fsutil.fsync_file(target)  # a plain flush of a read-only descriptor
+    with pytest.raises(OSError):
+        fsutil.fsync_file(link)  # never follows a link
+    assert manifest.read_anchor(root, "projects") == anchor_value
+    assert calls == []
 
 
 def test_seen_sources_read_hit_and_inversion_marker_are_unguarded(

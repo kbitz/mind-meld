@@ -208,6 +208,41 @@ The manifest is a **truth-based snapshot** of the selected local filesystem stat
 
 Tombstone keys use the same names (`claude:projects/@git-.../memory/x.md`). Each machine maps them back to the folder Claude uses for its own checkout; see docs/invariants/sync.md "Project identity on the wire".
 
+**Ancestry, anchors and deletion records (Track 91A).** Three additive fields carry what the
+pull rule and propagated deletions need. Older readers ignore them.
+
+```json
+"claude": {
+  "files": {
+    "projects/-Users-alice-myapp/memory/user_role.md": {
+      "sha256": "e3b0c44298fc...", "size": 4096, "mtime": "2026-04-08T11:30:00Z",
+      "from": ["a1b2c3d4e5f60718", "0f1e2d3c4b5a6978"]
+    }
+  },
+  "root_ids": {"projects": "6f1d0c2a9b8e47d3a5c1e0f2b3a49d87"}
+},
+"tombstones": {
+  "claude:projects/-Users-alice-myapp/memory/old.md": {
+    "deleted_at": "2026-04-08T12:00:00+00:00", "device_id": "a1b2c3d4",
+    "sha256": "ab12cd34ef56..."
+  }
+}
+```
+
+- `files[...]["from"]`: up to 16 sha256 prefixes (16 lowercase hex characters), newest first, naming the
+  versions this machine built that file on. Omitted when empty; an unchanged entry keeps its list. Its only reader is the
+  pull rule; a diff ignores it. Invalid shapes read as absent. See [conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a).
+- `sources[...]["root_ids"]`: per scan root, the random token in that folder's `.mind-meld-anchor` file, renewed by
+  every publishing push. A push mints a deletion record only for a file under a scan root whose token still matches.
+  Peers ignore it; mm-events has none.
+- `tombstones[...]["sha256"]`: the newest held version's full sha256, resolved from the prior entry or local peer bases. If its full hash is unknown or ambiguous, no record is minted; without a held row the accepted prior digest is used.
+  A peer deletes its copy only when its bytes equal it and its last-synced base for that peer equals it; a record
+  without a valid 64-hex `sha256` (every record from before Track 91A) only suppresses re-download and never deletes.
+
+These fields, the local `peer_base` and `seen_version` tables in `state.db`, the `.mind-meld-anchor` files, the
+`deleted` history action and the recovery folder `~/.config/mind-meld/deleted/` are specified in
+[sync invariants](docs/invariants/sync.md#fast-forward-propagated-deletions-and-anchors-track-91a).
+
 **Backward compatibility:**
 - v1 manifests (pre-v0.4 on-disk, top-level `files`, no `sources`) are auto-promoted to v2 shape by `normalize_manifest` on load: the files get wrapped as a `claude` source entry.
 - Pre-Track-1B v2 manifests emitted a redundant top-level `files` mirror of the claude source. `normalize_manifest` now strips that mirror unconditionally (both v1 promotion and v2 passthrough) so the single source of truth is `sources[<name>]["files"]`. Every manifest loaded from disk goes through `load_manifest`, which enforces this — callers may rely on `manifest["sources"]` being the only place file data lives.
@@ -339,13 +374,14 @@ mm init [--new-fleet]       # join the fleet (verify passphrase, register, pull)
 mm push [--dry-run]         # build manifest, diff against remote, upload changes
                             # --dry-run previews publication and deletions; changes nothing except the local lock file (v0.14.10)
                             # attended push refreshes consented host readers; needs selected, available mm-events. Usage-only refreshes leave activity counts/cursor unchanged; content changes count as one push.
-mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped)
+mm pull [--from DEVICE] [--source NAME] [--dry-run]  # download changes (optionally scoped); fast-forwards peer edits and follows peer deletions into ~/.config/mind-meld/deleted/ (30-day minimum); --dry-run lists delete/older predictions
            [--conflict-mode prompt|keep-both|fail]      # conflict handling mode (default keep-both)
                             # --dry-run previews outcome totals; changes nothing except the local lock file. Combine with --conflict-mode fail for a write-free CI gate (v0.14.15)
 mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
-                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, project_index, sync_scope, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, project_index, sync_scope, fast_forward, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
+                            # fast_forward (read-only): pull-ledger state, peer_base rows per peer, seen_version rows, scan-root anchor state and historical older-edit/anchor observations (possibly stale)
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -376,7 +412,7 @@ mm install-skills [--agent KEY]  # check/install the retro-fleet skill link for 
                                # --agent is repeatable: persist a maintenance grant without enabling sync or usage reading, then install every authorized agent
                                # also the documented undo for a deleted link: `mm push` leaves an absent link deleted (v0.12.44), `mm install-skills` / `mm init` put it back
 mm log [--source NAME] [--since DATE] [--action ACTION] [--verb VERB] [--limit N] [--format jsonl|table]
-                            # query the per-file pull/push history log
+                            # query the per-file pull/push history log; ACTION is one of written, merged, merged-via-lcs, skipped, conflicted, excluded, uploaded, failed, deleted
 mm retro-fleet [WINDOW] [--no-author-filter]
                             # render fleet retrospective markdown to stdout (default 7d). Public CLI surface for the /retro-fleet Claude Code skill; safe to invoke directly for scripted exports.
                             # Skill-internal second-pass flags (v0.12.0+): --theme TEXT (≤3x), --noteworthy TEXT, --name TEXT — supplied by the /retro-fleet skill on its second pass to render the pixel-aligned ASCII card up top. Direct CLI users typically don't pass these. --no-save is a hidden no-op as of v0.12.39.
@@ -451,16 +487,16 @@ attended push's conditional activity tail and exit contract, read
 3. If `--from` specified, pull only that device's manifest. Otherwise pull all.
 4. Download + decrypt remote manifest(s). Handle iCloud/Dropbox/Syncthing conflict resolution if applicable.
 5. If `--source` specified, diff only that source. Otherwise diff all sources.
-6. Apply tombstones: files in the remote manifest tombstone set are skipped.
-7. For each incoming file, re-read the local hash and mtime, then decide per `_apply_incoming_file`: write / update-base / merge / skip (local newer) / conflict-copy. See Conflict Resolution for the full decision tree.
+6. Apply tombstones: files in the remote manifest tombstone set are skipped (and, in step 12, may be deleted).
+7. For each incoming file, re-read the local hash and mtime, then decide per the pull rule (`pullplan.decide`, via `_apply_incoming_file`): write / matched / skip / fast-forward / older (held) / stale / union-merge / conflict-copy, using this machine's last-synced base for that peer and the `from` ancestry the peer published. A file the rule skips reads no blob. See Conflict Resolution for the rule.
 8. Download + decrypt changed blobs. Decompress (gzip). Missing blobs count as waiting, not failed; continue applying available files and retain the peer's manifest conflict copies while any files wait.
-9. For merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite.
+9. For both-changed or no-base fallback decisions on merge-eligible files (`.jsonl` union-merge, `MEMORY.md` line-merge), merge instead of overwrite. Fast-forward replaces them with the peer's bytes.
 10. Write files to their respective source paths using atomic writes (write to a `.tmp` sibling, then `os.replace`; a caught write error unlinks the sibling best-effort and a crash can strand it; see [atomic write publication failures](docs/invariants/sync.md#atomic-write-publication-failures)).
 11. For conflict-copy decisions, leave local at the canonical path and write remote to `<stem>.sync-conflict-<ts>-v1-<device>.<ext>`. Publish a replacement before cleaning up prior copies for that same file and peer; a failed replacement preserves them. With `--conflict-mode prompt`, prompt per-file instead. With `--conflict-mode fail`, preflight via `pullplan` and exit **3** before applying any file if a conflict or local failure is predicted (mergeable changes from multiple peers no longer cause a false conflict); combine with `--dry-run` for a write-free CI gate. (Exit 3, not 2 — see Conflict mode below for why the distinction from typer's usage-error exit is load-bearing.)
-12. Pull is **additive-only:** local files absent from the remote manifest are kept. Deletions propagate only via tombstones produced by a subsequent push from the originating device.
+12. **Propagated deletions.** A local file absent from a remote manifest is never deleted just because it is absent. Only a peer's own, active, hash-carrying tombstone deletes it, and only when this machine's last-synced base for that peer equals the hash and the local bytes hash to it (and the guards in sync invariants hold). The file is moved into `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30 days; a record without a hash, or a file whose bytes differ, is never deleted. The deleting machine holds the only record; a machine that followed it mints none.
 13. Write `.mind-meld-log.md` per affected project (claude source only), including `## Conflicts` and `## Skipped (local was newer)` sections when relevant.
 14. Release lockfile.
-15. Print the final outcome with applied, skipped and waiting counts; real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail.
+15. Print the final outcome with applied, skipped, deleted, older-edit and waiting counts; real failures still make attended pull incomplete. Verbose output retains written / merged / skipped / conflicted / failed / waiting detail.
 
 ### `mm gc`
 
@@ -472,10 +508,11 @@ attended push's conditional activity tail and exit contract, read
 6. Delete listed blobs whose parsed owner is this device and whose hash is unreferenced. Peer namespaces are never listed, counted or deleted.
 7. Reap `mm-events` files older than `EVENTS_RETENTION_DAYS` (90). Always-on fleet policy, not opt-in.
 8. Reap `session-tokens.json` cache entries whose underlying jsonl is gone, or whose most recent `by_day` key is more than 90 days old.
-9. With `--conflicts`, also reap post-inversion `.sync-conflict-*` files whose filename birth is older than `CONFLICT_AGE_DAYS` (30), only when canonical exists with identical bytes. Live, ownerless, missing-canonical, pre-inversion, and unhashable copies remain at any age.
-10. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. Bare `--dry-run` also previews conflict cleanup; deleting those copies requires `--conflicts`.
-11. Release lockfile.
-12. Print summary (blobs deleted, bytes freed).
+9. Reap recovery folders of propagated deletions (`~/.config/mind-meld/deleted/`) older than 30 days by the date in their name, never by mtime.
+10. With `--conflicts`, also reap post-inversion `.sync-conflict-*` files whose filename birth is older than `CONFLICT_AGE_DAYS` (30), only when canonical exists with identical bytes. Live, ownerless, missing-canonical, pre-inversion, and unhashable copies remain at any age.
+11. Supports `--dry-run`: each executed retention reaper selects the same candidates as apply mode, prints a stable summary (including zero counts), and makes no deletion or cache write; the recovery-copy reaper lists the folders it would remove. Token-cache preview holds a shared read-only lock, so inspecting a missing or malformed cache never creates, rewrites, re-permissions, or normalizes it. Apply mode counts a deletion only after it succeeds and reports failed or skipped work separately; use `mm gc -v` for safe per-path detail. Bare `--dry-run` also previews conflict cleanup; deleting those copies requires `--conflicts`.
+12. Release lockfile.
+13. Print summary (blobs deleted, bytes freed).
 
 The reapers and the tmp sweep live in `retention.py`; the `@app.command()` shell stays in `cli.py`.
 
@@ -548,7 +585,7 @@ The asymmetry is correct because **diagnostic** walkers are **lossy** — they d
 
 **Correctness invariant:** union-for-files + newest-wins-for-tombstones + `is_tombstoned()` gate at every downstream consumer. The tombstone gate is load-bearing. **Every new consumer of a merged manifest MUST check `is_tombstoned(source, rel_path, aggregated_tombstones)` before acting on a file entry.** Adding a consumer that reads `manifest["sources"][x]["files"]` without the gate will silently resurrect deletions.
 
-Current gated consumers: pull-side `_pull_core` (via `collect_tombstones` across all peers, applied at the `to_download` filter step).
+Current gated consumers: pull-side `_pull_core` (via `collect_tombstones` across all peers, applied at the `to_download` filter step). The deletion pass (`pullflow._deletion_candidates`) is a consumer of the opposite kind: it reads each peer's OWN tombstones, not the merged set whose newest-wins can drop a hash.
 
 ### Read-path normalization invariant (load-bearing)
 
@@ -562,15 +599,17 @@ DO NOT add a new manifest-load path that bypasses `load_manifest` (or sidecar's 
 
 ### Source-file conflicts (Syncthing-style conflict-copy preservation)
 
-If the local file has been edited independently of the remote version (local hash ≠ last-synced hash AND local hash ≠ remote hash), behavior is decided per-file at apply time by a documented decision tree in `_apply_incoming_file`. The default `keep-both` conflict-copy path preserves local bytes at canonical:
+Behavior is decided per file at apply time by the pull rule, one pure function (`pullplan.decide`) shared by the real pull and `pullplan`'s predictions; the full table is in [conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a). A file conflicts only when **both** machines changed it since they last synced. The rule uses this machine's last-synced base per peer (`peer_base`), the versions it has held or seen (`seen_version`) and the `from` ancestry the peer published. Outcomes, in the order the rule tries them:
 
-1. **Skip (S):** local mtime is newer than remote mtime — leave local as-is. Convergence happens on the next push.
-2. **Merge (M):** file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge).
-3. **Write (W):** no local divergence — write the remote version to the canonical path.
-4. **Conflict-copy (C, INVERTED in v0.9.2):** local has diverged AND isn't mergeable AND isn't newer — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside.
-5. **Update-base (U):** remote hash matches local hash — no I/O, just refresh the last-synced state.
+1. **Write (W):** the local file is missing and was not knowingly removed here — write the remote version to the canonical path. (A file this machine held and removed by hand stays missing: **held**.)
+2. **Update-base (U):** remote hash matches local hash — no content write; flush the canonical file and its parent before recording any new last-synced rows.
+3. **Skip:** the remote equals this peer's base — nothing changed on the peer. No download, no union, no prompt. A version this machine already moved past is **stale**: silent.
+4. **Fast-forward (F):** the local file has not been changed here since it was last synced, and the peer's version was built on it — write the remote bytes (restoring its mtime), no union and **no recovery copy** of the replaced bytes. If the peer's mtime is older than the local file's the edit is held back as **older** and reported.
+5. **Merge (M):** both changed and the file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge). A line deleted on one side returns when both sides changed the file.
+6. **Conflict-copy (C, INVERTED in v0.9.2):** both changed and the file isn't mergeable — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside. A sidecar that already holds the peer's bytes is **kept** (no count, no warning).
+7. **No-base fallback:** a path with no base for that peer where the peer published no ancestry runs the older rule exactly: merge if mergeable, else **skip (S)** when the local mtime is newer, else conflict-copy.
 
-Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
+Pull re-reads local hash and mtime at apply time. Fast-forward also re-checks size, mtime, ctime and inode immediately before replacement; a detected edit becomes both-changed. A small check-to-replace race remains, as with merge (see conflict invariants).
 
 **Inversion (v0.9.2 BREAKING).** Pre-v0.9.2 did the opposite for [C]: local was renamed out to the sidecar and remote bytes were written to canonical. The inversion makes the visible `.sync-conflict-*` file hold the *surprising* version (remote, from elsewhere) rather than the working version (local, on this machine). Sidecar-write failure is per-file isolated and does NOT need a rollback dance — local is never overwritten in the conflict path.
 
@@ -586,7 +625,7 @@ Sidecars remain local-only. Promote or copy a managed sidecar to a regular filen
 
 **Conflict mode.** `mm pull --conflict-mode` takes one of three values:
 - `keep-both` (default): auto-keep-both via the inverted [C] path — local stays at canonical, remote lands in `.sync-conflict-*`.
-- `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; `b` / `both` skip silently as unrecognized input since the alias was removed in 1.0.0). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site, because `_apply_incoming_file` already skipped before prompting whenever local was the newer file, so `(n)` would be a redundant alias of `(r)`.
+- `prompt`: per-file prompt (unified diff + pick `(m)erge` / `(l)ocal` / `(r)emote` / `(s)kip` / `(a)bort`, default skip in v0.11.1+; `b` / `both` skip silently as unrecognized input since the alias was removed in 1.0.0). Since v0.12.10 it also renders each side's timestamps and a recency verdict, but display-only — there is deliberately no `(n)ewer` shortcut at this site (under the no-base fallback `_apply_incoming_file` skips before prompting whenever local is the newer file, so `(n)` would be a redundant alias of `(r)`; the both-changed rule has no such skip, and the verdict line shows which side is newer).
 - `fail`: preflights via `pullplan` (Track 62A) and exits **3** before applying any file if a conflict or local failure is predicted; mergeable changes from multiple peers no longer cause a false conflict. For CI use; combine with `--dry-run` for a write-free gate (`mm pull --dry-run --conflict-mode fail`). Best-effort without `--dry-run` — a file edited between preflight and apply may still produce a `.sync-conflict-*` (TOCTOU); re-run pull to surface it. Exit 3 (not 2) distinguishes "conflict refusal" from typer/click's usage-error exit 2, so a stale script using the removed `--no-prompt` / `--resolve-interactive` flags can't be silently misclassified.
 
 **Conflict-prompt UX (v0.11.1, extended v0.12.8 / v0.12.10).** Both prompt sites (inline `mm pull --conflict-mode prompt` and `mm resolve`) render:
@@ -727,7 +766,8 @@ failure contract exists to prevent.
 `mm log` queries local `~/.config/mind-meld/state.db` (0600, rollback journal,
 forward migrations), falling back to legacy `pull-history.jsonl{,.1}` before
 the first writer imports them once. Per-file actions include `written`, `merged`,
-`merged-via-lcs`, `skipped`, `conflicted`, `excluded`, `uploaded`, `failed`, plus
+`merged-via-lcs`, `skipped`, `conflicted`, `excluded`, `uploaded`, `failed`, `deleted`
+(a file a peer's deletion removed; the row records the recovery folder), plus
 the separate self-upgrade row shape. Retention keeps 20,000 rows per known
 (verb, action) class. Writers batch 1000 rows; history failures never block sync.
 Inspection opens read-only and materializes its snapshot before printing.
@@ -772,7 +812,7 @@ Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 ### JSONL Merge on Pull
 
-`.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. `MEMORY.md` is a separate plain lexical line-union and does not consult `ts`.
+When both sides changed or the no-base fallback applies, `.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. Fast-forward takes the peer's bytes directly. `MEMORY.md` is a separate plain lexical line-union and does not consult `ts`.
 
 1. Union of unique normalized lines from local and remote (UTF-8 replacement, trailing-whitespace strip, blank lines dropped, byte-exact dedup). Original line text is kept; lines are not reserialized.
 2. Records whose decoded JSON is an object with a **string** `ts` (including empty) sort first, by `(ts, original line)`. Comparison is lexical — not chronological, and not numeric-epoch.
@@ -939,7 +979,7 @@ mind-meld/
     ├── test_storage_local.py  # uses tmp_path fixture, iCloud + Dropbox conflict resolution
     ├── test_lockfile.py       # acquire/release, stale PID, already held
     ├── test_merge.py          # JSONL union-merge, MEMORY.md line-merge
-    ├── test_additive_sync.py  # additive-only pull, tombstones, conflict manifest union
+    ├── test_additive_sync.py  # pull rule, tombstones, conflict manifest union
     ├── test_conflict_copy.py  # Syncthing-style conflict-copy preservation on pull
     ├── test_recovery.py       # corrupt-manifest recovery chain (sidecar → peers → refuse) + abandon-manifest destructive path
     ├── test_recover.py        # mm recover --abandon-manifest unit tests (flag, typed RESET, quarantine durability, collision)

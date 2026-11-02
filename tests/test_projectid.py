@@ -15,6 +15,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -22,9 +23,22 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from mind_meld import config as config_module
-from mind_meld import core, crypto, devices, manifest, projectid, pullflow, sidecar
+from mind_meld import (
+    core,
+    crypto,
+    devices,
+    fsutil,
+    manifest,
+    projectid,
+    pullflow,
+    pullhistory,
+    pullplan,
+    sidecar,
+    statedb,
+)
 from mind_meld.cli import PushResult, _push_core, app
 from mind_meld.errors import ManifestError
+from mind_meld.storage import keys as storage_keys
 from mind_meld.storage.keys import manifest_key
 from mind_meld.storage.local import LocalBackend
 
@@ -45,12 +59,18 @@ class Machine:
     def __init__(self, tmp_path: Path, store: Path, name: str, home: str, device_id: str):
         self.name = name
         self.device_id = device_id
+        self.home_path = "/" + home.strip("/")
         self.fs_root = tmp_path / f"fs-{name}"
         self.home = self.fs_root / home.strip("/")
         self.claude = self.home / ".claude"
         self.claude.mkdir(parents=True)
         self.sidecar_dir = tmp_path / f"sidecar-{name}"
         self.sidecar_dir.mkdir()
+        # Each machine keeps its own state.db and recovery folder, as a real one does.
+        self.state_dir = tmp_path / f"state-{name}"
+        # The config path is pinned for every command: tests/conftest.py gives each distinct
+        # config its own state.db, so direct calls and `cli()` must share one.
+        self.config_path = self.sidecar_dir / "config.toml"
         self.cwd: Path | None = None  # where its commands run; its home by default
         self.store = store
         self.config = {
@@ -72,6 +92,10 @@ class Machine:
             mp.setenv(projectid.WIRE_HOME_TEST_ENV, "1")
             mp.setattr(projectid, "_fs_root", lambda: self.fs_root)
             mp.setattr(sidecar, "SIDECAR_DIR", self.sidecar_dir)
+            mp.setattr(statedb, "DB_DIR", self.state_dir)
+            mp.setattr(pullhistory, "HISTORY_DIR", self.state_dir)
+            config_module.save_config(self.config, self.config_path)
+            mp.setattr(config_module, "CONFIG_PATH", self.config_path)
             mp.chdir(self.cwd or self.home)
             core._configure_project_names(self.config)
             try:
@@ -116,27 +140,20 @@ class Machine:
 
     def cli(self, *args: str):
         """Run an mm command as this machine, through the real CLI."""
-        path = self.sidecar_dir / "config.toml"
-        config_module.save_config(self.config, path)
         with self.on(), pytest.MonkeyPatch.context() as mp:
-            mp.setattr(config_module, "CONFIG_PATH", path)
             mp.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
             return runner.invoke(app, list(args))
 
-    def claim_base_path(self) -> None:
-        """Record the publisher's absolute base path as it would read on a real machine.
+    def edit_published(self, change) -> None:
+        """Rewrite this machine's published manifest in place; ``change`` edits the dict.
 
-        The walker records the real path of this machine's Claude folder, which
-        lives under a temporary root here; a real machine's is ``/Users/kb/.claude``.
-        The envelope's first byte and the rest of the manifest are untouched.
+        The envelope's first byte (the format) is kept.
         """
         path = Path(self.store) / manifest_key(self.device_id)
         raw = path.read_bytes()
         with self.on():
             data = json.loads(crypto.decrypt_manifest(raw, PASSPHRASE, MEMORY_KB))
-            data["sources"]["claude"]["base_path"] = "/" + str(
-                self.claude.relative_to(self.fs_root)
-            )
+            change(data)
             path.write_bytes(
                 crypto.encrypt_manifest(
                     json.dumps(data).encode(),
@@ -145,6 +162,38 @@ class Machine:
                     wire_names=raw[0] == crypto.MANIFEST_FORMAT_VERSION,
                 )
             )
+
+    def claim_base_path(self) -> None:
+        """Record the publisher's absolute base path as it would read on a real machine.
+
+        The walker records the real path of this machine's Claude folder, which
+        lives under a temporary root here; a real machine's is ``/Users/kb/.claude``.
+        The envelope's first byte and the rest of the manifest are untouched.
+        """
+
+        def claim(data: dict) -> None:
+            data["sources"]["claude"]["base_path"] = "/" + str(
+                self.claude.relative_to(self.fs_root)
+            )
+
+        self.edit_published(claim)
+
+    def as_the_previous_release(self) -> None:
+        """Make the published manifest read as the release before this Track wrote it.
+
+        That release minted deletion records with no content hash, kept no scan-root
+        tokens and published no ``from`` ancestry. The sidecar is not touched.
+        """
+
+        def strip(data: dict) -> None:
+            for record in data.get("tombstones", {}).values():
+                record.pop("sha256", None)
+            for entry in data["sources"].values():
+                entry.pop("root_ids", None)
+                for info in entry.get("files", {}).values():
+                    info.pop("from", None)
+
+        self.edit_published(strip)
 
     def published(self, device_id: str | None = None) -> dict:
         """The decrypted bytes of a published manifest, as the wire holds them."""
@@ -1280,6 +1329,11 @@ def test_an_old_form_tombstone_removes_no_local_bytes(tmp_path, store, mac):
     twin_gone = twin.claude / "projects/-Users-kb-scratch/memory/gone.md"
     (mac.claude / "projects/-Users-kb-scratch/memory/gone.md").unlink()
     seed_old_form(mac, {})
+    # The record a release before the content hash wrote: it names the path and nothing
+    # else, so it stops the re-download and can delete no bytes (criteria 9 and 20).
+    mac.as_the_previous_release()
+    assert all("sha256" not in r for r in mac.published()["tombstones"].values())
+    assert mac.published()["tombstones"], "the deletion is recorded"
     third = Machine(tmp_path, store, "third", "/Users/kb", "eeeeeeee")
     seed_old_form(
         third,
@@ -3262,8 +3316,10 @@ def test_a_missed_sidecar_write_then_an_outage_leaves_a_live_clones_record_on_it
 
 
 def test_losing_projects_mid_push_never_binds_an_undeleted_file_to_its_project(linux, monkeypatch):
-    """`projects/` goes between the manifest load and the scan, so that push records what it
-    cannot see. Only one project comes back, and nobody deleted the other's file."""
+    """`projects/` goes between the manifest load and the scan, so that push cannot see
+    what it published. Only one project comes back, and nobody deleted the other's file:
+    the push mints no record for any file it could not list (Track 91A), whichever name
+    it would have been filed under."""
     from mind_meld import cli as cli_module
 
     linux.checkout("/home/kb/x/proj")
@@ -3283,11 +3339,13 @@ def test_losing_projects_mid_push_never_binds_an_undeleted_file_to_its_project(l
     with monkeypatch.context() as patch:
         patch.setattr(cli_module, "build_manifest_v2", vanish_then_scan)
         linux.push()
+    assert linux.published()["tombstones"] == {}  # the losing push minted nothing
     linux.memory(y, "e.md", "e\n")
     linux.push()
     tombstones = linux.published()["tombstones"]
     assert f"claude:projects/{WIRE}/memory/a.md" not in tombstones
-    assert "claude:projects/@home-x-proj/memory/a.md" in tombstones
+    assert "claude:projects/@home-x-proj/memory/a.md" not in tombstones
+    assert tombstones == {}  # a recreated `projects/` is new: nothing under it is a deletion
 
 
 def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypatch):
@@ -3319,6 +3377,21 @@ def test_the_switch_decision_and_its_names_come_from_one_listing(linux, monkeypa
     assert set(linux.published()["tombstones"]) == {f"claude:projects/{WIRE}/memory/x.md"}
 
 
+def test_a_held_switch_is_announced_by_a_preview_beside_a_pending_change(linux):
+    """A preview says why the names are not published. Nothing under the unlistable
+    `projects/` counts as a deletion, so it takes another pending change to publish
+    anything (Track 91A: a deletion no longer makes the held push substantive)."""
+    notes = _with_notes_source(linux)
+    _held_machine(linux)
+    (notes / "d/n.md").write_text("changed\n")
+    before = LocalBackend(linux.store).get(manifest_key(linux.device_id))
+    preview = linux.cli("push", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    assert "shared project names" not in preview.output
+    assert "cannot be listed" in preview.output
+    assert LocalBackend(linux.store).get(manifest_key(linux.device_id)) == before
+
+
 def test_a_held_switch_says_project_memory_is_not_published(linux):
     from mind_meld.cli import _sync_success
 
@@ -3330,7 +3403,8 @@ def test_a_held_switch_says_project_memory_is_not_published(linux):
     preview = linux.cli("push", "--dry-run")
     assert preview.exit_code == 0, preview.output
     assert "shared project names" not in preview.output
-    assert "cannot be listed" in preview.output
+    # Nothing is pending: the files the held push cannot list are left out, not deleted.
+    assert "Nothing to push" in preview.output
     with linux.on():
         result = _push_core(
             linux.config,
@@ -3341,9 +3415,12 @@ def test_a_held_switch_says_project_memory_is_not_published(linux):
             result_observer=lambda r: None,
         )
     assert linux.first_byte() == crypto.FORMAT_VERSION
-    assert _sync_success("push", result) == (
-        "Push: project memory not published until Claude's projects folder can be listed."
+    # The parked folder's file is truthfully reported as left out beside the held switch.
+    line = _sync_success("push", result)
+    assert line.startswith(
+        "Push: project memory not published until Claude's projects folder can be listed; "
     )
+    assert "1 file left out because" in line and line.endswith("run mm pull to restore them.")
     assert _sync_success("push", PushResult(published_content_files=1, switch_held=True)) == (
         "Push: 1 content change published; "
         "project memory not published until Claude's projects folder can be listed."
@@ -3537,7 +3614,11 @@ def test_a_second_held_push_still_says_project_memory_is_not_published(linux):
     first = linux.cli("push")
     assert first.exit_code == 0, first.output
     assert "not published until Claude's projects folder can be listed" in first.output
-    assert linux.published()["sources"]["claude"]["files"] == {}  # the held push dropped them
+    # The held push publishes nothing: the files it cannot list stay as they were, with no
+    # record of a deletion (it used to drop them and mint one).
+    published = linux.published()
+    assert list(published["sources"]["claude"]["files"]) == ["projects/-home-kb-proj/memory/a.md"]
+    assert published["tombstones"] == {}
     second = linux.cli("push")
     assert second.exit_code == 0, second.output
     assert "not published until Claude's projects folder can be listed" in second.output
@@ -3548,7 +3629,9 @@ def test_a_held_no_op_push_records_no_changes_in_its_run_evidence(linux, monkeyp
 
     # A skipped usage capture would read as degraded and hide the cause under test.
     monkeypatch.setattr(config_module, "usage_capture_readiness", lambda *a, **k: "no-reader")
+    notes = _with_notes_source(linux)
     _held_machine(linux)
+    (notes / "d/n.md").write_text("changed\n")  # a held push publishes only if something changed
     assert linux.cli("push").exit_code == 0
     with linux.on():
         assert attemptlog.read_runs()["runs"]["push"]["cause"] == "ok"  # it published a manifest
@@ -3642,3 +3725,1539 @@ def test_reconcile_recovered_prior_passes_through_without_a_claude_entry():
     snapshot = json.dumps(prior, sort_keys=True)
     assert core.reconcile_recovered_prior(prior) is prior
     assert json.dumps(prior, sort_keys=True) == snapshot
+
+
+# ── Track 91A: fast-forward and propagated deletions across a fleet ───
+#
+# A Mac and two Linux machines that share a home (`/home/kb`). Both delivery forms
+# run: "git" is one project every machine has checked out (shared `@git-` name, three
+# different folder names), "home" is a loose folder under the home (the `@home-` name
+# maps the Mac's `-Users-kb-scratch` onto both Linux machines' identical
+# `-home-kb-scratch`, which is also the old same-home path form).
+
+
+@pytest.fixture
+def linux2(tmp_path, store):
+    return Machine(tmp_path, store, "linux2", "/home/kb", "cccccccc")
+
+
+CHECKOUTS = {
+    "mac": "/Users/kb/Dev/widgets",
+    "linux": "/home/kb/code/widgets",
+    "linux2": "/home/kb/src/widgets",
+}
+KINDS = pytest.mark.parametrize("kind", ["git", "home"])
+
+
+class Trio:
+    """The same project's memory on a Mac and two Linux machines, with a logical clock."""
+
+    def __init__(self, kind: str, mac: Machine, linux: Machine, linux2: Machine):
+        self.kind = kind
+        self.mac, self.linux, self.linux2 = mac, linux, linux2
+        self.machines = {m.name: m for m in (mac, linux, linux2)}
+        self.clock = time.time() - 7200
+        self.dirs = {m.name: self._place(m) for m in self.machines.values()}
+
+    def _place(self, machine: Machine) -> Path:
+        if self.kind == "git":
+            rel = CHECKOUTS[machine.name]
+            machine.checkout(rel)
+            folder = machine.folder_for(rel)
+        else:
+            folder = machine.folder_for(f"{machine.home_path}/scratch")
+        memory = machine.claude / "projects" / folder / "memory"
+        memory.mkdir(parents=True)
+        return memory
+
+    def tick(self) -> float:
+        self.clock += 60
+        return self.clock
+
+    def path(self, machine: Machine, name: str = "x.md") -> Path:
+        return self.dirs[machine.name] / name
+
+    def write(self, machine: Machine, name: str, text: str, *, mtime: float | None = None) -> Path:
+        """Write a file with the next logical mtime (or an explicit one)."""
+        target = self.path(machine, name)
+        target.write_text(text)
+        stamp = self.tick() if mtime is None else mtime
+        os.utime(target, (stamp, stamp))
+        return target
+
+    def text(self, machine: Machine, name: str = "x.md") -> str | None:
+        target = self.path(machine, name)
+        return target.read_text() if target.exists() else None
+
+
+@pytest.fixture(params=["git", "home"])
+def trio(request, mac, linux, linux2):
+    return Trio(request.param, mac, linux, linux2)
+
+
+def deleted_copies(machine: Machine) -> list[Path]:
+    """Every recovery copy this machine holds, whichever pull made it."""
+    return sorted(p for p in (machine.state_dir / "deleted").rglob("*") if p.is_file())
+
+
+def ledger_of(machine: Machine, *peers: Machine):
+    with machine.on():
+        ledger, exc = core.load_ledger([p.device_id for p in peers])
+    assert exc is None, exc
+    return ledger
+
+
+def tombstone_for(published: dict, name: str = "x.md") -> dict | None:
+    for key, record in published["tombstones"].items():
+        if key.endswith(f"/memory/{name}"):
+            return record
+    return None
+
+
+def sha_of(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def spread(trio: Trio, name: str, text: str) -> None:
+    """The Mac publishes a file and both Linux machines pull it (a base on each)."""
+    trio.write(trio.mac, name, text)
+    trio.mac.push()
+    for machine in (trio.linux, trio.linux2):
+        machine.pull()
+        assert trio.text(machine, name) == text
+
+
+def test_the_fleet_dirs_name_one_project(trio):
+    """Three folders (one name in the home form), one wire name."""
+    names = {name: d.parent.name for name, d in trio.dirs.items()}
+    if trio.kind == "home":
+        assert names["linux"] == names["linux2"] == "-home-kb-scratch"
+        assert names["mac"] == "-Users-kb-scratch"
+    else:
+        assert len(set(names.values())) == 3
+
+
+# ── edit, fast-forward, conflict, union ───────────────────────────────
+
+
+def test_a_peer_edit_to_an_untouched_file_fast_forwards_and_a_deleted_line_stays_deleted(trio):
+    spread(trio, "MEMORY.md", "- a\n- b\n- c\n")
+    trio.write(trio.mac, "MEMORY.md", "- a\n- c\n")  # a line is deleted
+    trio.mac.push()
+    for machine in (trio.linux, trio.linux2):
+        result = machine.pull()
+        assert (result.total_written, result.total_merged, result.total_conflicted) == (1, 0, 0)
+        assert trio.text(machine, "MEMORY.md") == "- a\n- c\n"  # no union put "- b" back
+        assert not list(machine.claude.rglob("*sync-conflict*"))
+    # Pulling again has nothing to say.
+    assert trio.linux.pull().total_applied == 0
+
+
+def test_both_sides_changing_a_file_writes_a_conflict_copy_not_an_overwrite(trio):
+    spread(trio, "topic.md", "one\n")
+    trio.write(trio.mac, "topic.md", "mac says\n")
+    trio.mac.push()
+    trio.write(trio.linux, "topic.md", "linux says\n")
+    result = trio.linux.pull()
+    assert result.total_conflicted == 1 and result.total_merged == 0
+    assert trio.text(trio.linux, "topic.md") == "linux says\n"  # local bytes stay canonical
+    copies = list(trio.dirs["linux"].glob("topic.sync-conflict-*.md"))
+    assert [c.read_text() for c in copies] == ["mac says\n"]
+    # A conflict that is already kept is no new outcome (criterion 10).
+    again = trio.linux.pull()
+    assert again.total_applied == 0 and again.total_conflicted == 0
+    assert len(list(trio.dirs["linux"].glob("topic.sync-conflict-*.md"))) == 1
+
+
+def test_a_mergeable_file_both_sides_changed_unions_and_a_deleted_line_returns(trio):
+    """Union has no base bytes: a line one side deleted comes back when the other side also
+    changed the file. Pinned as the documented limit of the rule (owner item h)."""
+    spread(trio, "MEMORY.md", "- a\n- b\n- c\n")
+    trio.write(trio.mac, "MEMORY.md", "- a\n- c\n")  # the Mac deletes "- b"
+    trio.mac.push()
+    trio.write(trio.linux, "MEMORY.md", "- a\n- b\n- d\n")  # Linux drops "- c" and adds "- d"
+    result = trio.linux.pull()
+    assert result.total_merged == 1 and result.total_conflicted == 0
+    merged = trio.text(trio.linux, "MEMORY.md")
+    assert merged is not None
+    assert sorted(line for line in merged.splitlines() if line) == ["- a", "- b", "- c", "- d"]
+
+
+# ── deletion: one record, followers, recovery ─────────────────────────
+
+
+def test_a_deletion_is_followed_with_one_record_and_a_recovery_copy(trio):
+    from mind_meld.cli import _sync_success
+
+    spread(trio, "x.md", "v0\n")
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    record = tombstone_for(trio.mac.published())
+    assert record is not None and record["sha256"] == sha_of("v0\n")
+    assert record["device_id"] == trio.mac.device_id
+
+    for follower in (trio.linux, trio.linux2):
+        result = follower.pull()
+        assert result.total_deleted == 1 and result.total_failed == 0, result
+        assert trio.text(follower) is None
+        assert result.deleted_origins == ["mac"]
+        copies = [c for c in deleted_copies(follower) if c.name == "x.md"]
+        assert [c.read_text() for c in copies] == ["v0\n"]
+        assert copies[0].stat().st_mode & 0o777 == 0o600
+        # The pull says what it deleted and where the copy is (O8).
+        line = _sync_success("pull", result)
+        assert line.startswith("Pull: 1 file deleted because mac deleted it; copies in ")
+        assert "for 30 days" in line and "#recovering-a-deleted-file" in line
+
+    # One record: a follower mints nothing, not even when its next push publishes.
+    trio.write(trio.linux, "other.md", "other\n")
+    trio.linux.push()
+    assert tombstone_for(trio.linux.published()) is None
+    trio.write(trio.linux2, "other2.md", "other2\n")
+    trio.linux2.push()
+    assert tombstone_for(trio.linux2.published()) is None
+    # ...and the third machine's pulls of the followers change nothing.
+    assert trio.mac.pull().total_deleted == 0
+    assert trio.text(trio.mac) is None
+
+
+def test_a_copy_put_back_on_the_origin_and_pushed_brings_the_file_back_everywhere(trio):
+    spread(trio, "x.md", "v0\n")
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    trio.linux.pull()
+    trio.linux2.pull()
+    [copy] = [c for c in deleted_copies(trio.linux) if c.name == "x.md"]
+
+    # The recovery recipe: copy the file onto the origin (not onto a follower) and push.
+    trio.path(trio.mac).write_bytes(copy.read_bytes())
+    trio.mac.push()
+    assert tombstone_for(trio.mac.published()) is None  # the record ends with the file's return
+    for follower in (trio.linux, trio.linux2):
+        result = follower.pull()
+        assert result.total_written == 1, result
+        assert trio.text(follower) == "v0\n"
+    assert trio.mac.pull().total_deleted == 0
+
+
+def test_the_plan_sequence_b_deletes_c_follows_b_restores_c_pushes_b_pulls(trio):
+    """B deletes X and pushes, C pulls and follows, B restores X, pushes and pulls, C pushes,
+    B pulls: X stays on B and returns to C on C's next pull."""
+    b, c = trio.mac, trio.linux
+    spread(trio, "x.md", "v0\n")
+    trio.path(b).unlink()
+    b.push()
+    assert c.pull().total_deleted == 1
+    assert trio.text(c) is None
+
+    trio.write(b, "x.md", "v0\n")  # restored: same bytes, a fresh logical mtime
+    b.push()
+    assert tombstone_for(b.published()) is None
+    assert b.pull().total_deleted == 0
+
+    trio.write(c, "other.md", "c edits something else\n")
+    c.push()
+    assert tombstone_for(c.published()) is None  # C followed; it never minted a second record
+    result = b.pull()
+    assert result.total_deleted == 0
+    assert trio.text(b) == "v0\n"  # stays on B
+
+    result = c.pull()
+    assert result.total_written == 1
+    assert trio.text(c) == "v0\n"  # returns to C
+
+
+@pytest.mark.parametrize("old_mtime", [False, True], ids=["fresh-mtime", "old-mtime"])
+def test_an_origin_restore_reaches_a_follower_even_with_an_old_mtime(trio, old_mtime):
+    """`mv`, `cp -p` or Finder's Put Back can keep the old mtime; the follower's row is
+    stamped with the record's device, so the restore still propagates."""
+    spread(trio, "x.md", "v0\n")
+    kept_mtime = trio.path(trio.mac).stat().st_mtime
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    trio.linux.pull()
+    assert trio.text(trio.linux) is None
+    trio.mac.pull()
+    restored = trio.path(trio.mac)
+    restored.write_text("v0\n")
+    if old_mtime:
+        os.utime(restored, (kept_mtime, kept_mtime))
+    trio.mac.push()
+    result = trio.linux.pull()
+    assert result.total_written == 1, result
+    assert trio.text(trio.linux) == "v0\n"
+    ledger = ledger_of(trio.linux, trio.mac)
+    assert ledger.newest_stamp(
+        "claude", f"projects/{trio.dirs['linux'].parent.name}/memory/x.md"
+    ) in (
+        None,
+        trio.mac.device_id,
+    )
+
+
+def test_a_failed_fsync_after_a_delete_does_not_delete_a_restored_file_again(trio, monkeypatch):
+    spread(trio, "x.md", "v0\n")
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    real = fsutil.fsync_dir
+    claude = str(trio.linux.claude)
+
+    def flaky(path):
+        if str(path).startswith(claude):
+            raise OSError(5, "injected directory flush failure")
+        return real(path)
+
+    monkeypatch.setattr(fsutil, "fsync_dir", flaky)
+    result = trio.linux.pull()
+    monkeypatch.undo()
+    assert result.total_deleted == 1 and result.durability_fsync_failures >= 1, result
+    assert trio.text(trio.linux) is None
+
+    # The file is put back by hand; the failed flush must not have kept the base that
+    # authorized the first deletion.
+    trio.write(trio.linux, "x.md", "v0\n")
+    again = trio.linux.pull()
+    assert again.total_deleted == 0 and again.total_failed == 0, again
+    assert trio.text(trio.linux) == "v0\n"
+
+
+def test_a_hand_deleted_file_is_not_restored_by_the_next_pull_and_then_propagates(trio):
+    """Owner item (g): a pull does not restore a file this machine held, published and removed
+    by hand; the removal reaches the fleet at its next push, with a copy on the followers."""
+    spread(trio, "x.md", "v0\n")
+    trio.linux.push()  # the machine's own manifest now lists x.md: it provably held it
+    trio.mac.pull()  # the others match that listing: each now has a base for linux
+    trio.linux2.pull()
+    trio.path(trio.linux).unlink()
+    result = trio.linux.pull()
+    assert result.total_written == 0
+    assert trio.text(trio.linux) is None
+    assert trio.text(trio.mac) == "v0\n"
+    trio.linux.push()
+    record = tombstone_for(trio.linux.published())
+    assert record is not None and record["sha256"] == sha_of("v0\n")
+    assert trio.mac.pull().total_deleted == 1
+    assert trio.linux2.pull().total_deleted == 1
+    assert trio.text(trio.mac) is None and trio.text(trio.linux2) is None
+
+
+def test_a_machine_with_no_base_for_the_deleting_peer_keeps_the_file(trio):
+    """The sync.md limit: a machine that caught up and deletes before its peers have matched
+    its listing publishes a hash their base for it does not carry; they keep the file."""
+    spread(trio, "x.md", "v0\n")
+    trio.linux.push()
+    trio.path(trio.linux).unlink()
+    trio.linux.push()
+    assert tombstone_for(trio.linux.published()) is not None
+    result = trio.mac.pull()  # never matched linux's listing: no base for linux
+    assert result.total_deleted == 0
+    assert trio.text(trio.mac) == "v0\n"
+    # Nothing is lost: the file is kept, and the machine that originated it is untouched.
+    trio.mac.push()
+    assert tombstone_for(trio.mac.published()) is None
+
+
+@pytest.mark.parametrize("full_hash_known", [True, False], ids=["known", "unknown"])
+def test_a_machine_that_pulls_newer_bytes_then_deletes_publishes_that_versions_hash(
+    trio, monkeypatch, full_hash_known
+):
+    from mind_meld import cli
+
+    spread(trio, "x.md", "v0\n")
+    trio.linux.push()
+    trio.mac.pull()
+    trio.write(trio.mac, "x.md", "v1\n")
+    trio.mac.push()
+    trio.linux.pull()
+    assert trio.text(trio.linux) == "v1\n"
+    trio.path(trio.linux).unlink()
+    if not full_hash_known:
+        # Bases can be lost while the prefix-only held history survives.
+        ledger = ledger_of(trio.linux, trio.mac, trio.linux2)
+        rel = trio.path(trio.linux).relative_to(trio.linux.claude).as_posix()
+        ledger.drop("claude", rel)
+        with trio.linux.on():
+            assert core.commit_ledger(ledger) is None
+        assert ledger.newest_held("claude", rel) == sha_of("v1\n")[:16]
+
+    generated = []
+    real_generate = cli.generate_tombstones
+
+    def capture(*args, **kwargs):
+        records = real_generate(*args, **kwargs)
+        generated.append(records)
+        return records
+
+    canonical = Path(trio.linux.store) / manifest_key(trio.linux.device_id)
+    before = canonical.read_bytes()
+    anchor = trio.linux.claude / "projects" / manifest.ANCHOR_NAME
+    anchor_before = anchor.read_bytes()
+    with monkeypatch.context() as preview_patch:
+        preview_patch.setattr(cli, "generate_tombstones", capture)
+        trio.linux.push(dry_run=True)
+    predicted = tombstone_for({"tombstones": generated[-1]})
+    assert canonical.read_bytes() == before
+    assert anchor.read_bytes() == anchor_before
+    if full_hash_known:
+        assert predicted is not None and predicted["sha256"] == sha_of("v1\n")
+    else:
+        assert predicted is None
+
+    trio.linux.push()
+    record = tombstone_for(trio.linux.published())
+    if full_hash_known:
+        assert record is not None and record["sha256"] == sha_of("v1\n")
+    else:
+        assert record is None
+    # Mac's base for Linux is still v0, so the latest bytes remain safe there.
+    assert trio.mac.pull().total_deleted == 0
+    assert trio.text(trio.mac) == "v1\n"
+
+
+def test_a_file_removed_before_this_machine_ever_published_it_is_restored_by_a_pull(trio):
+    """Nothing proves this machine kept the file (its own manifest never listed it), so a
+    pull brings it back: the safe side of the rule."""
+    spread(trio, "x.md", "v0\n")
+    trio.path(trio.linux).unlink()
+    assert trio.linux.pull().total_written == 1
+    assert trio.text(trio.linux) == "v0\n"
+
+
+# ── edit versus delete, dormant peers ─────────────────────────────────
+
+
+def expire(machine: Machine, days: int = 31) -> None:
+    """Age every deletion record in the machine's published manifest past its 30 days."""
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    def age(data: dict) -> None:
+        for record in data["tombstones"].values():
+            record["deleted_at"] = when
+
+    machine.edit_published(age)
+
+
+def test_when_one_machine_deletes_what_another_edited_the_edit_survives_and_arrives_later(trio):
+    spread(trio, "x.md", "v0\n")
+    trio.write(trio.linux, "x.md", "v1 edited on linux\n")
+    trio.linux.push()
+    trio.path(trio.mac).unlink()  # the Mac deletes the old version
+    trio.mac.push()
+
+    # The machine holding the old bytes deletes its copy.
+    assert trio.linux2.pull().total_deleted == 1
+    assert trio.text(trio.linux2) is None
+    # The machine holding the edit keeps it: its bytes are not the deleted version.
+    result = trio.linux.pull()
+    assert result.total_deleted == 0
+    assert trio.text(trio.linux) == "v1 edited on linux\n"
+    # The record suppresses the edit on the third machine for as long as it is active.
+    assert trio.linux2.pull().total_written == 0
+    assert trio.text(trio.linux2) is None
+
+    expire(trio.mac)
+    result = trio.linux2.pull()
+    assert result.total_written == 1
+    assert trio.text(trio.linux2) == "v1 edited on linux\n"
+
+
+def test_a_machine_that_never_held_a_deleted_file_can_receive_it_from_a_dormant_peer(trio):
+    """Owner item (k): after the record's 30 days a dormant peer that still lists the file
+    brings it to a machine that never held it. Never lost; removing a dead machine stays an
+    owner step."""
+    trio.write(trio.mac, "x.md", "v0\n")
+    trio.mac.push()
+    trio.linux.pull()
+    trio.linux.push()  # linux lists x.md, then goes dormant
+    trio.mac.pull()
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    # linux2 joins late: the record keeps the dormant peer's copy away while it is active.
+    assert trio.linux2.pull().total_written == 0
+    assert trio.text(trio.linux2) is None
+
+    expire(trio.mac)
+    result = trio.linux2.pull()
+    assert result.total_written == 1 and result.total_deleted == 0
+    assert trio.text(trio.linux2) == "v0\n"
+    assert trio.text(trio.linux) == "v0\n"  # the dormant peer's copy was never touched
+
+
+def test_a_dormant_peer_returning_after_the_record_expired_keeps_its_file(trio):
+    spread(trio, "x.md", "v0\n")
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    expire(trio.mac)  # linux2 sleeps through the whole 30 days
+    result = trio.linux2.pull()
+    assert result.total_deleted == 0
+    assert trio.text(trio.linux2) == "v0\n"
+
+
+# ── the stale handoff and the older edit ──────────────────────────────
+
+
+@pytest.mark.parametrize("a_pulls_first", [True, False], ids=["a-first", "b-first"])
+def test_the_two_machine_stale_flow_neither_conflicts_nor_rolls_back(trio, a_pulls_first):
+    """A edits, B catches up and publishes A's own older version, A edits again before pulling.
+    Neither the stale copy nor the newer edit may read as a conflict, whichever pulls first."""
+    a, b = trio.mac, trio.linux
+    spread(trio, "MEMORY.md", "- one\n- two\n")
+    trio.write(a, "MEMORY.md", "- one\n")  # A deletes a line (V1)
+    a.push()
+    assert b.pull().total_written == 1  # B fast-forwards to V1 and publishes it
+    b.push()
+    trio.write(a, "MEMORY.md", "- one\n- three\n")  # A edits again before pulling (V2)
+    a.push()
+
+    order = (a, b) if a_pulls_first else (b, a)
+    for machine in order:
+        result = machine.pull()
+        assert result.total_conflicted == 0 and result.total_merged == 0, (machine.name, result)
+    assert trio.text(a, "MEMORY.md") == "- one\n- three\n"  # A's V2 is not rolled back
+    assert trio.text(b, "MEMORY.md") == "- one\n- three\n"  # B fast-forwards to V2
+    assert "- two" not in (trio.text(b, "MEMORY.md") or "")  # and the deleted line stays deleted
+    assert not list(trio.mac.claude.rglob("*sync-conflict*"))
+    assert not list(trio.linux.claude.rglob("*sync-conflict*"))
+
+
+def test_a_restored_machine_with_an_older_timestamp_is_held_as_older_until_touched(trio):
+    """B builds on the version A holds but its file carries an older mtime (a restored clone):
+    A does not apply it, says so, and `touch` plus a push on B ends the hold."""
+    a, b = trio.mac, trio.linux
+    spread(trio, "x.md", "v0\n")
+    trio.write(b, "x.md", "v1 from a restored machine\n", mtime=trio.clock - 3600)
+    b.push()
+    result = a.pull()
+    assert [(e.device_name, e.rel_path.rsplit("/", 1)[-1]) for e in result.older] == [
+        ("linux", "x.md")
+    ]
+    assert trio.text(a) == "v0\n"
+    assert result.total_applied == 0
+    assert "older peer edit" in _sync_success_line(result)
+    # Pulling again keeps saying so and applies nothing.
+    assert a.pull().older and trio.text(a) == "v0\n"
+
+    os.utime(trio.path(b), None)  # touch
+    b.push()
+    result = a.pull()
+    assert not result.older and result.total_written == 1
+    assert trio.text(a) == "v1 from a restored machine\n"
+
+
+def _sync_success_line(result) -> str:
+    from mind_meld.cli import _sync_success
+
+    return _sync_success("pull", result)
+
+
+# ── a changed home, hash-less records, same-named files ───────────────
+
+
+def test_a_push_from_a_device_whose_home_changed_deletes_nothing_on_a_peer(mac, linux):
+    """`test_a_changed_home_mints_no_tombstone_and_settles` proves the push side. This carries
+    that push through a peer's pull, at the point where a record would start to delete."""
+    import shutil
+
+    mac.memory("-Users-kb-loose", "a.md", "a\n")
+    mac.push()
+    linux.pull()
+    landed = linux.claude / "projects/-home-kb-loose/memory/a.md"
+    assert landed.read_text() == "a\n"
+    linux.push()
+    mac.pull()  # each now holds the other's listing: both have a base for the file
+
+    new_home = mac.fs_root / "Users/renamed"
+    shutil.move(mac.home, new_home)
+    mac.home = new_home
+    mac.claude = new_home / ".claude"
+    mac.config["sync"]["sources"][0]["path"] = str(mac.claude)
+    result = mac.push()
+    assert result is not None and result.names_updated and not result.content_changed
+    assert mac.published()["tombstones"] == {}
+
+    for _ in range(2):  # and again: nothing settles into a deletion
+        pulled = linux.pull()
+        assert pulled.total_deleted == 0 and pulled.total_failed == 0, pulled
+        assert landed.read_text() == "a\n"
+    assert not (linux.state_dir / "deleted").exists()
+    linux.push()
+    assert linux.published()["tombstones"] == {}
+
+
+def test_a_hash_less_old_form_record_under_a_same_home_name_deletes_nothing(linux, linux2):
+    """Criteria 9 and 20: every record from the release before this one has no content hash.
+    It keeps today's effect (a path it names is not downloaded again) and deletes no bytes,
+    even on a machine that shares the publisher's home and holds the file unchanged."""
+    seed_old_form(
+        linux,
+        {"-home-kb-scratch/memory/gone.md": "y\n", "-home-kb-scratch/memory/stay.md": "z\n"},
+    )
+    assert linux2.pull().total_applied == 2
+    gone2 = linux2.claude / "projects/-home-kb-scratch/memory/gone.md"
+    assert gone2.read_text() == "y\n"
+
+    (linux.claude / "projects/-home-kb-scratch/memory/gone.md").unlink()
+    seed_old_form(linux, {})
+    linux.as_the_previous_release()
+    record = list(linux.published()["tombstones"].values())
+    assert len(record) == 1 and "sha256" not in record[0]
+
+    result = linux2.pull()
+    assert result.total_deleted == 0 and result.total_failed == 0, result
+    assert gone2.read_text() == "y\n"  # the bytes it holds are untouched
+    assert not (linux2.state_dir / "deleted").exists()
+    # Today's effect remains: with the file gone by hand, the record stops its re-download.
+    gone2.unlink()
+    assert linux2.pull().total_written == 0
+    assert not gone2.exists()
+
+
+def test_a_same_named_file_with_different_bytes_survives_a_record_for_a_re_cloned_path(mac, linux):
+    """The folder name is all a record carries. This path was re-cloned from another
+    repository, so the file under the same name holds other bytes: the hash keeps it."""
+    mac.memory("-Users-kb-proj", "note.md", "the first repository's note\n")
+    mac.push()
+    linux.pull()
+    note = linux.claude / "projects/-home-kb-proj/memory/note.md"
+    assert note.read_text() == "the first repository's note\n"
+    linux.push()
+    mac.pull()
+    # Re-cloned: the folder is rebuilt and the new repository has its own note.md.
+    note.write_text("the other repository's note\n")
+
+    (mac.claude / "projects/-Users-kb-proj/memory/note.md").unlink()
+    mac.push()
+    record = tombstone_for(mac.published(), "note.md")
+    assert record is not None and record["sha256"] == sha_of("the first repository's note\n")
+    result = linux.pull()
+    assert result.total_deleted == 0, result
+    assert note.read_text() == "the other repository's note\n"
+    verbose = linux.cli("pull", "--dry-run", "--verbose")
+    assert verbose.exit_code == 0, verbose.output
+    assert "keep (its bytes differ from the deleted version)" in verbose.output
+
+
+def test_a_same_named_file_in_a_lossy_folder_name_match_survives_a_record(mac, linux):
+    """`/Users/kb/my.proj` and `/home/kb/my-proj` encode to one folder name, so the names
+    meet though the projects do not. The other project's file holds other bytes."""
+    mac.memory("-Users-kb-my-proj", "note.md", "from my.proj on the Mac\n")
+    linux_note = linux.memory("-home-kb-my-proj", "note.md", "from my-proj on Linux\n")
+    old = time.time() - 3600
+    os.utime(linux_note, (old, old))  # older than the Mac's, so the pull keeps both
+    mac.push()
+    result = linux.pull()  # same name, other bytes: a conflict copy, never an overwrite
+    assert result.total_conflicted == 1
+    assert linux_note.read_text() == "from my-proj on Linux\n"
+    linux.push()
+    mac.pull()
+
+    (mac.claude / "projects/-Users-kb-my-proj/memory/note.md").unlink()
+    mac.push()
+    assert tombstone_for(mac.published(), "note.md") is not None
+    result = linux.pull()
+    assert result.total_deleted == 0, result
+    assert linux_note.read_text() == "from my-proj on Linux\n"
+    assert not (linux.state_dir / "deleted").exists()
+
+
+def test_each_machines_state_db_is_separate(trio):
+    spread(trio, "x.md", "v0\n")
+    # linux pulled, linux2 pulled, the Mac originated: each keeps its own ledger.
+    with trio.linux.on():
+        linux_db = statedb.db_path()
+    with trio.linux2.on():
+        linux2_db = statedb.db_path()
+    with trio.mac.on():
+        mac_db = statedb.db_path()
+    assert len({linux_db, linux2_db, mac_db}) == 3
+    assert ledger_of(trio.linux, trio.mac).bases
+    assert ledger_of(trio.linux2, trio.mac).bases
+    assert not ledger_of(trio.mac, trio.linux, trio.linux2).bases  # the Mac pulled nothing
+    # A later pull on one machine adds rows to that machine alone.
+    trio.write(trio.mac, "y.md", "v0 of y\n")
+    trio.mac.push()
+    before = dict(ledger_of(trio.linux2, trio.mac).bases)
+    trio.linux.pull()
+    assert dict(ledger_of(trio.linux2, trio.mac).bases) == before
+    assert len(ledger_of(trio.linux, trio.mac).bases) == len(before) + 1
+
+
+# ── what a push may call a deletion (criteria 18 and 19) ──────────────
+
+
+def add_source(machine: Machine, kind: str) -> tuple[Path, str, str]:
+    """A second source of ``kind`` with one file; returns (source folder, scan root, file)."""
+    root = machine.home / f"{kind}-src"
+    if kind == "generic":
+        scan, rel, body = "d", "d/n.md", "n\n"
+        entry = {"name": "notes", "path": str(root), "type": "generic", "include_dirs": [scan]}
+    elif kind == "gstack":
+        scan, rel, body = "projects", "projects/proj/design.md", "design\n"
+        entry = {"name": "gstack", "path": str(root), "type": "generic", "include_dirs": [scan]}
+    elif kind == "muse":
+        scan, rel, body = "memory", "memory/personal/MEMORY.md", "- note\n"
+        entry = {"name": "muse", "path": str(root), "type": "muse"}
+    else:
+        raise AssertionError(kind)
+    (root / rel).parent.mkdir(parents=True)
+    (root / rel).write_text(body)
+    machine.config["sync"]["sources"].append(entry)
+    return root, scan, rel
+
+
+def push_line(machine: Machine, **kwargs) -> tuple[PushResult | None, str]:
+    """An attended push, and the outcome line it would print."""
+    from mind_meld.cli import _sync_success
+
+    with machine.on():
+        result = _push_core(
+            machine.config,
+            PASSPHRASE,
+            MEMORY_KB,
+            quiet=True,
+            attended=True,
+            result_observer=lambda r: None,
+            **kwargs,
+        )
+    return result, _sync_success("push", result)
+
+
+def test_a_tombstone_records_the_hash_of_the_version_that_was_deleted(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    note = mac.memory(folder, "a.md", "first\n")
+    mac.push()
+    note.write_text("second, the version that is deleted\n")
+    mac.push()
+    note.unlink()
+    result = mac.push()
+    assert result is not None and result.total_deleted == 1
+    record = tombstone_for(mac.published(), "a.md")
+    assert record is not None
+    assert record["sha256"] == sha_of("second, the version that is deleted\n")
+    assert record["device_id"] == mac.device_id
+
+
+@pytest.mark.parametrize("kind", ["generic", "gstack", "muse"])
+def test_removing_one_file_under_an_unchanged_anchor_mints_with_its_hash(mac, kind):
+    root, scan, rel = add_source(mac, kind)
+    extra = root / scan / "extra.md"
+    extra.write_text("extra\n")
+    mac.push()
+    (root / rel).unlink()
+    mac.push()
+    tombstones = mac.published()["tombstones"]
+    [key] = [k for k in tombstones if k.endswith(rel)]
+    assert tombstones[key]["sha256"] and len(tombstones[key]["sha256"]) == 64
+
+
+@pytest.mark.parametrize("kind", ["claude", "generic", "gstack", "muse"])
+def test_a_recreated_scan_root_mints_nothing_and_says_what_it_left_out(mac, kind):
+    import shutil
+
+    if kind == "claude":
+        mac.checkout(CHECKOUTS["mac"])
+        mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+        folder, scan_root = mac.claude, "projects"
+    else:
+        folder, scan_root, _ = add_source(mac, kind)
+    mac.push()
+    shutil.rmtree(folder / scan_root)  # a new empty folder takes its place
+    (folder / scan_root).mkdir()
+    result, line = push_line(mac)
+    assert result is not None and result.total_deleted == 0
+    assert mac.published()["tombstones"] == {}
+    assert result.left_out_clause.endswith(" is new; run mm pull to restore them.")
+    assert result.left_out_clause.startswith("1 file left out because ")
+    assert str(folder / scan_root) in result.left_out_clause
+    assert line.endswith(result.left_out_clause)
+    assert mac.push() is None or mac.published()["tombstones"] == {}
+
+
+def test_a_restore_that_brings_back_an_older_token_mints_nothing(mac):
+    """`rsync -a --delete` of a backup into the existing folder: the folder is the same, the
+    file the backup lacked is gone, and the backup's anchor file is back."""
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    mac.memory(folder, "a.md", "a\n")
+    mac.push()
+    anchor = mac.claude / "projects" / manifest.ANCHOR_NAME
+    backup_token = anchor.read_bytes()
+    newer = mac.memory(folder, "b.md", "made after the backup\n")
+    mac.push()
+    assert anchor.read_bytes() != backup_token  # every publishing push renews the token
+    newer.unlink()  # the restore drops what the backup lacked...
+    anchor.write_bytes(backup_token)  # ...and brings its token back
+    result, line = push_line(mac)
+    assert result is not None and result.total_deleted == 0
+    assert mac.published()["tombstones"] == {}
+    assert "left out because" in line and "is new" in line
+
+
+def test_the_first_push_after_upgrading_mints_nothing_once_and_the_next_one_does(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    first = mac.memory(folder, "a.md", "a\n")
+    second = mac.memory(folder, "b.md", "b\n")
+    mac.push()
+    mac.as_the_previous_release()  # the published manifest records no scan-root token
+    assert "root_ids" not in mac.published()["sources"]["claude"]
+
+    first.unlink()
+    result, line = push_line(mac)
+    assert result is not None
+    assert mac.published()["tombstones"] == {}  # no token to compare: nothing mints
+    assert "left out" not in line  # and the upgrade is silent
+    assert mac.published()["sources"]["claude"]["root_ids"].get("projects")
+    # The file stays out of the manifest with no record; it can return by a later pull (h).
+    assert [rel.rsplit("/", 1)[-1] for rel in mac.published()["sources"]["claude"]["files"]] == [
+        "b.md"
+    ]
+
+    second.unlink()
+    mac.push()
+    assert tombstone_for(mac.published(), "b.md") is not None
+
+
+@pytest.mark.parametrize("kind", ["generic", "gstack", "muse"])
+def test_a_hand_seeded_prior_without_tokens_mints_nothing_from_any_source_kind(mac, kind):
+    """A prior published by the release before this one records no scan-root token: its first
+    push mints nothing from a generic, gstack-style or Muse source; the next one does."""
+    root, scan, rel = add_source(mac, kind)
+    extra = root / scan / "extra.md"
+    extra.write_text("extra\n")
+    mac.push()
+    mac.as_the_previous_release()
+    assert all("root_ids" not in entry for entry in mac.published()["sources"].values())
+    (root / rel).unlink()
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    extra.unlink()
+    mac.push()
+    [key] = list(mac.published()["tombstones"])
+    assert key.endswith("extra.md") and mac.published()["tombstones"][key]["sha256"]
+
+
+def test_removing_every_project_under_a_live_projects_folder_mints_for_each_file(mac):
+    """Named limit: `rm -rf projects/*` leaves the folder and its token, so every file is a
+    deletion. Criterion 23 adds no mass-deletion stop; visibility is the guard."""
+    import shutil
+
+    mac.checkout(CHECKOUTS["mac"])
+    one = mac.folder_for(CHECKOUTS["mac"])
+    mac.memory(one, "a.md", "a\n")
+    mac.memory(one, "b.md", "b\n")
+    mac.memory("-Users-kb-loose", "c.md", "c\n")
+    mac.push()
+    for child in (mac.claude / "projects").iterdir():
+        if child.is_dir():  # the anchor file stays, as it does for `rm -rf projects/*`
+            shutil.rmtree(child)
+    result = mac.push()
+    assert result is not None and result.total_deleted == 3
+    assert len(mac.published()["tombstones"]) == 3
+    assert all(r["sha256"] for r in mac.published()["tombstones"].values())
+
+
+def test_the_anchor_file_never_appears_in_a_manifest_and_a_peer_cannot_plant_one(mac, linux):
+    mac.checkout(CHECKOUTS["mac"])
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    _, _, _ = add_source(mac, "generic")
+    mac.push()
+    assert (mac.claude / "projects" / manifest.ANCHOR_NAME).exists()
+    for entry in mac.published()["sources"].values():
+        assert not [rel for rel in entry["files"] if rel.endswith(manifest.ANCHOR_NAME)]
+
+    # A peer's manifest that lists one is filtered at the consumer boundary.
+    planted = f"projects/{WIRE}/memory/{manifest.ANCHOR_NAME}"
+    peer = {
+        "sources": {"claude": {"files": {planted: {"sha256": "a" * 64}}}},
+        "tombstones": {f"claude:{planted}": {"deleted_at": "2026-01-01T00:00:00+00:00"}},
+    }
+    kept = core._filter_excluded_paths(peer, {}, [])
+    assert kept["sources"]["claude"]["files"] == {}
+    assert kept["tombstones"] == {}
+
+
+@pytest.mark.parametrize("shape", ["fifo", "symlink", "oversized", "malformed"])
+def test_an_anchor_that_is_not_a_plain_token_file_reads_as_no_token(tmp_path, shape):
+    base = tmp_path / "scan"
+    base.mkdir()
+    target = base / manifest.ANCHOR_NAME
+    secret = tmp_path / "elsewhere"
+    secret.write_text("a" * 32 + "\n")
+    if shape == "fifo":
+        os.mkfifo(target)
+    elif shape == "symlink":
+        target.symlink_to(secret)  # a link must not publish its target's bytes
+    elif shape == "oversized":
+        target.write_text("a" * 32 + "\n" + "b" * 100)
+    else:
+        target.write_text("not a token\n")
+    outcome = []
+
+    def read():
+        outcome.append(manifest.read_anchor(tmp_path, "scan"))
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(5)
+    assert not reader.is_alive(), "reading the anchor hung"
+    assert outcome == [None]
+    base_ok = tmp_path / "ok"
+    base_ok.mkdir()
+    (base_ok / manifest.ANCHOR_NAME).write_text("0123456789abcdef0123456789abcdef\n")
+    assert manifest.read_anchor(tmp_path, "ok") == "0123456789abcdef0123456789abcdef"
+
+
+needs_permissions = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root ignores the permission bits this test relies on"
+)
+
+
+@needs_permissions
+def test_an_unwritable_scan_root_has_no_id_and_an_attended_push_says_so_once(mac, capfd):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    note = mac.memory(folder, "a.md", "a\n")
+    projects = mac.claude / "projects"
+    projects.chmod(0o555)
+    try:
+        result, _ = push_line(mac)
+        assert result is not None and result.unwritable_roots == [str(projects)]
+        err = capfd.readouterr().err
+        assert err.count("will not propagate") == 1
+        assert f"mm: notice: deletions under {projects} will not propagate; " in err
+        assert "restore write access, then mm push" in err
+        assert "root_ids" not in mac.published()["sources"]["claude"]
+        assert not (projects / manifest.ANCHOR_NAME).exists()
+    finally:
+        projects.chmod(0o755)
+    # Nothing under a root that published no id mints: the deletion is not recorded as one.
+    note.unlink()
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+@needs_permissions
+def test_an_unwritable_scan_root_leaves_a_degraded_breadcrumb_after_autopush(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    projects = mac.claude / "projects"
+    projects.chmod(0o555)
+    try:
+        result = mac.cli("autopush")
+    finally:
+        projects.chmod(0o755)
+    assert result.exit_code == 0, result.output
+    assert (result.output + (result.stderr or "")).strip() == ""  # a hook prints nothing
+    crumb = json.loads((mac.sidecar_dir / "last-autorun.json").read_text())["push"]
+    assert crumb["outcome"] == "degraded"
+    assert "will not propagate" in crumb["detail"] and "restore write access" in crumb["detail"]
+
+
+def test_a_deletion_only_push_with_an_unchanged_anchor_publishes(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    mac.memory(folder, "a.md", "a\n")
+    gone = mac.memory(folder, "b.md", "b\n")
+    mac.push()
+    gone.unlink()
+    result = mac.push()
+    assert result is not None and result.total_deleted == 1 and not result.anchor_updated
+    assert tombstone_for(mac.published(), "b.md") is not None
+    assert mac.push() is None  # and then it settles
+
+
+def test_an_anchor_only_change_publishes_metadata_once_and_the_next_push_settles(mac):
+    import shutil
+
+    mac.checkout(CHECKOUTS["mac"])
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    mac.push()
+    anchor = mac.claude / "projects" / manifest.ANCHOR_NAME
+    anchor.unlink()  # the file is lost; every project file is still there
+    result, line = push_line(mac)
+    assert result is not None and result.anchor_updated and not result.content_changed
+    assert line == "Push: metadata updated."  # nothing was left out, so nothing else is said
+    assert anchor.exists() and mac.published()["tombstones"] == {}
+    assert (
+        mac.published()["sources"]["claude"]["root_ids"]["projects"] == anchor.read_text().strip()
+    )
+    again, line = push_line(mac)
+    assert again is None or "metadata updated" not in line
+    shutil.rmtree(mac.claude / "projects" / mac.folder_for(CHECKOUTS["mac"]))
+    assert mac.push().total_deleted == 1  # the settled anchor lets a real deletion mint again
+
+
+def test_an_unchanged_upgrade_push_bootstraps_anchors_before_the_first_deletion(mac):
+    mac.memory("-Users-kb-scratch", "a.md", "a\n")
+    mac.push()
+    mac.as_the_previous_release()
+    anchor = mac.claude / "projects" / manifest.ANCHOR_NAME
+    anchor.unlink()
+    result = mac.push()
+    assert result is not None and result.anchor_updated
+    assert anchor.is_file()
+    assert (
+        mac.published()["sources"]["claude"]["root_ids"]["projects"] == anchor.read_text().strip()
+    )
+    assert mac.push() is None
+
+
+@pytest.mark.parametrize("recovery", ["corrupt", "copies-only", "merged"])
+def test_a_recovered_or_merged_anchored_prior_never_mints_new_records(mac, recovery):
+    source = mac.home / "notes"
+    (source / "d").mkdir(parents=True)
+    mac.config["sync"]["sources"] = [
+        {"name": "notes", "path": str(source), "type": "generic", "include_dirs": ["d"]}
+    ]
+    for name in ("first", "second", "kept"):
+        (source / "d" / f"{name}.md").write_text(name)
+    mac.push()
+    (source / "d/first.md").unlink()
+    mac.push()
+    carried = mac.published()["tombstones"]["notes:d/first.md"]
+    (source / "d/second.md").unlink()
+    canonical = Path(mac.store) / manifest_key(mac.device_id)
+    if recovery != "corrupt":
+        canonical.with_name("manifest.json 2.enc").write_bytes(canonical.read_bytes())
+    if recovery == "corrupt":
+        canonical.write_bytes(b"corrupt")
+    elif recovery == "copies-only":
+        canonical.unlink()
+    mac.push()
+    assert mac.published()["tombstones"] == {"notes:d/first.md": carried}
+
+
+def test_a_push_with_an_unreadable_ledger_publishes_no_new_user_deletions(mac, monkeypatch):
+    source = mac.home / "notes"
+    (source / "d").mkdir(parents=True)
+    mac.config["sync"]["sources"] = [
+        {"name": "notes", "path": str(source), "type": "generic", "include_dirs": ["d"]}
+    ]
+    note = source / "d/note.md"
+    note.write_text("a")
+    mac.push()
+    note.unlink()
+
+    def unavailable(_peers):
+        return pullplan.Ledger(readable=False), OSError("isolated unavailable ledger")
+
+    monkeypatch.setattr(core, "load_ledger", unavailable)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+def test_left_out_files_name_a_missing_folder_and_a_pull_restores_them(mac, linux):
+    import shutil
+
+    a = mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    mac.memory(folder, "a.md", "a\n")
+    mac.memory(folder, "b.md", "b\n")
+    mac.push()
+    linux.checkout(CHECKOUTS["linux"])
+    (linux.claude / "projects" / linux.folder_for(CHECKOUTS["linux"])).mkdir(parents=True)
+    linux.pull()
+    linux.push()
+    mac.pull()
+
+    shutil.rmtree(mac.claude / "projects")  # the folder is missing (an unmounted volume)
+    result, line = push_line(mac)
+    projects = mac.claude / "projects"
+    assert result is not None and result.total_deleted == 0
+    assert result.left_out_clause == (
+        f"2 files left out because {projects} is missing; run mm pull to restore them."
+    )
+    assert line.endswith(result.left_out_clause)
+    assert mac.published()["tombstones"] == {}
+    mac.cwd = a
+    assert mac.pull().total_written == 2
+
+
+@needs_permissions
+def test_left_out_files_name_an_unreadable_folder_and_do_not_say_to_pull(tmp_path):
+    """The guard's third reason. A real push refuses before this (the snapshot cannot
+    list the folder), so it is pinned where the guard is, with the real permission bits."""
+    base = tmp_path / "notes-src"
+    (base / "d").mkdir(parents=True)
+    anchor_value = "0123456789abcdef0123456789abcdef"
+    manifest.write_anchor(base, "d", anchor_value)
+    cfg = {"name": "notes", "path": str(base), "type": "generic", "include_dirs": ["d"]}
+    prior = {
+        "sources": {
+            "notes": {"files": {"d/n.md": {"sha256": "a" * 64}}, "root_ids": {"d": anchor_value}}
+        }
+    }
+    local = {"sources": {"notes": {"files": {}}}}
+    ledger = pullplan.Ledger()
+    try:
+        assert (
+            core.compute_mint_guard(local, prior, [cfg], ledger).left_out == {}
+        )  # readable: a deletion
+        (base / "d").chmod(0o000)
+        guard = core.compute_mint_guard(local, prior, [cfg], ledger)
+    finally:
+        (base / "d").chmod(0o755)
+    assert guard.skip == {("notes", "d/n.md")} and guard.left_out == {"notes": {"d/n.md"}}
+    assert guard.clause() == (
+        f"1 file left out because {base / 'd'} cannot be read; restore read access."
+    )
+    assert "mm pull" not in guard.clause()
+
+
+def test_status_and_a_dry_run_do_not_count_left_out_files_as_deleted(mac):
+    import shutil
+
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    mac.memory(folder, "a.md", "a\n")
+    mac.push()
+    shutil.rmtree(mac.claude / "projects")
+    (mac.claude / "projects").mkdir()  # recreated empty: a new folder
+    for args in (("status",), ("push", "--dry-run")):
+        out = mac.cli(*args)
+        assert out.exit_code == 0, out.output
+        assert "deleted" not in out.output.replace("Nothing to push", ""), (args, out.output)
+    before = LocalBackend(mac.store).get(manifest_key(mac.device_id))
+    assert mac.cli("push", "--dry-run").exit_code == 0
+    assert LocalBackend(mac.store).get(manifest_key(mac.device_id)) == before
+    assert not (mac.claude / "projects" / manifest.ANCHOR_NAME).exists()  # previews only read
+
+
+def _orphan_blob(machine: Machine) -> str:
+    key = storage_keys.blob_key(machine.device_id, "f" * 64)
+    LocalBackend(machine.store).put(key, b"an orphan a GC would collect")
+    return key
+
+
+@pytest.mark.parametrize("left_out", [False, True], ids=["control", "files-left-out"])
+def test_post_push_gc_holds_while_files_are_left_out(mac, left_out):
+    """A push that left files out dropped their references without seeing them. Its sweep
+    would collect the only store copy of a file a pull could still restore, so it waits for
+    a push that lists them. The control proves a content push does sweep."""
+    import shutil
+
+    notes, scan, rel = add_source(mac, "generic")
+    mac.checkout(CHECKOUTS["mac"])
+    note = mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    mac.push()
+    sha = mac.published()["sources"]["claude"]["files"][f"projects/{WIRE}/memory/a.md"]["sha256"]
+    held_blob = storage_keys.blob_key(mac.device_id, sha)
+    orphan = _orphan_blob(mac)
+    backend = LocalBackend(mac.store)
+    assert backend.exists(held_blob)
+    if left_out:
+        shutil.rmtree(mac.claude / "projects")
+        (mac.claude / "projects").mkdir()  # new: a.md is left out, not deleted
+    else:
+        note.unlink()  # a real deletion under an unchanged anchor
+    (notes / rel).write_text("a content change, so the push sweeps\n")
+    result = mac.cli("push")
+    assert result.exit_code == 0, result.output
+    assert backend.exists(held_blob) is left_out
+    assert backend.exists(orphan) is left_out
+
+
+# ── a pull restores what a push left out ──────────────────────────────
+
+
+def _left_out_project(mac: Machine, linux: Machine, kind: str):
+    """The Mac's project is on a peer too; the Mac's `projects/` is then recreated empty."""
+    import shutil
+
+    if kind == "git":
+        checkout = mac.checkout(CHECKOUTS["mac"])
+        folder = mac.folder_for(CHECKOUTS["mac"])
+        linux.checkout(CHECKOUTS["linux"])
+        peer_folder = linux.folder_for(CHECKOUTS["linux"])
+        (linux.claude / "projects" / peer_folder).mkdir(parents=True)
+    else:
+        checkout = None
+        folder = "-Users-kb-scratch"
+    files = [mac.memory(folder, "a.md", "a\n"), mac.memory(folder, "b.md", "b\n")]
+    mac.push()
+    linux.pull()
+    linux.push()
+    shutil.rmtree(mac.claude / "projects")
+    (mac.claude / "projects").mkdir()
+    return checkout, folder, files
+
+
+@pytest.mark.parametrize("kind", ["git", "home"])
+def test_a_pull_outside_the_checkout_restores_the_files_a_push_left_out(mac, linux, kind):
+    _, folder, files = _left_out_project(mac, linux, kind)
+    result, line = push_line(mac)
+    assert result is not None and result.total_deleted == 0
+    assert result.left_out_clause.startswith("2 files left out because ")
+    assert mac.published()["tombstones"] == {}
+    assert mac.cwd is None  # the pull runs from the home folder, outside any checkout
+    restored = mac.pull()
+    assert restored.total_written == 2, restored
+    assert [f.read_text() for f in files] == ["a\n", "b\n"]
+
+
+def test_after_a_further_content_push_a_git_project_restores_only_inside_its_checkout(mac, linux):
+    """The documented limit: the folder owners a left-out push keeps last one publish."""
+    checkout, folder, files = _left_out_project(mac, linux, "git")
+    notes, scan, rel = add_source(mac, "generic")
+    push_line(mac)  # leaves the files out and keeps the project's folder owner
+    (notes / rel).write_text("a content change\n")
+    mac.push()  # a further content push, with no pull between
+    assert not any(f.exists() for f in files)
+
+    assert mac.pull().total_written == 0  # from the home folder the project is unplaced
+    assert not any(f.exists() for f in files)
+    mac.cwd = checkout
+    assert mac.pull().total_written == 2
+    assert [f.read_text() for f in files] == ["a\n", "b\n"]
+
+
+def test_an_outage_with_no_push_is_restored_by_a_pull_and_mints_nothing(mac, linux):
+    """`projects/` is missing and no push runs; a pull recreates it. The push after that
+    finds a folder with another token and reads nothing under it as deleted."""
+    import shutil
+
+    checkout, folder, files = _left_out_project(mac, linux, "git")
+    shutil.rmtree(mac.claude / "projects")  # missing again, as at the outage
+    mac.cwd = checkout
+    assert mac.pull().total_written == 2
+    assert [f.read_text() for f in files] == ["a\n", "b\n"]
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    assert mac.pull().total_applied == 0
+
+
+def test_a_restore_waiting_on_a_blob_is_not_minted_as_a_deletion(mac, linux):
+    """The only route for a never-restored file into a mint: it was held and published, then
+    lost in an outage, and the peer's blob is not here yet. The push must not tombstone it."""
+    checkout, folder, files = _left_out_project(mac, linux, "git")
+    backend = LocalBackend(mac.store)
+    for key in backend.list_keys("data/"):
+        backend.delete(key)  # no blob is reachable: the restore waits
+    mac.cwd = checkout
+    waiting = mac.pull()
+    assert waiting.total_written == 0 and waiting.total_waiting == 2, waiting
+    assert not any(f.exists() for f in files)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+
+
+def test_a_peers_file_that_was_never_delivered_here_mints_nothing(mac, linux):
+    mac.checkout(CHECKOUTS["mac"])
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    mac.push()
+    linux.checkout(CHECKOUTS["linux"])
+    folder = linux.folder_for(CHECKOUTS["linux"])
+    linux.memory(folder, "only-on-linux.md", "never reaches the Mac\n")
+    linux.push()
+    # The Mac never pulled it, so it is not in the Mac's prior; its next pushes mint nothing.
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "b.md", "b\n")
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    assert not any("only-on-linux" in rel for rel in mac.published()["sources"]["claude"]["files"])
+
+
+# ── a followed deletion, hardcoded exclusions, ancestry ───────────────
+
+
+def test_a_path_the_pull_deleted_mints_nothing_and_the_stamp_clears_when_published_again(trio):
+    spread(trio, "x.md", "v0\n")
+    trio.linux.push()  # linux's own manifest now lists x.md
+    trio.mac.pull()
+    trio.path(trio.mac).unlink()
+    trio.mac.push()
+    assert trio.linux.pull().total_deleted == 1
+    rel = f"projects/{trio.dirs['linux'].parent.name}/memory/x.md"
+    assert ledger_of(trio.linux, trio.mac).newest_stamp("claude", rel) == trio.mac.device_id
+
+    # x.md is in linux's prior and absent on disk, but linux only followed the deletion.
+    trio.write(trio.linux, "other.md", "something else changed\n")
+    trio.linux.push()
+    assert tombstone_for(trio.linux.published()) is None
+    assert ledger_of(trio.linux, trio.mac).newest_stamp("claude", rel) == trio.mac.device_id
+
+    # Published again, the stamp goes; a later hand deletion mints as any other.
+    trio.write(trio.linux, "x.md", "v0\n")
+    trio.linux.push()
+    assert ledger_of(trio.linux, trio.mac).newest_stamp("claude", rel) is None
+    trio.path(trio.linux).unlink()
+    trio.linux.push()
+    assert tombstone_for(trio.linux.published()) is not None
+
+
+def test_a_file_still_on_disk_that_only_the_hardcoded_exclusions_omit_mints_nothing(mac):
+    root, scan, rel = add_source(mac, "generic")
+    cache = root / scan / "module.pyc"  # "*.pyc" is excluded by mm, whatever the source says
+    cache.write_bytes(b"compiled")
+    mac.push()
+
+    def pretend_published(data: dict) -> None:
+        data["sources"]["notes"]["files"][f"{scan}/module.pyc"] = {
+            "sha256": sha_of("compiled"),
+            "size": 8,
+            "mtime": "2026-01-01T00:00:00+00:00",
+        }
+
+    mac.edit_published(pretend_published)  # a release that did not exclude it listed it
+    (root / rel).write_text("a change, so the push publishes\n")
+    mac.push()
+    assert mac.published()["tombstones"] == {}
+    assert cache.exists()
+
+
+def prefix16(text: str) -> str:
+    return sha_of(text)[:16]
+
+
+def test_a_published_file_lists_the_versions_it_was_built_on_newest_first(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    note = mac.memory(folder, "a.md", "v0\n")
+    key = f"projects/{WIRE}/memory/a.md"
+
+    def entry() -> dict:
+        return mac.published()["sources"]["claude"]["files"][key]
+
+    mac.push()
+    assert "from" not in entry()
+    note.write_text("v1\n")
+    mac.push()
+    assert entry()["from"] == [prefix16("v0\n")]
+    note.write_text("v2\n")
+    mac.push()
+    assert entry()["from"] == [prefix16("v1\n"), prefix16("v0\n")]
+
+    # An unchanged entry keeps the list it published, even when other files publish.
+    mac.memory(folder, "b.md", "b\n")
+    mac.push()
+    assert entry()["from"] == [prefix16("v1\n"), prefix16("v0\n")]
+
+
+def test_a_files_ancestry_is_capped_at_sixteen_versions(mac):
+    mac.checkout(CHECKOUTS["mac"])
+    folder = mac.folder_for(CHECKOUTS["mac"])
+    note = mac.memory(folder, "a.md", "v0\n")
+    key = f"projects/{WIRE}/memory/a.md"
+    mac.push()
+    for n in range(1, 21):
+        note.write_text(f"v{n}\n")
+        mac.push()
+    chain = mac.published()["sources"]["claude"]["files"][key]["from"]
+    assert len(chain) == 16
+    assert chain[0] == prefix16("v19\n") and chain[-1] == prefix16("v4\n")
+
+
+def test_the_internal_usage_source_publishes_no_ancestry():
+    ledger = pullplan.Ledger(untracked=frozenset({"mm-events"}))
+    ledger.hold("mm-events", "events/2026-11-01.jsonl", "a" * 64)
+    ledger.hold("notes", "n.md", "b" * 64)
+    local = {
+        "sources": {
+            "mm-events": {"files": {"events/2026-11-01.jsonl": {"sha256": "c" * 64}}},
+            "notes": {"files": {"n.md": {"sha256": "d" * 64}}},
+        }
+    }
+    core.stamp_ancestry(local, None, ledger)
+    assert "from" not in local["sources"]["mm-events"]["files"]["events/2026-11-01.jsonl"]
+    assert local["sources"]["notes"]["files"]["n.md"]["from"] == ["b" * 16]
+
+
+def test_a_push_that_loses_projects_mid_run_mints_nothing_and_a_pull_restores_the_files(
+    mac, linux, monkeypatch
+):
+    """`projects/` goes between the manifest load and the scan: the push sees an empty folder
+    it never published, so every file it cannot see is left out, in every project."""
+    from mind_meld import cli as cli_module
+
+    checkout, folder, files = _left_out_project(mac, linux, "git")
+    for f in files:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f.name.removesuffix(".md") + "\n")  # they are back on disk...
+    projects = mac.claude / "projects"
+    real = cli_module.build_manifest_v2
+
+    def vanish_then_scan(*args, **kwargs):
+        if projects.exists():
+            projects.rename(mac.claude / "projects.parked")
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli_module, "build_manifest_v2", vanish_then_scan)
+        result = mac.push()  # ...and then lost while the push is reading
+    assert result is None or result.total_deleted == 0
+    assert mac.published()["tombstones"] == {}
+    assert len(mac.published()["sources"]["claude"]["files"]) == 2  # nothing was dropped
+    (mac.claude / "projects.parked").rename(mac.claude / "projects.lost")
+    mac.cwd = checkout
+    assert mac.pull().total_written == 2
+    assert mac.published()["tombstones"] == {}
+
+
+def test_a_peer_cannot_plant_an_anchor_file_through_a_pull(mac, linux):
+    mac.memory("-Users-kb-scratch", "a.md", "a\n")
+    mac.push()
+
+    def plant(data: dict) -> None:
+        data["sources"]["claude"]["files"][
+            f"projects/@home-scratch/memory/{manifest.ANCHOR_NAME}"
+        ] = {"sha256": sha_of("a\n"), "size": 2, "mtime": "2026-01-01T00:00:00+00:00"}
+
+    mac.edit_published(plant)
+    result = linux.pull()
+    assert result.total_written == 1  # only a.md
+    assert not list(linux.claude.rglob(manifest.ANCHOR_NAME))
+
+
+def test_status_and_a_dry_run_say_what_a_push_would_leave_out(mac):
+    """The plan: the owner must act when files are left out, so `mm status` (its verdict) and
+    `mm push --dry-run` carry the same reason the push's outcome line does, instead of
+    "In sync" beside 0 local files and 1 remote."""
+    import shutil
+
+    mac.checkout(CHECKOUTS["mac"])
+    mac.memory(mac.folder_for(CHECKOUTS["mac"]), "a.md", "a\n")
+    mac.push()
+    shutil.rmtree(mac.claude / "projects")
+    (mac.claude / "projects").mkdir()
+    status = mac.cli("status")
+    assert status.exit_code == 0, status.output
+    assert "left out because" in first_line(status), first_line(status)
+    assert "In sync" not in first_line(status)
+    preview = mac.cli("push", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    assert "left out because" in " ".join(preview.output.split())
+
+
+# ── three machines, handoffs and reverts ──────────────────────────────
+
+
+def test_an_alternating_handoff_fast_forwards_each_side_without_a_conflict(trio):
+    """A edits and pushes V1; B pulls it, edits to V2 and pushes without ever publishing the
+    version it started from; A pulls: V2 was built on V1, which A holds, so A fast-forwards
+    and a line B deleted stays deleted."""
+    a, b = trio.mac, trio.linux
+    spread(trio, "MEMORY.md", "- one\n- two\n- three\n")
+    trio.write(a, "MEMORY.md", "- one\n- two\n- three\n- four\n")  # V1
+    a.push()
+    b.pull()
+    trio.write(b, "MEMORY.md", "- one\n- three\n- four\n")  # V2: B deletes "- two"
+    b.push()
+    result = a.pull()
+    assert (result.total_written, result.total_merged, result.total_conflicted) == (1, 0, 0)
+    assert trio.text(a, "MEMORY.md") == "- one\n- three\n- four\n"
+
+
+@pytest.mark.parametrize("tip_first", [False, True], ids=["chain-first", "tip-first"])
+def test_three_machines_with_a_lagging_peer_converge_in_either_pull_order(
+    mac, linux, linux2, tip_first
+):
+    """X edits V1, Y pulls it and edits V2, and Z (still at V0) pulls from both. `chain-first`
+    meets V1 then V2 (Z is linux2: mac, linux); `tip-first` meets V2 then V1 (Z is mac: linux,
+    then linux2). Neither order may read the older version as a conflict."""
+    if tip_first:
+        x, y, z = linux2, linux, mac
+    else:
+        x, y, z = mac, linux, linux2
+    trio = Trio("home", mac, linux, linux2)
+    trio.write(mac, "MEMORY.md", "- one\n- two\n")
+    mac.push()
+    for machine in (linux, linux2):
+        machine.pull()
+        machine.push()  # everyone lists the file: each has a base for every peer
+    mac.pull()
+    trio.write(x, "MEMORY.md", "- one\n- two\n- five\n")  # V1 adds "- five"
+    x.push()
+    y.pull()
+    trio.write(y, "MEMORY.md", "- one\n- two\n- four\n")  # V2 deletes "- five", adds "- four"
+    y.push()
+
+    result = z.pull()
+    assert result.total_conflicted == 0 and result.total_merged == 0, result
+    # V2, with "- five" still deleted: V1 is V2's own ancestor, not a rival edit.
+    assert trio.text(z, "MEMORY.md") == "- one\n- two\n- four\n"
+    assert not list(z.claude.rglob("*sync-conflict*"))
+
+
+def test_an_exact_revert_with_a_fresh_mtime_propagates(trio):
+    """Rule 4 before rule 5: A reverts to the bytes of an earlier version. The revert is built
+    on the current version (it is in `from`), so B fast-forwards to it even though B has
+    held those very bytes before."""
+    a, b = trio.mac, trio.linux
+    spread(trio, "x.md", "good\n")
+    trio.write(a, "x.md", "bad edit\n")
+    a.push()
+    b.pull()
+    assert trio.text(b) == "bad edit\n"
+    trio.write(a, "x.md", "good\n")  # exactly the earlier bytes, a fresh mtime
+    a.push()
+    result = b.pull()
+    assert result.total_written == 1 and result.total_conflicted == 0, result
+    assert trio.text(b) == "good\n"
+
+
+@pytest.mark.parametrize("name", ["topic.md", "MEMORY.md"])
+def test_inherited_ancestry_survives_two_sequential_handoffs(trio, name):
+    """C never held A's V1; its inherited provenance must still reach A via V3."""
+    a, b, c = trio.mac, trio.linux2, trio.linux  # A encounters C before B.
+    spread(trio, name, "- base\n")
+    for machine in (b, c):
+        machine.push()
+    a.pull()
+    trio.write(a, name, "- base\n- removed\n")  # V1
+    a.push()
+    b.pull(from_device=a.device_id)
+    assert trio.text(b, name) == "- base\n- removed\n"
+    trio.write(b, name, "- base\n- middle\n")  # V2 removes a line from V1.
+    b.push()
+    c.pull(from_device=b.device_id)  # C misses A entirely, and only writes V2.
+    assert trio.text(c, name) == "- base\n- middle\n"
+    trio.write(c, name, "- base\n- final\n")  # V3
+    c.push()  # Reloads C's committed database, so an in-memory fix is insufficient.
+
+    preview = a.cli("pull", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    result = a.pull()
+    assert (result.total_written, result.total_merged, result.total_conflicted) == (1, 0, 0)
+    assert trio.text(a, name) == "- base\n- final\n"
+    assert "Would write 1, merge up to 0, conflict 0" in preview.output, preview.output
+    assert not list(a.claude.rglob("*sync-conflict*"))
+    assert a.pull().total_applied == 0
+    assert trio.text(a, name) == "- base\n- final\n"
+
+
+@pytest.mark.parametrize("peer_base_known", [False, True])
+@pytest.mark.parametrize("publish_intermediate", [False, True])
+def test_a_handoff_exact_revert_propagates_when_the_origin_missed_the_intermediate_push(
+    trio, peer_base_known, publish_intermediate
+):
+    a, b = trio.mac, trio.linux
+    spread(trio, "x.md", "good\n")
+    b.push()
+    if peer_base_known:
+        a.pull()  # A's base for B stays at V0 throughout B's later work.
+    trio.write(a, "x.md", "bad edit\n")
+    a.push()
+    b.pull()
+    assert trio.text(b) == "bad edit\n"
+    if publish_intermediate:
+        b.push()  # A does not pull this publication.
+    trio.write(b, "x.md", "good\n")
+    b.push()
+
+    files = b.published()["sources"]["claude"]["files"]
+    entry = next(info for rel, info in files.items() if rel.endswith("/memory/x.md"))
+    assert prefix16("bad edit\n") in entry.get("from", [])
+    preview = a.cli("pull", "--dry-run")
+    assert preview.exit_code == 0, preview.output
+    assert "Would write 1, merge up to 0, conflict 0" in preview.output, preview.output
+    result = a.pull()
+    assert result.total_written == 1 and result.total_conflicted == 0, result
+    assert trio.text(a) == trio.text(b) == "good\n"
+    a.push()
+    for machine in (a, b):
+        again = machine.pull()
+        assert again.total_written == again.total_merged == again.total_conflicted == 0, again
+        assert trio.text(machine) == "good\n"

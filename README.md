@@ -16,6 +16,114 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Fast-forward peer edits and propagated deletions (Track 91A):** a peer's edit to a file
+you have not changed since you last synced it now simply applies (no union, no conflict
+copy), and a file deleted on one machine is now deleted on the others, each keeping a
+30-day recovery copy. Before this release a deletion only stopped a missing file from
+coming back, and every peer edit to a file both machines held was a conflict.
+
+**Update every machine, then run `mm push` and then `mm pull` on each, before anyone
+deletes a file you care about.** Deletions are provable only after a push on this release
+has published each folder's marker, and a pull on this release has recorded what each
+peer holds; a deletion made before that does not propagate (the first push after updating
+mints no deletion records, and a record from an older release carries no content hash, so
+it keeps its old effect of stopping a re-download and never deletes). Go one machine at a
+time, in any order.
+
+- **Update pinned Codex exclusions before syncing.** If your config has an explicit
+  `[[sync.sources]]` entry for `codex`, run `mm migrate-config --dry-run`, then
+  `mm migrate-config` on each machine. This appends `plugins/cache/*` and
+  `plugins/.remote-plugin-install-staging/*` to its exclusions, preserving your custom
+  exclusions. Codex manages these installed plugin files itself. Then run `mm push` on
+  each machine; removing them from sync leaves the local files in place and publishes
+  no deletion records. Configs using the default sources get these exclusions automatically.
+- **What a deletion removes.** A deletion record carries the sha256 of the version that was
+  deleted: the newest version this machine held for which it knows the full hash. If the
+  full hash is unknown, no record is published. A machine deletes its copy only when that
+  file's bytes equal that hash and it
+  last synced exactly that version from the machine that deleted it; a file you changed, a
+  same-named file with other bytes, or anything else stays. The deleted file is moved to
+  `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30
+  days. The pull's last line names the folder. See [Recovering a deleted
+  file](#recovering-a-deleted-file).
+- **A fast-forward has no recovery copy.** It replaces your unchanged file with the peer's
+  bytes, so a bad edit on one machine spreads to the others. When both machines changed a
+  file, `.jsonl` and `MEMORY.md` are still unioned (a line deleted on one side returns when
+  both sides changed the file) and any other file still gets a conflict copy.
+- **A pull no longer restores a file this machine held and removed by hand.** Deleting a
+  synced file is a deletion your next push publishes, so an accidental removal spreads at
+  the next push; copy it back from a recovery folder (see above) and push from the machine
+  that deleted it.
+- **Conflict copies that exist today do not clear by themselves.** `mm pull` stops
+  reporting a copy it already holds, but `mm conflicts` keeps listing it until you run
+  `mm resolve` on each one (it needs a terminal).
+- **A peer edit with an older timestamp is held.** When a peer's version was built on
+  yours but carries an older mtime (a machine restored from backup), pull leaves your file
+  alone and the line says `N older peer edits not applied`; `mm pull --verbose` lists them.
+  `mm diag` shows the last pull's observations, including both mtimes, labeled as possibly
+  stale; it does not fetch the peer's current files.
+  Compare both versions, then run `touch <file>` and `mm push` on the machine whose version
+  should win.
+- **`.mind-meld-anchor`.** mm keeps this small file (a random token) in each folder it
+  scans: for example `~/.claude/projects`, `~/.codex/skills`, `~/.codex/plugins` and
+  `~/.gstack/projects`, and the source folder itself (`~/.codex`, `~/.gstack`) for
+  sources that sync individual files there. It is never synced; leave it. It is how a push tells "a file was removed" from "the whole
+  folder was removed, recreated or restored from a backup". In the second case the push
+  mints no deletions and says `N files left out because <folder> is new; run mm pull to
+  restore them`. An anchor that cannot be written (a read-only folder) means deletions under
+  it will not propagate; the push says so. If a restore tool repeatedly rewrites the token,
+  push reports the repeated mismatch and `mm diag` records it; check that tool's restore
+  rules rather than repeatedly pushing.
+- **Rollback.** The previous release ignores the new `state.db` tables and the new manifest
+  fields; files already deleted stay deleted, with their copies. An older release's walker
+  publishes `.mind-meld-anchor` from a scan root as an ordinary file that differs on every
+  machine, so remove those files before going back, on each machine:
+
+  ```bash
+  find ~/.claude ~/.codex ~/.gstack -name .mind-meld-anchor -type f -print -delete
+  ```
+
+  Add any other synced source folder that `mm sources` lists.
+
+A two-machine recipe that exercises all of it (Mac A and Mac B; it uses a throwaway file under
+the default `gstack` source, so check `mm sources` shows `gstack` enabled on both):
+
+```bash
+# On Mac A, then Mac B (once each, in order)
+mm update && mm push           # Push: metadata updated.     (the new .mind-meld-anchor tokens; or N content changes published)
+mm pull                        # Pull: no changes.           (or N files applied)
+
+# On Mac A: create a file and share it
+mkdir -p ~/.gstack/analytics && echo "recipe v1" > ~/.gstack/analytics/mm-recipe.md
+mm push                        # Push: 1 content change published.
+
+# On Mac B: receive it
+mm pull --verbose              # Includes "flushed N files in X.XXs", then Pull: 1 file applied.
+cat ~/.gstack/analytics/mm-recipe.md   # recipe v1
+
+# On Mac A: delete it, preview, publish
+rm ~/.gstack/analytics/mm-recipe.md
+mm push --dry-run              # ... - 1 deleted ... Dry run complete. Nothing was changed except the local lock file.
+mm push                        # Push: 1 content change published.
+
+# On Mac B: preview, then follow the deletion
+mm pull --dry-run              # delete  analytics/mm-recipe.md   ...   1 would be deleted
+mm pull                        # Pull: 1 file deleted because Mac A deleted it; copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file.
+ls ~/.gstack/analytics/mm-recipe.md    # No such file or directory
+
+# Recover it onto Mac A, the machine that deleted it (a copy put back only on Mac B stays there)
+# On Mac B: send the copy to Mac A by any means (scp shown; <stamp> is the folder the pull line named)
+scp ~/.config/mind-meld/deleted/<stamp>/gstack/analytics/mm-recipe.md macA:/tmp/mm-recipe.md
+# On Mac A: put it back without overwriting anything newer, then publish
+cp -n /tmp/mm-recipe.md ~/.gstack/analytics/mm-recipe.md
+mm push                        # Push: 1 content change published.
+
+# On Mac B: the file comes back
+mm pull                        # Pull: 1 file applied.
+```
+
+Repeat the recipe with the Macs' roles reversed, and note the verbose flush time on each receiving Mac.
+
 **Shared Claude project memory (Track 90A):** Claude keeps a project's memory under a
 folder named for the checkout's absolute path, so the same repository at two paths, or
 on a Mac and a Linux box, was two projects. mm now publishes a project that has a
@@ -129,7 +237,9 @@ copies that already synced:
 4. Delete only confirmed copies that no tool still uses, on every Mac. Wait for
    dormant Macs to complete steps 1–3 too. Leave the explicit exclusions in
    place to prevent stale copies returning. Deleting a
-   still-published unmarked copy without step 3 can propagate a deletion.
+   still-published unmarked copy without step 3 can propagate a deletion: a Mac that
+   holds identical bytes deletes its copy (with a 30-day recovery copy) once this
+   release has run on it.
 
 **Undelivered content is waiting, not failed (Track 87A):** on a Syncthing
 folder a manifest can arrive before its blobs, or a file can be replaced while
@@ -395,9 +505,9 @@ A project's Claude memory lands only where mm can place it: in a Claude project 
 
 Push and pull on each Mac to exchange changes according to each file's sync rules:
 
-- **`.jsonl` files** deep-merge by line-union (deduped). Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate — this is why telemetry, learnings, and timeline files stay coherent across devices.
-- **Other divergent files** use mtime-skip: if your local file is newer than the remote, pull leaves it alone. Otherwise, with the default `keep-both` mode, your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). See [Handling conflicts](#handling-conflicts) below.
-- **Deletions** propagate via tombstones in the manifest. A tombstone stops a missing file from being restored from an older peer snapshot; it does not itself delete a file that is already on the receiving Mac.
+- **`.jsonl` files** deep-merge by line-union (deduped) when both sides changed or the no-base fallback applies; fast-forward takes the peer's bytes directly. Records with a string `ts` sort first by that string, then by the full line; every other line follows in lexical order. **`MEMORY.md`** is a plain lexical line-union and does not consult `ts`. Entries from all machines accumulate through these merges — this is why telemetry, learnings, and timeline files stay coherent across devices.
+- **Other files** follow what each Mac last synced. If only the peer changed a file, pull applies the peer's version (no merge, no conflict copy, no recovery copy of the bytes it replaces). If you changed it and the peer did not, pull leaves yours. If both changed it, with the default `keep-both` mode your local file stays at the canonical path and the remote version is saved as `<stem>.sync-conflict-<ts>-v1-<device>.<ext>` sitting next to it (Syncthing convention). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) falls back to the older rule, where a local file newer than the remote is left alone. See [Handling conflicts](#handling-conflicts) below.
+- **Deletions** propagate. A tombstone in the manifest carries the sha256 of the version that was deleted: it stops a missing file from being restored from an older peer snapshot, and a receiving Mac whose copy has exactly those bytes, last synced from the deleting Mac, moves it into `~/.config/mind-meld/deleted/` for at least 30 days instead of keeping it. A file you changed, or a record from a release before 91A (no hash), is never deleted. See [Recovering a deleted file](#recovering-a-deleted-file).
 
 After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then confirm one selected file you edited on A is present on B.
 
@@ -445,7 +555,7 @@ mm autopull
 \`\`\`
 
 - **No output:** Synced (or already in sync). Continue silently.
-- **Any output:** Surface conflicts, warnings and their suggested fixes.
+- **Any output:** Surface conflicts, deletions, warnings and their suggested fixes.
 
 At the **end of each conversation** (when the user is wrapping up, says goodbye,
 or you've completed the requested task), run:
@@ -473,7 +583,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 Mind Meld treats Codex as a first-class peer of Claude Code. Muse and Antigravity are the other usage-reader hosts (see [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
-- `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`.
+- `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
 - Enabling the `codex` source also lets the fleet-retro capture read that host's local usage records to publish **aggregate token counts per day** (no prompts, transcripts, paths, or tool output ever leave the machine). Decline the source and its records are never opened. By default that also stops maintenance of a skill link in that host's skills directory; an explicit `[skills] agents` grant is the deliberate exception. `mm enable-source agy` is the corresponding verb: it adds a scoped Antigravity source (`skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md`) and opts this Mac into reading step token totals from local conversation databases. Session databases, settings, and chat history stay on the Mac.
 - The bundled `/retro-fleet` skill is installed for an agent when that agent's sync source is enabled — on `mm init`, `mm push`, and `mm install-skills`. To keep a link maintained without enabling sync or usage reading: `mm install-skills --agent <key>`.
@@ -563,25 +673,26 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm init` | Join the fleet: verify the passphrase against the key header in the storage folder, register this device, save config and pull. Stops and writes nothing until the key header has arrived |
 | `mm init --new-fleet` | First machine of a new fleet only: create the key header (`mm-crypto-init`) and `.stignore` in an empty folder |
 | `mm push` | Sync content and refresh consented host usage. Exit 0 means content sync succeeded regardless of capture outcome; see [capture outcomes](#host-usage-capture) |
-| `mm push --dry-run` | Preview publication and deletions; changes nothing except the local lock file |
+| `mm push --dry-run` | Preview publication and deletions (files a recreated scan folder hides are not counted as deletions); changes nothing except the local lock file |
+| `mm pull --dry-run` | Preview what a pull would write, merge, conflict, delete or hold back as `older` (add `--verbose` for why a file with a deletion record is kept: `keep (<reason>)`); changes nothing except the local lock file |
 | `mm recapture [WINDOW]` | Redo this Mac's git capture for WINDOW (default `30d`, same as `mm init`). Safe to re-run — commits dedup fleet-wide on (remote, sha). Restores omitted commits; cannot remove rows already filed under a wrong remote. Partial recovery exits 4. If an mm-events file is held because it is still changing, the rows stay local and the command exits 1; run `mm push` once the file settles. Retros window by the COMMIT's date, not by when mm captured it |
-| `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail |
+| `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
-| `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted. Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
+| `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
-| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup; a missing own manifest skips blob collection with a warning |
+| `mm gc` | Delete this device's orphaned blobs using its raw manifest and run local retention cleanup (including recovery copies of deleted files older than 30 days); a missing own manifest skips blob collection with a warning |
 | `mm gc --dry-run` | Preview this device's orphan blobs plus temporary, events, and token-cache retention cleanup without deleting; each reaper reports candidates and any repairs or skips |
 | `mm gc --conflicts` | Also delete redundant `.sync-conflict-*` copies older than 30 days. Live conflicts are never reaped at any age: a sidecar whose canonical file differs, or is missing (the resolver still offers `(p)romote`), or cannot be hashed, is preserved |
 | `mm sources` | List configured sync sources |
-| `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
+| `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
 | `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
-| `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff). Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
+| `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff); needs a terminal. Run it on each conflict copy that exists when you upgrade; they do not clear by themselves. Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours. `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. `--set-model-price` / `--mark-pricing-verified` record local pricing overrides; see [Pricing refresh and local overrides](#fleet-retro-retro-fleet). |
 | `mm install-skills` | Force-check the `retro-fleet` skill link for every *authorized* agent and report every agent's outcome, including skipped (declined) rows. Creates missing links, repairs dangling ones, and re-points links left over from an old install onto the store at `~/.local/share/mind-meld/agent-skills/retro-fleet/`. A file of your own, or a link to somewhere Mind Meld does not recognize, is never overwritten — it is reported with the cause and the fix. `--agent KEY` (repeatable) grants and persists skill-link maintenance for that agent without enabling sync or usage reading, then installs every authorized agent. Bare invocation with no config is fresh-machine setup (install all available); with a config it honors `[skills]`. Restart the agent afterwards so it reloads SKILL.md. |
 
@@ -630,7 +741,13 @@ content change. Other explicit outcomes include `Push: no content changes.`,
 `Push: no enabled sources.`, `Pull: no changes.`, `Pull: no peer devices.`
 and `Pull: no enabled sources.`
 Pull counts applications across selected peers/sources, not guaranteed unique
-paths. Conflict copies are already included in applied files; skipped and failed
+paths. A deletion a peer made adds `; 3 files deleted because Mac B deleted them;
+copies in ~/.config/mind-meld/deleted/<stamp> for 30 days; see ...#recovering-a-deleted-file`
+(the clause leads the line when nothing else applied, and `peers` replaces the name when
+several machines deleted); `mm pull --verbose` lists the paths. A peer edit held back
+as `older` adds `; 1 older peer edit not applied`. A push whose scan folder was
+recreated says `Push: metadata updated; 12 files left out because
+/home/kb/.claude/projects is new; run mm pull to restore them.` Conflict copies are already included in applied files; skipped and failed
 outcomes are separate. A scoped pull makes no claim about other sources or peers.
 Content a sync tool has not delivered yet is **waiting**, not failed: the line
 gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
@@ -673,8 +790,10 @@ notice finish before the final line. Data-at-risk and actionable warnings stay
 visible: apply/fsync failures, kept conflict copies, corrupt/unsafe peer skips,
 recovery issues, large sync growth, config migration, missing custom mm-events
 folders, unavailable history/run evidence, and update failure/nudges. Successful `autopush` and
-`autopull` emit nothing; failures/warnings and their existing status breadcrumbs
-remain available. Previews retain their read-only scope and completion trailer.
+`autopull` emit nothing, except that an `autopull` which deleted files prints the
+deletion line above as one `mm:` line on stderr (deleted files are data at risk) and
+records the folder in its breadcrumb; failures/warnings and their existing status
+breadcrumbs remain available. Previews retain their read-only scope and completion trailer.
 
 
 ### Status verdicts
@@ -814,8 +933,8 @@ add an `exclude_patterns` glob such as `<folder>/*` instead. The freeze also
 ends, with the same effect, when this Mac's previous manifest no longer lists
 those entries: after disabling and re-enabling the source, `mm recover
 --abandon-manifest`, or recovery from a peer or a manifest whose blobs are gone.
-Pull never writes peer files into a local checkout (and, being additive, never
-deletes local files anywhere), and `mm diff` previews the same view. Both check
+Pull never writes peer files into a local checkout, nor deletes below one (a deletion
+record under a checkout is skipped like its files), and `mm diff` previews the same view. Both check
 only the local folders above incoming paths. An attended `mm pull` (not
 `--dry-run` or `autopull`) records one `excluded` log entry per checkout root
 and peer, whether that peer advertised files or only deletion records there.
@@ -860,7 +979,7 @@ content-changing push's GC. [Measurement and matching caveats](docs/invariants/s
 Those directory names are skipped at any depth inside a project; removing a
 default glob brings back the migration prompt. [Existing installs: v1.8.0 steps](#v180-scope-trim).
 
-This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** on pull (deduped; string `ts` first, then full-line lexical fallback). Append-only telemetry from 3 machines converges cleanly into one timeline.
+This covers the common cross-machine cases — in particular, `/retro global` sees activity from all your Macs because `analytics/skill-usage.jsonl`, `analytics/eureka.jsonl`, and `projects/<slug>/timeline.jsonl` are all `.jsonl` files that **set-union merge** divergent additions on pull (deduped; string `ts` first, then full-line lexical fallback), or fast-forward when only the peer changed them. Append-only telemetry from 3 machines converges cleanly into one timeline.
 
 **Browser profiles are skipped:** a directory holding a regular, non-symlink Chromium or Electron `Local State` file (a `chrome-profile`, a signed-in test profile, an Electron `user-data` directory) is never synced. That includes an include that starts inside the profile, and a file selected when the source has no `include_dirs`. See [Upgrading](#upgrading) for removing copies that synced before.
 
@@ -1136,7 +1255,11 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-For a divergent file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it. If your local file is newer than the remote (by mtime), pull leaves it alone — convergence happens on the next push.
+A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` applies the peer's version as it is (a fast-forward: no union, no conflict copy, and no recovery copy of the bytes it replaces, so a bad edit on one Mac spreads to the others). If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) uses the older rule for it: a local file newer than the remote (by mtime) is left alone and convergence happens on the next push.
+
+A peer edit that was built on your version but carries an **older mtime** than your file, as a machine restored from a backup publishes, is *not applied*. The pull line says `N older peer edits not applied` and `mm pull --verbose` lists them; compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
+
+**Conflict copies that exist when you upgrade do not clear by themselves.** A pull on the new release no longer counts or reports a copy it already holds, but `mm conflicts` keeps listing it until you run `mm resolve` on each one; it needs a terminal. After `(l)ocal`, `(r)emote` or `(m)erge` the file stops conflicting.
 
 Managed sidecars are latest-per-peer, not an archive. Unchanged peer content reuses the existing sidecar without cleaning up extras. Changed content publishes a new sidecar first, then removes prior same-peer copies for that file whose contents it could read and verify as different. Unreadable copies remain. If publication fails, local and prior copies remain. If only cleanup fails, the new copy is already saved and extras remain — `mm conflicts` / `mm resolve` can inspect them. Edits made inside a managed sidecar are subject to that replacement; promote or copy the sidecar out of managed naming to keep a durable document.
 
@@ -1146,19 +1269,22 @@ Managing conflicts:
 
 - `mm conflicts` — list every `.sync-conflict-*` file across your sources, with conflict age (when mm wrote the copy), peer-edit age (when the other Mac last saved the file), and canonical sibling.
 - `mm resolve` — walk each conflict interactively. Shows color LOCAL/REMOTE banners (with peer-name attribution when the conflict file's device prefix matches a registered peer), created/modified timestamps for each side plus a `-> SIDE is newer by N` recency verdict, a 3-number divergence summary, the unified diff, and prompts: `(m)erge` (accept LCS-merged result) / `(l)ocal` (keep your edits) / `(r)emote` (overwrite with peer's bytes) / `(n)ewer` (keep whichever was modified more recently) / `(p)romote` (keep BOTH — give the conflict file its own first-class filename) / `(s)kip` (leave both files) / `(a)bort` (stop the walk). The default key is always `(s)kip` — Enter never auto-accepts a merge or a recency guess. The merge uses LCS(local, remote) as a synthetic ancestor so additive edits on either side land cleanly; same-region edits show as `<<<<<<<` markers and (m) stays available. Binary content suppresses (m); `(n)ewer` is offered only when both sides' mtimes are readable and re-prompts on an exact tie (it never guesses). The remote side's "created" is shown as `pulled` — it is the local sync time, not the peer's real creation (the manifest carries only modified time). Acquires the mm lockfile so autopull can't race your decision. `c` / `f` are rejected with exit 1; other unrecognized input, including `b` / `both` (alias removed in 1.0.0), skips silently.
-- `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both. Shows the same per-side timestamps + recency verdict (display only — no `(n)ewer` shortcut here, since pull already keeps your file when it is the newer one).
+- `mm pull --conflict-mode prompt` — prompt per-conflict during the pull itself instead of auto keep-both. Shows the same per-side timestamps + recency verdict (display only — no `(n)ewer` shortcut here; the verdict line says which side is newer). An inline `(l)ocal` is remembered only if the pull is not aborted: `(a)bort` records nothing, so the next pull asks again.
 - `mm pull --conflict-mode fail` — preflight and exit 3 before applying any file if conflicts or local failures are predicted. For a write-free CI check use `mm pull --dry-run --conflict-mode fail`: 0 no conflicts predicted, 1 stopped, 3 conflicts/failures predicted (2 remains usage error). Two peers changing a mergeable file do not by themselves cause a conflict.
 - `mm gc --conflicts` — reap redundant conflict copies older than 30 days. A sidecar is only reapable once the conflict has converged (canonical exists and its bytes are identical); a live conflict, a missing canonical, or a file mm cannot hash is preserved at any age.
 - `mm diff` — compares local files with this Mac’s last push, or `--from DEVICE`. Use `mm pull --dry-run` to preview incoming changes from all selected peers.
 
 ## Troubleshooting
 
+<a id="history-database"></a>
 ### History database (state.db)
 
 History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
 (a directory mm creates is 0700; an existing `~/.config/mind-meld` keeps its
 mode). It records pull/push outcomes and self-upgrades, keeping the newest
-20,000 rows per known (verb, action) class. Excluded/uploaded traffic
+20,000 rows per known (verb, action) class. The same file holds the pull ledger:
+which version of each file this Mac last synced from each peer, and the versions it
+has held. The ledger is rebuildable (see the remedy below). Excluded/uploaded traffic
 cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
 workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
 rows in one snapshot, closes the connection, then prints; memory grows with
@@ -1194,8 +1320,8 @@ synchronous=FULL, without macOS fullfsync; it makes no hard power-loss durabilit
 claim. A killed process can lose up to 999 buffered rows; power loss can also
 corrupt the database.
 
-For a damaged database **while it holds history only**, with no mm running,
-move the database and all its companion files aside together:
+For a damaged database, with no mm running, move the database and all its companion
+files aside together:
 
 ```bash
 history_save="$HOME/mm-history-backup/state-$(date +%Y%m%d-%H%M%S)"
@@ -1206,10 +1332,108 @@ done
 ```
 
 History recorded since import is lost from `mm log`; the next write re-imports
-the remaining legacy JSONL. Preserve the moved files for investigation. This
-remedy expires before Track 91A stores a per-peer sync base in `state.db`.
-That Track has to supply recovery for the base before this move-aside is safe.
+the remaining legacy JSONL. Preserve the moved files for investigation.
 
+**Losing the ledger loses nothing you cannot rebuild.** The next `mm pull` records
+the last-synced version again for every file whose bytes match a peer's. Until then
+mm applies the older mtime and union rule for those files (a deleted line can return
+through the union) and **deletes no file**. Recovery copies of deleted files live
+outside `state.db` (`~/.config/mind-meld/deleted/`) and are untouched. One residual:
+the record that stops a Mac from publishing a second deletion for a file it deleted
+because a peer did lives in this database too, so after a loss one Mac can publish a
+second record for such a file. It names the same bytes, so it deletes only identical
+copies; "no file is deleted" holds for that Mac's own pulls only.
+
+`mm: notice: <reason>. Pull ledger unavailable; some sync history may not have been
+recorded. Completed file changes remain` means the ledger could not be read or written
+this time: wait for the other mm command (busy), run `mm update` (a newer schema), or move
+the database aside (damaged or interrupted). A read failure uses the fallback rule and
+deletes nothing; a later write failure does not undo changes already completed.
+`mm autopull` and `mm autopush` record it as `degraded` instead of printing it.
+
+
+### Recovering a deleted file
+
+When a peer deletes a file and your copy is byte-identical to the version it deleted,
+`mm pull` moves your copy into a recovery folder instead of unlinking it, and its last
+line says where:
+
+```text
+Pull: 3 files deleted because Mac B deleted them; copies in ~/.config/mind-meld/deleted/20261101-181530-3fa9 for 30 days; see https://github.com/kbitz/mind-meld#recovering-a-deleted-file.
+```
+
+`mm autopull` prints the same line (one `mm:` line on stderr), `mm pull --verbose` lists
+each path, and `mm log --action deleted` finds them later (each row records the folder).
+The `.mind-meld-log.md` of an affected Claude project lists them too.
+
+**Where the copy is.** `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>`,
+one folder per pull; `<source>` is the sync source (`claude`, `gstack`, ...) and `<path>`
+the file's path inside that source's folder on the machine that followed the deletion.
+`mm sources` maps each source to its folder: the `Path` column is the source root on
+that machine. The copy is the plaintext file itself
+(moved, not re-encrypted), stored `0600`. It depends on nothing in the shared store, so
+`mm gc` blob collection and a lost `state.db` do not touch it.
+
+**Put it back where the deletion started, then push.** The file's deletion came from one
+machine (the one the pull line names). Restore it there; a copy put back only on a machine that
+followed the deletion stays local until the deletion record expires, because the record
+still suppresses that file from every other machine. First transfer the recovery folder to
+the origin, preserving the folders inside it. Then choose the copy's path and the origin's
+destination separately. They can differ: a Claude project under `/home/kb/myapp` on Linux
+has a `projects/-home-kb-myapp/` folder, while the same project under `/Users/kb/myapp` on
+the origin Mac has `projects/-Users-kb-myapp/`. A shared git project can also live at
+different checkout paths. Check the origin's existing project folder or its checkout
+path; do not create a second project folder using the follower's name. For sources such
+as `gstack`, both paths are usually the same.
+
+Run this on the origin, setting each path for your file. `cp -n` preserves a newer file
+already at the destination:
+
+```bash
+copies="$HOME/mm-recovery-20261101-181530-3fa9"  # the transferred recovery folder
+source_name=claude                              # mm sources: Name
+source_dir="$HOME/.claude"                     # mm sources: Path on the origin
+copy_path="projects/-home-kb-myapp/memory/user_role.md"    # inside the follower's copy
+origin_path="projects/-Users-kb-myapp/memory/user_role.md" # inside the origin's source
+mkdir -p "$(dirname "$source_dir/$origin_path")"
+cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
+mm push
+```
+
+**The copy is on a machine that followed the deletion.** The origin removed the file
+itself and holds no copy. Find the folder on any machine that printed the line
+(`mm log --action deleted`), transfer it to the origin by any means, then run the commands
+above there. After the push, each other machine gets the file back at its next `mm pull`, even if the restored file keeps
+its old mtime.
+
+**Copies are safe to delete.** Delete a folder you no longer need
+(`rm -rf ~/.config/mind-meld/deleted/<folder>`). Thirty days is a **minimum**: `mm gc`
+and every real `mm pull` remove whole folders older than 30 days by the date in the
+folder's name, using this Mac's clock. `mm gc --dry-run` lists them. If a pull cannot
+create the recovery folder, it leaves the local file and says so. A failure after a file
+has moved can leave its bytes in that folder; the warning names the recovery path.
+
+**Uninstalling.** `rm -rf ~/.config/mind-meld` removes these copies with the rest of mm's
+local state. The `.mind-meld-anchor` files stay in each scan root; they are harmless and
+can be deleted by hand.
+
+**Many files were deleted that should not have been (incident runbook).** There is no
+setting that stops a Mac from following deletions, so act in this order:
+
+1. On every Mac that has not pulled yet, stop the `mm autopull` hook (take the line out
+   of the agent's global instructions, or run `mm disable-source <name>` for the affected
+   source) and do not run `mm pull`.
+2. Preview on each of those Macs with `mm pull --dry-run`. Lines starting `delete` are
+   the files it would remove; add `--verbose` for `keep (<reason>)` lines that say why a
+   file with a deletion record is staying.
+3. On Macs that already followed it, collect the files from their recovery folders (above),
+   copy them to the origin Mac, restore them there with `cp -n`, and `mm push`.
+4. Only then put the hook back (and `mm enable-source <name>` for any source you disabled)
+   and pull.
+
+A removal below a live scan folder is a real deletion on every Mac holding identical
+bytes: one project folder, or `rm -rf ~/.claude/projects/*`, which leaves the marker file
+behind. mm cannot tell a deliberate cleanup from a mistake.
 
 ### A gstack file doesn't reach my other Mac
 
@@ -1469,7 +1693,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 
@@ -1487,7 +1711,13 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
-**A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it. A tombstone suppresses restoration from peers that still advertise the file; it does not actively delete a copy that is already present. Push on the deleting Mac, then pull elsewhere.
+**A file came back after you deleted it.** Deletions are recorded as tombstones on the *next* successful push from the machine that deleted it, so push on the deleting Mac, then pull elsewhere. A tombstone suppresses restoration from peers that still advertise the file, and the peers whose copy is byte-identical to the deleted version, last synced from that Mac, delete it too (with a recovery copy; see [Recovering a deleted file](#recovering-a-deleted-file)). A peer whose copy differs keeps its file, and a push that found a recreated or restored scan folder (`N files left out because <folder> is new`) records no deletion and lets a pull bring the files back. After a lost `state.db` one Mac's pull may restore a file until the ledger rebuilds.
+
+**A deleted file did not go away on another Mac.** Run `mm pull --dry-run --verbose` there: a `keep (<reason>)` line names why (no content hash on the record because it came from an older release, the Mac never synced that version from the deleting Mac, the file's bytes differ, the peer lists the file again, a symlink on the path, ...). The file is not lost; it stays until the record expires after 30 days or you remove it by hand.
+
+**A push says `N files left out because <folder> is new` (or `missing`, or `cannot be read`).** The scan folder was recreated, restored from a backup, removed or cannot be read, so mm cannot tell "deleted" from "the folder is not what it was": that push publishes without those files and records **no** deletion for them. Run `mm pull` to bring them back from your other Macs (for `cannot be read`, restore read access first). Nothing was deleted anywhere. The first push after updating is silent about this by design. `mm: notice: deletions under <folder> will not propagate; restore write access, then mm push` means mm could not write the `.mind-meld-anchor` token there, so deletions under that folder will not propagate until it can.
+
+**A peer's edit shows `N older peer edits not applied`.** That peer's version was built on yours but its file has an older mtime than yours (a machine restored from a backup). `mm pull --verbose` lists the paths. Compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
 
 **Conflicts you didn't expect.** `mm conflicts` lists them, `mm pull --dry-run` predicts incoming changes; `mm diff` compares against a stored snapshot, and `mm resolve` walks them interactively. See [Handling conflicts](#handling-conflicts).
 
@@ -2082,10 +2312,10 @@ Push refused [snapshot-refused]: Cannot publish: source claude, projects/y/memor
 | Held (still changing, vanished or grew) | `N held` in the outcome; *not yet synced* paths with `--verbose` | Nothing; the prior version stays published. Exclude it if it is always being written. |
 | Frozen (inside a nested git checkout) | `skipped: nested git repository`; published entries kept | See [Nested git repositories](#nested-git-repositories) for resuming sync or excluding the subtree |
 | Skipped or excluded | `skipped:` lines with `--verbose` | Raise `sync.max_file_size` or adjust the glob |
-| Tombstoned | the deletion is published | Nothing |
+| Tombstoned | the deletion is published with the deleted version's hash | Nothing. Other Macs holding exactly those bytes move their copy to a 30-day recovery folder ([Recovering a deleted file](#recovering-a-deleted-file)) |
 | Refused | one final `Push refused [snapshot-refused]: Cannot publish: …` line, previous snapshot kept | The fix in the message. Blobs uploaded before the stop remain as orphans until GC. |
 
-`mm push --dry-run` previews this scan and deletion proof and **changes nothing except the local lock file**. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
+`mm push --dry-run` previews this scan and deletion proof (files a recreated scan folder hides are not counted as deletions) and **changes nothing except the local lock file**; it does not write the `.mind-meld-anchor` token a real push renews. It reports pending directory creation and shared crypto-init reconciliation without performing them. It uses your current config without prompting for migration; run `mm migrate-config` to review recommended updates. It does not preview host-usage capture, the activity row a real push appends, post-push GC of orphaned blobs, or upload re-reads.
 
 Preview exit codes: **0** completed; **1** stopped (snapshot refusal, crypto/config error, or lock held—the message explains which); **2** usage error. Every successful preview, including “Nothing to push,” ends with the lock-qualified completion message.
 
@@ -2102,6 +2332,8 @@ See [Previews](#previews) for every command’s write allowance, omitted work an
 | Default mm-events root, `events/`, or event files are missing | Missing files mean deletion: `mm push --dry-run` previews it and `mm push` publishes it (apart from the new activity row omitted by preview). To keep the previously published files, run `mm pull --from <this Mac's device id> --source mm-events` **before the next push**, then verify the files. Other Macs keep existing copies. |
 | Custom mm-events folder is missing | Push warns, skips mm-events for that push without new tombstones, and publishes the other sources; autopush records a degraded breadcrumb. Plug in the drive, create the folder, or run `mm disable-source mm-events`. The next push includes it again when it returns. |
 | Source folder is missing after it was previously published | Restore the folder, or `mm disable-source <name>` if it should stop syncing. |
+| Push says `N files left out because <folder> is new` (or `missing`, or `cannot be read`) | The scan folder was recreated, restored or cannot be read, so that push records no deletion for the files it cannot see. Run `mm pull` to restore them (restore read access first for `cannot be read`). Nothing was deleted anywhere. |
+| `mm: notice: deletions under <folder> will not propagate` | mm could not write the `.mind-meld-anchor` token there. Restore write access, then `mm push`. |
 | Pull says a file does not match the sending snapshot | Local bytes are kept. Run `mm pull --verbose` for peer/source/path, then `mm log --verb pull --action failed --limit 10`. A metadata-only `touch` or unchanged re-push does not rewrite a blob the diff considers unchanged. |
 
 Do not edit meaningful file contents just to force a new hash. Mixed-version fleets stay compatible, but older writers can still publish inconsistent blobs and older receivers lack this content check.
@@ -2123,8 +2355,8 @@ The lock allowance includes creating its parent if absent.
 | Command | May touch | Not previewed | Exit codes |
 |---|---|---|---|
 | `mm push --dry-run` | Local lock only | Host scanning/warming/capture, activity row, post-push GC, upload re-reads (a scan-time hold is applied and its count shown) | 0 completed, including held files; 1 stopped |
-| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures, blobs not delivered yet (waiting) | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
-| `mm gc --dry-run` | Local lock only | No cleanup is applied; conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
+| `mm pull --dry-run` | Local lock only | Pre-v0.9.2 conflict renames, pull history, project sync logs, manifest conflict-copy cleanup, blob download/decrypt failures, blobs not delivered yet (waiting), writing the pull ledger, creating recovery copies and removing old ones (it lists `delete` and `older` predictions without doing either) | 0 completed, including incomplete scans; 1 stopped; 3 when fail mode predicts conflicts or failures |
+| `mm gc --dry-run` | Local lock only | No cleanup is applied (it lists recovery copies older than 30 days that `mm gc` would remove); conflict deletion requires `--conflicts` | 0 completed; 1 stopped |
 | `mm recapture --dry-run [WINDOW]` | Local lock only | Writing git-snapshot rows and the full push publishing them with other pending changes | 0 completed, including partial scans; 1 stopped or no repositories |
 | `mm migrate-config --dry-run` | Nothing, including no lock | Applying the displayed config changes | 0 completed; 1 config error |
 | `mm diff [--from DEVICE]` | Nothing, including no lock | Snapshot comparison, not a forecast of all incoming peers; use `mm pull --dry-run` for that | 0 completed; 1 stopped |
@@ -2132,8 +2364,9 @@ The lock allowance includes creating its parent if absent.
 All commands use exit 2 for invalid usage. Pull and recapture print **Preview
 incomplete:** when a corrupt peer or incomplete repository scan limits their
 preview, while keeping their existing exit codes. Unknown pull sources remain
-warnings. Pull totals count writes, merges (an upper bound), conflicts, skips,
-and possible local failures across peers; conflicts leave canonical bytes alone.
+warnings. Pull totals count writes (fast-forwards included), merges (an upper bound), conflicts, skips,
+and possible local failures across peers, and name deletions (`N would be deleted`) and peer
+edits held back as `older` only when there are some; conflicts leave canonical bytes alone.
 Files can change between preview and apply.
 
 For a write-free CI gate, run `mm pull --dry-run --conflict-mode fail`: exit 0
@@ -2204,7 +2437,10 @@ done
 # Mind Meld refused to publish over it — move it out before running this.
 rm -rf ~/.local/share/mind-meld
 
-# Config, device identity, caches, and TTL markers.
+# Config, device identity, caches, TTL markers, the pull ledger (state.db) and the
+# 30-day recovery copies of files a peer's deletion removed here. Take anything you
+# still want out of ~/.config/mind-meld/deleted/ first. The `.mind-meld-anchor` files
+# mm keeps in each scan folder (for example ~/.claude/projects) stay; they are harmless.
 rm -rf ~/.config/mind-meld
 
 # Keychain entry (macOS; service `mind-meld`, account `passphrase`).
