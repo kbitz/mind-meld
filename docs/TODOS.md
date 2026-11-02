@@ -46,6 +46,14 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap promotion — 2026-11-02 (Muse reader)
+
+Run from manager Ephesus 8's brief on Karl's "ok sounds good" (2026-11-02) to card the Muse usage reader next, ahead of the bootstrap script. Inbox empty: **0 drained**. One Future entry promoted, "Read Muse Code 1.4.14's usage records (the reader has stopped on `unsupported` since 2026-10-21)", so Future goes from 18 to 17. Verification baseline: `927d84a` (v1.12.3); the symptom was re-observed that day at mm 1.12.3 (`muse.last_reason: unsupported` since 2026-10-21, 486 of 1,036 files cached). It becomes two Tracks, because the core-and-extensions constraint puts a move-only Track before any change to a reader in `host_usage.py`: Track 99A moves the Muse reader into `hosts/muse.py`, and Track 100A reads the cause on this Mac (read-only), re-censuses the corpus into the Muse CONTRACT.md and fixes the reader. Track 91B stays pinned (factory item 53b6eda2) with its card unchanged. The bootstrap script gains `_blocked-by: Track 100A` to hold the owner's order, leaves Group 91 and takes back its earlier ID (91C → 98A); Tracks 92A and 93A name it under the new ID, with no other change. No Tracks shipped since `927d84a`. 6 Future entries still lack an inline revisit trigger; the trigger migration was offered, not run.
+
+| Item | Disposition |
+|---|---|
+| Future: the Muse usage reader has stopped on `unsupported` since 2026-10-21 | place → Tracks 99A (move-only) and 100A (cause, census, fix); trigger met: the owner chose to fix it before the 2.0.0 cut, which needs O7 |
+
 ### Roadmap drain — 2026-11-02
 
 Run from manager Ephesus 8's brief on Karl's "go for it" after Track 91A merged. 10 inbox items: **0 placed, 2 deferred, 8 killed, 0 discharged**. Authored-false rate: 0 / (0 + 0), no placements. Verification baseline: `5a814c3` (v1.12.3). Tracks 97A (v1.12.2, PR #249) and 91A (v1.12.3, PR #251) were recorded independently in shipped history against their verified completion matrices; Group 97 is tombstoned, and Group 91 stays active for Track 91B (factory item 53b6eda2). Track 98A packs beside 91B now that 91A no longer holds `README.md`, so it is Track 91C. Track 91A's deferred manual check (matrix row D1) is placed on Track 93A's runbook. mmm-factory's open questions are recorded on Track 95A's card. Future grows from 16 to 18; 6 entries still lack an inline revisit trigger, and the trigger migration was offered, not run.
