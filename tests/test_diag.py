@@ -339,6 +339,178 @@ def test_unsupported_remedy_follows_cached_newest_release(tmp_path, monkeypatch,
         assert "run mm update before refreshing usage." in flats["status"]
 
 
+def test_diag_upgrade_view_failure_keeps_remedy_and_json_skips_view(tmp_path, monkeypatch):
+    # Value: protects=diag survives upgrade-view failures and JSON never reads that view;
+    # fails_when=the guard is removed or the view read moves before the JSON return;
+    # why_new=the three release-cache cases all return a successful view; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    calls = []
+
+    def broken_view(config):
+        calls.append(config)
+        raise RuntimeError("upgrade view unavailable")
+
+    monkeypatch.setattr(upgrade, "cached_upgrade_view", broken_view)
+    result = runner.invoke(app, ["diag"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "Run mm update; a consented reader has an unsupported record format." in flat
+    assert "no newer mm can yet" not in flat
+    assert len(calls) == 1
+
+    result = runner.invoke(app, ["diag", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["host_usage"]["muse"]["last_reason"] == "unsupported"
+    assert len(calls) == 1
+
+
+def test_unsupported_remedy_ignores_current_cache_when_checks_disabled(tmp_path, monkeypatch):
+    # Value: protects=disabled upgrade checks retain the update remedy despite a current cache;
+    # fails_when=status or diag ignores auto_check and uses the stale current-cache answer;
+    # why_new=existing integration cases cover current, newer and absent cache only; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    cfg = load_config()
+    cfg["upgrade"] = {"auto_check": False}
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "Run mm update; a consented reader has an unsupported record format." in flat
+        assert "no newer mm can yet" not in flat
+        assert (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns) == before
+
+
+def test_newest_release_remedy_names_all_unsupported_readers(tmp_path, monkeypatch):
+    # Value: protects=multiple unsupported readers and Cursor retain their own stop remedies;
+    # fails_when=plural output loses a reader or one blocker keeps the obsolete update remedy;
+    # why_new=the newest-release integration test has one unsupported Muse reader; seam=none;
+    # no_claim=live host formats or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "muse", "agy"))
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    for spec in host_registry.HOST_READER_DIAGS.values():
+        monkeypatch.setattr(
+            spec.owner,
+            spec.function,
+            lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+        )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert (
+            "Codex and Cursor and Muse and Antigravity usage not captured: "
+            "this mm can't read their current record formats, and no newer mm can yet."
+        ) in flat
+        for reader, label in (
+            ("codex", "Codex"),
+            ("cursor", "Cursor"),
+            ("muse", "Muse"),
+            ("agy", "Antigravity"),
+        ):
+            assert (
+                f"({reader} unsupported) — content sync and git/session capture unaffected. "
+                f"{label} usage not captured: this mm can't read {label}'s current record format"
+            ) in flat
+            assert f"mm disable-source {reader}" in flat
+        assert "[retro] cursor_host_usage = false in config.toml" in flat
+        assert "mm update" not in flat
+        assert "mm push" not in flat
+
+
+@pytest.mark.parametrize("other", ["rebuild", "warming"])
+def test_newest_release_remedy_reaches_pending_reader_hints(tmp_path, monkeypatch, other):
+    # Value: protects=pending reader hints use the unsupported sibling's newest-release remedy;
+    # fails_when=rebuild or warming hints omit the cached view and advise updating;
+    # why_new=the newest-release integration cases exercise standing blockers only; seam=none;
+    # no_claim=live host scans or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex", "muse"))
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    monkeypatch.setattr(
+        codex_host,
+        "codex_usage_diag",
+        lambda: {
+            "state": "migrating" if other == "warming" else "ready",
+            "files_pre_track": int(other == "rebuild"),
+        },
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        if command == "status":
+            marker = "Codex usage capture: rebuilding" if other == "rebuild" else "warming"
+            hint = flat.partition(marker)[2]
+            assert hint, result.output
+            assert "Muse usage not captured" in hint
+        elif other == "rebuild":
+            assert "codex awaiting re-walk: 1 — Muse usage not captured" in flat
+        assert "no newer mm can yet" in flat
+        assert "mm update" not in flat
+        assert "mm push" not in flat
+
+
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_unconsented_cached_reader_does_not_deny_siblings_consent(tmp_path, monkeypatch, reader):
     _setup(tmp_path, monkeypatch)
