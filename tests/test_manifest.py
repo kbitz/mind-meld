@@ -3914,7 +3914,7 @@ class TestWalkGenericIncludePatterns:
 
 
 class TestScanRootsAnchors91A:
-    TOKEN = "0123456789abcdef0123456789abcdef"
+    ANCHOR_VALUE = "0123456789abcdef0123456789abcdef"
 
     @pytest.mark.parametrize(
         "src,expected",
@@ -3950,21 +3950,21 @@ class TestScanRootsAnchors91A:
 
     def test_write_then_read_round_trips_with_a_private_mode(self, tmp_path):
         (tmp_path / "scan").mkdir()
-        write_anchor(tmp_path, "scan", self.TOKEN)
+        write_anchor(tmp_path, "scan", self.ANCHOR_VALUE)
         written = tmp_path / "scan" / ANCHOR_NAME
         assert written.stat().st_mode & 0o777 == 0o600
-        assert read_anchor(tmp_path, "scan") == self.TOKEN
+        assert read_anchor(tmp_path, "scan") == self.ANCHOR_VALUE
         write_anchor(tmp_path, "scan", "f" * 32)
         assert read_anchor(tmp_path, "scan") == "f" * 32
 
     def test_the_source_root_itself_can_hold_the_anchor(self, tmp_path):
-        write_anchor(tmp_path, "", self.TOKEN)
-        assert (tmp_path / ANCHOR_NAME).read_text().strip() == self.TOKEN
-        assert read_anchor(tmp_path, "") == self.TOKEN
+        write_anchor(tmp_path, "", self.ANCHOR_VALUE)
+        assert (tmp_path / ANCHOR_NAME).read_text().strip() == self.ANCHOR_VALUE
+        assert read_anchor(tmp_path, "") == self.ANCHOR_VALUE
 
     def test_a_scan_root_that_is_not_there_is_never_created(self, tmp_path):
         with pytest.raises(StorageError):
-            write_anchor(tmp_path, "missing", self.TOKEN)
+            write_anchor(tmp_path, "missing", self.ANCHOR_VALUE)
         assert not (tmp_path / "missing").exists()
         assert read_anchor(tmp_path, "missing") is None
 
@@ -3983,15 +3983,15 @@ class TestScanRootsAnchors91A:
         memory = claude / "projects" / "-Users-kb-p" / "memory"
         memory.mkdir(parents=True)
         (memory / "a.md").write_text("a")
-        (memory / ANCHOR_NAME).write_text(self.TOKEN + "\n")  # even inside a project folder
-        write_anchor(claude, "projects", self.TOKEN)
+        (memory / ANCHOR_NAME).write_text(self.ANCHOR_VALUE + "\n")  # even inside a project folder
+        write_anchor(claude, "projects", self.ANCHOR_VALUE)
         assert set(walk_claude_source(claude)) == {"projects/-Users-kb-p/memory/a.md"}
 
         base = tmp_path / "gen"
         (base / "d").mkdir(parents=True)
         (base / "d" / "n.md").write_text("n")
-        write_anchor(base, "d", self.TOKEN)
-        write_anchor(base, "", self.TOKEN)
+        write_anchor(base, "d", self.ANCHOR_VALUE)
+        write_anchor(base, "", self.ANCHOR_VALUE)
         (base / "AGENTS.md").write_text("agents")
         config = {
             "name": "g",

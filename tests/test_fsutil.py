@@ -2143,8 +2143,8 @@ def test_fsync_file_and_read_anchor_are_pure_reads(
 ):
     root = synthetic_account_home / ".claude"
     (root / "projects").mkdir(parents=True)
-    token = "0123456789abcdef0123456789abcdef"
-    (root / "projects" / manifest.ANCHOR_NAME).write_text(token + "\n")
+    anchor_value = "0123456789abcdef0123456789abcdef"
+    (root / "projects" / manifest.ANCHOR_NAME).write_text(anchor_value + "\n")
     target = root / "projects" / "note.md"
     target.write_bytes(b"data")
     link = root / "projects" / "link.md"
@@ -2158,7 +2158,7 @@ def test_fsync_file_and_read_anchor_are_pure_reads(
     fsutil.fsync_file(target)  # a plain flush of a read-only descriptor
     with pytest.raises(OSError):
         fsutil.fsync_file(link)  # never follows a link
-    assert manifest.read_anchor(root, "projects") == token
+    assert manifest.read_anchor(root, "projects") == anchor_value
     assert calls == []
 
 

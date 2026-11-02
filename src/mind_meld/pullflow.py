@@ -1840,10 +1840,10 @@ def _own_lookup(
         recorded = root_ids.get(root) if isinstance(root_ids, dict) and root is not None else None
         if root is None or not isinstance(recorded, str):
             return lists, False
-        key = (src_name, root)
-        if key not in tokens:
-            tokens[key] = manifest.read_anchor(local_sources_map[src_name]["path"], root)
-        return lists, tokens[key] is not None and tokens[key] == recorded
+        slot = (src_name, root)
+        if slot not in tokens:
+            tokens[slot] = manifest.read_anchor(local_sources_map[src_name]["path"], root)
+        return lists, tokens[slot] is not None and tokens[slot] == recorded
 
     return lookup
 
@@ -2206,10 +2206,10 @@ def _run_deletions(
     now = datetime.now(timezone.utc)
     folder = statedb.deleted_copies_dir() / _copy_folder_name(now)
     resolved_paths = {(d.src_name, d.rel_path): d.local_path.resolve() for d in deletions}
-    by_key = {(r.device_id, r.src_name): r for r in per_source_results}
+    by_slot = {(r.device_id, r.src_name): r for r in per_source_results}
     for d in deletions:
-        key = (d.peer_id, d.src_name)
-        if key not in by_key:
+        slot = (d.peer_id, d.src_name)
+        if slot not in by_slot:
             result = _PerSourceResult(
                 src_name=d.src_name,
                 device_name=d.peer_name,
@@ -2220,13 +2220,13 @@ def _run_deletions(
                 claude_sync_base=str(d.base_path) if d.src_type == "claude" else None,
                 deleted_folder=str(folder),
             )
-            by_key[key] = result
+            by_slot[slot] = result
             per_source_results.append(result)
         else:
-            by_key[key].deleted_folder = str(folder)
+            by_slot[slot].deleted_folder = str(folder)
 
     def fail(d: _Deletion, operation: str, exc: BaseException, preserved: str) -> None:
-        by_key[(d.peer_id, d.src_name)].outcomes["failed"].append(d.rel_path)
+        by_slot[(d.peer_id, d.src_name)].outcomes["failed"].append(d.rel_path)
         _warn_apply_failure(
             d.peer_name, d.src_name, d.rel_path, d.local_path, operation, exc, preserved=preserved
         )
@@ -2248,7 +2248,7 @@ def _run_deletions(
     def flush_failed(path: Path, exc: OSError) -> None:
         run.fsync_warnings.append(_FsyncWarning(path, str(exc), blocks_commit=False))
 
-    ledger_paths = {key for d in deletions for key in d.ledger_paths}
+    ledger_paths = {slot for d in deletions for slot in d.ledger_paths}
     saved_bases: dict[tuple[str, str], dict[tuple[str, str, str], str]] = {}
 
     def undo(d: _Deletion) -> None:
@@ -2283,9 +2283,9 @@ def _run_deletions(
     # Aliases without a tombstone can have pending incoming-file settlements.
     # Discard any failed flushes before staging the followed-deletion stamps.
     core.flush_ledger_files(ledger, on_error=flush_failed)
-    for key, sha in ledger.bases.items():
-        if key[1:] in ledger_paths:
-            saved_bases.setdefault(key[1:], {})[key] = sha
+    for slot, sha in ledger.bases.items():
+        if slot[1:] in ledger_paths:
+            saved_bases.setdefault(slot[1:], {})[slot] = sha
     ledger.drop_many(ledger_paths)
     for d in deletions:
         for source, rel in d.ledger_paths:
@@ -2305,7 +2305,7 @@ def _run_deletions(
     index = -1
     try:
         for index, d in enumerate(deletions):
-            result = by_key[(d.peer_id, d.src_name)]
+            result = by_slot[(d.peer_id, d.src_name)]
             copy_path = folder / d.src_name / d.rel_path
             before_move = None
             move_started = False

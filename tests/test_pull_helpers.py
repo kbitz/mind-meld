@@ -4346,7 +4346,7 @@ class TestDeletionHelpers91A:
 class TestOwnLookup91A:
     """Does this device's own manifest list a path, and is its scan root the one it published?"""
 
-    TOKEN = "0123456789abcdef0123456789abcdef"
+    ANCHOR_VALUE = "0123456789abcdef0123456789abcdef"
 
     def _setup(self, tmp_path):
         base = tmp_path / "docs"
@@ -4354,7 +4354,7 @@ class TestOwnLookup91A:
         cfg = {"name": "notes", "type": "generic", "path": str(base), "include_dirs": ["sub"]}
         own = {
             "sources": {
-                "notes": {"files": {"sub/a.md": {}}, "root_ids": {"sub": self.TOKEN}},
+                "notes": {"files": {"sub/a.md": {}}, "root_ids": {"sub": self.ANCHOR_VALUE}},
             },
             "tombstones": {"notes:sub/gone.md": {}},
         }
@@ -4365,7 +4365,7 @@ class TestOwnLookup91A:
         from mind_meld import manifest
 
         base, cfg, own, sources = self._setup(tmp_path)
-        manifest.write_anchor(base, "sub", self.TOKEN)
+        manifest.write_anchor(base, "sub", self.ANCHOR_VALUE)
         lookup = pullflow._own_lookup(own, {"notes": cfg}, sources)
         assert lookup("notes", "sub/a.md") == (True, True)
         assert lookup("notes", "sub/gone.md") == (True, True)  # a record names it
@@ -4392,7 +4392,7 @@ class TestOwnLookup91A:
         from mind_meld import manifest
 
         base, cfg, own, sources = self._setup(tmp_path)
-        manifest.write_anchor(base, "sub", self.TOKEN)
+        manifest.write_anchor(base, "sub", self.ANCHOR_VALUE)
         del own["sources"]["notes"]["root_ids"]
         assert pullflow._own_lookup(own, {"notes": cfg}, sources)("notes", "sub/a.md") == (
             True,
@@ -4415,7 +4415,7 @@ class TestOwnLookup91A:
 
         base, cfg, own, sources = self._setup(tmp_path)
         target = tmp_path / "elsewhere"
-        target.write_text(self.TOKEN + "\n")
+        target.write_text(self.ANCHOR_VALUE + "\n")
         (base / "sub" / manifest.ANCHOR_NAME).symlink_to(target)
         assert manifest.read_anchor(base, "sub") is None
         (base / "sub" / manifest.ANCHOR_NAME).unlink()

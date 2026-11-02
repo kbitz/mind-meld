@@ -4783,11 +4783,13 @@ def test_left_out_files_name_an_unreadable_folder_and_do_not_say_to_pull(tmp_pat
     list the folder), so it is pinned where the guard is, with the real permission bits."""
     base = tmp_path / "notes-src"
     (base / "d").mkdir(parents=True)
-    token = "0123456789abcdef0123456789abcdef"
-    manifest.write_anchor(base, "d", token)
+    anchor_value = "0123456789abcdef0123456789abcdef"
+    manifest.write_anchor(base, "d", anchor_value)
     cfg = {"name": "notes", "path": str(base), "type": "generic", "include_dirs": ["d"]}
     prior = {
-        "sources": {"notes": {"files": {"d/n.md": {"sha256": "a" * 64}}, "root_ids": {"d": token}}}
+        "sources": {
+            "notes": {"files": {"d/n.md": {"sha256": "a" * 64}}, "root_ids": {"d": anchor_value}}
+        }
     }
     local = {"sources": {"notes": {"files": {}}}}
     ledger = pullplan.Ledger()

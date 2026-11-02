@@ -267,11 +267,11 @@ class Ledger:
         """Forget absence history only after push accepted a path as left out."""
         if not self._tracked(source):
             return
-        key = (source, path)
-        self.seen.pop(key, None)
-        self.drop_seen.add(key)
-        self.unstamp.discard(key)
-        for pending in [k for k in self.new_seen if k[:2] == key]:
+        slot = (source, path)
+        self.seen.pop(slot, None)
+        self.drop_seen.add(slot)
+        self.unstamp.discard(slot)
+        for pending in [k for k in self.new_seen if k[:2] == slot]:
             del self.new_seen[pending]
         self.discard_deferred(source, path)
 
