@@ -278,7 +278,12 @@ def test_unsupported_remedy_follows_cached_newest_release(tmp_path, monkeypatch,
     monkeypatch.setattr(
         codex_host,
         "codex_usage_diag",
-        lambda: {"last_reason": "deadline", "state": "ready", "files_pre_track": 0},
+        lambda: {
+            "last_reason": "deadline",
+            "state": "ready",
+            "files_pre_track": 0,
+            "cache_state": "ok",
+        },
     )
     monkeypatch.setattr(upgrade, "__version__", "9.0.0")
     monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
@@ -327,16 +332,83 @@ def test_unsupported_remedy_follows_cached_newest_release(tmp_path, monkeypatch,
         else:
             assert "Run mm update; a consented reader has an unsupported record format." in flat
             assert "no newer mm can yet" not in flat
+    # Value: protects=diag's deadline sibling follows the same cached view as status;
+    # fails_when=diag drops no_release_reads or upgrade_required on that blocker;
+    # why_new=the stub omitted cache_state, so diag never printed the codex line;
+    # seam=none; no_claim=live host records (reader diagnostics are stubbed).
+    deadline = "(codex deadline) — content sync and git/session capture unaffected. "
     if cached == "newest":
         status = flats["status"]
         assert status.startswith(f"Usage not captured. {clause}")
         # The deadline sibling's own line follows the same view.
-        assert (
-            "(codex deadline) — content sync and git/session capture unaffected. " + clause
-        ) in status
+        assert (deadline + clause) in status
+        assert (deadline + clause) in flats["diag"]
     else:
+        update_sibling = (
+            deadline + "A consented reader has an unsupported record format; "
+            "run mm update before refreshing usage."
+        )
         assert flats["status"].startswith("Usage capture needs a newer mm. Run: mm update")
         assert "run mm update before refreshing usage." in flats["status"]
+        assert update_sibling in flats["diag"]
+
+
+@pytest.mark.parametrize("state", ["disabled", "unavailable"])
+def test_current_cache_keeps_capture_prerequisite_over_no_release(tmp_path, monkeypatch, state):
+    # Value: protects=a current upgrade cache cannot replace an mm-events prerequisite;
+    # fails_when=disabled or unavailable status/diag leads with the no-release clause;
+    # why_new=the readiness matrix never installs a current upgrade cache; seam=none;
+    # no_claim=live host records or fleet acceptance (reader diagnostics are stubbed).
+    from datetime import datetime, timezone
+
+    from mind_meld import upgrade
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("muse",))
+    cfg = load_config()
+    missing = tmp_path / "missing-custom"
+    if state == "disabled":
+        cfg["sync"]["disabled_sources"] = ["mm-events"]
+    else:
+        next(s for s in cfg["sync"]["sources"] if s["name"] == "mm-events")["path"] = str(missing)
+    save_config(cfg)
+    monkeypatch.setattr(upgrade, "__version__", "9.0.0")
+    monkeypatch.setattr(upgrade, "_INVOCATION_SKIP", False)
+    monkeypatch.setattr(upgrade, "_fetch_tags", lambda *_a, **_kw: pytest.fail("network fetch"))
+    monkeypatch.setattr(upgrade, "check_for_upgrade", lambda *_a, **_kw: pytest.fail("refresh"))
+    upgrade.CACHE_PATH.write_text(
+        json.dumps(
+            {"latest_version": "9.0.0", "checked_at": datetime.now(timezone.utc).isoformat()}
+        )
+    )
+    before = (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns)
+    monkeypatch.setattr(
+        host_usage,
+        "muse_usage_diag",
+        lambda **_kw: {"last_reason": "unsupported", "cache_state": "ok"},
+    )
+    for command in ("status", "diag"):
+        result = runner.invoke(app, [command])
+        assert result.exit_code == 0, result.output
+        flat = " ".join(result.output.split())
+        assert "no newer mm can yet" not in flat
+        assert "Run mm update; a consented reader" not in flat
+        if state == "disabled":
+            assert "Run mm enable-source mm-events to enable usage publication." in flat
+        else:
+            assert "Restore access to the configured mm-events folder." in flat
+        if command == "status":
+            headline = result.output.splitlines()[0]
+            assert headline.startswith("Usage capture unavailable.")
+            if state == "disabled":
+                assert "mm enable-source mm-events" in headline
+            else:
+                assert headline.endswith("Run: mm diag")
+                assert "enable-source mm-events" not in headline
+    assert (upgrade.CACHE_PATH.read_bytes(), upgrade.CACHE_PATH.stat().st_mtime_ns) == before
+    if state == "unavailable":
+        assert not missing.exists()
 
 
 def test_diag_upgrade_view_failure_keeps_remedy_and_json_skips_view(tmp_path, monkeypatch):
