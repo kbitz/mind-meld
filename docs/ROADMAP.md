@@ -49,12 +49,81 @@ _tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 94, 97_
 
 ### Phase 5: mm 2.0 on Syncthing
 
-**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, Muse usage read again, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
-**Groups:** 91, 99, 100, 98, 92, 95, 93
+**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, every consented host's usage read within the attended budget, repositories found from every agent's records, Cursor usage outside print mode found or ruled out, Muse usage read again, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
+**Groups:** 91, 101, 102, 103, 99, 100, 98, 92, 95, 93
+
+#### Group 101: Fair host usage sweep
+
+_Depends on: Group 91_
+
+**This group delivers:** An attended push reads Codex and Antigravity usage again on every machine, and one slow reader can no longer starve the others.
+
+##### Track 101A: Stop one slow usage reader from starving the others, and size the attended budget for the real corpus
+_3 tasks . ~250 LOC . medium risk . 7 files_
+**Outcome:** On every machine, with no per-machine setting, an attended `mm push` completes the Codex and Antigravity usage reads again, a slow reader no longer leaves the readers after it a 50 ms remainder, and the owner knows whether the days the readers missed since 2026-11-01 come back.
+**Supports:** MVP-1, docs/SPEC.md O7.2 (capture is complete again within three attended pushes without a recovery command) and O7.1; the 2.0.0 release line needs O7 (O7.4).
+**Done when:** the first task names, from a read-only run on this Mac (mm caches and state untouched: an in-process read with a throwaway cache path, or a temporary `HOME` pointed at the real session trees), why the Codex read needs about 1.8 s and why it started at the first attended push on 1.12.x (2026-11-01T13:01:16Z), deciding between corpus growth, a cache that stopped being reused (`mm diag` shows `codex.state: migrating` with 2 pending) and a 1.12.x change outside the readers, using counts, timings and key names only, never record content; in the attended sweep (`events_tail._capture_host_usage`) no reader's overrun takes another consented reader's whole read, so a reader that needs 236 ms (Antigravity) gets it after a reader that overruns, and autopush keeps its own fixed budget and never warms; the attended default fits this corpus on every machine, so this Mac completes Codex and Antigravity within three attended pushes after `[retro] host_usage_interactive_budget_ms` is removed from its `config.toml`, and an attended push still ends inside the one capture budget (O7.2); the PR states, and a test pins, whether a later complete read publishes the days a `deadline` read missed or whether they need `mm recapture`, and `mm status` names the fix when they do not come back; README and `events-retro.md` describe the sweep and budgets as built; the PR records `mm diag --json` on this Mac after the change showing `codex` and `agy` with `last_reason` cleared and the workaround line removed; `./bin/check --affected` passes.
+_touches: src/mind_meld/events_tail.py, src/mind_meld/config.py, tests/test_events_budget_scope.py, tests/test_host_usage_snapshot.py, tests/test_config.py, docs/invariants/events-retro.md, README.md_
+_blocked-by: Track 91B_
+_out: 102A_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/SPEC.md_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: Karl, 2026-11-02 ("go, and we need to fix the cursor usage gap"), after `mm retro-fleet` showed no usage outside Claude; the manager's reading on this Mac (349C-kb-ms) at mm 1.12.3, re-checked this run with `mm diag --json`: `codex.last_reason` and `agy.last_reason` are `deadline` since 2026-11-01T13:01:16Z, `codex.last_complete_ms` 1812 (6,751 files on disk, `state: migrating`, 2 pending), `agy.last_complete_ms` 236 with `last_deadline_allotted_ms` 50, and the latest attempt shows both `dropped:deadline`. kb-mbp shows the same Codex failure per the owner's retro-fleet session. A workaround is in place on this Mac only (`[retro] host_usage_interactive_budget_ms = 3000`); this Track makes it unnecessary. Premise check at df7d1e8: `git diff v1.11.20 v1.12.3` changes nothing in `hosts/`, `host_usage.py` or `host_registry.py`, and `events_tail.py` only in recapture's walk budget, so the readers themselves did not change in 1.12.x; the manager's 1.12.x-regression reading is the first task's to confirm or refute. The sweep runs readers in order under one deadline with a 50 ms floor for each later reader (`HOST_READER_GRACE_MS`); the attended sweep default is 500 ms (`config.DEFAULT_HOST_USAGE_INTERACTIVE_BUDGET_MS`)._
+
+- **Read the cause on this Mac (read-only)** -- _no repository change; the finding goes in the PR and `events-retro.md`, ~0 lines._ (S)
+- **Fair sweep and a corpus-sized attended default** -- _src/mind_meld/events_tail.py, src/mind_meld/config.py, tests/test_events_budget_scope.py, tests/test_host_usage_snapshot.py, tests/test_config.py, ~200 lines._ (M)
+- **Missed days and docs** -- _tests/test_host_usage_snapshot.py, docs/invariants/events-retro.md, README.md, ~50 lines._ (S)
+
+#### Group 102: Discovery from every agent
+
+_Depends on: Group 101_
+
+**This group delivers:** `retro-fleet` counts git activity in every repository an enabled agent, gstack, Paseo or the mmm factory works in, with no per-machine pins.
+
+##### Track 102A: Find projects in every enabled provider's logs, then in gstack, Paseo and mmm when installed
+_3 tasks . ~350 LOC . medium risk . 7 files_
+**Outcome:** On every machine, a repository the owner works in through any enabled agent (Claude Code, Codex, Cursor, Muse or Antigravity), or that gstack, Paseo or the mmm factory knows about when installed, is found by automatic discovery, so its commits reach `retro-fleet` without a `[retro] repo_roots` pin, and the owner knows how to recover the history missed before it was found.
+**Supports:** MVP-1, docs/SPEC.md O7.2 (every attended push captures this machine's git activity) and O7.4 (complete capture from every active machine).
+**Done when:** the first task records, using key names and counts only, which records name a working directory and what reading each costs under discovery's budget (`ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` 50, interactive 100): first the logs of every enabled provider (Claude, Codex, Cursor, Muse and Antigravity; for example Codex rollouts' `session_meta` `cwd`), then, when each is installed, gstack's project state, Paseo's project list and the mmm factory's records; a source that names no directory is recorded and skipped (Track 29A deleted the gstack prober because `repo-mode.json` carried no root path, so gstack is re-checked, not assumed); discovery gains a prober for every enabled provider whose logs name a directory, then one for each installed tool that does, each running only when its provider is enabled or its tool installed, indexed and reused across pushes like `_probe_claude`, so a cold corpus spreads over pushes rather than blowing the deadline; the probers read host records directly and change no usage reader in `host_usage.py` (core-and-extensions constraint); Paseo worktrees under `~/.paseo/worktrees/` deduplicate to their repository by common Git directory as today; working-directory paths stay local and never go on the events wire (the standing constraint), and no session is attributed to a project from its cwd; `mm diag` attributes each root to the prober that found it; on this Mac, with the six `[retro] repo_roots` pins removed, `mm diag` lists capsule-cli, agent-config, paseo, gkg-stewardship, paseo-plugins/agy-patched and paseo-plugins/muse-patched through automatic probers, and the PR records it; the PR states, and a test pins, whether a newly found repository's commits inside the retro window arrive on the next push or need `mm recapture <window>`, and README says which; tests use a `tmp_path` home with synthetic records; `./bin/check --affected` passes.
+_touches: src/mind_meld/events.py, src/mind_meld/rootprobes.py (new), tests/test_events.py, tests/test_root_probers.py (new), tests/test_module_boundaries.py, docs/invariants/events-retro.md, README.md_
+_blocked-by: Track 101A_
+_out: 103A_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: Karl, 2026-11-02, asking whether every project he works in through Paseo is tracked by `retro-fleet`, then setting this card's scope: "for the card when it comes up, we need to find projects in any enabled provider's logs; then we can review gstack if installed, paseo if installed, and mmm if installed". The manager's findings on this Mac, re-checked this run at df7d1e8: Paseo lists 13 projects (`paseo project ls --json`); `mm diag` attributes the six named above to `manual` (the pins in place on this Mac only) and every other root to `claude`; each of the six has a `~/.claude/projects/<folder>` with no session `.jsonl`; `events.discover_git_roots` runs only `[retro].repo_roots` and `_probe_claude`, which reads each project's cwd from Claude's session logs. A Codex rollout's first record is `session_meta` with `cwd` and `git` keys (key names checked on this Mac's newest rollout); the other providers' records are the first task's to census. `rootprobes.py` is a suggested home for the new probers so `events.py` grows only by their registration; the plan may keep them in `events.py`. Collides with Track 101A on `events-retro.md` and README, so it runs after it._
+
+- **Census every provider's logs and the installed tools (read-only)** -- _no repository change; findings go in the PR, ~0 lines._ (S)
+- **Probers for every enabled provider's logs** -- _src/mind_meld/rootprobes.py, src/mind_meld/events.py, tests/test_root_probers.py, tests/test_events.py, tests/test_module_boundaries.py, ~220 lines._ (M)
+- **Probers for gstack, Paseo and mmm when installed, recovery path and docs** -- _src/mind_meld/rootprobes.py, tests/test_root_probers.py, docs/invariants/events-retro.md, README.md, ~130 lines._ (M)
+
+#### Group 103: Cursor usage outside print mode
+
+_Depends on: Group 102_
+
+**This group delivers:** A found and qualified source for Cursor usage driven by Paseo and by the Cursor app, wired into `retro-fleet`, or a written finding the owner decides on.
+
+##### Track 103A: Find a source for Paseo-driven and interactive Cursor usage and wire the best one into retro-fleet
+_3 tasks . ~300 LOC . high risk . 6 files_
+**Outcome:** `retro-fleet` counts the owner's Cursor use through Paseo (ACP) and the Cursor app, not only `mm cursor-agent` print-mode runs; or, if no source gives per-session tokens, the owner has a written account of what each source can give and decides before anything lesser ships.
+**Supports:** MVP-1, docs/SPEC.md O7.1 (Cursor's runs count under their model's family) and O7.3 (usage mm cannot read is named as a coverage gap, never a silent zero); the 2.0.0 release line needs O7 (O7.4).
+**Done when:** the first task re-reads the 2026-10-06 finding (the Future entry "Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade" and the ACP paragraph in `events-retro.md`) rather than repeating it, then runs that entry's ACP hook re-check on the installed cursor-agent (2026.10.22, newer than the 2026.10.01 build measured), and surveys the unexplored sources: the Cursor plan usage Paseo reports (`plan_usage`, plan "Ultra"), Cursor's account usage (dashboard or API, including per-request usage events), and the Cursor app's local stores for interactive sessions; it records, per source, what it gives (per-session or per-request tokens with the four counters, per-day totals, plan percentage only), whether the counters are inclusive or disjoint, whether it overlaps what the stop hook already records, and what it needs to read (a local file, or an account credential); no investigation step opens, prints, copies or searches a credential file or token store, and a source that needs an account credential stops for the owner before mm reads one; if no source gives per-session or per-request tokens, the Track stops after the survey, writes up what each source can give in the PR and waits for the owner before shipping a lesser measure; otherwise the best source becomes a reader in its own module under `hosts/` behind the adapter contract (`tests/test_host_adapter_contract.py`), leaving the existing Cursor reader in `host_usage.py` unchanged (changing it needs a move-only Track first, per the core-and-extensions constraint), with a `CONTRACT.md` census of a real corpus and the observed host version, deduplication against hook-recorded runs, and `retro-fleet` counting the runs under their model's family; Cursor use no source can read is named as a coverage gap in `retro-fleet` and `mm status`; the PR records a live run on this Mac; `./bin/check --affected` passes.
+_touches: src/mind_meld/hosts/, src/mind_meld/host_registry.py, tests/, tests/fixtures/host_sessions/, docs/invariants/events-retro.md, README.md_
+_blocked-by: Track 102A_
+_out: 99A_
+_read-first: docs/invariants/README.md, docs/invariants/events-retro.md, docs/SPEC.md_
+_session: fresh · effort: high · verify: ./bin/check --affected_
+
+_Source: Karl, 2026-11-02 ("we need to fix the cursor usage gap"). Outside Conductor's run stores, mm captures Cursor usage only from the stop hook that `mm enable-source cursor` installs, which fires for `mm cursor-agent` print-mode runs; Cursor driven by Paseo over ACP (the factory's ship stages run Grok through Cursor this way) and the Cursor app's interactive sessions are not captured, so `retro-fleet` shows no Cursor usage since 2026-10-04 although the owner uses Cursor heavily. This run's `mm diag --json` shows `cursor` contributing with `hook_state: installed` and one model. Prior finding (2026-10-06, cursor-agent 2026.10.01): ACP fires no lifecycle hooks and sends no usage, and its `store.db` files hold a context-window gauge but no billed counters; never estimate tokens from that gauge. That Future entry's revisit trigger is met (cursor-agent is now 2026.10.22 on this Paseo-hosting Mac), so it is folded into this Track's first task. Unexplored source named by the manager: Paseo's own usage report shows Cursor plan usage (`plan_usage` about 20%, "Ultra"). Runs after Track 102A in the owner's order, and before Track 99A, which also edits `host_registry.py`._
+
+- **Survey the sources and re-check ACP (read-only)** -- _no repository change; findings go in the PR, ~0 lines._ (S)
+- **Wire the best source as a hosts/ reader** -- _src/mind_meld/hosts/, src/mind_meld/host_registry.py, tests/, tests/fixtures/host_sessions/, ~250 lines; only if a source gives per-session or per-request tokens and the owner approves any credential it needs._ (M)
+- **Coverage gap and docs** -- _docs/invariants/events-retro.md, README.md, ~50 lines._ (S)
 
 #### Group 99: Muse reader move
 
-_Depends on: Group 91_
+_Depends on: Group 91, Group 103_
 
 **This group delivers:** The Muse usage reader lives in its own adapter module, with no change in what it reads or reports, so the fix that follows touches one module.
 
@@ -64,7 +133,7 @@ _1 task . ~900 LOC . medium risk . 8 files_
 **Supports:** MVP-1, docs/SPEC.md O7.1 (Muse usage), through the core-and-extensions constraint (a move-only Track just before a Track that changes a host adapter in `host_usage.py`).
 **Done when:** `read_muse_usage`, `muse_usage_diag`, `muse_sessions_root`, `MUSE_SESSIONS_PATH`, `MUSE_CACHE_PATH`, `MUSE_USAGE_CENSUS_HOST_VERSION` and the Muse-only helpers (`_scan_muse_root`, `_freeze_muse_day`, `_validated_muse_frozen`, `_iter_muse_day_dirs`, `_muse_day_logs`, `_muse_now`, `_muse_turn_from_record`, `_validate_muse_counters` and the `_MUSE_*` constants) live in `src/mind_meld/hosts/muse.py`; callers in `host_registry.py`, `statusflow.py`, `events_tail.py` and the tests call them module-qualified; `tests/test_host_adapter_contract.py` runs its parametrized contract over Muse; `tests/test_module_boundaries.py` keeps `hosts/` modules importing neither `cli` nor each other; the Muse cache file, its format marker and every Muse total are unchanged, and `test_muse_contract_census_pin_matches_src_constant` reads the moved constant; the routing README and `events-retro.md` name the new module; `./bin/check` passes.
 _touches: src/mind_meld/host_usage.py, src/mind_meld/hosts/muse.py (new), src/mind_meld/host_registry.py, src/mind_meld/statusflow.py, src/mind_meld/events_tail.py, tests/, docs/invariants/README.md, docs/invariants/events-retro.md_
-_blocked-by: Track 91B_
+_blocked-by: Track 91B, Track 103A_
 _out: 100A_
 _read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/fixtures/host_sessions/muse/CONTRACT.md_
 _produces: `hosts/muse.py` owns the Muse reader; `host_usage.py` keeps only shared helpers and the other readers._
@@ -92,6 +161,8 @@ _read-first: tests/fixtures/host_sessions/muse/CONTRACT.md, docs/invariants/even
 _session: fresh · effort: medium · verify: ./bin/check --affected_
 
 _Source: the same Future entry (observed 2026-11-01 on this Mac at mm 1.12.1 with Muse Code 1.4.14). Re-observed 2026-11-02 at mm 1.12.3: `mm diag --json` shows `muse.last_reason: unsupported` since 2026-10-21T18:25:41Z, `last_complete_at` 2026-10-19, 486 of 1,036 files cached, and the latest attempt `dropped:deadline`. CONTRACT.md was rewritten for Muse 1.4.14 shapes on 2026-10-28 (PR #237, v1.11.16) from synthetic cases only; its census is still the 2026-10-14 Muse 1.4.7 corpus. Muse refusals carry no cause today (`_incomplete("unsupported")` on a cross-log disagreement and `_ReadFailure("unsupported")` in record validation), so the cause is unread._
+
+_Note, 2026-11-02 (manager, after the owner's attended `mm push` on this Mac at 17:06 UTC with the 3000 ms interactive budget): `mm diag` shows `muse.last_reason: null`, `files_cached` 1036 of 1036 on disk, the last complete read 84 ms and three models, so `unsupported` cleared with no code change. This card's premise (the reader refuses this Mac's records) may be stale: the reason may have come from the deadline path or from records that have since changed, which is unread. The first task re-checks the premise before any fix, and the Track is killed if the refusal does not recur._
 
 - **Read the cause on this Mac (read-only)** -- _no repository change; findings go into the census, ~0 lines._ (S)
 - **Re-census the corpus into CONTRACT.md** -- _tests/fixtures/host_sessions/muse/CONTRACT.md, ~60 lines._ (S)
@@ -217,7 +288,10 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
 - Group 91 ← {}
-- Group 99 ← {91}
+- Group 101 ← {91}
+- Group 102 ← {101}
+- Group 103 ← {102}
+- Group 99 ← {91, 103}
 - Group 100 ← {99}
 - Group 98 ← {100}
 - Group 92 ← {98}
@@ -231,6 +305,12 @@ Track detail per group:
 ```
 Group 91: Honest usage remedy          (in progress)
   +-- Track 91B ........... ~S . 1 task
+Group 101: Fair host usage sweep
+  +-- Track 101A .......... ~M . 3 tasks
+Group 102: Discovery from every agent
+  +-- Track 102A .......... ~L . 3 tasks
+Group 103: Cursor usage outside print mode
+  +-- Track 103A .......... ~M . 3 tasks
 Group 99: Muse reader move
   +-- Track 99A ........... ~L . 1 task
 Group 100: Muse usage read again
@@ -247,9 +327,9 @@ Group 96: Cross-model memory qualification
   +-- Track 96A ........... ~M . 1 task
 ```
 
-**Total: 8 groups . 8 tracks remaining.**
+**Total: 11 groups . 11 tracks remaining.**
 
-The owner put the Muse usage reader ahead of the bootstrap script on 2026-11-02, because Muse usage is frozen and 2.0.0 needs O7. Track 99A moves the reader out of `host_usage.py` first, as the core-and-extensions constraint requires, and waits for Track 91B because both edit `statusflow.py`, `events_tail.py` and `tests/test_diag.py`; Track 100A then reads the cause, re-censuses and fixes the reader in the moved module. The bootstrap script carries `_blocked-by: Track 100A` to hold that order (it shares no file with the Muse Tracks), so it leaves Group 91 and takes back Track 98A, its ID before PR #252. Tracks 98A, 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 98A lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
+On 2026-11-02 the owner put three usage-capture fixes first, after Track 91B: the fair host usage sweep (Track 101A), discovery from every agent's records (Track 102A, which shares `events-retro.md` and README with 101A and so runs after it) and the Cursor usage source (Track 103A). Each carries `_blocked-by:` on the one before it to hold that order, and Track 99A gains `_blocked-by: Track 103A` for the same reason (103A also edits `host_registry.py`); 99A's scope is unchanged. Earlier the same day the owner put the Muse usage reader ahead of the bootstrap script, because Muse usage is frozen and 2.0.0 needs O7. Track 99A moves the reader out of `host_usage.py` first, as the core-and-extensions constraint requires, and waits for Track 91B because both edit `statusflow.py`, `events_tail.py` and `tests/test_diag.py`; Track 100A then reads the cause, re-censuses and fixes the reader in the moved module. The bootstrap script carries `_blocked-by: Track 100A` to hold that order (it shares no file with the Muse Tracks), so it leaves Group 91 and takes back Track 98A, its ID before PR #252. Tracks 98A, 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 98A lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on their own observation on one Mac and both Linux machines after following Group 93's runbook, with O6 to O8 holding, the bootstrap script shipped and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
 
@@ -257,7 +337,7 @@ The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to
 
 ## Future
 
-Deferred: docs/roadmap-future.md (17 items)
+Deferred: docs/roadmap-future.md (16 items)
 
 ## Shipped
 
