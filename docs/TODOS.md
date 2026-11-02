@@ -46,6 +46,18 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap promotion — 2026-11-02 (usage capture)
+
+Run from manager Ephesus 8's brief on Karl's "go, and we need to fix the cursor usage gap" (2026-11-02, after `mm retro-fleet` showed no usage outside Claude) and its addendum on Karl's question whether every project worked through Paseo is tracked. Inbox empty: **0 drained**. Verification baseline: `df7d1e8` (v1.12.3), re-checked on this Mac with `mm diag --json`. Three Tracks are carded after the pinned Track 91B, in the owner's order: Track 101A (one slow usage reader can no longer starve the others, and the attended default fits the corpus), Track 102A (discovery finds projects in every enabled provider's logs, then in gstack, Paseo and mmm when installed, per Karl's scope for the card) and Track 103A (find and qualify a source for Paseo-driven and interactive Cursor usage, stopping for the owner if none gives per-session tokens). Track 99A gains `_blocked-by: Track 103A` to hold that order; its scope is unchanged. One Future entry is folded into Track 103A because its trigger is met (cursor-agent is now 2026.10.22), so Future goes from 17 to 16. Premise note: `git diff v1.11.20 v1.12.3` leaves the usage readers unchanged, so Track 101A's first task tests the 1.12.x-regression reading instead of assuming it. 6 Future entries still lack an inline revisit trigger; the trigger migration was not run.
+
+| Item | Disposition |
+|---|---|
+| Brief: Codex and Antigravity reads end on `deadline` every attended push since 2026-11-01 | place → Track 101A |
+| Addendum: 6 of 13 Paseo projects reach discovery only through this Mac's `[retro] repo_roots` pins | place → Track 102A |
+| Manager: Muse `unsupported` cleared after the 17:06 UTC attended push with no code change | note on Track 100A's card; its first task re-checks the premise, kill if it does not recur |
+| Brief: Cursor usage via Paseo (ACP) and the Cursor app is not captured | place → Track 103A |
+| Future: Re-check Cursor ACP (Paseo) capture after each cursor-agent upgrade | place → Track 103A, first task (trigger met) |
+
 ### Roadmap promotion — 2026-11-02 (Muse reader)
 
 Run from manager Ephesus 8's brief on Karl's "ok sounds good" (2026-11-02) to card the Muse usage reader next, ahead of the bootstrap script. Inbox empty: **0 drained**. One Future entry promoted, "Read Muse Code 1.4.14's usage records (the reader has stopped on `unsupported` since 2026-10-21)", so Future goes from 18 to 17. Verification baseline: `927d84a` (v1.12.3); the symptom was re-observed that day at mm 1.12.3 (`muse.last_reason: unsupported` since 2026-10-21, 486 of 1,036 files cached). It becomes two Tracks, because the core-and-extensions constraint puts a move-only Track before any change to a reader in `host_usage.py`: Track 99A moves the Muse reader into `hosts/muse.py`, and Track 100A reads the cause on this Mac (read-only), re-censuses the corpus into the Muse CONTRACT.md and fixes the reader. Track 91B stays pinned (factory item 53b6eda2) with its card unchanged. The bootstrap script gains `_blocked-by: Track 100A` to hold the owner's order, leaves Group 91 and takes back its earlier ID (91C → 98A); Tracks 92A and 93A name it under the new ID, with no other change. No Tracks shipped since `927d84a`. 6 Future entries still lack an inline revisit trigger; the trigger migration was offered, not run.
