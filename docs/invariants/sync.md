@@ -40,6 +40,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/core.py` — `MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause`
 - `src/mind_meld/manifest.py` — `scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME`
 - `src/mind_meld/retention.py` — `_gc_deleted_copies`
+- `src/mind_meld/resolveflow.py` — `_record_resolution`
+- `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
 
 Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, and for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables).
 
@@ -424,11 +426,13 @@ unavailable (<cause>); deletions are paused. See <README History database>`
 and never creates the database. `pullplan.Ledger` is a pure in-memory overlay
 (`pullplan` is a leaf): bases, held versions and ancestry update in memory after each
 settled outcome, in apply and planner alike, so a later peer in the same pull
-sees them. The durable commit is once per pull, and once after a push.
+sees them. Ordinary settlement commits at pull end, with a separate transaction
+before the deletion pass moves its first file, and once after a push.
 
-**Who writes it.** Only a pull (its deletion pass, and its `finally`) and a push
-after its manifest is accepted, all under the mm lock, each in one transaction that
-is the innermost lock
+**Who writes it.** A pull (its deletion pass, and its `finally`), a push
+after its manifest is accepted, and each successful explicit `mm resolve` choice
+(`resolveflow._record_resolution`), all under the mm lock. Each transaction is
+the innermost lock
 (`core.commit_ledger` → `statedb.commit_ledger`, writing only rows that changed).
 A push records every published version as `held` (`core.record_published`) and
 clears any `deleted_by` stamp on a path it publishes again. A pull records an outcome
@@ -508,10 +512,17 @@ exists:
 8. the peer's manifest does not list the path (a merged manifest can hold both), and
    on a case-insensitive volume lists no path equal to it after NFC and casefold
    (a case-only rename on Linux must not delete the live file on a Mac);
-9. the local path has no symlink component, resolves inside the source root, is a
+9. the local path has no symlink component below the source root (the root itself
+   may be a symlink), resolves inside the source root, is a
    regular file, and its bytes hash to the record's hash.
 
-Two peers naming one file give one candidate. `is_tombstoned` suppression is
+Multiple peers or configured source aliases naming one resolved file give one
+candidate and one physical recovery copy. The candidate carries every configured
+source/path alias, including an alias omitted by `--source` or with no tombstone.
+The transaction drops bases and stamps the followed deletion for all aliases;
+a refused/restored move restores each alias's original bases together. This keeps
+a later push through another name from minting a second deletion.
+`is_tombstoned` suppression is
 unchanged: a different file on a third machine stays suppressed for up to 30 days
 and returns after; its bytes are untouched.
 
@@ -524,7 +535,9 @@ Protocol (`pullflow._run_deletions`), in order:
 2. Flush written files and the directories, then commit **one** ledger
    transaction: drop every peer's base for each path and stamp the deleted version
    `deleted_by` with the origin's device id. If it fails, nothing is deleted.
-3. Per file, `_move_into_copy`: `os.rename` the file's own inode into the folder,
+3. Per file, `_move_into_copy`: reserve the recovery name with `O_EXCL` (including
+   case aliases on that volume), then `os.rename` the file's own inode over only
+   that private empty reservation into the folder,
    `chmod 0600`, hash the moved file. A matching hash completes the deletion. A
    mismatch hard-links it back with no clobber (`os.link`) and removes the copy
    (`restored`: the local file is kept and counts `failed`). If the link fails for
@@ -534,13 +547,17 @@ Protocol (`pullflow._run_deletions`), in order:
    Moving the inode closes the check-then-unlink window: a writer that replaces
    the path afterwards creates a new file that survives; one holding the file
    open writes into the copy. On `EXDEV` (a source on another volume) it falls
-   back to copy, re-stat and unlink (`_copy_then_unlink`): a named window. The
-   writers call `fsutil.refuse_real_state_write_under_pytest` first.
+   back to an exclusively created copy, flush its bytes and parent, then re-stat
+   size, `mtime_ns`, `ctime_ns` and inode before unlink (`_copy_then_unlink`):
+   a named check-to-unlink window. The writers call `fsutil.refuse_real_state_write_under_pytest` first.
 4. Fsync the recovery folders and the local parents.
 
-A move that fails or finds changed bytes undoes step 2 for that file (the base
-returns and the stamp clears), so the next pull may try it again. The one exception
-is an unlink that fails after the cross-volume copy was written: it is not retried.
+A refused move, or changed bytes successfully restored to the canonical path,
+undoes step 2 for all aliases (the original bases return and the stamps clear),
+so the next pull may try again. A moved inode retained in the recovery folder
+keeps the stamps, including when chmod or hash verification fails or no-clobber
+restoration cannot link it back; the warning names that folder. An unlink that
+fails after the cross-volume copy was written also keeps the stamps and is not retried.
 Step 2 already dropped the base, so the next pull keeps the file (`keep`: never
 synced from the peer), and because the deleted version is stamped this machine mints
 nothing until the file is published again. Delete it by hand, or keep it and this
@@ -587,8 +604,18 @@ it.
 To accept such an edit, compare both versions, then `touch <file>` and `mm push` on
 the machine whose version should win: the mtime-only republish makes it newer. `mm
 diag` and `--json` gain a read-only `fast_forward` section (ledger state,
-`peer_base` rows per peer, `seen_version` rows, each scan root's token state); it
-cannot list `older` edits because they need peer manifests.
+`peer_base` rows per peer, `seen_version` rows, each scan root's token state; a
+symlinked source root is allowed, descendant links are not); it
+shows prior `older` observations from the private local
+`sync-observations.json` cache (`syncdiag.py`), never fresh peer-manifest evidence.
+A real pull replaces the prior observation, including an empty list; interruption
+records partial coverage. Rows carry peer, source, relative path and both mtimes,
+with an observation time, completeness flag and `may_be_stale`. The bounded cache
+uses `lockedjson`; diag reads without creating, repairing or waiting for its lock.
+Missing, unreadable, unsupported or contended state is unknown, and no sync
+decision reads this cache. It also retains consecutive accepted-push anchor
+mismatches when no files were absent; after two, push names the restore-tool or
+filesystem-rollback limit rather than repeatedly advising `mm push`.
 
 **Anchors and the mint guard.** A tombstone is minted only for a file this machine
 held and can prove gone, so a removed or restored scan root can never read as a mass
@@ -620,9 +647,11 @@ publishes it and no peer plants it.
   recorded. Everything else joins `skip` and mints nothing: a path whose root is
   gone, new or unreadable; a path under no scan root; a path still on disk (an
   omission only the hardcoded `EXCLUDED` list explains); a deletion this machine only
-  followed (`deleted_by`). A minted record carries `sha256`, the prior entry's digest
-  (valid only as 64 lowercase hex; any other value reads as no hash), which
-  survives `_remap_keys`, `_merge_manifests` and carry-forward because they copy the
+  followed (`deleted_by`). An unreadable ledger or recovered/merged prior also
+  authorizes no mint. A minted record carries `sha256` for the newest held
+  version, resolving its prefix against full hashes in the prior entry and local
+  peer bases. An unknown or ambiguous full hash mints nothing; with no held row,
+  the accepted prior entry's valid full digest is used. The hash survives `_remap_keys`, `_merge_manifests` and carry-forward because they copy the
   info dict.
 - **`left_out`.** The skipped paths a gone, new or unreadable root explains join an
   in-memory `left_out` set per source, attached to the prior manifest copies
@@ -670,9 +699,9 @@ mints nothing.
 - A line deleted on one side returns when both sides changed the file (an owner-accepted limit).
 - The mtime gate survives only as the `older` guard and the no-base fallback.
 - `mm-events` tombstones stay suppress-only (see events-retro.md).
-- A machine that catches up and deletes before its next push publishes the hash of
-  its last published version, which a peer that already moved to a newer version does
-  not hold; that peer keeps the file until the record expires. Nothing is lost.
+- A machine that catches up and deletes before its next push uses its newest held
+  version's full hash from the peer bases. If no full hash identifies that version,
+  it publishes no deletion record; peers keep their copies.
 - When one machine deletes a file another has edited, a third machine still holding
   the old bytes deletes its copy and the edit stays suppressed there for up to 30
   days, then arrives (an owner-accepted limit).
@@ -1546,8 +1575,8 @@ index_list independently.
 |---|---|
 | meta | key/value: compat_version gates every connection; history_imported selects history; history_import_pending reports deferred import; legacy_jsonl_stat feeds the two-file stale-binary notice (73B). No other keys yet. |
 | history | id orders insertions/prune/ties, ts renders and sorts, ts_us filters --since, verb/device/source/rel_path/action/local_sha/remote_sha/extra reconstruct mm log rows (73B); old_version/new_version live in extra. |
-| peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
-| seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull and push (Track 91A). `mm diag` counts rows. |
+| peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and explicit resolution, and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
+| seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull, push and explicit resolution (Track 91A). `mm diag` counts rows. |
 | ledger | No reader. Provisional and empty. |
 | cursors | No reader. Provisional and empty. |
 | own_log | No reader. Provisional and empty. |

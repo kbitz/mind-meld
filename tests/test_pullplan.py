@@ -274,6 +274,73 @@ def test_stamp_clear_stamps_and_a_held_row_keeps_its_stamp():
     assert not ledger.dirty
 
 
+def test_followed_deletion_stamp_is_newer_than_newly_seen_ancestors():
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    ledger.settle(PEER, SRC, REL, V2, ancestors=(P1, P0))
+    last_seen = max(entry.time for entry in ledger.entries(SRC, REL).values())
+    ledger.mark_committed()
+
+    ledger.stamp_deleted(SRC, REL, V2, PEER)
+
+    assert ledger.newest_stamp(SRC, REL) == PEER
+    assert ledger.entries(SRC, REL)[P2].time > last_seen
+    assert ledger.new_seen[(SRC, REL, P2)][1:] == (
+        ledger.entries(SRC, REL)[P2].time,
+        PEER,
+    )
+
+
+def test_drop_many_removes_every_peer_base_and_pending_base_in_one_batch():
+    removed = {(SRC, f"gone-{i}.md") for i in range(200)}
+    ledger = pullplan.Ledger(
+        {(peer, source, path): V0 for peer in (PEER, OTHER) for source, path in removed},
+        now_us=NOW_US,
+    )
+    for source, path in removed:
+        ledger.settle(PEER, source, path, V1)
+    ledger.settle(PEER, SRC, "keep.md", V2)
+    ledger.settle(OTHER, "other", "gone-0.md", V2)
+
+    ledger.drop_many(iter(removed))
+
+    expected = {(PEER, SRC, "keep.md"): V2, (OTHER, "other", "gone-0.md"): V2}
+    assert ledger.bases == expected
+    assert ledger.new_bases == expected
+    assert ledger.drop_bases == removed
+    assert ledger.newest_held(SRC, "gone-0.md") == P1
+
+
+def test_successful_deletion_cancels_only_its_deferred_keep_local_rows():
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    ledger.settle(PEER, SRC, REL, V0)
+    ledger.deferred.extend([(OTHER, SRC, REL, V1, (P2,)), (OTHER, SRC, "keep.md", V1, (P2,))])
+    ledger.drop_many([(SRC, REL)])
+    ledger.stamp_deleted(SRC, REL, V0, PEER)
+    ledger.mark_committed()  # deletion preparation commits before the move
+    ledger.discard_deferred(SRC, REL)  # only a completed move cancels the decision
+    ledger.flush_deferred()
+
+    assert ledger.base(OTHER, SRC, REL) is None
+    assert ledger.newest_stamp(SRC, REL) == PEER
+    assert set(ledger.entries(SRC, REL)) == {P0}
+    assert ledger.base(OTHER, SRC, "keep.md") == V1
+
+
+def test_failed_deletion_keeps_the_deferred_keep_local_decision():
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    ledger.settle(PEER, SRC, REL, V0)
+    ledger.deferred.append((OTHER, SRC, REL, V1, (P2,)))
+    ledger.drop_many([(SRC, REL)])
+    ledger.stamp_deleted(SRC, REL, V0, PEER)
+    ledger.mark_committed()
+    ledger.undelete(SRC, REL, PEER, V0, restore_base=True)
+    ledger.flush_deferred()
+
+    assert ledger.base(OTHER, SRC, REL) == V1
+    assert ledger.base(PEER, SRC, REL) == V0
+    assert ledger.newest_stamp(SRC, REL) is None
+
+
 def test_drop_forgets_every_peers_base_for_the_path_only():
     ledger = pullplan.Ledger(
         {
@@ -363,6 +430,70 @@ def test_mark_committed_clears_pending_work_but_keeps_the_in_memory_state():
     ledger.mark_committed()
     assert not ledger.dirty and ledger.flush_paths == {}
     assert ledger.base(PEER, SRC, REL) == V0 and ledger.newest_held(SRC, REL) == P0
+
+
+def test_flush_ledger_files_reports_every_failure_and_discards_only_unsafe_rows(monkeypatch):
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    ledger.settle(PEER, SRC, REL, V0)
+    ledger.settle(PEER, SRC, "safe.md", V1)
+    bad_paths = [Path("canonical.md"), Path("conflict.md")]
+    safe_path = Path("safe.md")
+    ledger.flush_paths = {(SRC, REL): bad_paths, (SRC, "safe.md"): [safe_path]}
+    errors, attempted = [], []
+    failure = OSError("flush failed")
+
+    def flush(path):
+        attempted.append(path)
+        if path in bad_paths:
+            raise failure
+
+    monkeypatch.setattr(core.fsutil, "fsync_file", flush)
+    elapsed = core.flush_ledger_files(ledger, on_error=lambda path, exc: errors.append((path, exc)))
+
+    assert isinstance(elapsed, float)
+    assert attempted == [*bad_paths, safe_path]
+    assert errors == [(path, failure) for path in bad_paths]
+    assert ledger.base(PEER, SRC, REL) is None
+    assert ledger.entries(SRC, REL) == {}
+    assert ledger.base(PEER, SRC, "safe.md") == V1
+
+
+@pytest.mark.parametrize("platform,count", [("linux", 500), ("linux", 501), ("darwin", 501)])
+def test_flush_ledger_files_uses_sync_only_above_linux_threshold(monkeypatch, platform, count):
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    paths = [Path(f"file-{i}.md") for i in range(count)]
+    ledger.flush_paths[(SRC, REL)] = paths
+    syncs, flushed = [], []
+    monkeypatch.setattr(core.sys, "platform", platform)
+    monkeypatch.setattr(core.os, "sync", lambda: syncs.append(True))
+    monkeypatch.setattr(core.fsutil, "fsync_file", flushed.append)
+
+    elapsed = core.flush_ledger_files(ledger)
+
+    assert isinstance(elapsed, float)
+    assert syncs == ([True] if platform == "linux" and count > 500 else [])
+    assert flushed == ([] if syncs else paths)
+
+
+def test_failed_linux_sync_reports_each_path_and_discards_all_settlements(monkeypatch):
+    ledger = pullplan.Ledger(now_us=NOW_US)
+    paths = [Path(f"file-{i}.md") for i in range(501)]
+    for path in paths:
+        ledger.settle(PEER, SRC, str(path), V0)
+        ledger.flush_paths[(SRC, str(path))] = [path]
+    failure = OSError("sync failed")
+    errors = []
+
+    def fail_sync():
+        raise failure
+
+    monkeypatch.setattr(core.sys, "platform", "linux")
+    monkeypatch.setattr(core.os, "sync", fail_sync)
+    elapsed = core.flush_ledger_files(ledger, on_error=lambda path, exc: errors.append((path, exc)))
+
+    assert isinstance(elapsed, float)
+    assert errors == [(path, failure) for path in paths]
+    assert ledger.new_bases == {} and ledger.new_seen == {}
 
 
 # ── decide: row 1, the local file is missing ──────────────────────────

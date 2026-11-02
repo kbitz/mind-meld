@@ -30,8 +30,17 @@ mints no deletion records, and a record from an older release carries no content
 it keeps its old effect of stopping a re-download and never deletes). Go one machine at a
 time, in any order.
 
+- **Update pinned Codex exclusions before syncing.** If your config has an explicit
+  `[[sync.sources]]` entry for `codex`, run `mm migrate-config --dry-run`, then
+  `mm migrate-config` on each machine. This appends `plugins/cache/*` and
+  `plugins/.remote-plugin-install-staging/*` to its exclusions, preserving your custom
+  exclusions. Codex manages these installed plugin files itself. Then run `mm push` on
+  each machine; removing them from sync leaves the local files in place and publishes
+  no deletion records. Configs using the default sources get these exclusions automatically.
 - **What a deletion removes.** A deletion record carries the sha256 of the version that was
-  deleted. A machine deletes its copy only when that file's bytes equal that hash and it
+  deleted: the newest version this machine held for which it knows the full hash. If the
+  full hash is unknown, no record is published. A machine deletes its copy only when that
+  file's bytes equal that hash and it
   last synced exactly that version from the machine that deleted it; a file you changed, a
   same-named file with other bytes, or anything else stays. The deleted file is moved to
   `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>` and kept at least 30
@@ -51,6 +60,8 @@ time, in any order.
 - **A peer edit with an older timestamp is held.** When a peer's version was built on
   yours but carries an older mtime (a machine restored from backup), pull leaves your file
   alone and the line says `N older peer edits not applied`; `mm pull --verbose` lists them.
+  `mm diag` shows the last pull's observations, including both mtimes, labeled as possibly
+  stale; it does not fetch the peer's current files.
   Compare both versions, then run `touch <file>` and `mm push` on the machine whose version
   should win.
 - **`.mind-meld-anchor`.** mm keeps this small file (a random token) in each folder it
@@ -60,7 +71,9 @@ time, in any order.
   folder was removed, recreated or restored from a backup". In the second case the push
   mints no deletions and says `N files left out because <folder> is new; run mm pull to
   restore them`. An anchor that cannot be written (a read-only folder) means deletions under
-  it will not propagate; the push says so.
+  it will not propagate; the push says so. If a restore tool repeatedly rewrites the token,
+  push reports the repeated mismatch and `mm diag` records it; check that tool's restore
+  rules rather than repeatedly pushing.
 - **Rollback.** The previous release ignores the new `state.db` tables and the new manifest
   fields; files already deleted stay deleted, with their copies. An older release's walker
   publishes `.mind-meld-anchor` from a scan root as an ordinary file that differs on every
@@ -665,7 +678,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors}` (the pull ledger's state, its row counts per peer, and each scan root's `.mind-meld-anchor` state). Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -1329,11 +1342,12 @@ because a peer did lives in this database too, so after a loss one Mac can publi
 second record for such a file. It names the same bytes, so it deletes only identical
 copies; "no file is deleted" holds for that Mac's own pulls only.
 
-`mm: notice: <reason>. Fast-forward and deletions are paused: this pull used the old
-mtime rule and deleted nothing` means the ledger could not be read or written this
-time: wait for the other mm command (busy), run `mm update` (a newer schema), or move
-the database aside (damaged or interrupted). Sync itself still ran. `mm autopull` and
-`mm autopush` record it as `degraded` instead of printing it.
+`mm: notice: <reason>. Pull ledger unavailable; some sync history may not have been
+recorded. Completed file changes remain` means the ledger could not be read or written
+this time: wait for the other mm command (busy), run `mm update` (a newer schema), or move
+the database aside (damaged or interrupted). A read failure uses the fallback rule and
+deletes nothing; a later write failure does not undo changes already completed.
+`mm autopull` and `mm autopush` record it as `degraded` instead of printing it.
 
 
 ### Recovering a deleted file
@@ -1352,39 +1366,50 @@ The `.mind-meld-log.md` of an affected Claude project lists them too.
 
 **Where the copy is.** `~/.config/mind-meld/deleted/<UTC stamp>-<rand>/<source>/<path>`,
 one folder per pull; `<source>` is the sync source (`claude`, `gstack`, ...) and `<path>`
-the file's path inside that source's folder. `mm sources` maps each source to its folder:
-the `Path` column is where the file belongs. The copy is the plaintext file itself
+the file's path inside that source's folder on the machine that followed the deletion.
+`mm sources` maps each source to its folder: the `Path` column is the source root on
+that machine. The copy is the plaintext file itself
 (moved, not re-encrypted), stored `0600`. It depends on nothing in the shared store, so
 `mm gc` blob collection and a lost `state.db` do not touch it.
 
 **Put it back where the deletion started, then push.** The file's deletion came from one
-Mac (the one the pull line names). Restore it there; a copy put back only on a Mac that
+machine (the one the pull line names). Restore it there; a copy put back only on a machine that
 followed the deletion stays local until the deletion record expires, because the record
-still suppresses that file from every other Mac. Build the path from the copy folder, and
-use `cp -n` so a newer file at the destination is never overwritten:
+still suppresses that file from every other machine. First transfer the recovery folder to
+the origin, preserving the folders inside it. Then choose the copy's path and the origin's
+destination separately. They can differ: a Claude project under `/home/kb/myapp` on Linux
+has a `projects/-home-kb-myapp/` folder, while the same project under `/Users/kb/myapp` on
+the origin Mac has `projects/-Users-kb-myapp/`. A shared git project can also live at
+different checkout paths. Check the origin's existing project folder or its checkout
+path; do not create a second project folder using the follower's name. For sources such
+as `gstack`, both paths are usually the same.
+
+Run this on the origin, setting each path for your file. `cp -n` preserves a newer file
+already at the destination:
 
 ```bash
-copies="$HOME/.config/mind-meld/deleted/20261101-181530-3fa9"   # the folder the pull named
-source_name=gstack                                               # the sync source (mm sources: Name)
-source_dir="$HOME/.gstack"                                       # mm sources: Path of that source
-path="analytics/mm-recipe.md"                                    # the file inside that source
-mkdir -p "$(dirname "$source_dir/$path")"
-cp -n "$copies/$source_name/$path" "$source_dir/$path"
+copies="$HOME/mm-recovery-20261101-181530-3fa9"  # the transferred recovery folder
+source_name=claude                              # mm sources: Name
+source_dir="$HOME/.claude"                     # mm sources: Path on the origin
+copy_path="projects/-home-kb-myapp/memory/user_role.md"    # inside the follower's copy
+origin_path="projects/-Users-kb-myapp/memory/user_role.md" # inside the origin's source
+mkdir -p "$(dirname "$source_dir/$origin_path")"
+cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
-**The copy may be on another machine.** It sits on each Mac whose pull deleted the file,
-which is not the Mac that deleted it first: that one removed the file itself and holds no
-copy. Find the folder on any Mac that printed the line (`mm log --action deleted`), copy
-the file to the origin by any means, then run the commands above there. After the push,
-each other Mac gets the file back at its next `mm pull`, even if the restored file keeps
+**The copy is on a machine that followed the deletion.** The origin removed the file
+itself and holds no copy. Find the folder on any machine that printed the line
+(`mm log --action deleted`), transfer it to the origin by any means, then run the commands
+above there. After the push, each other machine gets the file back at its next `mm pull`, even if the restored file keeps
 its old mtime.
 
 **Copies are safe to delete.** Delete a folder you no longer need
 (`rm -rf ~/.config/mind-meld/deleted/<folder>`). Thirty days is a **minimum**: `mm gc`
 and every real `mm pull` remove whole folders older than 30 days by the date in the
 folder's name, using this Mac's clock. `mm gc --dry-run` lists them. If a pull cannot
-create or flush the folder, it deletes nothing and says so.
+create the recovery folder, it leaves the local file and says so. A failure after a file
+has moved can leave its bytes in that folder; the warning names the recovery path.
 
 **Uninstalling.** `rm -rf ~/.config/mind-meld` removes these copies with the rest of mm's
 local state. The `.mind-meld-anchor` files stay in each scan root; they are harmless and

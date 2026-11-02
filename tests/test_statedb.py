@@ -747,6 +747,24 @@ def test_core_commit_persists_dirty_rows_once_and_marks_them_committed():
     assert isinstance(again, pullplan.Ledger)
 
 
+def test_deletion_stamp_stays_newest_after_ancestry_and_database_reload():
+    from mind_meld import core, pullplan
+
+    ledger = pullplan.Ledger()
+    ledger.settle("peerpeer", "notes", "a.md", FULL, ancestors=(SHA_B,))
+    assert core.commit_ledger(ledger) is None
+    ledger, exc = core.load_ledger(["peerpeer"])
+    assert exc is None
+    ledger.drop("notes", "a.md")
+    ledger.stamp_deleted("notes", "a.md", FULL, "peerpeer")
+    assert core.commit_ledger(ledger) is None
+
+    again, exc = core.load_ledger(["peerpeer"])
+    assert exc is None
+    assert again.base("peerpeer", "notes", "a.md") is None
+    assert again.newest_stamp("notes", "a.md") == "peerpeer"
+
+
 def test_core_load_ledger_is_unreadable_for_a_damaged_database():
     from mind_meld import core
 

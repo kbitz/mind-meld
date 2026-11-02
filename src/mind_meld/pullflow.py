@@ -51,6 +51,7 @@ from mind_meld import (
     retention,
     safety,
     statedb,
+    syncdiag,
 )
 from mind_meld.config import MM_INTERNAL_SOURCE_NAMES, resolve_sources
 from mind_meld.conflictdiff import (
@@ -188,6 +189,8 @@ class OlderEdit:
     device_name: str
     src_name: str
     rel_path: str
+    local_mtime: str | None = field(default=None, compare=False)
+    peer_mtime: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -239,6 +242,7 @@ class PullResult:
     # surfaced to stderr by _print_pull_summary.
     durability_fsync_failures: int = 0
     corrupt_peer_count: int = 0
+    maintenance_failures: int = 0
     # Content the sync tool has not delivered yet (Track 87A): blobs per peer,
     # a peer manifest or a device entry that vanished mid-read. Never a failure
     # and never a degradation; the outcome line names it and the next pull
@@ -840,6 +844,7 @@ class _ApplyReporter:
     peer_id: str | None = None
     own: pullplan.OwnLookup | None = None
     older: list[str] = field(default_factory=list)
+    older_mtimes: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
     remote_sha: str | None = None
     remote_from: list[str] = field(default_factory=list)
     local_sha: str | None = None
@@ -847,6 +852,15 @@ class _ApplyReporter:
     # True when "unchanged" means this machine and the peer really agree (a
     # byte-equal file or a no-op merge), as opposed to a silent hold.
     agree: bool = False
+
+    def note_older(
+        self, path: str, local_mtime: datetime | None, peer_mtime: datetime | None
+    ) -> None:
+        self.older.append(path)
+        self.older_mtimes[path] = (
+            local_mtime.isoformat() if local_mtime else None,
+            peer_mtime.isoformat() if peer_mtime else None,
+        )
 
     def begin(
         self,
@@ -895,8 +909,8 @@ class _ApplyReporter:
             also_hold=also,
             ancestors=self.remote_from,
         )
-        written = self.copy_path if outcome == "conflicted" else self.local_path
-        if outcome in {"written", "merged", "merged-via-lcs", "conflicted"} and written:
+        written = self.copy_path if outcome in {"conflicted", "kept"} else self.local_path
+        if outcome in {"written", "merged", "merged-via-lcs", "conflicted", "kept"} and written:
             ledger.flush_paths.setdefault((self.src_name, self.rel_path), []).append(written)
 
     def defer_settle(self) -> None:
@@ -1137,6 +1151,7 @@ def _apply_conflict(
                 # the existing sidecar already represents this conflict.
                 # Skip the write so we don't accumulate duplicates.
                 # Unchanged-content retries do not clean extras.
+                reporter.copy_path = sidecar
                 if verbose:
                     console.print(
                         f"  [yellow]conflict (unchanged):[/yellow] "
@@ -1219,7 +1234,7 @@ def _ledger_verdict(
         local_mtime = mtime_from_path(local_path)
     except (TypeError, ValueError, OverflowError, OSError):
         local_mtime = None
-    return pullplan.decide(
+    verdict = pullplan.decide(
         ledger,
         reporter.peer_id,
         reporter.src_name,
@@ -1229,6 +1244,9 @@ def _ledger_verdict(
         remote_mtime,
         pullplan.parse_from(remote_info),
     )
+    if verdict == "older":
+        reporter.note_older(reporter.rel_path, local_mtime, remote_mtime)
+    return verdict
 
 
 def _apply_fast_forward(
@@ -1249,9 +1267,10 @@ def _apply_fast_forward(
     """
     try:
         now = local_path.lstat()
-        if (now.st_size, now.st_mtime_ns, now.st_ino) != (
+        if (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) != (
             before.st_size,
             before.st_mtime_ns,
+            before.st_ctime_ns,
             before.st_ino,
         ):
             return None
@@ -1359,7 +1378,6 @@ def _apply_incoming_file(
         reporter.agree = verdict == "matched"
         return "unchanged"
     if verdict == "older":
-        reporter.older.append(rel_path)
         return "unchanged"
     if verdict in ("fast-forward", "write"):
         forwarded = _apply_fast_forward(
@@ -1777,6 +1795,12 @@ class _Deletion:
     local_path: Path
     sha: str
     src_type: str = ""
+    aliases: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def ledger_paths(self) -> tuple[tuple[str, str], ...]:
+        """Every source key whose canonical entry this physical move removes."""
+        return self.aliases or ((self.src_name, self.rel_path),)
 
 
 def _folded(path: str) -> str:
@@ -1805,7 +1829,8 @@ def _own_lookup(
             (own_manifest or {}).get("tombstones") or {}
         )
         root = manifest.scan_root_for(cfg, rel_path)
-        recorded = (entry.get("root_ids") or {}).get(root) if root is not None else None
+        root_ids = entry.get("root_ids")
+        recorded = root_ids.get(root) if isinstance(root_ids, dict) and root is not None else None
         if root is None or not isinstance(recorded, str):
             return lists, False
         key = (src_name, root)
@@ -1863,7 +1888,51 @@ def _deletion_candidates(
     blocked = blocked or set()
     cutoff = datetime.now(timezone.utc) - timedelta(days=manifest.TOMBSTONE_TTL_DAYS)
     insensitive: dict[str, bool] = {}
+    folded_files: dict[tuple[str, str], set[str]] = {}
     taken: set[tuple[str, str]] = set()
+    taken_paths: set[tuple[tuple[int, int], str]] = set()
+    source_roots: dict[tuple[int, int], list[str]] = {}
+    for name, info in local_sources_map.items():
+        if name not in MM_INTERNAL_SOURCE_NAMES:
+            try:
+                root = info["path"].stat()
+            except (OSError, RuntimeError):
+                # An unresolvable root cannot safely participate in this pass.
+                return []
+            source_roots.setdefault((root.st_dev, root.st_ino), []).append(name)
+
+    directory_names: dict[tuple[int, int], dict[str, list[str]]] = {}
+    directory_paths: dict[tuple[int, int], tuple[tuple[str, Path], ...]] = {}
+
+    def entry_name(path: Path, parent_id: tuple[int, int]) -> str:
+        # resolve() preserves case on POSIX. Read the directory's real spelling
+        # once, including for a differently cased configured root in a suffix.
+        if parent_id not in directory_names:
+            names: dict[str, list[str]] = {}
+            for entry in path.parent.iterdir():
+                names.setdefault(_folded(entry.name), []).append(entry.name)
+            directory_names[parent_id] = names
+        names = directory_names[parent_id].get(_folded(path.name), [])
+        if path.name in names:
+            return path.name
+        matches = [name for name in names if (path.parent / name).samefile(path)]
+        if len(matches) != 1:
+            raise OSError("the directory entry changed or has ambiguous spelling")
+        return matches[0]
+
+    def directory_aliases(directory: Path):
+        info = directory.stat()
+        identity = (info.st_dev, info.st_ino)
+        if identity not in directory_paths:
+            aliases = [(name, Path()) for name in source_roots.get(identity, [])]
+            if directory.parent != directory:
+                parent_id, parents = directory_aliases(directory.parent)
+                if parents:
+                    name = entry_name(directory, parent_id)
+                    aliases.extend((source, rel / name) for source, rel in parents)
+            directory_paths[identity] = tuple(aliases)
+        return identity, directory_paths[identity]
+
     out: list[_Deletion] = []
     for device in pull_targets:
         did, dname = device["device_id"], device["device_name"]
@@ -1907,16 +1976,19 @@ def _deletion_candidates(
                 continue
             if src_name not in insensitive:
                 insensitive[src_name] = _detect_case_insensitive_fs(base_path)
-            if insensitive[src_name] and _folded(rel_path) in {_folded(p) for p in peer_files}:
-                keep("the peer lists a name that differs only in case")
-                continue
+            if insensitive[src_name]:
+                key = (did, src_name)
+                if key not in folded_files:
+                    folded_files[key] = {_folded(p) for p in peer_files}
+                if _folded(rel_path) in folded_files[key]:
+                    keep("the peer lists a name that differs only in case")
+                    continue
             try:
                 if pullplan._has_symlinked_component(local_path, base_path, strict=True):
                     keep("a folder on the way is a symlink")
                     continue
-                if not local_path.resolve(strict=False).is_relative_to(
-                    base_path.resolve(strict=False)
-                ):
+                resolved = local_path.resolve(strict=False)
+                if not resolved.is_relative_to(base_path.resolve(strict=False)):
                     keep("the path leaves the source folder")
                     continue
                 if not stat.S_ISREG(local_path.lstat().st_mode):
@@ -1925,10 +1997,22 @@ def _deletion_candidates(
                 if hash_file(local_path) != sha:
                     keep("its bytes differ from the deleted version")
                     continue
+                parent_id, parent_aliases = directory_aliases(resolved.parent)
+                name = entry_name(resolved, parent_id)
             except (OSError, ValueError, MindMeldError):
                 keep("it could not be read")
                 continue
+            identity = (parent_id, name)
+            if identity in taken_paths:
+                continue
+            # Different configured sources can name the same directory entry,
+            # including an alias with no tombstone of its own. Its next push
+            # must know that mm removed the file too. Parent identity plus the
+            # real entry name handles case aliases without merging hardlinks.
+            aliases = [(src_name, rel_path)]
+            aliases.extend((source, (rel / name).as_posix()) for source, rel in parent_aliases)
             taken.add((src_name, rel_path))
+            taken_paths.add(identity)
             out.append(
                 _Deletion(
                     did,
@@ -1939,6 +2023,7 @@ def _deletion_candidates(
                     local_path,
                     sha,
                     local_sources_map[src_name].get("type", ""),
+                    tuple(dict.fromkeys(aliases)),
                 )
             )
     return out
@@ -1980,22 +2065,52 @@ class _UnlinkFailed(OSError):
     """The recovery copy was written but the original could not be removed (another volume)."""
 
 
+class _MovedCopyError(OSError):
+    """The inode moved into recovery, but verification or restoration did not finish."""
+
+
+class _RestoredCopyError(_MovedCopyError):
+    """The changed file was linked back, but its extra recovery link could not be removed."""
+
+
+def _remove_owned_copy(copy_path: Path, owned: os.stat_result, *, empty: bool = False) -> None:
+    """Remove only our reservation/copy, never a replacement occupying its name."""
+    fsutil.refuse_real_state_write_under_pytest(copy_path)
+    current = copy_path.lstat()
+    if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino) or (
+        empty and current.st_size != 0
+    ):
+        raise OSError(errno.EEXIST, "recovery destination changed", str(copy_path))
+    copy_path.unlink()
+
+
 def _copy_then_unlink(local_path: Path, copy_path: Path, sha: str) -> str:
     """A source on another volume cannot be renamed: copy, re-check, unlink (a named window)."""
     fsutil.refuse_real_state_write_under_pytest(copy_path)
     fsutil.refuse_real_state_write_under_pytest(local_path)
     before = local_path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        return "restored"
     data = local_path.read_bytes()
     if hashlib.sha256(data).hexdigest() != sha:
         return "restored"
-    fsutil.atomic_write_bytes(copy_path, data, fsync=True, mode=0o600)
+    # Exclusive creation also refuses case aliases on the recovery volume. The
+    # source stays until this private copy is written and flushed successfully.
+    fd = os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        owned = os.fstat(stream.fileno())
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    fsutil.fsync_dir(copy_path.parent)
     now = local_path.lstat()
-    if (now.st_size, now.st_mtime_ns, now.st_ino) != (
+    if (now.st_size, now.st_mtime_ns, now.st_ctime_ns, now.st_ino) != (
         before.st_size,
         before.st_mtime_ns,
+        before.st_ctime_ns,
         before.st_ino,
     ):
-        copy_path.unlink()
+        _remove_owned_copy(copy_path, owned)
         return "restored"
     try:
         local_path.unlink()
@@ -2011,26 +2126,46 @@ def _move_into_copy(local_path: Path, copy_path: Path, sha: str) -> str:
     file went back) or ``kept-copy`` (restoration could not link it back; the moved
     file stays in the recovery folder). A writer that replaces the path after the
     move creates a new file that survives; one holding the file open writes into
-    the copy. Raises OSError when nothing moved.
+    the copy. A _MovedCopyError means the copy holds the moved inode; other
+    errors leave the canonical file untouched by this helper.
     """
     fsutil.refuse_real_state_write_under_pytest(copy_path)
     fsutil.refuse_real_state_write_under_pytest(local_path)
+    # Reserve the name atomically before rename. A source volume can distinguish
+    # names the recovery volume aliases; replacing another copy would lose bytes.
+    # This folder is private to the locked pull; rename replaces only our empty
+    # reservation, preserving the source inode and its open writers.
+    fd = os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        owned = os.fstat(fd)
+    finally:
+        os.close(fd)
     try:
         os.rename(local_path, copy_path)
     except OSError as exc:
+        _remove_owned_copy(copy_path, owned, empty=True)
         if exc.errno != errno.EXDEV:
             raise
         return _copy_then_unlink(local_path, copy_path, sha)
-    os.chmod(copy_path, 0o600)
-    if hash_file(copy_path) == sha:
-        return "deleted"
+    try:
+        moved = copy_path.lstat()
+        if not stat.S_ISREG(moved.st_mode):
+            return "kept-copy"
+        os.chmod(copy_path, 0o600, follow_symlinks=False)
+        if hash_file(copy_path) == sha:
+            return "deleted"
+    except (OSError, StorageError) as exc:
+        raise _MovedCopyError(str(exc)) from exc
     try:
         os.link(copy_path, local_path)
     except OSError:
         # A rename fallback could overwrite a file created after an absence check.
         # Preserve the moved bytes here whenever no-clobber restoration fails.
         return "kept-copy"
-    os.unlink(copy_path)
+    try:
+        _remove_owned_copy(copy_path, moved)
+    except OSError as exc:
+        raise _RestoredCopyError(str(exc)) from exc
     return "restored"
 
 
@@ -2038,6 +2173,7 @@ def _move_into_copy(local_path: Path, copy_path: Path, sha: str) -> str:
 class _DeletionRun:
     folder: Path | None = None
     ledger_exc: BaseException | None = None
+    fsync_warnings: list[_FsyncWarning] = field(default_factory=list)
 
 
 def _run_deletions(
@@ -2048,16 +2184,19 @@ def _run_deletions(
     per_source_results: list[_PerSourceResult],
     quiet: bool,
     verbose: bool,
+    pending_inline_bumps: dict[Path, float] | None = None,
+    run: _DeletionRun | None = None,
 ) -> _DeletionRun:
     """Follow peer deletions: recovery folders, one ledger commit, then move each file.
 
     Nothing is deleted unless every recovery folder exists and is flushed and the
     ledger transaction (clear the bases, stamp the deleted versions) committed.
     """
-    run = _DeletionRun()
+    run = run if run is not None else _DeletionRun()
     now = datetime.now(timezone.utc)
     folder = statedb.deleted_copies_dir() / _copy_folder_name(now)
-    by_key: dict[tuple[str, str], _PerSourceResult] = {}
+    resolved_paths = {(d.src_name, d.rel_path): d.local_path.resolve() for d in deletions}
+    by_key = {(r.device_id, r.src_name): r for r in per_source_results}
     for d in deletions:
         key = (d.peer_id, d.src_name)
         if key not in by_key:
@@ -2073,6 +2212,8 @@ def _run_deletions(
             )
             by_key[key] = result
             per_source_results.append(result)
+        else:
+            by_key[key].deleted_folder = str(folder)
 
     def fail(d: _Deletion, operation: str, exc: BaseException, preserved: str) -> None:
         by_key[(d.peer_id, d.src_name)].outcomes["failed"].append(d.rel_path)
@@ -2080,72 +2221,180 @@ def _run_deletions(
             d.peer_name, d.src_name, d.rel_path, d.local_path, operation, exc, preserved=preserved
         )
 
+    def removed(d: _Deletion) -> None:
+        for source, rel in d.ledger_paths:
+            ledger.discard_deferred(source, rel)
+        if pending_inline_bumps is not None:
+            pending_inline_bumps.pop(resolved_paths[(d.src_name, d.rel_path)], None)
+        touched_parents.add(d.local_path.parent)
+
+    def moved_failure(d: _Deletion, exc: BaseException) -> None:
+        # The moved inode is safely retained even when verification failed. Keep
+        # the followed stamp until republish: absence was caused by mm, not a new
+        # local deletion. A replacement canonical, if any, is never overwritten.
+        removed(d)
+        fail(d, "delete incomplete", exc, f"moved file kept in recovery folder {folder}")
+
+    def flush_failed(path: Path, exc: OSError) -> None:
+        run.fsync_warnings.append(_FsyncWarning(path, str(exc), blocks_commit=False))
+
+    ledger_paths = {key for d in deletions for key in d.ledger_paths}
+    saved_bases: dict[tuple[str, str], dict[tuple[str, str, str], str]] = {}
+
+    def undo(d: _Deletion) -> None:
+        # A refused/restored move affected no alias. Restore only bases that
+        # existed before it; an alias need never have synced from this origin.
+        for source, rel in d.ledger_paths:
+            ledger.undelete(source, rel, d.peer_id, d.sha, restore_base=False)
+            bases = saved_bases.get((source, rel), {})
+            ledger.bases.update(bases)
+            ledger.new_bases.update(bases)
+
     try:
         created = _make_copy_dirs(folder, deletions)
-        for directory in created:
-            fsutil.fsync_dir(directory)
-        if created:
-            fsutil.fsync_dir(created[0].parent)
     except (OSError, StorageError) as exc:
         for d in deletions:
             fail(d, "cannot create recovery folder", exc, "local preserved")
         return run
+    run.fsync_warnings.extend(
+        _fsync_touched_parents(set(created) | ({created[0].parent} if created else set()))
+    )
+    if run.fsync_warnings:
+        for d in deletions:
+            fail(
+                d,
+                "cannot flush recovery folder",
+                RuntimeError("directory flush failed"),
+                "local preserved",
+            )
+        _remove_copy_dirs(created)
+        return run
     run.folder = folder
+    # Aliases without a tombstone can have pending incoming-file settlements.
+    # Discard any failed flushes before staging the followed-deletion stamps.
+    core.flush_ledger_files(ledger, on_error=flush_failed)
+    for key, sha in ledger.bases.items():
+        if key[1:] in ledger_paths:
+            saved_bases.setdefault(key[1:], {})[key] = sha
+    ledger.drop_many(ledger_paths)
     for d in deletions:
-        ledger.drop(d.src_name, d.rel_path)
-        ledger.stamp_deleted(d.src_name, d.rel_path, d.sha, d.peer_id)
-    core.flush_ledger_files(ledger)
+        for source, rel in d.ledger_paths:
+            ledger.stamp_deleted(source, rel, d.sha, d.peer_id)
     warnings = _fsync_touched_parents(touched_parents)
+    run.fsync_warnings.extend(warnings)
+    touched_parents.clear()
     exc = RuntimeError("directory flush failed") if warnings else core.commit_ledger(ledger)
     if exc is not None:
         run.ledger_exc = exc
         run.folder = None
         _remove_copy_dirs(created)
         for d in deletions:
-            ledger.undelete(d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=True)
+            undo(d)
             fail(d, "deletion not recorded", exc, "local preserved")
         return run
-    for d in deletions:
-        result = by_key[(d.peer_id, d.src_name)]
-        copy_path = folder / d.src_name / d.rel_path
-        try:
-            outcome = _move_into_copy(d.local_path, copy_path, d.sha)
-        except _UnlinkFailed as e:
-            # The copy exists but the original stays: not retried. Delete it by hand,
-            # or keep it and this machine republishes it (its next push clears the stamp).
-            fail(
-                d,
-                "delete failed; not retried: delete the file by hand, or keep it and "
-                "this machine republishes it",
-                e,
-                "local file and recovery copy preserved",
-            )
-            continue
-        except (OSError, StorageError) as e:
-            ledger.undelete(d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=True)
-            fail(d, "delete failed", e, "local and recovery copy preserved")
-            continue
-        if outcome == "deleted":
-            result.outcomes["deleted"].append(d.rel_path)
-            result.touched_parents.add(d.local_path.parent)
-            touched_parents.add(d.local_path.parent)
-            if verbose and not quiet:
-                console.print(f"  [red]deleted[/red] {safe_str(d.rel_path)} (a peer deleted it)")
+    index = -1
+    try:
+        for index, d in enumerate(deletions):
+            result = by_key[(d.peer_id, d.src_name)]
+            copy_path = folder / d.src_name / d.rel_path
+            before_move = None
+            move_started = False
+            try:
+                before_move = d.local_path.lstat()
+                move_started = True
+                outcome = _move_into_copy(d.local_path, copy_path, d.sha)
+            except _UnlinkFailed as e:
+                # The copy exists but the original stays: not retried. Delete it by hand,
+                # or keep it and this machine republishes it (its next push clears the stamp).
+                fail(
+                    d,
+                    "delete failed; not retried: delete the file by hand, or keep it and "
+                    "this machine republishes it",
+                    e,
+                    f"local file and recovery copy preserved in {folder}",
+                )
+                continue
+            except _RestoredCopyError as e:
+                undo(d)
+                fail(
+                    d,
+                    "recovery copy cleanup failed",
+                    e,
+                    f"local file restored; recovery copy kept in {folder}",
+                )
+                continue
+            except _MovedCopyError as e:
+                moved_failure(d, e)
+                continue
+            except (OSError, StorageError) as e:
+                undo(d)
+                fail(d, "delete failed", e, f"local preserved; any recovery copy is in {folder}")
+                continue
+            if outcome == "deleted":
+                removed(d)
+                result.outcomes["deleted"].append(d.rel_path)
+                # Rewrite this project's cosmetic log once with its combined apply
+                # and deletion outcomes. History dedup remains on the same result.
+                result.sync_log_attempted = False
+                result.touched_parents.add(d.local_path.parent)
+                touched_parents.add(d.local_path.parent)
+                if verbose and not quiet:
+                    console.print(
+                        f"  [red]deleted[/red] {safe_str(d.rel_path)} (a peer deleted it)"
+                    )
+            else:
+                if outcome == "restored":
+                    undo(d)
+                else:
+                    removed(d)
+                fail(
+                    d,
+                    "delete skipped; the file changed while it was being deleted",
+                    RuntimeError(outcome),
+                    "local file kept"
+                    if outcome == "restored"
+                    else f"moved file kept in recovery folder {folder}",
+                )
+    except BaseException:
+        # The batch stamp commits before any move. Undo every file that never
+        # reached its move, and the in-flight file only when its original inode
+        # is still at canonical. A moved or uncertain inode retains its followed
+        # stamp; absence caused by mm must never mint a fresh deletion record.
+        for pending in deletions[index + 1 :]:
+            undo(pending)
+        if index >= 0 and d.rel_path not in (
+            result.outcomes["deleted"] + result.outcomes["failed"]
+        ):
+            stayed = not move_started
+            if move_started and before_move is not None:
+                try:
+                    current = d.local_path.lstat()
+                    stayed = (current.st_dev, current.st_ino) == (
+                        before_move.st_dev,
+                        before_move.st_ino,
+                    )
+                except OSError:
+                    stayed = False
+            if stayed:
+                undo(d)
+            else:
+                removed(d)
+                with suppress(Exception, SystemExit):
+                    core._print_apply_warning(
+                        "mm: warning: deletion interrupted for "
+                        f"{safety.safe_terminal_str(d.local_path)}; check the recovery folder "
+                        f"{safety.safe_terminal_str(folder)}. Completed moves remain there."
+                    )
+        raise
+    finally:
+        # Recovery-directory durability and partial reporting survive the first
+        # interruption. A second interrupt retains the existing recovery limit.
+        directories = {(folder / d.src_name / d.rel_path).parent for d in deletions}
+        if sys.exc_info()[0] is not None:
+            with suppress(Exception, SystemExit):
+                run.fsync_warnings.extend(_fsync_touched_parents(directories))
         else:
-            ledger.undelete(
-                d.src_name, d.rel_path, d.peer_id, d.sha, restore_base=outcome == "restored"
-            )
-            fail(
-                d,
-                "delete skipped; the file changed while it was being deleted",
-                RuntimeError(outcome),
-                "local file kept"
-                if outcome == "restored"
-                else f"moved file kept in recovery folder {folder}",
-            )
-    with suppress(OSError, StorageError):
-        for directory in {(folder / d.src_name / d.rel_path).parent for d in deletions}:
-            fsutil.fsync_dir(directory)
+            run.fsync_warnings.extend(_fsync_touched_parents(directories))
     return run
 
 
@@ -2171,6 +2420,9 @@ class _CorruptPeer:
 class _FsyncWarning:
     parent_dir: Path
     error: str
+    # Failed file flushes discard only that path's ledger updates. A failed
+    # directory flush leaves publication durability unknown for the whole batch.
+    blocks_commit: bool = True
 
 
 @dataclass
@@ -2215,6 +2467,7 @@ class _PerSourceResult:
     # Track 91A: peer edits held back because their timestamp is older than the
     # local file they were built on (reported, never applied).
     older: list[str] = field(default_factory=list)
+    older_mtimes: dict[str, tuple[str | None, str | None]] = field(default_factory=dict)
     deleted_folder: str | None = None
 
     @property
@@ -2550,7 +2803,7 @@ def _classify_with_ledger(
                 did, src_name, rel_path, info["sha256"], ancestors=pullplan.parse_from(info)
             )
         elif verdict == "older":
-            reporter.older.append(rel_path)
+            reporter.note_older(rel_path, local.mtime, remote_mtime)
         elif verdict in ("write", "fast-forward", "fallback", "both"):
             to_download[rel_path] = info
     return to_download
@@ -2606,6 +2859,8 @@ def _pull_one_source(
         bytes_transferred=0,
         touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
+        older=reporter.older,
+        older_mtimes=reporter.older_mtimes,
     )
     if dry_run:
         if predictions is None:
@@ -2649,7 +2904,6 @@ def _pull_one_source(
             if not is_tombstoned(src_name, path, all_tombstones)
         }
     if not to_download:
-        base_result.older = reporter.older
         return base_result
 
     if src_name in MM_INTERNAL_SOURCE_NAMES:
@@ -2686,6 +2940,7 @@ def _pull_one_source(
         touched_parents=reporter.touched_parents,
         claude_sync_base=str(base_path) if src_type == "claude" else None,
         older=reporter.older,
+        older_mtimes=reporter.older_mtimes,
     )
 
 
@@ -2841,7 +3096,7 @@ _LEDGER_NOTICES = {
     "corrupt": "state.db is damaged; move it aside as the README describes",
     "interrupted": "an interrupted mm left an unfinished write in state.db; run mm status",
     "unavailable": "this Python cannot load sqlite3",
-    "unreadable": "state.db could not be read",
+    "unreadable": "state.db could not be accessed",
 }
 
 
@@ -2852,8 +3107,8 @@ def ledger_notice(result: PullResult) -> str:
         return ""
     text = _LEDGER_NOTICES.get(cause, _LEDGER_NOTICES["unreadable"])
     return (
-        f"mm: notice: {text}. Fast-forward and deletions are paused: this pull used "
-        f"the old mtime rule and deleted nothing. See {LEDGER_URL}."
+        f"mm: notice: {text}. Pull ledger unavailable; some sync history may not "
+        f"have been recorded. Completed file changes remain. See {LEDGER_URL}."
     )
 
 
@@ -3305,6 +3560,30 @@ def _print_this_directory() -> None:
         console.print(f"This directory: no identity ({cwd.why or projectid.WHY_NO_CHECKOUT})")
 
 
+def _save_pull_observations(result: PullResult, *, dry_run: bool, complete: bool) -> None:
+    if dry_run:
+        return
+    error = syncdiag.record_pull_observations(
+        [
+            {
+                "peer": edit.device_name,
+                "source": edit.src_name,
+                "path": edit.rel_path,
+                "local_mtime": edit.local_mtime,
+                "peer_mtime": edit.peer_mtime,
+            }
+            for edit in result.older
+        ],
+        complete=complete,
+    )
+    if error is not None:
+        result.maintenance_failures += 1
+        core._print_apply_warning(
+            f"mm: notice: sync observations were not saved ({error}); "
+            "mm diag may show an earlier pull. Check access to the config folder."
+        )
+
+
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -3423,12 +3702,16 @@ def _pull_core(
                 console.print("[yellow]No other devices found to pull from.[/yellow]")
             if dry_run and not quiet:
                 console.print("No changes predicted.")
-            return PullResult(
+            result = PullResult(
                 no_peers=not (from_device and from_device in inventory.vanished),
                 no_sources=not pull_resolution.selected,
                 elapsed=time.time() - start,
                 waiting=_waiting_peers([], [], vanished_entries),
             )
+            _save_pull_observations(
+                result, dry_run=dry_run, complete=not from_device and not vanished_entries
+            )
+            return result
 
         vanished_manifests: list[_CorruptPeer] = []
         manifest_cache, corrupt_peers = _prefetch_manifests(
@@ -3670,6 +3953,7 @@ def _pull_core(
         total_written = total_merged = total_skipped = total_conflicted = 0
         total_failed = total_skipped_unknown_source = bytes_transferred = 0
         total_waiting = 0
+        maintenance_failures = 0
         deleted_folder: str | None = None
 
         in_flight: _ApplyReporter | None = None
@@ -3827,8 +4111,25 @@ def _pull_core(
 
             if not dry_run:
                 # Hooks never run `mm gc`; copies only grow when a pull deletes.
-                with suppress(Exception):
-                    retention._gc_deleted_copies(False, False, quiet=True)
+                try:
+                    cleanup = retention._gc_deleted_copies(False, False, quiet=True)
+                    maintenance_failures += cleanup.failed
+                except Exception as exc:
+                    maintenance_failures += 1
+                    core._print_apply_warning(
+                        "mm: warning: recovery cleanup failed under "
+                        f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}: "
+                        f"{safety.safe_terminal_str(exc)}. Check folder access, then run mm gc."
+                    )
+                else:
+                    if cleanup.failed:
+                        core._print_apply_warning(
+                            f"mm: warning: recovery cleanup failed for {cleanup.failed} "
+                            "operation(s) under "
+                            f"{safety.safe_terminal_str(statedb.deleted_copies_dir())}. "
+                            "Expired folders may be partly removed. Check folder access, "
+                            "then run mm gc."
+                        )
                 blocked = {
                     (r.device_id, r.src_name)
                     for r in per_source_results
@@ -3844,22 +4145,28 @@ def _pull_core(
                     blocked=blocked,
                 )
                 if deletions:
-                    run = _run_deletions(
-                        deletions,
-                        ledger=ledger,
-                        touched_parents=touched_parents,
-                        per_source_results=per_source_results,
-                        quiet=quiet,
-                        verbose=verbose,
-                    )
-                    deleted_folder = str(run.folder) if run.folder else None
-                    if run.ledger_exc is not None:
-                        ledger_exc = run.ledger_exc
+                    run = _DeletionRun()
+                    try:
+                        _run_deletions(
+                            deletions,
+                            ledger=ledger,
+                            touched_parents=touched_parents,
+                            per_source_results=per_source_results,
+                            quiet=quiet,
+                            verbose=verbose,
+                            pending_inline_bumps=pending_inline_bumps,
+                            run=run,
+                        )
+                    finally:
+                        deleted_folder = str(run.folder) if run.folder else None
+                        fsync_warnings.extend(run.fsync_warnings)
+                        if run.ledger_exc is not None:
+                            ledger_exc = run.ledger_exc
                     for r in per_source_results:
                         if r.deleted_folder is not None:
                             _record_source_bookkeeping(r, {}, quiet=quiet, verbose=verbose)
 
-            fsync_warnings = _fsync_touched_parents(touched_parents)
+            fsync_warnings.extend(_fsync_touched_parents(touched_parents))
 
             # Track 12A: end-of-pull-batch drain. Every peer has been walked, so
             # the recorded bump value beats all of them at once. INSIDE the try:
@@ -3885,15 +4192,25 @@ def _pull_core(
                         bytes_transferred=in_flight.bytes_transferred,
                         touched_parents=in_flight.touched_parents,
                         claude_sync_base=str(base_path) if src_type == "claude" else None,
+                        older=in_flight.older,
+                        older_mtimes=in_flight.older_mtimes,
                     )
                 if not accounted:
                     _account_source(per_source)
-            fsync_warnings = _fsync_touched_parents(touched_parents)
+            fsync_warnings.extend(_fsync_touched_parents(touched_parents))
             if in_flight is not None:
                 try:
                     _record_source_bookkeeping(per_source, src_data, quiet=quiet, verbose=verbose)
                 except (Exception, SystemExit):
                     pass
+            # Deletions bypass the incoming-file reporter. Record only their
+            # completed outcomes, reusing each result's history dedup markers.
+            for deletion_result in per_source_results:
+                if deletion_result.deleted_folder is not None:
+                    with suppress(Exception, SystemExit):
+                        _record_source_bookkeeping(
+                            deletion_result, {}, quiet=quiet, verbose=verbose
+                        )
             interruption = "aborted" if isinstance(exc, typer.Abort) else "interrupted"
             raise
         finally:
@@ -3903,13 +4220,17 @@ def _pull_core(
             # warnings to survive quiet mode AND partial pulls.
             if not dry_run and ledger.dirty:
                 flushed_files = sum(len(v) for v in ledger.flush_paths.values())
-                flush_seconds = core.flush_ledger_files(ledger)
+
+                def flush_failed(path: Path, exc: OSError) -> None:
+                    fsync_warnings.append(_FsyncWarning(path, str(exc), blocks_commit=False))
+
+                flush_seconds = core.flush_ledger_files(ledger, on_error=flush_failed)
                 if verbose and not quiet and flushed_files:
                     with suppress(Exception):
                         console.print(
                             f"  [dim]flushed {flushed_files} files in {flush_seconds:.2f}s[/dim]"
                         )
-                if not fsync_warnings:
+                if not any(w.blocks_commit for w in fsync_warnings):
                     commit_exc = core.commit_ledger(ledger)
                     if commit_exc is not None:
                         ledger_exc = commit_exc
@@ -3919,7 +4240,7 @@ def _pull_core(
                 deleted_origins=list(dict.fromkeys(r.device_name for r in deleted_results)),
                 deleted_folder=deleted_folder if deleted_results else None,
                 older=[
-                    OlderEdit(r.device_name, r.src_name, p)
+                    OlderEdit(r.device_name, r.src_name, p, *r.older_mtimes.get(p, (None, None)))
                     for r in per_source_results
                     for p in r.older
                 ],
@@ -3939,9 +4260,24 @@ def _pull_core(
                 device_names=device_names,
                 elapsed=time.time() - start,
                 durability_fsync_failures=len(fsync_warnings),
+                maintenance_failures=maintenance_failures,
                 corrupt_peer_count=len(corrupt_peers),
                 total_waiting=total_waiting,
                 waiting=_waiting_peers(per_source_results, vanished_manifests, vanished_entries),
+            )
+            _save_pull_observations(
+                _partial_result,
+                dry_run=dry_run,
+                complete=not (
+                    interruption
+                    or source_filter
+                    or from_device
+                    or total_failed
+                    or total_waiting
+                    or corrupt_peers
+                    or vanished_entries
+                    or vanished_manifests
+                ),
             )
             if result_observer is not None:
                 with suppress(Exception, SystemExit):

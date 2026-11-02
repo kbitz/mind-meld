@@ -150,6 +150,12 @@ def _run(fleet, monkeypatch, mode, *, refusal=None, **kwargs):
 
 def _counts(result, **expected):
     fields = asdict(result)
+    for edit in fields["older"]:
+        # Identity/count contracts predate diagnostic mtime metadata. Every
+        # actual older verdict must carry the two timestamps it compared.
+        local_mtime = datetime.fromisoformat(edit.pop("local_mtime"))
+        peer_mtime = datetime.fromisoformat(edit.pop("peer_mtime"))
+        assert local_mtime > peer_mtime
     elapsed = fields.pop("elapsed")
     assert elapsed >= 0
     defaults = asdict(pullflow.PullResult())
@@ -1144,10 +1150,13 @@ def test_two_peers_naming_one_file_give_one_candidate(fleet):
     _, tombs = _deletable(fleet)
     ledger = _committed()
     ledger.settle(THIRD, NOTES, "note.md", _sha(SHARED))
-    remote = lambda device: {  # noqa: E731
-        "sources": {NOTES: {"files": {}}},
-        "tombstones": {"notes:note.md": _tombstone(SHARED, device=device)},
-    }
+
+    def remote(device):
+        return {
+            "sources": {NOTES: {"files": {}}},
+            "tombstones": {"notes:note.md": _tombstone(SHARED, device=device)},
+        }
+
     found = pullflow._deletion_candidates(
         pull_targets=[
             {"device_id": PEER, "device_name": "Peer B"},
@@ -1551,18 +1560,21 @@ def test_a_cross_volume_delete_that_sees_the_file_change_keeps_it_and_drops_the_
     fleet, monkeypatch
 ):
     path = _setup_deletion(fleet)
-    real_write = pullflow.fsutil.atomic_write_bytes
+    real_flush = pullflow.fsutil.fsync_dir
 
     def other_volume(real, src, dst, *args, **kwargs):
         raise OSError(errno.EXDEV, "Invalid cross-device link")
 
-    def write_then_touch(target, data, **kwargs):
-        real_write(target, data, **kwargs)
-        if statedb.deleted_copies_dir() in Path(target).parents:
+    def flush_then_touch(target):
+        real_flush(target)
+        if (
+            statedb.deleted_copies_dir() in Path(target).parents
+            and (Path(target) / path.name).exists()
+        ):
             path.write_bytes(b"edited during the copy\n")
 
     monkeypatch.setattr(os, "rename", _on(os.rename, path, other_volume))
-    monkeypatch.setattr(pullflow.fsutil, "atomic_write_bytes", write_then_touch)
+    monkeypatch.setattr(pullflow.fsutil, "fsync_dir", flush_then_touch)
     result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
     assert path.read_bytes() == b"edited during the copy\n"
     assert (result.total_deleted, result.total_failed) == (0, 1)
@@ -1828,7 +1840,7 @@ def test_each_database_failure_class_falls_back_to_todays_rule_and_deletes_nothi
     # One notice names the cause and says what is paused.
     notice = pullflow.ledger_notice(result)
     assert notice in err
-    assert "Fast-forward and deletions are paused" in notice
+    assert "Pull ledger unavailable" in notice
     assert errors.LEDGER_URL in notice
     assert notice.startswith("mm: notice: ")
 
@@ -1841,8 +1853,8 @@ def test_each_database_failure_class_falls_back_to_todays_rule_and_deletes_nothi
         ("corrupt", "state.db is damaged; move it aside as the README describes"),
         ("interrupted", "an interrupted mm left an unfinished write in state.db; run mm status"),
         ("unavailable", "this Python cannot load sqlite3"),
-        ("unreadable", "state.db could not be read"),
-        ("anything-else", "state.db could not be read"),
+        ("unreadable", "state.db could not be accessed"),
+        ("anything-else", "state.db could not be accessed"),
     ],
 )
 def test_the_ledger_notice_names_each_cause(cause, text):
@@ -1910,7 +1922,10 @@ OLD_RELS = {"old-version.md"}
 
 def _parity_world(fleet):
     """One file per branch of the rule. Returns (own lookup, {name: (predicted, real)})."""
-    local = lambda name, data, mtime: _put_local(fleet, name, data, mtime)  # noqa: E731
+
+    def local(name, data, mtime):
+        return _put_local(fleet, name, data, mtime)
+
     remote: dict[str, bytes] = {}
     ancestors: dict[str, list[bytes]] = {}
     rows: list[tuple[str, bytes]] = []
@@ -2135,9 +2150,11 @@ def test_a_file_that_cannot_be_flushed_loses_its_base_but_the_others_keep_theirs
         return real(path)
 
     monkeypatch.setattr(fsutil, "fsync_file", flaky)
-    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
 
     assert result.total_written == 2
+    assert result.durability_fsync_failures == 1
+    assert f"durability fsync failed on {fleet.local / 'bad.md'}" in err
     ledger = _committed()
     assert ledger.base(PEER, NOTES, "bad.md") is None  # re-derived by the next pull
     assert _row_kinds(ledger, "bad.md") == {}
@@ -2167,3 +2184,643 @@ def test_an_interrupted_pull_still_commits_what_it_settled(fleet, monkeypatch):
     first, second = calls
     assert ledger.base(PEER, NOTES, first) is not None
     assert ledger.base(PEER, NOTES, second) is None
+
+
+# Review regressions: single-machine writers and recovery publication failures.
+def test_fast_forward_keeps_a_same_size_write_that_preserved_mtime(fleet, monkeypatch):
+    _seed(fleet, {"note.md": b"remote\n"})
+    path = _put_local(fleet, "note.md", b"before\n", 1_600_000_000)
+    _record(("note.md", b"before\n"))
+    real = pullflow._apply_fast_forward
+
+    def edit_before_recheck(local_path, *args, **kwargs):
+        before = local_path.stat()
+        local_path.write_bytes(b"edited\n")
+        os.utime(local_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return real(local_path, *args, **kwargs)
+
+    monkeypatch.setattr(pullflow, "_apply_fast_forward", edit_before_recheck)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert path.read_bytes() == b"edited\n"
+    assert result.total_conflicted == 1
+
+
+@pytest.mark.parametrize("copy_only", [False, True])
+def test_recovery_publication_never_overwrites_an_occupied_destination(tmp_path, copy_only):
+    local, recovery = tmp_path / "canonical", tmp_path / "recovery"
+    local.write_bytes(b"second file")
+    recovery.write_bytes(b"first recovered file")
+    move = pullflow._copy_then_unlink if copy_only else pullflow._move_into_copy
+    with pytest.raises(OSError):
+        move(local, recovery, _sha(b"second file"))
+    assert recovery.read_bytes() == b"first recovered file"
+    assert local.read_bytes() == b"second file"
+
+
+@pytest.mark.parametrize("phase", ["chmod", "hash", "copy-unlink"])
+def test_post_move_failure_names_the_recovery_folder_and_keeps_followed_evidence(
+    fleet, monkeypatch, phase
+):
+    path = _setup_deletion(fleet)
+    root = statedb.deleted_copies_dir()
+    if phase == "chmod":
+        real = os.chmod
+
+        def fail_chmod(target, *args, **kwargs):
+            if Path(target).name == path.name and root in Path(target).parents:
+                raise OSError(errno.EIO, "injected chmod failure")
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(os, "chmod", fail_chmod)
+    elif phase == "hash":
+        real = pullflow.hash_file
+
+        def fail_hash(target, *args, **kwargs):
+            if root in Path(target).parents:
+                raise OSError(errno.EIO, "injected hash failure")
+            return real(target, *args, **kwargs)
+
+        monkeypatch.setattr(pullflow, "hash_file", fail_hash)
+    else:
+
+        def edit_then_move(real, src, dst, *args, **kwargs):
+            path.write_bytes(b"new edited bytes\n")
+            return real(src, dst, *args, **kwargs)
+
+        real_unlink = os.unlink
+
+        def fail_unlink(target, *args, **kwargs):
+            if root in Path(target).parents and Path(target).name == path.name:
+                raise OSError(errno.EIO, "injected recovery unlink failure")
+            return real_unlink(target, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rename", _on(os.rename, path, edit_then_move))
+        monkeypatch.setattr(os, "unlink", fail_unlink)
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    folder = next(root.iterdir())
+    assert str(folder) in err
+    assert result.total_failed == 1
+    assert _copies()["notes/note.md"] == (
+        b"new edited bytes\n" if phase == "copy-unlink" else SHARED
+    )
+    if phase != "copy-unlink":
+        assert not path.exists()
+        assert _ledger_state("note.md") == (None, PEER)
+        assert "local and recovery copy preserved" not in err
+
+
+def test_moved_symlink_never_changes_its_target_permissions(fleet, monkeypatch):
+    path = _setup_deletion(fleet)
+    target = fleet.root / "private-target"
+    target.write_bytes(b"private contents")
+    target.chmod(0o644)
+
+    def swap_then_move(real, src, dst, *args, **kwargs):
+        path.unlink()
+        path.symlink_to(target)
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", _on(os.rename, path, swap_then_move))
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert target.read_bytes() == b"private contents"
+    assert result.total_failed == 1
+    assert str(next(statedb.deleted_copies_dir().iterdir())) in err
+
+
+def test_failed_hardlink_restore_does_not_turn_the_move_into_a_new_deletion(fleet, monkeypatch):
+    path = _setup_deletion(fleet)
+
+    def edit_then_move(real, src, dst, *args, **kwargs):
+        path.write_bytes(b"typed after check")
+        return real(src, dst, *args, **kwargs)
+
+    def no_links(*args, **kwargs):
+        raise OSError(errno.EPERM, "no hard links")
+
+    monkeypatch.setattr(os, "rename", _on(os.rename, path, edit_then_move))
+    monkeypatch.setattr(os, "link", no_links)
+    _run(fleet, monkeypatch, "quiet")
+    assert not path.exists()
+    assert _ledger_state("note.md") == (None, PEER)
+
+
+def test_every_recovery_directory_flush_is_attempted_and_failure_is_visible(fleet, monkeypatch):
+    for name in ("first/a.md", "second/b.md"):
+        _put_local(fleet, name, SHARED, 1_600_000_000)
+        _record((name, SHARED))
+    _seed(
+        fleet,
+        {},
+        tombstones={f"notes:{name}": _tombstone(SHARED) for name in ("first/a.md", "second/b.md")},
+    )
+    real = pullflow.fsutil.fsync_dir
+    flushed = []
+
+    def fail_after_move(directory):
+        directory = Path(directory)
+        # Initial empty-directory flush succeeds; only the post-move flush fails.
+        if any(directory.glob("*.md")):
+            flushed.append(directory.name)
+            raise errors.StorageError("injected recovery flush failure")
+        return real(directory)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_dir", fail_after_move)
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    assert set(flushed) == {"first", "second"}
+    assert result.total_deleted == 2
+    assert result.durability_fsync_failures == 2
+    assert "durability fsync failed" in err
+
+
+@pytest.mark.parametrize("bad_roots", [[], ["."], "invalid", 1])
+def test_malformed_own_root_ids_never_crash_or_prove_an_unchanged_root(fleet, bad_roots):
+    lookup = pullflow._own_lookup(
+        {"sources": {NOTES: {"files": {"note.md": {}}, "root_ids": bad_roots}}},
+        {NOTES: fleet.config["sync"]["sources"][0]},
+        {NOTES: {"path": fleet.local}},
+    )
+    assert lookup(NOTES, "note.md") == (True, False)
+
+
+def test_commit_failure_after_fast_forward_does_not_claim_the_old_rule_ran(fleet, monkeypatch):
+    _seed(fleet, {"note.md": b"remote\n"})
+    path = _put_local(fleet, "note.md", b"before\n", 1_600_000_000)
+    _record(("note.md", b"before\n"))
+    monkeypatch.setattr(core, "commit_ledger", lambda ledger: statedb.StateDBBusy("busy"))
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    assert path.read_bytes() == b"remote\n" and result.total_written == 1
+    assert "this pull used the old mtime rule" not in pullflow.ledger_notice(result)
+    assert "deletions are paused" not in pullflow.ledger_notice(result)
+
+
+def test_cross_volume_recheck_keeps_a_same_size_write_that_preserved_mtime(tmp_path, monkeypatch):
+    path, copy_path = tmp_path / "original", tmp_path / "copy"
+    path.write_bytes(b"before\n")
+    before = path.stat()
+    real = pullflow.fsutil.fsync_dir
+
+    def edit_before_recheck(directory):
+        path.write_bytes(b"edited\n")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return real(directory)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_dir", edit_before_recheck)
+    outcome = pullflow._copy_then_unlink(path, copy_path, _sha(b"before\n"))
+    assert outcome == "restored"
+    assert path.read_bytes() == b"edited\n"
+    assert not copy_path.exists()
+
+
+def test_mixed_apply_and_deletion_keep_both_in_the_project_sync_log(fleet, monkeypatch):
+    added, removed = "projects/demo/memory/new.md", "projects/demo/memory/gone.md"
+    fleet.config["sync"]["sources"][0]["type"] = "claude"
+    _put_local(fleet, removed, SHARED, 1_600_000_000)
+    _record((removed, SHARED))
+    _seed(fleet, {added: b"new content\n"}, tombstones={f"notes:{removed}": _tombstone(SHARED)})
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert result.total_written == result.total_deleted == 1
+    log = (fleet.local / "projects/demo/.mind-meld-log.md").read_text()
+    assert "memory/new.md" in log and "memory/gone.md" in log
+    rows = [r for r in pullhistory.read_records() if r.get("rel_path") in {added, removed}]
+    assert [(r["action"], r["rel_path"]) for r in rows] == [
+        ("written", added),
+        ("deleted", removed),
+    ]
+
+
+def test_kept_conflict_copy_is_flushed_before_recording_its_peer_base(fleet, monkeypatch):
+    _seed(fleet, {"note.md": b"peer bytes\n"})
+    _put_local(fleet, "note.md", b"my bytes\n", 1_600_000_000)
+    kept = fleet.local / "note.sync-conflict-20260421-120000-v1-bbbbbbbb.md"
+    kept.write_bytes(b"peer bytes\n")
+    real_flush, flushed = pullflow.fsutil.fsync_file, []
+
+    def record_flush(path):
+        flushed.append(Path(path))
+        return real_flush(path)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_file", record_flush)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert result.total_conflicted == 0 and result.total_written == 0
+    assert flushed == [kept]
+    assert _committed().base(PEER, NOTES, "note.md") == _sha(b"peer bytes\n")
+
+
+@pytest.mark.parametrize("recreated_link", [False, True])
+def test_deletion_cancels_inline_keep_local_bump_and_deferred_settlement(
+    fleet, monkeypatch, recreated_link
+):
+    path = _setup_deletion(fleet)
+    ledger = _committed()
+    ledger.deferred.append((PEER, NOTES, "note.md", _sha(b"some other peer edit"), ()))
+    pending = {path.resolve(): 1_800_000_000.0}
+    if recreated_link:
+        target = fleet.root / "new-target"
+        target.write_bytes(b"new unrelated contents")
+
+        def move_then_recreate(real, src, dst, *args, **kwargs):
+            result = real(src, dst, *args, **kwargs)
+            path.symlink_to(target)
+            return result
+
+        monkeypatch.setattr(os, "rename", _on(os.rename, path, move_then_recreate))
+    bumps = []
+    monkeypatch.setattr(
+        pullflow, "_bump_canonical_mtime_post_resolve", lambda *args: bumps.append(args)
+    )
+    deletion = pullflow._Deletion(PEER, "Peer B", NOTES, "note.md", fleet.local, path, _sha(SHARED))
+    pullflow._run_deletions(
+        [deletion],
+        ledger=ledger,
+        touched_parents=set(),
+        per_source_results=[],
+        quiet=True,
+        verbose=False,
+        pending_inline_bumps=pending,
+    )
+    pullflow._drain_inline_bumps(pending)
+    ledger.flush_deferred()
+    assert path.is_symlink() if recreated_link else not path.exists()
+    assert bumps == []
+    assert ledger.base(PEER, NOTES, "note.md") is None
+    assert ledger.newest_stamp(NOTES, "note.md") == PEER
+
+
+def test_remove_owned_copy_refuses_protected_root(synthetic_account_home, forbid_fs_mutations):
+    path = synthetic_account_home / ".config/mind-meld/recovery"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"sentinel")
+    owned = path.stat()
+    calls = forbid_fs_mutations()
+    with pytest.raises(pullflow.fsutil.PytestRealStateWriteError):
+        pullflow._remove_owned_copy(path, owned)
+    assert calls == []
+
+
+def test_remove_owned_copy_tmp_control_and_replacement_refusal(tmp_path):
+    path = tmp_path / "copy"
+    path.write_bytes(b"ours")
+    owned = path.stat()
+    pullflow._remove_owned_copy(path, owned)
+    assert not path.exists()
+    path.write_bytes(b"ours again")
+    owned = path.stat()
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"someone else")
+    replacement.replace(path)
+    with pytest.raises(OSError, match="recovery destination changed"):
+        pullflow._remove_owned_copy(path, owned)
+    assert path.read_bytes() == b"someone else"
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_recovery_cleanup_failure_warns_in_quiet_mode_and_degrades_the_result(
+    fleet, monkeypatch, raises
+):
+    _seed(fleet, {})
+
+    def fail_reaper(*args, **kwargs):
+        if raises:
+            raise RuntimeError("injected cleanup failure")
+        return pullflow.retention.ReapOutcome(failed=2)
+
+    monkeypatch.setattr(pullflow.retention, "_gc_deleted_copies", fail_reaper)
+    result, _, (_, err) = _run(fleet, monkeypatch, "quiet")
+    assert result.maintenance_failures == (1 if raises else 2)
+    assert "recovery cleanup failed" in err
+    assert str(statedb.deleted_copies_dir()) in err
+    assert "mm gc" in err
+
+
+def test_failed_reservation_cleanup_does_not_unlink_a_replacement(tmp_path, monkeypatch):
+    local, recovered = tmp_path / "local", tmp_path / "recovered"
+    local.write_bytes(b"canonical")
+
+    def replace_reservation_then_fail(src, dst):
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"someone else's copy")
+        replacement.replace(dst)
+        raise OSError(errno.EIO, "rename failed")
+
+    monkeypatch.setattr(os, "rename", replace_reservation_then_fail)
+    with pytest.raises(OSError):
+        pullflow._move_into_copy(local, recovered, _sha(b"canonical"))
+    assert local.read_bytes() == b"canonical"
+    assert recovered.read_bytes() == b"someone else's copy"
+
+
+def test_a_late_commit_failure_does_not_hide_the_completed_deletion(fleet, monkeypatch):
+    for name in ("a.md", "b.md"):
+        _put_local(fleet, name, SHARED, 1_600_000_000)
+        _record((name, SHARED))
+    _seed(fleet, {}, tombstones={f"notes:{name}": _tombstone(SHARED) for name in ("a.md", "b.md")})
+    real_commit, real_move = core.commit_ledger, pullflow._move_into_copy
+    commits = []
+
+    def first_commit_only(ledger):
+        commits.append(1)
+        return real_commit(ledger) if len(commits) == 1 else statedb.StateDBBusy("busy")
+
+    def fail_second(local, copy_path, sha):
+        if local.name == "b.md":
+            raise OSError(errno.EACCES, "rename refused")
+        return real_move(local, copy_path, sha)
+
+    monkeypatch.setattr(core, "commit_ledger", first_commit_only)
+    monkeypatch.setattr(pullflow, "_move_into_copy", fail_second)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert result.total_deleted == result.total_failed == 1
+    assert result.ledger_cause == "busy"
+    assert "deleted nothing" not in pullflow.ledger_notice(result)
+    assert "Completed file changes remain" in pullflow.ledger_notice(result)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, RuntimeError])
+@pytest.mark.parametrize("bookkeeping_raises", [False, True])
+def test_interrupted_deletion_keeps_completed_history_folder_and_unexecuted_bases(
+    fleet, monkeypatch, error_type, bookkeeping_raises
+):
+    names = [f"projects/demo/memory/{letter}.md" for letter in "abc"]
+    added = "projects/demo/memory/new.md"
+    fleet.config["sync"]["sources"][0]["type"] = "claude"
+    for name in names:
+        _put_local(fleet, name, SHARED, 1_600_000_000)
+        _record((name, SHARED))
+    _seed(
+        fleet,
+        {added: b"new content\n"},
+        tombstones={f"notes:{name}": _tombstone(SHARED) for name in names},
+    )
+    real_move = pullflow._move_into_copy
+    attempted, observed, bookkeeping_calls = [], [], []
+    interruption = error_type("original deletion interruption")
+
+    def interrupt_second(local, copy_path, sha):
+        attempted.append(local)
+        if len(attempted) == 2:
+            raise interruption
+        return real_move(local, copy_path, sha)
+
+    real_bookkeeping = pullflow._record_source_bookkeeping
+
+    def record_then_fail(result, src_data, **kwargs):
+        real_bookkeeping(result, src_data, **kwargs)
+        if result.outcomes["deleted"]:
+            bookkeeping_calls.append(result)
+            if bookkeeping_raises:
+                raise ValueError("secondary bookkeeping failure")
+
+    monkeypatch.setattr(pullflow, "_move_into_copy", interrupt_second)
+    monkeypatch.setattr(pullflow, "_record_source_bookkeeping", record_then_fail)
+    capture = {}
+    with pytest.raises(error_type) as caught:
+        _run(fleet, monkeypatch, "quiet", refusal=capture, result_observer=observed.append)
+    assert caught.value is interruption
+    assert len(observed) == 1
+    result = observed[0]
+    assert result.total_written == result.total_deleted == 1
+    assert result.total_failed == 0
+    folder = Path(result.deleted_folder)
+    assert (folder / NOTES / names[0]).read_bytes() == SHARED
+    assert not (fleet.local / names[0]).exists()
+    assert _ledger_state(names[0]) == (None, PEER)
+    for name in names[1:]:
+        assert (fleet.local / name).read_bytes() == SHARED
+        assert _ledger_state(name) == (_sha(SHARED), None)
+    rows = [r for r in pullhistory.read_records() if r.get("rel_path") in {*names, added}]
+    assert [(r["action"], r["rel_path"]) for r in rows] == [
+        ("written", added),
+        ("deleted", names[0]),
+    ]
+    assert len(bookkeeping_calls) == 1
+    log = (fleet.local / "projects/demo/.mind-meld-log.md").read_text()
+    assert "memory/new.md" in log and "memory/a.md" in log
+    assert "memory/b.md" not in log and "memory/c.md" not in log
+
+
+def test_interruption_inside_a_moved_file_keeps_its_stamp_without_claiming_success(
+    fleet, monkeypatch
+):
+    for name in ("a.md", "b.md", "c.md"):
+        _put_local(fleet, name, SHARED, 1_600_000_000)
+        _record((name, SHARED))
+    _seed(
+        fleet,
+        {},
+        tombstones={f"notes:{name}": _tombstone(SHARED) for name in ("a.md", "b.md", "c.md")},
+    )
+    real_move = pullflow._move_into_copy
+    observed = []
+    interruption = KeyboardInterrupt("after inode move")
+
+    def interrupt_after_second_move(local, copy_path, sha):
+        outcome = real_move(local, copy_path, sha)
+        if local.name == "b.md":
+            raise interruption
+        return outcome
+
+    monkeypatch.setattr(pullflow, "_move_into_copy", interrupt_after_second_move)
+    capture = {}
+    with pytest.raises(KeyboardInterrupt) as caught:
+        _run(fleet, monkeypatch, "quiet", refusal=capture, result_observer=observed.append)
+    assert caught.value is interruption
+    (result,) = observed
+    assert result.total_deleted == 1
+    folder = Path(result.deleted_folder)
+    for name in ("a.md", "b.md"):
+        assert (folder / NOTES / name).read_bytes() == SHARED
+        assert not (fleet.local / name).exists()
+        assert _ledger_state(name) == (None, PEER)
+    assert (fleet.local / "c.md").read_bytes() == SHARED
+    assert _ledger_state("c.md") == (_sha(SHARED), None)
+    rows = [r for r in pullhistory.read_records() if r.get("action") == "deleted"]
+    assert [r["rel_path"] for r in rows] == ["a.md"]
+    assert str(folder) in capture["output"][1]
+    assert "deletion interrupted" in capture["output"][1]
+
+
+def _setup_aliased_deletion(
+    fleet, *, alias_has_tombstone=False, nested_alias=False, case_alias=False
+):
+    name = "nested/note.md" if nested_alias else "note.md"
+    path = _put_local(fleet, name, SHARED, 1_600_000_000)
+    alias_root = path.parent if nested_alias else fleet.local
+    if case_alias:
+        differently_cased = alias_root.with_name(alias_root.name.swapcase())
+        if not differently_cased.exists() or not differently_cased.samefile(alias_root):
+            pytest.skip("requires a case-insensitive source filesystem")
+        assert differently_cased.resolve() != alias_root.resolve()
+        alias_root = differently_cased
+    alias = {"name": "alias", "type": "generic", "path": str(alias_root), "include_dirs": ["."]}
+    sources = fleet.config["sync"]["sources"]
+    sources.append(alias)
+    prior = manifest.build_manifest_v2(LOCAL, "Local A", sources)
+    core.publish_anchors(prior, sources, {})
+    ledger, _ = core.load_ledger(None)
+    ledger.settle(PEER, NOTES, name, _sha(SHARED))
+    ledger.settle(PEER, "alias", "note.md", _sha(SHARED))
+    core.record_published(ledger, prior)
+    assert core.commit_ledger(ledger) is None
+    tombstones = {f"{NOTES}:{name}": _tombstone(SHARED)}
+    if alias_has_tombstone:
+        tombstones["alias:note.md"] = _tombstone(SHARED)
+    _seed(fleet, {}, tombstones=tombstones)
+    return name, path, sources, prior
+
+
+@pytest.mark.parametrize("alias_has_tombstone", [False, True])
+@pytest.mark.parametrize("nested_alias", [False, True])
+@pytest.mark.parametrize("selected_source", [None, NOTES])
+@pytest.mark.parametrize("case_alias", [False, True], ids=["same-case", "case-alias"])
+def test_followed_deletion_cannot_remint_through_an_aliased_source(
+    fleet, monkeypatch, alias_has_tombstone, nested_alias, selected_source, case_alias
+):
+    name, path, sources, prior = _setup_aliased_deletion(
+        fleet,
+        alias_has_tombstone=alias_has_tombstone,
+        nested_alias=nested_alias,
+        case_alias=case_alias,
+    )
+
+    result, _, _ = _run(fleet, monkeypatch, "quiet", source_filter=selected_source)
+
+    assert not path.exists()
+    ledger, error = core.load_ledger(None)
+    assert error is None
+    # Exercise the next push's actual mint pipeline against its unchanged anchors.
+    current = manifest.build_manifest_v2(LOCAL, "Local A", sources)
+    guard = core.compute_mint_guard(current, prior, sources, ledger)
+    assert (
+        manifest.generate_tombstones(
+            current, prior, LOCAL, skip_mint=guard.skip, deleted_hashes=guard.deleted_hashes
+        )
+        == {}
+    )
+    assert result.total_deleted == 1 and result.total_failed == 0
+    copies = _copies()
+    assert len(copies) == 1 and list(copies.values()) == [SHARED]
+    assert set(copies) <= {f"{NOTES}/{name}", "alias/note.md"}
+    for source, rel in ((NOTES, name), ("alias", "note.md")):
+        assert ledger.base(PEER, source, rel) is None
+        assert ledger.newest_stamp(source, rel) == PEER
+
+
+@pytest.mark.parametrize("names", [("a.md", "b.md"), ("one/note.md", "two/note.md")])
+def test_deletion_preserves_distinct_hardlink_directory_entries(fleet, monkeypatch, names):
+    first = _put_local(fleet, names[0], SHARED, 1_600_000_000)
+    second = fleet.local / names[1]
+    second.parent.mkdir(parents=True, exist_ok=True)
+    os.link(first, second)
+    assert first.samefile(second)
+    for name in names:
+        _record((name, SHARED))
+    _seed(fleet, {}, tombstones={f"{NOTES}:{name}": _tombstone(SHARED) for name in names})
+
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+
+    assert result.total_deleted == 2 and result.total_failed == 0
+    assert not first.exists() and not second.exists()
+    assert _copies() == {f"{NOTES}/{name}": SHARED for name in names}
+    for name in names:
+        assert _ledger_state(name) == (None, PEER)
+
+
+@pytest.mark.parametrize("failure", ["refused", "restored", "interrupt-before", "interrupt-after"])
+def test_aliased_deletion_failure_restores_all_bases_unless_the_inode_moved(
+    fleet, monkeypatch, failure
+):
+    name, path, _, _ = _setup_aliased_deletion(fleet)
+    devices.register_device(fleet.backend, "cccccccc", "Peer C")
+    ledger, _ = core.load_ledger(None)
+    # The alias can have a different history from the tombstone's source.
+    ledger.settle("cccccccc", "alias", "note.md", _sha(b"another peer's old version"), hold=False)
+    assert core.commit_ledger(ledger) is None
+    before = dict(ledger.bases)
+    real_move = pullflow._move_into_copy
+
+    def fail_move(local, copy_path, sha):
+        if failure == "refused":
+            raise OSError(errno.EACCES, "refused")
+        if failure == "interrupt-before":
+            raise KeyboardInterrupt("before move")
+        if failure == "restored":
+            local.write_bytes(b"an agent's edit")
+        result = real_move(local, copy_path, sha)
+        if failure == "interrupt-after":
+            raise KeyboardInterrupt("after move")
+        return result
+
+    monkeypatch.setattr(pullflow, "_move_into_copy", fail_move)
+    if failure.startswith("interrupt-"):
+        with pytest.raises(KeyboardInterrupt):
+            _run(fleet, monkeypatch, "quiet")
+    else:
+        result, _, _ = _run(fleet, monkeypatch, "quiet")
+        assert result.total_deleted == 0 and result.total_failed == 1
+    after, error = core.load_ledger(None)
+    assert error is None
+    if failure == "interrupt-after":
+        assert not path.exists()
+        assert list(_copies().values()) == [SHARED]
+        for source, rel in ((NOTES, name), ("alias", "note.md")):
+            assert after.newest_stamp(source, rel) == PEER
+        assert after.bases == {}
+    else:
+        assert path.read_bytes() == (b"an agent's edit" if failure == "restored" else SHARED)
+        assert after.bases == before
+        for source, rel in ((NOTES, name), ("alias", "note.md")):
+            assert after.newest_stamp(source, rel) is None
+
+
+def test_aliased_deletion_stamp_survives_an_incoming_sidecar_flush_failure(fleet, monkeypatch):
+    name, path, sources, prior = _setup_aliased_deletion(fleet)
+    remote_bytes = b"a different peer version"
+    remote_sha = _sha(remote_bytes)
+    peer = {
+        "device_id": PEER,
+        "sources": {
+            NOTES: {"files": {}},
+            "alias": {
+                "files": {
+                    "note.md": {
+                        "sha256": remote_sha,
+                        "size": len(remote_bytes),
+                        "mtime": "2026-01-01T00:00:00+00:00",
+                    }
+                }
+            },
+        },
+        "tombstones": {f"{NOTES}:{name}": _tombstone(SHARED)},
+    }
+    fleet.backend.put(
+        blob_key(PEER, remote_sha), crypto.encrypt(remote_bytes, PASSPHRASE, MEMORY_KB)
+    )
+    fleet.backend.put(
+        manifest_key(PEER), crypto.encrypt(manifest.serialize_manifest(peer), PASSPHRASE, MEMORY_KB)
+    )
+    ledger, _ = core.load_ledger(None)
+    ledger.settle(PEER, "alias", "note.md", _sha(b"old base"), hold=False)
+    assert core.commit_ledger(ledger) is None
+    real_fsync = pullflow.fsutil.fsync_file
+
+    def fail_sidecar_flush(file):
+        if manifest.CONFLICT_INFIX in file.name:
+            raise OSError(errno.EIO, "injected sidecar flush failure")
+        return real_fsync(file)
+
+    monkeypatch.setattr(pullflow.fsutil, "fsync_file", fail_sidecar_flush)
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+    assert result.total_conflicted == result.total_deleted == 1
+    assert result.durability_fsync_failures == 1
+    assert not path.exists()
+    after, _ = core.load_ledger(None)
+    assert after.newest_stamp("alias", "note.md") == PEER
+    current = manifest.build_manifest_v2(LOCAL, "Local A", sources)
+    guard = core.compute_mint_guard(current, prior, sources, after)
+    assert (
+        manifest.generate_tombstones(
+            current, prior, LOCAL, skip_mint=guard.skip, deleted_hashes=guard.deleted_hashes
+        )
+        == {}
+    )

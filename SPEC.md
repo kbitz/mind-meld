@@ -235,7 +235,7 @@ pull rule and propagated deletions need. Older readers ignore them.
 - `sources[...]["root_ids"]`: per scan root, the random token in that folder's `.mind-meld-anchor` file, renewed by
   every publishing push. A push mints a deletion record only for a file under a scan root whose token still matches.
   Peers ignore it; mm-events has none.
-- `tombstones[...]["sha256"]`: the sha256 of the version the record deletes (the prior manifest entry's digest).
+- `tombstones[...]["sha256"]`: the newest held version's full sha256, resolved from the prior entry or local peer bases. If its full hash is unknown or ambiguous, no record is minted; without a held row the accepted prior digest is used.
   A peer deletes its copy only when its bytes equal it and its last-synced base for that peer equals it; a record
   without a valid 64-hex `sha256` (every record from before Track 91A) only suppresses re-download and never deletes.
 
@@ -381,7 +381,7 @@ mm status [--source NAME]   # show local vs remote state, pending changes
                             # plus a line for broken retro-fleet links (absent and removed-by-user are NOT broken)
 mm diag [--json]            # non-secret crypto / sync / breadcrumb triage dump; runs without a passphrase or a valid config
                             # top-level keys: mm_version, config, crypto_init, keyring, root_salt_drift, sidecar, storage_inventory, project_index, sync_scope, fast_forward, last_autorun, last_attended_runs, sync_run_projection, skill_links, host_usage, host_read_budgets, host_publication, discovery, git_capture
-                            # fast_forward (read-only): pull-ledger state, peer_base rows per peer, seen_version rows, each scan root's .mind-meld-anchor state
+                            # fast_forward (read-only): pull-ledger state, peer_base rows per peer, seen_version rows, scan-root anchor state and historical older-edit/anchor observations (possibly stale)
                             # `skill_links` rows: agent, target, store, store_state, store_version, status, maintain_links, readlink|detail
                             # status is one of ok | absent | removed-by-user | live-checkout | foreign | foreign-dangling | dangling-ours | dangling-ours-legacy | error
                             # removed-by-user = mm resolved that target before and the link is now gone (a deliberate deletion); absent = mm never installed there. Neither is broken.
@@ -609,7 +609,7 @@ Behavior is decided per file at apply time by the pull rule, one pure function (
 6. **Conflict-copy (C, INVERTED in v0.9.2):** both changed and the file isn't mergeable — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside. A sidecar that already holds the peer's bytes is **kept** (no count, no warning).
 7. **No-base fallback:** a path with no base for that peer where the peer published no ancestry runs the older rule exactly: merge if mergeable, else **skip (S)** when the local mtime is newer, else conflict-copy.
 
-Pull re-reads local hash and mtime at apply time so the decision reflects the actual state when writing, race-safe against editors running during a long pull.
+Pull re-reads local hash and mtime at apply time. Fast-forward also re-checks size, mtime, ctime and inode immediately before replacement; a detected edit becomes both-changed. A small check-to-replace race remains, as with merge (see conflict invariants).
 
 **Inversion (v0.9.2 BREAKING).** Pre-v0.9.2 did the opposite for [C]: local was renamed out to the sidecar and remote bytes were written to canonical. The inversion makes the visible `.sync-conflict-*` file hold the *surprising* version (remote, from elsewhere) rather than the working version (local, on this machine). Sidecar-write failure is per-file isolated and does NOT need a rollback dance — local is never overwritten in the conflict path.
 

@@ -33,6 +33,7 @@ from mind_meld import (
     sidecar,
     skill_link,
     statedb,
+    syncdiag,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -1618,8 +1619,8 @@ def _project_index_state(
 def _fast_forward_state(sources: list[dict]) -> dict:
     """Read-only Track 91A state: pull-ledger health, rows per peer, scan-root tokens.
 
-    Never writes. The ``older`` edits a pull held back need peer manifests, which
-    this passphrase-free report cannot read: ``mm pull --dry-run --verbose`` lists them.
+    Never writes or decrypts peer manifests. Older-edit details are historical
+    observations from the last real pull, explicitly labeled as possibly stale.
     """
     ledger_state, peers, seen = "ok", {}, 0
     try:
@@ -1639,7 +1640,9 @@ def _fast_forward_state(sources: list[dict]) -> dict:
         for root in manifest.scan_roots(src):
             folder = base / root if root else base
             try:
-                present = stat.S_ISDIR(folder.lstat().st_mode)
+                present = not manifest.path_has_descendant_symlink(folder, base) and stat.S_ISDIR(
+                    folder.stat().st_mode
+                )
             except OSError:
                 present = False
             token = manifest.read_anchor(base, root) if present else None
@@ -1653,6 +1656,7 @@ def _fast_forward_state(sources: list[dict]) -> dict:
         "peer_base_rows": peers,
         "seen_version_rows": seen,
         "anchors": anchors,
+        "observations": syncdiag.read_observations(),
     }
 
 
@@ -1977,6 +1981,48 @@ def diag(
     for name, roots in ff["anchors"].items():
         for root, status in roots.items():
             console.print(safe_str(f"  scan root {name}:{root}: {status}"))
+    observations = ff["observations"]
+    last_pull = observations["pull"]
+    if last_pull is not None:
+        completeness = "complete" if last_pull["complete"] else "partial"
+        console.print(
+            safe_str(
+                f"  Last pull observation: {last_pull['observed_at']} ({completeness}; "
+                "may be stale; peer files not rechecked)"
+            )
+        )
+        for row in last_pull["older"]:
+            console.print(
+                safe_str(
+                    f"  older peer edit not applied: {row['peer']}/{row['source']}/{row['path']}"
+                )
+            )
+            console.print(
+                safe_str(
+                    f"    local mtime: {row['local_mtime'] or 'unknown'}; "
+                    f"peer mtime: {row['peer_mtime'] or 'unknown'}"
+                )
+            )
+        if last_pull["older_count"] > len(last_pull["older"]):
+            console.print(
+                f"  Showing {len(last_pull['older'])} of {last_pull['older_count']} older edits."
+            )
+        if last_pull["older"]:
+            console.print(
+                "  Compare both versions first; touch the file and run mm push "
+                "on the machine whose version should win."
+            )
+    elif observations["state"] != "missing":
+        console.print(safe_str(f"  sync observations: {observations['state']}"))
+    for row in observations["push"]["records"]:
+        if row["count"] >= 2:
+            console.print(
+                safe_str(
+                    f"  repeated anchor mismatch: {row['source']}:{row['root'] or '.'} "
+                    f"({row['count']} accepted pushes; last observed {row['observed_at']}; "
+                    "may be stale)"
+                )
+            )
 
     pi = state["project_index"]
     names_state = pi.get("state") or "n/a"

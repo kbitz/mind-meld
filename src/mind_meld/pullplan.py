@@ -17,7 +17,7 @@ import re
 import stat
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -99,6 +99,7 @@ class Ledger:
         self.now_us = now_us if now_us is not None else time.time_ns() // 1000
         self.new_bases: dict[tuple[str, str, str], str] = {}
         self.drop_bases: set[tuple[str, str]] = set()
+        self.drop_seen: set[tuple[str, str]] = set()
         self.new_seen: dict[tuple[str, str, str], tuple[str, int, str | None]] = {}
         self.unstamp: set[tuple[str, str]] = set()
         # Files written for settled rows (to flush before the commit) and inline
@@ -125,6 +126,10 @@ class Ledger:
             self.settle(peer, source, path, sha, hold=False, ancestors=ancestors)
         self.deferred.clear()
 
+    def discard_deferred(self, source: str, path: str) -> None:
+        """Cancel keep-local settlements only after the canonical file was removed."""
+        self.deferred = [row for row in self.deferred if row[1:3] != (source, path)]
+
     def discard(self, source: str, path: str) -> None:
         """Drop every uncommitted change for a path whose bytes could not be flushed."""
         for key in [k for k in self.new_bases if k[1:] == (source, path)]:
@@ -137,13 +142,16 @@ class Ledger:
     def mark_committed(self) -> None:
         self.new_bases.clear()
         self.drop_bases.clear()
+        self.drop_seen.clear()
         self.new_seen.clear()
         self.unstamp.clear()
         self.flush_paths.clear()
 
     @property
     def dirty(self) -> bool:
-        return bool(self.new_bases or self.drop_bases or self.new_seen or self.unstamp)
+        return bool(
+            self.new_bases or self.drop_bases or self.drop_seen or self.new_seen or self.unstamp
+        )
 
     # reads
     def base(self, peer: str, source: str, path: str) -> str | None:
@@ -239,6 +247,9 @@ class Ledger:
             return
         self.hold(source, path, sha)
         entry = self.seen[(source, path)][head]
+        # settle() may have learned ancestors after holding this version.
+        # A followed deletion must remain the newest fact for the mint guard.
+        entry.time = self._next_time(source, path)
         entry.deleted_by = device_id
         self.new_seen[(source, path, head)] = (HELD, entry.time, device_id)
 
@@ -251,6 +262,18 @@ class Ledger:
             for key in [k for k in self.new_seen if k[:2] == (source, path)]:
                 kind, when, _ = self.new_seen[key]
                 self.new_seen[key] = (kind, when, None)
+
+    def clear_seen(self, source: str, path: str) -> None:
+        """Forget absence history only after push accepted a path as left out."""
+        if not self._tracked(source):
+            return
+        key = (source, path)
+        self.seen.pop(key, None)
+        self.drop_seen.add(key)
+        self.unstamp.discard(key)
+        for pending in [k for k in self.new_seen if k[:2] == key]:
+            del self.new_seen[pending]
+        self.discard_deferred(source, path)
 
     def undelete(self, source: str, path: str, peer: str, sha: str, *, restore_base: bool) -> None:
         """Take back a followed deletion that did not happen (the file is still here).
@@ -270,13 +293,18 @@ class Ledger:
 
     def drop(self, source: str, path: str) -> None:
         """Forget every peer's base for a path (a deletion is about to be followed)."""
+        self.drop_many([(source, path)])
+
+    def drop_many(self, paths: Iterable[tuple[str, str]]) -> None:
+        """Forget every peer's base for selected paths in one pass over each map."""
         if not self.readable:
             return
-        for key in [k for k in self.bases if k[1:] == (source, path)]:
+        removed = set(paths)
+        for key in [k for k in self.bases if k[1:] in removed]:
             del self.bases[key]
-        for key in [k for k in self.new_bases if k[1:] == (source, path)]:
+        for key in [k for k in self.new_bases if k[1:] in removed]:
             del self.new_bases[key]
-        self.drop_bases.add((source, path))
+        self.drop_bases.update(removed)
 
 
 @dataclass(frozen=True)

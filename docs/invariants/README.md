@@ -37,6 +37,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
 | `pullhistory.py` | Forensic table-backed pull/push/self-upgrade history, legacy import, batching and mm log queries |
 | `statedb.py` | Local state.db connections, forward migrations, translated errors, transactions and displaced expiry; (91A) the pull-ledger tables (`peer_base`, `seen_version`: `read_peer_bases`, `read_seen`, `ledger_counts`, `commit_ledger`) and the recovery-copy folder (`deleted_copies_dir`); standard library + fsutil leaf |
+| `syncdiag.py` | (91A) Local historical pull/anchor observations for passphrase-free diagnostics; bounded `sync-observations.json` through `lockedjson`, never sync authorization |
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |
 | `sidecar.py` | Manifest sidecar read/write |
@@ -49,7 +50,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | **`conflictmtime.py`** | **(16A)** mtime primitives shared by the apply path and the resolver |
 | **`skill_link.py`** | **(16A)** retro-fleet skill installer, the mm-owned `SKILL.md` store at `~/.local/share/mind-meld/agent-skills/` (24A), its 24h drift gate and markers, the `mm status` / `mm diag` link diagnosis, the `AGENT_ROWS` registry — add a new agent HERE — (25C) `consented_agent_keys` / `AgentRow.consent_source` / the installer `declined` status, and (28A) the deletion guard — `_marker_exists`, the `removed-by-user` status, and the rule that an ABSENT link is intent, not damage |
 | **`events_tail.py`** | **(16A)** The push/init mm-events tail, its walk budgets, (19A) the host-usage capture, (61A) shared host-only capture/warm helper, (31A) reader-scoped failure isolation, (30A) git-only recapture, and (57A) the later-reader grace floor with full-reader warm/retry |
-| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk |
+| **`resolveflow.py`** | **(16A)** Conflict discovery, promotion, the interactive `mm resolve` walk and durable per-choice ledger settlement (`_record_resolution`) |
 | **`retention.py`** | **(16A)** The `mm gc` reapers + crashed-push tmp sweep; (91A) the deleted-file recovery-copy reaper (`_gc_deleted_copies`) |
 | `safety.py` | Peer-controlled string sanitization |
 | `conflictdiff.py` | Pure leaf renderers for the conflict prompts |
@@ -114,6 +115,8 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `pullflow.py:_apply_conflict` / `pullflow.py:_apply_incoming_file` / `pullflow.py:_apply_fast_forward` / `pullflow.py:_ledger_verdict` / `pullflow.py:_classify_with_ledger` / `pullflow.py:_prompt_conflict_choice` / `pullflow.py:_check_fleet_version_or_refuse` / `pullflow.py:conflict_filename` / `core.py:_filter_excluded_paths` / `pullplan.py:decide` / `Ledger` / `parse_from` / `PullPlanner` | `docs/invariants/conflicts.md` and `docs/invariants/sync.md` (Fast-forward, propagated deletions and anchors) |
 | `retention.py:_gc_old_conflict_files` / `_is_live_conflict` | `docs/invariants/conflicts.md` |
 | `pullflow.py:_deletion_candidates` / `_run_deletions` / `_make_copy_dirs` / `_move_into_copy` / `_copy_then_unlink` / `_own_lookup` / `deleted_clause` / `deleted_detail` / `older_clause` / `ledger_notice` / `retention.py:_gc_deleted_copies` / `DELETED_COPY_DAYS` / `statedb.py:deleted_copies_dir` / `commit_ledger` / `read_peer_bases` / `read_seen` / `ledger_counts` / `core.py:MintGuard` / `compute_mint_guard` / `stamp_left_out` / `anchor_pending` / `publish_anchors` / `stamp_ancestry` / `record_published` / `load_ledger` / `flush_ledger_files` / `commit_ledger` / `ledger_cause` / `manifest.py:scan_roots` / `scan_root_for` / `write_anchor` / `read_anchor` / `ANCHOR_NAME` / `fsutil.py:fsync_file` | `docs/invariants/sync.md` (Fast-forward, propagated deletions and anchors) and `docs/invariants/conflicts.md` (the pull rule) |
+| `syncdiag.py` / `statusflow.py:_fast_forward_state` / (historical sync observations and root diagnostics) | `docs/invariants/sync.md` |
+| `resolveflow.py:_record_resolution` | `docs/invariants/sync.md` and `docs/invariants/conflicts.md` |
 | `resolveflow.py:_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync` | `docs/invariants/conflicts.md` |
 | `conflictmtime.py:_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime` (both prompt sites share these) | `docs/invariants/conflicts.md` |
 | `pullflow.py:_record_inline_bump` / `pullflow.py:_invalidate_inline_bump` / `pullflow.py:_drain_inline_bumps` / `pullflow.py:_CANONICAL_WRITE_OUTCOMES` / `pullflow.py:_pull_core` / `pullflow.py:_pull_one_source` / `pullflow.py:_download_and_apply` / (`pending_inline_bumps` plumbing and outcome-gated invalidation) | `docs/invariants/conflicts.md` |
@@ -296,11 +299,12 @@ mutation, and the static census reviews them:
 | Writer | Guard destination and placement | No-op / read edge |
 |---|---|---|
 | `pullflow.py:_make_copy_dirs` | the recovery folder (`~/.config/mind-meld/deleted/<stamp>/`) before the first mkdir | creates only missing components, 0700 |
-| `pullflow.py:_move_into_copy` / `pullflow.py:_copy_then_unlink` | the recovery copy path and the local path, both before the rename; the cross-volume copy fallback runs under the same two guards | `_move_into_copy` renames the file's own inode; `_copy_then_unlink` also writes through `atomic_write_bytes` |
+| `pullflow.py:_move_into_copy` / `pullflow.py:_copy_then_unlink` | the recovery copy path and the local path, both before the rename; the cross-volume copy fallback runs under the same two guards | `_move_into_copy` reserves the destination with `O_EXCL` before renaming the file's own inode; `_copy_then_unlink` creates its copy with `O_EXCL`, writes and flushes it before re-checking and unlinking the source |
 | `retention.py:_gc_deleted_copies` | each recovery folder before its `shutil.rmtree` | a preview, an empty listing and an unparseable folder name never guard or remove |
 | `manifest.py:write_anchor` | the `.mind-meld-anchor` path before `atomic_write_bytes` | `read_anchor`, and a root that is not a directory, never guard |
 
-`fsutil.fsync_file` opens read-only with `O_NOFOLLOW` and mutates nothing.
+`fsutil.fsync_file` opens read-only with `O_NOFOLLOW | O_NONBLOCK`, requires a
+regular descriptor and mutates nothing.
 `core.commit_ledger` writes through `statedb.connect(read_only=False)`, already guarded.
 
 Copy this pattern for a new writer. Guard the written file (logs/config/

@@ -141,6 +141,7 @@ class ManifestFetch:
     newer_version: int | None = None
     conflict_copies_only: bool = False
     vanished: bool = False
+    merged: bool = False  # A union of copies was never accepted as one published snapshot.
 
     @property
     def is_ok(self) -> bool:
@@ -572,6 +573,7 @@ def _fetch_remote_manifest(
         manifest=_merge_manifests(manifests),
         conflict_copies_only=conflict_copies_only,
         vanished=canonical_vanished,
+        merged=True,
     )
 
 
@@ -1175,12 +1177,23 @@ def _merge_manifests(manifests: list[dict]) -> dict:
     # Track 91A: a scan root's token survives a merge only when every copy that
     # names the source agrees on it; a disagreement means no id (nothing mints).
     for src_name, dst in merged_sources.items():
-        copies = [
-            m["sources"][src_name].get("root_ids") or {}
-            for m in sorted_manifests
-            if src_name in m.get("sources", {})
-            and isinstance(m["sources"][src_name].get("root_ids", {}), dict)
-        ]
+        copies = []
+        for m in sorted_manifests:
+            if src_name not in m.get("sources", {}):
+                continue
+            ids = m["sources"][src_name].get("root_ids")
+            copies.append(
+                {
+                    root: token
+                    for root, token in ids.items()
+                    if isinstance(root, str)
+                    and isinstance(token, str)
+                    and len(token) == 32
+                    and manifest._ANCHOR_RE.fullmatch(token)
+                }
+                if isinstance(ids, dict)
+                else {}
+            )
         roots = set().union(*copies) if copies else set()
         agreed = {
             root: values.pop()
@@ -1341,13 +1354,17 @@ class MintGuard:
     ``skip`` is every ``(source, path)`` that mints nothing. ``left_out`` is the
     part a gone, new or unreadable scan root explains, per source; ``reasons``
     names that root and why. A prior that recorded no token for a root (the first
-    push after upgrading) is skipped silently.
+    push after upgrading) is skipped silently. ``deleted_hashes`` holds the
+    unambiguous full digest of the newest held version, or the prior version
+    when no held version exists.
     """
 
     skip: set[tuple[str, str]] = field(default_factory=set)
     left_out: dict[str, set[str]] = field(default_factory=dict)
     reasons: dict[str, dict[str, str]] = field(default_factory=dict)
     folders: dict[tuple[str, str], str] = field(default_factory=dict)
+    root_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    deleted_hashes: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def left_out_files(self) -> int:
@@ -1357,13 +1374,18 @@ class MintGuard:
         """``3 files left out because /home/kb/.claude/projects is new; run mm pull ...``."""
         if not self.left_out_files:
             return ""
-        (src, root), folder = next(iter(self.folders.items()))
-        reason = self.reasons[src][root]
-        return (
-            f"{_count(self.left_out_files, 'file', 'files')} left out because "
-            f"{safe_str(folder)} is {reason}; "
-            + ("run mm pull to restore them." if reason != "unreadable" else "restore read access.")
-        ).replace("is unreadable", "cannot be read")
+        clauses = []
+        for (src, root), folder in self.folders.items():
+            reason = self.reasons[src][root]
+            state = "cannot be read" if reason == "unreadable" else f"is {reason}"
+            remedy = (
+                "restore read access" if reason == "unreadable" else "run mm pull to restore them"
+            )
+            clauses.append(
+                f"{_count(self.root_counts[(src, root)], 'file', 'files')} left out because "
+                f"{safe_str(folder)} {state}; {remedy}"
+            )
+        return "; ".join(clauses) + "."
 
 
 def compute_mint_guard(
@@ -1373,6 +1395,7 @@ def compute_mint_guard(
     ledger: pullplan.Ledger | None,
     *,
     still_present: set[tuple[str, str]] | None = None,
+    prior_accepted: bool = True,
 ) -> MintGuard:
     """Decide which absent prior paths are real deletions.
 
@@ -1380,11 +1403,20 @@ def compute_mint_guard(
     last published (its token is unchanged) and the scan listed that folder.
     Anything below a gone, recreated, restored or unreadable root, a path under
     no scan root, a file still on disk, and a deletion this machine only
-    followed all mint nothing.
+    followed all mint nothing. An unreadable ledger cannot rule out a followed
+    deletion, and a recovered/merged prior was never accepted as-is: neither
+    authorizes any new user-file deletion record. Newest held prefixes resolve
+    only against full hashes in the prior entry and local peer bases; an
+    unknown or ambiguous digest mints nothing.
     """
     guard = MintGuard(skip=set(still_present or ()))
     if prior is None:
         return guard
+    known_hashes: dict[tuple[str, str, str], set[str]] = {}
+    if ledger is not None and ledger.readable:
+        for (_peer, name, rel), sha in ledger.bases.items():
+            if pullplan.valid_hash(sha):
+                known_hashes.setdefault((name, rel, sha[:16]), set()).add(sha)
     for cfg in sources:
         name = cfg.get("name")
         if not name or name in MM_INTERNAL_SOURCE_NAMES:
@@ -1396,6 +1428,8 @@ def compute_mint_guard(
         absent = [p for p in entry["files"] if p not in local_files]
         if not absent:
             continue
+        if not prior_accepted or ledger is None or not ledger.readable:
+            guard.skip.update((name, rel) for rel in absent)
         base = Path(cfg["path"]).expanduser()
         ids = entry.get("root_ids") if isinstance(entry.get("root_ids"), dict) else {}
         status: dict[str, str] = {}
@@ -1410,12 +1444,29 @@ def compute_mint_guard(
             if root not in status:
                 status[root] = _root_status(base, root, ids.get(root))
             if status[root] == "unchanged":
+                if (name, rel) in guard.skip:
+                    continue
+                prior_sha = entry["files"][rel].get("sha256")
+                held = ledger.newest_held(name, rel) if ledger is not None else None
+                if held is None:
+                    candidates = {prior_sha} if pullplan.valid_hash(prior_sha) else set()
+                else:
+                    candidates = set(known_hashes.get((name, rel, held), ()))
+                    if pullplan.valid_hash(prior_sha) and prior_sha[:16] == held:
+                        candidates.add(prior_sha)
+                # Never substitute the last-published version for a newer held
+                # version whose complete digest is unknown or ambiguous.
+                if len(candidates) == 1:
+                    guard.deleted_hashes[(name, rel)] = next(iter(candidates))
+                else:
+                    guard.skip.add((name, rel))
                 continue
             guard.skip.add((name, rel))
             if status[root] != "unanchored":
                 guard.left_out.setdefault(name, set()).add(rel)
                 guard.reasons.setdefault(name, {})[root] = status[root]
                 guard.folders.setdefault((name, root), str(base / root if root else base))
+                guard.root_counts[(name, root)] = guard.root_counts.get((name, root), 0) + 1
     return guard
 
 
@@ -1424,8 +1475,10 @@ def _root_status(base: Path, root: str, recorded: object) -> str:
     if not isinstance(recorded, str):
         return "unanchored"
     folder = base / root if root else base
+    if manifest.path_has_descendant_symlink(folder, base):
+        return "missing"
     try:
-        info = folder.lstat()
+        info = folder.stat()
     except FileNotFoundError:
         return "missing"
     except OSError:
@@ -1454,25 +1507,65 @@ def anchor_pending(
     nested_roots: Mapping[str, Iterable[str]],
 ) -> bool:
     """True when a writable scan root's token differs from the one last published."""
+    return any(row["pending"] for row in observe_anchors(prior, sources, nested_roots))
+
+
+def observe_anchors(
+    prior: dict | None,
+    sources: list[dict[str, Any]],
+    nested_roots: Mapping[str, Iterable[str]],
+    *,
+    local_manifest: dict | None = None,
+) -> list[dict[str, Any]]:
+    """Read pre-publication token state; diagnostic counters never authorize a mint."""
+    observations = []
     for cfg in sources:
         name = cfg.get("name")
         if not name or name in MM_INTERNAL_SOURCE_NAMES:
             continue
         entry = ((prior or {}).get("sources") or {}).get(name) or {}
         ids = entry.get("root_ids") if isinstance(entry.get("root_ids"), dict) else {}
+        local_files = (((local_manifest or {}).get("sources") or {}).get(name) or {}).get(
+            "files", {}
+        )
+        absent_roots = {
+            manifest.scan_root_for(cfg, rel)
+            for rel in entry.get("files", {})
+            if local_manifest is not None and rel not in local_files
+        }
         base = Path(cfg["path"]).expanduser()
         for root in manifest.scan_roots(cfg):
             folder = base / root if root else base
+            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
+                continue
+            if manifest.path_has_descendant_symlink(folder, base):
+                continue
             try:
-                if not stat.S_ISDIR(folder.lstat().st_mode) or not os.access(folder, os.W_OK):
+                if not stat.S_ISDIR(folder.stat().st_mode) or not os.access(folder, os.W_OK):
                     continue
             except OSError:
                 continue
-            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
-                continue
-            if manifest.read_anchor(base, root) != ids.get(root):
-                return True
-    return False
+            token = manifest.read_anchor(base, root)
+            recorded = ids.get(root)
+            pending = token is None or token != recorded
+            known = (
+                isinstance(recorded, str)
+                and len(recorded) == 32
+                and manifest._ANCHOR_RE.fullmatch(recorded)
+            )
+            state = (
+                "absent" if root in absent_roots else "mismatch" if known and pending else "stable"
+            )
+            observations.append(
+                {
+                    "source": name,
+                    "root": root,
+                    "folder": str(folder),
+                    "state": state,
+                    "pending": pending,
+                }
+            )
+    return observations
 
 
 def publish_anchors(
@@ -1488,6 +1581,9 @@ def publish_anchors(
     be written has no id, so nothing under it mints.
     """
     unwritable: list[str] = []
+    # Filesystem identity is only a per-call dedup key, never persisted. Aliased
+    # sources must record the same generation for their one physical folder.
+    published: dict[tuple[int, int], str] = {}
     for cfg in sources:
         name = cfg.get("name")
         if not name or name in MM_INTERNAL_SOURCE_NAMES:
@@ -1499,12 +1595,19 @@ def publish_anchors(
         ids: dict[str, str] = {}
         for root in manifest.scan_roots(cfg):
             folder = base / root if root else base
+            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
+                continue
+            if manifest.path_has_descendant_symlink(folder, base):
+                continue
             try:
-                if not stat.S_ISDIR(folder.lstat().st_mode):
+                info = folder.stat()
+                if not stat.S_ISDIR(info.st_mode):
                     continue
             except OSError:
                 continue
-            if root and manifest._under_skip_prefix(root, list(nested_roots.get(name, ()))):
+            identity = (info.st_dev, info.st_ino)
+            if identity in published:
+                ids[root] = published[identity]
                 continue
             token = secrets.token_hex(16)
             try:
@@ -1513,6 +1616,7 @@ def publish_anchors(
                 unwritable.append(str(folder))
                 continue
             ids[root] = token
+            published[identity] = token
         if ids:
             entry["root_ids"] = ids
         else:
@@ -1526,8 +1630,6 @@ def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Le
     Newest first, at most 16 prefixes. An unchanged entry keeps the list it
     published before. ``mm-events`` publishes none.
     """
-    if not ledger.readable:
-        return
     for name, entry in (local_manifest.get("sources") or {}).items():
         if name in ledger.untracked:
             continue
@@ -1539,6 +1641,8 @@ def stamp_ancestry(local_manifest: dict, prior: dict | None, ledger: pullplan.Le
                 kept = pullplan.parse_from(old)
                 if kept:
                     info["from"] = kept
+                continue
+            if not ledger.readable:
                 continue
             chain = [h for h in ledger.held_newest_first(name, rel) if h != head]
             old_head = pullplan.prefix(old.get("sha256")) if isinstance(old, dict) else None
@@ -2240,20 +2344,24 @@ def _collect_peer_tombstones(
     )
 
 
-def load_ledger(peer_ids: Iterable[str]) -> tuple[pullplan.Ledger, BaseException | None]:
+def load_ledger(peer_ids: Iterable[str] | None) -> tuple[pullplan.Ledger, BaseException | None]:
     """Read the pull ledger. An unreadable table gives an unreadable ledger.
 
     An absent database, or a v1 database without the tables, is a normal empty
     ledger: that is a fresh machine. Anything else means nothing counts as held,
     so today's rule runs and nothing deletes; the caller reports the cause.
+    ``None`` loads all peer bases so push can resolve a held prefix to a full hash.
     """
     untracked = frozenset(_config_module.MM_INTERNAL_SOURCE_NAMES)
     try:
         with statedb.connect(read_only=True) as conn:
             bases: dict[tuple[str, str, str], str] = {}
-            for peer in peer_ids:
-                for (source, path), sha in statedb.read_peer_bases(conn, peer).items():
-                    bases[(peer, source, path)] = sha
+            if peer_ids is None:
+                bases = statedb.read_all_peer_bases(conn)
+            else:
+                for peer in peer_ids:
+                    for (source, path), sha in statedb.read_peer_bases(conn, peer).items():
+                        bases[(peer, source, path)] = sha
             seen = statedb.read_seen(conn)
     except (statedb.StateDBError, OSError) as exc:
         return pullplan.Ledger(readable=False, untracked=untracked), exc
@@ -2265,25 +2373,36 @@ def load_ledger(peer_ids: Iterable[str]) -> tuple[pullplan.Ledger, BaseException
 LINUX_SYNC_THRESHOLD = 500
 
 
-def flush_ledger_files(ledger: pullplan.Ledger) -> float:
+def flush_ledger_files(
+    ledger: pullplan.Ledger, *, on_error: Callable[[Path, OSError], None] | None = None
+) -> float:
     """Flush each file a settled row describes; a row whose file cannot be flushed is dropped.
 
     A base must never be more durable than its bytes: after a power loss, damaged
     bytes with a base equal to the remote would read as a local edit. Returns the
-    seconds spent (``--verbose`` prints it).
+    seconds spent (``--verbose`` prints it). ``on_error`` receives each file
+    whose durability could not be established, after its unsafe rows are dropped.
     """
     started = time.monotonic()
     total = sum(len(paths) for paths in ledger.flush_paths.values())
     if sys.platform != "darwin" and total > LINUX_SYNC_THRESHOLD:
-        os.sync()
+        try:
+            os.sync()
+        except OSError as exc:
+            for key, paths in list(ledger.flush_paths.items()):
+                ledger.discard(*key)
+                if on_error is not None:
+                    for path in paths:
+                        on_error(path, exc)
         return time.monotonic() - started
     for key, paths in list(ledger.flush_paths.items()):
         for path in paths:
             try:
                 fsutil.fsync_file(path)
-            except OSError:
+            except OSError as exc:
                 ledger.discard(*key)
-                break
+                if on_error is not None:
+                    on_error(path, exc)
     return time.monotonic() - started
 
 
@@ -2308,6 +2427,7 @@ def commit_ledger(ledger: pullplan.Ledger) -> BaseException | None:
                 seen=seen,
                 unstamp=ledger.unstamp,
                 now_us=ledger.now_us,
+                drop_seen=ledger.drop_seen,
             )
     except (statedb.StateDBError, OSError) as exc:
         return exc

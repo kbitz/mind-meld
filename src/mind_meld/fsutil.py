@@ -492,8 +492,10 @@ def fsync_file(path: Path) -> None:
     bytes it describes. Plain fsync, not F_FULLFSYNC: a first pull can touch
     thousands of files.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
         os.fsync(fd)
     finally:
         os.close(fd)

@@ -1783,6 +1783,11 @@ def raw_writer_control(tmp_path, monkeypatch):
             assert not path.exists()  # the file is gone from where it was
             moved = tmp_path / "unprotected/note.md"
             assert moved.read_bytes() == b"keep" and stat.S_IMODE(moved.stat().st_mode) == 0o600
+        elif writer in ("move_copy", "unlink_copy") and exists:
+            with pytest.raises(FileExistsError):
+                invoke()
+            assert path.read_bytes() == b"keep"
+            assert (tmp_path / "unprotected/note.md").read_bytes() == b"new"
         elif writer in ("move_copy", "unlink_copy"):
             assert invoke() == "deleted"
             assert path.read_bytes() == b"new" and stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -2087,6 +2092,50 @@ def test_deleted_copies_reaper_refuses_protected_root(raw_writer_refusal):
 
 def test_deleted_copies_reaper_tmp_control(raw_writer_control, raw_writer_exists):
     raw_writer_control("reap_deleted", raw_writer_exists)
+
+
+def test_fsync_file_refuses_a_fifo_without_waiting_for_a_writer(tmp_path):
+    fifo = tmp_path / "replaced-by-fifo"
+    os.mkfifo(fifo)
+    script = textwrap.dedent(
+        """\
+        import errno
+        import sys
+        from pathlib import Path
+        from mind_meld import fsutil
+
+        try:
+            fsutil.fsync_file(Path(sys.argv[1]))
+        except OSError as exc:
+            assert exc.errno == errno.EINVAL, repr(exc)
+        else:
+            raise AssertionError("FIFO was accepted as a regular file")
+        """
+    )
+    # A regression must fail within this timeout, never strand a pytest worker.
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(fifo)], capture_output=True, text=True, timeout=3
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_fsync_file_refuses_a_directory_and_closes_the_descriptor(tmp_path, monkeypatch):
+    opened = []
+    real_open = os.open
+
+    def record_open(path, flags):
+        fd = real_open(path, flags)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(fsutil.os, "open", record_open)
+    monkeypatch.setattr(fsutil.os, "fsync", lambda fd: pytest.fail("non-file reached fsync"))
+    with pytest.raises(OSError, match="regular file"):
+        fsutil.fsync_file(tmp_path)
+    assert len(opened) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[0])
+    assert closed.value.errno == errno.EBADF
 
 
 def test_fsync_file_and_read_anchor_are_pure_reads(

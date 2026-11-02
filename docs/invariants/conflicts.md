@@ -6,7 +6,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` (see "The pull rule" below)
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
-- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
+- `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
@@ -77,7 +77,7 @@ would return. `from` tells A that V2 was built on V1.
 
 **Fast-forward** (`_apply_fast_forward`) writes the remote bytes and restores its
 mtime with no union. It captures the file's `lstat` with its hash and re-checks
-size, `mtime_ns` and inode right before the replace; a change in between is treated
+size, `mtime_ns`, `ctime_ns` and inode right before the replace; a change in between is treated
 as both changed. The few milliseconds left are the same exposure as `_apply_merge`.
 **A fast-forward overwrites local bytes with no recovery copy** (owner item a): those
 bytes equal a version the same peer published and built on, so a bad edit made on
@@ -99,7 +99,8 @@ added one, so the deleted line returns. Nothing is lost; delete it again. The ba
 is a hash, not the bytes, so this is not fixable here.
 
 **Base and ancestry after each outcome** (`_ApplyReporter.record`, in memory at
-once so a later peer in the same pull sees them; durable commit once per pull):
+once so a later peer in the same pull sees them; settlement commits at pull end,
+with the separate pre-deletion commit described in sync.md):
 
 - written, fast-forward, keep-remote, matched, and an `unchanged` that really
   agrees (byte-equal file or a no-op merge): the base becomes the remote sha and
@@ -126,9 +127,14 @@ sidecar already holds the peer's bytes (`kept`: silent) and records the peer's s
 as this peer's base, but `mm conflicts` keeps listing the file until the owner runs
 `mm resolve` on each (it needs a terminal). After `(l)ocal`, `(r)emote` or `(m)erge`
 a later pull writes nothing and reports no conflict: the peer's sha is the base
-(row 3) until the peer publishes something new. Without any base the no-base
-fallback (row 7) ends it instead: the mtime bump of `(l)ocal` keeps the local file
-newer, and `(r)emote` leaves matching bytes (row 2).
+(row 3) until the peer publishes something new. `resolveflow._record_resolution`
+records that base after each successful explicit choice, including after a lost
+base. It requires one identifiable peer, flushes the chosen canonical file and
+its parent, then commits; `(r)emote` holds the remote version and `(m)erge` holds
+both inputs, while `(l)ocal` records the remote as seen. Aborting a later prompt
+keeps completed settlements. An unidentified peer, flush failure or unavailable
+ledger leaves the chosen bytes intact and warns that a later pull may conflict
+again. The local-choice mtime bump remains a propagation hint.
 
 **Inline keep-local deferral and abort.** At the inline prompt `(l)ocal` calls
 `_ApplyReporter.defer_settle`, which queues the settlement on the ledger; it is
@@ -337,7 +343,7 @@ Both prompt sites render created/modified timestamps per side plus a recency ver
 
 **Timestamp source differs by site (load-bearing).** `_resolve_interactive_loop`: both files on disk → `stat()` both via `_stat_mtime_btime`, statting the BANNER paths (`local_path_for_banner` / `remote_path_for_banner`) so LOCAL/REMOTE stay correct across inversion modes. `_prompt_conflict_choice`: the remote file is NOT on disk → `stat()` LOCAL only; the remote modified time comes from the manifest via a NEW keyword-only `remote_mtime: datetime | None` param threaded from `_apply_incoming_file` (`remote_mtime` already parsed at the mtime gate). The param is keyword-only/trailing so it never shifts the positional `peer_name` / `ambiguous_count` binding at the call site.
 
-**Birthtime labeling (load-bearing honesty).** A restored sidecar's `st_birthtime` is the LOCAL iCloud-drop time, NOT the peer's real creation. So the remote side is rendered with a `pulled` label (resolve site only), never `created`. The local side shows genuine `created`. The inline remote side shows `modified` only (no on-disk file → no birthtime). The manifest carries only `{sha256, size, mtime}` — there is no creation time on the wire, by design.
+**Birthtime labeling (load-bearing honesty).** A restored sidecar's `st_birthtime` is the LOCAL iCloud-drop time, NOT the peer's real creation. So the remote side is rendered with a `pulled` label (resolve site only), never `created`. The local side shows genuine `created`. The inline remote side shows `modified` only (no on-disk file → no birthtime). A manifest file entry carries `{sha256, size, mtime}` and optional `from` ancestry — there is no creation time on the wire, by design.
 
 **Verdict delta is file-vs-file, not wall-clock.** `render_verdict` computes `local_mtime - remote_mtime`, never vs `now`. This makes it deterministic in tests and stable across runs.
 

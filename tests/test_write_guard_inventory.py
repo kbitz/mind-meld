@@ -208,17 +208,6 @@ REVIEWED = {
             "replace(diff, deleted=[p for p in diff.deleted if p not in left_out])",
         ],
     ),
-    "core.py:MintGuard.clause": (
-        *_READ_ONLY,
-        [
-            (
-                "(f\"{_count(self.left_out_files, 'file', 'files')} left out because "
-                "{safe_str(folder)} is {reason}; \" + ('run mm pull to restore them.' if reason "
-                "!= 'unreadable' else 'restore read access.')).replace('is unreadable', "
-                "'cannot be read')"
-            ),
-        ],
-    ),
     "pullflow.py:_make_copy_dirs": (
         *_GUARDED,
         [
@@ -232,21 +221,24 @@ REVIEWED = {
             "directory.rmdir()",
         ],
     ),
+    "pullflow.py:_remove_owned_copy": (
+        *_GUARDED,
+        ["copy_path.unlink()"],
+    ),
     "pullflow.py:_copy_then_unlink": (
         *_GUARDED,
         [
-            "copy_path.unlink()",
+            "os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384)",
             "local_path.unlink()",
         ],
     ),
     "pullflow.py:_move_into_copy": (
         *_GUARDED,
         [
+            "os.open(copy_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 384)",
             "os.rename(local_path, copy_path)",
-            "os.chmod(copy_path, 384)",
+            "os.chmod(copy_path, 384, follow_symlinks=False)",
             "os.link(copy_path, local_path)",
-            "os.rename(copy_path, local_path)",
-            "os.unlink(copy_path)",
         ],
     ),
     "retention.py:_deleted_folder_age": (
@@ -264,7 +256,7 @@ REVIEWED = {
     "fsutil.py:fsync_file": (
         *_READ_ONLY,
         [
-            "os.open(path, os.O_RDONLY | os.O_NOFOLLOW)",
+            "os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
         ],
     ),
     "manifest.py:read_anchor": (

@@ -4059,6 +4059,63 @@ def test_a_machine_with_no_base_for_the_deleting_peer_keeps_the_file(trio):
     assert tombstone_for(trio.mac.published()) is None
 
 
+@pytest.mark.parametrize("full_hash_known", [True, False], ids=["known", "unknown"])
+def test_a_machine_that_pulls_newer_bytes_then_deletes_publishes_that_versions_hash(
+    trio, monkeypatch, full_hash_known
+):
+    from mind_meld import cli
+
+    spread(trio, "x.md", "v0\n")
+    trio.linux.push()
+    trio.mac.pull()
+    trio.write(trio.mac, "x.md", "v1\n")
+    trio.mac.push()
+    trio.linux.pull()
+    assert trio.text(trio.linux) == "v1\n"
+    trio.path(trio.linux).unlink()
+    if not full_hash_known:
+        # Bases can be lost while the prefix-only held history survives.
+        ledger = ledger_of(trio.linux, trio.mac, trio.linux2)
+        rel = trio.path(trio.linux).relative_to(trio.linux.claude).as_posix()
+        ledger.drop("claude", rel)
+        with trio.linux.on():
+            assert core.commit_ledger(ledger) is None
+        assert ledger.newest_held("claude", rel) == sha_of("v1\n")[:16]
+
+    generated = []
+    real_generate = cli.generate_tombstones
+
+    def capture(*args, **kwargs):
+        records = real_generate(*args, **kwargs)
+        generated.append(records)
+        return records
+
+    canonical = Path(trio.linux.store) / manifest_key(trio.linux.device_id)
+    before = canonical.read_bytes()
+    anchor = trio.linux.claude / "projects" / manifest.ANCHOR_NAME
+    anchor_before = anchor.read_bytes()
+    with monkeypatch.context() as preview_patch:
+        preview_patch.setattr(cli, "generate_tombstones", capture)
+        trio.linux.push(dry_run=True)
+    predicted = tombstone_for({"tombstones": generated[-1]})
+    assert canonical.read_bytes() == before
+    assert anchor.read_bytes() == anchor_before
+    if full_hash_known:
+        assert predicted is not None and predicted["sha256"] == sha_of("v1\n")
+    else:
+        assert predicted is None
+
+    trio.linux.push()
+    record = tombstone_for(trio.linux.published())
+    if full_hash_known:
+        assert record is not None and record["sha256"] == sha_of("v1\n")
+    else:
+        assert record is None
+    # Mac's base for Linux is still v0, so the latest bytes remain safe there.
+    assert trio.mac.pull().total_deleted == 0
+    assert trio.text(trio.mac) == "v1\n"
+
+
 def test_a_file_removed_before_this_machine_ever_published_it_is_restored_by_a_pull(trio):
     """Nothing proves this machine kept the file (its own manifest never listed it), so a
     pull brings it back: the safe side of the rule."""
@@ -4632,6 +4689,65 @@ def test_an_anchor_only_change_publishes_metadata_once_and_the_next_push_settles
     assert again is None or "metadata updated" not in line
     shutil.rmtree(mac.claude / "projects" / mac.folder_for(CHECKOUTS["mac"]))
     assert mac.push().total_deleted == 1  # the settled anchor lets a real deletion mint again
+
+
+def test_an_unchanged_upgrade_push_bootstraps_anchors_before_the_first_deletion(mac):
+    mac.memory("-Users-kb-scratch", "a.md", "a\n")
+    mac.push()
+    mac.as_the_previous_release()
+    anchor = mac.claude / "projects" / manifest.ANCHOR_NAME
+    anchor.unlink()
+    result = mac.push()
+    assert result is not None and result.anchor_updated
+    assert anchor.is_file()
+    assert (
+        mac.published()["sources"]["claude"]["root_ids"]["projects"] == anchor.read_text().strip()
+    )
+    assert mac.push() is None
+
+
+@pytest.mark.parametrize("recovery", ["corrupt", "copies-only", "merged"])
+def test_a_recovered_or_merged_anchored_prior_never_mints_new_records(mac, recovery):
+    source = mac.home / "notes"
+    (source / "d").mkdir(parents=True)
+    mac.config["sync"]["sources"] = [
+        {"name": "notes", "path": str(source), "type": "generic", "include_dirs": ["d"]}
+    ]
+    for name in ("first", "second", "kept"):
+        (source / "d" / f"{name}.md").write_text(name)
+    mac.push()
+    (source / "d/first.md").unlink()
+    mac.push()
+    carried = mac.published()["tombstones"]["notes:d/first.md"]
+    (source / "d/second.md").unlink()
+    canonical = Path(mac.store) / manifest_key(mac.device_id)
+    if recovery != "corrupt":
+        canonical.with_name("manifest.json 2.enc").write_bytes(canonical.read_bytes())
+    if recovery == "corrupt":
+        canonical.write_bytes(b"corrupt")
+    elif recovery == "copies-only":
+        canonical.unlink()
+    mac.push()
+    assert mac.published()["tombstones"] == {"notes:d/first.md": carried}
+
+
+def test_a_push_with_an_unreadable_ledger_publishes_no_new_user_deletions(mac, monkeypatch):
+    source = mac.home / "notes"
+    (source / "d").mkdir(parents=True)
+    mac.config["sync"]["sources"] = [
+        {"name": "notes", "path": str(source), "type": "generic", "include_dirs": ["d"]}
+    ]
+    note = source / "d/note.md"
+    note.write_text("a")
+    mac.push()
+    note.unlink()
+
+    def unavailable(_peers):
+        return pullplan.Ledger(readable=False), OSError("isolated unavailable ledger")
+
+    monkeypatch.setattr(core, "load_ledger", unavailable)
+    mac.push()
+    assert mac.published()["tombstones"] == {}
 
 
 def test_left_out_files_name_a_missing_folder_and_a_pull_restores_them(mac, linux):

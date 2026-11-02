@@ -59,6 +59,7 @@ from mind_meld import (
     sourceflow,
     statedb,
     statusflow,
+    syncdiag,
     updateprogress,
     upgrade,
 )
@@ -267,6 +268,7 @@ class PushResult:
     left_out_files: int = 0
     unwritable_roots: list[str] = field(default_factory=list)
     ledger_cause: str | None = None
+    anchor_warnings: list[str] = field(default_factory=list)
 
 
 app = typer.Typer(
@@ -978,11 +980,13 @@ def _sync_success(verb: str, result: PushResult | pullflow.PullResult | None) ->
             else f"{core._count(published_files, 'content change', 'content changes')} published"
             if published_files
             else "metadata updated"
-            if result.metadata_updated or result.anchor_updated
+            if result.metadata_updated
             else "source selection updated"
             if result.selection_updated
             else "manifest repaired"
             if result.manifest_repaired
+            else "metadata updated"
+            if result.anchor_updated
             else "no content changes"
         )
         if lead == "no content changes" and result.names_updated:
@@ -1625,6 +1629,7 @@ def _push_result_or_none(
     switch_held: bool = False,
     left_out_clause: str = "",
     left_out_files: int = 0,
+    anchor_warnings: list[str] | None = None,
 ) -> PushResult | None:
     """Preserve forensic degradations and held files on no-op exits without inventing a capture."""
     if (
@@ -1632,6 +1637,7 @@ def _push_result_or_none(
         or held
         or switch_held
         or left_out_clause
+        or anchor_warnings
     ) and not dry_run:
         return PushResult(
             events_degradations=events_degradations,
@@ -1639,8 +1645,28 @@ def _push_result_or_none(
             switch_held=switch_held,
             left_out_clause=left_out_clause,
             left_out_files=left_out_files,
+            anchor_warnings=list(anchor_warnings or []),
         )
     return None
+
+
+def _record_push_anchor_observations(observations: list[dict], *, attended: bool) -> list[str]:
+    """Record a successful push's observation and explain repeated external resets."""
+    if not observations:
+        return []
+    repeated, failure = syncdiag.record_push_anchor_observations(observations)
+    warnings = [
+        f"scan token repeatedly changed under {safety.safe_terminal_str(row['folder'])}; "
+        "an external restore or writer may be replacing it. Stop that replacement; "
+        "repeated pushes cannot fix this limit"
+        for row in repeated
+    ]
+    if failure:
+        warnings.append(f"sync observations unavailable ({failure}); inspect with mm diag")
+    if attended:
+        for warning in warnings:
+            core._print_apply_warning(f"mm: notice: {warning}.")
+    return warnings
 
 
 # ── held files (Track 75A) ────────────────────────────────────────────
@@ -2189,15 +2215,24 @@ def _push_core(
     # Track 91A: a push mints a tombstone only for a file this machine held and can
     # prove gone: the scan root is the folder it last published, the file is not
     # still on disk, and this machine did not merely follow a peer's deletion.
-    ledger, ledger_exc = core.load_ledger(())
+    ledger, ledger_exc = core.load_ledger(None)
     guard = core.compute_mint_guard(
-        local_manifest, remote_manifest, sources, ledger, still_present=still_present
+        local_manifest,
+        remote_manifest,
+        sources,
+        ledger,
+        still_present=still_present,
+        prior_accepted=fetch.is_ok and not fetch.conflict_copies_only and not fetch.merged,
     )
     core.stamp_left_out(guard, remote_manifest, fetch.manifest if fetch.is_ok else None)
 
     # Generate tombstones for files that disappeared since last push
     tombstones = generate_tombstones(
-        local_manifest, remote_manifest, device_id, skip_mint=guard.skip
+        local_manifest,
+        remote_manifest,
+        device_id,
+        skip_mint=guard.skip,
+        deleted_hashes=guard.deleted_hashes,
     )
     local_manifest["tombstones"] = tombstones
 
@@ -2219,7 +2254,15 @@ def _push_core(
     # A project renamed on the wire (remote change, moved checkout) differs only
     # in names: no content change, but the manifest is republished once.
     names_pending = core.names_only_change(local_manifest, remote_sources)
-    anchor_is_pending = core.anchor_pending(remote_manifest, sources, nested_roots)
+    anchor_observations = core.observe_anchors(
+        remote_manifest
+        if fetch.is_ok and not fetch.conflict_copies_only and not fetch.merged
+        else None,
+        sources,
+        nested_roots,
+        local_manifest=local_manifest,
+    )
+    anchor_is_pending = any(row["pending"] for row in anchor_observations)
     if fetch.is_ok:
         # Without an accepted manifest of our own, everything (including
         # content already fleet-wide) counts as new.
@@ -2259,6 +2302,11 @@ def _push_core(
         and not anchor_is_pending
     ):
         scan_held = _held_list(held_files)
+        anchor_warnings = (
+            []
+            if dry_run
+            else _record_push_anchor_observations(anchor_observations, attended=attended)
+        )
         left_out_note = guard.clause()
         if show and left_out_note and (dry_run or result_observer is None):
             console.print(f"[yellow]{safe_str(left_out_note)}[/yellow]")
@@ -2282,6 +2330,7 @@ def _push_core(
                 switch_held=form.switch_held,
                 left_out_clause=left_out_note,
                 left_out_files=guard.left_out_files,
+                anchor_warnings=anchor_warnings,
             )
             if result_observer is not None:
                 result_observer(result)
@@ -2315,6 +2364,7 @@ def _push_core(
             switch_held=form.switch_held,
             left_out_clause=left_out_note,
             left_out_files=guard.left_out_files,
+            anchor_warnings=anchor_warnings,
         )
 
     # OK, this push will upload bytes. Run the events tail now to capture
@@ -2399,7 +2449,11 @@ def _push_core(
                 )
             # mm-events file count may have rolled (new daily file); regenerate.
             local_manifest["tombstones"] = generate_tombstones(
-                local_manifest, remote_manifest, device_id, skip_mint=guard.skip | still_present
+                local_manifest,
+                remote_manifest,
+                device_id,
+                skip_mint=guard.skip | still_present,
+                deleted_hashes=guard.deleted_hashes,
             )
 
     source_by_name = {src["name"]: src for src in sources}
@@ -2520,7 +2574,11 @@ def _push_core(
         # upload then held and removed. Reconcile against the final entries so
         # that accepted deletion survives until replacement bytes are published.
         local_manifest["tombstones"] = generate_tombstones(
-            local_manifest, remote_manifest, device_id, skip_mint=guard.skip | still_present
+            local_manifest,
+            remote_manifest,
+            device_id,
+            skip_mint=guard.skip | still_present,
+            deleted_hashes=guard.deleted_hashes,
         )
 
     # Upload manifest (includes tombstones)
@@ -2624,8 +2682,14 @@ def _push_core(
     )
     backend.put(mkey, enc_manifest)
     result.content_accepted = True
+    result.anchor_warnings = _record_push_anchor_observations(
+        anchor_observations, attended=attended
+    )
     # The published versions are the ones this machine now holds; later pulls
     # fast-forward from them. A ledger that cannot be written degrades, never fails.
+    for source_name, paths in guard.left_out.items():
+        for rel in paths:
+            ledger.clear_seen(source_name, rel)
     core.record_published(ledger, local_manifest)
     ledger_exc = core.commit_ledger(ledger) or ledger_exc
     result.ledger_cause = core.ledger_cause(ledger_exc)
@@ -5547,9 +5611,9 @@ def autopull() -> None:
             # state persistent for monitoring on top of `mm status` / `mm diag`.
             degradations: list[str] = []
             if result.durability_fsync_failures:
-                degradations.append(
-                    f"fsync failed on {result.durability_fsync_failures} parent dir(s)"
-                )
+                degradations.append(f"fsync failed on {result.durability_fsync_failures} path(s)")
+            if result.maintenance_failures:
+                degradations.append(f"{result.maintenance_failures} follow-up failure(s)")
             if result.corrupt_peer_count:
                 degradations.append(f"{result.corrupt_peer_count} corrupt peer manifest(s)")
             if result.total_skipped_unknown_source:
@@ -5676,6 +5740,8 @@ def autopush() -> None:
                 )
             if result and result.left_out_clause:
                 details.append(result.left_out_clause.rstrip("."))
+            if result and result.anchor_warnings:
+                details.extend(result.anchor_warnings)
             # The first publish in the shared form leaves a trail (O8.3).
             switched = bool(result and result.wire_names_published)
             only_switched = switched and not details

@@ -306,6 +306,17 @@ def read_peer_bases(conn, peer: str) -> dict[tuple[str, str], str]:
         return {(r[0], r[1]): r[2] for r in rows}
 
 
+def read_all_peer_bases(conn) -> dict[BaseKey, str]:
+    """Every peer's full last-synced digest, used to resolve held prefixes on push."""
+    if conn is None:
+        return {}
+    with translate():
+        if not _need_read_tables(conn):
+            return {}
+        rows = conn.execute("SELECT peer, source, path, sha FROM peer_base")
+        return {(r[0], r[1], r[2]): r[3] for r in rows}
+
+
 def read_seen(conn) -> dict[tuple[str, str], list[SeenRow]]:
     """Every held/seen version this machine has recorded, keyed ``(source, path)``."""
     out: dict[tuple[str, str], list[SeenRow]] = {}
@@ -345,6 +356,7 @@ def commit_ledger(
     seen: list[tuple[str, str, str, str, int, str | None]],
     unstamp: set[tuple[str, str]],
     now_us: int,
+    drop_seen: set[tuple[str, str]] | None = None,
 ) -> None:
     """Write one pull's (or push's) ledger changes in the caller's transaction.
 
@@ -356,6 +368,8 @@ def commit_ledger(
     if not conn.in_transaction:
         raise StateDBError("ledger commit requires a transaction")
     with translate():
+        for source, path in drop_seen or ():
+            conn.execute("DELETE FROM seen_version WHERE source = ? AND path = ?", (source, path))
         for source, path in drop_bases:
             conn.execute("DELETE FROM peer_base WHERE source = ? AND path = ?", (source, path))
         for (peer, source, path), sha in bases.items():

@@ -3922,7 +3922,7 @@ class TestScanRootsAnchors91A:
             ({"type": "claude"}, ["projects"]),
             ({"type": "muse"}, ["memory"]),
             ({"type": "generic", "include_dirs": ["projects", "skills/"]}, ["projects", "skills"]),
-            ({"type": "generic", "include_dirs": ["a", "a", ".", ""]}, ["a"]),
+            ({"type": "generic", "include_dirs": ["a", "a", ".", ""]}, ["a", ""]),
             ({"type": "generic", "include_files": ["AGENTS.md"]}, [""]),
             (
                 {"type": "generic", "include_dirs": ["skills"], "include_files": ["AGENTS.md"]},

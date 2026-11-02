@@ -849,25 +849,22 @@ class TestFastForwardCli91A:
     def test_after_resolve_an_existing_conflict_stops_conflicting(
         self, tmp_path, monkeypatch, choice, old_peer
     ):
-        """Criterion 11: a conflict that exists when this ships has no base, so the old rule
-        keeps it until the owner runs `mm resolve`; after (l)ocal, (r)emote or (m)erge a
-        later pull writes no conflict copy and counts no conflict. With an old peer the
-        resolve meets the no-base rule directly; with a peer that publishes ancestry the
-        first pull after the loss re-records the base (the copy is kept), then resolve."""
+        """Criterion 11: resolving directly after losing the base must settle the peer,
+        including peers publishing ancestry; no preparatory pull is required."""
         config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch, old_peer=old_peer)
         monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
         _move_state_db_aside()  # the conflict predates the base table
-        if not old_peer:
-            assert runner.invoke(app, ["pull"]).exit_code == 0  # the kept copy settles a base
-        else:
-            again = runner.invoke(app, ["pull"])
-            assert again.exit_code == 0 and sidecar.exists()
-            _move_state_db_aside()  # it does not clear by itself; still no base
+        remote_sha = hashlib.sha256(sidecar.read_bytes()).hexdigest()
         monkeypatch.setattr(typer, "prompt", lambda *a, **kw: choice)
         resolved = runner.invoke(app, ["resolve"])
         assert resolved.exit_code == 0, resolved.output
         assert not sidecar.exists()
         settled = role_b.read_bytes()
+        ledger, exc = core.load_ledger(["aaaaaaaa"])
+        assert exc is None
+        resolved_base = ledger.base(
+            "aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md"
+        )
 
         pulled = runner.invoke(app, ["pull"])
         assert pulled.exit_code == 0, pulled.output
@@ -875,6 +872,64 @@ class TestFastForwardCli91A:
         assert list(role_b.parent.glob("user_role.sync-conflict-*.md")) == []
         assert role_b.read_bytes() == settled
         assert "sync-conflict" not in runner.invoke(app, ["conflicts"]).output
+        assert resolved_base == remote_sha
+
+    @pytest.mark.parametrize("failure_at", ["file-flush", "directory-flush", "ledger-commit"])
+    def test_resolve_retains_the_decision_but_records_no_base_after_durability_failure(
+        self, tmp_path, monkeypatch, failure_at
+    ):
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        _move_state_db_aside()
+        canonical = role_b.read_bytes()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+
+        def fail_flush(path):
+            raise OSError(errno.EIO, "flush failed")
+
+        with monkeypatch.context() as patch:
+            if failure_at == "file-flush":
+                patch.setattr(fsutil, "fsync_file", fail_flush)
+            elif failure_at == "directory-flush":
+                patch.setattr(fsutil, "fsync_dir", fail_flush)
+            else:
+                patch.setattr(core, "commit_ledger", lambda ledger: OSError(errno.EIO, "database"))
+            resolved = runner.invoke(app, ["resolve"])
+
+        assert resolved.exit_code == 0, resolved.output
+        assert "resolution kept" in resolved.stderr
+        assert "may conflict again" in resolved.stderr
+        assert role_b.read_bytes() == canonical and not sidecar.exists()
+        ledger, exc = core.load_ledger(["aaaaaaaa"])
+        assert exc is None
+        assert (
+            ledger.base("aaaaaaaa", "claude", "projects/-Users-kb-myapp/memory/user_role.md")
+            is None
+        )
+
+    def test_resolve_does_not_guess_the_peer_when_the_sidecar_prefix_is_ambiguous(
+        self, tmp_path, monkeypatch
+    ):
+        config_b, role_b, sidecar = self._conflict_on_b(tmp_path, monkeypatch)
+        monkeypatch.setattr("mind_meld.config.CONFIG_PATH", config_b)
+        _move_state_db_aside()
+        canonical = role_b.read_bytes()
+        monkeypatch.setattr(typer, "prompt", lambda *a, **kw: "l")
+        monkeypatch.setattr(
+            cli_module,
+            "list_devices",
+            lambda backend: [
+                {"device_id": "aaaaaaaa1", "device_name": "A1"},
+                {"device_id": "aaaaaaaa2", "device_name": "A2"},
+            ],
+        )
+
+        resolved = runner.invoke(app, ["resolve"])
+
+        assert resolved.exit_code == 0, resolved.output
+        assert role_b.read_bytes() == canonical and not sidecar.exists()
+        ledger, exc = core.load_ledger(["aaaaaaaa1", "aaaaaaaa2"])
+        assert exc is None and ledger.bases == {}
 
     def test_moving_state_db_aside_rebuilds_the_rows_and_deletes_nothing(
         self, tmp_path, monkeypatch
@@ -944,14 +999,15 @@ class TestFastForwardCli91A:
         assert not old.exists() and (odd / "note.md").exists()
 
     def test_the_readme_recovery_recipe_puts_the_file_back_on_the_origin(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, wire_home
     ):
         """The commands in README's "Recovering a deleted file" block, run against fixtures:
-        B followed A's deletion; the copy goes back onto A with `cp -n`, A pushes, B pulls."""
+        Linux follows a Mac's deletion; its differently named copy returns to the Mac's
+        canonical project with `cp -n`, then the Mac pushes and Linux restores its path."""
         import re
         import subprocess
 
-        from mind_meld import statedb
+        from mind_meld import projectid, sidecar, statedb
 
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
         section = readme.split("### Recovering a deleted file", 1)[1].split("\n### ", 1)[0]
@@ -959,26 +1015,60 @@ class TestFastForwardCli91A:
         assert recipe is not None, "the recovery section has no bash recipe"
 
         helper = TestPushPullRoundTrip()
-        config_a, config_b, claude_a, memory_b = helper._two_machines_with_a_deletion(
-            tmp_path, monkeypatch
-        )
-        helper._activate(monkeypatch, config_a)
+        filesystem = tmp_path / "fs"
+        home_a = filesystem / "Users" / "kb"
+        home_b = filesystem / "home" / "kb"
+        claude_a, claude_b = home_a / ".claude", home_b / ".claude"
+        helper._populate_claude(claude_a)
+        claude_b.mkdir(parents=True)
+        monkeypatch.setattr(projectid, "_fs_root", lambda: filesystem)
+        storage_dir = tmp_path / "storage"
+        backend = helper._bootstrap(storage_dir)
+        register_device(backend, "dev-a", "Mac")
+        register_device(backend, "dev-b", "Linux")
+        config_a = helper._make_config(tmp_path, storage_dir, claude_a, "dev-a", "Mac")
+        config_b = helper._make_config(tmp_path, storage_dir, claude_b, "dev-b", "Linux")
+        monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+
+        def activate(config_path, home):
+            helper._activate(monkeypatch, config_path)
+            monkeypatch.setenv("HOME", str(home))
+            monkeypatch.setattr(sidecar, "SIDECAR_DIR", home / ".config" / "mind-meld")
+            monkeypatch.chdir(home)
+
+        activate(config_a, home_a)
+        assert runner.invoke(app, ["push"]).exit_code == 0
+        activate(config_b, home_b)
+        received = runner.invoke(app, ["pull"])
+        assert received.exit_code == 0, received.output
+        memory_b = claude_b / "projects" / "-home-kb-myapp" / "memory"
+        assert (memory_b / "user_role.md").exists()
+
+        activate(config_a, home_a)
         origin_file = claude_a / "projects" / "-Users-kb-myapp" / "memory" / "user_role.md"
         before = origin_file.read_bytes()
         origin_file.unlink()
         assert runner.invoke(app, ["push"]).exit_code == 0
-        helper._activate(monkeypatch, config_b)
+        activate(config_b, home_b)
         assert runner.invoke(app, ["pull"]).exit_code == 0
         [copy] = statedb.deleted_copies_dir().glob("*/claude/**/user_role.md")
         folder = copy.relative_to(statedb.deleted_copies_dir()).parts[0]
         assert (memory_b / "user_role.md").exists() is False
+        copy_path = copy.relative_to(statedb.deleted_copies_dir() / folder / "claude")
+        origin_path = origin_file.relative_to(claude_a)
+        assert copy_path.as_posix() == "projects/-home-kb-myapp/memory/user_role.md"
+        assert copy_path != origin_path
 
-        # The recipe is run on the origin (A) with the copy folder it was told about.
+        # Transfer the follower's folder intact, then run the extracted recipe on the origin.
+        received_copies = home_a / f"mm-recovery-{folder}"
+        shutil.copytree(statedb.deleted_copies_dir() / folder, received_copies)
+        activate(config_a, home_a)
         fixtures = {
-            "copies": str(statedb.deleted_copies_dir() / folder),
+            "copies": str(received_copies),
             "source_name": "claude",
             "source_dir": str(claude_a),
-            "path": "projects/-Users-kb-myapp/memory/user_role.md",
+            "copy_path": copy_path.as_posix(),
+            "origin_path": origin_path.as_posix(),
         }
         lines = []
         for raw in recipe.group(1).splitlines():
@@ -994,6 +1084,7 @@ class TestFastForwardCli91A:
         )
         assert done.returncode == 0, done.stderr
         assert origin_file.read_bytes() == before
+        assert not (claude_a / copy_path).exists()
         # `cp -n` never overwrites: a newer file at the destination survives a second run.
         origin_file.write_text("a newer file")
         again = subprocess.run(
@@ -1003,12 +1094,12 @@ class TestFastForwardCli91A:
         assert origin_file.read_text() == "a newer file"
         origin_file.write_bytes(before)
 
-        helper._activate(monkeypatch, config_a)
         assert runner.invoke(app, ["push"]).exit_code == 0
-        helper._activate(monkeypatch, config_b)
+        activate(config_b, home_b)
         pulled = runner.invoke(app, ["pull"])
         assert pulled.exit_code == 0, pulled.output
         assert (memory_b / "user_role.md").read_bytes() == before
+        assert not (claude_b / origin_path).exists()
 
 
 class TestExcludePatterns5C:
@@ -9914,6 +10005,9 @@ def _seed_preview_prior(env, *, event_files=()):
     )
     sources = config_module.get_sources(cfg, bootstrap=False)
     prior = cli_module.build_manifest_v2("dev-a", "Mac A", sources)
+    # Seed a completed current-release push, including its scan-root tokens.
+    # An old manifest with no anchors correctly owes a metadata bootstrap.
+    assert core.publish_anchors(prior, sources, {}) == []
     for rel in event_files:
         prior["sources"]["mm-events"]["files"][rel] = {
             "sha256": hashlib.sha256(b"prior event").hexdigest(),

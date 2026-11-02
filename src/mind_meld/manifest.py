@@ -281,7 +281,10 @@ def scan_roots(src: dict) -> list[str]:
     roots: list[str] = []
     for entry in src.get("include_dirs") or []:
         root = str(entry).strip("/")
-        if root and root != "." and root not in roots:
+        if not root:
+            continue
+        root = "" if Path(root) == Path(".") else str(Path(root))
+        if root not in roots:
             roots.append(root)
     if src.get("include_files") and "" not in roots:
         roots.append("")
@@ -291,9 +294,10 @@ def scan_roots(src: dict) -> list[str]:
 def scan_root_for(src: dict, rel_path: str) -> str | None:
     """The scan root a manifest path lives under, or None when it is under none."""
     files = set(src.get("include_files") or [])
+    whole_root = any(Path(entry) == Path(".") for entry in src.get("include_dirs") or [])
     for root in scan_roots(src):
         if root == "":
-            if rel_path in files:
+            if whole_root or rel_path in files:
                 return root
         elif rel_path == root or rel_path.startswith(root + "/"):
             return root
@@ -3100,6 +3104,7 @@ def generate_tombstones(
     device_id: str,
     *,
     skip_mint: set[tuple[str, str]] | None = None,
+    deleted_hashes: dict[tuple[str, str], str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """Generate tombstones for files that disappeared since last push.
 
@@ -3126,8 +3131,9 @@ def generate_tombstones(
 
     ``skip_mint`` is a set of ``(source, path)`` pairs that mint nothing: paths a
     gone or recreated scan root hides, files still on disk, and deletions this
-    machine only followed. A minted record carries the sha256 of the version it
-    deletes (the prior entry's), so a peer deletes only identical bytes.
+    machine only followed. ``deleted_hashes`` supplies the newest held version's
+    full digest, resolved by the caller; without one the prior entry's hash is
+    used. A peer deletes only identical bytes.
 
     Returns:
         Dict mapping relative paths to {"deleted_at": ISO timestamp, "device_id": str,
@@ -3183,8 +3189,9 @@ def generate_tombstones(
                 if path not in local_files and key not in tombstones:
                     record = {"deleted_at": now_iso, "device_id": device_id}
                     prior_sha = (remote_files.get(path) or {}).get("sha256")
-                    if _is_content_hash(prior_sha):
-                        record["sha256"] = prior_sha
+                    deleted_sha = (deleted_hashes or {}).get((src_name, path), prior_sha)
+                    if _is_content_hash(deleted_sha):
+                        record["sha256"] = deleted_sha
                     tombstones[key] = record
 
     # Remove tombstones for files that exist locally again (un-delete)

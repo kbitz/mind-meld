@@ -306,7 +306,7 @@ class TestAutopullDegradedBreadcrumb:
         assert crumb["pull"]["outcome"] == "degraded"
         detail = crumb["pull"]["detail"]
         # Every signal appears with its count.
-        assert "fsync failed on 1 parent dir(s)" in detail
+        assert "fsync failed on 1 path(s)" in detail
         assert "2 corrupt peer manifest(s)" in detail
         assert "3 unknown source(s)" in detail
         assert "4 file(s) failed" in detail
@@ -673,6 +673,12 @@ class TestLedgerCauseInTheAutopullBreadcrumb:
         _, crumb = self._crumb(tmp_path, monkeypatch, result)
         assert crumb["outcome"] == "degraded"
         assert crumb["detail"] == "2 file(s) failed; pull ledger unavailable (busy)"
+
+    def test_recovery_cleanup_failure_degrades_the_pull(self, tmp_path, monkeypatch):
+        result = pullflow.PullResult(maintenance_failures=2, elapsed=0.1)
+        _, crumb = self._crumb(tmp_path, monkeypatch, result)
+        assert crumb["outcome"] == "degraded"
+        assert crumb["detail"] == "2 follow-up failure(s)"
 
     def test_a_healthy_ledger_adds_nothing(self, tmp_path, monkeypatch):
         _, crumb = self._crumb(tmp_path, monkeypatch, pullflow.PullResult(elapsed=0.1))
