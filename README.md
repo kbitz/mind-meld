@@ -16,13 +16,27 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex and
+Cursor index used to need more pushes than discovery's 100 ms attended budget could
+give, so the retro cursor stayed held. An attended `mm push` now gives discovery
+1,500 ms (inside the capture budget's tail share); autopush keeps 50 ms and init
+keeps 100 ms. Progress persists between pushes and a finished provider is never
+re-read, so discovery reaches `complete` within three attended pushes on a cold
+index and costs about 0.1 s once it is warm. `mm recapture 30d` finishes discovery
+in one run (it gets a 30 s discovery budget), and `mm status` names it when
+discovery is partial. `mm refresh-identity` also runs a complete discovery first,
+so it reads the repository-local email of every repository discovery holds. Held
+history comes back on the first push after discovery completes, for commits since
+the held cursor; only commits older than that cursor, in repositories discovery
+finds for the first time, need `mm recapture <window>`.
+
 **Git-root discovery reads more records (Track 102A):** besides Claude Code's project
 logs, discovery now finds repositories from the working directories recorded by Codex
 (rollouts), Cursor (ACP and Conductor sessions; needs `[retro] cursor_host_usage = true`),
 Muse and Antigravity when those providers are enabled, and from Paseo's project list and
 the mmm factory's items when they are installed. `mm diag` names the source of each root.
-After updating, run `mm push` until `mm diag` shows discovery `complete` (a first
-index of a large Codex or Cursor history spreads over a few pushes), then run
+After updating, run `mm push` until `mm diag` shows discovery `complete` (see the
+entry above for how long that takes), then run
 `mm recapture 30d` once to collect commits from repositories discovery has just found.
 Pins in `[retro] repo_roots` for repositories these sources now name can be removed.
 
@@ -712,7 +726,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm sources` | List configured sync sources |
 | `mm log` | Query local `~/.config/mind-meld/state.db` history (legacy JSONL before import). Filter with `--source`, `--since`, `--action {written\|merged\|merged-via-lcs\|skipped\|conflicted\|excluded\|uploaded\|failed\|deleted}`, `--verb {pull\|push\|self-upgrade}`, `--limit`; `--format {jsonl\|table}` |
 | `mm migrate-config` | Append any missing recommended `exclude_patterns`, and set `include_patterns` to the current default when that key is absent or still a previous default list. An edited list, even an empty one, stays. Idempotent; `--dry-run` to preview, `--yes` to skip the prompt |
-| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
+| `mm refresh-identity` | Force-refresh the cached author-email set that decides which fleet commits count as yours. Runs repository discovery to completion first (30 s budget), so it reads every discovered repository's local email. Shows `+`/`-` changes when the previous cache is readable. `--json` prints only the resolved set |
 | `mm conflicts` | List unresolved `.sync-conflict-*` files with age and canonical sibling |
 | `mm resolve [PATH]` | Interactively pick a winner for conflict files (shows unified diff); needs a terminal. Run it on each conflict copy that exists when you upgrade; they do not clear by themselves. Exits 1 if any per-conflict rename/unlink/read fails so CI / scripts can detect partial failure (the walk still continues through every conflict). |
 | `mm retro-fleet [WINDOW]` | Render the fleet retrospective markdown to stdout (default `7d`). The `/retro-fleet` Claude Code skill calls this under the hood; safe to run directly for scripted exports (`mm retro-fleet 30d > /tmp/retro.md`). `--no-author-filter` renders every fleet commit instead of just yours (automated `checkpointer@noreply` / `checkpoint:` commits are never counted). `--dump-host-usage` prints forensic JSON of accepted host inventory (family totals, per-model `tokens_by_day`, a detail status per device, and coverage fields `degraded` / `partial` with the reason a coverage field was dropped) and skips the markdown retro. `--set-model-price` / `--mark-pricing-verified` record local pricing overrides; see [Pricing refresh and local overrides](#fleet-retro-retro-fleet). |
@@ -1731,7 +1745,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history; when `mm diag` shows discovery `partial`, `mm status` names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
@@ -1762,7 +1776,8 @@ walk ran past 120 s), or `raised` (an unexpected walk exception). `no commits
 yet (benign)` is an empty repository and needs no fix.
 The preview is a fresh scan over the requested window (default 30d). `mm
 recapture` and its preview walk Git on their own budget, 30 s per repository
-and 120 s for the walk; repository discovery keeps its 100 ms budget. A clean
+and 120 s for the walk, and repository discovery gets 30 s, enough to finish a
+cold index in one run. A clean
 preview does not prove the earlier push was complete.
 
 For `git_error`, check for a broken checkout or ownership mismatch. If Git

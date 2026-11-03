@@ -4687,6 +4687,9 @@ def refresh_identity_cmd(
     * after editing ``git config --global user.email``
     * after adding a per-repo ``user.email`` override
 
+    Repository discovery runs to completion first, on recapture's discovery
+    budget, so no repository is missing from the per-repository reads.
+
     Sources unioned: global git config, per-repo git config (every
     discovered git root, bounded by a 5s wall-clock budget), mm's
     ``[retro].author_emails`` config knob, and the GitHub
@@ -4700,7 +4703,11 @@ def refresh_identity_cmd(
     except ConfigError:
         discovery = None
     else:
-        discovery = events.discover_git_roots(config, persist=True)
+        discovery = events.discover_git_roots(
+            config,
+            persist=True,
+            deadline_monotonic=time.monotonic() + events.RECAPTURE_DISCOVERY_BUDGET_MS / 1000.0,
+        )
     emails = identity.refresh_identity_cache(force=True, root_discovery=discovery)
     if json_output:
         typer.echo(json.dumps(sorted(emails)))
