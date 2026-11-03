@@ -6,11 +6,11 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry`
+- `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
@@ -1757,7 +1757,9 @@ that line is not replaced by the unsupported-reader remedy above, status and
 diag include the last allotted budget, last complete read and age, and
 cached/on-disk counts (unknown when unavailable). That conditional remedy
 raises `[retro] host_usage_autopush_budget_ms` if the last complete read is
-over budget, otherwise requests a capture. That deadline remedy links to
+over the autopush budget, names `[retro] capture_budget_ms` (host reads get
+three fifths of it) when an attended push is also too small, and otherwise
+requests a capture. That deadline remedy links to
 `HOST_USAGE_CAPTURE_URL`, and on diag it does not send the user back to `mm diag`.
 On status and plain-text diag, a ready capture with an unsupported reader
 replaces a non-permanent line, including a sibling deadline, with the
@@ -2419,10 +2421,12 @@ warms. Autopush supplies no warm callback. Codex/Grok/Muse continue to converge
 through partial commits; Cursor commits stable-file progress but reparses
 rewritten files, so repeated short passes need not converge.
 
-`warm_host_cache` is now the attended-notice hook only. After
-`mm: reading <reader> usage (bounded by the capture budget)...`,
-`_capture_host_snapshot` wraps `warm_host_cache_inline(reader=name)` in a
-singleton `_capture_host_usage` call. The deadline is at most three fifths of
+`warm_host_cache` is the attended-notice hook only.
+`_capture_host_snapshot` runs each retry inside a singleton
+`_capture_host_usage` call. That call prints
+`mm: reading <reader> usage (bounded by the capture budget)...` only when the
+retry reader starts, then calls `warm_host_cache_inline(reader=name)`. A retry
+whose deadline has already passed prints nothing. The deadline is at most three fifths of
 `capture_budget_ms` when that key is set, and three fifths of the 5,000 ms default
 when neither key is set, less the reserve held for the retries after it. Only an explicit legacy interactive budget, with no
 `capture_budget_ms`, keeps the 5-second warm deadline.
