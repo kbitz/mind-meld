@@ -382,7 +382,8 @@ def _scan_codex_root(
     are listed before any settled-day skip, so a complete pass still prunes
     deleted files by REPLACE). A settled day's ``files`` entries are carried
     into ``staged`` without per-file stat/open; stalest settled days are
-    re-verified by directory stat digest, at least one per complete scan.
+    re-verified by directory stat digest, one attempt per scan. Archive
+    groups have a separate rotation using their listed files' stat digest.
     The returned ``settled_days`` is the PRIOR map unchanged unless the pass
     completed — additions, evictions and ``check_seq`` bumps from a partial
     pass roll back.

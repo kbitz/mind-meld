@@ -1859,8 +1859,14 @@ class TestColdCacheWarmAndRetry:
     def test_autopush_sweep_keeps_grace_and_never_warms(self, tmp_path, monkeypatch):
         """Track 101A: the reserve is attended-only. An autopush sweep keeps its
         fixed 250 ms and the 50 ms later-reader grace, and nothing warms."""
-        import time as _time
+        clock = {"t": 100.0}
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
+        real_capture = events_tail._capture_host_usage
 
+        def sweep(readers, *, deadline, **kwargs):
+            return real_capture(readers, deadline=deadline, now=lambda: clock["t"], **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
         events_root = tmp_path / "events_root"
         sources = _sources(events_root)
         _stub_fast_walks(monkeypatch)
@@ -1868,8 +1874,8 @@ class TestColdCacheWarmAndRetry:
 
         def reader(name: str, pause: float):
             def read(*, deadline):
-                seen.append((name, _time.monotonic(), deadline))
-                _time.sleep(pause)
+                seen.append((name, clock["t"], deadline))
+                clock["t"] += pause
                 return _incomplete("deadline") if pause else _complete()
 
             return read
@@ -1893,9 +1899,9 @@ class TestColdCacheWarmAndRetry:
 
         assert [name for name, _start, _deadline in seen] == ["codex", "cursor", "muse", "agy"]
         _name, first_start, sweep = seen[0]
-        assert sweep - first_start == pytest.approx(0.25, abs=0.02)
+        assert sweep - first_start == pytest.approx(0.25)
         for _name, start, deadline in seen[1:]:
-            assert deadline == pytest.approx(max(sweep, start + 0.05), abs=0.01)
+            assert deadline == pytest.approx(max(sweep, start + 0.05))
         assert seen[1][2] > sweep, "the overrun leaves the next reader exactly the 50 ms grace"
         assert warmed == [], "autopush never warms"
 
@@ -2818,7 +2824,7 @@ class TestCaptureBudget85A:
                     "reserve_s": reserve_s,
                 }
             )
-            extra = {} if now is None else {"now": now}
+            extra = {"now": events_tail.time.monotonic if now is None else now}
             return real(readers, deadline=deadline, reserve_s=reserve_s, **extra)
 
         monkeypatch.setattr(events_tail, "_capture_host_usage", spy)
@@ -2881,10 +2887,35 @@ class TestCaptureBudget85A:
         # The phase is three fifths of 10 s, counted from the snapshot's start.
         assert before + 6.0 <= second["deadline"] <= after + 6.0
 
+    def test_expired_retry_does_not_announce_a_read(self, monkeypatch):
+        clock = {"t": 100.0}
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 5000)
+        real = events_tail._capture_host_usage
+
+        def sweep(readers, *, deadline, **kwargs):
+            return real(readers, deadline=deadline, now=lambda: clock["t"], **kwargs)
+
+        def expired(*, deadline):
+            clock["t"] = 104.0
+            return _incomplete("deadline")
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
+        notices, warmed = [], []
+        monkeypatch.setattr(
+            _mm_host_registry, "warm_host_cache_inline", lambda **kw: warmed.append(kw)
+        )
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a", (("codex", expired),), host_budget_ms=3000, warm_host_cache=notices.append
+        )
+        assert warmed == []
+        assert notices == []
+        assert capture.dropped == (("codex", "deadline"),)
+        assert rows == []
+
     def test_legacy_only_retries_keep_a_fresh_allowance_each(self, monkeypatch):
         """No capture total stashed: no phase deadline, so no reserve arithmetic."""
-        import time as _time
-
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: 100.0)
         calls = self._spy_sweeps(monkeypatch)
         monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", None)
         monkeypatch.setattr(
@@ -2898,9 +2929,7 @@ class TestCaptureBudget85A:
 
         _sweep, first, second = calls
         for retry in (first, second):
-            assert (
-                retry["deadline"] - _time.monotonic() > _mm_host_usage.DEFAULT_READ_BUDGET_S - 1.0
-            )
+            assert retry["deadline"] == 100.0 + _mm_host_usage.DEFAULT_READ_BUDGET_S
 
     def test_warm_retry_one_arg_monkeypatch_still_works(self, monkeypatch):
         def warm(*, reader="codex"):

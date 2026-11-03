@@ -995,7 +995,7 @@ fresh `DEFAULT_READ_BUDGET_S` per retry. Merge its
 result, including failures, with the first pass's completed readers — a flaky
 second-pass read of an already-completed reader must never erase totals
 already captured. If
-the retry expires before invoking a reader, it has no replacement outcome, so
+the retry expires before invoking a reader, it emits no reading notice and has no replacement outcome, so
 retain the initial deadline declaration.
 
 **Grok terminal skip (Track 31A, partial discharged Track 34A, ignorable keys Track 46A).** A `turn_completed` whose `params.update`
@@ -2314,12 +2314,14 @@ Antigravity and Cursor got the 50 ms grace for 100 to 236 ms reads and the warm
 retry spent its half-capture phase on Codex while Antigravity's retry got 50 ms
 (`last_deadline_allotted_ms` 50). T1's read-only probe (pipx 1.12.3 interpreter,
 a copy of `host-tokens.json`, counts and timings only): the warm Codex read is
-820 ms and a read that learns the roughly 120 rollouts created between pushes is
+820 ms and a read that learns roughly 120 new rollouts in the probe is
 1,803 ms; the cache is reused (the warm pass does zero full reads) and
 `state: migrating` is only the count of pending rollouts (6,754 cached of 6,838
 on disk). The corpus grew 25% in a week (5,481 to 6,838 rollouts), which crossed
 the old budget. No reader changed in 1.12.x (`git diff --stat v1.11.20 v1.12.3`
 touches none; its one `events_tail.py` change is recapture's git walk). The
+exact failure onset and rollout counts between attended pushes remain unverified;
+the owner accepted the narrower corpus-growth and learning-cost evidence. The
 fix is arithmetic and a reserve, not a reader change: a 3,000 ms attended
 default, host reads at three fifths of the capture budget, a reserve of up to
 300 ms held for each later attended reader (sweep and warm retries), and

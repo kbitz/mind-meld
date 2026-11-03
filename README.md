@@ -23,7 +23,8 @@ host reads (sweep plus inline warm) now get up to three fifths of `capture_budge
 slow Codex read can no longer take Antigravity's, Cursor's or Muse's. Autopush is
 unchanged at 250 ms and never warms. If you pinned `host_usage_interactive_budget_ms`
 in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
-`mm push`; the new default completes every reader on the owner's corpus. Codex also
+`mm push`; the measured reader timings fit the new default. Live verification
+across up to three attended pushes follows release installation. Codex also
 settles archived rollouts by the date in their name, so rollouts that have not changed
 are no longer re-read on later pushes.
 

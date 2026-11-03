@@ -961,9 +961,9 @@ def _capture_host_snapshot(
             if name in deadline_names and name in WARMABLE_HOST_READERS
         ]
         for position, name in enumerate(retry_names):
-            warm_host_cache(name)
 
             def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
+                warm_host_cache(name)
                 remaining = max(0.0, deadline - time.monotonic())
                 return host_registry.warm_host_cache_inline(
                     reader=name,
