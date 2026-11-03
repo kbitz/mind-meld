@@ -44,6 +44,7 @@ see TypedDict definitions below.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import inspect
 import json
@@ -66,7 +67,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
 
 from mind_meld import config as mm_config
-from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, token_usage
+from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, rootprobes, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import safe_terminal_str
 
@@ -542,7 +543,35 @@ def _default_git_capture_cache() -> dict:
         # path -> common git dir, so a removed checkout still maps to its store.
         "repo_cursor_stores": {},
         "incomplete_streak": 0,
+        # Track 102A: per host-record prober unit index (local only, never on the wire).
+        "probe_index": {},
     }
+
+
+def _normalize_probe_index(index: object) -> dict:
+    """Keep every well-formed prober record and unit; drop only malformed parts."""
+    if not isinstance(index, dict):
+        return {}
+    clean: dict[str, dict] = {}
+    for name, record in index.items():
+        if not isinstance(name, str) or not isinstance(record, dict):
+            continue
+        units = record.get("units")
+        state = record.get("state")
+        clean[name] = {
+            "units": {
+                key: unit
+                for key, unit in (units.items() if isinstance(units, dict) else [])
+                if isinstance(key, str)
+                and isinstance(unit, list)
+                and len(unit) == 2
+                and (unit[0] is None or isinstance(unit[0], list))
+                and isinstance(unit[1], list)
+                and all(isinstance(root, str) for root in unit[1])
+            },
+            "state": state if isinstance(state, dict) else {},
+        }
+    return clean
 
 
 def _normalize_git_capture_cache(cache: dict) -> None:
@@ -588,6 +617,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         cache["pending_refresh_since"] = None
     if type(cache.get("incomplete_streak")) is not int or cache["incomplete_streak"] < 0:
         cache["incomplete_streak"] = 0
+    cache["probe_index"] = _normalize_probe_index(cache.get("probe_index"))
 
 
 def read_git_capture_cache() -> dict:
@@ -698,10 +728,20 @@ def discover_git_roots(
     probers: list[tuple[str, Callable[..., list[Path]]]] = []
     # Track 29A deleted `_probe_gstack`: every live `repo-mode.json` carries
     # `{mode, top_pct, authors, total, computed}` — none of `repo_root` /
-    # `repo_path` / `root`. A "gstack" enabled source is now a no-op for
-    # discovery; the only automatic prober is `_probe_claude`.
+    # `repo_path` / `root`. Track 102A's census re-read gstack's project state
+    # (repo-mode.json, timeline.jsonl, learnings.jsonl) and found no record
+    # that names a directory, so a "gstack" enabled source stays a no-op for
+    # discovery. The registry runs `_probe_claude`, then the host-record
+    # probers in `rootprobes.PROBERS` order (cheap tools first, so a cold
+    # Codex or Cursor corpus cannot starve Paseo or mmm).
+    host_probers = (
+        [] if exceeded or deadline_expired() else _enabled_root_probers(config, enabled_sources)
+    )
+    host_prober_names = {prober.name for prober in host_probers}
     if "claude" in enabled_sources:
         probers.append(("claude", _probe_claude))
+    for host_prober in host_probers:
+        probers.append((host_prober.name, functools.partial(_probe_host_records, host_prober)))
 
     for name, prober in probers:
         if exceeded or deadline_expired():
@@ -735,6 +775,7 @@ def discover_git_roots(
                         for entry in cache["projects"].values():
                             if entry.get("git_root") in stale_roots:
                                 entry["git_root"] = None
+                        _strip_probe_roots(cache, name, stale_roots)
                 if not indexed_complete:
                     mark_exceeded()
             elif not validate(candidates, name):
@@ -742,7 +783,12 @@ def discover_git_roots(
         except Exception as e:
             if name not in probers_ran:
                 probers_ran.append(name)
-            errors.append(f"{name} prober: {type(e).__name__}: {e}")
+            if name in host_prober_names:
+                # Host-record probers name only the exception type: a message
+                # can carry a record path, and errors reach the events wire.
+                errors.append(f"{name} prober: {type(e).__name__}")
+            else:
+                errors.append(f"{name} prober: {type(e).__name__}: {e}")
             continue
 
     if deadline_expired() and "claude" not in probers_ran:
@@ -756,6 +802,11 @@ def discover_git_roots(
             cache["projects"] = {}
             cache["discovery_resume_after"] = None
             cache["pending_refresh_since"] = None
+        # Likewise a host-record prober that no longer runs (provider disabled
+        # or tool uninstalled) takes its index with it.
+        registered = {name for name, _ in probers}
+        for stale_name in [n for n in cache["probe_index"] if n not in registered]:
+            del cache["probe_index"][stale_name]
         active_roots = {str(root) for root in roots}
         # Retire cursors of undiscovered roots, but fold a sibling worktree's
         # older cursor into the retained representative of the same object
@@ -799,7 +850,12 @@ def discover_git_roots(
             ) as locked:
                 _normalize_git_capture_cache(locked.data)
                 # Merge only discovery-owned fields; cursor commits have their own lock interval.
-                for key in ("projects", "discovery_resume_after", "pending_refresh_since"):
+                for key in (
+                    "projects",
+                    "discovery_resume_after",
+                    "pending_refresh_since",
+                    "probe_index",
+                ):
                     locked.data[key] = cache[key]
                 for root, ts in cache["repo_cursors"].items():
                     if original_cache["repo_cursors"].get(root) != ts:
@@ -846,12 +902,38 @@ def _enabled_source_names(config: dict) -> set[str]:
         names = {s.get("name") for s in explicit if isinstance(s, dict)}
     else:
         # Default sources include claude (and gstack if ~/.gstack exists, and
-        # mm-events). Only "claude" has a discovery prober after Track 29A.
+        # mm-events). "gstack" has no discovery prober (Track 29A). Codex joins
+        # an implicit config when ~/.codex exists, mirroring `get_sources`
+        # (Track 102A); muse and agy are opt-in sources, so only an explicit
+        # list names them.
         names = {"claude"}
         if (Path.home() / ".gstack").exists():
             names.add("gstack")
+        if mm_config._optional_host_present(rootprobes._discovery_home() / ".codex"):
+            names.add("codex")
     disabled = set(sync_cfg.get("disabled_sources") or [])
     return {n for n in names if isinstance(n, str) and n not in disabled}
+
+
+def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootprobes.RootProber]:
+    """Host-record probers that may run, in registry order.
+
+    A provider runs under the consent its usage reader already uses: its
+    enabled sync source (codex, muse, agy) or, for Cursor, the usage-only
+    consent bit. A tool runs when its record exists.
+    """
+    home = rootprobes._discovery_home()
+    selected: list[rootprobes.RootProber] = []
+    for prober in rootprobes.PROBERS:
+        if prober.kind == "tool":
+            allowed = rootprobes.installed(prober, home)
+        elif prober.name == "cursor":
+            allowed = mm_config.cursor_host_usage_enabled(config)
+        else:
+            allowed = prober.name in enabled_sources
+        if allowed:
+            selected.append(prober)
+    return selected
 
 
 def _claude_projects_dir() -> Path:
@@ -1041,6 +1123,105 @@ def _probe_claude(
     if not deferred:
         cache["pending_refresh_since"] = None
     return list(dict.fromkeys(roots))
+
+
+def _strip_probe_roots(cache: dict, name: str, stale: set[str]) -> None:
+    """Remove roots that stopped being git roots from one prober's cached units."""
+    record = cache.get("probe_index", {}).get(name)
+    units = record.get("units") if isinstance(record, dict) else None
+    for unit in (units or {}).values():
+        if isinstance(unit, list) and len(unit) == 2 and isinstance(unit[1], list):
+            unit[1] = [root for root in unit[1] if root not in stale]
+
+
+def _classify_named_dirs(dirs: Sequence[object] | None) -> list[str]:
+    """Resolve each directory a record names once; keep only git roots."""
+    roots: list[str] = []
+    for raw in dirs or []:
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            continue
+        try:
+            candidate = Path(raw).expanduser()
+            if not candidate.is_absolute():
+                continue
+            resolved = candidate.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if _classify_git_root(resolved) and str(resolved) not in roots:
+            roots.append(str(resolved))
+    return roots
+
+
+def _probe_host_records(
+    prober: rootprobes.RootProber,
+    *,
+    deadline_monotonic: float | None = None,
+    cache: dict | None = None,
+    since: datetime | None = None,
+) -> list[Path]:
+    """Index a host's directory-naming records, one unit at a time (Track 102A).
+
+    Follows ``_probe_claude``'s contract: the index lives in the private
+    capture cache (``probe_index[name] = {"units": {key: [stamp, [roots]]},
+    "state": {}}``), a unit is re-read only when its stamp changed (a ``None``
+    stamp means immutable once read), and a deadline spreads a cold corpus
+    over pushes. ``cache["_discovery_complete"]`` tells the registry whether
+    every unit is indexed. The deadline is checked before every unit read;
+    a listing the deadline cut returns the cached roots, and vanished units
+    are pruned only after a complete listing.
+
+    A unit whose read failed (``None``) is a completed observation of no
+    directories: a stamped unit is cached under its stamp, an immutable one is
+    retried next push. Only git roots are stored, each resolved and
+    classified once. ``since`` is unused: a newly found root walks from the
+    push cursor, so earlier commits need ``mm recapture <window>``.
+    """
+    cache = cache if cache is not None else _default_git_capture_cache()
+    index = cache.get("probe_index")
+    if not isinstance(index, dict):
+        index = cache["probe_index"] = {}
+    record = index.get(prober.name)
+    if not (
+        isinstance(record, dict)
+        and isinstance(record.get("units"), dict)
+        and isinstance(record.get("state"), dict)
+    ):
+        record = index[prober.name] = {"units": {}, "state": {}}
+    units: dict[str, list] = record["units"]
+    home = rootprobes._discovery_home()
+
+    def cached_roots() -> list[Path]:
+        found = [root for unit in units.values() for root in unit[1]]
+        return [Path(root) for root in dict.fromkeys(found)]
+
+    listing = prober.list_units(home, record["state"], deadline_monotonic)
+    if listing is None:
+        cache["_discovery_complete"] = False
+        return cached_roots()
+    listed = {key for key, _stamp in listing}
+    for key in units.keys() - listed:
+        del units[key]
+    roots: list[str] = []
+    complete = True
+    for key, stamp in listing:
+        stamp = list(stamp) if isinstance(stamp, tuple) else stamp
+        unit = units.get(key)
+        if unit is not None and unit[0] == stamp:
+            roots.extend(unit[1])
+            continue
+        if complete and not _deadline_expired(deadline_monotonic):
+            dirs, completed = prober.read_unit(home, key, deadline_monotonic)
+            if completed:
+                found = _classify_named_dirs(dirs)
+                if dirs is not None or stamp is not None:
+                    units[key] = [stamp, found]
+                roots.extend(found)
+                continue
+        complete = False
+        if unit is not None:
+            roots.extend(unit[1])
+    cache["_discovery_complete"] = complete
+    return [Path(root) for root in dict.fromkeys(roots)]
 
 
 def _read_cwd_from_latest_jsonl(

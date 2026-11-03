@@ -276,7 +276,7 @@ def _isolate_devices_write_lock(monkeypatch, tmp_path) -> None:
 def _isolate_git_capture_cache(monkeypatch, tmp_path):
     from pathlib import Path
 
-    from mind_meld import config, events
+    from mind_meld import config, events, rootprobes
 
     real_home = Path.home()
     monkeypatch.setattr(config, "GIT_CAPTURE_CACHE_PATH", tmp_path / "git-capture-cache.json")
@@ -288,6 +288,15 @@ def _isolate_git_capture_cache(monkeypatch, tmp_path):
             if Path.home() == real_home
             else Path.home() / ".claude" / "projects"
         ),
+    )
+    # Track 102A: the host-record probers read Codex, Cursor, Muse, Antigravity,
+    # Paseo and mmm records under this home, exactly as `_claude_projects_dir`
+    # does for Claude. HOME is not moved suite-wide (see the isolation fixtures
+    # below), so redirect the one patch point instead.
+    monkeypatch.setattr(
+        rootprobes,
+        "_discovery_home",
+        lambda: tmp_path / "_isolated_discovery_home" if Path.home() == real_home else Path.home(),
     )
 
 

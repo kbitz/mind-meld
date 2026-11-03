@@ -1,0 +1,926 @@
+"""Track 102A: automatic git-root discovery from host records.
+
+Every test builds a ``tmp_path`` home with synthetic records. The autouse
+``_isolate_git_capture_cache`` fixture redirects ``rootprobes._discovery_home``
+so none of these ever reads the real account's Codex, Cursor, Muse,
+Antigravity, Paseo or mmm stores.
+"""
+
+from __future__ import annotations
+
+import builtins
+import json
+import os
+import pwd
+import shutil
+import sqlite3
+import subprocess
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+import pytest
+
+from mind_meld import config as mm_config
+from mind_meld import events, events_tail, rootprobes, token_usage
+from tests.test_events import _git_env_repos, _init_git_repo, _make_git_worktree
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch) -> Path:
+    """A synthetic account home for discovery and for ``Path.home()``."""
+    root = tmp_path / "home"
+    root.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: root))
+    monkeypatch.setattr(rootprobes, "_discovery_home", lambda: root)
+    return root
+
+
+def _fake_repo(path: Path) -> Path:
+    """A directory discovery classifies as a git root, without spawning git."""
+    (path / ".git").mkdir(parents=True)
+    (path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    return path.resolve()
+
+
+def _cfg(*sources: str, cursor: bool = False, disabled: tuple[str, ...] = ()) -> dict:
+    config: dict = {"sync": {"sources": [{"name": name} for name in sources]}}
+    if disabled:
+        config["sync"]["disabled_sources"] = list(disabled)
+    if cursor:
+        config["retro"] = {"cursor_host_usage": True}
+    return config
+
+
+def _discover(config: dict, *, persist: bool = False, seconds: float = 30.0):
+    return events.discover_git_roots(
+        config, deadline_monotonic=time.monotonic() + seconds, persist=persist
+    )
+
+
+def _cached_units(name: str) -> dict:
+    return events.read_git_capture_cache()["probe_index"][name]["units"]
+
+
+def _codex_rollout(
+    path: Path,
+    cwd: str,
+    *,
+    before_cwd: int = 0,
+    after_cwd: int = 0,
+    first_type: str = "session_meta",
+) -> Path:
+    """One rollout: a compact first record shaped like Codex's ``session_meta``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"id": "abc"}
+    if before_cwd:
+        payload["instructions"] = "x" * before_cwd
+    payload["cwd"] = cwd
+    payload["git"] = {"branch": "main"}
+    if after_cwd:
+        payload["tail"] = "y" * after_cwd
+    first = json.dumps(
+        {"timestamp": "2026-11-03T10:00:00Z", "ordinal": 0, "type": first_type, "payload": payload},
+        separators=(",", ":"),
+    )
+    path.write_text(first + "\n" + json.dumps({"type": "event_msg"}) + "\n")
+    return path
+
+
+def _codex_day(home: Path, day: str = "2026/11/03") -> Path:
+    return home / ".codex" / "sessions" / day
+
+
+def _bump(path: Path, offset_ns: int) -> None:
+    """Give a directory a distinct mtime: coarse filesystem clocks tie otherwise."""
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + offset_ns))
+
+
+def _make_db(path: Path, table: str, column: str, rows: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute(f"create table {table} ({column} text)")
+    connection.executemany(f"insert into {table} values (?)", [(row,) for row in rows])
+    connection.commit()
+    connection.close()
+
+
+def _synthetic(units: dict, *, stamps: dict | None = None, reads: list | None = None, clock=None):
+    """A ``RootProber`` named codex over ``units`` (key -> directories, or None)."""
+    reads = reads if reads is not None else []
+
+    def list_units(_home, _state, _deadline):
+        return [(key, (stamps or {}).get(key)) for key in list(units)]
+
+    def read_unit(_home, key, _deadline):
+        reads.append(key)
+        if clock is not None:
+            clock[0] += 1.0
+        value = units[key]
+        return (None, True) if value is None else (list(value), True)
+
+    return rootprobes.RootProber("codex", "provider", list_units, read_unit)
+
+
+# ---------------------------------------------------------------------------
+# T2: the generic indexed prober, registry, cache and test isolation
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryAndIsolation:
+    def test_registry_order_puts_cheap_tools_first(self):
+        assert [p.name for p in rootprobes.PROBERS] == [
+            "paseo",
+            "mmm",
+            "agy",
+            "muse",
+            "cursor",
+            "codex",
+        ]
+        assert {p.name: p.kind for p in rootprobes.PROBERS} == {
+            "paseo": "tool",
+            "mmm": "tool",
+            "agy": "provider",
+            "muse": "provider",
+            "cursor": "provider",
+            "codex": "provider",
+        }
+
+    def test_discovery_home_is_not_the_real_home_by_default(self):
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        assert rootprobes._discovery_home() != real
+        assert rootprobes._discovery_home().name == "_isolated_discovery_home"
+
+    def test_probers_refuse_the_real_home_under_pytest(self):
+        real = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        for prober in rootprobes.PROBERS:
+            with pytest.raises(RuntimeError, match="real account"):
+                prober.list_units(real, {}, None)
+
+    def test_corpus_larger_than_the_deadline_completes_over_pushes(self, home, monkeypatch):
+        repos = {f"u{i}": [str(_fake_repo(home / f"repo{i}"))] for i in range(10)}
+        reads: list[str] = []
+        clock = [1000.0]
+        monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(repos, reads=reads, clock=clock),))
+
+        def push():
+            return events.discover_git_roots(
+                _cfg("codex"), deadline_monotonic=clock[0] + 3.5, persist=True
+            )
+
+        first = push()
+        assert first.exceeded and len(first.roots) == 4 and len(reads) == 4
+        second = push()
+        assert second.exceeded and len(second.roots) == 8 and len(reads) == 8
+        third = push()
+        assert not third.exceeded and len(third.roots) == 10 and len(reads) == 10
+        assert third.attribution and {source for source, _ in third.attribution} == {"codex"}
+        fourth = push()
+        assert not fourth.exceeded and len(fourth.roots) == 10
+        assert len(reads) == 10, "a warm index reads no unit"
+
+    def test_stamp_change_rereads_only_that_unit(self, home, monkeypatch):
+        units = {
+            "a": [str(_fake_repo(home / "a"))],
+            "b": [str(_fake_repo(home / "b"))],
+        }
+        stamps = {"a": [1], "b": [1]}
+        reads: list[str] = []
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units, stamps=stamps, reads=reads),))
+        _discover(_cfg("codex"), persist=True)
+        assert sorted(reads) == ["a", "b"]
+        reads.clear()
+        stamps["a"] = [2]
+        units["a"] = [str(_fake_repo(home / "a2"))]
+        found = _discover(_cfg("codex"), persist=True)
+        assert reads == ["a"]
+        assert {p.name for p in found.roots} == {"a2", "b"}
+
+    def test_vanished_unit_drops_its_roots(self, home, monkeypatch):
+        units = {
+            "a": [str(_fake_repo(home / "a"))],
+            "b": [str(_fake_repo(home / "b"))],
+        }
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units),))
+        assert len(_discover(_cfg("codex"), persist=True).roots) == 2
+        del units["b"]
+        found = _discover(_cfg("codex"), persist=True)
+        assert [p.name for p in found.roots] == ["a"]
+        assert set(_cached_units("codex")) == {"a"}
+
+    def test_incomplete_listing_keeps_cached_roots_and_prunes_nothing(self, home, monkeypatch):
+        units = {"a": [str(_fake_repo(home / "a"))]}
+        prober = _synthetic(units)
+        monkeypatch.setattr(rootprobes, "PROBERS", (prober,))
+        _discover(_cfg("codex"), persist=True)
+        cut = rootprobes.RootProber("codex", "provider", lambda *_: None, prober.read_unit)
+        monkeypatch.setattr(rootprobes, "PROBERS", (cut,))
+        found = _discover(_cfg("codex"), persist=True)
+        assert found.exceeded
+        assert [p.name for p in found.roots] == ["a"]
+        assert set(_cached_units("codex")) == {"a"}
+
+    def test_persist_false_creates_no_cache(self, home, monkeypatch):
+        monkeypatch.setattr(
+            rootprobes, "PROBERS", (_synthetic({"a": [str(_fake_repo(home / "a"))]}),)
+        )
+        found = _discover(_cfg("codex"), persist=False)
+        assert [p.name for p in found.roots] == ["a"]
+        assert not mm_config.GIT_CAPTURE_CACHE_PATH.exists()
+
+    def test_deselected_provider_loses_its_index_on_complete_discovery(self, home, monkeypatch):
+        monkeypatch.setattr(
+            rootprobes, "PROBERS", (_synthetic({"a": [str(_fake_repo(home / "a"))]}),)
+        )
+        assert _discover(_cfg("codex"), persist=True).probers_ran == ("codex",)
+        assert "codex" in events.read_git_capture_cache()["probe_index"]
+        off = _discover(_cfg("codex", disabled=("codex",)), persist=True)
+        assert off.probers_ran == () and not off.exceeded
+        assert "codex" not in events.read_git_capture_cache()["probe_index"]
+
+    def test_cached_root_that_stopped_being_a_repository_is_dropped(self, home, monkeypatch):
+        repo = _fake_repo(home / "gone")
+        keeper = _fake_repo(home / "keeper")
+        monkeypatch.setattr(
+            rootprobes,
+            "PROBERS",
+            (_synthetic({"a": [str(repo)], "b": [str(keeper)]}),),
+        )
+        assert len(_discover(_cfg("codex"), persist=True).roots) == 2
+        shutil.rmtree(repo / ".git")
+        found = _discover(_cfg("codex"), persist=True)
+        assert [p.name for p in found.roots] == ["keeper"]
+        assert sum(n for _reason, n in found.reject_counts) == 1
+        units = _cached_units("codex")
+        assert units["a"][1] == [] and units["b"][1] == [str(keeper)]
+
+    def test_named_directories_are_classified_once_and_only_roots_are_stored(
+        self, home, monkeypatch
+    ):
+        repo = _fake_repo(home / "repo")
+        plain = home / "plain"
+        plain.mkdir()
+        units = {"a": [str(plain), "relative/dir", str(repo), str(repo), ""]}
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units),))
+        found = _discover(_cfg("codex"), persist=True)
+        assert list(found.roots) == [repo]
+        assert _cached_units("codex")["a"] == [None, [str(repo)]]
+
+    def test_unit_read_failure_is_a_completed_observation(self, home, monkeypatch):
+        reads: list[str] = []
+        units = {"immutable": None, "stamped": None}
+        stamps = {"stamped": [7]}
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units, stamps=stamps, reads=reads),))
+        found = _discover(_cfg("codex"), persist=True)
+        assert not found.exceeded and found.errors == ()
+        cached = _cached_units("codex")
+        assert "immutable" not in cached, "an immutable unit that failed is retried next push"
+        assert cached["stamped"] == [[7], []]
+        reads.clear()
+        _discover(_cfg("codex"), persist=True)
+        assert reads == ["immutable"]
+
+    def test_prober_error_names_the_exception_type_only(self, home, monkeypatch):
+        def boom(_home, _state, _deadline):
+            raise PermissionError(13, "denied", "/secret/x")
+
+        monkeypatch.setattr(
+            rootprobes,
+            "PROBERS",
+            (rootprobes.RootProber("codex", "provider", boom, lambda *_: ([], True)),),
+        )
+        found = _discover(_cfg("codex"))
+        assert found.errors == ("codex prober: PermissionError",)
+        row = events.make_mm_push_event(
+            device="dev", mm_version="1.0.0", discovery_errors=list(found.errors)
+        )
+        assert "/secret" not in json.dumps(row)
+
+    def test_no_usage_reader_is_called_or_changed(self, home, monkeypatch):
+        from mind_meld import host_usage
+        from mind_meld.hosts import codex as codex_host
+
+        calls: list[str] = []
+
+        def forbidden(name):
+            def reader(*_a, **_k):
+                calls.append(name)
+                raise AssertionError(f"discovery called usage reader {name}")
+
+            return reader
+
+        monkeypatch.setattr(host_usage, "read_muse_usage", forbidden("muse"))
+        monkeypatch.setattr(host_usage, "read_agy_usage", forbidden("agy"))
+        monkeypatch.setattr(host_usage, "read_cursor_usage", forbidden("cursor"))
+        monkeypatch.setattr(codex_host, "read_codex_usage", forbidden("codex"))
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(_codex_day(home) / "rollout-1.jsonl", str(repo))
+        found = _discover(_cfg("codex", "muse", "agy", cursor=True))
+        assert calls == [] and found.errors == ()
+        assert found.probers_ran == ("agy", "muse", "cursor", "codex")
+        assert list(found.roots) == [repo]
+
+    def test_normalization_keeps_valid_probe_index_parts(self):
+        cache = events._default_git_capture_cache()
+        cache["probe_index"] = {
+            "codex": {
+                "units": {
+                    "good": [[1], ["/r"]],
+                    "immutable": [None, []],
+                    "bad-shape": ["x"],
+                    "bad-roots": [None, [1]],
+                    "bad-stamp": ["s", []],
+                },
+                "state": {"archived_mtime_ns": 5},
+            },
+            "muse": {"units": "nope", "state": []},
+            "weird": "nope",
+            3: {"units": {}, "state": {}},
+        }
+        events._normalize_git_capture_cache(cache)
+        assert cache["probe_index"] == {
+            "codex": {
+                "units": {"good": [[1], ["/r"]], "immutable": [None, []]},
+                "state": {"archived_mtime_ns": 5},
+            },
+            "muse": {"units": {}, "state": {}},
+        }
+        broken = {"version": 1, "probe_index": "nope"}
+        events._normalize_git_capture_cache(broken)
+        assert broken["probe_index"] == {}
+        assert events._default_git_capture_cache()["probe_index"] == {}
+
+    def test_commit_repo_cursors_preserves_probe_index(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic({"a": [str(repo)]}),))
+        _discover(_cfg("codex"), persist=True)
+        before = events.read_git_capture_cache()["probe_index"]
+        assert before["codex"]["units"]["a"][1] == [str(repo)]
+        now = datetime.now(timezone.utc)
+        events.commit_repo_cursors(
+            [{"type": "git-snapshot", "projects": [{"local_path": str(repo), "commits": []}]}],
+            since=now - timedelta(days=1),
+            cursor_ts=now,
+        )
+        after = events.read_git_capture_cache()
+        assert after["probe_index"] == before
+        assert str(repo) in after["repo_cursors"], "the commit wrote the cache"
+
+    def test_manual_roots_still_validate_first_and_win_attribution(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic({"a": [str(repo)]}),))
+        config = {**_cfg("codex"), "retro": {"repo_roots": [str(repo)]}}
+        found = _discover(config)
+        assert found.attribution == (("manual", repo),)
+        assert found.probers_ran == ("manual", "codex")
+
+
+# ---------------------------------------------------------------------------
+# T3: provider probers
+# ---------------------------------------------------------------------------
+
+
+class TestCodexProber:
+    def test_short_first_line_is_parsed_whole(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo))
+        spy = _spy_lines(monkeypatch)
+        assert list(_discover(_cfg("codex")).roots) == [repo]
+        assert spy == []
+
+    def test_long_line_with_cwd_early_uses_the_head_scan(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        rollout = _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo), after_cwd=20_000)
+        assert len(rollout.read_text().splitlines()[0]) > 20_000
+        spy = _spy_lines(monkeypatch)
+        assert list(_discover(_cfg("codex")).roots) == [repo]
+        assert spy == [], "the head scan found cwd without reading the whole line"
+
+    def test_cwd_after_a_large_field_falls_back_to_the_first_line(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo), before_cwd=20_000)
+        spy = _spy_lines(monkeypatch)
+        assert list(_discover(_cfg("codex")).roots) == [repo]
+        assert len(spy) == 1
+
+    def test_a_first_record_that_is_not_session_meta_names_nothing(self, home):
+        repo = _fake_repo(home / "repo")
+        day = _codex_day(home)
+        _codex_rollout(day / "rollout-a.jsonl", str(repo), first_type="turn_context")
+        _codex_rollout(
+            day / "rollout-b.jsonl", str(repo), first_type="turn_context", before_cwd=20_000
+        )
+        found = _discover(_cfg("codex"))
+        assert found.roots == () and found.probers_ran == ("codex",)
+
+    def test_archived_rollout_is_found(self, home):
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(
+            home / ".codex" / "archived_sessions" / "rollout-2026-10-04T08-12-00-xyz.jsonl",
+            str(repo),
+        )
+        assert list(_discover(_cfg("codex"), persist=True).roots) == [repo]
+        assert "archived/2026-10-04" in _cached_units("codex")
+
+    def test_warm_second_call_reads_no_rollout(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo))
+        _codex_rollout(
+            home / ".codex" / "archived_sessions" / "rollout-2026-10-04T08-12-00-xyz.jsonl",
+            str(repo),
+        )
+        _discover(_cfg("codex"), persist=True)
+        read = _spy_rollouts(monkeypatch)
+        listed: list[Path] = []
+        original = rootprobes._archived_groups
+        monkeypatch.setattr(
+            rootprobes,
+            "_archived_groups",
+            lambda archived, *a: (listed.append(archived), original(archived, *a))[1],
+        )
+        assert list(_discover(_cfg("codex"), persist=True).roots) == [repo]
+        assert read == []
+        assert listed == [], "an unchanged archived directory is not listed again"
+
+    def test_new_rollout_rereads_only_its_day(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        other = _fake_repo(home / "other")
+        old_day = _codex_day(home, "2026/11/01")
+        new_day = _codex_day(home, "2026/11/03")
+        _codex_rollout(old_day / "rollout-old.jsonl", str(repo))
+        _codex_rollout(new_day / "rollout-first.jsonl", str(repo))
+        _discover(_cfg("codex"), persist=True)
+        read = _spy_rollouts(monkeypatch)
+        _codex_rollout(new_day / "rollout-second.jsonl", str(other))
+        _bump(new_day, 5_000_000)
+        found = _discover(_cfg("codex"), persist=True)
+        assert {p.name for p in found.roots} == {"repo", "other"}
+        assert sorted(p.name for p in read) == ["rollout-first.jsonl", "rollout-second.jsonl"]
+
+    def test_newest_day_is_indexed_first(self, home):
+        units = rootprobes._codex_list(home, {}, None)
+        assert units == []
+        for day in ("2026/10/30", "2026/11/03", "2026/09/01"):
+            _codex_rollout(_codex_day(home, day) / "rollout-a.jsonl", str(home))
+        keys = [key for key, _stamp in rootprobes._codex_list(home, {}, None)]
+        assert keys == ["live/2026/11/03", "live/2026/10/30", "live/2026/09/01"]
+
+    def test_unreadable_listing_is_a_prober_error_not_an_empty_tree(self, home):
+        sessions = home / ".codex" / "sessions"
+        sessions.mkdir(parents=True)
+        os.chmod(sessions, 0)
+        try:
+            if os.access(sessions, os.R_OK):
+                pytest.skip("permissions are not enforced for this user")
+            found = _discover(_cfg("codex"))
+        finally:
+            os.chmod(sessions, 0o700)
+        assert found.errors == ("codex prober: PermissionError",)
+
+
+def _spy_lines(monkeypatch) -> list[str]:
+    """Record every whole-first-line fallback read."""
+    calls: list[str] = []
+    original = token_usage.iter_bounded_lines
+
+    def spy(fh, path_str, *args, **kwargs):
+        calls.append(path_str)
+        return original(fh, path_str, *args, **kwargs)
+
+    monkeypatch.setattr(token_usage, "iter_bounded_lines", spy)
+    return calls
+
+
+def _spy_rollouts(monkeypatch) -> list[Path]:
+    read: list[Path] = []
+    original = rootprobes._codex_rollout_cwd
+
+    def spy(path):
+        read.append(path)
+        return original(path)
+
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", spy)
+    return read
+
+
+class TestCursorProber:
+    def _acp(self, home: Path, session: str, cwd: str) -> None:
+        directory = home / ".cursor" / "acp-sessions" / session
+        directory.mkdir(parents=True)
+        (directory / "meta.json").write_text(
+            json.dumps({"cwd": cwd, "schemaVersion": 1, "title": "t"})
+        )
+
+    def _conductor(self, home: Path) -> Path:
+        return home / "Library" / "Application Support" / "com.conductor.app" / "cursor-sdk-store"
+
+    def test_acp_ndjson_and_index_db_all_name_roots(self, home):
+        acp_repo = _fake_repo(home / "acp-repo")
+        ndjson_repo = _fake_repo(home / "ndjson-repo")
+        db_repo = _fake_repo(home / "db-repo")
+        self._acp(home, "s1", str(acp_repo))
+        store = self._conductor(home) / "store-1"
+        store.mkdir(parents=True)
+        (store / "agents.ndjson").write_text(
+            json.dumps({"cwd": str(ndjson_repo)}) + "\nnot json\n" + json.dumps({"id": 1}) + "\n"
+        )
+        _make_db(store / "index.db", "agents", "workspace_ref", [str(db_repo), "relative", "x"])
+        found = _discover(_cfg(cursor=True), persist=True)
+        assert found.probers_ran == ("cursor",)
+        assert {p.name for p in found.roots} == {"acp-repo", "ndjson-repo", "db-repo"}
+        assert {source for source, _ in found.attribution} == {"cursor"}
+        assert set(_cached_units("cursor")) == {
+            "acp/s1",
+            "conductor/store-1/agents.ndjson",
+            "conductor/store-1/index.db",
+        }
+
+    def test_cursor_needs_its_usage_consent(self, home):
+        self._acp(home, "s1", str(_fake_repo(home / "repo")))
+        for config in (_cfg("cursor"), _cfg(), {"retro": {"cursor_host_usage": False}}):
+            found = _discover(config)
+            assert "cursor" not in found.probers_ran and found.roots == ()
+        assert "cursor" in _discover(_cfg(cursor=True)).probers_ran
+
+    def test_credential_neighbours_are_never_opened(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        self._acp(home, "s1", str(repo))
+        auth = home / ".cursor" / "projects" / "p" / "mcp-auth.json"
+        auth.parent.mkdir(parents=True)
+        auth.write_text('{"token": "never-read"}')
+        store_db = home / ".cursor" / "chats" / "x" / "y" / "store.db"
+        store_db.parent.mkdir(parents=True)
+        store_db.write_bytes(b"not a database")
+        (home / ".cursor" / "cli-config.json").write_text("{}")
+        (home / ".paseo").mkdir()
+        (home / ".paseo" / "config.json").write_text('{"secret": 1}')
+        oauth = home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+        oauth.parent.mkdir(parents=True)
+        oauth.write_text("secret")
+        _make_db(
+            home / ".gemini" / "antigravity-cli" / "conversation_summaries.db",
+            "conversation_summaries",
+            "workspace_uris",
+            [json.dumps([repo.as_uri()])],
+        )
+
+        touched: list[str] = []
+
+        def recording(real):
+            def spy(*args, **kwargs):
+                target = args[0] if args else next(iter(kwargs.values()), "")
+                touched.append(str(target))
+                return real(*args, **kwargs)
+
+            return spy
+
+        monkeypatch.setattr(builtins, "open", recording(builtins.open))
+        monkeypatch.setattr(os, "open", recording(os.open))
+        monkeypatch.setattr(sqlite3, "connect", recording(sqlite3.connect))
+        monkeypatch.setattr(os, "scandir", recording(os.scandir))
+        found = _discover(_cfg("agy", cursor=True))
+        assert list(found.roots) == [repo]
+        ours = [t for t in touched if str(home) in t]
+        assert ours, "the spy saw the probers' own reads"
+        for forbidden in ("mcp-auth", "store.db", "oauth-token", "config.json", "cli-config"):
+            assert not [t for t in ours if forbidden in t], forbidden
+        for directory in (".cursor/projects", ".cursor/chats"):
+            assert not [t for t in ours if directory in t], directory
+
+    def test_index_db_with_a_hot_journal_is_skipped_until_it_settles(self, home):
+        repo = _fake_repo(home / "repo")
+        store = self._conductor(home) / "store-1"
+        store.mkdir(parents=True)
+        _make_db(store / "index.db", "agents", "workspace_ref", [str(repo)])
+        (store / "index.db-journal").write_bytes(b"")
+        assert _discover(_cfg(cursor=True), persist=True).roots == ()
+        (store / "index.db-journal").unlink()
+        assert list(_discover(_cfg(cursor=True), persist=True).roots) == [repo]
+
+    def test_acp_session_without_meta_is_retried(self, home):
+        (home / ".cursor" / "acp-sessions" / "fresh").mkdir(parents=True)
+        found = _discover(_cfg(cursor=True), persist=True)
+        assert found.roots == () and not found.exceeded
+        assert "acp/fresh" not in _cached_units("cursor")
+
+
+class TestMuseProber:
+    def _session(self, home: Path, key: str, records: list[dict]) -> None:
+        directory = home / ".local" / "share" / "muse" / "sessions" / key
+        directory.mkdir(parents=True)
+        (directory / "session.jsonl").write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n"
+        )
+
+    def test_both_workspace_root_shapes(self, home):
+        direct = _fake_repo(home / "direct")
+        nested = _fake_repo(home / "nested")
+        self._session(
+            home,
+            "2026/11/03/s-direct",
+            [
+                {"payload": {"record": {"kind": "x"}}},
+                {"payload": {"record": {"workspace_root": str(direct)}}},
+            ],
+        )
+        self._session(
+            home,
+            "2026/11/02/s-nested",
+            [
+                {"payload": {"record": {"kind": "x"}}},
+                {
+                    "payload": {
+                        "record": {"command": {"session_metadata": {"workspace_root": str(nested)}}}
+                    }
+                },
+            ],
+        )
+        found = _discover(_cfg("muse"), persist=True)
+        assert {p.name for p in found.roots} == {"direct", "nested"}
+        assert [key for key, _ in rootprobes._muse_list(home, {}, None)] == [
+            "2026/11/03/s-direct",
+            "2026/11/02/s-nested",
+        ]
+
+    def test_only_the_first_sixteen_records_are_read(self, home):
+        repo = _fake_repo(home / "late")
+        records = [{"payload": {"record": {"kind": "x"}}}] * 16
+        self._session(
+            home,
+            "2026/11/03/s",
+            [*records, {"payload": {"record": {"workspace_root": str(repo)}}}],
+        )
+        assert _discover(_cfg("muse")).roots == ()
+
+    def test_muse_needs_its_source(self, home):
+        repo = _fake_repo(home / "repo")
+        self._session(
+            home, "2026/11/03/s", [{"payload": {"record": {"workspace_root": str(repo)}}}]
+        )
+        assert "muse" not in _discover(_cfg("codex")).probers_ran
+        assert "muse" not in _discover(_cfg("muse", disabled=("muse",))).probers_ran
+        assert list(_discover(_cfg("muse")).roots) == [repo]
+
+
+class TestAntigravityProber:
+    def _summaries(self, home: Path) -> Path:
+        return home / ".gemini" / "antigravity-cli" / "conversation_summaries.db"
+
+    def test_percent_encoded_uris_with_spaces_and_brackets(self, home):
+        repo = _fake_repo(home / "my repo <x>")
+        uri = "file://" + quote(str(repo))
+        assert "%20" in uri and "%3C" in uri and "%3E" in uri
+        _make_db(
+            self._summaries(home),
+            "conversation_summaries",
+            "workspace_uris",
+            [
+                json.dumps([uri, "https://example.com/x", "file://other-host/x"]),
+                "not json",
+                json.dumps({"not": "a list"}),
+            ],
+        )
+        found = _discover(_cfg("agy"), persist=True)
+        assert list(found.roots) == [repo]
+        assert found.attribution == (("agy", repo),)
+
+    def test_live_wal_rows_are_visible(self, home):
+        repo = _fake_repo(home / "repo")
+        database = self._summaries(home)
+        database.parent.mkdir(parents=True)
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA wal_autocheckpoint=0")
+            connection.execute("create table conversation_summaries (workspace_uris text)")
+            connection.execute(
+                "insert into conversation_summaries values (?)", (json.dumps([repo.as_uri()]),)
+            )
+            connection.commit()
+            assert database.with_name(database.name + "-wal").exists()
+            assert list(_discover(_cfg("agy")).roots) == [repo]
+        finally:
+            connection.close()
+
+    def test_unchanged_database_is_not_read_again(self, home, monkeypatch):
+        repo = _fake_repo(home / "repo")
+        _make_db(
+            self._summaries(home),
+            "conversation_summaries",
+            "workspace_uris",
+            [json.dumps([repo.as_uri()])],
+        )
+        _discover(_cfg("agy"), persist=True)
+        reads: list[str] = []
+        original = rootprobes._sqlite_first_column
+        monkeypatch.setattr(
+            rootprobes,
+            "_sqlite_first_column",
+            lambda *a, **k: (reads.append("read"), original(*a, **k))[1],
+        )
+        assert list(_discover(_cfg("agy"), persist=True).roots) == [repo]
+        assert reads == []
+
+
+class TestProviderGates:
+    def test_providers_run_only_when_enabled(self, home):
+        repo = _fake_repo(home / "repo")
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo))
+        assert "codex" not in _discover(_cfg("muse")).probers_ran
+        assert "codex" not in _discover(_cfg("codex", disabled=("codex",))).probers_ran
+        assert "codex" not in _discover({"sync": {"sources": []}}).probers_ran
+        assert _discover(_cfg("codex")).probers_ran == ("codex",)
+
+    def test_implicit_config_runs_codex_when_the_directory_exists(self, home):
+        repo = _fake_repo(home / "repo")
+        assert "codex" not in _discover({}).probers_ran
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo))
+        found = _discover({})
+        assert found.probers_ran == ("claude", "codex")
+        assert list(found.roots) == [repo]
+        assert "codex" not in _discover({"sync": {"disabled_sources": ["codex"]}}).probers_ran
+        # muse and agy are opt-in sources: an implicit config never names them.
+        assert {"muse", "agy"}.isdisjoint(found.probers_ran)
+
+
+# ---------------------------------------------------------------------------
+# T4: tool probers and worktree deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestToolProbers:
+    def _paseo(self, home: Path, *root_paths: str, extra: list | None = None) -> None:
+        path = home / ".paseo" / "projects" / "projects.json"
+        path.parent.mkdir(parents=True)
+        items = [{"projectId": f"p{i}", "rootPath": root} for i, root in enumerate(root_paths)]
+        path.write_text(json.dumps(items + (extra or [])))
+
+    def test_paseo_root_with_spaces_is_attributed_to_paseo(self, home):
+        repo = _fake_repo(home / "My Projects" / "repo with spaces")
+        self._paseo(
+            home,
+            str(repo),
+            extra=[
+                {"projectId": "gone", "rootPath": str(home / "missing"), "archivedAt": "2026-01-01"}
+            ],
+        )
+        found = _discover(_cfg(), persist=True)
+        assert found.probers_ran == ("paseo",)
+        assert found.attribution == (("paseo", repo),)
+
+    def test_archived_paseo_projects_still_count(self, home):
+        repo = _fake_repo(home / "old")
+        path = home / ".paseo" / "projects" / "projects.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps([{"rootPath": str(repo), "archivedAt": "2026-01-01"}]))
+        assert list(_discover(_cfg()).roots) == [repo]
+
+    def test_mmm_item_repo_becomes_a_root(self, home):
+        repo = _fake_repo(home / "repo")
+        items = home / ".mmm" / "items"
+        items.mkdir(parents=True)
+        (items / "a.json").write_text(json.dumps({"repo": str(repo), "worktree": str(home / "x")}))
+        (items / "b.json").write_text("not json")
+        (items / "a.plan.md").write_text("# not read")
+        (home / ".mmm" / "manager.toml").write_text("secret = 1")
+        found = _discover(_cfg(), persist=True)
+        assert found.probers_ran == ("mmm",)
+        assert found.attribution == (("mmm", repo),)
+        assert set(_cached_units("mmm")) == {"items/a.json"}, "an unreadable item is retried"
+
+    def test_tools_that_are_not_installed_do_not_run(self, home):
+        (home / ".paseo").mkdir()
+        (home / ".mmm").mkdir()
+        found = _discover(_cfg("codex", "muse", "agy", cursor=True))
+        assert "paseo" not in found.probers_ran and "mmm" not in found.probers_ran
+
+    def test_gstack_project_state_runs_no_prober(self, home):
+        project = home / ".gstack" / "projects" / "owner-repo"
+        project.mkdir(parents=True)
+        (project / "repo-mode.json").write_text(
+            json.dumps({"mode": "solo", "top_pct": 100, "authors": 1, "total": 3, "computed": "x"})
+        )
+        found = _discover({})
+        assert "gstack" not in found.probers_ran
+        assert found.probers_ran == ("claude",)
+
+    def test_installed_checks_the_named_record_only(self, home):
+        paseo, mmm = rootprobes.PROBERS[0], rootprobes.PROBERS[1]
+        assert (paseo.name, mmm.name) == ("paseo", "mmm")
+        assert not rootprobes.installed(paseo, home) and not rootprobes.installed(mmm, home)
+        (home / ".paseo").mkdir()
+        (home / ".mmm").mkdir()
+        assert not rootprobes.installed(paseo, home) and not rootprobes.installed(mmm, home)
+        self._paseo(home, str(home))
+        (home / ".mmm" / "items").mkdir()
+        assert rootprobes.installed(paseo, home) and rootprobes.installed(mmm, home)
+
+    def test_paseo_main_repo_wins_over_a_worktree_named_by_a_provider(
+        self, home, tmp_path, monkeypatch
+    ):
+        _git_env_repos(tmp_path, monkeypatch)
+        main = home / "main"
+        _init_git_repo(main)
+        worktree = home / ".paseo" / "worktrees" / "abc" / "repo"
+        worktree.parent.mkdir(parents=True)
+        _make_git_worktree(main, worktree)
+        self._paseo(home, str(main))
+        _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(worktree))
+        found = _discover(_cfg("codex"), persist=True)
+        assert found.roots == (main.resolve(),)
+        assert found.attribution == (("paseo", main.resolve()),)
+        # Codex did name the worktree; it is the same repository, so it folds in.
+        assert _cached_units("codex")["live/2026/11/03"][1] == [str(worktree.resolve())]
+
+    def test_worktrees_of_one_repository_collapse_to_one_root(self, home, tmp_path, monkeypatch):
+        _git_env_repos(tmp_path, monkeypatch)
+        main = tmp_path / "elsewhere" / "main"
+        _init_git_repo(main)
+        first = home / ".paseo" / "worktrees" / "abc" / "one"
+        second = home / ".paseo" / "worktrees" / "def" / "two"
+        first.parent.mkdir(parents=True)
+        _make_git_worktree(main, first, branch="wt-one")
+        second.parent.mkdir(parents=True)
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-b", "wt-two", str(second)], check=True
+        )
+        for name, path in (("s1", first), ("s2", second)):
+            directory = home / ".cursor" / "acp-sessions" / name
+            directory.mkdir(parents=True)
+            (directory / "meta.json").write_text(json.dumps({"cwd": str(path)}))
+        found = _discover(_cfg(cursor=True), persist=True)
+        assert len(found.roots) == 1
+        assert found.roots[0] in {first.resolve(), second.resolve()}
+        assert found.attribution[0][0] == "cursor"
+
+
+# ---------------------------------------------------------------------------
+# T6: a newly found repository's earlier commits need `mm recapture`
+# ---------------------------------------------------------------------------
+
+
+def _commit_at(repo: Path, message: str, when: datetime) -> None:
+    stamp = when.isoformat()
+    env = {**os.environ, "GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp}
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", message],
+        check=True,
+        env=env,
+    )
+
+
+def _captured_messages(rows: list[dict]) -> set[str]:
+    return {
+        commit["subject"]
+        for row in rows
+        for project in row.get("projects", [])
+        for commit in project.get("commits", [])
+    }
+
+
+def test_new_root_walks_from_the_push_cursor_and_recapture_reaches_history(
+    home, tmp_path, monkeypatch
+):
+    """Criterion 8: a repository found for the first time is captured from the
+    push cursor forward; commits older than that need ``mm recapture <window>``."""
+    _git_env_repos(tmp_path, monkeypatch)
+    repo = home / "dev" / "found-by-paseo"
+    _init_git_repo(repo)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    _commit_at(repo, "ten days ago", now - timedelta(days=10))
+    _commit_at(repo, "just now", now - timedelta(minutes=5))
+    path = home / ".paseo" / "projects" / "projects.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([{"projectId": "p", "rootPath": str(repo)}]))
+
+    rows, discovery, _aborts, errors = events_tail._capture_git_rows(
+        {},
+        "dev",
+        since=now - timedelta(days=2),
+        walk_budget_ms=10_000,
+        root_discovery_budget_ms=10_000,
+        persist=True,
+        use_repo_cursors=True,
+    )
+    assert errors == 0 and discovery.attribution == (("paseo", repo.resolve()),)
+    assert _captured_messages(rows) == {"just now"}
+
+    rows, _discovery, _aborts, errors = events_tail._capture_git_rows(
+        {},
+        "dev",
+        since=now - timedelta(days=30),
+        walk_budget_ms=10_000,
+        root_discovery_budget_ms=10_000,
+        origin=events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
+        persist=True,
+        use_repo_cursors=True,
+    )
+    assert errors == 0
+    assert _captured_messages(rows) == {"ten days ago", "just now"}

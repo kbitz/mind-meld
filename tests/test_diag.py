@@ -1705,6 +1705,60 @@ class TestDiagDiscovery:
         runner.invoke(app, ["diag"])
         assert calls["n"] == 1
 
+    def test_text_root_lines_name_the_prober_that_found_them(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GitRootDiscovery
+
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        monkeypatch.setattr(
+            "mind_meld.statusflow.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery(
+                (repo, other),
+                (),
+                False,
+                (("paseo", repo), ("codex", other)),
+                (),
+                (),
+                ("paseo", "codex"),
+            ),
+        )
+        lines = [
+            line.strip()
+            for line in runner.invoke(app, ["diag"]).stdout.splitlines()
+            if line.strip().endswith(("(paseo)", "(codex)"))
+        ]
+        assert len(lines) == 2
+        assert lines[0].endswith("repo (paseo)") and lines[1].endswith("other (codex)")
+
+    def test_no_prober_line_names_the_gates_not_the_claude_source(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        from mind_meld.events import GitRootDiscovery
+
+        monkeypatch.setattr(
+            "mind_meld.statusflow.events.discover_git_roots",
+            lambda _cfg, **_kw: GitRootDiscovery((), (), False),
+        )
+        text = runner.invoke(app, ["diag"]).stdout
+        assert "(none ran" in text and "no provider enabled or tool installed" in text
+        assert "claude source disabled" not in text
+
+    def test_real_discovery_attributes_a_paseo_project_in_json(self, tmp_path, monkeypatch):
+        _setup(tmp_path, monkeypatch)
+        repo = tmp_path / "dev" / "paseo-project"
+        (repo / ".git").mkdir(parents=True)
+        (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        projects = tmp_path / ".paseo" / "projects" / "projects.json"
+        projects.parent.mkdir(parents=True)
+        projects.write_text(json.dumps([{"projectId": "p", "rootPath": str(repo)}]))
+        payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["discovery"]
+        assert payload["attribution"] == [{"source": "paseo", "path": str(repo.resolve())}]
+        assert "paseo" in payload["probers_ran"] and payload["status"] == "complete"
+        text = runner.invoke(app, ["diag"]).stdout
+        assert "(paseo)" in text
+
 
 class TestDiagGitCapture:
     def test_recorded_and_fresh_differ(self, tmp_path, monkeypatch):
