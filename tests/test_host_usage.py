@@ -3046,6 +3046,84 @@ class TestCodexSettledMemo105A:
         assert "2026/08/14" not in settled, "the shared turn blocks it from settling again"
         assert "archive/2026-08-13" in settled
 
+    # Value: protects=failed closure rereads retain prior memos and parsed progress;
+    # fails_when=partial closure eviction publishes totals or loses retry state;
+    # why_new=existing rollback tests fail before closure rereads begin;
+    # seam=none; no_claim=real filesystem failure timing (injected reader failure).
+    @pytest.mark.parametrize("reason", ["deadline", "io_error"])
+    def test_failed_closure_reread_keeps_memos_and_recovers(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        before = self._cache(isolated_cache)
+        self._write_at(
+            self._live("09/01"),
+            "rollout-young.jsonl",
+            [_context(turn="fork"), _token(100, last=100), _token(210, last=110)],
+            old=False,
+        )
+        real_full = codex_host._read_full_rollout
+
+        def fail_partway(path, stat, deadline):
+            if path == corpus["fork-b"]:
+                raise hu._ReadFailure(reason)
+            return real_full(path, stat, deadline)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(codex_host, "_read_full_rollout", fail_partway)
+            failed = codex_host.read_codex_usage()
+
+        assert failed.complete is False and failed.reason == reason
+        assert failed.hosts == {}, "an incomplete closure reread must not publish its memo"
+        after = self._cache(isolated_cache)
+        assert after["settled_days"] == before["settled_days"]
+        assert before["files"].keys() <= after["files"].keys()
+        assert "states" in after["files"][self._key(corpus["partial"])]
+        assert after["files"][self._key(corpus["fork-b"])]["settled"] is True
+
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        assert "2026/08/14" not in self._cache(isolated_cache)["settled_days"]
+
+    # Value: protects=closure recovery follows turn sharing revealed by a reread;
+    # fails_when=a second settled memo survives after its lineage becomes shared;
+    # why_new=existing sharing tests expose all shared turn ids before rereading;
+    # seam=none; no_claim=live Codex rewrite patterns (synthetic rollout append).
+    def test_closure_reread_reveals_another_record_that_must_be_evicted(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = self._write_at(
+            self._live("08/14"), "rollout-a.jsonl", [_context(turn="a"), _token(100)]
+        )
+        second = self._write_at(
+            self._live("08/13"), "rollout-b.jsonl", [_context(turn="b"), _token(200)]
+        )
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        data = self._cache(isolated_cache)
+        # Verify the unchanged second record this pass, leaving the first's
+        # newly appended turn unseen until its shared older turn evicts it.
+        data["settled_days"]["2026/08/13"]["check_seq"] = 0
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        self._write_at(
+            first.parent,
+            first.name,
+            [_context(turn="a"), _token(100), _context(turn="b"), _token(150)],
+        )
+        self._write_at(
+            self._live("09/01"),
+            "rollout-young.jsonl",
+            [_context(turn="a"), _token(100)],
+            old=False,
+        )
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])
+
+        self._assert_matches_oracle(result)
+        assert {first, second} <= reread
+        assert self._cache(isolated_cache)["settled_days"] == {}
+
     def test_two_records_holding_one_turn_are_both_evicted_and_rebuilt(
         self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3195,6 +3273,30 @@ class TestCodexSettledMemo105A:
             "keys": ["k"],
             **extra,
         }
+
+    # Value: protects=an all-no-ledger settled group retains a usable empty memo;
+    # fails_when=an empty memo is rejected and repeatedly reparses settled files;
+    # why_new=the mixed corpus includes no-ledger files only beside nonempty ledgers;
+    # seam=none; no_claim=real Codex session distribution (synthetic no-ledger group).
+    def test_empty_group_memo_survives_a_warm_read(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_at(
+            codex_host.CODEX_ARCHIVED_SESSIONS_PATH,
+            "rollout-2026-08-13T10-00-00-empty.jsonl",
+            [_context(turn="empty")],
+        )
+        first = codex_host.read_codex_usage()
+        assert first.complete and first.hosts == {} and first.tokens_by_day == {}
+        record = self._cache(isolated_cache)["settled_days"]["archive/2026-08-13"]
+        assert record["totals"] == {} and record["partial_days"] == []
+        monkeypatch.setattr(
+            codex_host,
+            "_read_full_rollout",
+            lambda *args: pytest.fail("the empty memo must be carried without reparsing"),
+        )
+        assert codex_host.read_codex_usage() == first
+        assert codex_host.codex_usage_diag()["state"] == "ready"
 
     def test_a_record_without_a_memo_is_still_accepted(self) -> None:
         kept = codex_host._validated_settled_days({"2026/08/14": self._record()})
