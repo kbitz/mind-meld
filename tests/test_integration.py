@@ -6205,7 +6205,7 @@ def test_conductor_sqlite_run_reaches_encrypted_retro_snapshot(capture61):
         "run-PRIVATE-RUN-ID",
         at=stamp,
         request_id="PRIVATE-REQUEST-ID",
-        usage_json=usage(inp=40_000, out=1_000, read=9_000, reasoning=500),
+        usage_json=usage(inp=40_000, out=1_000, read=9_000, reasoning=2 * 250),
         result="PRIVATE RESULT",
     )
     make_store(_mm_host_usage.CURSOR_STORE_PATH, "0123456789abcdef", [row])
@@ -14191,7 +14191,7 @@ def test_attended_pull_2500_excluded_three_flushes73(push_preview56, monkeypatch
     monkeypatch.setattr(pullhistory, "write_rows", counted)
     result = runner.invoke(app, ["pull"])
     assert result.exit_code == 0, result.exception
-    assert counts == [1000, 1000, 500], result.output
+    assert counts == [1000, 1000, 2 * 250], result.output
     assert len(pullhistory.query(action="excluded", limit=0)) == 2500
 
 

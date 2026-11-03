@@ -1166,7 +1166,7 @@ class TestWalkSessionMetadata:
         proj.mkdir(parents=True)
         (proj / "session.jsonl").write_text(
             # Many lines, none with a `cwd` field.
-            "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(500))
+            "\n".join(json.dumps({"type": "user", "msg": f"x{i}"}) for i in range(2 * 250))
         )
         out = events.walk_session_metadata(
             tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
@@ -4201,14 +4201,14 @@ def test_recapture_walks_with_its_own_budget(tmp_path, monkeypatch, argv):
         assert budget <= events.WALK_TIME_BUDGET_INTERACTIVE_MS
 
 
-@pytest.mark.parametrize("quiet, budget_ms", [(True, 250), (False, 500)])
+@pytest.mark.parametrize("quiet, budget_ms", [(True, 250), (False, 2 * 250)])
 def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(
     tmp_path, monkeypatch, quiet, budget_ms
 ):
     from mind_meld import events_tail
 
     assert events.WALK_TIME_BUDGET_AUTOPUSH_MS == 250
-    assert events.WALK_TIME_BUDGET_INTERACTIVE_MS == 500
+    assert events.WALK_TIME_BUDGET_INTERACTIVE_MS == 2 * 250
     assert events.PER_REPO_TIMEOUT_FLOOR_MS == 200
     assert events.PER_REPO_TIMEOUT_CAP_MS == 2000
 
@@ -4236,7 +4236,7 @@ def test_push_and_autopush_walk_budgets_and_cap_are_unchanged(
         {}, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
     )
 
-    # One repository: (250 * 8) // 1 = 2000 and (500 * 8) // 1 = 4000, capped to 2000.
+    # One repository: (250 * 8) // 1 = 2000 and (2 * 250 * 8) // 1 = 4000, capped to 2000.
     assert [(budget, "per_repo_timeout_ms" in kw) for budget, kw in walks] == [(budget_ms, False)]
     assert timeouts == [2000]
 
