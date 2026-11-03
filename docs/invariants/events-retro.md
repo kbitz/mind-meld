@@ -233,12 +233,16 @@ a partial pass slims nothing and keeps the prior map. Kept fields and their
 readers: `turn_ids` for `_freeze_settled_days`' turn-sharing check and
 `_unclosed_settled_records`; `models` for `_diag_model_ids` (diag `models` and
 `model_count`); `settled` for `_validated_settled_entry` and `codex_usage_diag`,
-which counts it as migrated, never pre-track, so `state` stays `ready`. Dropped,
-because nothing reads them once the totals live on the record: `dev`, `ino`,
-`size`, `mtime_ns`, `head`, `head_len`, `tail`, `tail_len`, `offset` (read only
-by the cache-hit and resume checks, the `_aggregate` per-file id and the freeze
-digest of a not-yet-settled day) and `states`, `days`, `last_total`,
-`last_model`, `last_turn` (read only by `_aggregate` and resume). `pending`
+which counts it as migrated, never pre-track, so missing `states` does not by
+itself make `state` `migrating`. Dropped, because nothing reads them once the
+totals live on the record: `dev`, `ino`, `size` and `mtime_ns` are the cache-hit
+identity and `_aggregate`'s per-file id (`dev:ino:size:mtime_ns`); resume also
+checks `dev`, `ino` and `size`; a not-yet-settled day reads `mtime_ns` for the
+24h idle check and `(size, mtime_ns)` for the freeze digest. `head`, `head_len`,
+`tail` and `tail_len` are the cache-hit fingerprint and the resume probe.
+`offset` is the resume seek and must equal `size`; it is not part of the
+per-file id or the digest. `states` and `days` are read by `_aggregate` and
+resume; `last_total`, `last_model` and `last_turn` by resume only. `pending`
 never exists on a settled entry. `_validated_entry` is unchanged and rejects
 the slim shape (no `states`), so a slim entry can never count as a cache hit:
 an evicted record's files are re-read in full.
