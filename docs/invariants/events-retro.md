@@ -218,9 +218,10 @@ and every partial day appears in `totals`; a malformed memo, or one half of it,
 drops the whole record, so its files are read per-file again. A pre-105A record
 (neither half) is accepted and memoized on its first complete pass. A newly
 frozen record and a pre-105A one each get their memo from one `_aggregate` call
-over their own entries in `record["keys"]` order (`_record_memo`), so every
+over their own entries in the same path order as the whole-corpus reduction
+(`_record_memo`), so every
 entry reaches `_aggregate` exactly once per complete pass and the upgrade pass
-re-parses nothing. All sums are integers, so the merged memos equal a
+re-parses no unchanged, still-closed settled group. All sums are integers, so the merged memos equal a
 whole-corpus reduction as dicts, zero `t -> t` buckets included. Pinned by
 `test_host_usage.py::TestCodexSettledMemo105A`, whose oracle is `_aggregate`
 over a full parse of every rollout on disk.
@@ -248,8 +249,13 @@ before the freeze (`_unclosed_settled_records`): a carried record holding a
 turn id that also appears in any staged entry outside it (a later fork or
 resume of an old session, or another record) is un-carried, repeating to a
 fixpoint. It leaves the carried set and its pending update, its staged entries
-are dropped, and its files go through the same per-file body, so the totals
-still equal a full reduction. The settle rule then applies to it again.
+are dropped, and its files go through the same per-file body. Parsing stays
+newest-first for deadline progress; before freezing and reducing, staged entries
+are ordered by sorted live path followed by sorted archive path, matching the
+full-parse oracle. The reducer's first-seen opening ownership is order-sensitive:
+appending an evicted record after its later fork could otherwise suppress an
+opening and lose usage. This order applies on the eviction pass and every later
+warm pass. The settle rule then applies to the record again.
 
 Day directories are enumerated
 before any settled skip, so a complete pass still prunes deleted files by

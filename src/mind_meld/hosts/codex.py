@@ -422,8 +422,8 @@ def _scan_codex_root(
     re-read through the same per-file body, and it leaves the map for the pass.
     Each entry reaches ``_aggregate`` once: a newly frozen record, and a
     pre-105A record on the upgrade pass, as one call over its own entries in
-    ``record["keys"]`` order, the order a carried record's entries reached the
-    old whole-corpus reduction. A COMPLETE pass then replaces every entry under
+    the same live-then-archive path order as the whole-corpus reduction.
+    A COMPLETE pass then replaces every entry under
     a record with its slim shape; a partial pass slims nothing.
     """
     prior_settled = settled_days or {}
@@ -565,6 +565,17 @@ def _scan_codex_root(
         if stopped is not None:
             return stopped, staged, learned, prior_settled
 
+    # Parsing stays newest-first for deadline progress. Reduction needs one
+    # stable order across cold, carried and closure-evicted entries: the shared
+    # reducer keeps the first occurrence of an opening transition, including
+    # which file owns it. Appending a re-read after its later fork can otherwise
+    # suppress that opening and lose usage. Match a full live-then-archive walk.
+    ordered_keys = (
+        host_usage._cache_key(path, root=base, canonical_root=canonical_roots[base])
+        for path, base, _rel in sorted(rollouts, key=lambda item: (item[1] != root, item[0]))
+    )
+    staged = {key: staged[key] for key in ordered_keys if key in staged}
+
     new_settled = _freeze_settled_days(
         days + [(rel, archived_root, paths) for rel, paths in archive_groups.items()]
         if archived_root is not None
@@ -628,9 +639,10 @@ def _unclosed_settled_records(
 def _record_memo(entries: list[_CacheEntry]) -> dict[str, Any]:
     """One settled record's aggregate contribution, from its own entries.
 
-    ``host_usage._aggregate`` over a closed set of entries, in the record's
-    ``keys`` order. ``totals`` is ``{day: {model: Usage}}`` and ``partial_days``
-    the days whose increments carried a nonzero ``cache_create``; merged back
+    ``host_usage._aggregate`` over a closed set of entries, in the same path
+    order as the whole-corpus reduction. ``totals`` is ``{day: {model: Usage}}``;
+    ``partial_days`` holds the days whose increments carried a nonzero
+    ``cache_create``. Merged back,
     they equal the record's share of a whole-corpus reduction, because every
     sum is an integer sum.
     """
@@ -660,10 +672,14 @@ def _reduce_with_settled_memos(
     """
     memoized: dict[str, dict[str, Any]] = {}
     covered: set[str] = set()
+    entry_order = {key: index for index, key in enumerate(staged)}
     for rel, record in settled.items():
         covered.update(record["keys"])
         if "totals" not in record:
-            record = {**record, **_record_memo([staged[key] for key in record["keys"]])}
+            # Persisted keys are hashes. Their ordering must not choose which
+            # rollout owns a shared opening when a record gets its first memo.
+            keys = sorted(record["keys"], key=entry_order.__getitem__)
+            record = {**record, **_record_memo([staged[key] for key in keys])}
         memoized[rel] = record
     buckets = host_usage._aggregate(entry for key, entry in staged.items() if key not in covered)
     for record in memoized.values():

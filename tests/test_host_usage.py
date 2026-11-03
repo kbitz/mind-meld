@@ -3069,6 +3069,55 @@ class TestCodexSettledMemo105A:
         assert set(settled) == {"2026/08/14", "archive/2026-08-13"}, "and rebuilt from true ids"
         assert all("totals" in record for record in settled.values())
 
+    @pytest.mark.parametrize("fork_model", ["gpt-5-codex", "gpt-5.2-codex"])
+    def test_later_fork_with_a_repeated_opening_keeps_full_reduction_order(
+        self, isolated_cache: Path, fork_model: str
+    ) -> None:
+        self._write_at(
+            self._live("08/14"),
+            "rollout-old.jsonl",
+            [_context(turn="same"), _token(100, last=100), _token(100, last=0)],
+        )
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        assert "2026/08/14" in self._cache(isolated_cache)["settled_days"]
+        self._write_at(
+            self._live("09/01"),
+            "rollout-young.jsonl",
+            [
+                _context(fork_model, turn="same"),
+                _token(100, last=100, timestamp="2026-08-16T00:00:01Z"),
+            ],
+            old=False,
+        )
+
+        for _ in range(2):  # eviction and the following warm pass
+            result = codex_host.read_codex_usage()
+            self._assert_matches_oracle(result)
+            assert result.hosts["codex"]["2026-08-15"]["input"] == 100
+            assert "2026/08/14" not in self._cache(isolated_cache)["settled_days"]
+
+    def test_legacy_record_key_order_does_not_choose_the_opening_owner(
+        self, isolated_cache: Path
+    ) -> None:
+        first = self._write_at(
+            self._live("08/14"),
+            "rollout-a.jsonl",
+            [_context(turn="same"), _token(100, last=100), _token(100, last=0)],
+        )
+        second = self._write_at(
+            self._live("08/14"),
+            "rollout-b.jsonl",
+            [_context("gpt-5.2-codex", turn="same"), _token(100, last=100)],
+        )
+        self._seed_legacy(isolated_cache, {"2026/08/14": [first, second]}, [])
+        data = self._cache(isolated_cache)
+        # Cache keys are hashes, so their order is not rollout path order.
+        data["settled_days"]["2026/08/14"]["keys"] = [self._key(second), self._key(first)]
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+
+        for _ in range(2):  # the upgrade memo and its later carry
+            self._assert_matches_oracle(codex_host.read_codex_usage())
+
     def test_diag_is_the_same_on_the_legacy_seed_and_the_slimmed_cache(
         self, isolated_cache: Path
     ) -> None:
