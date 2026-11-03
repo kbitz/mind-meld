@@ -10,7 +10,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
-- `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
+- `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
@@ -207,9 +207,62 @@ A `YYYY/MM/DD` day freezes into `host-tokens.json` `settled_days` (additive on
 cache version 1) when its date is at least 2 UTC days old, every rollout has
 been idle at least 24h, no entry carries `pending`, no entry has an empty
 `turn_id`, and no `turn_id` is shared with any `CacheEntry` outside the day.
-Settled records keep their backing `files` entries — only the per-file
-stat/open loop is skipped — so `_aggregate` union-find deduplication and
-`codex_usage_diag` file counts stay exact. Day directories are enumerated
+A settled record stores its aggregate contribution once (Track 105A): `totals`
+(`{day: {model: Usage}}`) and `partial_days` sit on the record beside `keys`,
+and the whole-corpus reduction runs over the staged entries OUTSIDE every
+record, then merges each memo with `_add_usage` and the `partial_days` union.
+`_validated_settled_memo` accepts a memo only when `totals` passes Muse's
+frozen-day validator (`_validated_muse_frozen_days`) with every day key
+through `_validated_day`, `partial_days` passes `_validated_turn_partial_days`,
+and every partial day appears in `totals`; a malformed memo, or one half of it,
+drops the whole record, so its files are read per-file again. A pre-105A record
+(neither half) is accepted and memoized on its first complete pass. A newly
+frozen record and a pre-105A one each get their memo from one `_aggregate` call
+over their own entries in the same path order as the whole-corpus reduction
+(`_record_memo`). Each unsettled or newly memoized entry reaches `_aggregate`
+once per complete pass; entries with an existing memo are not reduced again.
+The upgrade pass re-parses no unchanged, still-closed settled group.
+All sums are integers, so the merged memos equal a
+whole-corpus reduction as dicts, zero `t -> t` buckets included. Pinned by
+`test_host_usage.py::TestCodexSettledMemo105A`, whose oracle is `_aggregate`
+over a full parse of every rollout on disk.
+
+On a complete pass every entry under a record becomes the slim settled shape,
+`{"settled": true}` plus `turn_ids` and `models` when non-empty (`_slim_entry`);
+a partial pass slims nothing and keeps the prior map. Kept fields and their
+readers: `turn_ids` for `_freeze_settled_days`' turn-sharing check and
+`_unclosed_settled_records`; `models` for `_diag_model_ids` (diag `models` and
+`model_count`); `settled` for `_validated_settled_entry` and `codex_usage_diag`,
+which counts it as migrated, never pre-track, so missing `states` does not by
+itself make `state` `migrating`. Dropped, because nothing reads them once the
+totals live on the record: `dev`, `ino`, `size` and `mtime_ns` are the cache-hit
+identity and `_aggregate`'s per-file id (`dev:ino:size:mtime_ns`); resume also
+checks `dev`, `ino` and `size`; a not-yet-settled day reads `mtime_ns` for the
+24h idle check and `(size, mtime_ns)` for the freeze digest. `head`, `head_len`,
+`tail` and `tail_len` are the cache-hit fingerprint and the resume probe.
+`offset` is the resume seek and must equal `size`; it is not part of the
+per-file id or the digest. `states` and `days` are read by `_aggregate` and
+resume; `last_total`, `last_model` and `last_turn` by resume only. `pending`
+never exists on a settled entry. `_validated_entry` is unchanged and rejects
+the slim shape (no `states`), so a slim entry can never count as a cache hit:
+an evicted record's files are re-read in full.
+
+A memo is exact only while the record's lineages are closed, and
+`_freeze_settled_days` proves closure only when a record settles. So
+`_scan_codex_root` re-checks it on every pass, after the per-file loop and
+before the freeze (`_unclosed_settled_records`): a carried record holding a
+turn id that also appears in any staged entry outside it (a later fork or
+resume of an old session, or another record) is un-carried, repeating to a
+fixpoint. It leaves the carried set and its pending update, its staged entries
+are dropped, and its files go through the same per-file body. Parsing stays
+newest-first for deadline progress; before freezing and reducing, staged entries
+are ordered by sorted live path followed by sorted archive path, matching the
+full-parse oracle. The reducer's first-seen opening ownership is order-sensitive:
+appending an evicted record after its later fork could otherwise suppress an
+opening and lose usage. This order applies on the eviction pass and every later
+warm pass. The settle rule then applies to the record again.
+
+Day directories are enumerated
 before any settled skip, so a complete pass still prunes deleted files by
 REPLACE; settled mutations (additions, evictions, `check_seq` bumps) commit
 only on a complete pass and roll back otherwise. Every carried day first
@@ -217,7 +270,14 @@ passes an exact key-set check against the live enumeration, so additions and
 deletions evict immediately; exactly one settled day per scan — the stalest
 `check_seq` — is further verified by directory stat digest
 (`dir_mtime_ns, count, sum_size, sum_mtime_ns`), and a failed or mismatched
-verification evicts it to the per-file loop. Track 101A adds archive groups
+verification evicts it to the per-file loop, which now re-reads the whole group
+in full and rebuilds its memo when it settles again. A record without a memo
+needs full entries to be carried; one with a memo requires slim entries for
+every key. A full entry beside a memo is progress from a partial eviction and
+invalidates that memo: refreshed turn ids could otherwise hide the closure
+violation and reuse stale totals. The per-file retry retains that progress as
+an ordinary validated cache hit and rebuilds the memo from current entries.
+Track 101A adds archive groups
 to the same map (see "Archived Codex rollouts"): their own stat-digest
 rotation runs beside the live one, one more verification per scan, so the live
 days' rotation keeps its rate. Independently of
@@ -225,7 +285,12 @@ settling, a cached rollout idle at least 24h is a stat-only cache hit (no
 8 KiB fingerprint read); younger files keep the fingerprint. Shared pure
 helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
 `SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
-code is untouched.
+code is untouched. The memo is additive on cache `version` 1, with no
+`CACHE_VERSION` bump: that constant is shared with the Cursor, Muse and
+Antigravity caches, so a bump would cold-start all four, and `settled_days` and
+earlier fields were added the same way. An older mm rejects slim entries and
+re-parses a settled group's files, then writes records without a memo; the next
+current read memoizes them again from full entries without a re-parse.
 
 Push and recapture deduplicate discovered roots by common Git directory
 (`_git_common_dir`, matching `git rev-parse --git-common-dir`), electing each
@@ -2286,7 +2351,8 @@ unread.
   archived name starts `rollout-YYYY-MM-DDT…` (all 2,813 on the owner's Mac,
   2026-11-02). `_archive_group_rel` maps such a name to `archive/YYYY-MM-DD`
   and a name with no valid date to no group, so it stays per-file as before.
-  Groups live in `settled_days` as records of the live shape, committed and
+  Groups live in `settled_days` as records of the live shape (the Track 105A
+  memo and slim entries apply to them too), committed and
   rolled back with it, with `dir_mtime_ns: null`: the flat archive's own mtime
   changes on every archival, so only the listed files' `(size, mtime_ns)`
   digest (`_archive_group_digest`, no opens) is verified. The freeze rules are
@@ -2347,9 +2413,53 @@ archived stats from 5,742 to 771 (27 archive groups settled, 2,570 keys). The
 per-file part of the warm read stops growing with the archive. The rest still
 does: `_aggregate` over 174,304 cached states (about 290 ms), the 11.6 MB cache
 load and write (about 190 ms), entry validation of every settled key (it moved
-from the loop into the carry) and listing the archive. Memoizing settled
-aggregates and slimming settled entries is a separate cache-format follow-up,
-not part of this Track.
+from the loop into the carry) and listing the archive. Track 105A (below)
+memoizes settled aggregates and slims settled entries.
+
+**Track 105A: settled Codex records memoize their totals and slim their entries
+(2026-11-02).** T1's baseline, read-only (pipx 1.12.5 interpreter, Python
+3.14.10, a copy of the owner's `host-tokens.json`, counts, sizes and timings
+only, the real cache's size and mtime unchanged before and after): the warm
+Codex read held 6,916 `files` entries, 176,211 cached states, 136 settled
+records (109 live days, 27 archive groups) over 6,149 keys carrying 151,970 of
+those states, and 2,883 archived rollouts on disk. Its phases: `_aggregate`
+about 293 to 304 ms in one call over all 176,211 states, cache load about 92 ms
+and write about 96 ms for 11,719,626 bytes, validating the settled entries in
+the carry about 112 ms, and `last_complete_ms` 808 and 1,106 on two runs at
+load about 9 on 12 CPUs. After (same machine, a frozen snapshot of the same
+cache, baseline and worktree code alternating, load about 15 on 12 CPUs, so
+read the counts and the pairs): the warm read reduces 769 entries and 24,264
+states, the unsettled ones, where it reduced 6,918 entries and 176,234 states.
+
+| Warm read, two pairs | 1.12.5 | with the memo |
+|---|---|---|
+| `last_complete_ms` | 762, 761 | 316, 321 |
+| `_aggregate` | 292, 298 ms | 35.7, 35.3 ms |
+| cache load | 91, 90 ms | 17.6, 17.5 ms |
+| cache write | 96, 96 ms | 23.0, 23.2 ms |
+| settled-entry validation in the carry | 112, 113 ms | 1.2 ms plus 5.6, 5.8 ms (slim) |
+| cache size | 11,719,626 bytes | 3,464,824 bytes |
+
+The upgrade pass (the first read of the new code over a 1.12.5 cache) reduced
+every entry once, in 137 `_aggregate` calls (136 record memos and one over the
+unsettled entries), re-parsed no settled file (its 10 full reads and 9 resumes
+were live rollouts that had grown since the cache was written, the same as the
+baseline's first run), took 786 and 781 ms, and left all 136 records with a
+memo and 6,149 slim entries. The reduction, cache load and
+cache write no longer grow with archived states, and the cache is a third of its
+size. The per-file loop over the 769 unsettled entries, discovery, and the
+carry's key-set and digest checks still scale with the corpus. No
+`CACHE_VERSION` bump, for the reason above. The cost moved to eviction: a record
+evicted by a change, an addition, a removal or a closure violation re-reads its
+files in full (its slim entries cannot be a hit), where it was a stat-only hit
+before. On 2026-11-02 about 3 archive groups a day could evict, from archive
+names and ctimes (40 of 1,931 archivals in 14 days landed two or more days after
+their name date; planning probe, counts only). The re-read is deadline-bounded and partial passes keep their
+progress; if later diag shows group re-reads overrunning the attended host
+share, keeping the memo across a pure addition is a follow-up, not this Track.
+An in-place change to a settled file is still caught only when its group's
+rotation comes round: the memo adds no new stale window. Pinned by
+`test_host_usage.py::TestCodexSettledMemo105A`.
 
 **Cache persistence is DECOUPLED from result validity.** "May this scan be
 published?" and "did we learn something durable about individual files?" are

@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.6] - 2026-11-03
+
+**A later `mm push` reuses Codex totals for days it has already settled, and a push that stops early keeps the last complete totals.** Closed days are not parsed again to add the same numbers. An unfinished read does not publish a partial Codex total; that day is read again on the next complete push.
+
+### Changed
+
+- A settled Codex day stores its totals in the local cache. The next complete read adds those totals instead of parsing every rollout in the day again.
+- A push that does not finish leaves the previous settled map in place and does not shrink those cache entries.
+- A settled day is parsed again when a file is added or removed, a turn is shared with a newer session, or a partial read saved a full entry beside the stored totals.
+- The cache version is unchanged, so Cursor, Muse, and Antigravity usage on this machine is not reread from scratch. An older mm rereads the settled Codex files once, and the next current mm stores the totals again.
+
+### Fixed
+
+- Reading a settled day again counts the same usage as a full read, including when a newer session forked an older one.
+- A partial reread cannot keep the old totals after it has parsed new entries for that day.
+
 ## [1.12.5] - 2026-11-02
 
 **Attended `mm push` gives host usage reads 3 seconds and keeps a share for every reader, and Codex skips archived rollouts that have not changed.** A slow Codex read can no longer spend the whole sweep. Antigravity, Cursor, and Muse still get their read. Autopush stays at 250 ms and never warms.

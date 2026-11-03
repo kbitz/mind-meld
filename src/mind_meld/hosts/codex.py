@@ -48,13 +48,28 @@ def _now_ns() -> int:
 
 
 class _CacheEntry(TypedDict, total=False):
-    """One rollout's cached parse. Two shapes share this map.
+    """One rollout's cached parse. Three shapes share this map.
 
     A LEDGER entry carries ``states`` plus the resume carry-set described
     below. A NO-LEDGER entry sets ``no_ledger`` instead and carries none of
     them: the file was parsed in full and provably contained no usage (an
     abandoned or response-less session). Both carry the same identity +
     fingerprint fields.
+
+    A SETTLED entry (Track 105A) is the slim shape a rollout takes once its
+    ``settled_days`` record holds the group's memoized totals: ``settled`` plus
+    ``turn_ids`` and ``models`` when non-empty, nothing else. ``turn_ids`` is
+    read by ``_freeze_settled_days`` and the closure check in
+    ``_scan_codex_root``; ``models`` by ``_diag_model_ids``; ``settled`` by
+    ``_validated_settled_entry`` and ``codex_usage_diag``. Every other field
+    has no reader once the totals live on the record, and
+    ``_validated_entry`` rejects the shape (no ``states``), so a slim entry can
+    never be a cache hit: an evicted record's files are re-read in full. It is
+    additive on cache ``version`` 1, with no ``CACHE_VERSION`` bump for the
+    reason given under "Entries written before this Track" below: the constant
+    is shared with the Cursor, Muse and Antigravity caches. A pre-105A
+    ``settled_days`` record has no memo and full entries; the first complete
+    pass memoizes it from those entries without re-parsing anything.
 
     The no-ledger shape exists for convergence, not tidiness. Without it those
     files are re-parsed on EVERY scan forever, so a corpus whose ledger-less
@@ -111,6 +126,7 @@ class _CacheEntry(TypedDict, total=False):
     last_turn: str
     pending: list[list[Any]]
     no_ledger: bool
+    settled: bool
 
 
 @host_usage._pause_gc()
@@ -286,7 +302,14 @@ def codex_usage_diag() -> dict[str, Any]:
     for value in files.values():
         if not isinstance(value, dict):
             continue
-        if value.get("no_ledger") is True or isinstance(value.get("states"), list):
+        # A slim settled entry (Track 105A) holds no `states` by design: its
+        # totals live on the `settled_days` record, so it is migrated, never
+        # pre-track, and `state` stays `ready` for a fully memoized cache.
+        if (
+            value.get("no_ledger") is True
+            or value.get("settled") is True
+            or isinstance(value.get("states"), list)
+        ):
             migrated += 1
         else:
             pre_track += 1
@@ -387,6 +410,21 @@ def _scan_codex_root(
     The returned ``settled_days`` is the PRIOR map unchanged unless the pass
     completed — additions, evictions and ``check_seq`` bumps from a partial
     pass roll back.
+
+    Track 105A: a settled record stores its aggregate contribution once
+    (``totals`` and ``partial_days``), so the reduction runs over the staged
+    entries OUTSIDE every record and merges each record's memo. That is exact
+    only while a record's lineages are closed, and ``_freeze_settled_days``
+    proves closure only when a record first settles. So after the per-file
+    loop this re-checks every carried record against every staged entry: a
+    record holding a turn id that also appears outside it (a later fork or
+    resume of an old session, or another record) is un-carried, its files are
+    re-read through the same per-file body, and it leaves the map for the pass.
+    Each entry reaches ``_aggregate`` once: a newly frozen record, and a
+    pre-105A record on the upgrade pass, as one call over its own entries in
+    the same live-then-archive path order as the whole-corpus reduction.
+    A COMPLETE pass then replaces every entry under
+    a record with its slim shape; a partial pass slims nothing.
     """
     prior_settled = settled_days or {}
     archive_groups: dict[str, list[Path]] = {}
@@ -458,51 +496,86 @@ def _scan_codex_root(
         archive_groups=archive_groups,
     )
     key_day: dict[str, str | None] = {}
-    for path, base, rel in rollouts:
-        if rel is not None and rel in carried_days:
-            continue
-        if host_usage._expired(deadline):
-            return host_usage._incomplete("deadline"), staged, learned, prior_settled
-        key = host_usage._cache_key(path, root=base, canonical_root=canonical_roots[base])
-        try:
-            try:
-                before = host_usage._regular_stat(path)
-            except host_usage._ReadFailure as failure:
-                if (
-                    base is root
-                    and isinstance(failure.__cause__, FileNotFoundError)
-                    and path.name in archived_names
-                ):
-                    # Codex archived it after the live listing. The archived
-                    # copy is read in this pass, so the move is not a failure.
-                    # Any other stat error, or an archived path that vanished,
-                    # stays io_error.
-                    continue
-                raise
-            existing = _validated_entry(cached_files.get(key))
-            entry = _cache_hit(path, before, existing, deadline)
-            if entry is None:  # cache miss
-                resume = _resumable_entry(path, before, existing, deadline)
-                entry = (
-                    _resume_rollout(path, before, resume, deadline)
-                    if resume is not None
-                    else _read_full_rollout(path, before, deadline)
-                )
-                learned = True
-            staged[key] = entry
-            key_day[key] = rel
-        except host_usage._ReadFailure as failure:
-            # Hand back what was staged BEFORE the failure. Each entry is a
-            # complete, fingerprinted parse of one stable file, so it stays
-            # valid regardless of what a later file did. The result is still
-            # incomplete — the caller publishes nothing — but the work is not
-            # thrown away. See `read_codex_usage` for why that matters.
-            return host_usage._incomplete(failure.reason), staged, learned, prior_settled
 
-    try:
-        buckets = host_usage._aggregate(staged.values())
-    except host_usage._ReadFailure as failure:
-        return host_usage._incomplete(failure.reason), staged, learned, prior_settled
+    def read_rollouts(only: set[str] | None) -> host_usage.HostUsageResult | None:
+        """Stage the non-carried rollouts, or just those under ``only``.
+
+        Returns an incomplete result to hand back with what is staged so far,
+        or ``None`` when every selected rollout is staged.
+        """
+        nonlocal learned
+        for path, base, rel in rollouts:
+            if only is None:
+                if rel is not None and rel in carried_days:
+                    continue
+            elif rel not in only:
+                continue
+            if host_usage._expired(deadline):
+                return host_usage._incomplete("deadline")
+            key = host_usage._cache_key(path, root=base, canonical_root=canonical_roots[base])
+            try:
+                try:
+                    before = host_usage._regular_stat(path)
+                except host_usage._ReadFailure as failure:
+                    if (
+                        base is root
+                        and isinstance(failure.__cause__, FileNotFoundError)
+                        and path.name in archived_names
+                    ):
+                        # Codex archived it after the live listing. The archived
+                        # copy is read in this pass, so the move is not a failure.
+                        # Any other stat error, or an archived path that vanished,
+                        # stays io_error.
+                        continue
+                    raise
+                existing = _validated_entry(cached_files.get(key))
+                entry = _cache_hit(path, before, existing, deadline)
+                if entry is None:  # cache miss
+                    resume = _resumable_entry(path, before, existing, deadline)
+                    entry = (
+                        _resume_rollout(path, before, resume, deadline)
+                        if resume is not None
+                        else _read_full_rollout(path, before, deadline)
+                    )
+                    learned = True
+                staged[key] = entry
+                key_day[key] = rel
+            except host_usage._ReadFailure as failure:
+                # Hand back what was staged BEFORE the failure. Each entry is a
+                # complete, fingerprinted parse of one stable file, so it stays
+                # valid regardless of what a later file did. The result is still
+                # incomplete — the caller publishes nothing — but the work is not
+                # thrown away. See `read_codex_usage` for why that matters.
+                return host_usage._incomplete(failure.reason)
+        return None
+
+    stopped = read_rollouts(None)
+    if stopped is not None:
+        return stopped, staged, learned, prior_settled
+    # Closure re-check (criterion 10): a memo is additive only while its
+    # record's lineages are closed, and a later fork or resume can share a
+    # settled turn. Un-carry each violator and read its files like any
+    # evicted day; their entries can in turn expose another record, so repeat.
+    while unclosed := _unclosed_settled_records(staged, carried_days, settled_updates):
+        for rel in unclosed:
+            carried_days.discard(rel)
+            for key in settled_updates.pop(rel)["keys"]:
+                staged.pop(key, None)
+        stopped = read_rollouts(unclosed)
+        if stopped is not None:
+            return stopped, staged, learned, prior_settled
+
+    # Parsing stays newest-first for deadline progress. Reduction needs one
+    # stable order across cold, carried and closure-evicted entries: the shared
+    # reducer keeps the first occurrence of an opening transition, including
+    # which file owns it. Appending a re-read after its later fork can otherwise
+    # suppress that opening and lose usage. Match a full live-then-archive walk.
+    ordered_keys = (
+        host_usage._cache_key(path, root=base, canonical_root=canonical_roots[base])
+        for path, base, _rel in sorted(rollouts, key=lambda item: (item[1] != root, item[0]))
+    )
+    staged = {key: staged[key] for key in ordered_keys if key in staged}
+
     new_settled = _freeze_settled_days(
         days + [(rel, archived_root, paths) for rel, paths in archive_groups.items()]
         if archived_root is not None
@@ -513,6 +586,13 @@ def _scan_codex_root(
         settled_updates=settled_updates,
         seq_counter=seq_counter,
     )
+    try:
+        buckets, new_settled = _reduce_with_settled_memos(staged, new_settled)
+    except host_usage._ReadFailure as failure:
+        return host_usage._incomplete(failure.reason), staged, learned, prior_settled
+    for record in new_settled.values():
+        for key in record["keys"]:
+            staged[key] = _slim_entry(staged[key])
     return (
         host_usage._result_from_buckets(
             buckets, partial_days=frozenset(buckets.unattributable_days)
@@ -521,6 +601,112 @@ def _scan_codex_root(
         learned,
         new_settled,
     )
+
+
+def _unclosed_settled_records(
+    staged: dict[str, _CacheEntry],
+    carried_days: set[str],
+    settled_updates: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Carried records that hold a turn id some entry outside them also holds.
+
+    The settle-time freeze rule, re-applied every pass (Track 105A): a record's
+    memoized totals equal its share of a whole-corpus reduction only while no
+    lineage crosses its edge. A turn id counts as shared when it appears under
+    another carried record or in any staged entry outside every record. Turn
+    ids come from slim and full entries alike.
+    """
+    shared = object()  # owner mark: held by a second record or by the outside
+    key_rel = {key: rel for rel in carried_days for key in settled_updates[rel]["keys"]}
+    owner_of: dict[str, Any] = {}
+    for key, entry in staged.items():
+        owner = key_rel.get(key)
+        for turn_id in entry.get("turn_ids") or ():
+            if owner_of.setdefault(turn_id, owner) != owner:
+                owner_of[turn_id] = shared
+    unclosed: set[str] = set()
+    for rel in carried_days:
+        for key in settled_updates[rel]["keys"]:
+            entry = staged.get(key)
+            if entry is not None and any(
+                owner_of[turn_id] is shared for turn_id in entry.get("turn_ids") or ()
+            ):
+                unclosed.add(rel)
+                break
+    return unclosed
+
+
+def _record_memo(entries: list[_CacheEntry]) -> dict[str, Any]:
+    """One settled record's aggregate contribution, from its own entries.
+
+    ``host_usage._aggregate`` over a closed set of entries, in the same path
+    order as the whole-corpus reduction. ``totals`` is ``{day: {model: Usage}}``;
+    ``partial_days`` holds the days whose increments carried a nonzero
+    ``cache_create``. Merged back,
+    they equal the record's share of a whole-corpus reduction, because every
+    sum is an integer sum.
+    """
+    reduced = host_usage._aggregate(entries)
+    return {
+        "totals": {
+            day: {
+                model: {name: usage[name] for name in TOKEN_FIELDS}
+                for model, usage in bucket["by_model"].items()
+            }
+            for day, bucket in reduced.by_day.items()
+        },
+        "partial_days": sorted(reduced.unattributable_days),
+    }
+
+
+def _reduce_with_settled_memos(
+    staged: dict[str, _CacheEntry], settled: dict[str, dict[str, Any]]
+) -> tuple[host_usage.HostUsageBuckets, dict[str, dict[str, Any]]]:
+    """Whole-corpus buckets from the unsettled entries plus every record's memo.
+
+    A record without a memo (newly frozen, or written before Track 105A) gets
+    one from its own entries first, so each entry is aggregated exactly once.
+    Returns the buckets and the settled map with every record memoized; the
+    input records are never mutated, because the caller may hand the prior map
+    back after a failure.
+    """
+    memoized: dict[str, dict[str, Any]] = {}
+    covered: set[str] = set()
+    entry_order = {key: index for index, key in enumerate(staged)}
+    for rel, record in settled.items():
+        covered.update(record["keys"])
+        if "totals" not in record:
+            # Persisted keys are hashes. Their ordering must not choose which
+            # rollout owns a shared opening when a record gets its first memo.
+            keys = sorted(record["keys"], key=entry_order.__getitem__)
+            record = {**record, **_record_memo([staged[key] for key in keys])}
+        memoized[rel] = record
+    buckets = host_usage._aggregate(entry for key, entry in staged.items() if key not in covered)
+    for record in memoized.values():
+        for day, models in record["totals"].items():
+            for model, usage in models.items():
+                host_usage._add_usage(buckets, day, model, usage)
+        buckets.unattributable_days.update(record["partial_days"])
+    return buckets, memoized
+
+
+def _slim_entry(entry: _CacheEntry) -> _CacheEntry:
+    """The settled shape of one entry: ``settled`` plus non-empty ``turn_ids``/``models``.
+
+    Kept fields and readers: ``turn_ids`` for ``_freeze_settled_days`` and
+    ``_unclosed_settled_records``, ``models`` for ``_diag_model_ids``,
+    ``settled`` for ``_validated_settled_entry`` and ``codex_usage_diag``.
+    Identity, fingerprint, resume and ``states`` fields are read only by cache
+    hits, resumes and ``_aggregate``, none of which touch a settled entry.
+    """
+    if entry.get("settled") is True:
+        return entry
+    slim: _CacheEntry = {"settled": True}
+    for name in ("turn_ids", "models"):
+        value = entry.get(name)
+        if value:
+            slim[name] = value  # type: ignore[literal-required]
+    return slim
 
 
 def _carry_settled_days(
@@ -550,6 +736,15 @@ def _carry_settled_days(
     verification per scan by stat digest of its listed files, so the live
     days' rotation keeps its rate. A group is gone when its date no longer
     lists any file.
+
+    Track 105A: a record with a memo (``totals``) requires slim entries for
+    every key; a full entry means a partial pass re-read a file, so the old
+    memo no longer proves its contribution. A record without a memo needs
+    full entries, as before. The key-set
+    check, the one digest attempt per kind and the ``check_seq`` rotation are
+    unchanged, and they are what evict a changed, added or removed file. Closure
+    against turn ids outside the record is NOT decided here: it needs every
+    staged entry, so ``_scan_codex_root`` re-checks it after the per-file loop.
     """
     carried: set[str] = set()
     updates: dict[str, dict[str, Any]] = {}
@@ -566,8 +761,14 @@ def _carry_settled_days(
         if day_keys_expected.get(rel) != set(record["keys"]):
             continue  # files added/removed; rescan the day per-file
         entries: dict[str, _CacheEntry] = {}
+        memoized = "totals" in record
         for key in record["keys"]:
-            entry = _validated_entry(cached_files.get(key))
+            cached = cached_files.get(key)
+            # A full entry beside a memo is progress from an incomplete
+            # eviction. Its refreshed turn ids may hide the old closure
+            # violation; do not reuse the old memo even when closure now holds.
+            # The per-file loop can reuse that full parse as an ordinary hit.
+            entry = _validated_settled_entry(cached) if memoized else _validated_entry(cached)
             if entry is None:
                 entries = {}
                 break
@@ -616,6 +817,12 @@ def _freeze_settled_days(
     the day — so carrying its ``files`` entries can never change
     ``_aggregate``'s union-find result, even across ``archived_sessions/``
     moves. Carried days keep their (possibly re-verified) record.
+
+    Track 105A: the sharing rule above holds only at settle time; carried
+    records are re-checked every pass by ``_unclosed_settled_records``, which
+    runs before this and removes any record that no longer qualifies. This body
+    reads no usage buckets and no slim entry's fields beyond ``turn_ids``: a
+    carried day is skipped before its entries' stat fields are touched.
     """
     turn_days: dict[str, set[str | None]] = {}
     day_keys: dict[str, list[str]] = {}
@@ -1246,8 +1453,14 @@ def _validated_settled_days(value: Any) -> dict[str, dict[str, Any]]:
 
     Additive on cache ``version`` 1: an older mm ignores the key, and a
     missing/malformed record simply means that day is scanned per-file.
-    Records only ever point INTO ``files`` (``keys``) — the ``CacheEntry``
-    rows stay the accounting source for ``_aggregate`` and diag counts.
+    Records point INTO ``files`` (``keys``).
+
+    Track 105A: a record may carry a memo, ``totals`` (``{day: {model: Usage}}``)
+    and ``partial_days``, which together replace its entries as the accounting
+    source. A record with neither is the pre-105A shape and is kept: its first
+    complete pass memoizes it. A record with exactly one of them, or a
+    malformed one, is dropped like any malformed record, so its files are read
+    per-file again.
     """
     if not isinstance(value, dict):
         return {}
@@ -1278,8 +1491,34 @@ def _validated_settled_days(value: Any) -> dict[str, dict[str, Any]]:
             valid = False
         if not valid or fields["count"] != len(keys):
             continue
-        out[rel] = {**fields, "dir_mtime_ns": dir_mtime_ns, "keys": list(keys)}
+        validated = {**fields, "dir_mtime_ns": dir_mtime_ns, "keys": list(keys)}
+        if "totals" in record or "partial_days" in record:
+            memo = _validated_settled_memo(record.get("totals"), record.get("partial_days"))
+            if memo is None:
+                continue
+            validated.update(memo)
+        out[rel] = validated
     return out
+
+
+def _validated_settled_memo(totals: Any, partial_days: Any) -> dict[str, Any] | None:
+    """A record's memo, or ``None`` when either half is malformed.
+
+    ``totals`` goes through Muse's frozen-day validator, then every day key
+    through ``_validated_day`` (the Muse one checks the shape only, and a cached
+    day becomes a synced key). ``partial_days`` must be a duplicate-free list of
+    valid days that all appear in ``totals``: ``_aggregate`` only marks a day
+    unattributable when it also buckets it.
+    """
+    days = host_usage._validated_muse_frozen_days(totals)
+    partial = host_usage._validated_turn_partial_days(partial_days)
+    if days is None or partial is None:
+        return None
+    if not all(host_usage._validated_day(day) for day in (*days, *partial)):
+        return None
+    if not set(partial) <= days.keys():
+        return None
+    return {"totals": days, "partial_days": partial}
 
 
 def _settled_record_digest(record: dict[str, Any]) -> tuple[int | None, int, int, int]:
@@ -1417,6 +1656,28 @@ def _validated_entry(value: Any) -> _CacheEntry | None:
         and len(model.encode("utf-8")) <= host_usage._MAX_MODEL_ID_BYTES
     ):
         out["last_model"] = model
+    return out
+
+
+def _validated_settled_entry(value: Any) -> _CacheEntry | None:
+    """Validate a slim settled entry (Track 105A); ``None`` for any other shape.
+
+    Only ``settled``, ``turn_ids`` and ``models`` exist on it. ``_validated_entry``
+    rejects this shape, so it can never be a cache hit.
+    """
+    if not isinstance(value, dict) or value.get("settled") is not True:
+        return None
+    out: _CacheEntry = {"settled": True}
+    turn_ids = host_usage._validated_table(
+        value.get("turn_ids", []), host_usage._MAX_PROMPT_ID_BYTES, allow_empty=True
+    )
+    models = host_usage._validated_table(value.get("models", []), host_usage._MAX_MODEL_ID_BYTES)
+    if turn_ids is None or models is None:
+        return None
+    if turn_ids:
+        out["turn_ids"] = turn_ids
+    if models:
+        out["models"] = models
     return out
 
 

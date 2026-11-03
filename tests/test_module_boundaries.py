@@ -1647,6 +1647,8 @@ CODEX_HOST_DEFINITIONS = frozenset(
     _read_rollout
     _reading_from_record
     _record_day
+    _record_memo
+    _reduce_with_settled_memos
     _resumable_entry
     _resume_rollout
     _same_cache_metadata
@@ -1654,10 +1656,14 @@ CODEX_HOST_DEFINITIONS = frozenset(
     _scan_codex_root
     _settled_record_digest
     _settled_rel_date
+    _slim_entry
+    _unclosed_settled_records
     _validated_counter_list
     _validated_entry
     _validated_pending
     _validated_settled_days
+    _validated_settled_entry
+    _validated_settled_memo
     _validated_turn_id
     _walk_from_entry
     codex_usage_diag
@@ -1685,7 +1691,7 @@ ALLOWED_HOST_ADAPTER_IMPORTS = frozenset(
 def test_codex_and_registry_single_ownership():
     from mind_meld import host_usage
 
-    assert len(CODEX_HOST_DEFINITIONS) == 50
+    assert len(CODEX_HOST_DEFINITIONS) == 56
     assert len(HOST_REGISTRY_DEFINITIONS) == 5
     codex_defs = _top_level_definitions((SRC / "hosts" / "codex.py").read_text(encoding="utf-8"))
     registry_defs = _top_level_definitions((SRC / "host_registry.py").read_text(encoding="utf-8"))
