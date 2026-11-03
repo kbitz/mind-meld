@@ -2369,14 +2369,21 @@ def diag(
         console.print(f"  error:        {safe_str(str(disc.get('error', '')))}")
     probers = disc.get("probers_ran") or []
     if not probers:
-        console.print("  probers:      (none ran — claude source disabled)")
+        console.print("  probers:      (none ran — no provider enabled or tool installed)")
     else:
         console.print(f"  probers:      {safe_str(', '.join(str(p) for p in probers))}")
     roots = disc.get("roots") or []
     console.print(f"  roots:        {len(roots)}")
+    found_by = {
+        str(item.get("path")): str(item.get("source"))
+        for item in disc.get("attribution") or []
+        if isinstance(item, dict)
+    }
     for raw in roots:
         shown = core._home_relative_path(Path(str(raw)))
-        console.print(f"    {safe_str(shown)}")
+        source = found_by.get(str(raw))
+        suffix = f" ({safe_str(source)})" if source else ""
+        console.print(f"    {safe_str(shown)}{suffix}")
     counts = (disc.get("rejects") or {}).get("counts") or {}
     parts = [
         f"{counts[reason]} {reason}" for reason in _DISCOVERY_REJECT_REASONS if counts.get(reason)

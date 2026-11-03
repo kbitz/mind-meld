@@ -9,7 +9,8 @@ Read BEFORE editing any of these:
 - `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
@@ -20,7 +21,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`.
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers).
 
 
 ## Sync diagnostic presentation (Track 78A)
@@ -73,6 +74,7 @@ terminal outcome and finalization order; auto-upgrade.md owns update eligibility
 - [Events tail in `_push_core`](#events-tail-in-_push_core-load-bearing-v0103-gated-v0122)
 - [Git subprocess environment](#git-subprocess-environment-load-bearing-track-55a)
 - [Cursor gate + recapture](#cursor-gate--recapture-load-bearing-track-30a)
+- [Provider and tool root probers](#provider-and-tool-root-probers-track-102a)
 - [Host-usage snapshot capture](#host-usage-snapshot-capture-load-bearing-track-19a)
 - [Track 22A consumer](#track-22a-consumer-last-known-good-inventory)
 - [Unified-agents renderer contract](#unified-agents-renderer-contract-track-67a-supersedes-23a)
@@ -123,7 +125,7 @@ Track 7B wires `events.py` (Track 7A foundation, v0.10.2) into the push hot path
 
 4. **Wall-clock budget (Codex C4 + C5; walk-scoped v0.12.9).** `WALK_TIME_BUDGET_AUTOPUSH_MS` (250) for `quiet=True` (autopush hook). `WALK_TIME_BUDGET_INTERACTIVE_MS` (500) remains the session-walk cap for init and for an attended push that sets `host_usage_interactive_budget_ms` without `capture_budget_ms`. With `capture_budget_ms` set, or with neither key set, the attended tail uses the capture partition's shared deadline, so that session walk is not capped at 500 ms (see **One capture budget** below). The deadline is plumbed through to `walk_session_metadata` via the new keyword-only `deadline_monotonic` param — `_read_cwd_from_latest_jsonl` reads jsonl line-by-line until a `cwd` field appears, so a single pathological project can blow the budget without per-project deadline checks. On autopush, init, and that legacy-only attended push, the `mm: notice: events tail budget exceeded` notice reports specifically on the **session-metadata walk**: `deadline` is reset (events_tail.py) AFTER `walk_git_projects` runs, so the git walk is NOT in this comparison — it self-bounds via its own `total_budget_ms` arg. A partitioned attended tail passes one `deadline_monotonic` through discovery, the git walk, token warm and the session walk, so earlier phases can exhaust that notice's deadline. Git-walk repository loss is a separate degradation (`session_walk_exceeded_budget` is the session-walk flag; do not rename it back). The flag that used to be called `walk_exceeded_budget` measured the session walk and is why git-walk loss was invisible. The check compares a `walk_done = time.monotonic()` snapshot captured the moment the session walk finishes against `deadline`, NOT a post-write `time.monotonic()`. **Load-bearing (v0.12.9):** the snapshot MUST precede `identity.gather_local_identities(allow_refresh=True)` (events_tail.py), whose cold path runs a synchronous refresh bounded by its OWN timeouts (`identity._GIT_GLOBAL_TIMEOUT_S` + `_PER_REPO_BUDGET_S` + `_GH_TIMEOUT_S` ≈ up to 10s, 7d TTL). Pre-v0.12.9 the check sat after the gather + write, so a routine cold identity refresh tripped the walk-budget notice even though the walk itself finished in ~200ms — a misleading signal (the gather emits its own `refreshing identity cache (one-off)` line; the two concerns are now orthogonal). `_run_events_backfill` mirrors this exactly: its `walk_done` snapshot precedes the deliberate `refresh_identity_cache(force=True)` init warm, which ALWAYS runs. Do NOT move either snapshot back below the identity gather. The notice remains a visible-failure-contract signal (the push/init proceeds regardless).
 
-**Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. Autopush, init, and a legacy-only attended push still run the git and session walks on separate budgets after that. A partitioned attended tail also clamps this discovery deadline to the shared tail deadline. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic Claude probes (the gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path). The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11-3.13 and return False on 3.14+ (see the Python 3.14 audit item in docs/TODOS.md); the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
+**Git-root discovery budget and reuse (Track 18C, classifier Track 29A).** Root discovery has its own cooperative deadline: `ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS` (50) for autopush and `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100) for interactive push and init. Autopush, init, and a legacy-only attended push still run the git and session walks on separate budgets after that. A partitioned attended tail also clamps this discovery deadline to the shared tail deadline. `events.discover_git_roots()` returns one frozen `GitRootDiscovery(roots, errors, exceeded)` that remains compatible with `roots, errors = ...`; capture retains that exact object and passes it to a cold tail gather or forced init identity refresh so one invocation never repeats the root probes. Explicit `[retro].repo_roots` classify before automatic probes. Their canonical order starts with Claude, then the provider and tool probers of Track 102A; incomplete passes rotate the automatic starting point ([below](#provider-and-tool-root-probers-track-102a)). The gstack prober was deleted in Track 29A — `repo-mode.json` never carried a root path — and Track 102A's census re-read gstack's project state and found no record naming a directory. The deadline is checked before every registry entry, JSONL file/line, and git-root classify step; classification is a `.git` + `HEAD`/`gitdir:` stat, not a `git rev-parse` subprocess. It is cooperative rather than a filesystem-interrupt guarantee: a system call already running may finish, but no later discovery step starts after expiry. Preserve successful roots and append the stable `git root discovery exceeded its time budget` forensic error with `exceeded=True`; never report it as a clean no-repositories result. `Path.exists()` / `Path.is_dir()` raise `PermissionError` on Python 3.11-3.13 and return False on 3.14+ (see the Python 3.14 audit item in docs/TODOS.md); the classifier body is `try/except OSError` and prober `validate()` sits inside the prober `try`, so one unreadable directory cannot abort the events tail. `mm diag` runs discovery at the autopush budget and is the support-facing observation surface.
 
 **Resumable Git discovery and capture (Track 82A).** The private local
 `GIT_CAPTURE_CACHE_PATH` JSON cache contains `projects`, `discovery_resume_after`,
@@ -493,6 +495,146 @@ The path-free `_GIT_WALK_DEGRADATION` phrase is `git walk dropped {n} repositori
 **`mm recapture [WINDOW]`** explicitly recovers historical intervals beyond automatic retained catch-up and retries persistent failures. Shape: write git-snapshot rows (marked `origin: recapture`, no mm-push) first, then run the ordinary push path. Catch ``SnapshotError`` from that push the same way interactive ``mm push`` does: print that the recapture was written locally but not synced, then the four-part refusal, exit 1, no traceback. A push that succeeds but **holds** an mm-events file because it was still changing (Track 75A, docs/invariants/sync.md "Complete snapshots") also takes the written-locally-but-not-synced exit 1, with the fix `mm push` once the file settles: any held mm-events path blocks, with no intersection refinement, and a held user file does not. Do **not** add a `recapture_requested` disjunct to the substantive-change gate (that re-opens the v0.12.2 phantom-change path). Do **not** route through `_run_events_backfill`. Window is `Nd`, default `30d` (= init backfill), min `1d`, max `90d`. Partial recovery exits 4 (exit 3 is `pull --conflict-mode fail`). Zero roots writes nothing and exits 1. Retros window by the COMMIT's date, not by when mm captured it: `mm recapture 90d` produces zero visible change on a `mm retro-fleet 7d` card. `_coverage_floor_from_files` still uses the event filename date by design.
 
 **Recapture walks Git on its own budget (Track 97A).** `events.RECAPTURE_PER_REPO_TIMEOUT_MS` (30 s) and `events.RECAPTURE_WALK_BUDGET_MS` (120 s) are chosen floors, not measurements at the 90-day window. `_prepare_recapture` passes both, read at call time, for `mm recapture` and its `--dry-run`. `walk_git_projects(per_repo_timeout_ms=...)` hands that value to every repository verbatim: no `PER_REPO_TIMEOUT_FLOOR_MS`, no `PER_REPO_TIMEOUT_CAP_MS`, no division by the repository count (the budget formula falls below 30 s above 32 repositories). Push, autopush and init pass no override and keep their existing budget selection and the 2 s cap, pinned by `test_push_and_autopush_walk_budgets_and_cap_are_unchanged`; the push inside a real recapture is an ordinary push. Repository discovery keeps `ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS` (100 ms); only the walk was widened. A repository that still outruns the budget is skipped as before: `timeout` when it alone ran past its 30 s, `budget_abort` when the walk ran past 120 s, with `Recapture incomplete` and exit 4 (preview: `Preview incomplete`, exit 0). The mm lock covers the walk and, for a real recapture, the subsequent row writes and ordinary push; `recapture` releases it in its `finally` block. While that lock is held, `mm push` refuses with the lock message and autopush records `lock-held`. Separately, interpreter shutdown joins any running worker after the lock is released: a `git log` started near the 120 s walk deadline can add about 30 s before process exit, plus its post-log work. This is not a 150 s bound on lock duration or total command time. The walk prints nothing while it runs.
+
+## Provider and tool root probers (Track 102A)
+
+Discovery reads the host records that name a working directory, not only Claude's
+project logs. `rootprobes.py` is a leaf (standard library and `token_usage` only)
+that owns the record shapes; `events._probe_host_records` owns the index, deadline
+and resume protocol, one generic helper for every prober. **No usage reader
+changes or is imported** (`test_events_imports_no_host_usage_reader`,
+`test_rootprobes_imports_only_token_usage_and_the_standard_library`): a record is
+read for its directory alone.
+
+**Registry order and gates.** Canonical precedence is `manual`, `claude`, then
+`rootprobes.PROBERS`: `paseo`, `mmm`, `agy`, `muse`, `cursor`, `codex`. Manual roots
+always run first. A fresh automatic pass uses that order; an incomplete pass resumes
+with later probers so a cold corpus cannot starve them. Duplicate roots use the
+first matching prober in canonical order, regardless of resume order. A provider runs under the
+consent its usage reader uses: its enabled sync source (`codex`, `muse`, `agy`; an
+implicit config adds `codex` when `~/.codex` exists, as `get_sources` does), or for
+Cursor `[retro] cursor_host_usage = true` (`mm_config.cursor_host_usage_enabled`). A
+tool runs when its record exists (`rootprobes.installed`): `~/.paseo/projects/projects.json`,
+`~/.mmm/items/`. gstack has no prober (census: `repo-mode.json`, `timeline.jsonl` and
+`learnings.jsonl` carry no directory).
+
+**Records read** (key names only; every read is bounded and opens the named file,
+no symlink, regular files only):
+
+| Prober | Record | Key | Unit and stamp |
+|---|---|---|---|
+| `codex` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, `archived_sessions/rollout-YYYY-MM-DD*.jsonl` first record, a `session_meta` | `payload.cwd` | live day directory `[dir mtime_ns]`; archived date group `[count, name digest]` |
+| `cursor` | `~/.cursor/acp-sessions/<id>/meta.json` | `cwd` | `acp/<id>`, immutable |
+| `cursor` | Conductor `cursor-sdk-store/<id>/agents.ndjson`; `index.db` `agents` | `cwd`; `workspace_ref` | `[mtime_ns, size]`; lstat of db, `-wal` and `-journal` |
+| `muse` | `~/.local/share/muse/sessions/YYYY/MM/DD/<session>/session.jsonl`, first 16 records | `payload.record.workspace_root` or `payload.record.command.session_metadata.workspace_root` | session, immutable |
+| `agy` | `~/.gemini/antigravity-cli/conversation_summaries.db` | `workspace_uris` (`file://` URIs, percent-decoded) | lstat of db, `-wal` and `-journal` |
+| `paseo` | `~/.paseo/projects/projects.json` | every item's `rootPath`, archived included | `[mtime_ns, size]` |
+| `mmm` | `~/.mmm/items/*.json` | top-level `repo` | item file, immutable |
+
+Recorded and not read: Codex `session_index.jsonl`, `state_5.sqlite` and Muse
+`session-index.db` (a versioned, undocumented schema and a WAL read cost more than
+the plain files they duplicate), Cursor `projects/*/repo.json` (`id` only), Paseo
+`workspaces.json`, gstack-extend `projects.json`.
+
+**Credential neighbours are never opened:** Cursor `projects/*` (`mcp-auth.json`) and
+`chats/*/*/store.db`, `~/.gemini/antigravity-cli/antigravity-oauth-token`,
+`~/.paseo/config.json`. Nothing lists those directories either. A new prober names
+its record files exactly; `test_credential_neighbours_are_never_opened` spies on
+`open`, `os.open`, `os.scandir` and `sqlite3.connect`. SQLite follows the
+Antigravity reader's pattern: `mode=ro`, `immutable=1` only without a `-wal`, a
+progress handler on the deadline, a lazy `import sqlite3`.
+
+**The index (`probe_index`, local only).** `GIT_CAPTURE_CACHE_PATH` gains
+`probe_index[name] = {"units": {key: [stamp, [roots]]}, "state": {}}`. A unit is
+re-read only when its stamp changed (`None` means immutable once read). The deadline
+is checked before every unit read; a listing the deadline cut returns the cached roots
+and marks discovery incomplete, and vanished units are pruned only after a complete
+listing. A unit whose read failed is a completed observation of no directories: a
+stamped unit is cached under its stamp, an immutable one is retried next push (a
+raised error would mark discovery partial forever on one bad record). Each named
+directory is resolved and classified once and only git roots are stored. A cached
+root that later stops being a git root is rejected by the registry and stripped from
+its unit (`_strip_probe_roots`), with its prior stamp and root retained under
+`state.retry_roots[key] = [stamp, [roots]]`. `_probe_host_records` reclassifies
+those formerly known roots next push; directories that have never been roots
+are never retained for retry. A changed stamp discards this old retry entry.
+
+Listing itself resumes: `rootprobes._listing_entries` retains host-record names,
+stat fields, the directory mtime observed before listing, and the next metadata-check position under `state.listing_steps`.
+Completed directory steps are reused instead of reopening a costly prefix.
+Archived Codex memo entries use that snapshot's mtime, so a directory changed
+during a partial listing cannot make old names look current.
+Cursor store stamps use `listing_stores`. `_probe_host_records` holds a complete
+`unit_listing` through its reading round, tracks `attempted_units`, and rotates
+`unit_after` so unfinished immutable records cannot starve unread units.
+`unit_remaining` acknowledges each unit after one attempt; `round_incomplete`
+remembers any interrupted reader. Once every unit has had a turn, listing
+snapshots and round bookkeeping are cleared even if a reader remains incomplete,
+so later records enter the next round. Pending reader progress survives. Partial listings
+never prune old units. Their names identify host records, not working directories.
+
+Large Codex groups and Cursor `agents.ndjson` files resume within a unit:
+`state.pending_units[key] = {"stamp": stamp, "reader": {}, "roots": []}`.
+`_probe_host_records` accumulates only classified roots; the reader owns its
+cursor (`after`, the last Codex filename, or `offset`, the Cursor byte offset).
+Stamp changes reset this progress. Codex's reader also keeps `waiting` filenames
+for empty or unfinished first records and a `retry` flag; `retry_after` resumes a
+retry round across deadlines so early unfinished files cannot starve later ones.
+After a Codex unit's initial scan, `scan_complete` drops its directory listing
+snapshot and retries only `waiting` filenames; a changed unit stamp resets it.
+It attempts each file at most once per push, continues to later files, and retains progress for the next
+push even after a complete pass. Pending metadata alone is not a deadline error.
+Muse streams that end before their 16-record scan finds metadata, and Cursor ACP
+records without a cwd, are retried rather than frozen as empty immutable units.
+Codex and Cursor streams acknowledge a filename or byte offset only after the
+generic consumer has classified that record's cwd (including a negative result).
+An interrupted record is replayed; an acknowledged prefix is not. Small atomic
+JSON/SQLite results retain a numeric `classified` position in the pending unit;
+unclassified working-directory strings are never persisted. Known-root retry
+classification has its own `retry_classification` positions. The bounded JSON
+read/decode remains a cooperative atomic operation, not an interruptible parser;
+classification never starts a new filesystem check after the deadline expires.
+JSONL byte caps and deadlines are enforced before the shared reader can drain an
+oversized line; discovery does not print that reader's path-bearing notice.
+Both state maps lose vanished units after a complete listing. A prober that no longer runs (provider disabled,
+tool uninstalled) loses its index on complete discovery. `_normalize_git_capture_cache`
+keeps every valid part of `probe_index`; other cache writers normalize, then mutate,
+and so keep it. The Codex head scan reads the first 4 KiB and takes `payload.cwd`
+from it when `type` precedes `payload` (the current key order); any other shape falls
+back to parsing the whole first line.
+
+An incomplete registry pass persists `prober_resume_after` (normalized and merged
+by the discovery cache writer), so an early incomplete provider yields a turn to
+later providers on the next push. `PROBERS` order and duplicate-source precedence
+remain canonical; a complete pass clears the resume cursor. The registry does not
+reclassify roots that the current provider already classified in this invocation.
+Cached-root validation
+for these host-record probers retains only its remaining known roots in
+`probe_index[name].state.validation_remaining`; a deadline preserves cached roots in the explicitly partial
+result and resumes their validation later, including when resolution itself
+crosses the deadline. Resolution failures finish that root's validation turn and
+record a typed prober error; they cannot indefinitely exempt other roots from
+validation or authorize cursor retirement. Claude keeps its existing
+indexed-refresh/completeness contract.
+
+**Errors carry no message.** A host-record prober that raises records
+`"<name> prober: <ExceptionType>"` only: a message can hold a record path, and
+discovery errors reach the events wire. (Claude's and the manual prober keep their
+messages.) An unreadable root directory raises rather than reading as empty.
+
+**Working directories stay local.** Paths live in the local cache and local `mm diag`
+output (text and JSON). No directory goes on the events wire, and no session is attributed to a
+project from its working directory; discovery finds repositories, nothing more.
+
+**A newly found repository needs `mm recapture`.** A root with no repository cursor
+walks from the push cursor, so its commits older than that are not collected by the
+next push; `mm recapture <window>` collects them
+(`test_new_root_walks_from_the_push_cursor_and_recapture_reaches_history`). Discovery
+does not pin new roots to a window: that would change capture semantics.
+
+**`mm diag`** labels each root line with the prober that found it; the JSON already
+carries `attribution`. Paseo worktrees under `~/.paseo/worktrees/` deduplicate to their
+repository by common Git directory, unchanged.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 

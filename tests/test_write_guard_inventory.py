@@ -498,6 +498,22 @@ REVIEWED = {
             "sqlite3.connect(uri, uri=True, isolation_level=None, timeout=min(remaining, 5.0))",
         ],
     ),
+    "rootprobes.py:_open_regular": (
+        "read-only",
+        "O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC open of one named host record; "
+        "regular files only, never a credential neighbour (Track 102A)",
+        [
+            "os.open(path, flags)",
+        ],
+    ),
+    "rootprobes.py:_sqlite_first_column": (
+        "read-only",
+        "read-only SQLite URI (mode=ro, query_only); _check_home refuses the real account "
+        "home under pytest (Track 102A)",
+        [
+            "sqlite3.connect(uri, uri=True, isolation_level=None, timeout=min(remaining, 1.0))",
+        ],
+    ),
     "host_usage.py:_read_cursor_file": (
         *_READ_ONLY,
         [

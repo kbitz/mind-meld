@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.7] - 2026-11-03
+
+**`mm` finds Git repositories from every enabled agent's working directories, not only Claude Code.** Codex, Cursor, Muse, and Antigravity count when those providers are enabled. Cursor still needs `[retro] cursor_host_usage = true`. Installed Paseo projects and mmm factory items count too. `mm diag` names the source that found each root.
+
+### Added
+
+- Discovery reads Codex rollouts, Cursor ACP and Conductor sessions, Muse sessions, and Antigravity conversation summaries, plus Paseo's project list and mmm items when those tools are installed.
+- A large first index continues on later `mm push` runs until `mm diag` shows discovery complete.
+
+### Changed
+
+- `[retro] repo_roots` stays for repositories none of those sources name. Pins for repositories discovery now finds can be removed.
+- A repository found for the first time is captured from this Mac's push cursor forward. Run `mm recapture 30d` once after discovery completes to collect earlier commits.
+
 ## [1.12.6] - 2026-11-03
 
 **A later `mm push` reuses Codex totals for days it has already settled, and a push that stops early keeps the last complete totals.** Closed days are not parsed again to add the same numbers. An unfinished read does not publish a partial Codex total; that day is read again on the next complete push.

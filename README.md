@@ -16,6 +16,16 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Git-root discovery reads more records (Track 102A):** besides Claude Code's project
+logs, discovery now finds repositories from the working directories recorded by Codex
+(rollouts), Cursor (ACP and Conductor sessions; needs `[retro] cursor_host_usage = true`),
+Muse and Antigravity when those providers are enabled, and from Paseo's project list and
+the mmm factory's items when they are installed. `mm diag` names the source of each root.
+After updating, run `mm push` until `mm diag` shows discovery `complete` (a first
+index of a large Codex or Cursor history spreads over a few pushes), then run
+`mm recapture 30d` once to collect commits from repositories discovery has just found.
+Pins in `[retro] repo_roots` for repositories these sources now name can be removed.
+
 **Attended usage reads get 3,000 ms and a fair share (Track 101A):** the attended
 host-usage default (`host_usage_interactive_budget_ms`) rises from 500 ms to 3,000 ms,
 host reads (sweep plus inline warm) now get up to three fifths of `capture_budget_ms`
@@ -1251,7 +1261,7 @@ The link is created on `mm init` and re-checked by each push **for agents author
 
 To filter to your own commits only, the skill consults `git config --global user.email` plus any `[retro].author_emails` aliases in `~/.config/mind-meld/config.toml`. Pass `--no-author-filter` to render every fleet commit. To override the events directory (custom `mm-events` path), set `MM_EVENTS_DIR=/path/to/events` before invoking.
 
-**Pin repositories this Mac should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic Claude project discovery, and they are the *only* discovery mechanism on a machine where the `claude` source is disabled. Verify with `mm diag`:
+**Pin repositories this Mac should capture** with `[retro] repo_roots` in `~/.config/mind-meld/config.toml`. Paths must be absolute (or start with `~`). The setting is per-machine and is not synced. Manual roots are classified before automatic discovery, which reads the logs of every enabled provider (Claude Code, Codex, Cursor with `[retro] cursor_host_usage = true`, Muse and Antigravity) and, when installed, Paseo's project list and the mmm factory's items; `repo_roots` remains for repositories none of those names. Verify with `mm diag`, which labels each root with the source that found it:
 
 ```toml
 [retro]
@@ -1260,6 +1270,8 @@ repo_roots = [
   "/Users/you/src/bolt",
 ]
 ```
+
+A repository discovery finds for the first time is captured from this Mac's capture cursor forward, so its commits from before that point are not collected on the next `mm push`: run `mm recapture 30d` (or the window you need) once to bring them in.
 
 Historical capture gaps can be repaired on the Mac that owns the repositories: `mm recapture 7d`. Recapture scans local Git history and syncs new snapshot rows. It does not change commit dates: a commit from June appears only in a retro window containing June. Verify a recovery by rendering the same window — `mm recapture 90d` then `mm retro-fleet 90d`. Repeat on each Mac that owns missing repositories. `_coverage_floor_from_files` still uses the event filename date, so `## Trends vs prior Nd` can stay "unavailable" on a young machine even after a successful recovery — that is correct by design.
 
@@ -1719,7 +1731,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo Claude Code has no session for, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 

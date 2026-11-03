@@ -44,6 +44,7 @@ see TypedDict definitions below.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 import inspect
 import json
@@ -66,7 +67,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypedDict
 
 from mind_meld import config as mm_config
-from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, token_usage
+from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, rootprobes, token_usage
 from mind_meld.config import DEFAULT_MAX_FILE_SIZE, MM_INTERNAL_SOURCE_NAMES
 from mind_meld.safety import safe_terminal_str
 
@@ -535,6 +536,7 @@ def _default_git_capture_cache() -> dict:
         "version": 1,
         "projects": {},
         "discovery_resume_after": None,
+        "prober_resume_after": None,
         # Per-Claude-root rotation cursors: {str(claude_dir): last project}.
         "session_resume_after": {},
         "pending_refresh_since": None,
@@ -542,7 +544,35 @@ def _default_git_capture_cache() -> dict:
         # path -> common git dir, so a removed checkout still maps to its store.
         "repo_cursor_stores": {},
         "incomplete_streak": 0,
+        # Track 102A: per host-record prober unit index (local only, never on the wire).
+        "probe_index": {},
     }
+
+
+def _normalize_probe_index(index: object) -> dict:
+    """Keep every well-formed prober record and unit; drop only malformed parts."""
+    if not isinstance(index, dict):
+        return {}
+    clean: dict[str, dict] = {}
+    for name, record in index.items():
+        if not isinstance(name, str) or not isinstance(record, dict):
+            continue
+        units = record.get("units")
+        state = record.get("state")
+        clean[name] = {
+            "units": {
+                key: unit
+                for key, unit in (units.items() if isinstance(units, dict) else [])
+                if isinstance(key, str)
+                and isinstance(unit, list)
+                and len(unit) == 2
+                and (unit[0] is None or isinstance(unit[0], list))
+                and isinstance(unit[1], list)
+                and all(isinstance(root, str) for root in unit[1])
+            },
+            "state": state if isinstance(state, dict) else {},
+        }
+    return clean
 
 
 def _normalize_git_capture_cache(cache: dict) -> None:
@@ -571,7 +601,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         and common
         and root in cache["repo_cursors"]
     }
-    for key in ("discovery_resume_after", "pending_refresh_since"):
+    for key in ("discovery_resume_after", "prober_resume_after", "pending_refresh_since"):
         if not isinstance(cache.get(key), str):
             cache[key] = None
     resume_map = cache.get("session_resume_after")
@@ -588,6 +618,7 @@ def _normalize_git_capture_cache(cache: dict) -> None:
         cache["pending_refresh_since"] = None
     if type(cache.get("incomplete_streak")) is not int or cache["incomplete_streak"] < 0:
         cache["incomplete_streak"] = 0
+    cache["probe_index"] = _normalize_probe_index(cache.get("probe_index"))
 
 
 def read_git_capture_cache() -> dict:
@@ -698,33 +729,106 @@ def discover_git_roots(
     probers: list[tuple[str, Callable[..., list[Path]]]] = []
     # Track 29A deleted `_probe_gstack`: every live `repo-mode.json` carries
     # `{mode, top_pct, authors, total, computed}` — none of `repo_root` /
-    # `repo_path` / `root`. A "gstack" enabled source is now a no-op for
-    # discovery; the only automatic prober is `_probe_claude`.
+    # `repo_path` / `root`. Track 102A's census re-read gstack's project state
+    # (repo-mode.json, timeline.jsonl, learnings.jsonl) and found no record
+    # that names a directory, so a "gstack" enabled source stays a no-op for
+    # discovery. The registry runs `_probe_claude`, then the host-record
+    # probers in `rootprobes.PROBERS` order (cheap tools first, so a cold
+    # Codex or Cursor corpus cannot starve Paseo or mmm).
+    host_probers = (
+        [] if exceeded or deadline_expired() else _enabled_root_probers(config, enabled_sources)
+    )
+    host_prober_names = {prober.name for prober in host_probers}
     if "claude" in enabled_sources:
         probers.append(("claude", _probe_claude))
+    for host_prober in host_probers:
+        probers.append((host_prober.name, functools.partial(_probe_host_records, host_prober)))
 
-    for name, prober in probers:
-        if exceeded or deadline_expired():
+    ranks = {name: index for index, (name, _) in enumerate(probers)}
+    resume = cache.get("prober_resume_after")
+    ordered_probers = probers
+    if resume in ranks:
+        cut = ranks[resume] + 1
+        ordered_probers = probers[cut:] + probers[:cut]
+    for name, prober in ordered_probers:
+        if deadline_expired():
             mark_exceeded()
             break
+        cache["prober_resume_after"] = name
+        cache.pop("_probe_validated", None)
         try:
             candidates = prober(deadline_monotonic=deadline_monotonic, cache=cache, since=since)
             probers_ran.append(name)
             indexed_complete = cache.pop("_discovery_complete", None)
             if indexed_complete is not None:
+                accepted = set(cache.pop("_probe_validated", []))
+                deadline_bound = name in host_prober_names
+                # Claude's existing indexed-refresh/completeness contract is
+                # separate; this change bounds the new host-record registry.
+                validation_state = (
+                    cache["probe_index"].setdefault(name, {"units": {}, "state": {}})["state"]
+                    if deadline_bound
+                    else {}
+                )
+                remaining = validation_state.get("validation_remaining")
+                names = {str(candidate) for candidate in candidates}
+                if isinstance(remaining, list) and all(isinstance(root, str) for root in remaining):
+                    remaining = [
+                        root for root in remaining if root in names and root not in accepted
+                    ]
+                    accepted.update(names - set(remaining))
+                else:
+                    remaining = sorted(names - accepted)
+                candidates.sort(key=lambda p: (str(p) not in accepted, str(p)))
                 for candidate in candidates:
-                    try:
-                        resolved = candidate.resolve()
-                    except PermissionError:
-                        record_reject("unreadable", candidate)
-                        continue
-                    except (OSError, RuntimeError, ValueError):
-                        record_reject("gone", candidate)
-                        continue
+                    if str(candidate) in accepted or (deadline_bound and deadline_expired()):
+                        resolved = candidate
+                        valid = True
+                        if str(candidate) not in accepted:
+                            # Retain previously classified roots on a partial
+                            # pass; their validation cursor resumes next time.
+                            mark_exceeded()
+                    else:
+                        try:
+                            resolved = candidate.resolve()
+                        except PermissionError:
+                            record_reject("unreadable", candidate)
+                            if str(candidate) in remaining:
+                                remaining.remove(str(candidate))
+                            if deadline_bound:
+                                errors.append(f"{name} prober: PermissionError")
+                            continue
+                        except (OSError, RuntimeError, ValueError) as e:
+                            record_reject("gone", candidate)
+                            if str(candidate) in remaining:
+                                remaining.remove(str(candidate))
+                            if deadline_bound:
+                                errors.append(f"{name} prober: {type(e).__name__}")
+                            continue
+                        if deadline_bound and deadline_expired():
+                            mark_exceeded()
+                            resolved = candidate
+                            valid = True
+                        else:
+                            valid = _classify_git_root(resolved)
+                            if str(candidate) in remaining:
+                                remaining.remove(str(candidate))
                     if resolved in seen:
+                        # Resuming work must not change canonical source precedence.
+                        attribution[:] = [
+                            (
+                                name
+                                if root == resolved
+                                and source != "manual"
+                                and ranks.get(name, -1) < ranks.get(source, -1)
+                                else source,
+                                root,
+                            )
+                            for source, root in attribution
+                        ]
                         continue
                     seen.add(resolved)
-                    if _classify_git_root(resolved):
+                    if valid:
                         roots.append(resolved)
                         attribution.append((name, resolved))
                     else:
@@ -735,14 +839,25 @@ def discover_git_roots(
                         for entry in cache["projects"].values():
                             if entry.get("git_root") in stale_roots:
                                 entry["git_root"] = None
+                        _strip_probe_roots(cache, name, stale_roots)
+                if not remaining:
+                    validation_state.pop("validation_remaining", None)
+                else:
+                    validation_state["validation_remaining"] = remaining
                 if not indexed_complete:
                     mark_exceeded()
             elif not validate(candidates, name):
                 break
         except Exception as e:
+            cache.pop("_probe_validated", None)
             if name not in probers_ran:
                 probers_ran.append(name)
-            errors.append(f"{name} prober: {type(e).__name__}: {e}")
+            if name in host_prober_names:
+                # Host-record probers name only the exception type: a message
+                # can carry a record path, and errors reach the events wire.
+                errors.append(f"{name} prober: {type(e).__name__}")
+            else:
+                errors.append(f"{name} prober: {type(e).__name__}: {e}")
             continue
 
     if deadline_expired() and "claude" not in probers_ran:
@@ -750,12 +865,18 @@ def discover_git_roots(
     roots, attribution = _dedup_discovered_roots(roots, attribution, cache=cache)
     _remember_cursor_stores(cache)
     if not exceeded and not errors:
+        cache["prober_resume_after"] = None
         # Complete discovery is authoritative for source removal as well as
         # additions. Historical cursors must not keep a deselected repo pending.
         if "claude" not in enabled_sources:
             cache["projects"] = {}
             cache["discovery_resume_after"] = None
             cache["pending_refresh_since"] = None
+        # Likewise a host-record prober that no longer runs (provider disabled
+        # or tool uninstalled) takes its index with it.
+        registered = {name for name, _ in probers}
+        for stale_name in [n for n in cache["probe_index"] if n not in registered]:
+            del cache["probe_index"][stale_name]
         active_roots = {str(root) for root in roots}
         # Retire cursors of undiscovered roots, but fold a sibling worktree's
         # older cursor into the retained representative of the same object
@@ -799,7 +920,13 @@ def discover_git_roots(
             ) as locked:
                 _normalize_git_capture_cache(locked.data)
                 # Merge only discovery-owned fields; cursor commits have their own lock interval.
-                for key in ("projects", "discovery_resume_after", "pending_refresh_since"):
+                for key in (
+                    "projects",
+                    "discovery_resume_after",
+                    "prober_resume_after",
+                    "pending_refresh_since",
+                    "probe_index",
+                ):
                     locked.data[key] = cache[key]
                 for root, ts in cache["repo_cursors"].items():
                     if original_cache["repo_cursors"].get(root) != ts:
@@ -846,12 +973,38 @@ def _enabled_source_names(config: dict) -> set[str]:
         names = {s.get("name") for s in explicit if isinstance(s, dict)}
     else:
         # Default sources include claude (and gstack if ~/.gstack exists, and
-        # mm-events). Only "claude" has a discovery prober after Track 29A.
+        # mm-events). "gstack" has no discovery prober (Track 29A). Codex joins
+        # an implicit config when ~/.codex exists, mirroring `get_sources`
+        # (Track 102A); muse and agy are opt-in sources, so only an explicit
+        # list names them.
         names = {"claude"}
         if (Path.home() / ".gstack").exists():
             names.add("gstack")
+        if mm_config._optional_host_present(rootprobes._discovery_home() / ".codex"):
+            names.add("codex")
     disabled = set(sync_cfg.get("disabled_sources") or [])
     return {n for n in names if isinstance(n, str) and n not in disabled}
+
+
+def _enabled_root_probers(config: dict, enabled_sources: set[str]) -> list[rootprobes.RootProber]:
+    """Host-record probers that may run, in registry order.
+
+    A provider runs under the consent its usage reader already uses: its
+    enabled sync source (codex, muse, agy) or, for Cursor, the usage-only
+    consent bit. A tool runs when its record exists.
+    """
+    home = rootprobes._discovery_home()
+    selected: list[rootprobes.RootProber] = []
+    for prober in rootprobes.PROBERS:
+        if prober.kind == "tool":
+            allowed = rootprobes.installed(prober, home)
+        elif prober.name == "cursor":
+            allowed = mm_config.cursor_host_usage_enabled(config)
+        else:
+            allowed = prober.name in enabled_sources
+        if allowed:
+            selected.append(prober)
+    return selected
 
 
 def _claude_projects_dir() -> Path:
@@ -1041,6 +1194,271 @@ def _probe_claude(
     if not deferred:
         cache["pending_refresh_since"] = None
     return list(dict.fromkeys(roots))
+
+
+def _strip_probe_roots(cache: dict, name: str, stale: set[str]) -> None:
+    """Remove roots that stopped being git roots from one prober's cached units."""
+    record = cache.get("probe_index", {}).get(name)
+    units = record.get("units") if isinstance(record, dict) else None
+    state = record.get("state") if isinstance(record, dict) else None
+    if not isinstance(state, dict):
+        return
+    retry = _probe_state_map(state, "retry_roots")
+    for key, unit in (units or {}).items():
+        if isinstance(unit, list) and len(unit) == 2 and isinstance(unit[1], list):
+            removed = [root for root in unit[1] if root in stale]
+            prior = retry.get(key)
+            old = prior[1] if _valid_probe_unit(prior) and prior[0] == unit[0] else []
+            if removed:
+                retry[key] = [unit[0], list(dict.fromkeys([*old, *removed]))]
+            unit[1] = [root for root in unit[1] if root not in stale]
+
+
+def _probe_state_map(state: dict, name: str) -> dict:
+    value = state.get(name)
+    if not isinstance(value, dict):
+        value = state[name] = {}
+    return value
+
+
+def _valid_probe_unit(unit: object) -> bool:
+    return (
+        isinstance(unit, list)
+        and len(unit) == 2
+        and (unit[0] is None or isinstance(unit[0], list))
+        and isinstance(unit[1], list)
+        and all(isinstance(root, str) for root in unit[1])
+    )
+
+
+def _classify_named_dirs(
+    dirs: Sequence[object] | None,
+    *,
+    deadline_monotonic: float | None = None,
+    progress: dict | None = None,
+) -> list[str]:
+    """Consume a bounded directory prefix; persist only its numeric position."""
+    progress = progress if progress is not None else {}
+    offset = progress.get("classified", 0)
+    if not isinstance(offset, int) or offset < 0:
+        offset = 0
+    roots: list[str] = []
+    values = dirs or []
+    for index in range(offset, len(values)):
+        if _deadline_expired(deadline_monotonic):
+            break
+        raw = values[index]
+        resolved = None
+        if isinstance(raw, str) and raw and "\x00" not in raw:
+            try:
+                candidate = Path(raw).expanduser()
+                if candidate.is_absolute():
+                    resolved = candidate.resolve()
+            except (OSError, RuntimeError, ValueError):
+                pass
+        if resolved is not None:
+            if _deadline_expired(deadline_monotonic):
+                break
+            if _classify_git_root(resolved) and str(resolved) not in roots:
+                roots.append(str(resolved))
+        progress["classified"] = index + 1
+    return roots
+
+
+def _probe_host_records(
+    prober: rootprobes.RootProber,
+    *,
+    deadline_monotonic: float | None = None,
+    cache: dict | None = None,
+    since: datetime | None = None,
+) -> list[Path]:
+    """Index a host's directory-naming records, one unit at a time (Track 102A).
+
+    Follows ``_probe_claude``'s contract: the index lives in the private
+    capture cache (``probe_index[name] = {"units": {key: [stamp, [roots]]},
+    "state": {}}``), a unit is re-read only when its stamp changed (a ``None``
+    stamp means immutable once read), and a deadline spreads a cold corpus
+    over pushes. ``cache["_discovery_complete"]`` tells the registry whether
+    every unit is indexed. The deadline is checked before every unit read;
+    a listing the deadline cut returns the cached roots, and vanished units
+    are pruned only after a complete listing.
+
+    A unit whose read failed (``None``) is a completed observation of no
+    directories: a stamped unit is cached under its stamp, an immutable one is
+    retried next push. ``state.pending_units`` retains reader progress and
+    already classified roots across deadlines; its reader retry flag also
+    revisits unfinished metadata after a complete pass. ``state.retry_roots``
+    retains only previously known roots rejected by the registry, so temporary
+    absence can recover without a changed host record. Both maps are pruned
+    with their units and invalidated on stamp changes. Only git roots are
+    stored. ``since`` is unused: a newly found root walks from the
+    push cursor, so earlier commits need ``mm recapture <window>``.
+    """
+    cache = cache if cache is not None else _default_git_capture_cache()
+    index = cache.get("probe_index")
+    if not isinstance(index, dict):
+        index = cache["probe_index"] = {}
+    record = index.get(prober.name)
+    if not (
+        isinstance(record, dict)
+        and isinstance(record.get("units"), dict)
+        and isinstance(record.get("state"), dict)
+    ):
+        record = index[prober.name] = {"units": {}, "state": {}}
+    units: dict[str, list] = record["units"]
+    pending = _probe_state_map(record["state"], "pending_units")
+    retry = _probe_state_map(record["state"], "retry_roots")
+    home = rootprobes._discovery_home()
+
+    def cached_roots() -> list[Path]:
+        found = [root for unit in units.values() for root in unit[1]]
+        found.extend(
+            root for progress in pending.values() for root in _pending_probe_roots(progress)
+        )
+        return [Path(root) for root in dict.fromkeys(found)]
+
+    state = record["state"]
+    listing = state.get("unit_listing")
+    if not (
+        isinstance(listing, list)
+        and all(
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+            and isinstance(item[0], str)
+            and (item[1] is None or isinstance(item[1], (list, tuple)))
+            for item in listing
+        )
+    ):
+        listing = prober.list_units(home, state, deadline_monotonic)
+        if listing is None:
+            cache["_discovery_complete"] = False
+            return cached_roots()
+        state["unit_listing"] = listing
+    listed = {key for key, _stamp in listing}
+    attempted = _probe_state_map(state, "attempted_units")
+    retry_classification = _probe_state_map(state, "retry_classification")
+    for records in (units, pending, retry, attempted, retry_classification):
+        for key in records.keys() - listed:
+            del records[key]
+    after = state.get("unit_after")
+    if after in [key for key, _stamp in listing]:
+        cut = next(i for i, (key, _) in enumerate(listing) if key == after) + 1
+        ordered = listing[cut:] + listing[:cut]
+    else:
+        ordered = listing
+    # Unobserved records get a turn before failed immutable records are retried.
+    ordered = [item for item in ordered if item[0] not in attempted] + [
+        item for item in ordered if item[0] in attempted
+    ]
+    remaining = state.get("unit_remaining")
+    if not isinstance(remaining, list) or not all(isinstance(key, str) for key in remaining):
+        remaining = [key for key, _ in ordered]
+    remaining = [key for key in remaining if key in listed]
+    state["unit_remaining"] = remaining
+    stamps = dict(listing)
+    for key in list(remaining):
+        stamp = stamps[key]
+        stamp = list(stamp) if isinstance(stamp, tuple) else stamp
+        unit = units.get(key)
+        progress = pending.get(key)
+        prior = retry.get(key)
+        if prior is not None and not (_valid_probe_unit(prior) and prior[0] == stamp):
+            retry.pop(key, None)
+            retry_classification.pop(key, None)
+            prior = None
+        if (
+            unit is not None
+            and unit[0] == stamp
+            and not isinstance(progress, dict)
+            and prior is None
+        ):
+            remaining.remove(key)
+            continue
+        if _deadline_expired(deadline_monotonic):
+            break
+        # One attempt per listed unit finishes a round even if some records
+        # remain incomplete. The next round refreshes inventory before retries.
+        remaining.remove(key)
+        state["unit_after"] = key
+        if prior is not None:
+            retry_progress = retry_classification.setdefault(key, {})
+            recovered = _classify_named_dirs(
+                prior[1], deadline_monotonic=deadline_monotonic, progress=retry_progress
+            )
+            if unit is not None:
+                unit[1] = list(dict.fromkeys([*unit[1], *recovered]))
+            cache.setdefault("_probe_validated", []).extend(recovered)
+            if retry_progress.get("classified", 0) < len(prior[1]):
+                state["round_incomplete"] = True
+                continue
+            prior[1] = [root for root in prior[1] if unit is None or root not in unit[1]]
+            state["retry_classification"].pop(key, None)
+            if not prior[1]:
+                retry.pop(key, None)
+            if unit is not None and unit[0] == stamp and not isinstance(progress, dict):
+                continue
+        if not (
+            isinstance(progress, dict)
+            and progress.get("stamp") == stamp
+            and isinstance(progress.get("reader"), dict)
+            and isinstance(progress.get("roots"), list)
+            and all(isinstance(root, str) for root in progress["roots"])
+        ):
+            progress = pending[key] = {"stamp": stamp, "reader": {}, "roots": []}
+        attempted[key] = stamp
+
+        def consume(raw: object) -> bool:
+            one: dict = {}
+            found = _classify_named_dirs([raw], deadline_monotonic=deadline_monotonic, progress=one)
+            if one.get("classified") != 1:
+                return False
+            progress["roots"] = list(dict.fromkeys([*progress["roots"], *found]))
+            cache.setdefault("_probe_validated", []).extend(found)
+            return True
+
+        if prober.consume_unit is not None:
+            dirs, completed = prober.consume_unit(
+                home, key, deadline_monotonic, progress["reader"], consume
+            )
+        elif prober.resume_unit is not None:
+            dirs, completed = prober.resume_unit(home, key, deadline_monotonic, progress["reader"])
+        else:
+            dirs, completed = prober.read_unit(home, key, deadline_monotonic)
+        # Small atomic JSON/SQLite results use an ordinal; native record streams
+        # invoke consume before advancing their seekable record cursor.
+        values = dirs or []
+        found = _classify_named_dirs(
+            values, deadline_monotonic=deadline_monotonic, progress=progress
+        )
+        progress["roots"] = list(dict.fromkeys([*progress["roots"], *found]))
+        cache.setdefault("_probe_validated", []).extend(found)
+        classified = progress.get("classified", 0) >= len(values)
+        if completed and classified:
+            if dirs is not None or stamp is not None:
+                units[key] = [stamp, progress["roots"]]
+            if progress["reader"].get("retry") is not True:
+                pending.pop(key, None)
+            progress.pop("classified", None)
+        else:
+            state["round_incomplete"] = True
+    complete = not remaining and not state.get("round_incomplete", False)
+    if not remaining:
+        for name in (
+            "unit_listing",
+            "unit_remaining",
+            "round_incomplete",
+            "listing_steps",
+            "listing_stores",
+        ):
+            state.pop(name, None)
+    cache["_discovery_complete"] = complete
+    return cached_roots()
+
+
+def _pending_probe_roots(progress: object) -> list[str]:
+    if isinstance(progress, dict) and isinstance(progress.get("roots"), list):
+        return [root for root in progress["roots"] if isinstance(root, str)]
+    return []
 
 
 def _read_cwd_from_latest_jsonl(

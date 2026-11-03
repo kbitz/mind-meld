@@ -43,6 +43,7 @@ EXTRACTED = [
     "initflow",
     "sourceflow",
     "host_registry",
+    "rootprobes",
     *HOST_ADAPTER_MODULES,
 ]
 
@@ -58,6 +59,7 @@ LEAVES = [
     "gitenv",
     "updateprogress",
     "projectid",
+    "rootprobes",
 ]
 
 
@@ -217,6 +219,40 @@ def test_projectid_leaf_imports_only_gitenv_safety_and_the_standard_library() ->
                 if alias.name.startswith("mind_meld.")
             )
     assert package_imports == {"gitenv", "safety"}, package_imports
+
+
+def _mind_meld_imports(path: Path) -> set[str]:
+    """Top-level ``mind_meld`` modules (``hosts.codex`` stays dotted) a file imports."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "mind_meld":
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mind_meld."):
+            imports.add((node.module or "").split(".", 1)[1])
+        elif isinstance(node, ast.Import):
+            imports.update(
+                alias.name.split(".", 1)[1]
+                for alias in node.names
+                if alias.name.startswith("mind_meld.")
+            )
+    return imports
+
+
+def test_rootprobes_imports_only_token_usage_and_the_standard_library() -> None:
+    """Track 102A: the host-record probers are a leaf events can import safely."""
+    assert _mind_meld_imports(SRC / "rootprobes.py") == {"token_usage"}
+
+
+def test_events_imports_no_host_usage_reader() -> None:
+    """Track 102A: discovery reads host records itself and changes no usage reader."""
+    imported = _mind_meld_imports(SRC / "events.py")
+    readers = {
+        name
+        for name in imported
+        if name in {"host_usage", "host_registry"} or name.startswith("hosts")
+    }
+    assert readers == set(), f"events.py must not import a host usage reader: {sorted(readers)}"
 
 
 _MAY_CREATE_CALLEES = {"_ensure_retro_skill_links", "_skill_links_check_due"}
