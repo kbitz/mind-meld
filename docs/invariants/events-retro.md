@@ -219,9 +219,10 @@ drops the whole record, so its files are read per-file again. A pre-105A record
 (neither half) is accepted and memoized on its first complete pass. A newly
 frozen record and a pre-105A one each get their memo from one `_aggregate` call
 over their own entries in the same path order as the whole-corpus reduction
-(`_record_memo`), so every
-entry reaches `_aggregate` exactly once per complete pass and the upgrade pass
-re-parses no unchanged, still-closed settled group. All sums are integers, so the merged memos equal a
+(`_record_memo`). Each unsettled or newly memoized entry reaches `_aggregate`
+once per complete pass; entries with an existing memo are not reduced again.
+The upgrade pass re-parses no unchanged, still-closed settled group.
+All sums are integers, so the merged memos equal a
 whole-corpus reduction as dicts, zero `t -> t` buckets included. Pinned by
 `test_host_usage.py::TestCodexSettledMemo105A`, whose oracle is `_aggregate`
 over a full parse of every rollout on disk.
