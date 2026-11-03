@@ -2521,7 +2521,7 @@ def test_valid_host_read_budgets(auto, interactive):
 @pytest.mark.parametrize(
     "retro,auto,interactive",
     [
-        ({"host_usage_autopush_budget_ms": 501}, 501, 500),
+        ({"host_usage_autopush_budget_ms": 3001}, 3001, 3000),
         ({"host_usage_autopush_budget_ms": 400, "host_usage_interactive_budget_ms": 300}, 400, 300),
     ],
 )

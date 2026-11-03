@@ -674,11 +674,111 @@ class TestHostDeadline:
         grace = 100.0 + events_tail.HOST_READER_GRACE_MS / 1000.0
         assert log == ["codex", ("grok", grace), (SYNTH, grace)]
 
+    @staticmethod
+    def _clocked_reader(clock: dict, name: str, cost: float):
+        """A cooperative reader: it costs ``cost`` s, or stops at its deadline."""
+
+        def read(*, deadline):
+            end = clock["t"] + cost
+            if end > deadline:
+                clock["t"] = deadline
+                return _incomplete("deadline")
+            clock["t"] = end
+            return _complete({name: {"2026-08-15": _usage(1)}})
+
+        return read
+
+    def test_attended_reserve_lets_a_later_reader_finish_after_an_overrun(self):
+        """Track 101A: a reader that overruns takes its own share, not the
+        whole read of the readers after it. Antigravity needs 236 ms."""
+        clock = {"t": 0.0}
+        seen: dict[str, float] = {}
+
+        def codex(*, deadline):
+            seen["codex"] = deadline
+            clock["t"] = 2.4  # overran its 2.1 s share by 0.3 s
+            return _incomplete("deadline")
+
+        def later(name: str, cost: float):
+            inner = self._clocked_reader(clock, name, cost)
+
+            def read(*, deadline):
+                seen[name] = deadline
+                return inner(deadline=deadline)
+
+            return read
+
+        capture = events_tail._capture_host_usage(
+            _readers(
+                ("codex", codex),
+                ("cursor", later("cursor", 0.1)),
+                ("muse", later("muse", 0.084)),
+                ("agy", later("agy", 0.236)),
+            ),
+            deadline=3.0,
+            now=lambda: clock["t"],
+            reserve_s=0.3,
+        )
+
+        assert seen["codex"] == pytest.approx(2.1)
+        assert capture.token_sources == ("cursor", "muse", "agy")
+        assert capture.dropped == (("codex", "deadline"),)
+        assert clock["t"] <= 3.0
+
+    def test_without_a_reserve_the_same_overrun_costs_agy_its_read(self):
+        """The base behaviour the reserve fixes: with only the 50 ms grace, a
+        codex read that spends the whole sweep leaves agy 50 ms for 236 ms."""
+        clock = {"t": 0.0}
+
+        def codex(*, deadline):
+            clock["t"] = 3.0
+            return _incomplete("deadline")
+
+        capture = events_tail._capture_host_usage(
+            _readers(("codex", codex), ("agy", self._clocked_reader(clock, "agy", 0.236))),
+            deadline=3.0,
+            now=lambda: clock["t"],
+        )
+        assert capture.dropped == (("codex", "deadline"), ("agy", "deadline"))
+
+    def test_attended_reserve_fits_measured_warm_reads(self):
+        """The slowest reads measured on the owner's Mac (Codex 1.812 s, Cursor
+        0.100, Muse 0.642, Antigravity 0.236) all complete inside 3.0 s."""
+        clock = {"t": 0.0}
+        names = ("codex", "cursor", "muse", "agy")
+        costs = (1.812, 0.100, 0.642, 0.236)
+
+        capture = events_tail._capture_host_usage(
+            _readers(*[(n, self._clocked_reader(clock, n, c)) for n, c in zip(names, costs)]),
+            deadline=3.0,
+            now=lambda: clock["t"],
+            reserve_s=0.3,
+        )
+
+        assert capture.token_sources == names
+        assert capture.dropped == ()
+        assert clock["t"] <= 3.0
+
+    def test_reserve_never_vetoes_the_first_reader(self):
+        """The index-0 veto stays keyed to the sweep deadline, not the held-back one."""
+        log: list = []
+        capture = events_tail._capture_host_usage(
+            _readers(
+                ("codex", _recording_reader(_complete(), log, "codex")),
+                ("agy", _recording_reader(_complete(), log, "agy")),
+            ),
+            deadline=10.0,
+            now=lambda: 9.9,  # inside the sweep, but past 10.0 - 0.3
+            reserve_s=0.3,
+        )
+        assert capture.invoked is True
+        assert [name for name, _ in log] == ["codex", "agy"]
+
     def test_budgets_are_separate_from_the_walk_budget(self):
         """Deliberately its own pair of constants: reusing the walk budget
         would let a busy host store redefine the session-walk notice."""
         assert events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS == 250
-        assert events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS == 500
+        assert events_tail.HOST_USAGE_READ_BUDGET_INTERACTIVE_MS == 3000
         assert (
             events_tail.HOST_USAGE_READ_BUDGET_AUTOPUSH_MS != _mm_host_usage.DEFAULT_READ_BUDGET_S
         )
@@ -1756,6 +1856,55 @@ class TestColdCacheWarmAndRetry:
         assert len(degradations) == 1
         assert degradations[0].startswith("host-usage snapshot skipped (codex deadline)")
 
+    def test_autopush_sweep_keeps_grace_and_never_warms(self, tmp_path, monkeypatch):
+        """Track 101A: the reserve is attended-only. An autopush sweep keeps its
+        fixed 250 ms and the 50 ms later-reader grace, and nothing warms."""
+        clock = {"t": 100.0}
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
+        real_capture = events_tail._capture_host_usage
+
+        def sweep(readers, *, deadline, **kwargs):
+            return real_capture(readers, deadline=deadline, now=lambda: clock["t"], **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
+        events_root = tmp_path / "events_root"
+        sources = _sources(events_root)
+        _stub_fast_walks(monkeypatch)
+        seen: list[tuple[str, float, float]] = []
+
+        def reader(name: str, pause: float):
+            def read(*, deadline):
+                seen.append((name, clock["t"], deadline))
+                clock["t"] += pause
+                return _incomplete("deadline") if pause else _complete()
+
+            return read
+
+        # Codex overruns the 250 ms sweep by 20 ms; the others are instant.
+        readers = tuple(
+            (name, reader(name, 0.27 if name == "codex" else 0.0))
+            for name in ("codex", "cursor", "muse", "agy")
+        )
+        monkeypatch.setattr(events_tail, "_default_host_readers", lambda *_a, **_kw: readers)
+        warmed: list[dict] = []
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda **kw: warmed.append(kw) or _complete(),
+        )
+
+        events_tail._run_events_tail(
+            _tail_config(sources), sources, "dev-a", dry_run=False, quiet=True
+        )
+
+        assert [name for name, _start, _deadline in seen] == ["codex", "cursor", "muse", "agy"]
+        _name, first_start, sweep = seen[0]
+        assert sweep - first_start == pytest.approx(0.25)
+        for _name, start, deadline in seen[1:]:
+            assert deadline == pytest.approx(max(sweep, start + 0.05))
+        assert seen[1][2] > sweep, "the overrun leaves the next reader exactly the 50 ms grace"
+        assert warmed == [], "autopush never warms"
+
     def test_healthy_capture_never_pays_for_a_warm(self, tmp_path, monkeypatch, capsys):
         """Zero cost on the happy path — the whole reason the gate is a failed
         attempt rather than a coldness heuristic."""
@@ -2259,6 +2408,113 @@ def test_deadline_remedy_exact_evidence_and_context(reader, verb, in_diag, evide
         assert "`mm diag`" not in phrase
 
 
+def test_deadline_remedy_names_the_attended_lever():
+    """Track 101A: the remedy named only the autopush lever, which cannot help
+    an attended push that overran its own share."""
+    import mind_meld.statusflow as statusflow
+
+    stamp = "2999-01-01T00:00:00+00:00"
+    evidence = events_tail.HostReadEvidence(2100, 2400, stamp, 50, 51)
+    phrase = events_tail._host_skip_phrase(
+        "codex", "deadline", readiness="ready", verb="push", evidence=evidence
+    )
+    assert "raise `[retro] host_usage_autopush_budget_ms`" in phrase
+    assert "raise `[retro] capture_budget_ms`; host reads get three fifths of it;" in phrase
+    assert "warming" not in phrase
+    assert phrase.index("`[retro] capture_budget_ms`") < phrase.index("see ")
+
+    state = {
+        "last_reason": "deadline",
+        "last_reason_since": "2026-11-01T13:01:16+00:00",
+        "last_deadline_allotted_ms": 2100,
+        "last_complete_ms": 2400,
+        "last_complete_at": stamp,
+        "files_cached": 50,
+        "files_on_disk": 51,
+    }
+    blocker = statusflow._host_usage_blocker("codex", state, readiness="ready")
+    # `safe_str` escapes the Rich markup bracket, so the display form is `\[retro]`.
+    assert "raise `\\[retro] capture_budget_ms`" in blocker
+    assert blocker.endswith("(first observed 2026-11-01 UTC)")
+    # The push-time notice passes no evidence and stays as it was.
+    notice = events_tail._host_skip_phrase("codex", "deadline", readiness="ready")
+    assert "capture_budget_ms" not in notice
+
+
+def test_complete_read_after_deadline_republishes_missed_days(tmp_path, monkeypatch):
+    """Track 101A: days a ``deadline`` read missed come back on the next
+    complete read. ``mm recapture`` redoes Git capture only, so there is no
+    other path: the next attended push IS the recovery.
+
+    Readers aggregate the whole local corpus and a row carries its last 90 UTC
+    days, and the aggregator keeps each device's latest accepted row whole.
+    """
+    import time as _time
+    from datetime import timedelta
+
+    from mind_meld.skills.retro_fleet import aggregator
+    from tests.test_host_usage import _context, _token, _write_rollout
+
+    sessions = tmp_path / "sessions"
+    monkeypatch.setattr(_mm_codex_host, "CACHE_PATH", tmp_path / "config" / "host-tokens.json")
+    monkeypatch.setattr(_mm_codex_host, "CODEX_SESSIONS_PATH", sessions)
+    monkeypatch.setattr(_mm_codex_host, "CODEX_ARCHIVED_SESSIONS_PATH", tmp_path / "archived")
+
+    today = datetime.now(timezone.utc).date()
+    d1, d2 = (today - timedelta(days=3)).isoformat(), (today - timedelta(days=1)).isoformat()
+
+    def write(name, day, turn, tokens):
+        _write_rollout(
+            sessions, name, [_context(turn=turn), _token(tokens, timestamp=f"{day}T12:00:00Z")]
+        )
+
+    def capture(readers):
+        _capture, rows = events_tail._capture_host_snapshot("dev-a", readers, host_budget_ms=3000)
+        assert len(rows) == 1
+        return rows[0]
+
+    def codex_complete(*, deadline):
+        return _mm_codex_host.read_codex_usage(deadline=deadline)
+
+    def codex_expired(*, deadline):
+        return _mm_codex_host.read_codex_usage(deadline=_time.monotonic() - 1.0)
+
+    def muse(*, deadline):
+        return _complete({"muse": {d2: _usage(1)}})
+
+    write("rollout-d1.jsonl", d1, "t-d1", 100)
+    first = capture(_readers(("codex", codex_complete)))
+    assert set(first["hosts"]["codex"]) == {d1}
+
+    write("rollout-d2.jsonl", d2, "t-d2", 200)
+    second = capture(_readers(("codex", codex_expired), ("muse", muse)))
+    assert "codex" not in second["token_sources"]
+    assert second["degraded_sources"] == ["codex"]
+    assert "codex" not in second["hosts"]
+
+    third = capture(_readers(("codex", codex_complete)))
+    assert "degraded_sources" not in third
+    assert set(third["hosts"]["codex"]) == {d1, d2}
+
+    start = datetime.now(timezone.utc)
+    first["ts"], second["ts"] = start.isoformat(), (start + timedelta(hours=1)).isoformat()
+    third["ts"] = (start + timedelta(hours=2)).isoformat()
+    rows = [first, second, third]
+    since = start - timedelta(days=7)
+    view = aggregator.aggregate_host_usage(
+        rows, since=since, until=start + timedelta(hours=3), registered_ids=None
+    ).by_device["dev-a"]
+    assert set(view.lifetime_by_family["codex"]) == {d1, d2}
+
+    # The exception: a window that ends more than 24 h before the complete
+    # read never sees it, and reads the degraded row.
+    third["ts"] = (start + timedelta(days=2, hours=1)).isoformat()
+    early = aggregator.aggregate_host_usage(
+        rows, since=since, until=start + timedelta(hours=2), registered_ids=None
+    ).by_device["dev-a"]
+    assert "codex" not in early.lifetime_by_family
+
+
 @pytest.mark.parametrize("reader", ["codex", "muse"])
 def test_attended_deadline_does_not_promise_escaping_its_own_budget(reader):
     background = events_tail._host_skip_phrase(reader, "deadline", readiness="ready")
@@ -2454,7 +2710,7 @@ class TestCaptureBudget85A:
 
     def test_capture_budget_takes_precedence_over_legacy_interactive(self):
         # Sweep keeps the legacy value, capped inside the capture phase
-        # (half of capture_budget_ms, enforced in _capture_host_snapshot).
+        # (three fifths of capture_budget_ms, enforced in _capture_host_snapshot).
         config = {"retro": {"capture_budget_ms": 4000, "host_usage_interactive_budget_ms": 300}}
         assert events_tail.resolve_host_read_budget(config, interactive=True) == (
             300,
@@ -2462,14 +2718,14 @@ class TestCaptureBudget85A:
         )
         assert events_tail.resolve_host_read_budget(
             {"retro": {"capture_budget_ms": 400}}, interactive=True
-        ) == (200, "config")
+        ) == (240, "config")
         assert events_tail.resolve_host_read_budget(
             {"retro": {"capture_budget_ms": 4000}}, interactive=True
-        ) == (500, "config")
+        ) == (2400, "config")
 
     def test_legacy_budgets_preserved_without_capture_budget(self):
         assert events_tail.resolve_host_read_budget({"retro": {}}, interactive=True) == (
-            500,
+            3000,
             "default",
         )
         config = {"retro": {"host_usage_interactive_budget_ms": 900}}
@@ -2509,8 +2765,171 @@ class TestCaptureBudget85A:
             warm_host_cache=lambda _name: None,
         )
         assert budgets, "warm retry did not run"
-        # Phase is half of 1000 ms; the instant sweep leaves just under 0.5 s.
-        assert all(0.0 < budget <= 0.5 for budget in budgets)
+        # Phase is three fifths of 1000 ms; the instant sweep leaves just
+        # under 0.6 s.
+        assert all(0.0 < budget <= 0.6 for budget in budgets)
+
+    def test_default_partition_fits_inside_capture_budget(self, monkeypatch, tmp_path):
+        """Track 101A: the 3 s attended default is the host share of the 5 s
+        capture budget, so host time plus the tail's floor is the whole budget."""
+        assert events_tail.resolve_host_read_budget({}, interactive=True) == (3000, "default")
+        assert events_tail._host_phase_ms(5000) == 3000
+        assert events_tail._host_phase_ms(1) == 1
+
+        seen = {}
+        real_capture = events_tail._capture_event_snapshots
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real_capture(*args, **kwargs)
+
+        monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", 3.0)
+        sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+        events_tail._run_events_tail(
+            {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=True
+        )
+        assert seen["budget_ms"] == 2000, "a suppressed tail after 3.0 s of host time keeps 2 s"
+
+        monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
+        events_tail._run_events_tail(
+            {}, sources, "dev-a", dry_run=False, quiet=False, suppress_host_capture=False
+        )
+        assert seen["budget_ms"] == 2000, "an unsuppressed tail keeps the two fifths"
+
+    def test_push_help_states_three_fifths_share(self):
+        import re
+
+        from typer.testing import CliRunner
+
+        from mind_meld.cli import app
+
+        result = CliRunner().invoke(app, ["push", "--help"])
+        assert result.exit_code == 0
+        raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.stdout)
+        flat = " ".join(raw.replace("│", " ").split())
+        assert "three fifths of the capture budget" in flat
+        assert "at most half of the capture budget" not in flat
+
+    @staticmethod
+    def _spy_sweeps(monkeypatch):
+        calls: list[dict] = []
+        real = events_tail._capture_host_usage
+
+        def spy(readers, *, deadline, now=None, reserve_s=0.0):
+            calls.append(
+                {
+                    "names": tuple(name for name, _ in readers),
+                    "deadline": deadline,
+                    "reserve_s": reserve_s,
+                }
+            )
+            extra = {"now": events_tail.time.monotonic if now is None else now}
+            return real(readers, deadline=deadline, reserve_s=reserve_s, **extra)
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", spy)
+        return calls
+
+    def test_snapshot_reserves_only_for_attended_callers(self, monkeypatch):
+        calls = self._spy_sweeps(monkeypatch)
+        warmed: list[str] = []
+        monkeypatch.setattr(
+            _mm_host_registry,
+            "warm_host_cache_inline",
+            lambda **kw: warmed.append(kw["reader"]) or _complete(),
+        )
+        four = tuple(
+            (n, lambda *, deadline: _complete()) for n in ("codex", "cursor", "muse", "agy")
+        )
+        slow = tuple((n, lambda *, deadline: _incomplete("deadline")) for n in ("codex", "muse"))
+
+        events_tail._capture_host_snapshot(
+            "dev-a", four, host_budget_ms=3000, warm_host_cache=lambda _name: None
+        )
+        assert calls[-1]["reserve_s"] == pytest.approx(0.3)
+
+        events_tail._capture_host_snapshot(
+            "dev-a", four, host_budget_ms=1000, warm_host_cache=lambda _name: None
+        )
+        assert calls[-1]["reserve_s"] == pytest.approx(0.125)
+
+        events_tail._capture_host_snapshot(
+            "dev-a", four[:1], host_budget_ms=3000, warm_host_cache=lambda _name: None
+        )
+        assert calls[-1]["reserve_s"] == 0.0, "one reader has nobody to hold a reserve for"
+
+        before = len(calls)
+        events_tail._capture_host_snapshot("dev-a", slow, host_budget_ms=3000)
+        assert [c["reserve_s"] for c in calls[before:]] == [0.0]
+        assert len(calls) == before + 1 and warmed == [], "no callback: no reserve and no warm"
+
+    def test_attended_warm_retries_hold_reserves(self, monkeypatch):
+        """Each retry leaves the later ones their reserve under the phase deadline."""
+        import time as _time
+
+        calls = self._spy_sweeps(monkeypatch)
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 10_000)
+        monkeypatch.setattr(
+            _mm_host_registry, "warm_host_cache_inline", lambda **_kw: _incomplete("deadline")
+        )
+        slow = tuple((n, lambda *, deadline: _incomplete("deadline")) for n in ("codex", "muse"))
+
+        before = _time.monotonic()
+        events_tail._capture_host_snapshot(
+            "dev-a", slow, host_budget_ms=3000, warm_host_cache=lambda _name: None
+        )
+        after = _time.monotonic()
+
+        sweep, first, second = calls
+        assert sweep["names"] == ("codex", "muse") and sweep["reserve_s"] == pytest.approx(0.3)
+        assert (first["names"], second["names"]) == (("codex",), ("muse",))
+        assert second["deadline"] - first["deadline"] == pytest.approx(0.3)
+        # The phase is three fifths of 10 s, counted from the snapshot's start.
+        assert before + 6.0 <= second["deadline"] <= after + 6.0
+
+    def test_expired_retry_does_not_announce_a_read(self, monkeypatch):
+        clock = {"t": 100.0}
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: clock["t"])
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", 5000)
+        real = events_tail._capture_host_usage
+
+        def sweep(readers, *, deadline, **kwargs):
+            return real(readers, deadline=deadline, now=lambda: clock["t"], **kwargs)
+
+        def expired(*, deadline):
+            clock["t"] = 104.0
+            return _incomplete("deadline")
+
+        monkeypatch.setattr(events_tail, "_capture_host_usage", sweep)
+        notices, warmed = [], []
+        monkeypatch.setattr(
+            _mm_host_registry, "warm_host_cache_inline", lambda **kw: warmed.append(kw)
+        )
+        capture, rows = events_tail._capture_host_snapshot(
+            "dev-a", (("codex", expired),), host_budget_ms=3000, warm_host_cache=notices.append
+        )
+        assert warmed == []
+        assert notices == []
+        assert capture.dropped == (("codex", "deadline"),)
+        assert rows == []
+
+    def test_legacy_only_retries_keep_a_fresh_allowance_each(self, monkeypatch):
+        """No capture total stashed: no phase deadline, so no reserve arithmetic."""
+        monkeypatch.setattr(events_tail.time, "monotonic", lambda: 100.0)
+        calls = self._spy_sweeps(monkeypatch)
+        monkeypatch.setattr(events_tail, "_pending_capture_budget_ms", None)
+        monkeypatch.setattr(
+            _mm_host_registry, "warm_host_cache_inline", lambda **_kw: _incomplete("deadline")
+        )
+        slow = tuple((n, lambda *, deadline: _incomplete("deadline")) for n in ("codex", "muse"))
+
+        events_tail._capture_host_snapshot(
+            "dev-a", slow, host_budget_ms=3000, warm_host_cache=lambda _name: None
+        )
+
+        _sweep, first, second = calls
+        for retry in (first, second):
+            assert retry["deadline"] == 100.0 + _mm_host_usage.DEFAULT_READ_BUDGET_S
 
     def test_warm_retry_one_arg_monkeypatch_still_works(self, monkeypatch):
         def warm(*, reader="codex"):
@@ -2578,7 +2997,7 @@ class TestCaptureBudget85A:
             quiet=False,
             suppress_host_capture=True,
         )
-        # Elapsed 1s of 4s: tail share is max(2s, 3s) from tail start.
+        # Elapsed 1s of 4s: tail share is max(1.6s, 3s) from tail start.
         assert seen["budget_ms"] == 3000
         assert seen["git_budget_ms"] <= 3000
         assert before + 2.9 <= seen["session_deadline"] <= _time.monotonic() + 3.0

@@ -2379,7 +2379,8 @@ estimate fits the budget left after ``_MUSE_TAIL_RESERVE_S``; a day that
 does not fit is skipped, not waited on, and a day whose check runs out of
 time moves to the back of the queue. With enough budget every frozen day is
 re-checked (~400 ms for 90 days of ~100 logs); an attended push checks what
-its share of the 500 ms budget allows, an autopush what fits in its grace."""
+its share of the sweep budget allows (500 ms when measured, 3000 ms since
+Track 101A), an autopush what fits in its grace."""
 _MUSE_STEP_LEAD_DAYS = 1
 """How many UTC days a step may precede its session directory's date.
 

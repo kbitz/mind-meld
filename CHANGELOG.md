@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.5] - 2026-11-02
+
+**Attended `mm push` gives host usage reads 3 seconds and keeps a share for every reader, and Codex skips archived rollouts that have not changed.** A slow Codex read can no longer spend the whole sweep. Antigravity, Cursor, and Muse still get their read. Autopush stays at 250 ms and never warms.
+
+### Changed
+
+- The attended default for `host_usage_interactive_budget_ms` rises from 500 ms to 3,000 ms. Host sweep and inline warm share at most three fifths of `capture_budget_ms`. Each later attended reader keeps a reserve of up to 300 ms.
+- If `~/.config/mind-meld/config.toml` pins `host_usage_interactive_budget_ms` as a workaround, remove that line and run `mm push`.
+- Days a `deadline` read missed come back on that reader's next complete read. `mm recapture` does not recover them. `mm status` names `[retro] capture_budget_ms` when an attended push still cannot finish them.
+- Codex settles archived rollouts by the date in their name. A rollout that has not changed since its last complete read is not read again on later pushes.
+- `mm push --help` states that host sweep and inline warm share at most three fifths of the capture budget.
+- A warm retry that expires before it starts a reader no longer prints a reading notice for that reader.
+
 ## [1.12.4] - 2026-11-02
 
 **When this mm is already the newest release, status and plain-text diag say an unsupported host record has no newer reader yet.** They name the stop step and `mm diag`. A newer release, or a missing cache, still says to run `mm update`.
