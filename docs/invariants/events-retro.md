@@ -6,17 +6,17 @@ Read BEFORE editing any of these:
 - `src/mind_meld/statusflow.py` — `status` / `diag` / `_collect_diag_state`
 - `src/mind_meld/cli.py` — `PushResult.events_degradations`
 - `src/mind_meld/statusflow.py` — `_breadcrumb_staleness_suffix` / `_host_usage_blocker` / `_host_read_budgets` / `_host_complete_read_line` / `_host_read_sweep_line`
-- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
+- `src/mind_meld/events_tail.py` — `_run_events_tail` / `_run_events_backfill` / `_identity_inputs_digest_for_push` / `_decide_token_walk_policy` / `_enabled_claude_paths` / `_capture_host_usage` / `_default_host_readers` / `_host_skip_phrase` / `HostReadEvidence` / `host_read_age` / `resolve_host_read_budget` / `resolve_capture_budget` / `_host_phase_ms` / `_warm_host_cache_with_notice` / `HostUsageCapture` / `_merge_host_usage_maps` / `_merge_warm_retry_capture` / `HOST_USAGE_READ_BUDGET_*` / `HOST_READER_RESERVE_MS` / `WARMABLE_HOST_READERS` / `_HOST_PERMANENT_REASONS`
 - `src/mind_meld/skill_link.py` — `_ensure_retro_skill_links` / `_skill_link*_check_due*` / `_resolve_retro_skill_src` / `_skill_store_dir` / `_publish_skill_store` / `_prepare_store_dir` / `_should_publish` / `_store_needs_refresh` / `diagnose_skill_links` / `render_skill_status` / `BROKEN_SKILL_STATUSES` / `_emit_status_notice` / `_marker_dir` / `AGENT_ROWS` / `_descriptor_for` / `_real_guard_paths` / `consented_agent_keys` / `_row_is_consented` / `AgentRow.consent_source` / `_owned_store_exists` / `_marker_exists`
 - `src/mind_meld/retention.py` — `EVENTS_RETENTION_DAYS` / `CONFLICT_AGE_DAYS` / `_gc_old_event_files` / `_gc_old_conflict_files` / `_gc_token_cache` / `_sweep_local_tmp_files` / `_gc_orphan_retros_dir`
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
-- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
+- `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
 - `src/mind_meld/attemptlog.py` — local attended-attempt writer, validation and read/render states (65A)
-- `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `CACHE_PATH` / `TTL_SECONDS`
+- `src/mind_meld/identity.py` — `gather_local_identities` / `refresh_identity_cache` / `read_cached_identities` / `_normalize_cache` / `_is_cache_stale` / `_store_refresh` / `_persist_or_yield_concurrent` / `_persist_force` / `CACHE_PATH` / `TTL_SECONDS`
 - `src/mind_meld/skills/retro_fleet/aggregator.py` — `aggregate` / `aggregate_local_emails_from_events` / `aggregate_git` / `aggregate_sessions` / `aggregate_host_usage` / `_accept_host_usage_snapshot` / `_aggregate_git_period_pair` / `gather_author_emails` / `_emit_custom_path_notice_if_due`
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
@@ -3194,7 +3194,8 @@ produced different filters from the same synced events, breaking
 cross-fleet retro determinism.
 
 **Push-time emit.** `_run_events_tail` calls `identity.gather_local_
-identities(allow_refresh=True)` and threads the result into
+identities(allow_refresh=True)` and threads the result, unioned with
+`events.configured_author_emails(config, roots)`, into
 `make_mm_push_event(local_emails=...)`. Every `mm-push` event row on
 synced storage carries the emitting machine's identity set. Cache hit
 is ~1ms; cold/stale cache runs a synchronous refresh inline and emits
@@ -3256,6 +3257,79 @@ reachable):
 4. `<id>+<login>@users.noreply.github.com` derived from `gh api user`
    when `gh` is authenticated
 
+**Published set equals what capture filters on (Track 104A).** The
+published `local_emails` is the gathered set plus every identity the
+capture walk reads from configuration: `[retro].author_emails`, the global
+gitconfig `[user] email` and each discovered root's repository-local
+`[user] email`. `events._configured_author_spellings` is the one reader
+behind both `resolve_walk_author_emails` (the walk's `--author` filter)
+and `configured_author_emails` (publication), so the two cannot drift. A
+TTL-fresh cache that predates a repository-local or `[retro]` identity
+therefore still publishes it on the next push, autopush included, and a
+peer's retro counts those commits with no entry in its own config.
+`local_emails` stays `list[str]` (sorted, lowercase); no schema change. The
+tail reads these configs with file reads only, once per push.
+
+**Input-change refresh (Track 104A).** An attended push (`quiet=False`,
+which includes the push inside `mm recapture`) and `mm init`'s warm pass
+`inputs_digest` to the identity cache: `events.identity_inputs_digest` is a
+SHA-256 over three sorted inputs: the `[retro].author_emails` keys, the
+lowercase global gitconfig emails and the discovered repositories keyed by
+common Git directory (a linked worktree of a listed repository changes
+nothing; a repository-local email is not an input, since publication carries
+it on every push). `identity._is_cache_stale(cache, inputs_digest)` is true
+when a digest is given and differs from the stored `inputs_digest`, or when
+`refreshed_at` is missing, malformed or past the TTL. A cache written before
+the field existed differs from every digest, so the first attended push after
+the upgrade refreshes once. Phase 1 and phase 3 (`_persist_or_yield_
+concurrent`) use that same test, so a concurrently written cache that is fresh
+by TTL but carries another digest cannot swallow the change.
+
+- Autopush passes no digest and keeps its budget; the TTL-only test applies.
+- A partial discovery (`classify_discovery == "partial"`: budget expiry or a
+  prober error) passes no digest, because it could not persist the refresh
+  and would re-gather on every attended push. An incomplete gather still
+  never writes cache bytes or `refreshed_at` (see below).
+- `_store_refresh` stores the digest the refresh was given and pops it when
+  none was given (`mm refresh-identity`, retro render, an autopush TTL refresh),
+  so `inputs_digest` always describes the inputs behind `emails`. The next
+  attended push then refreshes once more instead of trusting a digest that
+  could match restored inputs after the emails changed.
+
+**`[retro].author_emails` stays additive.** It unions with the gathered set
+and the fleet trust set, never replaces them. Its job is identities no
+configuration names, such as an ID a hosted service writes as the author
+email; an address that a gitconfig already carries needs no entry.
+
+**Checkpoint commits never count (Track 104A).** A commit whose author email
+is `checkpointer@noreply` (case-insensitive, trimmed) or whose subject starts
+with `checkpoint:` (exact prefix) is automation, not work.
+`events.is_checkpoint_commit` is the one predicate: `_parse_git_log_numstat`
+drops those records, so push, init and recapture walks never capture one,
+filtered or fail-open; `aggregate_git` and `_aggregate_git_period_pair` skip
+them before the author filter, so rows captured earlier and
+`--no-author-filter` runs exclude them as well. The rule is literal: an
+owner commit whose subject starts with `checkpoint:` is dropped too.
+
+**Diagnosis behind Track 104A (this Mac, 2026-11-03, read-only).** The
+identity cache (refreshed 2026-10-27) held two emails: the global address and
+the GitHub noreply address. `[retro] author_emails` held five entries
+including both missing identities, added after that refresh (config edited
+2026-11-02), so the cache stayed TTL-fresh past the edit and neither the walk
+(which reads `[retro]` directly) nor publication (which read only the cache)
+agreed. capsule-cli's repository-local address (a discovery-sourced identity;
+capsule-cli was first walked in the 2026-11-02 recapture) was likewise absent,
+and the Foundry ID is in no Git configuration, so only `[retro]` can name it.
+The discovery budget is not the cause: all 18 repository roots were walked,
+`walk_budget_aborts` was 0 and discovery was `complete` on every 2026-11-02
+and 2026-11-03 snapshot, and a truncated gather never persists. Cause:
+discovery (an identity only a repository config names) plus the seven-day TTL
+(no input change refreshed the cache). From 2026-10-14 this Mac's `mm-push`
+rows carried two emails (none named either identity), while its earlier rows
+(2026-08-04 to 2026-08-06, 2026-09-10 to 2026-09-14) and a peer's rows
+(2026-09-07 to 2026-09-29) carried them; the fleet union keeps covering those
+commits only until those rows pass the 90-day event retention (Fleet retention, above).
+
 **Trust-rooted invariant.** Identity gather NEVER walks `git log` for
 author emails. Walking commits would pull in collaborator emails on
 shared repos (their PRs / pulled-in commits sit in local history) and
@@ -3266,7 +3340,8 @@ git repo with both kb and alice commits and asserts alice doesn't
 leak into the gather output.
 
 **`mm refresh-identity` user-facing CLI.** Force-runs
-`refresh_identity_cache(force=True)` ignoring the TTL. Use after
+`refresh_identity_cache(force=True)` ignoring the TTL (it passes no digest, so
+the stored one is dropped and the next attended push refreshes once more). Use after
 editing `[retro].author_emails`, `gh auth login`, or
 `git config --global user.email`. `--json` flag for scripting; default
 output lists the resolved emails and, when the prior cache is readable, the `+`/`-` changes. Exits 1 with a `mm: warning:` when

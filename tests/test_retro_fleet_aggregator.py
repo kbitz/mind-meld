@@ -8295,3 +8295,163 @@ class TestCodexPrefixLegacyPricing:
         assert "codex-auto-review" not in aggregator._agent_top_model(row)
         row.by_model.pop("gpt-6.1-sol")
         assert aggregator._agent_top_model(row) == "—"
+
+
+# ---------------------------------------------------------------------------
+# Track 104A — publish every identity capture uses; checkpoints never count.
+# ---------------------------------------------------------------------------
+
+
+class TestPeerRepositoryLocalIdentity:
+    """A repository-local identity on machine A reaches machine B's retro
+    with no entry in B's own configuration."""
+
+    def test_peer_local_identity_reaches_another_machines_retro(self, tmp_path, monkeypatch):
+        import subprocess
+
+        from mind_meld import events_tail, identity
+        from tests.test_events import _init_git_repo, _recapture_test_sources, _stub_discovery_to
+
+        global_config = tmp_path / "global.gitconfig"
+        global_config.write_text("[user]\n\temail = a-global@example.com\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        git = ["git", "-C", str(repo)]
+        subprocess.run([*git, "config", "user.email", "peer-local@example.com"], check=True)
+        for name, author in (
+            ("mine.txt", None),
+            ("theirs.txt", "Alice <alice@example.com>"),
+        ):
+            (repo / name).write_text(name)
+            subprocess.run([*git, "add", name], check=True)
+            extra = ["--author", author] if author else []
+            subprocess.run([*git, "commit", "-q", "-m", f"feat: {name}", *extra], check=True)
+        sources = _recapture_test_sources(tmp_path)
+        _stub_discovery_to(monkeypatch, repo)
+
+        # This Mac's 2026-10-27 shape: a fresh cache that names only the global email.
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                    "emails": ["a-global@example.com"],
+                }
+            )
+        )
+
+        def no_gather(**_kw):
+            raise AssertionError("autopush must not gather")
+
+        monkeypatch.setattr(identity, "_do_full_gather", no_gather)
+        events_tail._run_events_tail(
+            {}, sources, "dev-a", dry_run=False, quiet=True, suppress_host_capture=True
+        )
+
+        events_dir = tmp_path / "mm-events" / "events"
+        rows = [
+            json.loads(line)
+            for path in events_dir.glob("*.jsonl")
+            for line in path.read_text().splitlines()
+        ]
+        push = max((r for r in rows if r.get("type") == "mm-push"), key=lambda r: r["ts"])
+        assert "peer-local@example.com" in push["local_emails"]
+        assert "a-global@example.com" in push["local_emails"]
+        # Trust-rooted: nothing is learned from git log.
+        assert "alice@example.com" not in push["local_emails"]
+
+        data = aggregator.aggregate(
+            events_dir=events_dir,
+            window_days=7,
+            author_emails=frozenset({"b@example.com"}),
+        )
+        assert data.git.commits == 1
+
+
+class TestCheckpointCommitsNeverCount:
+    CHECKPOINT = "checkpointer@noreply"
+
+    def _events(self) -> list[dict]:
+        return [
+            _git_event(
+                "dev-a",
+                1,
+                [
+                    _commit("a" * 40, 1, author_email="kb@example.com"),
+                    _commit("b" * 40, 1, author_email=self.CHECKPOINT, subject="wip"),
+                    _commit("c" * 40, 1, author_email="kb@example.com", subject="checkpoint: wip"),
+                ],
+            )
+        ]
+
+    def test_predicate(self):
+        from mind_meld import events as mm_events
+
+        assert mm_events.is_checkpoint_commit(" Checkpointer@NoReply ", "x")
+        assert mm_events.is_checkpoint_commit("kb@example.com", "checkpoint: wip")
+        assert not mm_events.is_checkpoint_commit("kb@example.com", "Checkpoint: wip")
+        assert not mm_events.is_checkpoint_commit("kb@example.com", "fix: checkpoint: wip")
+        assert not mm_events.is_checkpoint_commit(None, 3)
+
+    @pytest.mark.parametrize(
+        "author_emails",
+        [
+            None,
+            frozenset({"kb@example.com"}),
+            frozenset({"kb@example.com", "checkpointer@noreply"}),
+        ],
+    )
+    def test_render_drops_checkpoints_under_every_filter(self, tmp_path, author_emails):
+        events_dir = tmp_path / "events"
+        _write_events(events_dir, "dev-a", "2026-04-27", self._events())
+        data = aggregator.aggregate(
+            events_dir=events_dir, window_days=7, author_emails=author_emails, now=NOW
+        )
+        assert data.git.commits == 1
+
+    def test_period_pair_drops_checkpoints(self):
+        prior, current = _pair(
+            self._events(), emails=frozenset({"kb@example.com", "checkpointer@noreply"})
+        )
+        assert current.commits == 1
+        assert prior.commits == 0
+
+    def test_parser_never_captures_checkpoints(self):
+        from mind_meld import events as mm_events
+
+        def record(sha: str, email: str, subject: str) -> str:
+            return f"\x1e{sha}\t2026-04-27T10:00:00+00:00\t{email}\t{subject}\n1\t0\tf.txt\n"
+
+        out = (
+            record("a" * 40, "kb@example.com", "feat: real")
+            + record("b" * 40, self.CHECKPOINT, "wip")
+            + record("c" * 40, "kb@example.com", "checkpoint: wip")
+        )
+        parsed = mm_events._parse_git_log_numstat(out)
+        assert [c["sha"] for c in parsed] == ["a" * 40]
+
+    def test_fail_open_walk_captures_no_checkpoint(self, tmp_path):
+        import subprocess
+
+        from mind_meld import events as mm_events
+        from tests.test_events import _init_git_repo
+
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        git = ["git", "-C", str(repo)]
+        for name, subject, author in (
+            ("a.txt", "feat: real", None),
+            ("b.txt", "wip", f"Bot <{self.CHECKPOINT}>"),
+            ("c.txt", "checkpoint: wip", None),
+        ):
+            (repo / name).write_text(name)
+            subprocess.run([*git, "add", name], check=True)
+            extra = ["--author", author] if author else []
+            subprocess.run([*git, "commit", "-q", "-m", subject, *extra], check=True)
+
+        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        project, error = mm_events._walk_one_repo(repo, since, 5000)
+        assert error is None and project is not None
+        assert [c["subject"] for c in project["commits"]] == ["feat: real"]

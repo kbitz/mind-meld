@@ -41,6 +41,19 @@ Trust-rooted: only emails sourced from CONFIGURED identities on the running
 machine. Walking ``git log`` for every author email would silently include
 collaborator emails on shared repos — not what we want.
 
+Published set: the tail publishes ``local_emails`` as this gather unioned with
+``events.configured_author_emails`` (``[retro].author_emails``, the global
+gitconfig email and each discovered repository's local email, all read from
+files), so every identity the capture walk filters on reaches the fleet union
+even when a TTL-fresh cache predates it.
+
+Input-change refresh: an attended push or init passes ``inputs_digest``
+(``events.identity_inputs_digest``: ``[retro].author_emails``, the global
+email, the discovered repositories by object store). ``_is_cache_stale``
+treats a cache written under another digest, or none, as stale before the
+TTL. Autopush, retro render and ``mm refresh-identity`` pass none, so they keep
+the TTL-only test; a refresh without a digest drops the stored one.
+
 Git environment: both Git reads use ``gitenv.scrubbed_git_env`` so inherited
 repository and command-scoped overrides cannot change attribution. Global
 and repository configuration still apply. Decode identifiers strictly: an
@@ -51,7 +64,8 @@ Cache schema (forward-compat, ``total=False`` shape):
     {
       "version": 2,
       "refreshed_at": "<ISO 8601 UTC>",
-      "emails": ["a@b.c", "d@e.f"]    # lowercased, deduped, sorted
+      "emails": ["a@b.c", "d@e.f"],   # lowercased, deduped, sorted
+      "inputs_digest": "<sha256 hex>"  # optional; read by _is_cache_stale
     }
 
 Failure modes — every source independently degrades to "no emails from this
@@ -97,6 +111,7 @@ def gather_local_identities(
     allow_refresh: bool = True,
     diagnostic=None,
     root_discovery: GitRootDiscovery | None = None,
+    inputs_digest: str | None = None,
 ) -> list[str]:
     """Return the locally-known author emails as a sorted, lowercased list.
 
@@ -108,6 +123,10 @@ def gather_local_identities(
       full subprocess refresh, persist, return fresh list.
     * Cache miss / stale AND ``allow_refresh=False`` → return whatever the
       cache holds (possibly empty).
+
+    ``inputs_digest`` (attended push and init only) makes a cache written
+    under other inputs stale before its TTL: see ``_is_cache_stale``. ``None``
+    (autopush, retro render) keeps the TTL-only test.
 
     Never raises. Pure-cache failures degrade to an empty list.
 
@@ -128,7 +147,7 @@ def gather_local_identities(
         ) as ljson:
             cache = ljson.data
             _normalize_cache(cache)
-            stale = _is_cache_stale(cache)
+            stale = _is_cache_stale(cache, inputs_digest)
             if not stale or not allow_refresh:
                 return list(cache.get("emails") or [])
             try:
@@ -156,13 +175,14 @@ def gather_local_identities(
     # Phase 3: brief write under lock. A concurrent caller may have written
     # a fresh cache while we were gathering; in that case use theirs and
     # skip our write (idempotent: same machine, same identity sources).
-    return _persist_or_yield_concurrent(emails)
+    return _persist_or_yield_concurrent(emails, inputs_digest)
 
 
 def refresh_identity_cache(
     *,
     force: bool = False,
     root_discovery: GitRootDiscovery | None = None,
+    inputs_digest: str | None = None,
 ) -> list[str]:
     """Refresh the identity cache and return the new list.
 
@@ -172,7 +192,10 @@ def refresh_identity_cache(
     newly gathered emails or a fresh timestamp. Phase 1 may still normalize
     a well-formed older cache to the current version with ``refreshed_at=None``
     so the previous emails stay available. ``force=False`` is a no-op when
-    the cache is already fresh.
+    the cache is already fresh for the caller's ``inputs_digest``. A refresh
+    without a digest drops the stored one, so the next attended push (which
+    passes one) refreshes again rather than trusting a digest that no longer
+    describes ``emails``.
 
     Returns the resulting email list. On failure, returns whatever was in
     the cache before (may be empty).
@@ -190,7 +213,7 @@ def refresh_identity_cache(
         ) as ljson:
             cache = ljson.data
             _normalize_cache(cache)
-            if not force and not _is_cache_stale(cache):
+            if not force and not _is_cache_stale(cache, inputs_digest):
                 return list(cache.get("emails") or [])
     except Exception:
         return []
@@ -209,8 +232,8 @@ def refresh_identity_cache(
     # Phase 3: write — but on ``force=False``, defer to a concurrent fresh
     # write if one landed. ``force=True`` always overwrites.
     if force:
-        return _persist_force(emails)
-    return _persist_or_yield_concurrent(emails)
+        return _persist_force(emails, inputs_digest)
+    return _persist_or_yield_concurrent(emails, inputs_digest)
 
 
 def _note_gather_complete(complete: bool) -> None:
@@ -252,9 +275,27 @@ def _return_incomplete_union(emails: list[str]) -> list[str]:
         return list(emails)
 
 
-def _persist_or_yield_concurrent(emails: list[str]) -> list[str]:
-    """Phase-3 write helper. If a concurrent writer landed a fresh cache
-    while we were gathering, use theirs; otherwise persist ours."""
+def _store_refresh(cache: dict, emails: list[str], inputs_digest: str | None) -> None:
+    """Write one completed refresh. ``inputs_digest`` always describes ``emails``.
+
+    A refresh that was not given a digest cannot vouch for the inputs it
+    gathered from, so any stored digest goes: it could otherwise match restored
+    inputs after the emails changed (A, B, A) and skip a needed refresh.
+    """
+    cache["version"] = CACHE_VERSION
+    cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
+    cache["emails"] = emails
+    if inputs_digest is None:
+        cache.pop("inputs_digest", None)
+    else:
+        cache["inputs_digest"] = inputs_digest
+
+
+def _persist_or_yield_concurrent(emails: list[str], inputs_digest: str | None = None) -> list[str]:
+    """Phase-3 write helper. If a concurrent writer landed a cache that is
+    fresh for this caller's inputs while we were gathering, use theirs;
+    otherwise persist ours. Same staleness test as phase 1, so a cache that is
+    fresh by TTL but carries another digest cannot swallow an input change."""
     try:
         with locked_json_rmw(
             CACHE_PATH,
@@ -262,17 +303,15 @@ def _persist_or_yield_concurrent(emails: list[str]) -> list[str]:
             on_contention="block",
         ) as ljson:
             cache = ljson.data
-            if _is_valid_cache(cache) and not _is_cache_stale(cache):
+            if _is_valid_cache(cache) and not _is_cache_stale(cache, inputs_digest):
                 return list(cache.get("emails") or [])
-            cache["version"] = CACHE_VERSION
-            cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
-            cache["emails"] = emails
+            _store_refresh(cache, emails, inputs_digest)
             return list(emails)
     except Exception:
         return list(emails)
 
 
-def _persist_force(emails: list[str]) -> list[str]:
+def _persist_force(emails: list[str], inputs_digest: str | None = None) -> list[str]:
     """Phase-3 write helper for ``force=True``: always overwrite."""
     try:
         with locked_json_rmw(
@@ -280,10 +319,7 @@ def _persist_force(emails: list[str]) -> list[str]:
             default_factory=_default_cache,
             on_contention="block",
         ) as ljson:
-            cache = ljson.data
-            cache["version"] = CACHE_VERSION
-            cache["refreshed_at"] = datetime.now(timezone.utc).isoformat()
-            cache["emails"] = emails
+            _store_refresh(ljson.data, emails, inputs_digest)
             return list(emails)
     except Exception:
         return list(emails)
@@ -344,9 +380,15 @@ def read_cached_identities(*, require_refresh: bool = False) -> list[str] | None
     return None
 
 
-def _is_cache_stale(cache: dict) -> bool:
-    """True iff ``refreshed_at`` is missing, malformed, or older than
-    ``TTL_SECONDS``."""
+def _is_cache_stale(cache: dict, inputs_digest: str | None = None) -> bool:
+    """True iff the cache must be refreshed for this caller.
+
+    Stale when ``inputs_digest`` is given and differs from the stored one (a
+    cache written before the field existed differs from every digest), or when
+    ``refreshed_at`` is missing, malformed, or older than ``TTL_SECONDS``.
+    """
+    if inputs_digest is not None and cache.get("inputs_digest") != inputs_digest:
+        return True
     refreshed_at = cache.get("refreshed_at")
     if not isinstance(refreshed_at, str) or not refreshed_at:
         return True
