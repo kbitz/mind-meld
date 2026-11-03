@@ -3124,6 +3124,59 @@ class TestCodexSettledMemo105A:
         assert {first, second} <= reread
         assert self._cache(isolated_cache)["settled_days"] == {}
 
+    @pytest.mark.parametrize("reason", ["deadline", "io_error"])
+    def test_partial_closure_reread_with_changed_turn_ids_cannot_reuse_old_memo(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch, reason: str
+    ) -> None:
+        changed = self._write_at(
+            self._live("08/14"), "rollout-z.jsonl", [_context(turn="x"), _token(100)]
+        )
+        pending = self._write_at(
+            self._live("08/14"), "rollout-a.jsonl", [_context(turn="z"), _token(50)]
+        )
+        self._write_at(
+            self._live("08/13"), "rollout-other.jsonl", [_context(turn="other"), _token(20)]
+        )
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        before = self._cache(isolated_cache)
+        # The other record takes the digest slot on both the partial pass and
+        # its retry: the partial pass rolls back every check_seq update.
+        before["settled_days"]["2026/08/13"]["check_seq"] = 0
+        before["settled_days"]["2026/08/14"]["check_seq"] = 1
+        isolated_cache.write_text(json.dumps(before), encoding="utf-8")
+        self._write_at(changed.parent, changed.name, [_context(turn="y"), _token(400)])
+        self._write_at(
+            self._live("09/01"),
+            "rollout-young.jsonl",
+            [_context(turn="x"), _token(100)],
+            old=False,
+        )
+        real_full = codex_host._read_full_rollout
+
+        def fail_after_changed(path, stat, deadline):
+            if path == pending:
+                raise hu._ReadFailure(reason)
+            return real_full(path, stat, deadline)
+
+        with monkeypatch.context() as patched:
+            patched.setattr(codex_host, "_read_full_rollout", fail_after_changed)
+            failed = codex_host.read_codex_usage()
+
+        assert failed.complete is False and failed.reason == reason and failed.hosts == {}
+        after = self._cache(isolated_cache)
+        assert after["settled_days"] == before["settled_days"]
+        parsed = after["files"][self._key(changed)]
+        assert parsed["turn_ids"] == ["y"] and "states" in parsed
+        assert after["files"][self._key(pending)]["settled"] is True
+
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+        recovered = codex_host.read_codex_usage()
+        reads = {name: set(paths) for name, paths in seen.items()}
+        self._assert_matches_oracle(recovered)
+        assert recovered.hosts["codex"]["2026-08-15"]["input"] == 570
+        assert changed in reads["cache_hit"] and changed not in reads["read_full"]
+        assert pending in reads["read_full"]
+
     def test_two_records_holding_one_turn_are_both_evicted_and_rebuilt(
         self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

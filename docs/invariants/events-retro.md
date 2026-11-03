@@ -268,8 +268,12 @@ deletions evict immediately; exactly one settled day per scan — the stalest
 (`dir_mtime_ns, count, sum_size, sum_mtime_ns`), and a failed or mismatched
 verification evicts it to the per-file loop, which now re-reads the whole group
 in full and rebuilds its memo when it settles again. A record without a memo
-needs full entries to be carried; one with a memo takes slim or full entries per
-key. Track 101A adds archive groups
+needs full entries to be carried; one with a memo requires slim entries for
+every key. A full entry beside a memo is progress from a partial eviction and
+invalidates that memo: refreshed turn ids could otherwise hide the closure
+violation and reuse stale totals. The per-file retry retains that progress as
+an ordinary validated cache hit and rebuilds the memo from current entries.
+Track 101A adds archive groups
 to the same map (see "Archived Codex rollouts"): their own stat-digest
 rotation runs beside the live one, one more verification per scan, so the live
 days' rotation keeps its rate. Independently of

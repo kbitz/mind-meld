@@ -737,8 +737,10 @@ def _carry_settled_days(
     days' rotation keeps its rate. A group is gone when its date no longer
     lists any file.
 
-    Track 105A: a record with a memo (``totals``) accepts slim or full entries
-    per key; a record without one needs full entries, as before. The key-set
+    Track 105A: a record with a memo (``totals``) requires slim entries for
+    every key; a full entry means a partial pass re-read a file, so the old
+    memo no longer proves its contribution. A record without a memo needs
+    full entries, as before. The key-set
     check, the one digest attempt per kind and the ``check_seq`` rotation are
     unchanged, and they are what evict a changed, added or removed file. Closure
     against turn ids outside the record is NOT decided here: it needs every
@@ -762,12 +764,11 @@ def _carry_settled_days(
         memoized = "totals" in record
         for key in record["keys"]:
             cached = cached_files.get(key)
-            # A memoized record's entries are slim once it has been through a
-            # complete pass, full after a partial pass that re-read some of
-            # them. A pre-105A record has no memo, so it needs full entries.
-            entry = _validated_entry(cached)
-            if entry is None and memoized:
-                entry = _validated_settled_entry(cached)
+            # A full entry beside a memo is progress from an incomplete
+            # eviction. Its refreshed turn ids may hide the old closure
+            # violation; do not reuse the old memo even when closure now holds.
+            # The per-file loop can reuse that full parse as an ordinary hit.
+            entry = _validated_settled_entry(cached) if memoized else _validated_entry(cached)
             if entry is None:
                 entries = {}
                 break
