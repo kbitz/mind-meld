@@ -605,10 +605,20 @@ class TestCursorProber:
         assert list(_discover(_cfg(cursor=True), persist=True).roots) == [repo]
 
     def test_acp_session_without_meta_is_retried(self, home):
+        # Value: protects=late Cursor cwd is discovered after missing or incomplete metadata;
+        # fails_when=an empty ACP observation becomes a permanent negative cache;
+        # why_new=the existing assertion checked cache absence but never a later successful read;
+        # seam=none; no_claim=live Cursor format acceptance (synthetic metadata).
         (home / ".cursor" / "acp-sessions" / "fresh").mkdir(parents=True)
         found = _discover(_cfg(cursor=True), persist=True)
         assert found.roots == () and not found.exceeded
         assert "acp/fresh" not in _cached_units("cursor")
+        metadata = home / ".cursor" / "acp-sessions" / "fresh" / "meta.json"
+        metadata.write_text("{}")
+        assert _discover(_cfg(cursor=True), persist=True).roots == ()
+        repo = _fake_repo(home / "repo")
+        metadata.write_text(json.dumps({"cwd": str(repo)}))
+        assert _discover(_cfg(cursor=True), persist=True).roots == (repo,)
 
 
 class TestMuseProber:
@@ -924,3 +934,275 @@ def test_new_root_walks_from_the_push_cursor_and_recapture_reaches_history(
     )
     assert errors == 0
     assert _captured_messages(rows) == {"ten days ago", "just now"}
+
+
+def test_muse_metadata_arriving_after_initial_records_is_retried(home):
+    repo = _fake_repo(home / "repo")
+    path = home / ".local/share/muse/sessions/2026/11/03/fresh/session.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"payload":{"record":{"kind":"started"}}}\n')
+    assert _discover(_cfg("muse"), persist=True).roots == ()
+    with path.open("a") as stream:
+        stream.write(json.dumps({"payload": {"record": {"workspace_root": str(repo)}}}) + "\n")
+    assert _discover(_cfg("muse"), persist=True).roots == (repo,)
+
+
+def test_codex_day_keeps_progress_between_budgeted_pushes(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    for i in range(6):
+        _codex_rollout(_codex_day(home) / f"rollout-{i}.jsonl", str(repo))
+    clock = [0.0]
+    original = rootprobes._codex_rollout_cwd
+    reads = []
+
+    def read(path):
+        reads.append(path.name)
+        clock[0] += 1.0
+        return original(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
+    for _ in range(4):
+        result = _discover(_cfg("codex"), persist=True, seconds=2.5)
+        if not result.exceeded:
+            break
+    assert not result.exceeded and result.roots == (repo,)
+    assert reads == [f"rollout-{i}.jsonl" for i in range(6)]
+    assert not events.read_git_capture_cache()["probe_index"]["codex"]["state"].get("pending_units")
+
+
+def test_codex_empty_rollout_is_retried_after_first_record_arrives(home):
+    repo = _fake_repo(home / "repo")
+    path = _codex_day(home) / "rollout-a.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"")
+    other = _fake_repo(home / "other")
+    _codex_rollout(path.with_name("rollout-b.jsonl"), str(other))
+    result = _discover(_cfg("codex"), persist=True)
+    assert not result.exceeded and result.roots == (other,)
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    _codex_rollout(path, str(repo))
+    result = _discover(_cfg("codex"), persist=True)
+    assert not result.exceeded and set(result.roots) == {repo, other}
+
+
+def test_previously_known_root_returns_after_temporary_absence(home):
+    repo = _fake_repo(home / "repo")
+    path = home / ".paseo/projects/projects.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([{"rootPath": str(repo)}]))
+    assert _discover(_cfg(), persist=True).roots == (repo,)
+    (repo / ".git").rename(repo / ".git-away")
+    assert _discover(_cfg(), persist=True).roots == ()
+    assert _cached_units("paseo")["projects.json"][1] == []
+    (repo / ".git-away").rename(repo / ".git")
+    assert _discover(_cfg(), persist=True).roots == (repo,)
+    path.write_text("[]")
+    assert _discover(_cfg(), persist=True).roots == ()
+
+
+def test_muse_read_cap_bounds_input_before_oversize_drain(home, monkeypatch, capsys):
+    import io
+
+    class Counted(io.BytesIO):
+        count = 0
+
+        def readline(self, size=-1):
+            raw = super().readline(size)
+            self.count += len(raw)
+            return raw
+
+        def read(self, size=-1):
+            raw = super().read(size)
+            self.count += len(raw)
+            return raw
+
+    stream = Counted(b"x" * 1024)
+    monkeypatch.setattr(rootprobes, "_open_regular", lambda path: stream)
+    monkeypatch.setattr(rootprobes, "_MUSE_CAP", 32)
+    monkeypatch.setattr(token_usage, "MAX_JSONL_LINE_BYTES", 16)
+    rootprobes._muse_read(home, "2026/11/03/s", None)
+    assert stream.count <= 32
+    assert capsys.readouterr().err == ""
+
+
+def test_cursor_stream_keeps_progress_between_budgeted_pushes(home, monkeypatch):
+    repos = [_fake_repo(home / f"repo-{i}") for i in range(6)]
+    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store" / "agents.ndjson"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps({"cwd": str(repo)}) + "\n" for repo in repos))
+    clock = [0.0]
+    original = rootprobes._loads
+    reads = []
+
+    def load(raw):
+        result = original(raw)
+        if isinstance(result, dict) and "cwd" in result:
+            reads.append(result["cwd"])
+            clock[0] += 1.0
+        return result
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_loads", load)
+    for _ in range(4):
+        result = _discover(_cfg(cursor=True), persist=True, seconds=2.5)
+        if not result.exceeded:
+            break
+    assert not result.exceeded and set(result.roots) == set(repos)
+    assert reads == [str(repo) for repo in repos]
+
+
+def test_pending_unit_restarts_on_change_and_is_pruned_when_vanished(home, monkeypatch):
+    first = _fake_repo(home / "first")
+    second = _fake_repo(home / "second")
+    day = _codex_day(home)
+    _codex_rollout(day / "rollout-a.jsonl", str(first))
+    _codex_rollout(day / "rollout-b.jsonl", str(second))
+    clock = [0.0]
+    original = rootprobes._codex_rollout_cwd
+
+    def read(path):
+        clock[0] += 1.0
+        return original(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
+    assert _discover(_cfg("codex"), persist=True, seconds=0.5).exceeded
+    _codex_rollout(day / "rollout-a.jsonl", str(second))
+    _bump(day, 1_000_000)
+    assert _discover(_cfg("codex"), persist=True).roots == (second,)
+    shutil.rmtree(day)
+    assert _discover(_cfg("codex"), persist=True).roots == ()
+    state = events.read_git_capture_cache()["probe_index"]["codex"]["state"]
+    assert state["pending_units"] == {} and state["retry_roots"] == {}
+
+
+def test_retry_roots_exclude_never_repositories_and_follow_record_lifetime(home):
+    repo = _fake_repo(home / "repo")
+    ordinary = home / "ordinary"
+    ordinary.mkdir()
+    path = home / ".paseo/projects/projects.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([{"rootPath": str(p)} for p in (repo, ordinary)]))
+    _discover(_cfg(), persist=True)
+    (repo / ".git").rename(repo / ".git-away")
+    _discover(_cfg(), persist=True)
+    record = events.read_git_capture_cache()["probe_index"]["paseo"]
+    assert record["state"]["retry_roots"]["projects.json"][1] == [str(repo)]
+    assert str(ordinary) not in json.dumps(record)
+    path.write_text("[]")
+    _discover(_cfg(), persist=True)
+    assert events.read_git_capture_cache()["probe_index"]["paseo"]["state"]["retry_roots"] == {}
+    path.unlink()
+    _discover(_cfg(), persist=True)
+    assert "paseo" not in events.read_git_capture_cache()["probe_index"]
+
+
+def test_agy_malformed_sqlite_value_does_not_hide_valid_rows(home):
+    repo = _fake_repo(home / "repo")
+    path = home.joinpath(*rootprobes._AGY_SUMMARIES)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("create table conversation_summaries (workspace_uris)")
+        conn.executemany(
+            "insert into conversation_summaries values (?)",
+            [(42,), (json.dumps([repo.as_uri()]),)],
+        )
+    assert _discover(_cfg("agy")).roots == (repo,)
+
+
+def test_cursor_cap_preserves_roots_from_complete_prefix(home, monkeypatch, capsys):
+    repo = _fake_repo(home / "repo")
+    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store" / "agents.ndjson"
+    path.parent.mkdir(parents=True)
+    first = json.dumps({"cwd": str(repo)}) + "\n"
+    path.write_text(first + "x" * 128)
+    monkeypatch.setattr(rootprobes, "_CURSOR_NDJSON_CAP", len(first.encode()) + 16)
+    result = _discover(_cfg(cursor=True), persist=True)
+    assert not result.exceeded and result.roots == (repo,)
+    assert capsys.readouterr().err == ""
+
+
+def test_codex_pending_retries_share_progress_across_pushes(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    day = _codex_day(home)
+    day.mkdir(parents=True)
+    for name in ("a", "b", "c"):
+        (day / f"rollout-{name}.jsonl").write_bytes(b"")
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    _codex_rollout(day / "rollout-c.jsonl", str(repo))
+    clock = [0.0]
+    original = rootprobes._codex_rollout_cwd
+    reads = []
+
+    def read(path):
+        reads.append(path.name)
+        clock[0] += 1.0
+        return original(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
+    for _ in range(3):
+        result = _discover(_cfg("codex"), persist=True, seconds=0.5)
+    # Each synthetic read takes longer than this call's budget; discovering the
+    # third file proves forward progress even while the registry reports that cut.
+    assert result.roots == (repo,)
+    assert reads == ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"]
+
+
+def test_cursor_record_symlink_is_not_followed_and_replacement_is_read(home):
+    # Value: protects=record-only discovery refuses a symlink at the named metadata file;
+    # fails_when=the reader follows a metadata symlink into an unrelated local file;
+    # why_new=credential-neighbour tests use ordinary neighbours rather than record symlinks;
+    # seam=none; no_claim=all filesystem races or live Cursor stores.
+    repo = _fake_repo(home / "repo")
+    unrelated = home / "unrelated.json"
+    unrelated.write_text(json.dumps({"cwd": str(repo)}))
+    metadata = home / ".cursor" / "acp-sessions" / "s" / "meta.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.symlink_to(unrelated)
+    result = _discover(_cfg(cursor=True), persist=True)
+    assert result.roots == () and not result.exceeded
+    metadata.unlink()
+    metadata.write_text(json.dumps({"cwd": str(repo)}))
+    assert _discover(_cfg(cursor=True), persist=True).roots == (repo,)
+
+
+def test_sqlite_unreadable_record_recovers_after_replacement_and_deadline_is_incomplete(home):
+    # Value: protects=SQLite read failure stays nonfatal and an expired read is incomplete;
+    # fails_when=corrupt databases crash discovery or a deadline is cached as a complete read;
+    # why_new=existing SQLite tests cover valid rows/WAL but not corrupt input or expired reads;
+    # seam=none; no_claim=live database contention or provider acceptance (synthetic SQLite).
+    repo = _fake_repo(home / "repo")
+    database = home.joinpath(*rootprobes._AGY_SUMMARIES)
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"not a sqlite database")
+    result = _discover(_cfg("agy"), persist=True)
+    assert result.roots == () and result.errors == () and not result.exceeded
+    database.unlink()
+    _make_db(database, "conversation_summaries", "workspace_uris", [json.dumps([repo.as_uri()])])
+    assert _discover(_cfg("agy"), persist=True).roots == (repo,)
+    assert rootprobes._agy_read(home, "conversation_summaries.db", -1.0) == (None, False)
+    assert rootprobes._cursor_read(home, "conductor/store/index.db", -1.0) == (None, False)
+
+
+def test_malformed_resume_state_is_replaced_without_losing_discovered_roots(home):
+    # Value: protects=discovery recovers from malformed machine-local resume and retry state;
+    # fails_when=bad persisted state crashes a scan or suppresses a valid current root;
+    # why_new=normalization tests cover unit records but not the new per-unit resume maps;
+    # seam=none; no_claim=arbitrary cache corruption outside the changed probe-index schema.
+    repo = _fake_repo(home / "repo")
+    _codex_rollout(_codex_day(home) / "rollout-a.jsonl", str(repo))
+    _discover(_cfg("codex"), persist=True)
+    cache = events.read_git_capture_cache()
+    state = cache["probe_index"]["codex"]["state"]
+    state["pending_units"] = {
+        "live/2026/11/03": {"stamp": [], "reader": [], "roots": [7]},
+        "vanished": {"reader": {}, "roots": [str(home / "absent")]},
+    }
+    state["retry_roots"] = {"live/2026/11/03": ["invalid", [str(repo)]]}
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    result = _discover(_cfg("codex"), persist=True)
+    assert result.roots == (repo,) and result.errors == () and not result.exceeded
+    state = events.read_git_capture_cache()["probe_index"]["codex"]["state"]
+    assert state["pending_units"] == {} and state["retry_roots"] == {}

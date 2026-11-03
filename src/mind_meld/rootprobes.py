@@ -40,6 +40,7 @@ Stamp = Any
 
 ListUnits = Callable[[Path, dict, "float | None"], "list[tuple[str, Stamp]] | None"]
 ReadUnit = Callable[[Path, str, "float | None"], "tuple[list[str] | None, bool]"]
+ResumeUnit = Callable[[Path, str, "float | None", dict], "tuple[list[str] | None, bool]"]
 
 
 @dataclass(frozen=True)
@@ -56,12 +57,18 @@ class RootProber:
     ``read_unit(home, key, deadline)`` returns ``(directories, completed)``:
     ``completed`` is False only when the deadline cut the read; any read error
     is ``(None, True)``, and a unit that names no directory is ``([], True)``.
+
+    Optional ``resume_unit`` also receives a unit-local reader state. It returns
+    newly read directories while preserving its cursor across deadlines. Its
+    ``retry`` flag retains state after a complete pass for unfinished metadata;
+    the generic index retries that state next push even if the stamp is stable.
     """
 
     name: str
     kind: str
     list_units: ListUnits
     read_unit: ReadUnit
+    resume_unit: ResumeUnit | None = None
 
 
 def _discovery_home() -> Path:
@@ -134,7 +141,7 @@ def _loads(raw: bytes | str | None) -> Any:
         return None
     try:
         return json.loads(raw)
-    except (ValueError, RecursionError):
+    except (TypeError, ValueError, RecursionError):
         return None
 
 
@@ -186,6 +193,35 @@ def _strings(values: Any) -> list[str]:
 
 class _Cut(Exception):
     """The deadline interrupted a read."""
+
+
+class _ReadLimit(Exception):
+    """A record exceeded its byte bound; do not drain it or print a notice."""
+
+
+class _Pending(Exception):
+    """The first metadata record has not finished arriving yet."""
+
+
+class _RecordStream:
+    """Bound reads before the shared JSONL reader can drain an oversized line."""
+
+    def __init__(self, stream: BinaryIO, cap: int, deadline: float | None):
+        self.stream = stream
+        self.remaining = cap
+        self.deadline = deadline
+
+    def readline(self, size: int) -> bytes:
+        if _expired(self.deadline):
+            raise _Cut
+        if self.remaining <= 0:
+            raise _ReadLimit
+        limit = min(size, self.remaining)
+        raw = self.stream.readline(limit)
+        self.remaining -= len(raw)
+        if len(raw) == limit and not raw.endswith(b"\n"):
+            raise _ReadLimit
+        return raw
 
 
 def _sqlite_stamp(db: Path) -> list[int] | None:
@@ -412,15 +448,23 @@ def _muse_read(home: Path, key: str, deadline: float | None):
     try:
         with fh:
             lines = token_usage.iter_bounded_lines(
-                fh, str(path), 0, label="root probe", yield_final_partial=True
+                _RecordStream(fh, _MUSE_CAP, deadline),
+                str(path),
+                0,
+                label="root probe",
+                yield_final_partial=True,
             )
-            for index, (raw, end) in enumerate(lines):
-                if index >= _MUSE_RECORDS or end > _MUSE_CAP:
-                    break
+            for _ in range(_MUSE_RECORDS):
+                line = next(lines, None)
+                if line is None:
+                    return None, True  # metadata may arrive in a later append
+                raw, _end = line
                 found = _muse_workspace(_loads(raw.strip()))
                 if found:
                     return [found], True
-    except OSError:
+    except _Cut:
+        return None, False
+    except (OSError, _ReadLimit):
         return None, True
     return [], True
 
@@ -476,6 +520,10 @@ def _cursor_list(home: Path, state: dict, deadline: float | None):
 
 
 def _cursor_read(home: Path, key: str, deadline: float | None):
+    return _cursor_resume(home, key, deadline, {})
+
+
+def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict):
     _check_home(home)
     kind, _, rest = key.partition("/")
     if kind == "acp":
@@ -484,13 +532,14 @@ def _cursor_read(home: Path, key: str, deadline: float | None):
         data = _loads(_read_capped(_cursor_acp_root(home) / rest / "meta.json", _CURSOR_ACP_CAP))
         if not isinstance(data, dict):
             return None, True
-        return _strings([data.get("cwd")]), True
+        paths = _strings([data.get("cwd")])
+        return paths or None, True
     store, _, name = rest.partition("/")
     if kind != "conductor" or not _FILE_NAME.fullmatch(store) or store in (".", ".."):
         return None, True
     directory = home.joinpath(*_CONDUCTOR_STORE) / store
     if name == "agents.ndjson":
-        return _cursor_ndjson(directory / name, deadline)
+        return _cursor_ndjson(directory / name, deadline, state)
     if name == "index.db":
         if _lstat(directory / "index.db-journal") is not None:
             return None, True  # mid-transaction; the stamp changes when it settles
@@ -506,24 +555,33 @@ def _cursor_read(home: Path, key: str, deadline: float | None):
     return None, True
 
 
-def _cursor_ndjson(path: Path, deadline: float | None):
+def _cursor_ndjson(path: Path, deadline: float | None, state: dict):
     fh = _open_regular(path)
     if fh is None:
         return None, True
     found: list[Any] = []
+    offset = state.get("offset", 0)
+    if not isinstance(offset, int) or not 0 <= offset < _CURSOR_NDJSON_CAP:
+        offset = 0
     try:
         with fh:
+            fh.seek(offset)
             lines = token_usage.iter_bounded_lines(
-                fh, str(path), 0, label="root probe", yield_final_partial=True
+                _RecordStream(fh, _CURSOR_NDJSON_CAP - offset, deadline),
+                str(path),
+                offset,
+                label="root probe",
+                yield_final_partial=True,
             )
             for raw, end in lines:
-                if end > _CURSOR_NDJSON_CAP:
-                    break
-                if _expired(deadline):
-                    return None, False
                 record = _loads(raw.strip())
                 if isinstance(record, dict):
                     found.append(record.get("cwd"))
+                state["offset"] = end
+    except _Cut:
+        return _strings(found), False
+    except _ReadLimit:
+        return _strings(found), True
     except OSError:
         return None, True
     return _strings(found), True
@@ -591,16 +649,26 @@ def _codex_rollout_cwd(path: Path) -> str | None:
             head = fh.read(_CODEX_HEAD_BYTES)
             newline = head.find(b"\n")
             if newline >= 0 or len(head) < _CODEX_HEAD_BYTES:
-                return _codex_meta_cwd(_loads(head if newline < 0 else head[:newline]))
+                record = _loads(head if newline < 0 else head[:newline])
+                if newline < 0 and record is None:
+                    raise _Pending
+                return _codex_meta_cwd(record)
             cwd = _codex_head_cwd(head)
             if cwd is not None:
                 return cwd
             fh.seek(0)
             for raw, _end in token_usage.iter_bounded_lines(
-                fh, str(path), 0, label="root probe", yield_final_partial=True
+                _RecordStream(fh, token_usage.MAX_JSONL_LINE_BYTES, None),
+                str(path),
+                0,
+                label="root probe",
+                yield_final_partial=True,
             ):
-                return _codex_meta_cwd(_loads(raw.strip()))
-    except OSError:
+                record = _loads(raw.strip())
+                if not raw.endswith(b"\n") and record is None:
+                    raise _Pending
+                return _codex_meta_cwd(record)
+    except (OSError, _ReadLimit):
         return None
     return None
 
@@ -685,16 +753,57 @@ def _codex_list(home: Path, state: dict, deadline: float | None):
     return live + [(f"archived/{date}", groups[date]) for date in sorted(groups, reverse=True)]
 
 
-def _codex_unit_cwds(paths: list[Path], deadline: float | None):
+def _codex_unit_cwds(paths: list[Path], deadline: float | None, state: dict):
     found: list[Any] = []
-    for path in paths:
+    after = state.get("after")
+    if not isinstance(after, str):
+        after = ""
+    waiting = state.get("waiting")
+    waiting = (
+        set(waiting)
+        if isinstance(waiting, list) and all(isinstance(n, str) for n in waiting)
+        else set()
+    )
+    waiting.intersection_update(path.name for path in paths)
+    # New files precede retry files so one unfinished record cannot starve the
+    # main cursor. Each filename is attempted at most once per invocation.
+    todo = [path for path in paths if path.name > after]
+    retry_after = state.get("retry_after", "")
+    if not isinstance(retry_after, str):
+        retry_after = ""
+    retries = [
+        path
+        for path in paths
+        if path.name <= after and path.name in waiting and path.name > retry_after
+    ]
+    scan_after = after
+    todo.extend(retries)
+    for path in todo:
         if _expired(deadline):
-            return None, False
-        found.append(_codex_rollout_cwd(path))
+            state["waiting"] = sorted(waiting)
+            state["retry"] = bool(waiting)
+            return _strings(found), False
+        try:
+            found.append(_codex_rollout_cwd(path))
+        except _Pending:
+            waiting.add(path.name)
+        else:
+            waiting.discard(path.name)
+        state["after"] = max(after, path.name)
+        after = state["after"]
+        if path.name <= scan_after:
+            state["retry_after"] = path.name
+    state["waiting"] = sorted(waiting)
+    state["retry"] = bool(waiting)
+    state.pop("retry_after", None)
     return _strings(found), True
 
 
 def _codex_read(home: Path, key: str, deadline: float | None):
+    return _codex_resume(home, key, deadline, {})
+
+
+def _codex_resume(home: Path, key: str, deadline: float | None, state: dict):
     _check_home(home)
     root = _codex_root(home)
     live = _CODEX_LIVE_KEY.fullmatch(key)
@@ -707,7 +816,7 @@ def _codex_read(home: Path, key: str, deadline: float | None):
                 )
         except OSError:
             return None, True
-        return _codex_unit_cwds([day / name for name in names], deadline)
+        return _codex_unit_cwds([day / name for name in names], deadline, state)
     archived_key = _CODEX_ARCHIVED_KEY.fullmatch(key)
     if archived_key:
         archived = root / "archived_sessions"
@@ -721,7 +830,7 @@ def _codex_read(home: Path, key: str, deadline: float | None):
         if groups is None:
             return None, False
         return _codex_unit_cwds(
-            [archived / name for name in groups.get(archived_key.group(1), [])], deadline
+            [archived / name for name in groups.get(archived_key.group(1), [])], deadline, state
         )
     return None, True
 
@@ -737,8 +846,8 @@ PROBERS: tuple[RootProber, ...] = (
     RootProber("mmm", "tool", _mmm_list, _mmm_read),
     RootProber("agy", "provider", _agy_list, _agy_read),
     RootProber("muse", "provider", _muse_list, _muse_read),
-    RootProber("cursor", "provider", _cursor_list, _cursor_read),
-    RootProber("codex", "provider", _codex_list, _codex_read),
+    RootProber("cursor", "provider", _cursor_list, _cursor_read, _cursor_resume),
+    RootProber("codex", "provider", _codex_list, _codex_read, _codex_resume),
 )
 
 _TOOL_MARKERS: dict[str, tuple[tuple[str, ...], bool]] = {

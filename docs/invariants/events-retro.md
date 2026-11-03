@@ -553,7 +553,25 @@ stamped unit is cached under its stamp, an immutable one is retried next push (a
 raised error would mark discovery partial forever on one bad record). Each named
 directory is resolved and classified once and only git roots are stored. A cached
 root that later stops being a git root is rejected by the registry and stripped from
-its unit (`_strip_probe_roots`). A prober that no longer runs (provider disabled,
+its unit (`_strip_probe_roots`), with its prior stamp and root retained under
+`state.retry_roots[key] = [stamp, [roots]]`. `_probe_host_records` reclassifies
+those formerly known roots next push; directories that have never been roots
+are never retained for retry. A changed stamp discards this old retry entry.
+
+Large Codex groups and Cursor `agents.ndjson` files resume within a unit:
+`state.pending_units[key] = {"stamp": stamp, "reader": {}, "roots": []}`.
+`_probe_host_records` accumulates only classified roots; the reader owns its
+cursor (`after`, the last Codex filename, or `offset`, the Cursor byte offset).
+Stamp changes reset this progress. Codex's reader also keeps `waiting` filenames
+for empty or unfinished first records and a `retry` flag; `retry_after` resumes a
+retry round across deadlines so early unfinished files cannot starve later ones.
+It attempts each file at most once per push, continues to later files, and retains progress for the next
+push even after a complete pass. Pending metadata alone is not a deadline error.
+Muse streams that end before their 16-record scan finds metadata, and Cursor ACP
+records without a cwd, are retried rather than frozen as empty immutable units.
+JSONL byte caps and deadlines are enforced before the shared reader can drain an
+oversized line; discovery does not print that reader's path-bearing notice.
+Both state maps lose vanished units after a complete listing. A prober that no longer runs (provider disabled,
 tool uninstalled) loses its index on complete discovery. `_normalize_git_capture_cache`
 keeps every valid part of `probe_index`; other cache writers normalize, then mutate,
 and so keep it. The Codex head scan reads the first 4 KiB and takes `payload.cwd`
@@ -565,8 +583,8 @@ back to parsing the whole first line.
 discovery errors reach the events wire. (Claude's and the manual prober keep their
 messages.) An unreadable root directory raises rather than reading as empty.
 
-**Working directories stay local.** Paths live in the local cache and in `mm diag
---json` only. No directory goes on the events wire, and no session is attributed to a
+**Working directories stay local.** Paths live in the local cache and local `mm diag`
+output (text and JSON). No directory goes on the events wire, and no session is attributed to a
 project from its working directory; discovery finds repositories, nothing more.
 
 **A newly found repository needs `mm recapture`.** A root with no repository cursor

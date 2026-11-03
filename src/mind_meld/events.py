@@ -1129,9 +1129,35 @@ def _strip_probe_roots(cache: dict, name: str, stale: set[str]) -> None:
     """Remove roots that stopped being git roots from one prober's cached units."""
     record = cache.get("probe_index", {}).get(name)
     units = record.get("units") if isinstance(record, dict) else None
-    for unit in (units or {}).values():
+    state = record.get("state") if isinstance(record, dict) else None
+    if not isinstance(state, dict):
+        return
+    retry = _probe_state_map(state, "retry_roots")
+    for key, unit in (units or {}).items():
         if isinstance(unit, list) and len(unit) == 2 and isinstance(unit[1], list):
+            removed = [root for root in unit[1] if root in stale]
+            prior = retry.get(key)
+            old = prior[1] if _valid_probe_unit(prior) and prior[0] == unit[0] else []
+            if removed:
+                retry[key] = [unit[0], list(dict.fromkeys([*old, *removed]))]
             unit[1] = [root for root in unit[1] if root not in stale]
+
+
+def _probe_state_map(state: dict, name: str) -> dict:
+    value = state.get(name)
+    if not isinstance(value, dict):
+        value = state[name] = {}
+    return value
+
+
+def _valid_probe_unit(unit: object) -> bool:
+    return (
+        isinstance(unit, list)
+        and len(unit) == 2
+        and (unit[0] is None or isinstance(unit[0], list))
+        and isinstance(unit[1], list)
+        and all(isinstance(root, str) for root in unit[1])
+    )
 
 
 def _classify_named_dirs(dirs: Sequence[object] | None) -> list[str]:
@@ -1172,8 +1198,13 @@ def _probe_host_records(
 
     A unit whose read failed (``None``) is a completed observation of no
     directories: a stamped unit is cached under its stamp, an immutable one is
-    retried next push. Only git roots are stored, each resolved and
-    classified once. ``since`` is unused: a newly found root walks from the
+    retried next push. ``state.pending_units`` retains reader progress and
+    already classified roots across deadlines; its reader retry flag also
+    revisits unfinished metadata after a complete pass. ``state.retry_roots``
+    retains only previously known roots rejected by the registry, so temporary
+    absence can recover without a changed host record. Both maps are pruned
+    with their units and invalidated on stamp changes. Only git roots are
+    stored. ``since`` is unused: a newly found root walks from the
     push cursor, so earlier commits need ``mm recapture <window>``.
     """
     cache = cache if cache is not None else _default_git_capture_cache()
@@ -1188,10 +1219,15 @@ def _probe_host_records(
     ):
         record = index[prober.name] = {"units": {}, "state": {}}
     units: dict[str, list] = record["units"]
+    pending = _probe_state_map(record["state"], "pending_units")
+    retry = _probe_state_map(record["state"], "retry_roots")
     home = rootprobes._discovery_home()
 
     def cached_roots() -> list[Path]:
         found = [root for unit in units.values() for root in unit[1]]
+        found.extend(
+            root for progress in pending.values() for root in _pending_probe_roots(progress)
+        )
         return [Path(root) for root in dict.fromkeys(found)]
 
     listing = prober.list_units(home, record["state"], deadline_monotonic)
@@ -1201,27 +1237,70 @@ def _probe_host_records(
     listed = {key for key, _stamp in listing}
     for key in units.keys() - listed:
         del units[key]
+    for records in (pending, retry):
+        for key in records.keys() - listed:
+            del records[key]
     roots: list[str] = []
     complete = True
     for key, stamp in listing:
         stamp = list(stamp) if isinstance(stamp, tuple) else stamp
         unit = units.get(key)
-        if unit is not None and unit[0] == stamp:
+        prior = retry.get(key)
+        if _valid_probe_unit(prior) and prior[0] == stamp:
+            recovered = _classify_named_dirs(prior[1])
+            if unit is not None:
+                unit[1] = list(dict.fromkeys([*unit[1], *recovered]))
+            prior[1] = [root for root in prior[1] if root not in recovered]
+            if not prior[1]:
+                retry.pop(key, None)
+        else:
+            retry.pop(key, None)
+        progress = pending.get(key)
+        if unit is not None and unit[0] == stamp and not isinstance(progress, dict):
             roots.extend(unit[1])
             continue
         if complete and not _deadline_expired(deadline_monotonic):
-            dirs, completed = prober.read_unit(home, key, deadline_monotonic)
-            if completed:
+            progress = None
+            if prober.resume_unit is not None:
+                progress = pending.get(key)
+                if not (
+                    isinstance(progress, dict)
+                    and progress.get("stamp") == stamp
+                    and isinstance(progress.get("reader"), dict)
+                    and isinstance(progress.get("roots"), list)
+                    and all(isinstance(root, str) for root in progress["roots"])
+                ):
+                    progress = pending[key] = {"stamp": stamp, "reader": {}, "roots": []}
+                dirs, completed = prober.resume_unit(
+                    home, key, deadline_monotonic, progress["reader"]
+                )
+                progress["roots"] = list(
+                    dict.fromkeys([*progress["roots"], *_classify_named_dirs(dirs)])
+                )
+                found = progress["roots"]
+                roots.extend(found)
+            else:
+                dirs, completed = prober.read_unit(home, key, deadline_monotonic)
                 found = _classify_named_dirs(dirs)
+            if completed:
                 if dirs is not None or stamp is not None:
                     units[key] = [stamp, found]
+                if progress is None or progress["reader"].get("retry") is not True:
+                    pending.pop(key, None)
                 roots.extend(found)
                 continue
         complete = False
         if unit is not None:
             roots.extend(unit[1])
+        roots.extend(_pending_probe_roots(pending.get(key)))
     cache["_discovery_complete"] = complete
     return [Path(root) for root in dict.fromkeys(roots)]
+
+
+def _pending_probe_roots(progress: object) -> list[str]:
+    if isinstance(progress, dict) and isinstance(progress.get("roots"), list):
+        return [root for root in progress["roots"] if isinstance(root, str)]
+    return []
 
 
 def _read_cwd_from_latest_jsonl(
