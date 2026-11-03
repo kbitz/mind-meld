@@ -2550,7 +2550,8 @@ class TestCodexSettledDays85A:
         assert result.complete is True
         # The key set no longer matches: both files of that date go per-file.
         assert set(seen["cache_hit"]) >= {a, c} and b not in seen["cache_hit"]
-        assert seen["read_full"] == [c]
+        # Track 105A: `a` was slim, so the evicted group is re-read in full.
+        assert sorted(seen["read_full"]) == sorted([a, c])
         assert result.hosts["codex"]["2026-08-15"]["input"] == 350
         settled = json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"]
         assert settled["archive/2026-08-13"]["count"] == 2, "re-frozen once it verifies"
@@ -2750,9 +2751,15 @@ class TestCodexSettledDays85A:
             root, "rollout-pend.jsonl", [_context(turn="t-pend"), _token(90)]
         )
         _age(pending_file)
-        assert codex_host.read_codex_usage(root).complete is True
+        # Track 105A: a settled entry is slim and a full re-read would discard an
+        # injected `pending`, so seed it while the day cannot settle yet.
+        with monkeypatch.context() as unsettleable:
+            unsettleable.setattr(hu, "SETTLE_IDLE_NS", 2**62)
+            assert codex_host.read_codex_usage(root).complete is True
         data = json.loads(isolated_cache.read_text(encoding="utf-8"))
+        assert data["settled_days"] == {}
         for entry in data["files"].values():
+            assert "states" in entry
             entry["pending"] = [[[90, 0, 0, 0], "2026-08-15", None]]
         data["settled_days"] = {}
         isolated_cache.write_text(json.dumps(data), encoding="utf-8")
@@ -2769,6 +2776,607 @@ class TestCodexSettledDays85A:
         _age(recent_file)
         assert codex_host.read_codex_usage(root).complete is True
         assert json.loads(isolated_cache.read_text(encoding="utf-8"))["settled_days"] == {}
+
+
+class TestCodexSettledMemo105A:
+    """Track 105A: settled records memoize their totals and slim their entries.
+
+    Every read is compared with an oracle, ``hu._aggregate`` over a full parse
+    of every rollout on disk, so a memo that drifts from a whole-corpus
+    reduction fails here whatever shape it takes.
+    """
+
+    _LIVE_14 = ("fork-a", "fork-b", "partial", "zero")
+    _ARCHIVE_13 = ("arch-1", "arch-2", "arch-none")
+
+    @staticmethod
+    def _write_at(directory: Path, name: str, records: list[dict], *, old: bool = True) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_bytes(b"".join(json.dumps(record).encode("utf-8") + b"\n" for record in records))
+        if old:
+            _age(path)
+        return path
+
+    @staticmethod
+    def _live(day: str) -> Path:
+        return codex_host.CODEX_SESSIONS_PATH / "2026" / day[:2] / day[3:]
+
+    def _build_corpus(self) -> dict[str, Path]:
+        """Two settleable groups, plus an archive group and a live day sharing a turn."""
+        arch = codex_host.CODEX_ARCHIVED_SESSIONS_PATH
+        live_14 = self._live("08/14")
+        write = self._write_at
+        return {
+            # Live 2026/08/14 settles as one record: two forks sharing a turn, a
+            # nonzero cache_create (a partial day) and a zero `t -> t` day.
+            "fork-a": write(
+                live_14,
+                "rollout-fork-a.jsonl",
+                [_context(turn="fork"), _token(100, last=100), _token(150, last=50)],
+            ),
+            "fork-b": write(
+                live_14,
+                "rollout-fork-b.jsonl",
+                [_context(turn="fork"), _token(100, last=100), _token(180, last=80)],
+            ),
+            "partial": write(
+                live_14,
+                "rollout-partial.jsonl",
+                [
+                    _context(turn="partial"),
+                    _token(
+                        300,
+                        cache_create=30,
+                        cache_read=10,
+                        output=7,
+                        timestamp="2026-08-16T00:00:01Z",
+                    ),
+                ],
+            ),
+            "zero": write(
+                live_14,
+                "rollout-zero.jsonl",
+                [
+                    _context(turn="zero"),
+                    _token(70, last=70),
+                    _token(70, last=0, timestamp="2026-08-17T00:00:01Z"),
+                ],
+            ),
+            # Archive 2026-08-13 settles: two ledgers (two models) and a no-ledger file.
+            "arch-1": write(
+                arch,
+                "rollout-2026-08-13T10-00-00-a.jsonl",
+                [_context(turn="arch-a"), _token(50)],
+            ),
+            "arch-2": write(
+                arch,
+                "rollout-2026-08-13T11-00-00-b.jsonl",
+                [
+                    _context("gpt-5.2-codex", turn="arch-b"),
+                    _token(60, timestamp="2026-08-18T00:00:01Z"),
+                ],
+            ),
+            "arch-none": write(
+                arch, "rollout-2026-08-13T12-00-00-none.jsonl", [_context(turn="arch-none")]
+            ),
+            # An archive group and a live day sharing a turn: neither settles.
+            "shared-arch": write(
+                arch,
+                "rollout-2026-08-12T10-00-00-s.jsonl",
+                [_context(turn="shared"), _token(40)],
+            ),
+            "shared-live": write(
+                self._live("08/12"),
+                "rollout-shared-live.jsonl",
+                [_context(turn="shared"), _token(40), _token(90)],
+            ),
+        }
+
+    @staticmethod
+    def _all_rollouts() -> list[Path]:
+        live = sorted(codex_host.CODEX_SESSIONS_PATH.rglob("rollout-*.jsonl"))
+        archived = sorted(codex_host.CODEX_ARCHIVED_SESSIONS_PATH.glob("rollout-*.jsonl"))
+        return live + archived
+
+    @staticmethod
+    def _full_entries(paths: list[Path]) -> list[dict]:
+        deadline = time.monotonic() + 60
+        return [
+            codex_host._read_full_rollout(path, hu._regular_stat(path), deadline) for path in paths
+        ]
+
+    def _oracle(self, paths: list[Path] | None = None) -> hu.HostUsageBuckets:
+        return hu._aggregate(self._full_entries(paths or self._all_rollouts()))
+
+    def _assert_matches_oracle(self, result: hu.HostUsageResult) -> None:
+        expected = self._oracle()
+        assert result.complete is True
+        assert result.hosts == expected.by_family
+        assert result.tokens_by_day == expected.by_day
+        assert result.partial_days == frozenset(expected.unattributable_days)
+
+    def _totals(self, paths: list[Path]) -> dict[str, dict[str, dict[str, int]]]:
+        return {
+            day: {
+                model: {name: usage[name] for name in hu.TOKEN_FIELDS}
+                for model, usage in bucket["by_model"].items()
+            }
+            for day, bucket in self._oracle(paths).by_day.items()
+        }
+
+    @staticmethod
+    def _cache(cache: Path) -> dict:
+        return json.loads(cache.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _key(path: Path) -> str:
+        archived = path.parent == codex_host.CODEX_ARCHIVED_SESSIONS_PATH
+        base = (
+            codex_host.CODEX_ARCHIVED_SESSIONS_PATH if archived else codex_host.CODEX_SESSIONS_PATH
+        )
+        return _codex_key(path, base)
+
+    def _seed_legacy(
+        self, cache: Path, groups: dict[str, list[Path]], rest: list[Path]
+    ) -> dict[str, dict]:
+        """A hand-built 1.12.5 cache: full entries, records with no memo."""
+        files: dict[str, dict] = {}
+        settled: dict[str, dict] = {}
+        for seq, (rel, paths) in enumerate(groups.items(), start=1):
+            stats = []
+            for path in paths:
+                stat = hu._regular_stat(path)
+                stats.append((stat.st_size, stat.st_mtime_ns))
+            dir_mtime = None if rel.startswith("archive/") else paths[0].parent.stat().st_mtime_ns
+            digest = hu._stat_digest(dir_mtime, stats)
+            settled[rel] = {
+                "dir_mtime_ns": digest[0],
+                "count": digest[1],
+                "sum_size": digest[2],
+                "sum_mtime_ns": digest[3],
+                "check_seq": seq,
+                "keys": sorted(self._key(path) for path in paths),
+            }
+        every = [path for paths in groups.values() for path in paths] + rest
+        for path, entry in zip(every, self._full_entries(every), strict=True):
+            files[self._key(path)] = entry
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps(
+                {
+                    "version": hu.CACHE_VERSION,
+                    "last_reason": None,
+                    "last_reason_since": None,
+                    "files": files,
+                    "settled_days": settled,
+                }
+            ),
+            encoding="utf-8",
+        )
+        return settled
+
+    def _legacy_corpus(self, cache: Path) -> dict[str, Path]:
+        corpus = self._build_corpus()
+        live = [corpus[name] for name in self._LIVE_14]
+        archive = [corpus[name] for name in self._ARCHIVE_13]
+        rest = [corpus["shared-arch"], corpus["shared-live"]]
+        self._seed_legacy(cache, {"2026/08/14": live, "archive/2026-08-13": archive}, rest)
+        return corpus
+
+    @staticmethod
+    def _spy_aggregate(monkeypatch: pytest.MonkeyPatch) -> list[list[dict]]:
+        calls: list[list[dict]] = []
+        real = hu._aggregate
+
+        def spy(entries):
+            entries = list(entries)
+            calls.append(entries)
+            return real(entries)
+
+        monkeypatch.setattr(hu, "_aggregate", spy)
+        return calls
+
+    def test_memoized_totals_equal_a_full_aggregate_cold_and_warm(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        calls = self._spy_aggregate(monkeypatch)
+        cold = codex_host.read_codex_usage()
+        cold_calls = list(calls)  # the oracle below calls `_aggregate` too
+        self._assert_matches_oracle(cold)
+        # Each rollout reaches the reduction exactly once: one call per newly
+        # frozen record, one over the entries outside every record.
+        assert sum(len(entries) for entries in cold_calls) == len(corpus)
+
+        data = self._cache(isolated_cache)
+        assert set(data["settled_days"]) == {"2026/08/14", "archive/2026-08-13"}
+        live_record = data["settled_days"]["2026/08/14"]
+        assert live_record["totals"] == self._totals([corpus[n] for n in self._LIVE_14])
+        # The nonzero cache_create day is partial; the zero `t -> t` day is kept.
+        assert live_record["partial_days"] == ["2026-08-16"]
+        assert live_record["totals"]["2026-08-17"] == {
+            "gpt-5-codex": {name: 0 for name in hu.TOKEN_FIELDS}
+        }
+        archive_record = data["settled_days"]["archive/2026-08-13"]
+        assert archive_record["totals"] == self._totals([corpus[n] for n in self._ARCHIVE_13])
+        assert archive_record["partial_days"] == []
+        assert set(archive_record["totals"]["2026-08-18"]) == {"gpt-5.2-codex"}
+        # The archive group and the live day that share a turn never settled.
+        assert corpus["shared-arch"] and set(data["settled_days"]).isdisjoint(
+            {"archive/2026-08-12", "2026/08/12"}
+        )
+
+        calls.clear()
+        warm = codex_host.read_codex_usage()
+        warm_calls = list(calls)
+        self._assert_matches_oracle(warm)
+        assert len(warm_calls) == 1, "the warm read reduces once"
+        assert len(warm_calls[0]) == 2, "and only the two unsettled entries reach it"
+        assert all(entry.get("settled") is not True for entry in warm_calls[0])
+        assert {entry["size"] for entry in warm_calls[0]} == {
+            corpus["shared-arch"].stat().st_size,
+            corpus["shared-live"].stat().st_size,
+        }
+
+    def test_later_fork_of_a_settled_turn_evicts_the_record_and_rereads_it(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        assert "2026/08/14" in self._cache(isolated_cache)["settled_days"]
+
+        # A resume of an old session, in a new day, shares the settled turn. Its
+        # own branch past 150 must count once and the shared prefix must not
+        # count twice.
+        young = self._write_at(
+            self._live("09/01"),
+            "rollout-young.jsonl",
+            [_context(turn="fork"), _token(100, last=100), _token(210, last=110)],
+            old=False,
+        )
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])  # the oracle below parses every rollout too
+
+        self._assert_matches_oracle(result)
+        assert {corpus[name] for name in self._LIVE_14} | {young} <= reread
+        assert not reread & {corpus[name] for name in self._ARCHIVE_13}
+        settled = self._cache(isolated_cache)["settled_days"]
+        assert "2026/08/14" not in settled, "the shared turn blocks it from settling again"
+        assert "archive/2026-08-13" in settled
+
+    def test_two_records_holding_one_turn_are_both_evicted_and_rebuilt(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        data = self._cache(isolated_cache)
+        # Corrupt the slim turn-id table of the archive group so that it claims a
+        # turn the live record holds: a lineage crossing two records.
+        key = self._key(corpus["arch-1"])
+        data["files"][key]["turn_ids"] = ["fork"]
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])
+
+        self._assert_matches_oracle(result)
+        expected = {corpus[name] for name in (*self._LIVE_14, *self._ARCHIVE_13)}
+        assert expected <= reread, "both records were re-read in full"
+        settled = self._cache(isolated_cache)["settled_days"]
+        assert set(settled) == {"2026/08/14", "archive/2026-08-13"}, "and rebuilt from true ids"
+        assert all("totals" in record for record in settled.values())
+
+    def test_diag_is_the_same_on_the_legacy_seed_and_the_slimmed_cache(
+        self, isolated_cache: Path
+    ) -> None:
+        self._legacy_corpus(isolated_cache)
+        timing = set(hu._cached_read_timing({}))
+
+        def diag() -> dict:
+            return {k: v for k, v in codex_host.codex_usage_diag().items() if k not in timing}
+
+        legacy = diag()
+        assert legacy["state"] == "ready" and legacy["files_pre_track"] == 0
+        assert legacy["files_cached"] == 9 == legacy["files_on_disk"]
+
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        assert any(
+            entry.get("settled") is True for entry in self._cache(isolated_cache)["files"].values()
+        )
+        assert diag() == legacy
+        assert diag()["models"] == ["gpt-5-codex", "gpt-5.2-codex"]
+
+    def test_settled_entries_keep_only_the_fields_that_have_a_reader(
+        self, isolated_cache: Path
+    ) -> None:
+        corpus = self._legacy_corpus(isolated_cache)
+        legacy_bytes = isolated_cache.stat().st_size
+        legacy = self._cache(isolated_cache)["files"]
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+
+        data = self._cache(isolated_cache)
+        settled_keys = {key for record in data["settled_days"].values() for key in record["keys"]}
+        assert len(settled_keys) == 7
+        for key in settled_keys:
+            entry = data["files"][key]
+            assert entry["settled"] is True
+            assert set(entry) <= {"settled", "turn_ids", "models"}
+            for name in ("turn_ids", "models"):
+                assert entry.get(name) == (legacy[key].get(name) or None)
+            assert codex_host._validated_entry(entry) is None, "a slim entry is never a hit"
+            assert codex_host._validated_settled_entry(entry) == entry
+        assert data["files"][self._key(corpus["arch-none"])] == {"settled": True}
+        unsettled = data["files"][self._key(corpus["shared-live"])]
+        assert "states" in unsettled and "settled" not in unsettled
+        assert isolated_cache.stat().st_size < legacy_bytes
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"settled": False},
+            {"settled": 1},
+            {"turn_ids": ["t"]},
+            {"settled": True, "turn_ids": [1]},
+            {"settled": True, "turn_ids": "t"},
+            {"settled": True, "models": [""]},
+            {"settled": True, "models": ["m" * 300]},
+            "settled",
+        ],
+    )
+    def test_slim_entry_validator_rejects_other_shapes(self, value: object) -> None:
+        assert codex_host._validated_settled_entry(value) is None
+
+    def test_slim_entry_validator_accepts_the_shape_and_drops_extras(self) -> None:
+        assert codex_host._validated_settled_entry({"settled": True}) == {"settled": True}
+        assert codex_host._validated_settled_entry(
+            {"settled": True, "turn_ids": ["t"], "models": ["m"], "states": [[1]]}
+        ) == {"settled": True, "turn_ids": ["t"], "models": ["m"]}
+
+    @staticmethod
+    def _record(**extra: object) -> dict:
+        return {
+            "dir_mtime_ns": None,
+            "count": 1,
+            "sum_size": 1,
+            "sum_mtime_ns": 1,
+            "check_seq": 1,
+            "keys": ["k"],
+            **extra,
+        }
+
+    def test_a_record_without_a_memo_is_still_accepted(self) -> None:
+        kept = codex_host._validated_settled_days({"2026/08/14": self._record()})
+        assert set(kept) == {"2026/08/14"}
+        assert "totals" not in kept["2026/08/14"]
+
+    def test_a_well_formed_memo_is_kept(self) -> None:
+        usage = {"input": 5, "cache_create": 0, "cache_read": 1, "output": 2}
+        kept = codex_host._validated_settled_days(
+            {
+                "2026/08/14": self._record(
+                    totals={"2026-08-15": {"gpt-5-codex": usage}}, partial_days=["2026-08-15"]
+                )
+            }
+        )
+        assert kept["2026/08/14"]["totals"] == {"2026-08-15": {"gpt-5-codex": usage}}
+        assert kept["2026/08/14"]["partial_days"] == ["2026-08-15"]
+
+    @pytest.mark.parametrize(
+        "memo",
+        [
+            {"totals": {"2026-08-15": {}}},  # one half of the memo only
+            {"partial_days": []},
+            {"totals": [], "partial_days": []},
+            {"totals": {"2026-8-15": {}}, "partial_days": []},  # non-canonical day
+            {"totals": {"2026-02-31": {}}, "partial_days": []},  # impossible day
+            {"totals": {"2026-08-15": {"": {}}}, "partial_days": []},
+            {"totals": {"2026-08-15": {"m": {"input": -1}}}, "partial_days": []},
+            {
+                "totals": {
+                    "2026-08-15": {
+                        "m": {"input": True, "cache_create": 0, "cache_read": 0, "output": 0}
+                    }
+                },
+                "partial_days": [],
+            },
+            {
+                "totals": {"2026-08-15": {"m": {"input": 1, "cache_create": 0, "cache_read": 0}}},
+                "partial_days": [],
+            },
+            {"totals": {"2026-08-15": {}}, "partial_days": ["2026-08-16"]},  # not in totals
+            {"totals": {"2026-08-15": {}}, "partial_days": ["2026-08-15", "2026-08-15"]},
+            {"totals": {"2026-08-15": {}}, "partial_days": "2026-08-15"},
+        ],
+    )
+    def test_a_malformed_memo_drops_the_record(self, memo: dict) -> None:
+        assert codex_host._validated_settled_days({"2026/08/14": self._record(**memo)}) == {}
+
+    def test_malformed_memo_rereads_the_group_and_rebuilds_the_memo(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        data = self._cache(isolated_cache)
+        data["settled_days"]["2026/08/14"]["totals"]["2026-08-15"]["gpt-5-codex"]["input"] = -1
+        isolated_cache.write_text(json.dumps(data), encoding="utf-8")
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])
+
+        self._assert_matches_oracle(result)
+        assert {corpus[name] for name in self._LIVE_14} <= reread
+        record = self._cache(isolated_cache)["settled_days"]["2026/08/14"]
+        assert record["totals"] == self._totals([corpus[name] for name in self._LIVE_14])
+
+    def test_in_place_change_drops_the_memo_and_rereads_the_group(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        # An in-place append, with a new mtime, in the group the live rotation verifies.
+        corpus["fork-a"] = self._write_at(
+            self._live("08/14"),
+            "rollout-fork-a.jsonl",
+            [
+                _context(turn="fork"),
+                _token(100, last=100),
+                _token(150, last=50),
+                _token(190, last=40),
+            ],
+            old=False,
+        )
+        _age(corpus["fork-a"], _OLD_NS + 1_000_000_000)
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        touched = {name: set(paths) for name, paths in seen.items()}
+
+        self._assert_matches_oracle(result)
+        live = {corpus[name] for name in self._LIVE_14}
+        assert live <= touched["read_full"] | touched["resume"]
+        archive = {corpus[name] for name in self._ARCHIVE_13}
+        assert not archive & (touched["cache_hit"] | touched["read_full"] | touched["resume"])
+        record = self._cache(isolated_cache)["settled_days"]["2026/08/14"]
+        assert record["totals"] == self._totals([corpus[name] for name in self._LIVE_14])
+
+    def test_added_archived_rollout_drops_the_group_memo_and_rereads_it(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        added = self._write_at(
+            codex_host.CODEX_ARCHIVED_SESSIONS_PATH,
+            "rollout-2026-08-13T13-00-00-new.jsonl",
+            [_context(turn="arch-new"), _token(25)],
+        )
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])
+
+        self._assert_matches_oracle(result)
+        group = [corpus[name] for name in self._ARCHIVE_13] + [added]
+        assert set(group) <= reread, "the slim members are re-read in full"
+        record = self._cache(isolated_cache)["settled_days"]["archive/2026-08-13"]
+        assert record["count"] == 4
+        assert record["totals"] == self._totals(group)
+
+    def test_removed_rollout_drops_the_day_memo_and_rereads_the_rest(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._build_corpus()
+        self._assert_matches_oracle(codex_host.read_codex_usage())
+        corpus.pop("fork-b").unlink()
+        seen = TestCodexSettledDays85A._spy_reads(monkeypatch)
+
+        result = codex_host.read_codex_usage()
+        reread = set(seen["read_full"])
+
+        self._assert_matches_oracle(result)
+        rest = [corpus[name] for name in self._LIVE_14 if name != "fork-b"]
+        assert set(rest) <= reread
+        record = self._cache(isolated_cache)["settled_days"]["2026/08/14"]
+        assert record["count"] == 3
+        assert record["totals"] == self._totals(rest)
+
+    def test_first_read_after_upgrade_memoizes_in_place_without_reparsing(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        corpus = self._legacy_corpus(isolated_cache)
+        expected = self._oracle()
+        legacy = self._cache(isolated_cache)
+        assert all("totals" not in record for record in legacy["settled_days"].values())
+
+        def no_parse(*args: object, **kwargs: object) -> object:
+            raise AssertionError("the upgrade pass must memoize from cached entries")
+
+        monkeypatch.setattr(codex_host, "_read_full_rollout", no_parse)
+        monkeypatch.setattr(codex_host, "_resume_rollout", no_parse)
+        calls = self._spy_aggregate(monkeypatch)
+
+        first = codex_host.read_codex_usage()
+
+        assert first.complete is True
+        assert first.hosts == expected.by_family
+        assert first.tokens_by_day == expected.by_day
+        assert first.partial_days == frozenset(expected.unattributable_days)
+        assert sum(len(entries) for entries in calls) == len(corpus), "each entry reduces once"
+        data = self._cache(isolated_cache)
+        assert data["version"] == hu.CACHE_VERSION, "no CACHE_VERSION bump"
+        assert set(data["settled_days"]) == set(legacy["settled_days"])
+        for record in data["settled_days"].values():
+            assert "totals" in record and "partial_days" in record
+            assert all(data["files"][key]["settled"] is True for key in record["keys"])
+
+        calls.clear()
+        second = codex_host.read_codex_usage()
+        assert second.hosts == expected.by_family
+        assert second.tokens_by_day == expected.by_day
+        assert len(calls) == 1 and len(calls[0]) == 2
+
+    def test_upgrade_spreads_over_budget_limited_reads_without_a_recovery_command(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _FakeTime:
+            now = 1_000.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        self._legacy_corpus(isolated_cache)
+        seeded = self._cache(isolated_cache)["settled_days"]
+        for i in range(6):
+            self._write_at(
+                self._live("09/01"),
+                f"rollout-young-{i}.jsonl",
+                [_context(turn=f"young-{i}"), _token(10 + i)],
+                old=False,
+            )
+        expected = self._oracle()
+        clock = _FakeTime()
+        monkeypatch.setattr(hu, "time", clock)
+        monkeypatch.setattr(codex_host, "time", clock)
+        real_full = codex_host._read_full_rollout
+
+        def timed(path, before, deadline):
+            clock.now += 0.1
+            return real_full(path, before, deadline)
+
+        monkeypatch.setattr(codex_host, "_read_full_rollout", timed)
+        result = None
+        for attempt in range(1, 4):
+            result = codex_host.read_codex_usage(deadline=clock.now + 0.25)
+            data = self._cache(isolated_cache)
+            assert set(seeded) <= set(data["settled_days"]), "a partial pass keeps the records"
+            if result.complete:
+                break
+
+        assert result is not None and result.complete is True
+        assert 1 < attempt <= 3
+        assert result.hosts == expected.by_family
+        assert result.tokens_by_day == expected.by_day
+        assert all("totals" in record for record in data["settled_days"].values())
+
+    def test_failed_memoization_keeps_the_legacy_records_and_entries(
+        self, isolated_cache: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._legacy_corpus(isolated_cache)
+        before = self._cache(isolated_cache)
+
+        def refuse(entries: object) -> object:
+            raise hu._ReadFailure("unsupported")
+
+        monkeypatch.setattr(hu, "_aggregate", refuse)
+        result = codex_host.read_codex_usage()
+
+        assert result.complete is False and result.reason == "unsupported"
+        after = self._cache(isolated_cache)
+        assert after["settled_days"] == before["settled_days"]
+        assert after["files"] == before["files"]
 
 
 def _now_old_ns() -> int:
