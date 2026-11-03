@@ -46,6 +46,14 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap promotion — 2026-11-02 (Codex warm read)
+
+Run from manager Ephesus 8's brief on Karl's "ok, keep going" (2026-11-02), on the recommendation to build Track 101A as planned and card the real Codex fix next. Inbox empty: **0 drained**. Verification baseline: `3cd462c` (v1.12.5). Tracks 91B (v1.12.4, PR #254) and 101A (v1.12.5, PR #257) were recorded independently in shipped history against their completion matrices; 101A's post-release rows are closed by the manager's `mm diag --json` on this Mac after the owner's attended push. Groups 91 and 101 are tombstoned and In Progress is empty. New: Track 105A (memoize settled Codex records' totals and slim their cache entries), placed first; Track 102A gains `_blocked-by: Track 105A` because both edit `events-retro.md` and `tests/test_module_boundaries.py`, with its scope unchanged. Future stays at 17 items (byte-identical); 6 entries still lack an inline revisit trigger, and the trigger migration was not run.
+
+| Item | Disposition |
+|---|---|
+| Brief: the Codex warm read still grows with archived states (aggregate, cache load and write, entry validation) after Track 101A | place → Track 105A |
+
 ### Roadmap promotion — 2026-11-02 (usage capture)
 
 Run from manager Ephesus 8's brief on Karl's "go, and we need to fix the cursor usage gap" (2026-11-02, after `mm retro-fleet` showed no usage outside Claude) and its addendum on Karl's question whether every project worked through Paseo is tracked. Inbox empty: **0 drained**. Verification baseline: `df7d1e8` (v1.12.3), re-checked on this Mac with `mm diag --json`. Three Tracks are carded after the pinned Track 91B, in the owner's order: Track 101A (one slow usage reader can no longer starve the others, and the attended default fits the corpus), Track 102A (discovery finds projects in every enabled provider's logs, then in gstack, Paseo and mmm when installed, per Karl's scope for the card) and Track 103A (find and qualify a source for Paseo-driven and interactive Cursor usage, stopping for the owner if none gives per-session tokens). Track 99A gains `_blocked-by: Track 103A` to hold that order; its scope is unchanged. One Future entry is folded into Track 103A because its trigger is met (cursor-agent is now 2026.10.22), so Future goes from 17 to 16. Premise note: `git diff v1.11.20 v1.12.3` leaves the usage readers unchanged, so Track 101A's first task tests the 1.12.x-regression reading instead of assuming it. 6 Future entries still lack an inline revisit trigger; the trigger migration was not run.
