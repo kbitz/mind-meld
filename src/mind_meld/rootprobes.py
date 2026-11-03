@@ -391,7 +391,7 @@ def _agy_read(home: Path, key: str, deadline: float | None):
 
 _YEAR = re.compile(r"\d{4}")
 _MONTH_OR_DAY = re.compile(r"\d{2}")
-_MUSE_KEY = re.compile(r"\d{4}/\d{2}/\d{2}/[^/\x00]+")
+_MUSE_UNIT_PATTERN = re.compile(r"\d{4}/\d{2}/\d{2}/[^/\x00]+")
 _MUSE_RECORDS = 16
 _MUSE_CAP = 8 * 1024 * 1024
 
@@ -439,7 +439,7 @@ def _muse_workspace(record: Any) -> str | None:
 
 def _muse_read(home: Path, key: str, deadline: float | None):
     _check_home(home)
-    if not _MUSE_KEY.fullmatch(key) or ".." in key.split("/"):
+    if not _MUSE_UNIT_PATTERN.fullmatch(key) or ".." in key.split("/"):
         return None, True
     path = _muse_root(home) / key / "session.jsonl"
     fh = _open_regular(path)
@@ -597,8 +597,8 @@ _CODEX_HEAD_BYTES = 4096
 _CODEX_SESSION_META = b'"type":"session_meta"'
 _CODEX_PAYLOAD = b'"payload":'
 _CODEX_CWD = b'"cwd":'
-_CODEX_LIVE_KEY = re.compile(r"live/(\d{4})/(\d{2})/(\d{2})")
-_CODEX_ARCHIVED_KEY = re.compile(r"archived/(\d{4}-\d{2}-\d{2})")
+_CODEX_LIVE_UNIT_PATTERN = re.compile(r"live/(\d{4})/(\d{2})/(\d{2})")
+_CODEX_ARCHIVED_UNIT_PATTERN = re.compile(r"archived/(\d{4}-\d{2}-\d{2})")
 _CODEX_ARCHIVED_NAME = re.compile(r"rollout-(\d{4}-\d{2}-\d{2})[^/\x00]*\.jsonl")
 _CODEX_LIVE_NAME = re.compile(r"rollout-[^/\x00]*\.jsonl")
 
@@ -682,8 +682,8 @@ def _archived_groups(
 ) -> dict[str, list[str]] | None:
     """Archived rollout names grouped by their name date; ``None`` if cut."""
     global _archived_memo
-    key = (str(archived), mtime_ns)
-    if _archived_memo is not None and _archived_memo[0] == key:
+    memo_stamp = (str(archived), mtime_ns)
+    if _archived_memo is not None and _archived_memo[0] == memo_stamp:
         return _archived_memo[1]
     groups: dict[str, list[str]] = {}
     try:
@@ -698,7 +698,7 @@ def _archived_groups(
         return {}
     for names in groups.values():
         names.sort()
-    _archived_memo = (key, groups)
+    _archived_memo = (memo_stamp, groups)
     return groups
 
 
@@ -806,7 +806,7 @@ def _codex_read(home: Path, key: str, deadline: float | None):
 def _codex_resume(home: Path, key: str, deadline: float | None, state: dict):
     _check_home(home)
     root = _codex_root(home)
-    live = _CODEX_LIVE_KEY.fullmatch(key)
+    live = _CODEX_LIVE_UNIT_PATTERN.fullmatch(key)
     if live:
         day = root.joinpath("sessions", *live.groups())
         try:
@@ -817,7 +817,7 @@ def _codex_resume(home: Path, key: str, deadline: float | None, state: dict):
         except OSError:
             return None, True
         return _codex_unit_cwds([day / name for name in names], deadline, state)
-    archived_key = _CODEX_ARCHIVED_KEY.fullmatch(key)
+    archived_key = _CODEX_ARCHIVED_UNIT_PATTERN.fullmatch(key)
     if archived_key:
         archived = root / "archived_sessions"
         info = _lstat(archived)
