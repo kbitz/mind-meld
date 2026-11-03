@@ -176,15 +176,17 @@ class TestRegistryAndIsolation:
             )
 
         first = push()
-        assert first.exceeded and len(first.roots) == 4 and len(reads) == 4
+        assert first.exceeded and len(first.roots) == 3 and len(reads) == 4
         second = push()
-        assert second.exceeded and len(second.roots) == 8 and len(reads) == 8
+        assert second.exceeded and len(second.roots) == 6 and len(reads) == 8
         third = push()
-        assert not third.exceeded and len(third.roots) == 10 and len(reads) == 10
-        assert third.attribution and {source for source, _ in third.attribution} == {"codex"}
+        assert third.exceeded and len(third.roots) == 8
         fourth = push()
         assert not fourth.exceeded and len(fourth.roots) == 10
-        assert len(reads) == 10, "a warm index reads no unit"
+        assert fourth.attribution and {source for source, _ in fourth.attribution} == {"codex"}
+        reads.clear()
+        assert not push().exceeded
+        assert reads == [], "a warm index reads no unit"
 
     def test_stamp_change_rereads_only_that_unit(self, home, monkeypatch):
         units = {
@@ -967,7 +969,9 @@ def test_codex_day_keeps_progress_between_budgeted_pushes(home, monkeypatch):
         if not result.exceeded:
             break
     assert not result.exceeded and result.roots == (repo,)
-    assert reads == [f"rollout-{i}.jsonl" for i in range(6)]
+    # Only the record whose read crossed the deadline is replayed: its cwd
+    # was not classified, so its filename cannot be acknowledged yet.
+    assert reads == [f"rollout-{i}.jsonl" for i in (0, 1, 2, 2, 3, 4, 4, 5)]
     assert not events.read_git_capture_cache()["probe_index"]["codex"]["state"].get("pending_units")
 
 
@@ -1049,7 +1053,7 @@ def test_cursor_stream_keeps_progress_between_budgeted_pushes(home, monkeypatch)
         if not result.exceeded:
             break
     assert not result.exceeded and set(result.roots) == set(repos)
-    assert reads == [str(repo) for repo in repos]
+    assert reads == [str(repos[i]) for i in (0, 1, 2, 2, 3, 4, 4, 5)]
 
 
 def test_pending_unit_restarts_on_change_and_is_pruned_when_vanished(home, monkeypatch):
@@ -1130,6 +1134,10 @@ def test_codex_pending_retries_share_progress_across_pushes(home, monkeypatch):
     for name in ("a", "b", "c"):
         (day / f"rollout-{name}.jsonl").write_bytes(b"")
     assert not _discover(_cfg("codex"), persist=True).exceeded
+    reader = events.read_git_capture_cache()["probe_index"]["codex"]["state"]["pending_units"][
+        "live/2026/11/03"
+    ]["reader"]
+    assert reader["scan_complete"] and "listing_steps" not in reader
     _codex_rollout(day / "rollout-c.jsonl", str(repo))
     clock = [0.0]
     original = rootprobes._codex_rollout_cwd
@@ -1143,11 +1151,290 @@ def test_codex_pending_retries_share_progress_across_pushes(home, monkeypatch):
     monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
     for _ in range(3):
-        result = _discover(_cfg("codex"), persist=True, seconds=0.5)
-    # Each synthetic read takes longer than this call's budget; discovering the
-    # third file proves forward progress even while the registry reports that cut.
+        result = _discover(_cfg("codex"), persist=True, seconds=1.5)
+        if result.roots:
+            break
     assert result.roots == (repo,)
     assert reads == ["rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl"]
+
+
+@pytest.mark.parametrize("provider", ["muse", "cursor", "codex"])
+def test_greptile_listing_progress_survives_push_boundaries(home, monkeypatch, provider):
+    repo = _fake_repo(home / "repo")
+    for i in range(6):
+        if provider == "muse":
+            path = home / f".local/share/muse/sessions/2026/11/{i + 1:02d}/s/session.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"payload": {"record": {"workspace_root": str(repo)}}}))
+        elif provider == "cursor":
+            path = home / f".cursor/acp-sessions/s{i}/meta.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"cwd": str(repo)}))
+        else:
+            _codex_rollout(_codex_day(home, f"2026/11/{i + 1:02d}") / "rollout-a.jsonl", str(repo))
+    clock = [0.0]
+    scandir = os.scandir
+    listdir = os.listdir
+
+    class SlowListing:
+        def __init__(self, path):
+            self.inner = scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.inner.close()
+
+        def __iter__(self):
+            for entry in self.inner:
+                clock[0] += 1
+                yield entry
+
+    def slow_listdir(path):
+        clock[0] += 1
+        return listdir(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes.os, "scandir", SlowListing)
+    monkeypatch.setattr(rootprobes.os, "listdir", slow_listdir)
+    prober = next(p for p in rootprobes.PROBERS if p.name == provider)
+    state = {}
+    for _ in range(30):
+        listing = prober.list_units(home, state, clock[0] + 2.5)
+        state = json.loads(json.dumps(state))  # a fresh process only gets persisted state
+        if listing is not None:
+            break
+    assert listing is not None and len(listing) == 6
+
+
+def test_greptile_unfinished_units_cannot_starve_unread_units(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    clock = [0.0]
+    reads = []
+    prober = _synthetic({"a": None, "b": None, "c": [str(repo)]}, reads=reads, clock=clock)
+    cache = events._default_git_capture_cache()
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    for _ in range(3):
+        roots = events._probe_host_records(prober, cache=cache, deadline_monotonic=clock[0] + 1.5)
+        cache = json.loads(json.dumps(cache))
+        if roots:
+            break
+    assert roots == [repo] and reads[:3] == ["a", "b", "c"]
+
+
+def test_greptile_classification_is_bounded_and_resumes(home, monkeypatch):
+    repos = [_fake_repo(home / f"repo-{i}") for i in range(6)]
+    ordinary = home / "ordinary"
+    ordinary.mkdir()
+    prober = _synthetic({"one": [str(ordinary), *map(str, repos)]})
+    clock = [0.0]
+    classified = []
+    original = events._classify_git_root
+
+    def classify(path):
+        classified.append(path)
+        clock[0] += 1
+        return original(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(events, "_classify_git_root", classify)
+    cache = events._default_git_capture_cache()
+    for _ in range(4):
+        before = len(classified)
+        roots = events._probe_host_records(prober, cache=cache, deadline_monotonic=clock[0] + 2.5)
+        assert len(classified) - before <= 3
+        assert str(ordinary) not in json.dumps(cache)
+        cache = json.loads(json.dumps(cache))
+        if cache["_discovery_complete"]:
+            break
+    assert set(roots) == set(repos) and cache["_discovery_complete"]
+    assert len(classified) == 7
+
+
+def test_greptile_reader_acknowledgment_skips_costly_classified_prefix(home, monkeypatch):
+    repos = [_fake_repo(home / f"repo-{i}") for i in range(6)]
+    path = home.joinpath(*rootprobes._CONDUCTOR_STORE) / "store/agents.ndjson"
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps({"cwd": str(repo)}) + "\n" for repo in repos))
+    clock = [0.0]
+    reads = []
+    original_load = rootprobes._loads
+    original_classify = events._classify_git_root
+
+    def load(raw):
+        value = original_load(raw)
+        if isinstance(value, dict) and "cwd" in value:
+            reads.append(value["cwd"])
+            clock[0] += 0.6
+        return value
+
+    def classify(path):
+        clock[0] += 0.75
+        return original_classify(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_loads", load)
+    monkeypatch.setattr(events, "_classify_git_root", classify)
+    for _ in range(10):
+        result = _discover(_cfg(cursor=True), persist=True, seconds=2.5)
+        if not result.exceeded:
+            break
+    assert set(result.roots) == set(repos) and not result.exceeded
+    assert reads == [str(repo) for repo in repos]
+
+
+def test_greptile_later_provider_gets_a_turn_when_earlier_stays_incomplete(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    clock = [0.0]
+
+    def never_listed(*_args):
+        clock[0] += 3
+        return None
+
+    early = rootprobes.RootProber("muse", "provider", never_listed, lambda *_: ([], True))
+    later = _synthetic({"one": [str(repo)]})
+    monkeypatch.setattr(rootprobes, "PROBERS", (early, later))
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    first = _discover(_cfg("muse", "codex"), persist=True, seconds=2.5)
+    second = _discover(_cfg("muse", "codex"), persist=True, seconds=2.5)
+    assert first.exceeded and first.roots == ()
+    assert second.exceeded and second.roots == (repo,)
+    assert second.attribution == (("codex", repo),)
+
+
+def test_greptile_archive_snapshot_keeps_its_original_stamp(home, monkeypatch):
+    first = _fake_repo(home / "first")
+    later = _fake_repo(home / "later")
+    archive = home / ".codex/archived_sessions"
+    for name in ("a", "b"):
+        _codex_rollout(archive / f"rollout-2026-11-03-{name}.jsonl", str(first))
+    clock = [0.0]
+    original = rootprobes._lstat
+
+    def stat(path):
+        result = original(path)
+        if path.parent == archive:
+            clock[0] += 1
+        return result
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_lstat", stat)
+    prober = next(p for p in rootprobes.PROBERS if p.name == "codex")
+    cache = events._default_git_capture_cache()
+    events._probe_host_records(prober, cache=cache, deadline_monotonic=0.5)
+    assert not cache["_discovery_complete"]
+    _codex_rollout(archive / "rollout-2026-11-03-c.jsonl", str(later))
+    _bump(archive, 1_000_000)
+    for _ in range(4):
+        roots = events._probe_host_records(prober, cache=cache, deadline_monotonic=clock[0] + 20)
+        cache = json.loads(json.dumps(cache))
+    assert later in roots
+
+
+def test_greptile_listing_prefix_validation_has_linear_membership_work(home):
+    class Counted(str):
+        comparisons = 0
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            type(self).comparisons += 1
+            return str.__eq__(self, other)
+
+    names = [Counted(f"entry-{i}") for i in range(400)]
+    state = {
+        "listing_steps": {
+            str(home): {
+                "names": names,
+                "offset": len(names),
+                "entries": [[str(name), 0, 0, 0] for name in names],
+            }
+        }
+    }
+    assert len(rootprobes._listing_entries(home, state, None)) == len(names)
+    assert Counted.comparisons <= 4 * len(names)
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_greptile_retry_round_refreshes_inventory_even_when_records_stay_bad(
+    home, monkeypatch, incomplete
+):
+    repo = _fake_repo(home / "repo")
+    records = {"a": None, "b": None, "c": None}
+    clock = [0.0]
+    original = _synthetic(records, clock=clock)
+
+    def read(home, key, deadline):
+        values, done = original.read_unit(home, key, deadline)
+        return values, done and not (incomplete and values is None)
+
+    prober = rootprobes.RootProber("codex", "provider", original.list_units, read)
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    cache = events._default_git_capture_cache()
+    for _ in range(2):
+        events._probe_host_records(prober, cache=cache, deadline_monotonic=clock[0] + 1.5)
+    records["new"] = [str(repo)]
+    for _ in range(4):
+        roots = events._probe_host_records(prober, cache=cache, deadline_monotonic=clock[0] + 1.5)
+        cache = json.loads(json.dumps(cache))
+        if repo in roots:
+            break
+    assert repo in roots
+
+
+def test_greptile_resolution_deadline_keeps_cached_roots(home, monkeypatch):
+    repos = [_fake_repo(home / name) for name in ("a", "b")]
+    monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic({"one": list(map(str, repos))}),))
+    _discover(_cfg("codex"), persist=True)
+    clock = [0.0]
+    original = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        if path in repos:
+            clock[0] += 2
+        return result
+
+    monkeypatch.setattr(events.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(Path, "resolve", resolve)
+    result = _discover(_cfg("codex"), persist=True, seconds=1)
+    assert result.exceeded and set(result.roots) == set(repos)
+
+
+def test_greptile_unresolvable_root_does_not_disable_other_root_validation(home, monkeypatch):
+    broken, deleted = [_fake_repo(home / name) for name in ("a", "b")]
+    monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic({"one": [str(broken), str(deleted)]}),))
+    _discover(_cfg("codex"), persist=True)
+    original = Path.resolve
+
+    def resolve(path, *args, **kwargs):
+        if path == broken:
+            raise RuntimeError("synthetic symlink loop")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    _discover(_cfg("codex"), persist=True)
+    shutil.rmtree(deleted / ".git")
+    assert deleted not in _discover(_cfg("codex"), persist=True).roots
+
+
+def test_greptile_rotation_preserves_canonical_source_and_disabled_cleanup(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    early = _synthetic({"one": [str(repo)]})
+    late = rootprobes.RootProber("muse", "provider", early.list_units, early.read_unit)
+    monkeypatch.setattr(rootprobes, "PROBERS", (early, late))
+    cache = events._default_git_capture_cache()
+    cache["prober_resume_after"] = "codex"
+    read_cache = events.read_git_capture_cache
+    monkeypatch.setattr(events, "read_git_capture_cache", lambda: cache)
+    result = _discover(_cfg("codex", "muse"), persist=True)
+    assert result.probers_ran == ("muse", "codex")
+    assert result.attribution == (("codex", repo),)
+    cache = read_cache()
+    assert cache["prober_resume_after"] is None
+    _discover(_cfg("codex", "muse", disabled=("codex", "muse")), persist=True)
+    cache = read_cache()
+    assert cache["probe_index"] == {} and cache["prober_resume_after"] is None
 
 
 def test_cursor_record_symlink_is_not_followed_and_replacement_is_read(home):

@@ -41,6 +41,9 @@ Stamp = Any
 ListUnits = Callable[[Path, dict, "float | None"], "list[tuple[str, Stamp]] | None"]
 ReadUnit = Callable[[Path, str, "float | None"], "tuple[list[str] | None, bool]"]
 ResumeUnit = Callable[[Path, str, "float | None", dict], "tuple[list[str] | None, bool]"]
+ConsumeUnit = Callable[
+    [Path, str, "float | None", dict, Callable[[object], bool]], "tuple[list[str] | None, bool]"
+]
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,10 @@ class RootProber:
     newly read directories while preserving its cursor across deadlines. Its
     ``retry`` flag retains state after a complete pass for unfinished metadata;
     the generic index retries that state next push even if the stamp is stable.
+
+    ``consume_unit`` invokes the generic classifier before acknowledging each
+    native record cursor. False from its consumer leaves that record unread;
+    only classified roots and record positions survive the next push.
     """
 
     name: str
@@ -69,6 +76,7 @@ class RootProber:
     list_units: ListUnits
     read_unit: ReadUnit
     resume_unit: ResumeUnit | None = None
+    consume_unit: ConsumeUnit | None = None
 
 
 def _discovery_home() -> Path:
@@ -152,13 +160,104 @@ def _lstat(path: Path) -> os.stat_result | None:
         return None
 
 
-def _child_dirs(path: Path, pattern: re.Pattern[str], deadline: float | None):
+@dataclass(frozen=True)
+class _ListedEntry:
+    name: str
+    path: str
+    st_mode: int
+    st_mtime_ns: int
+    st_size: int
+
+    def is_dir(self, *, follow_symlinks=False):
+        return stat.S_ISDIR(self.st_mode)
+
+    def is_file(self, *, follow_symlinks=False):
+        return stat.S_ISREG(self.st_mode)
+
+    def stat(self, *, follow_symlinks=False):
+        return self
+
+
+def _listing_entries(path: Path, state: dict, deadline: float | None):
+    """Resume directory metadata checks without rereading a completed prefix.
+
+    Only host-record names and stat fields are retained, never record contents.
+    listdir is one cooperative filesystem operation; each subsequent stat has
+    its own deadline check. The generic owner clears these steps after a round.
+    """
+    steps = state.setdefault("listing_steps", {})
+    if not isinstance(steps, dict):
+        steps = state["listing_steps"] = {}
+    record = steps.get(str(path))
+    if not isinstance(record, dict):
+        if _expired(deadline):
+            return None
+        info = _lstat(path)
+        try:
+            names = sorted(os.listdir(path))
+        except (FileNotFoundError, NotADirectoryError):
+            names = []
+        record = steps[str(path)] = {
+            "names": names,
+            "offset": 0,
+            "entries": [],
+            "directory_mtime_ns": info.st_mtime_ns if info is not None else None,
+        }
+    names, offset, entries = record.get("names"), record.get("offset"), record.get("entries")
+    name_set = (
+        set(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) else set()
+    )
+    if not (
+        isinstance(names, list)
+        and all(
+            isinstance(n, str) and n not in (".", "..") and "/" not in n and "\x00" not in n
+            for n in names
+        )
+        and isinstance(offset, int)
+        and 0 <= offset <= len(names)
+        and isinstance(entries, list)
+        and all(
+            isinstance(e, list)
+            and len(e) == 4
+            and isinstance(e[0], str)
+            and e[0] in name_set
+            and all(isinstance(v, int) for v in e[1:])
+            for e in entries
+        )
+    ):
+        steps.pop(str(path), None)
+        return _listing_entries(path, state, deadline)
+    while offset < len(names):
+        if _expired(deadline):
+            return None
+        name = names[offset]
+        info = _lstat(path / name)
+        if info is not None:
+            entries.append([name, info.st_mode, info.st_mtime_ns, info.st_size])
+        offset += 1
+        record["offset"] = offset
+    return [
+        _ListedEntry(name, str(path / name), mode, mtime, size)
+        for name, mode, mtime, size in entries
+    ]
+
+
+def _child_dirs(
+    path: Path, pattern: re.Pattern[str], deadline: float | None, state: dict | None = None
+):
     """Real child directories whose name matches ``pattern``, sorted by name.
 
     ``None`` when the deadline cut the listing; ``[]`` when ``path`` is absent.
     Other errors (permission) propagate so discovery records the prober error
     rather than treating an unreadable tree as an empty one.
     """
+    if state is not None:
+        entries = _listing_entries(path, state, deadline)
+        return (
+            None
+            if entries is None
+            else [entry for entry in entries if pattern.fullmatch(entry.name) and entry.is_dir()]
+        )
     if _expired(deadline):
         return None
     try:
@@ -309,20 +408,10 @@ _FILE_NAME = re.compile(r"[^/\x00]+")
 
 def _mmm_list(home: Path, state: dict, deadline: float | None):
     _check_home(home)
-    try:
-        with os.scandir(home / ".mmm" / "items") as listing:
-            names = []
-            for n, entry in enumerate(listing):
-                if n % 256 == 0 and _expired(deadline):
-                    return None
-                if entry.name.endswith(".json"):
-                    try:
-                        if entry.is_file(follow_symlinks=False):
-                            names.append(entry.name)
-                    except OSError:
-                        continue
-    except (FileNotFoundError, NotADirectoryError):
-        return []
+    entries = _listing_entries(home / ".mmm" / "items", state, deadline)
+    if entries is None:
+        return None
+    names = [entry.name for entry in entries if entry.name.endswith(".json") and entry.is_file()]
     names.sort()
     return [(f"items/{name}", None) for name in names]
 
@@ -403,19 +492,19 @@ def _muse_root(home: Path) -> Path:
 def _muse_list(home: Path, state: dict, deadline: float | None):
     _check_home(home)
     units: list[tuple[str, Stamp]] = []
-    years = _child_dirs(_muse_root(home), _YEAR, deadline)
+    years = _child_dirs(_muse_root(home), _YEAR, deadline, state)
     if years is None:
         return None
     for year in reversed(years):
-        months = _child_dirs(Path(year.path), _MONTH_OR_DAY, deadline)
+        months = _child_dirs(Path(year.path), _MONTH_OR_DAY, deadline, state)
         if months is None:
             return None
         for month in reversed(months):
-            days = _child_dirs(Path(month.path), _MONTH_OR_DAY, deadline)
+            days = _child_dirs(Path(month.path), _MONTH_OR_DAY, deadline, state)
             if days is None:
                 return None
             for day in reversed(days):
-                sessions = _child_dirs(Path(day.path), _FILE_NAME, deadline)
+                sessions = _child_dirs(Path(day.path), _FILE_NAME, deadline, state)
                 if sessions is None:
                     return None
                 prefix = f"{year.name}/{month.name}/{day.name}/"
@@ -487,27 +576,23 @@ def _cursor_list(home: Path, state: dict, deadline: float | None):
     _check_home(home)
     units: list[tuple[str, Stamp]] = []
     root = _cursor_acp_root(home)
-    if _expired(deadline):
+    entries = _listing_entries(root, state, deadline)
+    if entries is None:
         return None
-    try:
-        with os.scandir(root) as listing:
-            sessions = []
-            for n, entry in enumerate(listing):
-                if n % 256 == 0 and _expired(deadline):
-                    return None
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        sessions.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
-                except OSError:
-                    continue
-    except (FileNotFoundError, NotADirectoryError):
-        sessions = []
+    sessions = [(entry.st_mtime_ns, entry.name) for entry in entries if entry.is_dir()]
     sessions.sort(reverse=True)
     units.extend((f"acp/{name}", None) for _mtime, name in sessions)
-    stores = _child_dirs(home.joinpath(*_CONDUCTOR_STORE), _FILE_NAME, deadline)
+    stores = _child_dirs(home.joinpath(*_CONDUCTOR_STORE), _FILE_NAME, deadline, state)
     if stores is None:
         return None
+    parts = state.setdefault("listing_stores", {})
     for store in stores:
+        if store.name in parts:
+            units.extend(parts[store.name])
+            continue
+        if _expired(deadline):
+            return None
+        start = len(units)
         ndjson = _lstat(Path(store.path) / "agents.ndjson")
         if ndjson is not None and stat.S_ISREG(ndjson.st_mode):
             units.append(
@@ -516,6 +601,7 @@ def _cursor_list(home: Path, state: dict, deadline: float | None):
         stamp = _sqlite_stamp(Path(store.path) / "index.db")
         if stamp is not None:
             units.append((f"conductor/{store.name}/index.db", stamp))
+        parts[store.name] = units[start:]
     return units
 
 
@@ -523,7 +609,7 @@ def _cursor_read(home: Path, key: str, deadline: float | None):
     return _cursor_resume(home, key, deadline, {})
 
 
-def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict):
+def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict, consume=None):
     _check_home(home)
     kind, _, rest = key.partition("/")
     if kind == "acp":
@@ -539,7 +625,7 @@ def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict):
         return None, True
     directory = home.joinpath(*_CONDUCTOR_STORE) / store
     if name == "agents.ndjson":
-        return _cursor_ndjson(directory / name, deadline, state)
+        return _cursor_ndjson(directory / name, deadline, state, consume)
     if name == "index.db":
         if _lstat(directory / "index.db-journal") is not None:
             return None, True  # mid-transaction; the stamp changes when it settles
@@ -555,7 +641,7 @@ def _cursor_resume(home: Path, key: str, deadline: float | None, state: dict):
     return None, True
 
 
-def _cursor_ndjson(path: Path, deadline: float | None, state: dict):
+def _cursor_ndjson(path: Path, deadline: float | None, state: dict, consume=None):
     fh = _open_regular(path)
     if fh is None:
         return None, True
@@ -576,7 +662,12 @@ def _cursor_ndjson(path: Path, deadline: float | None, state: dict):
             for raw, end in lines:
                 record = _loads(raw.strip())
                 if isinstance(record, dict):
-                    found.append(record.get("cwd"))
+                    cwd = record.get("cwd")
+                    if consume is not None:
+                        if not consume(cwd):
+                            return [], False
+                    else:
+                        found.append(cwd)
                 state["offset"] = end
     except _Cut:
         return _strings(found), False
@@ -678,24 +769,27 @@ def _codex_root(home: Path) -> Path:
 
 
 def _archived_groups(
-    archived: Path, mtime_ns: int, deadline: float | None
+    archived: Path, mtime_ns: int, deadline: float | None, state: dict | None = None
 ) -> dict[str, list[str]] | None:
     """Archived rollout names grouped by their name date; ``None`` if cut."""
     global _archived_memo
-    memo_stamp = (str(archived), mtime_ns)
+    steps = state.get("listing_steps", {}) if state is not None else {}
+    snapshot = steps.get(str(archived), {}) if isinstance(steps, dict) else {}
+    snapshot_mtime = snapshot.get("directory_mtime_ns", mtime_ns)
+    memo_stamp = (str(archived), snapshot_mtime)
     if _archived_memo is not None and _archived_memo[0] == memo_stamp:
         return _archived_memo[1]
     groups: dict[str, list[str]] = {}
-    try:
-        with os.scandir(archived) as listing:
-            for n, entry in enumerate(listing):
-                if n % 256 == 0 and _expired(deadline):
-                    return None
-                match = _CODEX_ARCHIVED_NAME.fullmatch(entry.name)
-                if match:
-                    groups.setdefault(match.group(1), []).append(entry.name)
-    except (FileNotFoundError, NotADirectoryError):
-        return {}
+    listing_state = state if state is not None else {}
+    entries = _listing_entries(archived, listing_state, deadline)
+    if entries is None:
+        return None
+    snapshot_mtime = listing_state["listing_steps"][str(archived)].get("directory_mtime_ns", -1)
+    memo_stamp = (str(archived), snapshot_mtime)
+    for entry in entries:
+        match = _CODEX_ARCHIVED_NAME.fullmatch(entry.name)
+        if match:
+            groups.setdefault(match.group(1), []).append(entry.name)
     for names in groups.values():
         names.sort()
     _archived_memo = (memo_stamp, groups)
@@ -711,15 +805,15 @@ def _codex_list(home: Path, state: dict, deadline: float | None):
     _check_home(home)
     root = _codex_root(home)
     live: list[tuple[str, Stamp]] = []
-    years = _child_dirs(root / "sessions", _YEAR, deadline)
+    years = _child_dirs(root / "sessions", _YEAR, deadline, state)
     if years is None:
         return None
     for year in years:
-        months = _child_dirs(Path(year.path), _MONTH_OR_DAY, deadline)
+        months = _child_dirs(Path(year.path), _MONTH_OR_DAY, deadline, state)
         if months is None:
             return None
         for month in months:
-            days = _child_dirs(Path(month.path), _MONTH_OR_DAY, deadline)
+            days = _child_dirs(Path(month.path), _MONTH_OR_DAY, deadline, state)
             if days is None:
                 return None
             for day in days:
@@ -744,16 +838,17 @@ def _codex_list(home: Path, state: dict, deadline: float | None):
             if isinstance(date, str) and isinstance(stamp, list)
         }
     else:
-        names = _archived_groups(archived, info.st_mtime_ns, deadline)
+        names = _archived_groups(archived, info.st_mtime_ns, deadline, state)
         if names is None:
             return None
         groups = {date: _group_stamp(group) for date, group in names.items()}
-        state["archived_mtime_ns"] = info.st_mtime_ns
+        snapshot = state.get("listing_steps", {}).get(str(archived), {})
+        state["archived_mtime_ns"] = snapshot.get("directory_mtime_ns", info.st_mtime_ns)
         state["archived_groups"] = groups
     return live + [(f"archived/{date}", groups[date]) for date in sorted(groups, reverse=True)]
 
 
-def _codex_unit_cwds(paths: list[Path], deadline: float | None, state: dict):
+def _codex_unit_cwds(paths: list[Path], deadline: float | None, state: dict, consume=None):
     found: list[Any] = []
     after = state.get("after")
     if not isinstance(after, str):
@@ -784,7 +879,14 @@ def _codex_unit_cwds(paths: list[Path], deadline: float | None, state: dict):
             state["retry"] = bool(waiting)
             return _strings(found), False
         try:
-            found.append(_codex_rollout_cwd(path))
+            cwd = _codex_rollout_cwd(path)
+            if consume is not None:
+                if not consume(cwd):
+                    state["waiting"] = sorted(waiting)
+                    state["retry"] = bool(waiting)
+                    return [], False
+            else:
+                found.append(cwd)
         except _Pending:
             waiting.add(path.name)
         else:
@@ -803,35 +905,59 @@ def _codex_read(home: Path, key: str, deadline: float | None):
     return _codex_resume(home, key, deadline, {})
 
 
-def _codex_resume(home: Path, key: str, deadline: float | None, state: dict):
+def _codex_resume(home: Path, key: str, deadline: float | None, state: dict, consume=None):
     _check_home(home)
     root = _codex_root(home)
     live = _CODEX_LIVE_UNIT_PATTERN.fullmatch(key)
+    archived_key = _CODEX_ARCHIVED_UNIT_PATTERN.fullmatch(key)
+    if state.get("scan_complete") is True and (live or archived_key):
+        directory = (
+            root.joinpath("sessions", *live.groups()) if live else root / "archived_sessions"
+        )
+        waiting = state.get("waiting", [])
+        names = (
+            [
+                name
+                for name in waiting
+                if isinstance(name, str)
+                and "/" not in name
+                and "\x00" not in name
+                and _CODEX_LIVE_NAME.fullmatch(name)
+            ]
+            if isinstance(waiting, list)
+            else []
+        )
+        return _codex_unit_cwds([directory / name for name in names], deadline, state, consume)
+
+    def read_paths(paths):
+        result = _codex_unit_cwds(paths, deadline, state, consume)
+        if result[1]:
+            state["scan_complete"] = True
+            state.pop("listing_steps", None)
+        return result
+
     if live:
         day = root.joinpath("sessions", *live.groups())
         try:
-            with os.scandir(day) as listing:
-                names = sorted(
-                    entry.name for entry in listing if _CODEX_LIVE_NAME.fullmatch(entry.name)
-                )
+            entries = _listing_entries(day, state, deadline)
         except OSError:
             return None, True
-        return _codex_unit_cwds([day / name for name in names], deadline, state)
-    archived_key = _CODEX_ARCHIVED_UNIT_PATTERN.fullmatch(key)
+        if entries is None:
+            return None, False
+        names = [entry.name for entry in entries if _CODEX_LIVE_NAME.fullmatch(entry.name)]
+        return read_paths([day / name for name in names])
     if archived_key:
         archived = root / "archived_sessions"
         info = _lstat(archived)
         if info is None:
             return None, True
         try:
-            groups = _archived_groups(archived, info.st_mtime_ns, deadline)
+            groups = _archived_groups(archived, info.st_mtime_ns, deadline, state)
         except OSError:
             return None, True
         if groups is None:
             return None, False
-        return _codex_unit_cwds(
-            [archived / name for name in groups.get(archived_key.group(1), [])], deadline, state
-        )
+        return read_paths([archived / name for name in groups.get(archived_key.group(1), [])])
     return None, True
 
 
@@ -846,8 +972,8 @@ PROBERS: tuple[RootProber, ...] = (
     RootProber("mmm", "tool", _mmm_list, _mmm_read),
     RootProber("agy", "provider", _agy_list, _agy_read),
     RootProber("muse", "provider", _muse_list, _muse_read),
-    RootProber("cursor", "provider", _cursor_list, _cursor_read, _cursor_resume),
-    RootProber("codex", "provider", _codex_list, _codex_read, _codex_resume),
+    RootProber("cursor", "provider", _cursor_list, _cursor_read, _cursor_resume, _cursor_resume),
+    RootProber("codex", "provider", _codex_list, _codex_read, _codex_resume, _codex_resume),
 )
 
 _TOOL_MARKERS: dict[str, tuple[tuple[str, ...], bool]] = {
