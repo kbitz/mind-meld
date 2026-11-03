@@ -1503,6 +1503,26 @@ class TestTailPublishesAndRefreshes:
 
         return run, calls, repo
 
+    def test_init_warms_digest_so_first_attended_push_reuses_cache(self, tail, tmp_path):
+        # Value: protects=init warms identities for the first attended push;
+        # fails_when=init omits the digest and the first push gathers again;
+        # why_new=refresh unit tests do not exercise init's digest forwarding;
+        # seam=none; no_claim=live identity discovery (temporary repo and fake gather).
+        from mind_meld import events_tail
+
+        run, calls, repo = tail
+        config: dict = {}
+
+        events_tail._run_events_backfill(config, _recapture_test_sources(tmp_path), "dev-a")
+
+        assert len(calls) == 1
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == (
+            events.identity_inputs_digest(config, (repo,))
+        )
+        row = run(config, quiet=False)
+        assert len(calls) == 1
+        assert "gathered@example.com" in row["local_emails"]
+
     def test_attended_push_refreshes_once_per_input_change(self, tail, tmp_path, monkeypatch):
         run, calls, repo = tail
         config: dict = {}

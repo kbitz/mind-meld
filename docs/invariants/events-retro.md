@@ -3317,12 +3317,17 @@ the GitHub noreply address. `[retro] author_emails` held five entries
 including both missing identities, added after that refresh (config edited
 2026-11-02), so the cache stayed TTL-fresh past the edit and neither the walk
 (which reads `[retro]` directly) nor publication (which read only the cache)
-agreed. capsule-cli's repository-local address (a discovery-sourced identity;
-capsule-cli was first walked in the 2026-11-02 recapture) was likewise absent,
-and the Foundry ID is in no Git configuration, so only `[retro]` can name it.
-The discovery budget is not the cause: all 18 repository roots were walked,
-`walk_budget_aborts` was 0 and discovery was `complete` on every 2026-11-02
-and 2026-11-03 snapshot, and a truncated gather never persists. Cause:
+agreed. capsule-cli's repository-local address (a discovery-sourced identity)
+was likewise absent, and the Foundry ID is in no Git configuration, so only
+`[retro]` can name it.
+The discovery and Git-walk budgets do not explain the missing identities:
+completed walks reached all 18 repository roots and `walk_budget_aborts` was 0
+on every 2026-11-02 and 2026-11-03 snapshot. Discovery was `complete` on all
+12 non-empty snapshots; the two partial snapshots contained no projects.
+Those fields do not measure identity gathering's
+separate five-second `_PER_REPO_BUDGET_S`. If that gather truncates, its
+partial union is returned for the current event without persisting the gathered
+emails or `refreshed_at`; it cannot make a partial identity set TTL-fresh. Cause:
 discovery (an identity only a repository config names) plus the seven-day TTL
 (no input change refreshed the cache). From 2026-10-14 this Mac's `mm-push`
 rows carried two emails (none named either identity), while its earlier rows
