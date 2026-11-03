@@ -16,6 +16,17 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Attended usage reads get 3,000 ms and a fair share (Track 101A):** the attended
+host-usage default (`host_usage_interactive_budget_ms`) rises from 500 ms to 3,000 ms,
+host reads (sweep plus inline warm) now get up to three fifths of `capture_budget_ms`
+(half before), and each later attended reader keeps a reserve of up to 300 ms, so a
+slow Codex read can no longer take Antigravity's, Cursor's or Muse's. Autopush is
+unchanged at 250 ms and never warms. If you pinned `host_usage_interactive_budget_ms`
+in `~/.config/mind-meld/config.toml` as a workaround, remove that line and run
+`mm push`; the new default completes every reader on the owner's corpus. Codex also
+settles archived rollouts by the date in their name, so rollouts that have not changed
+are no longer re-read on later pushes.
+
 **Fast-forward peer edits and propagated deletions (Track 91A):** a peer's edit to a file
 you have not changed since you last synced it now simply applies (no union, no conflict
 copy), and a file deleted on one machine is now deleted on the others, each keeping a
@@ -1979,7 +1990,7 @@ read supplies the result. Multiple readers can be cold. Budgets are
 cooperative, not hard timeouts; content sync follows capture. Lowering
 `host_usage_interactive_budget_ms` does not cap the separate warm allowance. A
 set `capture_budget_ms`, and the 5,000 ms default when neither key is set, caps
-host sweep and inline warm together at half of that total. Only the legacy
+host sweep and inline warm together at three fifths of that total. Only the legacy
 interactive key, with no `capture_budget_ms`, keeps about five seconds of warm
 scanning per cold reader. Autopush stays gated on substantive changes and never
 warms; it is not an attended substitute with the same failure reporting.
@@ -2194,8 +2205,8 @@ Older undated blockers gain a date when this version first observes them.
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |
 | `partial` | A final record is unfinished. | Let the host finish the record, then `mm push`; `mm diag` shows the reader's state. |
-| `deadline`, last complete read over the autopush budget | The warm read costs more than this Mac allows. | Raise `[retro] host_usage_autopush_budget_ms` using the last complete read and sweep estimate in `mm diag`. Stay at or below `capture_budget_ms` when that key is set, and at or below an explicitly set interactive budget. When neither is set, stay at or below the 500 ms interactive default. When both apply, stay at or below the smaller one. |
-| `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` again. Host sweep and inline warm share at most half of `capture_budget_ms` (default 5,000 ms). Only an explicit `host_usage_interactive_budget_ms`, with no `capture_budget_ms`, keeps about 5 s of warm scanning per cold reader. Then compare the last complete read and counts in `mm diag`. |
+| `deadline`, last complete read over the autopush budget | The warm read costs more than this Mac allows. | Raise `[retro] host_usage_autopush_budget_ms` using the last complete read and sweep estimate in `mm diag`. Stay at or below `capture_budget_ms` when that key is set, and at or below an explicitly set interactive budget. When neither is set, stay at or below the 3,000 ms interactive default. When both apply, stay at or below the smaller one. If the read is over what an attended push allows, raise `[retro] capture_budget_ms` instead; host reads get three fifths of it. |
+| `deadline`, last complete read within budget or unknown | The latest attempt ran out of time; a cold or changing store may need more work. | Run `mm push` again. Host sweep and inline warm share at most three fifths of `capture_budget_ms` (default 5,000 ms). Only an explicit `host_usage_interactive_budget_ms`, with no `capture_budget_ms`, keeps about 5 s of warm scanning per cold reader. Then compare the last complete read and counts in `mm diag`. |
 
 Every attended push attempts a fresh capture. If every consented reader later
 fails, no host row is written and this snapshot ages. If another reader
@@ -2203,6 +2214,12 @@ completes, the newer row supersedes the device's coverage and may omit the
 failed reader. Status shows the latest coverage. The read-budget lever is
 the lasting fix when warm autopush reads consistently exceed their allowance.
 Fleet retros flag devices whose last snapshot predates the requested window.
+Days a `deadline` read missed come back on the reader's next complete read: readers
+aggregate the whole local corpus, each row carries the device's last 90 UTC days, and
+the retro keeps each device's latest accepted row whole. `mm recapture` redoes Git
+capture only and cannot recover them. They do not come back when the retro window ended
+more than 24 hours before that read, when they are older than 90 days, or when the host
+deleted its files; `mm status` names `[retro] capture_budget_ms` as the attended fix.
 
 Set budgets in this Mac's `~/.config/mind-meld/config.toml`:
 
@@ -2210,20 +2227,22 @@ Set budgets in this Mac's `~/.config/mind-meld/config.toml`:
 [retro]
 capture_budget_ms = 5000
 host_usage_autopush_budget_ms = 350
-host_usage_interactive_budget_ms = 500
+host_usage_interactive_budget_ms = 3000
 ```
 
 `capture_budget_ms` (range **250–60,000**, default **5,000**) is the one total
 budget for an attended push's usage and activity capture: host reads plus
-inline warming get at most half, and git/session capture keeps the rest plus
-whatever the host phase leaves unused. When it is set it takes precedence
+inline warming get at most three fifths, and git/session capture keeps the rest plus
+whatever the host phase leaves unused. Each reader after the first keeps a reserve of
+up to 300 ms in the sweep and across the warm retries (at most half the sweep divided
+by the reader count), so one reader's overrun cannot take another's whole read. When it is set it takes precedence
 over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
 its own small fixed shares regardless.
 
-Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **500 ms** (range **250–5,000**).
+Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **3,000 ms** (range **250–5,000**).
 All must be integers. Effective autopush must not exceed `capture_budget_ms`
 when that key is set, and must not exceed an explicitly set interactive budget.
-When neither is set, it must not exceed the 500 ms interactive default. When
+When neither is set, it must not exceed the 3,000 ms interactive default. When
 both ceilings apply, it must not exceed the smaller one.
 Invalid values stop sync like any other `[retro]` error. Raising
 a budget trades more autopush latency for read headroom. This is per Mac and
@@ -2235,7 +2254,7 @@ not a publication check. Missing measurements say `unknown`; future dates
 say `in the future`. Lowering `host_usage_interactive_budget_ms` does not cap
 the separate warm allowance. A set `capture_budget_ms`, and the 5,000 ms
 default when neither key is set, caps host sweep and inline warm together at
-half of that total.
+three fifths of that total.
 
 An attended `mm push` re-reads usage even when nothing else needs uploading. A
 no-op `mm autopush` still does not: autopush stays change-gated and never warms,
@@ -2276,7 +2295,7 @@ and `last_deadline_allotted_ms`. The new top-level `host_read_budgets` contains
 `capture_ms`, `capture_source`, and
 `warm_ms` (always 5000, the legacy warm constant). `capture_ms` is the
 attended total. `warm_ms` is not that cap: host sweep and inline warm share
-at most half of `capture_ms` unless only the legacy interactive key is set.
+at most three fifths of `capture_ms` unless only the legacy interactive key is set.
 Timings exclude cache serialization. Dates are normalized
 UTC ISO text or null; missing old fields become null,
 and an invalid date never erases a valid blocker. Diag reads caches without

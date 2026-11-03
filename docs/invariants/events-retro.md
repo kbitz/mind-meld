@@ -154,14 +154,15 @@ pre-scan `_capture_host_snapshot` (sweep + inline warm) and `_run_events_tail`
 (discovery, git walk capped at the tail share, token warm, session walk),
 excluding `build_manifest_v2` scan time. When configured it takes precedence
 over legacy `host_usage_interactive_budget_ms`: `resolve_host_read_budget`
-returns the host sweep budget (legacy value or 500 ms default, capped at
-half the capture budget, `config` source) and stashes the
+returns the host sweep budget (legacy value or 3000 ms default, capped at
+three fifths of the capture budget by `_host_phase_ms`, `config` source) and
+stashes the
 total for `_capture_host_snapshot`, whose sweep and warm retries share that
 phase deadline; warmers receive the remaining `budget_s`/`deadline_s` only
 when `inspect.signature` shows they accept it, so one-arg test patches keep
 working. Elapsed attended host time is recorded in `events_tail` and the tail
-keeps at least half the capture budget plus whatever the host phase left
-unused. The tail's git walk, token warm and session walk share ONE absolute
+keeps at least two fifths of the capture budget plus whatever the host phase
+left unused (Track 101A; Track 85A split it in half). The tail's git walk, token warm and session walk share ONE absolute
 deadline minted from that share, so the share is spent once across phases,
 not once per phase (if discovery exhausts the deadline, `walk_git_projects`
 records `WALK_SKIP_BUDGET_ABORT` for discovered roots without spawning worker
@@ -173,7 +174,7 @@ its fixed 250 ms walk / 250 ms host / 50 ms discovery shares and never warms.
 Config validation checks `host_usage_autopush_budget_ms` against
 `capture_budget_ms` when set and against an explicitly set legacy interactive
 value (the legacy rule). When neither key is set, autopush still must not
-exceed the 500 ms interactive default. When both ceilings apply, autopush
+exceed the 3000 ms interactive default. When both ceilings apply, autopush
 must not exceed the smaller one.
 
 `walk_session_metadata(..., persist=False)` is the legacy read-only walk.
@@ -216,7 +217,10 @@ passes an exact key-set check against the live enumeration, so additions and
 deletions evict immediately; exactly one settled day per scan — the stalest
 `check_seq` — is further verified by directory stat digest
 (`dir_mtime_ns, count, sum_size, sum_mtime_ns`), and a failed or mismatched
-verification evicts it to the per-file loop. Independently of
+verification evicts it to the per-file loop. Track 101A adds archive groups
+to the same map (see "Archived Codex rollouts"): their own stat-digest
+rotation runs beside the live one, one more verification per scan, so the live
+days' rotation keeps its rate. Independently of
 settling, a cached rollout idle at least 24h is a stat-only cache hit (no
 8 KiB fingerprint read); younger files keep the fingerprint. Shared pure
 helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
@@ -558,7 +562,8 @@ skipped, and a deadline inside a check stops checking without failing the
 pass and sends that day to the back of the queue. With enough budget every
 frozen day is re-checked (about 400 ms for 90 days of ~100 logs, measured
 on a synthetic corpus); an attended push checks what its share of the
-500 ms budget allows and the rest over later pushes, and an autopush checks
+sweep budget allows (500 ms when this was measured, 3000 ms since Track 101A)
+and the rest over later pushes, and an autopush checks
 what fits; a digest mismatch (a resumed, pruned, moved or new log)
 unfreezes that day and re-reads it; (4) every day directory is listed but
 only live ones are read, so there is no calendar floor: a frozen day stays
@@ -980,8 +985,13 @@ warms every warmable reader. The attended warm IS the retry (Track 63A):
 `warm_host_cache_inline(reader=name)` runs through `_capture_host_usage` on a
 singleton reader. Only an explicit legacy interactive budget, with no
 `capture_budget_ms`, uses `DEFAULT_READ_BUDGET_S`. Otherwise the deadline is
-the shared host-phase cap: half of `capture_budget_ms`, or half of the 5,000 ms
-default when neither key is set. Merge its
+the shared host-phase cap: three fifths of `capture_budget_ms`, or three fifths
+of the 5,000 ms default when neither key is set (Track 101A; half before).
+Retries hold reserves: the retry names are listed first, and under a phase
+deadline the k-th of n retries gets `phase_deadline - reserve_s * (n - k)`, so a
+slow retry cannot spend the phase a later retry needs (the observed failure was
+Codex's retry spending it while Antigravity's got 50 ms). Legacy-only keeps a
+fresh `DEFAULT_READ_BUDGET_S` per retry. Merge its
 result, including failures, with the first pass's completed readers — a flaky
 second-pass read of an already-completed reader must never erase totals
 already captured. If
@@ -1670,9 +1680,19 @@ would let `a_b` mean `a/b` on Monday and `a?b` on Tuesday and read as per-day
 movement that never happened.
 
 **Its own deadline, started after `walk_done`.**
-`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (500) set the
+`HOST_USAGE_READ_BUDGET_AUTOPUSH_MS` (250) / `_INTERACTIVE_MS` (3000) set the
 sweep deadline. The first reader receives it unchanged; each later reader
 receives `max(sweep_deadline, start_i + HOST_READER_GRACE_MS / 1000)`.
+**Attended sweeps hold a reserve (Track 101A).** `_capture_host_snapshot` passes
+`reserve_s = min(HOST_READER_RESERVE_MS (300), host_budget_ms // (2 * readers)) / 1000`
+to `_capture_host_usage` only when a warm callback is present and there are at
+least two readers. With `later = readers - i - 1`, reader `i` gets
+`sweep_deadline - reserve_s * later`, and a later reader never gets less than
+`max(sweep_deadline - reserve_s * later, start_i + max(HOST_READER_GRACE_MS / 1000, reserve_s))`.
+At `reserve_s == 0` (autopush, which never warms, and every caller that does not
+pass it) this is exactly the grace rule above. The index-0 veto stays keyed to
+the sweep deadline. Pinned by `test_host_usage_snapshot.py::TestHostDeadline`
+(`test_attended_reserve_*`) and `TestCaptureBudget85A`.
 `HOST_READER_GRACE_MS = 50`: Track 57A's E16 probe measured warm Grok at
 19–20 ms while Codex consumed 73–80% of the autopush budget. This is a
 cooperative grace floor, not a hard elapsed-time ceiling or a full second
@@ -1686,7 +1706,8 @@ autopush walk budget spent on optional analytics. Track 63A's attended warm
 publishes its own result through the same reader failure boundary.
 `resolve_host_read_budget` owns effective budgets and their `default`/`config`
 source: `[retro] host_usage_autopush_budget_ms` defaults to 250 (100–5000),
-`host_usage_interactive_budget_ms` to 500 (250–5000). Both reject bools,
+`host_usage_interactive_budget_ms` to 3000 (250–5000; 500 before Track 101A).
+Both reject bools,
 non-integers and out-of-range values; effective autopush cannot exceed the
 effective attended ceiling. Capture defaults, tail, init and attended push all use this
 resolver. The independent 5-second warm and 50 ms later-reader grace remain
@@ -1825,7 +1846,9 @@ reason remains, and is removed when the reason clears. Millisecond fields
 accept only ints in 0–86,400,000. Date validation matches `last_reason_since`;
 invalid or absent values are unknown, never inferred from counts.
 A later reader's allowance is the sweep time remaining after earlier readers,
-floored at `HOST_READER_GRACE_MS` (50 ms); it varies with earlier read times,
+floored at `HOST_READER_GRACE_MS` (50 ms) on autopush and at
+`max(HOST_READER_GRACE_MS, reserve)` (up to 300 ms) on an attended sweep; it
+varies with earlier read times,
 not merely entry-latency rounding. That variation could defeat the exact
 write-skip comparison if the later reader remains `deadline`-incomplete with
 no newly learned file and an unchanged blocker pair. No Mac has shown that
@@ -1921,7 +1944,8 @@ capture. Both readers can be cold. Lowering `host_usage_interactive_budget_ms`
 does not cap the separate warm allowance: only that legacy key, with no
 `capture_budget_ms`, keeps about five seconds of warm scanning per cold reader.
 A set `[retro] capture_budget_ms`, and the 5,000 ms default when neither key is
-set, caps host sweep and warm together at half of that total (Track 85A).
+set, caps host sweep and warm together at three fifths of that total (Track 85A
+split it in half; Track 101A moved it to three fifths).
 Autopush is still change-gated, never warms, and retains its own
 quiet error/lock behavior; it is not an equivalent attended no-capture command.
 
@@ -2256,12 +2280,72 @@ unread.
   no budget changes are included here. These are local observations, not a
   performance floor: remeasure on each producing Mac and use the existing
   per-Mac host-read budget when its corpus outgrows the default.
+- **Archived rollouts settle in name-dated groups (Track 101A).** Every observed
+  archived name starts `rollout-YYYY-MM-DDT…` (all 2,813 on the owner's Mac,
+  2026-11-02). `_archive_group_rel` maps such a name to `archive/YYYY-MM-DD`
+  and a name with no valid date to no group, so it stays per-file as before.
+  Groups live in `settled_days` as records of the live shape, committed and
+  rolled back with it, with `dir_mtime_ns: null`: the flat archive's own mtime
+  changes on every archival, so only the listed files' `(size, mtime_ns)`
+  digest (`_archive_group_digest`, no opens) is verified. The freeze rules are
+  the live ones (date at least 2 UTC days old by `_settled_rel_date`, every
+  file idle at least 24h, no `pending`, no empty `turn_id`, no `turn_id`
+  shared outside the group), so a turn shared between an archive group and a
+  live day blocks both. The exact key-set check stays first: an archival into,
+  or an unarchival out of, a group evicts it at once. A name's date may be
+  local rather than UTC, so a group can sit up to a day off; the 24h idle rule
+  still guards freezing. An older mm drops these records (its
+  `_validated_settled_days` rejects the `archive/` key) and scans per-file. A
+  settled archived rollout changed in place, rather than moved, is caught only
+  when its group's rotation comes round. Pinned by
+  `test_host_usage.py::TestCodexSettledDays85A` (`test_unchanged_archived_*`,
+  `test_changed_archived_*`, `test_new_rollout_with_the_same_name_date_*`,
+  `test_undated_archived_name_never_settles`).
 - **Diag counts both roots.** `codex_usage_diag` adds the flat archive count to
   `files_on_disk`, with the reader's predicates and no deadline. Otherwise
   cached archived entries would exceed the count and `pending` would clamp
   to 0. A listed archive candidate that disappears makes the count unknown.
 
 Pinned by `test_host_usage.py::TestCodexArchivedRollouts`.
+
+**Track 101A: a slow reader no longer starves the others (2026-11-02).** On the
+owner's Mac the attended sweep (500 ms) always expired inside Codex, so
+Antigravity and Cursor got the 50 ms grace for 100 to 236 ms reads and the warm
+retry spent its half-capture phase on Codex while Antigravity's retry got 50 ms
+(`last_deadline_allotted_ms` 50). T1's read-only probe (pipx 1.12.3 interpreter,
+a copy of `host-tokens.json`, counts and timings only): the warm Codex read is
+820 ms and a read that learns the roughly 120 rollouts created between pushes is
+1,803 ms; the cache is reused (the warm pass does zero full reads) and
+`state: migrating` is only the count of pending rollouts (6,754 cached of 6,838
+on disk). The corpus grew 25% in a week (5,481 to 6,838 rollouts), which crossed
+the old budget. No reader changed in 1.12.x (`git diff --stat v1.11.20 v1.12.3`
+touches none; its one `events_tail.py` change is recapture's git walk). The
+fix is arithmetic and a reserve, not a reader change: a 3,000 ms attended
+default, host reads at three fifths of the capture budget, a reserve of up to
+300 ms held for each later attended reader (sweep and warm retries), and
+`mm status` naming `[retro] capture_budget_ms`. Autopush is unchanged (250 ms,
+50 ms grace, never warms): no small budget completes Codex.
+
+*Missed days.* A later complete read republishes the days a `deadline` read
+missed: readers aggregate the whole local corpus, a row carries its last
+`token_usage.MAX_BY_DAY_DAYS` (90) UTC days, and the aggregator keeps each
+device's latest accepted row whole. `mm recapture` redoes Git capture only
+(`cli.py`), so it cannot. The days do not return when the retro window ends
+more than 24 hours before that complete read (`_HOST_FUTURE_SKEW`), when they
+are older than 90 days, or when the host deleted its files. Pinned by
+`test_host_usage_snapshot.py::test_complete_read_after_deadline_republishes_missed_days`.
+
+*Before and after the archive settle* (same corpus copy, pipx 3.14 interpreter,
+alternating, machine load about 12 on 12 CPUs, so compare the call counts and
+the pairs): the warm Codex read, `last_complete_ms`, was 1,016 and 807 ms before
+and 761 and 740 ms after; archived `_cache_hit` calls fell from 2,871 to 301 and
+archived stats from 5,742 to 771 (27 archive groups settled, 2,570 keys). The
+per-file part of the warm read stops growing with the archive. The rest still
+does: `_aggregate` over 174,304 cached states (about 290 ms), the 11.6 MB cache
+load and write (about 190 ms), entry validation of every settled key (it moved
+from the loop into the carry) and listing the archive. Memoizing settled
+aggregates and slimming settled entries is a separate cache-format follow-up,
+not part of this Track.
 
 **Cache persistence is DECOUPLED from result validity.** "May this scan be
 published?" and "did we learn something durable about individual files?" are
@@ -2336,9 +2420,9 @@ rewritten files, so repeated short passes need not converge.
 `warm_host_cache` is now the attended-notice hook only. After
 `mm: reading <reader> usage (bounded by the capture budget)...`,
 `_capture_host_snapshot` wraps `warm_host_cache_inline(reader=name)` in a
-singleton `_capture_host_usage` call. The deadline is at most half of
-`capture_budget_ms` when that key is set, and half of the 5,000 ms default
-when neither key is set. Only an explicit legacy interactive budget, with no
+singleton `_capture_host_usage` call. The deadline is at most three fifths of
+`capture_budget_ms` when that key is set, and three fifths of the 5,000 ms default
+when neither key is set, less the reserve held for the retries after it. Only an explicit legacy interactive budget, with no
 `capture_budget_ms`, keeps the 5-second warm deadline.
 The warm result merges through `_merge_warm_retry_capture(retried_names={name})`.
 There is no second bounded read: a completed warm contributes its totals,

@@ -13,7 +13,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -30,6 +30,12 @@ CODEX_ARCHIVED_SESSIONS_PATH = Path.home() / ".codex" / "archived_sessions"
 date tree; Paseo archives on merge, and the Codex app and VS Code can too."""
 
 _ROLLOUT_NAME = re.compile(r"^rollout-.*\.jsonl$")
+
+_ARCHIVED_NAME_DATE = re.compile(r"^rollout-([0-9]{4})-([0-9]{2})-([0-9]{2})T")
+"""Start date every observed rollout name carries: ``rollout-YYYY-MM-DDT…``."""
+
+_ARCHIVE_GROUP_REL = re.compile(r"^archive/([0-9]{4})-([0-9]{2})-([0-9]{2})$")
+"""Settled-record key for archived rollouts grouped by their name's date (Track 101A)."""
 
 
 def _now_ns() -> int:
@@ -382,6 +388,7 @@ def _scan_codex_root(
     pass roll back.
     """
     prior_settled = settled_days or {}
+    archive_groups: dict[str, list[Path]] = {}
     try:
         if host_usage._expired(deadline):
             raise host_usage._ReadFailure("deadline")
@@ -395,7 +402,11 @@ def _scan_codex_root(
                 key=lambda path: path.name,
                 reverse=True,
             )
-            rollouts += [(path, archived_root, None) for path in archived]
+            rollouts += [(path, archived_root, _archive_group_rel(path.name)) for path in archived]
+            for path in archived:
+                group_rel = _archive_group_rel(path.name)
+                if group_rel is not None:
+                    archive_groups.setdefault(group_rel, []).append(path)
             # A reverse move before archive discovery can miss both listings.
             # Revalidate the live inventory under the same deadline; removals
             # are allowed for forward moves, but a new path requires a retry.
@@ -423,8 +434,27 @@ def _scan_codex_root(
         for rel, _day, paths in days
         if rel in prior_settled
     }
+    if archived_root is not None:
+        day_keys_expected.update(
+            {
+                rel: {
+                    host_usage._cache_key(
+                        path, root=archived_root, canonical_root=canonical_roots[archived_root]
+                    )
+                    for path in paths
+                }
+                for rel, paths in archive_groups.items()
+                if rel in prior_settled
+            }
+        )
     carried_days, settled_updates, seq_counter = _carry_settled_days(
-        prior_settled, day_dirs, day_keys_expected, cached_files, staged, deadline
+        prior_settled,
+        day_dirs,
+        day_keys_expected,
+        cached_files,
+        staged,
+        deadline,
+        archive_groups=archive_groups,
     )
     key_day: dict[str, str | None] = {}
     for path, base, rel in rollouts:
@@ -473,7 +503,9 @@ def _scan_codex_root(
     except host_usage._ReadFailure as failure:
         return host_usage._incomplete(failure.reason), staged, learned, prior_settled
     new_settled = _freeze_settled_days(
-        days,
+        days + [(rel, archived_root, paths) for rel, paths in archive_groups.items()]
+        if archived_root is not None
+        else days,
         staged,
         key_day,
         carried_days=carried_days,
@@ -497,6 +529,8 @@ def _carry_settled_days(
     cached_files: dict[str, Any],
     staged: dict[str, _CacheEntry],
     deadline: float,
+    *,
+    archive_groups: dict[str, list[Path]] | None = None,
 ) -> tuple[set[str], dict[str, dict[str, Any]], int]:
     """Stage settled days' ``files`` entries without per-file stat/open.
 
@@ -509,16 +543,25 @@ def _carry_settled_days(
     that day instead of trusting it. Remaining days carry on the key-set
     check. Returns ``(carried, updates, seq_counter)``; callers commit
     ``updates`` only on a complete pass.
+
+    Track 101A: an ``archive/YYYY-MM-DD`` group (archived rollouts that share
+    a name date) is carried the same way and has its own rotation, one more
+    verification per scan by stat digest of its listed files, so the live
+    days' rotation keeps its rate. A group is gone when its date no longer
+    lists any file.
     """
     carried: set[str] = set()
     updates: dict[str, dict[str, Any]] = {}
     seq_counter = max((record["check_seq"] for record in prior_settled.values()), default=0)
-    verified_any = False
+    verified_live = False
+    verified_archive = False
     for rel in sorted(prior_settled, key=lambda r: prior_settled[r]["check_seq"]):
         record = prior_settled[rel]
-        day = day_dirs.get(rel)
-        if day is None:
-            continue  # directory gone; a complete pass drops the record
+        is_archive = _ARCHIVE_GROUP_REL.fullmatch(rel) is not None
+        day = None if is_archive else day_dirs.get(rel)
+        group = (archive_groups or {}).get(rel) if is_archive else None
+        if day is None and group is None:
+            continue  # directory or group gone; a complete pass drops the record
         if day_keys_expected.get(rel) != set(record["keys"]):
             continue  # files added/removed; rescan the day per-file
         entries: dict[str, _CacheEntry] = {}
@@ -530,12 +573,19 @@ def _carry_settled_days(
             entries[key] = entry
         if not entries:
             continue  # backing files lost; rescan the day per-file
-        if not verified_any:
-            # Exactly one digest ATTEMPT per scan: a failed attempt spends it,
-            # so a run of changed days cannot multiply stat sweeps.
-            verified_any = True
+        if not (verified_archive if is_archive else verified_live):
+            # Exactly one digest ATTEMPT per scan and kind: a failed attempt
+            # spends it, so a run of changed days cannot multiply stat sweeps.
+            if is_archive:
+                verified_archive = True
+            else:
+                verified_live = True
             try:
-                digest = _day_disk_digest(day, deadline)
+                digest = (
+                    _archive_group_digest(group, deadline)
+                    if group is not None
+                    else _day_disk_digest(day, deadline)
+                )
             except host_usage._ReadFailure:
                 digest = None
             if digest != _settled_record_digest(record):
@@ -594,7 +644,7 @@ def _freeze_settled_days(
         keys = day_keys.get(rel) or []
         if not paths or len(keys) != len(paths):
             continue
-        if not host_usage._settle_date_eligible(host_usage._day_dir_date(rel), today=today):
+        if not host_usage._settle_date_eligible(_settled_rel_date(rel), today=today):
             continue
         entries = [staged[key] for key in keys]
         if any(now_ns - entry["mtime_ns"] < host_usage.SETTLE_IDLE_NS for entry in entries):
@@ -606,10 +656,14 @@ def _freeze_settled_days(
             continue
         if any(turn_days.get(turn_id) != {rel} for turn_id in turn_ids):
             continue
-        try:
-            dir_mtime_ns: int | None = day.stat().st_mtime_ns
-        except OSError:
-            dir_mtime_ns = None
+        dir_mtime_ns: int | None = None
+        if _ARCHIVE_GROUP_REL.fullmatch(rel) is None:
+            # The flat archive's own mtime moves on every archival, so an
+            # archive group carries no directory time (Track 101A).
+            try:
+                dir_mtime_ns = day.stat().st_mtime_ns
+            except OSError:
+                dir_mtime_ns = None
         digest = host_usage._stat_digest(
             dir_mtime_ns,
             [(entry["size"], entry["mtime_ns"]) for entry in entries],
@@ -1198,7 +1252,7 @@ def _validated_settled_days(value: Any) -> dict[str, dict[str, Any]]:
         return {}
     out: dict[str, dict[str, Any]] = {}
     for rel, record in value.items():
-        if not isinstance(rel, str) or host_usage._day_dir_date(rel) is None:
+        if not isinstance(rel, str) or _settled_rel_date(rel) is None:
             continue
         if not isinstance(record, dict):
             continue
@@ -1234,6 +1288,45 @@ def _settled_record_digest(record: dict[str, Any]) -> tuple[int | None, int, int
         record["sum_size"],
         record["sum_mtime_ns"],
     )
+
+
+def _archive_group_rel(name: str) -> str | None:
+    """``archive/YYYY-MM-DD`` for a rollout named ``rollout-YYYY-MM-DDT…``.
+
+    Track 101A: archived rollouts settle in groups by the start date in their
+    name. A name without a valid date has no group and stays per-file, as
+    every archived rollout did before this Track.
+    """
+    match = _ARCHIVED_NAME_DATE.match(name)
+    if match is None:
+        return None
+    try:
+        date(int(match[1]), int(match[2]), int(match[3]))
+    except ValueError:
+        return None
+    return f"archive/{match[1]}-{match[2]}-{match[3]}"
+
+
+def _settled_rel_date(rel: str) -> date | None:
+    """Calendar date of a settled-record key, live ``YYYY/MM/DD`` or ``archive/YYYY-MM-DD``."""
+    match = _ARCHIVE_GROUP_REL.fullmatch(rel)
+    if match is None:
+        return host_usage._day_dir_date(rel)
+    try:
+        return date(int(match[1]), int(match[2]), int(match[3]))
+    except ValueError:
+        return None
+
+
+def _archive_group_digest(paths: list[Path], deadline: float) -> tuple[int | None, int, int, int]:
+    """Stat digest of an archive group's listed rollouts (no directory time, no opens)."""
+    stats: list[tuple[int, int]] = []
+    for path in paths:
+        if host_usage._expired(deadline):
+            raise host_usage._ReadFailure("deadline")
+        st = host_usage._regular_stat(path)
+        stats.append((st.st_size, st.st_mtime_ns))
+    return host_usage._stat_digest(None, stats)
 
 
 def _day_disk_digest(day: Path, deadline: float) -> tuple[int | None, int, int, int]:

@@ -135,7 +135,7 @@ _pending_capture_budget_ms: int | None = None
 ``cli._capture_attended_usage`` passes only ``host_budget_ms`` into
 ``_capture_host_snapshot``; the ``resolve_host_read_budget`` call that
 produced it stashes the configured capture total here so the snapshot can
-partition host+warm inside half of it. Consumed (read and cleared) by the
+partition host+warm inside three fifths of it. Consumed (read and cleared) by the
 next ``_capture_host_snapshot`` call; ``None`` keeps legacy warm allowance."""
 
 _attended_host_elapsed_s: float | None = None
@@ -171,14 +171,25 @@ def resolve_capture_budget(config: dict) -> tuple[int, str]:
     return DEFAULT_CAPTURE_BUDGET_MS, "default"
 
 
+def _host_phase_ms(capture_ms: int) -> int:
+    """Host phase (sweep + inline warm) share of an attended capture budget.
+
+    Three fifths (Track 101A; Track 85A used half). At the 5 s default this is
+    3 s, which the 3 s attended default fills, and the events tail keeps the
+    other two fifths plus whatever the host phase leaves unused (docs/SPEC.md
+    O8.2's one capture budget).
+    """
+    return max(1, capture_ms * 3 // 5)
+
+
 def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, str]:
     """Effective per-Mac budget and its source, from an already validated config.
 
     Attended: a configured ``capture_budget_ms`` takes precedence over the
     legacy interactive key and the host phase (sweep + inline warm) gets at
-    most half of it; the tail keeps the rest plus whatever the host phase
-    leaves unused. The return value is the host SWEEP budget: the legacy
-    interactive value (or its 500 ms default) capped at that half. With only
+    most three fifths of it; the tail keeps the rest plus whatever the host
+    phase leaves unused. The return value is the host SWEEP budget: the legacy
+    interactive value (or its 3000 ms default) capped at that share. With only
     the legacy key configured, legacy sweep/warm behavior applies unchanged;
     with neither key, the 5000 ms capture default partitions the phase.
     Autopush always keeps its own small fixed share.
@@ -195,7 +206,7 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
         sweep_ms = retro.get(
             "host_usage_interactive_budget_ms", HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
         )
-        return max(1, min(sweep_ms, capture_ms // 2)), "config"
+        return max(1, min(sweep_ms, _host_phase_ms(capture_ms))), "config"
     if interactive:
         _pending_capture_budget_ms = (
             None
@@ -207,12 +218,19 @@ def resolve_host_read_budget(config: dict, *, interactive: bool) -> tuple[int, s
     )
     if isinstance(retro, dict) and setting_name in retro:
         return retro[setting_name], "config"
-    return (
-        HOST_USAGE_READ_BUDGET_INTERACTIVE_MS
-        if interactive
-        else HOST_USAGE_READ_BUDGET_AUTOPUSH_MS,
-        "default",
-    )
+    if interactive:
+        # Neither key set: the default sweep may not exceed the host phase of
+        # the default capture budget, whatever either default is.
+        return (
+            max(
+                1,
+                min(
+                    HOST_USAGE_READ_BUDGET_INTERACTIVE_MS, _host_phase_ms(DEFAULT_CAPTURE_BUDGET_MS)
+                ),
+            ),
+            "default",
+        )
+    return HOST_USAGE_READ_BUDGET_AUTOPUSH_MS, "default"
 
 
 HOST_READER_GRACE_MS = 50
@@ -220,6 +238,15 @@ HOST_READER_GRACE_MS = 50
 Track 57A evidence E16 measured warm Grok reads at 19–20 ms while Codex
 used 73–80% of the autopush budget. This floor gives Grok about 2.5x that
 read time. Deadlines are cooperative, not filesystem-interrupt ceilings."""
+
+HOST_READER_RESERVE_MS = 300
+"""Attended sweep: time held back for EACH later reader (Track 101A), so one
+reader's overrun cannot take another's whole read. Sized from measured reads:
+Antigravity 109 to 236 ms, Cursor 100 ms, Muse 84 to 642 ms, and Codex 746 ms
+warm to 1,812 ms while learning new rollouts, which under the 3,000 ms attended
+default gets a 2,100 ms first share (three later readers). Capped per sweep at
+``sweep / (2 * readers)`` and floored per later reader at the reserve. The
+autopush sweep passes no reserve and keeps ``HOST_READER_GRACE_MS``."""
 
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
@@ -523,8 +550,17 @@ def _capture_host_usage(
     *,
     deadline: float,
     now: Callable[[], float] = time.monotonic,
+    reserve_s: float = 0.0,
 ) -> HostUsageCapture:
     """Read consented hosts under a sweep deadline plus later-reader grace.
+
+    ``reserve_s`` (Track 101A, attended sweeps only) holds that much of the
+    sweep back for each reader still to come: reader ``i`` of ``n`` gets
+    ``deadline - reserve_s * (n - i - 1)``, and a later reader never gets less
+    than ``max(HOST_READER_GRACE_MS, reserve_s)`` from its own start, so an
+    overrun by an earlier reader cannot take a later reader's whole read. At
+    ``0.0`` (autopush, and every caller that does not pass it) the rule is the
+    grace floor alone.
 
     Reader-scoped for FAILURES (Track 31A): a file/record failure still fails
     that whole reader, but a reader failure no longer discards the others.
@@ -558,8 +594,12 @@ def _capture_host_usage(
         start = now()
         if index == 0 and start >= deadline:
             return HostUsageCapture(None, name, "deadline", invoked=False)
+        later = len(readers) - index - 1
+        held_back = deadline - reserve_s * later
         reader_deadline = (
-            max(deadline, start + HOST_READER_GRACE_MS / 1000.0) if index else deadline
+            max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s))
+            if index
+            else held_back
         )
         try:
             result = read(deadline=reader_deadline)
@@ -842,7 +882,9 @@ def _host_skip_phrase(
                 f"{progress}. "
                 "If the last complete read is over your autopush budget, raise "
                 "`[retro] host_usage_autopush_budget_ms`; attended mm push refreshes usage "
-                "and can warm cold readers; "
+                "and can warm cold readers. "
+                "If it is over what an attended push allows, raise "
+                "`[retro] capture_budget_ms`; host reads get three fifths of it; "
                 f"see {HOST_USAGE_CAPTURE_URL}."
             )
         compare = (
@@ -876,18 +918,28 @@ def _capture_host_snapshot(
 
     Track 85A: with a configured ``capture_budget_ms`` (stashed by
     ``resolve_host_read_budget``), sweep + inline warm share one phase
-    deadline of at most half the capture budget; without it (legacy key
-    only) each warm retry keeps its legacy fresh allowance. Elapsed
-    attended time is recorded for the events tail.
+    deadline of at most three fifths of the capture budget (Track 101A);
+    without it (legacy key only) each warm retry keeps its legacy fresh
+    allowance. Attended callers (a warm callback) also hold a reserve for each
+    later reader, in the sweep and across the warm retries. Elapsed attended
+    time is recorded for the events tail.
     """
     global _attended_host_elapsed_s, _pending_capture_budget_ms
     started = time.monotonic()
     _attended_host_elapsed_s = None
     capture_ms = _pending_capture_budget_ms
     _pending_capture_budget_ms = None
-    phase_deadline = started + max(1, capture_ms // 2) / 1000.0 if capture_ms is not None else None
+    phase_deadline = (
+        started + _host_phase_ms(capture_ms) / 1000.0 if capture_ms is not None else None
+    )
+    reserve_s = (
+        min(HOST_READER_RESERVE_MS, host_budget_ms // (2 * len(host_readers))) / 1000.0
+        if warm_host_cache is not None and len(host_readers) >= 2
+        else 0.0
+    )
+    sweep_kwargs = _accepted_kwargs(_capture_host_usage, reserve_s=reserve_s) if reserve_s else {}
     host_capture = _capture_host_usage(
-        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0
+        host_readers, deadline=time.monotonic() + host_budget_ms / 1000.0, **sweep_kwargs
     )
     if not host_capture.invoked and host_capture.reason == "deadline":
         # No reader ran: declare every omission so a failed warm cannot vanish
@@ -903,9 +955,12 @@ def _capture_host_snapshot(
     if warm_host_cache is not None:
         # The attended warm IS the retry. Contain it through the same reader
         # boundary, then replace only that reader's first-pass outcome.
-        for name, _read in host_readers:
-            if name not in deadline_names or name not in WARMABLE_HOST_READERS:
-                continue
+        retry_names = [
+            name
+            for name, _read in host_readers
+            if name in deadline_names and name in WARMABLE_HOST_READERS
+        ]
+        for position, name in enumerate(retry_names):
             warm_host_cache(name)
 
             def warm_read(*, deadline: float) -> host_usage.HostUsageResult:
@@ -918,7 +973,8 @@ def _capture_host_snapshot(
             retry_capture = _capture_host_usage(
                 ((name, warm_read),),
                 deadline=(
-                    phase_deadline
+                    # Each retry holds a reserve for the retries after it.
+                    phase_deadline - reserve_s * (len(retry_names) - position - 1)
                     if phase_deadline is not None
                     else time.monotonic() + host_usage.DEFAULT_READ_BUDGET_S
                 ),
@@ -1260,7 +1316,7 @@ def _run_events_tail(
         # the two would make a first-run 30-day cursor silently raise the
         # session-walk notice threshold (and break the AUTOPUSH=0 pin).
         # Attended (Track 85A): one capture budget partitions across the
-        # pre-scan host phase and this tail. The tail keeps at least half,
+        # pre-scan host phase and this tail. The tail keeps at least two fifths,
         # plus whatever the host phase left unused; autopush keeps its
         # fixed 250 ms walk / 50 ms discovery shares.
         tail_deadline: float | None = None
@@ -1286,9 +1342,11 @@ def _run_events_tail(
                 elapsed_ms = int((_attended_host_elapsed_s or 0.0) * 1000)
                 _attended_host_elapsed_s = None
                 if suppress_host_capture:
-                    budget_ms = max(capture_ms // 2, capture_ms - elapsed_ms)
+                    budget_ms = max(
+                        capture_ms - _host_phase_ms(capture_ms), capture_ms - elapsed_ms
+                    )
                 else:
-                    budget_ms = max(1, capture_ms // 2)
+                    budget_ms = max(1, capture_ms - _host_phase_ms(capture_ms))
                 git_budget_ms = min(events.git_walk_budget_ms(quiet=False, since=since), budget_ms)
                 # One absolute deadline for git + warm + session walk.
                 tail_deadline = time.monotonic() + budget_ms / 1000.0
