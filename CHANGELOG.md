@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.8] - 2026-11-03
+
+Configured fleet identities are published with usage, and checkpoints are left out of that publication.
+
+### Fixed
+
+- Identities configured for the fleet are published, so those machines are included in fleet usage.
+- Checkpoints are excluded from the published events that `mm retro-fleet` counts.
+
 ## [1.12.7] - 2026-11-03
 
 **`mm` finds Git repositories from every enabled agent's working directories, not only Claude Code.** Codex, Cursor, Muse, and Antigravity count when those providers are enabled. Cursor still needs `[retro] cursor_host_usage = true`. Installed Paseo projects and mmm factory items count too. `mm diag` names the source that found each root.

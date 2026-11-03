@@ -1941,6 +1941,72 @@ def _spelling_patterns(found: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(sorted(patterns))
 
 
+def _configured_author_spellings(
+    config: Mapping[str, object] | None,
+    roots: Sequence[Path],
+) -> dict[str, str]:
+    """Map each lowercased configured address to its first spelling.
+
+    The identities this machine's configuration names: ``[retro].author_emails``,
+    the global gitconfig ``[user] email`` and each root's repository-local
+    ``[user] email``. File reads only. Both the walk filter
+    (``resolve_walk_author_emails``) and the published ``local_emails``
+    (``configured_author_emails``) read through here, so they cannot drift.
+    """
+    found: dict[str, str] = {}
+    if isinstance(config, Mapping):
+        retro = config.get("retro")
+        if isinstance(retro, Mapping):
+            found.update(_author_spellings(retro.get("author_emails")))
+    for email in _read_global_config_emails():
+        found.setdefault(email.lower(), email)
+    for root in roots:
+        for email in _read_repo_config_emails(root):
+            found.setdefault(email.lower(), email)
+    return found
+
+
+def configured_author_emails(
+    config: Mapping[str, object] | None,
+    roots: Sequence[Path] = (),
+) -> tuple[str, ...]:
+    """Sorted lowercase identities the walk filter reads from configuration.
+
+    The tail unions these into the published ``mm-push`` ``local_emails``, so
+    a peer's retro counts commits under an identity only this machine's
+    repository configuration (or ``[retro].author_emails``) names. Never
+    learned from ``git log``: the trust-rooted rule holds.
+    """
+    return tuple(sorted(_configured_author_spellings(config, roots)))
+
+
+def identity_inputs_digest(
+    config: Mapping[str, object] | None,
+    roots: Sequence[Path] = (),
+) -> str:
+    """SHA-256 over what decides the published identity set.
+
+    Three inputs: the ``[retro].author_emails`` keys, the lowercase global
+    gitconfig emails, and the discovered repositories keyed by object store
+    (a worktree comes and goes without changing the set). File reads only:
+    no subprocess, no cache write. A changed digest tells an attended push
+    to refresh ``identity-cache.json`` before its TTL.
+    """
+    retro_emails: list[str] = []
+    if isinstance(config, Mapping):
+        retro = config.get("retro")
+        if isinstance(retro, Mapping):
+            retro_emails = sorted(_author_spellings(retro.get("author_emails")))
+    global_emails = sorted({email.lower() for email in _read_global_config_emails()})
+    stores = sorted({str(_git_common_dir(Path(root)) or root) for root in roots})
+    payload = json.dumps(
+        {"retro": retro_emails, "global": global_emails, "repositories": stores},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def resolve_walk_author_emails(
     config: Mapping[str, object] | None = None,
     roots: Sequence[Path] = (),
@@ -1963,21 +2029,8 @@ def resolve_walk_author_emails(
     if cached is None:
         return ()
     found = _author_spellings(cached)
-    if isinstance(config, Mapping):
-        retro = config.get("retro")
-        if isinstance(retro, Mapping):
-            found.update(
-                {
-                    key: value
-                    for key, value in _author_spellings(retro.get("author_emails")).items()
-                    if key not in found
-                }
-            )
-    for email in _read_global_config_emails():
-        found.setdefault(email.lower(), email)
-    for root in roots:
-        for email in _read_repo_config_emails(root):
-            found.setdefault(email.lower(), email)
+    for key, value in _configured_author_spellings(config, roots).items():
+        found.setdefault(key, value)
     return _spelling_patterns(found)
 
 
@@ -2295,6 +2348,23 @@ def _walk_one_repo(
     return proj, None
 
 
+CHECKPOINT_AUTHOR_EMAIL = "checkpointer@noreply"
+CHECKPOINT_SUBJECT_PREFIX = "checkpoint:"
+
+
+def is_checkpoint_commit(author_email: object, subject: object) -> bool:
+    """True for an automated checkpoint commit: never work, never counted.
+
+    The checkpointer's author is ``checkpointer@noreply``; its subjects start
+    with ``checkpoint:``. Capture drops these at parse time and the retro
+    aggregator drops them at render, so rows captured before this rule and
+    ``--no-author-filter`` runs exclude them too. Non-strings never match.
+    """
+    if isinstance(author_email, str) and author_email.strip().lower() == CHECKPOINT_AUTHOR_EMAIL:
+        return True
+    return isinstance(subject, str) and subject.startswith(CHECKPOINT_SUBJECT_PREFIX)
+
+
 def _parse_git_log_numstat(out: str) -> list[GitCommit]:
     """Parse `git log --format=<RS>%H\\t%cI\\t%ae\\t%s --numstat` output.
 
@@ -2320,6 +2390,8 @@ def _parse_git_log_numstat(out: str) -> list[GitCommit]:
         try:
             sha, date, ae, subject = header.split("\t", 3)
         except ValueError:
+            continue
+        if is_checkpoint_commit(ae, subject):
             continue
         files = 0
         add = 0

@@ -28,7 +28,13 @@ from pathlib import Path
 import pytest
 
 from mind_meld import events, identity, lockedjson
-from tests.test_events import _git_env_repos
+from tests.test_events import (
+    _git_env_repos,
+    _init_git_repo,
+    _make_git_worktree,
+    _recapture_test_sources,
+    _stub_discovery_to,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers — fake subprocess.run dispatch by command prefix.
@@ -1196,3 +1202,399 @@ def test_refresh_diagnostic_failure_does_not_cancel_gather(monkeypatch):
     assert identity.gather_local_identities(diagnostic=broken) == ["owner@example.test"]
     assert calls and calls[0][1] is False
     assert identity.read_cached_identities() == ["owner@example.test"]
+
+
+class TestInputsDigestStaleness:
+    """Track 104A: a cache written under other inputs is stale before its TTL,
+    but only for a caller that passes a digest (attended push, init)."""
+
+    def _write_fresh(self, emails: list[str], digest: str | None) -> None:
+        payload: dict = {
+            "version": identity.CACHE_VERSION,
+            "refreshed_at": _isoformat(datetime.now(timezone.utc)),
+            "emails": emails,
+        }
+        if digest is not None:
+            payload["inputs_digest"] = digest
+        identity.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        identity.CACHE_PATH.write_text(json.dumps(payload))
+
+    def _counting_gather(self, monkeypatch, emails: list[str]) -> list[int]:
+        calls: list[int] = []
+
+        def gather(*, root_discovery=None):
+            calls.append(1)
+            return list(emails)
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather)
+        return calls
+
+    def test_mismatched_digest_refreshes_once_and_stores_the_new_digest(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        calls = self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.gather_local_identities(inputs_digest="d2") == ["new@example.com"]
+        assert len(calls) == 1
+        stored = json.loads(identity.CACHE_PATH.read_text())
+        assert stored["inputs_digest"] == "d2"
+        assert stored["emails"] == ["new@example.com"]
+
+        assert identity.gather_local_identities(inputs_digest="d2") == ["new@example.com"]
+        assert len(calls) == 1
+
+    def test_no_digest_keeps_the_ttl_only_test(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        calls = self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.gather_local_identities() == ["old@example.com"]
+        assert identity.refresh_identity_cache() == ["old@example.com"]
+        assert calls == []
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == "d1"
+
+    def test_cache_written_before_the_field_refreshes_for_a_digest_caller(self, monkeypatch):
+        self._write_fresh(["old@example.com"], None)
+        calls = self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.gather_local_identities(inputs_digest="d1") == ["new@example.com"]
+        assert len(calls) == 1
+
+    def test_no_refresh_allowed_returns_the_cache_despite_a_mismatch(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        calls = self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.gather_local_identities(allow_refresh=False, inputs_digest="d2") == [
+            "old@example.com"
+        ]
+        assert calls == []
+
+    def test_refresh_identity_cache_honors_the_digest(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        calls = self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.refresh_identity_cache(inputs_digest="d1") == ["old@example.com"]
+        assert calls == []
+        assert identity.refresh_identity_cache(inputs_digest="d2") == ["new@example.com"]
+        assert len(calls) == 1
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == "d2"
+
+    def test_forced_refresh_without_a_digest_drops_the_stored_one(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        self._counting_gather(monkeypatch, ["new@example.com"])
+
+        assert identity.refresh_identity_cache(force=True) == ["new@example.com"]
+        stored = json.loads(identity.CACHE_PATH.read_text())
+        assert "inputs_digest" not in stored
+        assert stored["emails"] == ["new@example.com"]
+
+    def test_forced_refresh_with_a_digest_stores_it(self, monkeypatch):
+        self._write_fresh(["old@example.com"], None)
+        self._counting_gather(monkeypatch, ["new@example.com"])
+
+        identity.refresh_identity_cache(force=True, inputs_digest="d9")
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == "d9"
+
+    def test_concurrent_fresh_cache_with_another_digest_does_not_swallow_the_change(
+        self, monkeypatch
+    ):
+        """Phase 3 uses phase 1's test: a cache that landed mid-gather, fresh
+        by TTL but under ``d1``, must not replace a ``d2`` refresh."""
+        self._write_fresh(["old@example.com"], "d0")
+
+        def gather(*, root_discovery=None):
+            self._write_fresh(["racer@example.com"], "d1")
+            return ["new@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather)
+
+        assert identity.gather_local_identities(inputs_digest="d2") == ["new@example.com"]
+        stored = json.loads(identity.CACHE_PATH.read_text())
+        assert stored["inputs_digest"] == "d2"
+        assert stored["emails"] == ["new@example.com"]
+
+    def test_concurrent_cache_with_the_same_digest_wins(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d0")
+
+        def gather(*, root_discovery=None):
+            self._write_fresh(["racer@example.com"], "d2")
+            return ["new@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather)
+
+        assert identity.gather_local_identities(inputs_digest="d2") == ["racer@example.com"]
+
+    def test_incomplete_discovery_with_a_mismatch_leaves_cache_bytes_alone(self, monkeypatch):
+        self._write_fresh(["old@example.com"], "d1")
+        before = json.loads(identity.CACHE_PATH.read_text())
+        incomplete = events.GitRootDiscovery((), ("budget",), True)
+        monkeypatch.setattr(
+            identity,
+            "_do_full_gather",
+            lambda *, root_discovery=None: ["new@example.com"],
+        )
+
+        emails = identity.gather_local_identities(root_discovery=incomplete, inputs_digest="d2")
+        assert emails == ["new@example.com", "old@example.com"]
+        assert json.loads(identity.CACHE_PATH.read_text()) == before
+
+        emails = identity.refresh_identity_cache(
+            force=True, root_discovery=incomplete, inputs_digest="d2"
+        )
+        assert emails == ["new@example.com", "old@example.com"]
+        assert json.loads(identity.CACHE_PATH.read_text()) == before
+
+
+def _write_global_gitconfig(tmp_path: Path, monkeypatch, *emails: str) -> Path:
+    """Point git at a temporary global config: HOME is not moved suite-wide."""
+    path = tmp_path / "global.gitconfig"
+    path.write_text("".join(f"[user]\n\temail = {email}\n" for email in emails))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(path))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    return path
+
+
+class TestIdentityInputsDigest:
+    """``events.identity_inputs_digest``: three inputs, file reads only."""
+
+    def test_each_input_changes_the_digest(self, tmp_path, monkeypatch):
+        glob = _write_global_gitconfig(tmp_path, monkeypatch, "g@example.com")
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        _init_git_repo(repo_a)
+        _init_git_repo(repo_b)
+        base = events.identity_inputs_digest({}, (repo_a,))
+
+        assert events.identity_inputs_digest({}, (repo_a,)) == base
+        assert (
+            events.identity_inputs_digest(
+                {"retro": {"author_emails": ["x@example.com"]}}, (repo_a,)
+            )
+            != base
+        )
+        glob.write_text("[user]\n\temail = other@example.com\n")
+        assert events.identity_inputs_digest({}, (repo_a,)) != base
+        glob.write_text("[user]\n\temail = g@example.com\n")
+        assert events.identity_inputs_digest({}, (repo_a,)) == base
+        assert events.identity_inputs_digest({}, (repo_a, repo_b)) != base
+
+    def test_case_order_and_linked_worktrees_do_not_change_it(self, tmp_path, monkeypatch):
+        _write_global_gitconfig(tmp_path, monkeypatch, "G@Example.com")
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        _init_git_repo(repo_a)
+        _init_git_repo(repo_b)
+        worktree = tmp_path / "wt"
+        _make_git_worktree(repo_a, worktree)
+
+        first = events.identity_inputs_digest(
+            {"retro": {"author_emails": ["X@example.com", "y@example.com"]}}, (repo_a, repo_b)
+        )
+        reordered = events.identity_inputs_digest(
+            {"retro": {"author_emails": ["y@EXAMPLE.com", "x@example.com"]}},
+            (repo_b, repo_a, worktree),
+        )
+        assert first == reordered
+
+    def test_a_repository_local_email_is_not_an_input(self, tmp_path, monkeypatch):
+        """The card names three inputs; publication carries local additions anyway."""
+        _write_global_gitconfig(tmp_path, monkeypatch, "g@example.com")
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        before = events.identity_inputs_digest({}, (repo,))
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "new@example.com"], check=True
+        )
+        assert events.identity_inputs_digest({}, (repo,)) == before
+
+    def test_configured_author_emails_union_all_three_sources(self, tmp_path, monkeypatch):
+        _write_global_gitconfig(tmp_path, monkeypatch, "g@example.com")
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "Peer@Example.com"], check=True
+        )
+        config = {"retro": {"author_emails": ["61af450b-c4a6-4d8c-acf2-70f6534f4b91"]}}
+
+        assert events.configured_author_emails(config, (repo,)) == (
+            "61af450b-c4a6-4d8c-acf2-70f6534f4b91",
+            "g@example.com",
+            "peer@example.com",
+        )
+
+    def test_walk_filter_keeps_its_exact_output(self, tmp_path, monkeypatch):
+        """Extracting the shared helper must not change the walk's patterns."""
+        _write_global_gitconfig(tmp_path, monkeypatch, "G@Example.com")
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "user.email", "Peer@Example.com"], check=True
+        )
+        identity.CACHE_PATH.write_text(
+            json.dumps(
+                {
+                    "version": identity.CACHE_VERSION,
+                    "refreshed_at": _isoformat(datetime.now(timezone.utc)),
+                    "emails": ["cached@example.com", "peer@example.com"],
+                }
+            )
+        )
+        patterns = events.resolve_walk_author_emails(
+            {"retro": {"author_emails": ["Cfg@Example.com"]}}, (repo,)
+        )
+        assert patterns == (
+            "Cfg@Example.com",
+            "G@Example.com",
+            "cached@example.com",
+            "cfg@example.com",
+            "g@example.com",
+            "peer@example.com",
+        )
+
+
+class TestTailPublishesAndRefreshes:
+    """Track 104A at the tail: attended push refreshes on an input change,
+    autopush keeps its budget, and the published row names every configured
+    identity even when a fresh cache predates it."""
+
+    @staticmethod
+    def _seed_cache(emails: list[str], digest: str | None) -> None:
+        payload: dict = {
+            "version": identity.CACHE_VERSION,
+            "refreshed_at": _isoformat(datetime.now(timezone.utc)),
+            "emails": emails,
+        }
+        if digest is not None:
+            payload["inputs_digest"] = digest
+        identity.CACHE_PATH.write_text(json.dumps(payload))
+
+    @staticmethod
+    def _latest_push(tmp_path: Path) -> dict:
+        rows = []
+        for path in (tmp_path / "mm-events" / "events").glob("*.jsonl"):
+            for line in path.read_text().splitlines():
+                row = json.loads(line)
+                if row.get("type") == "mm-push":
+                    rows.append(row)
+        return max(rows, key=lambda row: row["ts"])
+
+    @pytest.fixture
+    def tail(self, tmp_path, monkeypatch):
+        from mind_meld import events_tail
+
+        _write_global_gitconfig(tmp_path, monkeypatch, "g@example.com")
+        repo = tmp_path / "repo"
+        _init_git_repo(repo)
+        sources = _recapture_test_sources(tmp_path)
+        _stub_discovery_to(monkeypatch, repo)
+        calls: list[object] = []
+
+        def gather(*, root_discovery=None):
+            calls.append(root_discovery)
+            return ["gathered@example.com"]
+
+        monkeypatch.setattr(identity, "_do_full_gather", gather)
+
+        def run(config: dict, *, quiet: bool, roots: tuple[Path, ...] | None = None) -> dict:
+            if roots is not None:
+                _stub_discovery_to(monkeypatch, *roots)
+            events_tail._run_events_tail(
+                config, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+            )
+            return self._latest_push(tmp_path)
+
+        return run, calls, repo
+
+    def test_init_warms_digest_so_first_attended_push_reuses_cache(self, tail, tmp_path):
+        # Value: protects=init warms identities for the first attended push;
+        # fails_when=init omits the digest and the first push gathers again;
+        # why_new=refresh unit tests do not exercise init's digest forwarding;
+        # seam=none; no_claim=live identity discovery (temporary repo and fake gather).
+        from mind_meld import events_tail
+
+        run, calls, repo = tail
+        config: dict = {}
+
+        events_tail._run_events_backfill(config, _recapture_test_sources(tmp_path), "dev-a")
+
+        assert len(calls) == 1
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == (
+            events.identity_inputs_digest(config, (repo,))
+        )
+        row = run(config, quiet=False)
+        assert len(calls) == 1
+        assert "gathered@example.com" in row["local_emails"]
+
+    def test_attended_push_refreshes_once_per_input_change(self, tail, tmp_path, monkeypatch):
+        run, calls, repo = tail
+        config: dict = {}
+        self._seed_cache(["g@example.com"], events.identity_inputs_digest(config, (repo,)))
+
+        run(config, quiet=False)
+        assert calls == []
+
+        config = {"retro": {"author_emails": ["61af450b-c4a6-4d8c-acf2-70f6534f4b91"]}}
+        row = run(config, quiet=False)
+        assert len(calls) == 1
+        assert "gathered@example.com" in row["local_emails"]
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == (
+            events.identity_inputs_digest(config, (repo,))
+        )
+        run(config, quiet=False)
+        assert len(calls) == 1
+
+        _write_global_gitconfig(tmp_path, monkeypatch, "g2@example.com")
+        run(config, quiet=False)
+        assert len(calls) == 2
+        run(config, quiet=False)
+        assert len(calls) == 2
+
+        second = tmp_path / "second-repo"
+        _init_git_repo(second)
+        run(config, quiet=False, roots=(repo, second))
+        assert len(calls) == 3
+        run(config, quiet=False, roots=(repo, second))
+        assert len(calls) == 3
+
+    def test_autopush_gathers_nothing_but_still_publishes_the_new_identity(self, tail):
+        run, calls, repo = tail
+        self._seed_cache(["g@example.com"], "stale-digest")
+        config = {"retro": {"author_emails": ["61af450b-c4a6-4d8c-acf2-70f6534f4b91"]}}
+
+        row = run(config, quiet=True)
+
+        assert calls == []
+        assert "61af450b-c4a6-4d8c-acf2-70f6534f4b91" in row["local_emails"]
+        assert json.loads(identity.CACHE_PATH.read_text())["inputs_digest"] == "stale-digest"
+
+    def test_partial_discovery_passes_no_digest(self, tail, monkeypatch):
+        run, _calls, repo = tail
+        seen: list[dict] = []
+
+        def spy(*, allow_refresh=True, root_discovery=None, inputs_digest=None, diagnostic=None):
+            seen.append({"inputs_digest": inputs_digest})
+            return ["g@example.com"]
+
+        monkeypatch.setattr(identity, "gather_local_identities", spy)
+        monkeypatch.setattr(
+            events,
+            "discover_git_roots",
+            lambda _cfg, **_kw: events.GitRootDiscovery((repo,), ("budget",), True),
+        )
+        run({}, quiet=False)
+        assert seen == [{"inputs_digest": None}]
+
+        _stub_discovery_to(monkeypatch, repo)
+        run({}, quiet=False)
+        assert seen[-1]["inputs_digest"] == events.identity_inputs_digest({}, (repo,))
+        run({}, quiet=True)
+        assert seen[-1]["inputs_digest"] is None
+
+    def test_strict_signature_gather_fakes_still_work(self, tail, monkeypatch):
+        """Older fakes accept no ``inputs_digest``; the tail must not pass it."""
+        run, _calls, _repo = tail
+        monkeypatch.setattr(
+            identity,
+            "gather_local_identities",
+            lambda *, allow_refresh=True, root_discovery=None: ["fake@example.com"],
+        )
+        row = run({}, quiet=False)
+        assert "fake@example.com" in row["local_emails"]

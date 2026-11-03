@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal, Sequence, get_args
+from typing import Callable, Literal, Mapping, Sequence, get_args
 
 from mind_meld import (
     __version__,
@@ -443,6 +443,23 @@ def _accepted_kwargs(fn: Callable, **kwargs: object) -> dict[str, object]:
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return dict(kwargs)
     return {key: value for key, value in kwargs.items() if key in params}
+
+
+def _identity_inputs_digest_for_push(
+    config: Mapping[str, object] | None,
+    discovery: events.GitRootDiscovery,
+    *,
+    quiet: bool,
+) -> str | None:
+    """Input digest for an attended push over a complete root set, else None.
+
+    Autopush (``quiet``) keeps its budget and never refreshes early. A partial
+    discovery (budget expiry or a prober error) cannot persist a refresh, so
+    passing a digest would re-gather on every attended push.
+    """
+    if quiet or events.classify_discovery(discovery) == "partial":
+        return None
+    return events.identity_inputs_digest(config, discovery.roots)
 
 
 def _decide_token_walk_policy(
@@ -1419,11 +1436,26 @@ def _run_events_tail(
         # as `local_emails: []` (explicit empty) when this machine has no
         # configured identities — distinguishable from "pre-v0.11.17 peer
         # with no field at all" so the aggregator can choose its fallback.
-        local_emails = identity.gather_local_identities(
+        #
+        # Track 104A: publish every identity the capture walk filters on. The
+        # cache can predate a repository-local or ``[retro].author_emails``
+        # identity, so the configured set is unioned in from the same file
+        # reads the walk uses. An attended push over a complete root set also
+        # passes the inputs digest, so a changed input refreshes the cache now
+        # rather than at the TTL; autopush and a partial root set pass none.
+        configured = events.configured_author_emails(config, capture.root_discovery.roots)
+        gathered = identity.gather_local_identities(
             allow_refresh=True,
             root_discovery=capture.root_discovery,
             **({"diagnostic": _DIAGNOSTIC.get()} if _DIAGNOSTIC.get() is not None else {}),
+            **_accepted_kwargs(
+                identity.gather_local_identities,
+                inputs_digest=_identity_inputs_digest_for_push(
+                    config, capture.root_discovery, quiet=quiet
+                ),
+            ),
         )
+        local_emails = sorted({*gathered, *configured})
         mm_event = events.make_mm_push_event(
             device=device_id,
             mm_version=__version__,
@@ -1644,6 +1676,12 @@ def _run_events_backfill(
             identity.refresh_identity_cache(
                 force=True,
                 root_discovery=capture.root_discovery,
+                **_accepted_kwargs(
+                    identity.refresh_identity_cache,
+                    inputs_digest=_identity_inputs_digest_for_push(
+                        config, capture.root_discovery, quiet=False
+                    ),
+                ),
             )
         except Exception as e:
             _diagnostic(f"mm: notice: identity cache warm at init failed: {_exception_detail(e)}\n")

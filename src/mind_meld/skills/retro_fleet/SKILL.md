@@ -362,13 +362,19 @@ incomplete, not "no change". Never invent a trend from the two windows.
 
 ## Author email filtering
 
-By default the aggregator filters commits to those authored by `git config
---global user.email` plus any `[retro].author_emails` aliases in the user's mm
-config.toml. To render ALL fleet commits:
+By default the aggregator filters commits by the fleet-wide identity union:
+locally gathered identities plus the `local_emails` each machine publishes.
+These include global and discovered repository-local `user.email` values,
+the GitHub noreply identity and additive `[retro].author_emails` aliases.
+Use aliases for identities no Git configuration names; a peer needs no alias
+for an identity another machine publishes. To include other authors' commits:
 
 ```bash
 mm retro-fleet <window> --no-author-filter
 ```
+
+Commits by `checkpointer@noreply` (case-insensitive, trimmed) or with a literal
+`checkpoint:` subject prefix never count, even with `--no-author-filter`.
 
 ## Raw host inventory
 

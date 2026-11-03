@@ -1466,6 +1466,8 @@ def aggregate_git(
                 commit_dt = _parse_iso(c.get("date"))
                 if commit_dt is None:
                     continue
+                if mm_events.is_checkpoint_commit(c.get("author_email"), c.get("subject")):
+                    continue
                 if author_emails:
                     ae = c.get("author_email")
                     if not isinstance(ae, str) or ae.lower() not in author_emails:
@@ -1652,6 +1654,8 @@ def _aggregate_git_period_pair(
                     continue
                 commit_dt = _parse_iso(c.get("date"))
                 if commit_dt is None:
+                    continue
+                if mm_events.is_checkpoint_commit(c.get("author_email"), c.get("subject")):
                     continue
                 if emails:
                     ae = c.get("author_email")
