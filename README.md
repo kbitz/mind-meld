@@ -23,8 +23,10 @@ give, so the retro cursor stayed held. An attended `mm push` now gives discovery
 keeps 100 ms. Progress persists between pushes and a finished provider is never
 re-read, so discovery reaches `complete` within three attended pushes on a cold
 index and costs about 0.1 s once it is warm. `mm recapture 30d` finishes discovery
-in one run (it gets a 30 s discovery budget), and `mm status` names it when
-discovery is partial. `mm refresh-identity` also runs a complete discovery first,
+in one run (it gets a 30 s discovery budget). While the last push recorded discovery
+`partial`, `mm status` names `mm push` until it advises recovery (for example after
+three incomplete captures), then names `mm recapture` as the way to finish discovery.
+`mm refresh-identity` also runs a complete discovery first,
 so it reads the repository-local email of every repository discovery holds. Held
 history comes back on the first push after discovery completes, for commits since
 the held cursor; only commits older than that cursor, in repositories discovery
@@ -1745,7 +1747,7 @@ Versions 0.12.42 and 0.12.43 announced this once on stderr; v0.12.44 removed tha
 
 **`mm status` shows a `degraded` breadcrumb.** Read its `detail`: `file(s) failed` means a file could not be applied (decrypt, write, permission) — run `mm pull` to see the warnings and retry ([pull failures](#pull-incomplete--could-not-pull-a-file)). A push detail that says a file was held and is not yet synced means the previous version, if any, stayed published; it goes out on a later push, or exclude it if a writer keeps it changing ([Snapshot failures](#snapshot-failures)). Corrupt peers or unknown sources also leave content incomplete; a `corrupt peer manifest(s)` count can also mean this Mac's own manifest vanished during the pull ([waiting content](#waiting-content-is-not-a-failure)). Fsync failures mean completed writes may not survive a crash. Fleet-retro capture and host-usage snapshots are best-effort and never block content sync. If the detail mentions git repository discovery, check `mm status` on that Mac. Run `mm push` to continue pending discovery and Git capture, or follow the explicit recapture remedy when status reports a persistent failure.
 
-**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history; when `mm diag` shows discovery `partial`, `mm status` names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
+**`mm retro-fleet` under-counts commits, or `mm diag` shows `status: empty` / `exceeded`.** Discovery is local to each Mac. Upgrade that machine, then run `mm push` to resume pending Git discovery/capture and refresh host usage. Use the `mm recapture` remedy from `mm status` for persistent failures or older history. While the last push recorded discovery `partial`, `mm status` names `mm push` until it advises recovery (for example after three incomplete captures), then names `mm recapture <window>` as the way to finish discovery in one run. Recapture does not change commit dates: verify with `mm retro-fleet` at a window that includes those dates. To force a machine to include a repo none of the discovery sources (Claude Code, Codex, Cursor, Muse and Antigravity logs; Paseo; the mmm factory) names, add it to `[retro] repo_roots` (absolute paths) and verify with `mm diag`.
 
 **`mm push --verbose` prints `events tail budget exceeded` (or `mm status` reports the events walk exceeded its budget).** Run `mm gc` to reap token-cache entries for sessions that no longer exist, which shrinks what every push has to read.
 
