@@ -301,6 +301,26 @@ def _isolate_git_capture_cache(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_syncthing(monkeypatch, tmp_path) -> None:
+    """Redirect ``syncthing.config_dirs`` so no test reaches a real Syncthing."""
+    from mind_meld import syncthing
+
+    monkeypatch.setattr(syncthing, "config_dirs", lambda: [tmp_path / "_isolated_syncthing"])
+
+
+@pytest.fixture
+def fake_syncthing(tmp_path):
+    """Run an in-process ``FakeSyncthing`` bound to the isolated config directory."""
+    from tests.syncthing_folder import FakeSyncthing
+
+    server = FakeSyncthing(tmp_path / "_isolated_syncthing", tmp_path / "storage")
+    try:
+        yield server
+    finally:
+        server.close()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_identity_cache(monkeypatch, tmp_path) -> None:
     """Redirect ``mind_meld.identity.CACHE_PATH`` to a per-test path.
 

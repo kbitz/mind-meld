@@ -34,10 +34,9 @@ SCHEMA = {
     ],
     "cursors": [
         ("peer", "TEXT", 1, None, 1),
-        ("applied_seq", "INTEGER", 1, "0", 0),
-        ("hash", "TEXT", 0, None, 0),
-        ("gap_seq", "INTEGER", 0, None, 0),
-        ("gap_since", "INTEGER", 0, None, 0),
+        ("applied", "INTEGER", 0, None, 0),
+        ("seen", "INTEGER", 0, None, 0),
+        ("waiting", "INTEGER", 1, "0", 0),
     ],
     "own_log": [
         ("seq", "INTEGER", 0, None, 1),
@@ -115,7 +114,7 @@ INDEXES = {
 def test_schema_settings_and_reopen():
     for _ in range(2):
         with statedb.connect(read_only=False) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (3,)
             assert conn.execute("PRAGMA auto_vacuum").fetchone() == (2,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
             assert conn.execute("PRAGMA synchronous").fetchone() == (2,)
@@ -150,7 +149,7 @@ def test_read_only_absent_populated_and_closes():
         pass
     before = {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()}
     with statedb.connect(read_only=True) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
     assert {p.name: p.read_bytes() for p in statedb.DB_DIR.iterdir()} == before
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
@@ -237,12 +236,12 @@ def test_displaced_expiry_preserves_metadata():
 def test_compatible_future_and_wal_then_incompatible_untouched():
     with statedb.connect(read_only=False) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA user_version=3")  # newer than this build (2) but compatible
+        conn.execute("PRAGMA user_version=4")  # newer than this build (3) but compatible
         conn.execute("DROP TABLE ledger")
         conn.execute("CREATE TABLE ledger (future TEXT)")
     for read_only in (True, False):
         with statedb.connect(read_only=read_only) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+            assert conn.execute("PRAGMA user_version").fetchone() == (4,)
             assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
     with sqlite3.connect(statedb.db_path()) as conn:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -333,7 +332,7 @@ import sys
 from mind_meld import statedb
 statedb.DB_DIR = Path(sys.argv[1])
 with statedb.connect(read_only=False) as conn:
-    assert conn.execute('PRAGMA user_version').fetchone() == (2,)
+    assert conn.execute('PRAGMA user_version').fetchone() == (3,)
 """
     children = [
         subprocess.Popen(
@@ -429,7 +428,7 @@ def test_racing_opener_migrates_before_our_begin(monkeypatch):
 
     monkeypatch.setattr(statedb, "transaction", transaction)
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
         assert conn.execute("SELECT count(*) FROM meta").fetchone() == (1,)
     assert raced == [1]
 
@@ -455,7 +454,7 @@ def test_writer_refuses_compat_raised_before_its_transaction(monkeypatch):
             newer = sqlite3.connect(statedb.db_path())
             with newer:  # the newer mm migrates after our gate, before our BEGIN
                 newer.execute("UPDATE meta SET value='2' WHERE key='compat_version'")
-                newer.execute("PRAGMA user_version = 3")
+                newer.execute("PRAGMA user_version = 4")
             newer.close()
             raced.append(statedb.db_path().read_bytes())
         with original(conn):
@@ -530,7 +529,7 @@ def test_migration_two_keeps_compat_and_a_v1_database_reads_silently():
     assert statedb.db_path().read_bytes() == before
 
     with statedb.connect(read_only=False) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
         # No compat bump: a release that only knows version 1 keeps working.
         assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
             "1",
@@ -814,3 +813,100 @@ def test_core_load_ledger_is_unreadable_for_a_damaged_database():
     # An unreadable ledger answers "no base, nothing seen": today's rule runs.
     assert ledger.base("peerpeer", "notes", "a.md") is None
     assert ledger.entries("notes", "a.md") == {}
+
+
+# ── Track 92A: the peer cursors table ─────────────────────────────────
+
+
+def _seed_v2_database():
+    statedb.DB_DIR.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(statedb.db_path())
+    for index in range(2):
+        for statement in statedb.MIGRATIONS[index][0]:
+            raw.execute(statement)
+    raw.execute("INSERT INTO meta (key, value) VALUES ('compat_version', '1')")
+    raw.execute(
+        "INSERT INTO peer_base (peer, source, path, sha) VALUES (?, ?, ?, ?)",
+        ("peer1", "notes", "a.md", FULL),
+    )
+    raw.execute(
+        "INSERT INTO cursors (peer, applied_seq, hash, gap_seq, gap_since) "
+        "VALUES ('peer1', 5, 'deadbeef', 1, 2)"
+    )
+    raw.execute("PRAGMA user_version = 2")
+    raw.commit()
+    raw.close()
+
+
+def test_migration_three_recreates_cursors_without_a_compat_bump():
+    _seed_v2_database()
+    with statedb.connect(read_only=False) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (3,)
+        assert conn.execute("SELECT value FROM meta WHERE key='compat_version'").fetchone() == (
+            "1",
+        )
+        assert statedb.read_peer_bases(conn, "peer1") == {("notes", "a.md"): FULL}
+        assert [r[1:] for r in conn.execute("PRAGMA table_info(cursors)")] == SCHEMA["cursors"]
+        assert statedb.read_cursors(conn) == {}
+
+
+def test_read_cursors_is_empty_and_writes_nothing_for_absent_old_or_v2_tables():
+    with statedb.connect(read_only=True) as conn:
+        assert conn is None
+        assert statedb.read_cursors(conn) == {}
+    assert not statedb.DB_DIR.exists()
+
+    _seed_v2_database()
+    before = statedb.db_path().read_bytes()
+    with statedb.connect(read_only=True) as conn:
+        assert statedb.read_cursors(conn) == {}
+    assert statedb.db_path().read_bytes() == before
+
+    raw = sqlite3.connect(statedb.db_path())
+    raw.execute("DROP TABLE cursors")
+    raw.commit()
+    raw.close()
+    before = statedb.db_path().read_bytes()
+    with statedb.connect(read_only=True) as conn:
+        assert statedb.read_cursors(conn) == {}
+    assert statedb.db_path().read_bytes() == before
+
+
+def test_commit_cursors_upserts_keeps_applied_on_none_and_needs_a_transaction():
+    with statedb.connect(read_only=False) as conn:
+        with pytest.raises(statedb.StateDBError, match="requires a transaction"):
+            statedb.commit_cursors(conn, {"peer1": (100, 100, 0)})
+
+        with statedb.transaction(conn):
+            statedb.commit_cursors(
+                conn,
+                {"peer1": (100, 100, 0), "peer2": (None, 200, 3)},
+            )
+        assert statedb.read_cursors(conn) == {
+            "peer1": (100, 100, 0),
+            "peer2": (None, 200, 3),
+        }
+
+        # Re-committing identical rows writes nothing.
+        before = conn.total_changes
+        with statedb.transaction(conn):
+            statedb.commit_cursors(
+                conn,
+                {"peer1": (100, 100, 0), "peer2": (None, 200, 3)},
+            )
+        assert conn.total_changes == before
+
+        # A pull with waiting/failed files passes applied=None and keeps the stored applied.
+        with statedb.transaction(conn):
+            statedb.commit_cursors(conn, {"peer1": (None, 300, 2)})
+        assert statedb.read_cursors(conn)["peer1"] == (100, 300, 2)
+
+        before = conn.total_changes
+        with statedb.transaction(conn):
+            statedb.commit_cursors(conn, {"peer1": (None, 300, 2)})
+        assert conn.total_changes == before
+
+        # Once those files apply, applied advances and waiting resets.
+        with statedb.transaction(conn):
+            statedb.commit_cursors(conn, [("peer1", 300, 300, 0)])
+        assert statedb.read_cursors(conn)["peer1"] == (300, 300, 0)

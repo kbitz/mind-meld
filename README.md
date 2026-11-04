@@ -561,6 +561,19 @@ After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then co
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
 
+### Syncthing folder options
+
+Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or child directory. Set the Syncthing folder on every machine to the folder options from `store-v2` §10:
+
+- **`type = sendreceive`** — every machine both sends and receives fleet files.
+- **`versioning = none`** — mm keeps its own conflict and deleted-file copies; Syncthing's `.stversions` duplicates encrypted blobs without context.
+- **`maxConflicts != 0`** (keep Syncthing's default `-1` or any positive count, never `0`) — `0` deletes losing conflict copies silently, which can discard a manifest or device update before mm can read it.
+- **`ignorePerms = false`** — mode `0600` on synced files must survive.
+- **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them, reducing waiting pulls.
+- **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` writes `.stignore` on the first machine; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on every other machine, because Syncthing does not sync `.stignore` itself.
+
+mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`.
+
 ## Project memory across machines
 
 Clone a project anywhere. mm finds your checkout from the folder names Claude created
@@ -856,6 +869,7 @@ Representative first lines:
 
 ```text
 In sync with this device's last push.
+Waiting more than 24 h for Mac B's push of 2026-06-14. Run: mm pull
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
 Project memory ready to publish under shared names. Run: mm push
 Metadata-only changes waiting to push. Run: mm push
@@ -866,8 +880,7 @@ Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm pus
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```
 
-The comparison does not assess incoming peer changes, peer delivery or
-Syncthing health. Counts cover the selected `--source` set. Metadata means
+`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention) and, under `Registered devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
 equal hashes with a strictly newer local mtime, using the same forward-only
 gate as push; a source selection change also needs publication. Holds and
 failed files stay pending or degraded; pushing does not force a green verdict.
@@ -1334,7 +1347,8 @@ History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
 mode). It records pull/push outcomes and self-upgrades, keeping the newest
 20,000 rows per known (verb, action) class. The same file holds the pull ledger:
 which version of each file this Mac last synced from each peer, and the versions it
-has held. The ledger is rebuildable (see the remedy below). Excluded/uploaded traffic
+has held, as well as the `cursors` table recording each peer's last applied push
+timestamp, last seen push timestamp, and waiting file count. The ledger and cursors are rebuildable (see the remedy below). Excluded/uploaded traffic
 cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
 workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
 rows in one snapshot, closes the connection, then prints; memory grows with
@@ -1683,7 +1697,9 @@ files still apply. Waiting alone keeps the exit at 0 and `mm autopull` at
 A peer's manifest copies are kept while any of its files are waiting. A device
 entry or peer manifest that vanished mid-read is reported the same way. Run
 `mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
-paths. If a file stays waiting for a long time, check that Syncthing shows the
+paths. `mm status` shows each peer's waiting file count from the last full pull
+(`N file(s) waiting for sync`) and warns in the opening verdict after 24 h. If a
+file stays waiting for a long time, check that Syncthing shows the
 folder as up to date on both Macs.
 If this Mac's own manifest is replaced while `mm status` reads it, status opens
 with `This device's manifest is still arriving from sync. Run: mm status` instead

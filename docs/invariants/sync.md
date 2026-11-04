@@ -42,8 +42,9 @@ Read BEFORE editing any of these:
 - `src/mind_meld/retention.py` — `_gc_deleted_copies`
 - `src/mind_meld/resolveflow.py` — `_record_resolution`
 - `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
+- `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` (see "Syncthing state and each peer's push (Track 92A)")
 
-Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, and for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables).
+Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`.
 
 ---
 
@@ -242,7 +243,7 @@ across peers, from `core.project_name_report`), `mm pull --dry-run --verbose`
 lists them with a clone hint, and a join adds the line once. It is not
 `waiting`, not `degraded`, changes no exit code and prints nothing on push or a
 default pull. Unplaced and old-form counts are not "pending" for O3.2's 24 h
-warning; Track 92A owns honouring that. A peer still on path names shows as
+warning (see "Syncthing state and each peer's push (Track 92A)" below). A peer still on path names shows as
 `PullResult.old_form_peers` (`312 files from Mac B wait until it publishes
 shared names (mm status)`), kept apart from `WaitingPeer` because it waits on a
 person. A marked peer's stale 0x02 conflict copy adds no such row: that machine
@@ -474,10 +475,10 @@ the same database, so a lost database can let one machine mint a second record f
 file it followed. The second record carries the same hash, so it deletes only
 identical bytes a peer's base names.
 
-**Provisional tables.** `ledger`, `cursors`, `own_log` and `displaced` still have no
-production reader. The schema table below names each as "no reader" and
-`expire_displaced` has no caller; whichever current Track first needs one decides
-whether to reuse or drop it.
+**Provisional tables.** `ledger`, `own_log` and `displaced` still have no
+production reader (migration 3 adopted `cursors` for Track 92A). The schema table
+below names each remaining one as "no reader" and `expire_displaced` has no caller;
+whichever current Track first needs one decides whether to reuse or drop it.
 
 **Ancestry: the `from` field.** A manifest file entry gains `"from": [<16-hex sha
 prefix>, ...]`, newest first, at most 16, omitted when empty; an unchanged entry
@@ -1581,15 +1582,16 @@ error/notice strings and errors.STATEDB_HELP_URL.
 
 **Move-aside remedy boundary:** the corrupt-database move-aside advice in README is
 valid while every non-history table is rebuildable or unused. That holds for the
-pull ledger (the base is rebuilt on the next pull, until then today's mtime and
-union rule runs and no file is deleted) and for the four provisional tables. A
+pull ledger and `cursors` (both are rebuilt on the next pull; until then today's mtime and
+union rule runs and no file is deleted) and for the three remaining provisional tables. A
 Track that stores data the machine cannot rebuild in `state.db` must replace the
 advice first.
 
 ### Schema columns and readers
 
 Migration 1 pins six tables and four indexes; migration 2 adds `peer_base`,
-`seen_version` and two indexes (statedb.py). Tests assert table_info and
+`seen_version` and two indexes; migration 3 drops and recreates `cursors`
+without raising `compat_version` (statedb.py). Tests assert table_info and
 index_list independently.
 
 | Table | Columns and readers |
@@ -1599,11 +1601,11 @@ index_list independently.
 | peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and explicit resolution, and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
 | seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull, push and explicit resolution (Track 91A). `mm diag` counts rows. |
 | ledger | No reader. Provisional and empty. |
-| cursors | No reader. Provisional and empty. |
+| cursors | peer/applied/seen/waiting: each peer's last applied manifest timestamp (`applied`, UTC microseconds), last seen manifest timestamp (`seen`, UTC microseconds) and waiting file count (`waiting`); read by `statusflow.status` (`statedb.read_cursors`, `statusflow._peer_states`) and written at the end of an unscoped non-interrupted pull by `pullflow._record_peer_cursors` (`statedb.commit_cursors`; Track 92A). Rebuilt on the next pull. |
 | own_log | No reader. Provisional and empty. |
 | displaced | No reader. Provisional and empty; `expire_displaced` has no caller. |
 
-ledger, cursors, own_log and displaced are **provisional and empty**, with no
+ledger, own_log and displaced are **provisional and empty**, with no
 reader (each row above says so). A Track that adopts one may DROP and re-CREATE it in
 a migration without raising compat_version: released binaries read only meta and
 history. `expire_displaced` is unit-tested only and has no caller: at 30 days it
@@ -1713,10 +1715,76 @@ to), and a waiting-only device gets no
 files. `waiting_clause` builds `waiting for 2 files from Mac B, Mac C's manifest,
 cccccccc's device entry`, appended to the attended success line and placed before
 `Run:` on a failed one; `waiting_detail` is the autopull `success` breadcrumb
-detail (`mm status` prints it). Attended runs record no waiting count. A published
-peer's not-yet-arrived manifest and an attended waiting count in `mm status` stay
-with Track 92A. `mm diag` adds `ignored_storage_files`; its manifest and device
+detail (`mm status` prints it). Attended runs record no waiting count in
+`last-attended-runs.json`; instead, pull records each peer's waiting count in
+`cursors` (see "Syncthing state and each peer's push (Track 92A)" below).
+`mm diag` adds `ignored_storage_files`; its manifest and device
 totals count valid keys only.
+
+## Syncthing state and each peer's push (Track 92A)
+
+`syncthing.py` is a standard-library-only leaf module (enforced by
+`tests/test_module_boundaries.py`). It discovers local Syncthing configuration
+(`config_dirs()`: `~/Library/Application Support/Syncthing` on macOS;
+`$XDG_CONFIG_HOME/syncthing` or `~/.config/syncthing` then
+`$XDG_STATE_HOME/syncthing` or `~/.local/state/syncthing` on Linux) and reads
+`config.xml`, `https-cert.pem` and `.stignore` after `lstat()` regular-file and
+1 MiB size checks (symlinks are rejected). It talks only to a loopback GUI
+address (`127.0.0.1`, `::1`, `localhost`; `0.0.0.0`, `::` and `[::]` rewrite to
+loopback; non-loopback hosts and unix sockets return `state="address-unsupported"`
+without opening a socket). It sends only `GET` requests with `X-API-Key` from
+`config.xml`, refuses HTTP redirects, verifies HTTPS against `https-cert.pem` in
+the config directory (`cause="tls"` when missing or mismatched), bounds each
+request to `0.75 s` and the whole read to `1.5 s`, and caps each response at
+4 MiB. It never writes Syncthing's configuration or state, and never exposes the
+API key or Syncthing device IDs in `SyncthingState`, `mm status` or `mm diag`.
+Missing or unreachable Syncthing is reported (`not-found`, `config-unreadable`,
+`address-unsupported`, `unreachable`, `unauthorized`, `error`), never a command
+error.
+
+**Folder lint (`FOLDER_OPTIONS`).** When a Syncthing folder's `path` matches the
+storage root (after `expanduser().resolve()`; a non-matching setup reports
+`no-folder`), `read_state()` checks the five folder options from `store-v2` §10
+(`type = sendreceive`, `versioning = none`, `maxConflicts != 0`,
+`ignorePerms = false`, `order = alphabetic`) and `.stignore` for `(?d)tmp*.tmp`
+(plus `paused`). `mm status` prints one `Syncthing: ...` line and, when folder
+settings need attention, a second line pointing to `mm diag`; `mm diag` prints
+and emits in `--json` each option's value and whether it matches.
+
+**Adopted `cursors` table and pull recording.** Migration 3 in `statedb.py` drops
+and recreates `cursors(peer TEXT NOT NULL PRIMARY KEY, applied INTEGER, seen
+INTEGER, waiting INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID` with `compat = None`
+so older binaries keep working. `statedb.read_cursors(conn)` is read-only and
+returns `{}` when `conn is None`, the table is absent, or its columns are still
+migration 1's provisional shape. `statedb.commit_cursors(conn, rows)` upserts in
+the caller's transaction, writing only changed rows and preserving earlier
+`applied` via `COALESCE(excluded.applied, cursors.applied)` when `excluded.applied`
+is `None`. In `pullflow._pull_core`'s `finally`, when `not dry_run and
+interruption is None and source_filter is None and ledger_exc is None`,
+`_record_peer_cursors` writes one row per pulled peer whose manifest decrypted
+with a valid aware `timestamp`: `applied = ts_us` when that peer had zero
+`waiting` and zero `failed` files across its sources (`seen = ts_us, waiting = 0`),
+or `(None, ts_us, peer_waiting)` when any file waited or failed. Unplaced project
+memory and old-form peer files are filtered before the source loop and never
+block `applied`. Cursor write failures emit one attended `mm: notice:` line on
+stderr (`safe_terminal_str`), stay silent in quiet mode, and never fail the pull.
+
+**Per-peer status and the 24 h warning.** `statusflow.status` decrypts each peer's
+manifest once and shares that map between `_peer_states` and
+`_project_name_lines(..., manifests=peer_manifests)`. `_peer_states` classifies
+each peer as `applied` (`applied >= manifest_us`), `waiting` (`waiting > 0` and
+`seen >= manifest_us`), `not-pulled`, `not-arrived` (device entry has `last_seen`
+but manifest is missing), `never-pushed` (no manifest and no `last_seen`),
+`unreadable`, `newer-format` or `unknown` (`state.db` unreadable). A peer is
+`overdue` when `now - since > 24 h` (`PEER_WAIT_WARN`, strictly `> 24 h`) in
+`not-pulled` (`remedy="mm pull"`), `waiting` (`remedy="mm diag"`) or
+`not-arrived` (`remedy="mm diag"`). Unplaced and old-form files never make a peer
+`not-pulled` or `waiting` after a pull. `_overdue_peers_line` formats
+`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD (and K more). Run: <remedy>`,
+and `_status_verdict(..., peers_overdue=)` places it immediately before `"In sync
+with this device's last push."` in every mode (including `--source`). Both
+`mm status` and `mm diag` remain strictly read-only (`statedb.connect(read_only=True)`,
+no `state.db` creation, no Syncthing mutation).
 
 ## Manifest read-path invariant (load-bearing)
 Every manifest loaded from bytes/disk MUST go through `manifest.load_manifest(bytes) -> dict`, which composes `deserialize_manifest + normalize_manifest` plus full inner-shape validation. The function guarantees the returned dict has dict-typed `sources` and `tombstones`, each source has a dict `files`, each file value is a dict with a string `sha256`, and each tombstone value is a dict. Non-string file mtimes normalize to `None` only after the file shape is validated. Malformed manifests raise `ManifestError` at the load boundary instead of crashing downstream consumers (`_merge_manifests`, `collect_tombstones`, `generate_tombstones`, the diff loop) with `AttributeError`. `_fetch_remote_manifest` already catches `ManifestError` and falls through to the recovery chain, so a malformed peer manifest degrades to a clean "corrupt" status. Do NOT add a new manifest-load path that bypasses `load_manifest` (sidecar.read uses `deserialize_manifest + structural-check + normalize_manifest` deliberately, to preserve the anti-tampering guard on raw input).
@@ -1867,12 +1935,13 @@ observations: blocking setup/storage/format/incomplete scan, conflicts, unresolv
 same-verb failure/actionable degradation or uncertain history, current capture
 prerequisite/reader blockers, own manifest still arriving, first push, pending content,
 shared project names owed (`names_ready`), forward-only metadata, a held first switch
-(`names_held`), then “In sync with this device's last push.” Missing own
+(`names_held`), left-out scan roots (`left_out`), overdue peer pushes (`peers_overdue`,
+Track 92A), then “In sync with this device's last push.” Missing own
 metadata selects the first-push verdict unless a higher-priority action applies;
 missing with `ManifestFetch.vanished` (observed, then gone mid-read; Track 87A)
 selects “This device's manifest is still arriving from sync. Run: mm status”
-instead. No incoming peer convergence
-is measured. Every --source verdict names its source; verdict counts come from
+instead. Peer push convergence and Syncthing state are reported as described in
+"Syncthing state and each peer's push (Track 92A)" above. Every --source verdict names its source; verdict counts come from
 `core.content_counts` and the detail rows from `core.iter_content_diffs`, so both
 leave out Claude name-only differences. Selection, availability and previous publication must
 agree: missing previously published enabled roots, unavailable requested roots,
@@ -1939,6 +2008,6 @@ not lost work. Keep auto hook-age meaning in diag; attended age is not hook
 liveness. `last_autorun`, `last_attended_runs`, `sync_run_projection` remain in
 both diag formats. Status shows only selected summaries plus current capture
 facts; only existing latest_attempt_superseded proof hides a capture row.
-No history engine, future capture counters or Track 92A
-peer-state assessment is introduced. Track 78A changes exits/tails only as
+No history engine or future capture counters are introduced here; peer-state
+assessment is in Track 92A above. Track 78A changes exits/tails only as
 described above.

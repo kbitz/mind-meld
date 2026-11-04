@@ -1,10 +1,10 @@
 """Private local SQLite state. Write transactions are always the innermost lock.
 
 Live tables: ``history`` (forensic log), ``peer_base`` and ``seen_version`` (pull
-fast-forward ledger, rebuildable). The provisional store tables ``ledger``,
-``cursors``, ``own_log`` and ``displaced`` have no production reader by design;
-``sync.md``'s schema table says so for each. No connection is cached and sqlite3
-is loaded lazily.
+fast-forward ledger, rebuildable), and ``cursors`` (each peer's last applied push
+and waiting count). The provisional store tables ``ledger``, ``own_log`` and
+``displaced`` have no production reader by design; ``sync.md``'s schema table
+says so for each. No connection is cached and sqlite3 is loaded lazily.
 """
 
 from __future__ import annotations
@@ -151,6 +151,18 @@ MIGRATIONS = (
                 "PRIMARY KEY (source, path, sha)) WITHOUT ROWID"
             ),
             "CREATE INDEX seen_version_time ON seen_version (time)",
+        ),
+        None,
+    ),
+    # Migration 3 adopts the provisional cursors table for peer push state; no
+    # compat bump so released binaries keep working.
+    (
+        (
+            "DROP TABLE cursors",
+            (
+                "CREATE TABLE cursors (peer TEXT NOT NULL PRIMARY KEY, applied INTEGER, "
+                "seen INTEGER, waiting INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID"
+            ),
         ),
         None,
     ),
@@ -402,3 +414,54 @@ def commit_ledger(
                 (source, path, sha, when, kind, deleted_by),
             )
         conn.execute("DELETE FROM seen_version WHERE time < ?", (now_us - SEEN_MAX_AGE_US,))
+
+
+CursorRow = tuple["int | None", "int | None", int]  # (applied_us, seen_us, waiting)
+_CURSOR_COLUMNS = ("peer", "applied", "seen", "waiting")
+
+
+def _has_cursors_table(conn) -> bool:
+    cols = tuple(r[1] for r in conn.execute("PRAGMA table_info(cursors)"))
+    return cols == _CURSOR_COLUMNS
+
+
+def read_cursors(conn) -> dict[str, CursorRow]:
+    """Each peer's ``(applied, seen, waiting)`` cursor; empty without the table."""
+    if conn is None:
+        return {}
+    with translate():
+        if not _has_cursors_table(conn):
+            return {}
+        rows = conn.execute("SELECT peer, applied, seen, waiting FROM cursors")
+        return {
+            r[0]: (
+                int(r[1]) if r[1] is not None else None,
+                int(r[2]) if r[2] is not None else None,
+                int(r[3]),
+            )
+            for r in rows
+        }
+
+
+def commit_cursors(conn, rows) -> None:
+    """Upsert peer cursors in the caller's transaction, writing only changed rows."""
+    if not conn.in_transaction:
+        raise StateDBError("cursor commit requires a transaction")
+    items = (
+        [(peer, applied, seen, waiting) for peer, (applied, seen, waiting) in rows.items()]
+        if isinstance(rows, dict)
+        else list(rows)
+    )
+    with translate():
+        for peer, applied, seen, waiting in items:
+            conn.execute(
+                "INSERT INTO cursors (peer, applied, seen, waiting) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (peer) DO UPDATE SET "
+                "applied = COALESCE(excluded.applied, cursors.applied), "
+                "seen = excluded.seen, "
+                "waiting = excluded.waiting "
+                "WHERE (excluded.applied IS NOT NULL AND cursors.applied IS NOT excluded.applied) "
+                "OR cursors.seen IS NOT excluded.seen "
+                "OR cursors.waiting != excluded.waiting",
+                (peer, applied, seen, waiting),
+            )

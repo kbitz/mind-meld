@@ -3433,3 +3433,117 @@ def test_a_dry_run_never_tidies_an_index(fleet, monkeypatch):
 
     assert result.total_applied == 0
     assert _snapshot(fleet.local) == before
+
+
+# ── Track 92A: peer cursors recorded after pull ───────────────────────
+
+
+def _cursors() -> dict[str, statedb.CursorRow]:
+    with statedb.connect(read_only=True) as conn:
+        return statedb.read_cursors(conn)
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("from_device", [None, PEER])
+def test_a_complete_pull_records_the_peers_applied_manifest_time(
+    fleet, monkeypatch, mode, from_device
+):
+    peer, _ = _seed(fleet, {"note.md": b"peer content\n"})
+    expected_us = pullflow._aware_timestamp_us(peer["timestamp"])
+    assert expected_us is not None
+
+    result, _, _ = _run(fleet, monkeypatch, mode, from_device=from_device)
+
+    assert result.total_written == 1 and result.total_failed == 0
+    assert _cursors() == {PEER: (expected_us, expected_us, 0)}
+
+
+def test_waiting_files_record_the_count_and_keep_the_earlier_applied_time(
+    fleet, syncthing, monkeypatch
+):
+    first, _ = _seed(fleet, {"a.md": b"alpha\n"})
+    first_us = pullflow._aware_timestamp_us(first["timestamp"])
+    assert first_us is not None
+    _run(fleet, monkeypatch, "attended")
+    assert _cursors() == {PEER: (first_us, first_us, 0)}
+
+    second, _ = _seed(fleet, {"a.md": b"alpha\n", "b.md": b"bravo\n", "c.md": b"charlie\n"})
+    second["timestamp"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    _republish(fleet, second)
+    second_us = pullflow._aware_timestamp_us(second["timestamp"])
+    assert second_us is not None and second_us > first_us
+    for name in ("b.md", "c.md"):
+        syncthing.hide(_blob(second, name))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+    assert result.total_waiting == 2 and result.total_failed == 0
+    assert _cursors() == {PEER: (first_us, second_us, 2)}
+
+    for name in ("b.md", "c.md"):
+        syncthing.arrive(_blob(second, name))
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+    assert result.total_written == 2 and result.total_waiting == 0
+    assert _cursors() == {PEER: (second_us, second_us, 0)}
+
+
+def test_failed_files_leave_the_push_unapplied(fleet, monkeypatch):
+    first, _ = _seed(fleet, {"a.md": b"alpha\n"})
+    first_us = pullflow._aware_timestamp_us(first["timestamp"])
+    assert first_us is not None
+    _run(fleet, monkeypatch, "attended")
+
+    second, _ = _seed(fleet, {"a.md": b"alpha\n", "bad.md": b"corrupt\n"})
+    second["timestamp"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    _republish(fleet, second)
+    second_us = pullflow._aware_timestamp_us(second["timestamp"])
+    assert second_us is not None
+    bad_blob = _blob(second, "bad.md")
+    raw = fleet.backend.get(bad_blob)
+    fleet.backend.put(bad_blob, raw[:-1] + bytes([raw[-1] ^ 1]))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+    assert result.total_failed == 1
+    assert _cursors() == {PEER: (first_us, second_us, 0)}
+
+
+def test_dry_run_scoped_and_interrupted_pulls_record_nothing(fleet, monkeypatch):
+    _seed(fleet, {"note.md": b"peer content\n"})
+
+    # Dry run never creates state.db or records cursors.
+    _run(fleet, monkeypatch, "attended", dry_run=True)
+    assert not statedb.db_path().exists()
+
+    # Source-filtered pull leaves cursors untouched.
+    _run(fleet, monkeypatch, "attended", source_filter="notes")
+    assert _cursors() == {}
+
+    # Interrupted pull leaves cursors untouched.
+    (fleet.local / "note.md").unlink()
+    monkeypatch.setattr(
+        pullflow,
+        "_pull_one_source",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        _run(fleet, monkeypatch, "attended")
+    assert _cursors() == {}
+
+
+@pytest.mark.parametrize("mode", ("attended", "quiet"))
+def test_a_cursor_write_failure_is_one_notice_and_never_fails_the_pull(fleet, monkeypatch, mode):
+    _seed(fleet, {"note.md": b"peer content\n"})
+
+    def fail_cursors(conn, rows):
+        raise statedb.StateDBBusy("SQLITE_BUSY")
+
+    monkeypatch.setattr(statedb, "commit_cursors", fail_cursors)
+
+    result, _, (_, err) = _run(fleet, monkeypatch, mode)
+
+    assert result.total_written == 1 and result.total_failed == 0
+    assert result.maintenance_failures == 1
+    assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
+    notices = [line for line in err.splitlines() if line.startswith("mm: notice:")]
+    assert len(notices) == 1
+    assert "peer push record not saved (busy);" in notices[0]
+    assert "mm status may show an earlier pull." in notices[0]

@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from mind_meld import (
     events,
     events_tail,
     host_registry,
+    initflow,
     manifest,
     projectid,
     resolveflow,
@@ -34,6 +36,7 @@ from mind_meld import (
     skill_link,
     statedb,
     syncdiag,
+    syncthing,
     upgrade,
 )
 from mind_meld import config as _config_module
@@ -114,6 +117,8 @@ def _project_name_lines(
     device_id: str,
     passphrase: str,
     memory_kb: int,
+    *,
+    manifests: dict[str, dict | None] | None = None,
 ) -> list[str]:
     """The project-name lines `mm status` prints after its verdict (Track 90A).
 
@@ -141,14 +146,17 @@ def _project_name_lines(
             "output of ls ~/.claude/projects."
         )
     peers = [d for d in devices if d.get("device_id") != device_id]
-    manifests: dict[str, dict | None] = {}
-    for peer in peers:
-        try:
-            fetch = core._fetch_remote_manifest(backend, peer["device_id"], passphrase, memory_kb)
-        except (OSError, MindMeldError):
-            continue
-        if fetch.is_ok:
-            manifests[peer["device_id"]] = fetch.manifest
+    if manifests is None:
+        manifests = {}
+        for peer in peers:
+            try:
+                fetch = core._fetch_remote_manifest(
+                    backend, peer["device_id"], passphrase, memory_kb
+                )
+            except (OSError, MindMeldError):
+                continue
+            if fetch.is_ok:
+                manifests[peer["device_id"]] = fetch.manifest
     report = core.project_name_report(manifests)
     by_id = {d["device_id"]: d for d in peers}
     for did, files in sorted(report.old_form.items(), key=lambda item: str(item[0])):
@@ -193,6 +201,7 @@ def _status_verdict(
     names_ready: bool = False,
     names_held: bool = False,
     left_out: str = "",
+    peers_overdue: str = "",
 ) -> str:
     """Pure priority selector over explicit current observations and run evidence."""
     scope = f"Source '{source}' — " if source is not None else ""
@@ -243,9 +252,355 @@ def _status_verdict(
                 )
             elif left_out:
                 verdict = f"Not everything is published: {left_out}"
+            elif peers_overdue:
+                verdict = peers_overdue
             else:
                 verdict = "In sync with this device's last push."
     return safety.safe_terminal_str(scope + verdict)
+
+
+PEER_WAIT_WARN = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class PeerState:
+    """One peer's push and applied state for ``mm status`` (Track 92A)."""
+
+    device_id: str
+    device_name: str
+    state: str
+    last_push: str | None = None
+    since: datetime | None = None
+    overdue: bool = False
+    remedy: str | None = None
+    waiting: int = 0
+    newer_version: int | None = None
+    cause: str | None = None
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+
+def _parse_aware_dt(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo is not None and raw.utcoffset() is not None else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip())
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            return None
+        return dt
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _dt_to_us(dt: datetime | None) -> int | None:
+    if dt is None:
+        return None
+    return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(microseconds=1)
+
+
+def _peer_states(
+    devices: Sequence[dict],
+    device_id: str,
+    fetches: dict[str, Any],
+    cursors: dict[str, tuple[int | None, int | None, int]] | str | BaseException | None,
+    syncthing_state: Any = None,
+    now: datetime | None = None,
+    *,
+    cursors_cause: str | None = None,
+) -> list[PeerState]:
+    """Pure per-peer push and applied-state classifier (Track 92A)."""
+    ref_now = now if now is not None else datetime.now(timezone.utc)
+    cursors_unknown = not isinstance(cursors, dict)
+    if cursors_unknown:
+        if isinstance(cursors, str) and cursors:
+            db_cause = cursors
+        elif isinstance(cursors, BaseException):
+            db_cause = core.ledger_cause(cursors) or "unreadable"
+        else:
+            db_cause = cursors_cause or "unreadable"
+        cursors_map: dict[str, tuple[int | None, int | None, int]] = {}
+    else:
+        db_cause = None
+        cursors_map = cursors
+
+    results: list[PeerState] = []
+    for entry in devices:
+        pid = entry.get("device_id")
+        if not isinstance(pid, str) or not pid or pid == device_id:
+            continue
+        pname = str(entry.get("device_name") or pid)
+        raw_last_seen = entry.get("last_seen")
+        last_seen_str = (
+            raw_last_seen.strip()
+            if isinstance(raw_last_seen, str) and raw_last_seen.strip()
+            else None
+        )
+        fetch = fetches.get(pid)
+
+        if fetch is None or fetch == "unreadable" or isinstance(fetch, BaseException):
+            newer_ver = getattr(fetch, "newer_version", None)
+            if isinstance(newer_ver, int):
+                results.append(
+                    PeerState(
+                        device_id=pid,
+                        device_name=pname,
+                        state="newer-format",
+                        last_push=last_seen_str,
+                        newer_version=newer_ver,
+                    )
+                )
+            else:
+                results.append(
+                    PeerState(
+                        device_id=pid,
+                        device_name=pname,
+                        state="unreadable",
+                        last_push=last_seen_str,
+                    )
+                )
+            continue
+
+        if isinstance(fetch, dict):
+            fetch_status = "ok"
+            manifest_dict: dict | None = fetch
+            newer_ver = None
+        else:
+            fetch_status = getattr(fetch, "status", "corrupt")
+            manifest_dict = getattr(fetch, "manifest", None)
+            newer_ver = getattr(fetch, "newer_version", None)
+
+        if isinstance(newer_ver, int):
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="newer-format",
+                    last_push=last_seen_str,
+                    newer_version=newer_ver,
+                )
+            )
+            continue
+
+        if fetch_status == "corrupt":
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="unreadable",
+                    last_push=last_seen_str,
+                )
+            )
+            continue
+
+        if fetch_status == "missing" or not isinstance(manifest_dict, dict):
+            if last_seen_str is not None:
+                since_dt = _parse_aware_dt(last_seen_str)
+                is_overdue = bool(since_dt is not None and (ref_now - since_dt) > PEER_WAIT_WARN)
+                results.append(
+                    PeerState(
+                        device_id=pid,
+                        device_name=pname,
+                        state="not-arrived",
+                        last_push=last_seen_str,
+                        since=since_dt,
+                        overdue=is_overdue,
+                        remedy="mm diag",
+                    )
+                )
+            else:
+                results.append(
+                    PeerState(
+                        device_id=pid,
+                        device_name=pname,
+                        state="never-pushed",
+                    )
+                )
+            continue
+
+        raw_m_ts = manifest_dict.get("timestamp")
+        manifest_ts_str = (
+            raw_m_ts.strip() if isinstance(raw_m_ts, str) and raw_m_ts.strip() else None
+        )
+        last_push = last_seen_str if last_seen_str is not None else manifest_ts_str
+        manifest_dt = _parse_aware_dt(manifest_ts_str)
+        manifest_us = _dt_to_us(manifest_dt)
+
+        if cursors_unknown:
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="unknown",
+                    last_push=last_push,
+                    remedy="mm diag",
+                    cause=db_cause,
+                )
+            )
+            continue
+
+        cursor = cursors_map.get(pid)
+        applied_us = cursor[0] if cursor is not None else None
+        seen_us = cursor[1] if cursor is not None else None
+        waiting_count = int(cursor[2]) if cursor is not None else 0
+
+        if applied_us is not None and manifest_us is not None and applied_us >= manifest_us:
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="applied",
+                    last_push=last_push,
+                )
+            )
+        elif waiting_count > 0 and (
+            seen_us is None or manifest_us is None or seen_us >= manifest_us
+        ):
+            is_overdue = bool(manifest_dt is not None and (ref_now - manifest_dt) > PEER_WAIT_WARN)
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="waiting",
+                    last_push=last_push,
+                    since=manifest_dt,
+                    overdue=is_overdue,
+                    remedy="mm diag",
+                    waiting=waiting_count,
+                )
+            )
+        else:
+            is_overdue = bool(manifest_dt is not None and (ref_now - manifest_dt) > PEER_WAIT_WARN)
+            results.append(
+                PeerState(
+                    device_id=pid,
+                    device_name=pname,
+                    state="not-pulled",
+                    last_push=last_push,
+                    since=manifest_dt,
+                    overdue=is_overdue,
+                    remedy="mm pull",
+                )
+            )
+
+    return results
+
+
+def _overdue_peers_line(peer_states: Sequence[PeerState]) -> str:
+    overdue = [p for p in peer_states if p.overdue and p.since is not None]
+    if not overdue:
+        return ""
+    first = overdue[0]
+    assert first.since is not None
+    name = safety.safe_terminal_str(first.device_name)
+    day = first.since.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    more = f" (and {len(overdue) - 1} more)" if len(overdue) > 1 else ""
+    remedy = first.remedy or "mm pull"
+    return safety.safe_terminal_str(
+        f"Waiting more than 24 h for {name}'s push of {day}{more}. Run: {remedy}"
+    )
+
+
+def _format_last_push(raw: str | None) -> str:
+    dt = _parse_aware_dt(raw)
+    if dt is not None:
+        return f"last push {dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+    if raw:
+        return f"last push {safety.safe_terminal_str(raw)}"
+    return "last push unknown"
+
+
+def _format_peer_state(p: PeerState) -> str:
+    if p.state == "never-pushed":
+        return "never pushed"
+    if p.state == "newer-format":
+        return safety.safe_terminal_str(core._newer_format_message(p.newer_version or 0))
+    if p.state == "unreadable":
+        prefix = f"{_format_last_push(p.last_push)}; " if p.last_push else ""
+        return f"{prefix}manifest unreadable here (mm pull shows why)"
+    if p.state == "unknown":
+        prefix = f"{_format_last_push(p.last_push)}; " if p.last_push else ""
+        cause = safety.safe_terminal_str(p.cause or "unreadable")
+        return f"{prefix}applied state unknown (state.db {cause}). Run: mm diag"
+    push_str = _format_last_push(p.last_push)
+    if p.state == "applied":
+        return f"{push_str}; applied here"
+    if p.state == "not-pulled":
+        return f"{push_str}; not pulled here yet"
+    if p.state == "waiting":
+        return f"{push_str}; {core._count(p.waiting, 'file', 'files')} waiting for sync"
+    if p.state == "not-arrived":
+        return f"{push_str}; its manifest has not arrived"
+    return push_str
+
+
+def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) -> list[str]:
+    lines: list[str] = []
+    if st.state == "not-found":
+        return ["  Syncthing: not found on this machine"]
+    if st.state == "config-unreadable":
+        where = core._home_relative_path(st.config_dir) if st.config_dir else "config.xml"
+        return [f"  Syncthing: config unreadable at {safety.safe_terminal_str(where)}"]
+    if st.state == "address-unsupported":
+        addr = safety.safe_terminal_str(st.gui_address or "unknown")
+        lines.append(f"  Syncthing: unsupported GUI address {addr}")
+    elif st.state in ("unreachable", "unauthorized", "error"):
+        addr = safety.safe_terminal_str(st.gui_address or "unknown")
+        reason = "unauthorized" if st.state == "unauthorized" else (st.cause or st.state)
+        lines.append(f"  Syncthing: not reachable at {addr} ({safety.safe_terminal_str(reason)})")
+    elif "no-folder" in st.problems:
+        shown_path = safety.safe_terminal_str(core._home_relative_path(storage_path))
+        lines.append(f"  Syncthing: no Syncthing folder shares {shown_path}")
+    else:
+        if st.total_peers is not None and st.connected_peers is not None:
+            peer_part = f"connected {st.connected_peers} of {st.total_peers} devices"
+            if st.disconnected_peers:
+                names = ", ".join(safety.safe_terminal_str(n) for n in st.disconnected_peers)
+                peer_part += f" ({names} disconnected)"
+        elif st.total_peers is not None:
+            peer_part = f"{st.total_peers} devices configured"
+        else:
+            peer_part = "connected"
+
+        if st.folder_paused:
+            state_part = "paused"
+        elif st.files_to_fetch and st.files_to_fetch > 0:
+            state_part = f"syncing, {core._count(st.files_to_fetch, 'file', 'files')} to fetch"
+        elif st.folder_state == "idle":
+            state_part = "up to date"
+        elif st.folder_state == "syncing":
+            n = st.files_to_fetch or 0
+            state_part = f"syncing, {core._count(n, 'file', 'files')} to fetch"
+        elif st.folder_state:
+            state_part = safety.safe_terminal_str(st.folder_state)
+        else:
+            state_part = "state unknown"
+        lines.append(f"  Syncthing: {peer_part}; {state_part}")
+
+    setting_problems = [p for p in st.problems if p != "no-folder"]
+    if st.state == "ok" and setting_problems:
+        lines.append(
+            f"  Syncthing folder settings need attention ({len(setting_problems)}). Run: mm diag"
+        )
+    return [safe_str(line) for line in lines]
+
+
+def _backend_storage_path(backend: object, config: dict | None = None) -> Path:
+    root = getattr(backend, "root", None)
+    if isinstance(root, (str, Path)) and str(root):
+        return Path(root).expanduser()
+    if isinstance(config, dict):
+        storage = config.get("storage")
+        if isinstance(storage, dict):
+            raw = storage.get("path")
+            if isinstance(raw, (str, Path)) and str(raw):
+                return Path(raw).expanduser()
+    return Path(DEFAULT_STORAGE_PATH).expanduser()
 
 
 @contextmanager
@@ -474,6 +829,41 @@ def status(
             state.get("last_reason") not in (None, "locked") for state in reader_states.values()
         ):
             capture_action = "Usage capture needs attention. Run: mm diag"
+
+        devices = core._list_devices_warn(backend)
+        peer_fetches: dict[str, Any] = {}
+        peer_manifests: dict[str, dict | None] = {}
+        for peer in devices:
+            pid = peer.get("device_id")
+            if not isinstance(pid, str) or not pid or pid == device_id:
+                continue
+            try:
+                pfetch = core._fetch_remote_manifest(backend, pid, passphrase, memory_kb)
+            except (OSError, MindMeldError) as exc:
+                peer_fetches[pid] = exc
+            else:
+                peer_fetches[pid] = pfetch
+                if pfetch.is_ok:
+                    peer_manifests[pid] = pfetch.manifest
+        try:
+            with statedb.connect(read_only=True) as conn:
+                cursors: dict[str, tuple[int | None, int | None, int]] | BaseException = (
+                    statedb.read_cursors(conn)
+                )
+        except (statedb.StateDBError, OSError) as exc:
+            cursors = exc
+        storage_root = _backend_storage_path(backend, config)
+        syncthing_state = syncthing.read_state(storage_root, stignore_line=initflow.STIGNORE_LINE)
+        peer_states = _peer_states(
+            devices,
+            device_id,
+            peer_fetches,
+            cursors,
+            syncthing_state,
+            datetime.now(timezone.utc),
+        )
+        peers_overdue = _overdue_peers_line(peer_states)
+
         verdict = _status_verdict(
             source=source,
             blocking=blocking,
@@ -487,17 +877,22 @@ def status(
             names_ready=names_ready,
             names_held=names_held,
             left_out=left_out_clause,
+            peers_overdue=peers_overdue,
         )
         report["verdict"] = verdict
+        if peers_overdue and peers_overdue not in verdict:
+            console.print(safe_str(peers_overdue), soft_wrap=True)
 
-        # Devices
-        devices = core._list_devices_warn(backend)
         if claude_selected and (source is None or source == "claude"):
-            for line in _project_name_lines(backend, devices, device_id, passphrase, memory_kb):
+            for line in _project_name_lines(
+                backend, devices, device_id, passphrase, memory_kb, manifests=peer_manifests
+            ):
                 console.print(line, soft_wrap=True)
 
         console.print("\n[bold]Mind Meld Status[/bold]")
         console.print(f"  Device: {safe_str(device_name)} ({safe_str(device_id)})")
+        for st_line in _syncthing_status_lines(syncthing_state, storage_root):
+            console.print(st_line, soft_wrap=True)
         nested_count = sum(
             len(roots) for name, roots in nested_roots.items() if source is None or name == source
         )
@@ -941,11 +1336,17 @@ def status(
                 "\n  Project memory not published until Claude's projects folder can be listed."
             )
 
-        if len(devices) > 1:
+        if peer_states:
             console.print("\n  Other devices:")
-            for d in devices:
-                if d["device_id"] != device_id:
-                    console.print(f"    {safe_str(d['device_name'])} ({safe_str(d['device_id'])})")
+            for p in peer_states:
+                label = (
+                    f"{safety.safe_terminal_str(p.device_name)} "
+                    f"({safety.safe_terminal_str(p.device_id)})"
+                )
+                console.print(
+                    safe_str(f"    {label}: {_format_peer_state(p)}"),
+                    soft_wrap=True,
+                )
 
 
 _DISCOVERY_REJECT_REASONS = ("gone", "not-a-repo", "unreadable")
@@ -1733,6 +2134,118 @@ def _fast_forward_state(sources: list[dict]) -> dict:
     }
 
 
+def _syncthing_diag(storage_path: Path) -> dict[str, Any]:
+    """Read-only Syncthing diagnostic state; never exposes credentials or peer IDs."""
+    try:
+        st = syncthing.read_state(storage_path, stignore_line=initflow.STIGNORE_LINE)
+        return {
+            "state": st.state,
+            "cause": st.cause,
+            "config_dir": (
+                core._home_relative_path(st.config_dir) if st.config_dir is not None else None
+            ),
+            "gui_address": st.gui_address,
+            "folder_id": st.folder_id,
+            "folder_label": st.folder_label,
+            "folder_path": (
+                core._home_relative_path(st.folder_path) if st.folder_path is not None else None
+            ),
+            "folder_state": st.folder_state,
+            "files_to_fetch": st.files_to_fetch,
+            "bytes_to_fetch": st.bytes_to_fetch,
+            "connected_peers": st.connected_peers,
+            "total_peers": st.total_peers,
+            "options": dict(st.options),
+            "problems": list(st.problems),
+            "stignore": st.stignore,
+        }
+    except Exception as exc:
+        return {"state": "error", "cause": type(exc).__name__}
+
+
+def _print_syncthing_diag(st: dict[str, Any]) -> None:
+    console.print("\n[bold]Syncthing[/bold]")
+    st_state = st.get("state") or "unknown"
+    cause = st.get("cause")
+    state_shown = f"{st_state} ({cause})" if cause else str(st_state)
+    console.print(f"  state:                   {safe_str(safety.safe_terminal_str(state_shown))}")
+    if st.get("config_dir"):
+        console.print(
+            f"  config_dir:              {safe_str(safety.safe_terminal_str(st['config_dir']))}"
+        )
+    if st.get("gui_address"):
+        console.print(
+            f"  gui_address:             {safe_str(safety.safe_terminal_str(st['gui_address']))}"
+        )
+    folder_id = st.get("folder_id")
+    folder_label = st.get("folder_label")
+    folder_path = st.get("folder_path")
+    problems = set(st.get("problems") or ())
+    if folder_id or folder_path:
+        label_part = (
+            f"{folder_label} ({folder_id})"
+            if folder_label and folder_id
+            else (folder_id or folder_label or "")
+        )
+        path_part = f" at {folder_path}" if folder_path else ""
+        folder_shown = f"{label_part}{path_part}".strip()
+        console.print(
+            f"  folder:                  {safe_str(safety.safe_terminal_str(folder_shown))}"
+        )
+    elif "no-folder" in problems:
+        console.print(
+            "  folder:                  none shares the storage path (problem: no-folder)"
+        )
+    if st.get("folder_state") is not None or "paused" in problems:
+        fstate = st.get("folder_state") or ("paused" if "paused" in problems else "unknown")
+        fetch_files = st.get("files_to_fetch")
+        fetch_bytes = st.get("bytes_to_fetch")
+        extra = ""
+        if fetch_files:
+            extra = f" ({fetch_files} files, {fetch_bytes or 0} bytes to fetch)"
+        if "paused" in problems and fstate != "paused":
+            extra += " (paused)"
+        console.print(
+            f"  folder state:            {safe_str(safety.safe_terminal_str(f'{fstate}{extra}'))}"
+        )
+    conn = st.get("connected_peers")
+    total = st.get("total_peers")
+    if total is not None:
+        conn_shown = "unknown" if conn is None else str(conn)
+        console.print(f"  connected peers:         {conn_shown} of {total}")
+    options = st.get("options") or {}
+    if options:
+        for opt_name, wanted, why in syncthing.FOLDER_OPTIONS:
+            raw_val = options.get(opt_name)
+            if opt_name == "versioning":
+                val_shown = str(raw_val) if raw_val else "none"
+            elif isinstance(raw_val, bool):
+                val_shown = "true" if raw_val else "false"
+            elif raw_val is None:
+                val_shown = "unknown"
+            else:
+                val_shown = str(raw_val)
+            if syncthing.option_is_ok(opt_name, raw_val):
+                verdict = "(ok)"
+            else:
+                verdict = f"(want {wanted}: {why})"
+            console.print(
+                safe_str(safety.safe_terminal_str(f"  option {opt_name}: {val_shown} {verdict}"))
+            )
+    stignore = st.get("stignore")
+    if stignore is not None:
+        if stignore == "ok":
+            st_detail = f"ok ({initflow.STIGNORE_LINE})"
+        elif stignore == "missing":
+            st_detail = f"missing (want {initflow.STIGNORE_LINE} in .stignore)"
+        elif stignore == "missing-line":
+            st_detail = f"missing line (want {initflow.STIGNORE_LINE} in .stignore)"
+        else:
+            st_detail = f"unreadable (want {initflow.STIGNORE_LINE} in .stignore)"
+        console.print(f"  .stignore:               {safe_str(safety.safe_terminal_str(st_detail))}")
+    console.print("  mm only reads Syncthing; change these settings in Syncthing.")
+
+
 def _collect_diag_state(backend: LocalBackend) -> dict:
     """Gather non-secret state for support triage.
 
@@ -1769,6 +2282,10 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         paths, the closed secret_service / item vocabularies and an
         exception class name; never a secret, an item label or an item path
         (Track 73A)
+      * Syncthing GUI credential, Syncthing device IDs, or Syncthing device
+        names (only state, cause, home-relative config/folder paths, GUI
+        address, folder id/label/state, fetch counts, peer counts, option
+        values, problems and .stignore state; Track 92A)
 
     Uses existing tri-state helpers (`fetch_crypto_init`, `sidecar.read`)
     rather than re-sampling raw blob bytes — the tri-state branches are
@@ -1962,6 +2479,7 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         ),
         "sidecar": sidecar_info,
         "storage_inventory": storage_inv,
+        "syncthing": _syncthing_diag(_backend_storage_path(backend, cfg)),
         "project_index": _project_index_state(
             cfg, config_state, dev_id, backend, resolved_sources, device_inventory
         ),
@@ -2145,6 +2663,8 @@ def diag(
     console.print(f"  devices/ entries:        {inv['devices_total']}")
     console.print(f"  own manifest conflicts:  {inv['own_manifest_conflict_copies']}")
     console.print(f"  ignored storage files:   {inv['ignored_storage_files']}")
+
+    _print_syncthing_diag(state.get("syncthing") or {})
 
     console.print("\n[bold]Last autorun[/bold]")
     br = state["last_autorun"]

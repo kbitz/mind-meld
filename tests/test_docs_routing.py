@@ -1102,6 +1102,7 @@ _DIAG_JSON_TOP_LEVEL = (
     "discovery",
     "git_capture",
     "fast_forward",
+    "syncthing",
 )
 _SKILL_LINKS_ROW_FIELDS = (
     "key",

@@ -3698,6 +3698,52 @@ def _save_pull_observations(result: PullResult, *, dry_run: bool, complete: bool
         )
 
 
+def _aware_timestamp_us(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return None
+        return (stamp - datetime(1970, 1, 1, tzinfo=timezone.utc)) // timedelta(microseconds=1)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _record_peer_cursors(
+    result: PullResult,
+    *,
+    pull_targets: list[dict],
+    manifest_times: dict[str, Any],
+    per_source_results: list[_PerSourceResult],
+) -> None:
+    rows: dict[str, tuple[int | None, int | None, int]] = {}
+    for device in pull_targets:
+        did = device["device_id"]
+        if did not in manifest_times:
+            continue
+        seen = _aware_timestamp_us(manifest_times[did])
+        waiting = sum(
+            len(r.outcomes.get("waiting", ())) for r in per_source_results if r.device_id == did
+        )
+        failed = sum(
+            len(r.outcomes.get("failed", ())) for r in per_source_results if r.device_id == did
+        )
+        applied = seen if waiting == 0 and failed == 0 else None
+        rows[did] = (applied, seen, waiting)
+    if not rows:
+        return
+    try:
+        with statedb.connect(read_only=False) as conn, statedb.transaction(conn):
+            statedb.commit_cursors(conn, rows)
+    except (statedb.StateDBError, OSError) as exc:
+        result.maintenance_failures += 1
+        core._print_apply_warning(
+            f"mm: notice: peer push record not saved ({core.ledger_cause(exc)}); "
+            "mm status may show an earlier pull. Check access to the config folder."
+        )
+
+
 def _pull_core(
     config: dict,
     passphrase: str,
@@ -3837,6 +3883,9 @@ def _pull_core(
             memory_kb,
             vanished_out=vanished_manifests,
         )
+        manifest_times: dict[str, Any] = {
+            did: m.get("timestamp") for did, m in manifest_cache.items() if isinstance(m, dict)
+        }
         # This Mac's own manifest carries its deletion records. If it vanished
         # mid-read they are not applied this pull, so a file deleted here can
         # come back from a peer: data at risk, reported like a corrupt
@@ -4414,6 +4463,18 @@ def _pull_core(
                     or vanished_manifests
                 ),
             )
+            if (
+                not dry_run
+                and interruption is None
+                and source_filter is None
+                and ledger_exc is None
+            ):
+                _record_peer_cursors(
+                    _partial_result,
+                    pull_targets=pull_targets,
+                    manifest_times=manifest_times,
+                    per_source_results=per_source_results,
+                )
             if result_observer is not None:
                 with suppress(Exception, SystemExit):
                     result_observer(_partial_result)
