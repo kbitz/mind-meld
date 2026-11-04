@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: ACP notice after successful capture or a reader blocker
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The hook-state test asserts the ACP notice with no successful scan; successful-scan and reader-blocker tests do not assert that notice.
+- **Hypothesis (untested):** Extend existing status cases to require the ACP notice alongside a successful scan and alongside a reader blocker.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/statusflow.py:860`
+- **Evidence:** The notice is appended after all three narrative branches. The 103A coverage audit found two missing assertions, not a runtime failure; 1,827 targeted tests passed.
+- **Context:** Filed by /review-and-prep for Track 103A at `07f6c9f` (2026-11-03 local), before PR creation. Revisit when a Track next touches these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/events.py|src/mind_meld/statusflow.py|README.md] Warm autopush and mm diag discovery may not fit their 50 ms budget
 - **Description:** Track 106A's measurements on the owner's Mac put a complete warm discovery pass at about 66 ms elapsed (probers 33-38 ms, the rest cache load and copy inside the deadline; pass totals up to 140 ms with the write). Autopush and `mm diag` keep 50 ms by the owner's decision. If warm autopush rows stay `partial`, each holds the cursor display and adds to `incomplete_streak`, so `mm status` can keep printing the recovery wording ("Finish repository discovery … `mm recapture Nd`") right after an attended push finished discovery. The README upgrade step ("run `mm push` until `mm diag` shows discovery `complete`") can then loop, because diag's fresh pass also runs at 50 ms.
 - **Hypothesis (untested):** time a warm `discover_git_roots` at 50 ms with and without persist. If it is partial, tell a budget-only partial over a complete index apart from unfinished discovery (a persisted-state check or a row marker), or stop counting it toward `incomplete_streak`.
