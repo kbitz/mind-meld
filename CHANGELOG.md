@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.10] - 2026-11-03
+
+Status and retro-fleet name the Cursor ACP usage coverage gap, so missing coverage is identified.
+
+### Fixed
+
+- `mm status` names the Cursor ACP usage coverage gap, so that missing coverage is identified.
+- Retro-fleet names the Cursor ACP usage coverage gap, so the report shows Cursor ACP usage is outside coverage.
+
 ## [1.12.9] - 2026-11-03
 
 Attended pushes finish git-root discovery, including a record that changed during the pass or never caches.

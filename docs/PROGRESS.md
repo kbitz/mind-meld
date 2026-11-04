@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.10 | 2026-11-03 | Status and retro-fleet name the Cursor ACP usage coverage gap, so missing coverage is identified. |
 | 1.12.9 | 2026-11-03 | Attended pushes finish git-root discovery, including a record that changed during the pass or never caches. |
 | 1.12.8 | 2026-11-03 | Configured fleet identities are published with usage, and checkpoints are left out of that publication. |
 | 1.12.7 | 2026-11-03 | **`mm` finds Git repositories from every enabled agent's working directories, not only Claude Code.** Codex, Cursor, Muse, and Antigravity count when those providers are enabled. Cursor still needs `[retro] cursor_host_usage = true`. Installed Paseo projects and mmm factory items count too. `mm diag` names the source that found each root. |

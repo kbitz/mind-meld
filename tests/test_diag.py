@@ -2061,6 +2061,7 @@ def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_s
     hint = "not captured until mm enable-source cursor installs the completion hook"
     assert (hint in status) is (hook_state == "missing")
     assert ("completion hook file is malformed" in status) is (hook_state == "malformed")
+    assert "Cursor runs through ACP front-ends such as Paseo are not counted" in status
     assert f"completion hook: {hook_state}" in diag
     assert "outside coverage" not in diag
 

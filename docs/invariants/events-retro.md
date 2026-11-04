@@ -889,7 +889,8 @@ raw. A successful run with no result line warns that usage was not recorded.
 that points back at mm fail fast instead of recursing.
 
 **ACP sessions are uncaptured (measured 2026-10-06, cursor-agent
-2026.10.01-e373342).** `cursor-agent acp`, Paseo's Cursor runtime, fires no
+2026.10.01-e373342; re-measured 2026-11-03 on 2026.10.22-27dcf5f with the same
+result).** `cursor-agent acp`, Paseo's Cursor runtime, fires no
 lifecycle hook (`sessionStart`, `stop`, `sessionEnd`), though tool hooks still
 run. Its ACP messages carry no usage or token fields. Its session stores
 (`~/.cursor/acp-sessions/<id>/store.db`, the same `blobs`/`meta` schema as
@@ -905,6 +906,25 @@ proxy either, because ACP sends no usage to intercept. If cursor-agent starts
 firing a `stop` payload under ACP with `status: completed`, `generation_id`,
 `model` and all four inclusive counters, the existing hook captures these
 sessions unchanged. Re-check after each cursor-agent upgrade.
+
+The 2026.10.22 re-check (Track 103A) added: a project-level `.cursor/hooks.json`
+is not loaded under ACP at all (not even a `postToolUse` probe fired), so the
+user-level `~/.cursor/hooks.json` is the only valid venue, and there only tool
+hooks fire. The `session/prompt` result carries only `stopReason`; no
+`usage_update` update is sent. No credential-free local source was found for
+billed ACP tokens. The inspected Paseo plugin maps `plan_usage` to an account
+percentage, not tokens; the ai-tracking database schema holds line attribution.
+Cursor's public Admin API docs describe per-event tokens using a team API key,
+but do not establish inclusive/disjoint semantics or a per-event deduplication
+ID. Dashboard usage-event CSV exports are another candidate. Neither account
+route was exercised: individual-plan access, ACP coverage, counter semantics
+and deduplication against existing capture remain unverified. Those routes need
+a separate owner-decided card; mm currently reads none of these sources. The gap is named in
+`mm status` (a clause on the Cursor line) and in `retro-fleet` (an
+`agent_coverage` health note, emitted by `_cursor_acp_gap_notes` when any
+accepted snapshot consulted `cursor`). The note is a separate helper from
+`_agent_coverage_notes` because it is not a refresh problem and carries no
+attended-producer remedy.
 
 Both capture paths (hook and wrapper) require the existing consent bit. The
 hidden hook command reads bounded stdin, returns `{}` and exits zero on

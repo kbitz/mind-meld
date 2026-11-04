@@ -3798,6 +3798,27 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
     return lead + "; ".join(models) + ")"
 
 
+CURSOR_ACP_GAP_NOTE = (
+    "Cursor runs through ACP front-ends such as Paseo are not counted: cursor-agent's ACP "
+    "mode reports no usage and fires no completion hook, so no action resolves this."
+)
+
+
+def _cursor_acp_gap_notes(data: RetroData) -> list[str]:
+    """Name the known Cursor coverage gap when any machine published Cursor usage.
+
+    Kept apart from ``_agent_coverage_notes``: it is not a refresh problem, so it
+    carries no attended-producer remedy.
+    """
+    inventory = data.host_inventory
+    if not isinstance(inventory, HostUsageInventory):
+        return []
+    for snap in inventory.by_device.values():
+        if isinstance(snap, HostDeviceSnapshot) and "cursor" in snap.consulted:
+            return [CURSOR_ACP_GAP_NOTE]
+    return []
+
+
 def _agent_coverage_notes(
     data: RetroData,
     *,
@@ -4760,6 +4781,8 @@ def format_retro(
         for detail in _extrapolation_notes(row.by_model, scope=row.label):
             note("pricing_extrapolated", detail, agent=row.label)
     for detail in _agent_coverage_notes(data, view=agent_view, labels=labels):
+        note("agent_coverage", detail)
+    for detail in _cursor_acp_gap_notes(data):
         note("agent_coverage", detail)
     if data.fleet.unregistered_event_devices:
         note(
