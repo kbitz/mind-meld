@@ -258,7 +258,7 @@ fallback for those keys. `b`, `both`, `c`, and `f` must never be reassigned in 1
 
 ## JSONL line-union ordering (load-bearing, Track 51A)
 
-`merge.py:merge_jsonl` / `_extract_ts` implement the silent `.jsonl` merge on pull. This is **not** filesystem or manifest mtime, and it is **not** `MEMORY.md` (that file is a plain lexical line-union with no `ts` key).
+`merge.py:merge_jsonl` / `_extract_ts` implement the silent `.jsonl` merge on pull. This is **not** filesystem or manifest mtime, and it is **not** `MEMORY.md` (that file uses a lexically sorted line-merge with relative `.md` pointer deduplication and post-pull missing-target cleanup, as described under "Line-deletion limit" above, and no `ts` key).
 
 **Normalized unique-line preservation.** `_split_lines` decodes with UTF-8 replacement, strips trailing whitespace, and drops blank lines. The union is a `set` of those normalized lines. Duplicates, trailing spaces, and invalid UTF-8 byte sequences are not preserved. Original line *text* is never reserialized.
 

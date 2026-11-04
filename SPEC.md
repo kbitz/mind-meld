@@ -812,7 +812,7 @@ Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 ### JSONL Merge on Pull
 
-When both sides changed or the no-base fallback applies, `.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. Fast-forward takes the peer's bytes directly. `MEMORY.md` is a separate plain lexical line-union and does not consult `ts`.
+When both sides changed or the no-base fallback applies, `.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. Fast-forward takes the peer's bytes directly. `MEMORY.md` uses a separate lexically sorted line-merge with relative `.md` pointer deduplication and post-pull missing-target cleanup (see [conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a)); it does not consult `ts`.
 
 1. Union of unique normalized lines from local and remote (UTF-8 replacement, trailing-whitespace strip, blank lines dropped, byte-exact dedup). Original line text is kept; lines are not reserialized.
 2. Records whose decoded JSON is an object with a **string** `ts` (including empty) sort first, by `(ts, original line)`. Comparison is lexical — not chronological, and not numeric-epoch.
