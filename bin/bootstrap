@@ -5,9 +5,9 @@
 # POSIX /bin/sh (not bash): macOS ships bash 3.2 and Ubuntu CI runs /bin/sh as
 # dash. See bin/check for the same portability rule.
 #
-# README runs this as `sh -c "$(curl -fsSL …)"`. All the work happens in
-# main(), called on the last line, so a download cut off part-way defines at
-# most some functions and runs nothing.
+# README downloads this into a variable and runs it with `sh -c` only when
+# curl succeeds. All the work also happens in main(), called on the last line,
+# so a copy cut off part-way defines at most some functions and runs nothing.
 
 set -eu
 

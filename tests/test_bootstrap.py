@@ -19,7 +19,8 @@ BOOTSTRAP = ROOT / "bin" / "bootstrap"
 README = ROOT / "README.md"
 
 README_BOOTSTRAP_CMD = (
-    'sh -c "$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"'
+    "mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"
+    ' && sh -c "$mm_bootstrap"'
 )
 HOMEBREW_INSTALL_CMD = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
@@ -95,6 +96,18 @@ exit 2
 
     def install_mm(self, directory: Path) -> None:
         _make_fake_script(directory / "mm", "mm", "exit 0\n")
+
+    def install_curl(self, *, serve: Path | None) -> None:
+        # Serves `serve` like `curl -fsSL` would, or fails with curl's HTTP error exit.
+        if serve is None:
+            logic = "exit 22\n"
+        else:
+            logic = f"""\
+while IFS= read -r _line || [ -n "$_line" ]; do
+  printf '%s\\n' "$_line"
+done < "{serve}"
+"""
+        _make_fake_script(self.sysbin / "curl", "curl", logic)
 
     def install_pipx(self, directory: Path) -> None:
         _make_fake_script(
@@ -703,10 +716,43 @@ class TestBootstrapUnsupportedAndErrors:
 
 
 class TestBootstrapDownload:
+    def _run_readme_command(self, harness: BootstrapHarness) -> subprocess.CompletedProcess[str]:
+        # The README command calls `sh` by name.
+        real_sh = shutil.which("sh")
+        assert real_sh, "required tool sh not found"
+        (harness.tools / "sh").symlink_to(real_sh)
+        return subprocess.run(
+            ["/bin/sh", "-c", README_BOOTSTRAP_CMD],
+            env=harness.env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+
+    def test_readme_command_fails_when_download_fails(self, harness: BootstrapHarness) -> None:
+        # A failed download must stop with curl's failure status, not run an
+        # empty script and report success.
+        harness.install_uname("Darwin")
+        harness.install_curl(serve=None)
+
+        proc = self._run_readme_command(harness)
+        assert proc.returncode != 0, proc.stdout
+        assert [row[0] for row in harness.calls()] == ["curl"]
+
+    def test_readme_command_runs_downloaded_script(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_curl(serve=BOOTSTRAP)
+
+        proc = self._run_readme_command(harness)
+        assert proc.returncode == 1
+        assert "Homebrew is not installed" in _last_line(proc.stdout)
+        assert [row[0] for row in harness.calls()] == ["curl", "uname"]
+
     @pytest.mark.parametrize("cut", ["quarter", "half", "three-quarters", "all-but-last-line"])
     def test_truncated_download_runs_nothing(self, harness: BootstrapHarness, cut: str) -> None:
-        # README runs `sh -c "$(curl -fsSL …)"`; a transfer cut off part-way
-        # must define at most some functions and run no command.
+        # Should a cut-off copy ever reach `sh -c`, it must define at most some
+        # functions and run no command.
         harness.install_uname("Darwin")
         harness.install_brew()
         text = BOOTSTRAP.read_text(encoding="utf-8")

@@ -9,7 +9,7 @@ Sync AI coding-agent context, skills, and gstack activity across your machines t
 On a fresh Mac or Arch-based Linux machine, fetch and run the bootstrap script from the `latest` release branch:
 
 ```bash
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"
+mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
 ```
 
 It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest`, and verifies that `mm` on `PATH` is pipx's copy. It stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun changes nothing. Pairing machines and sharing the folder stay manual — the script never touches Syncthing's configuration; see [Quick Start](#quick-start) for the next steps.
