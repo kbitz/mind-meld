@@ -1327,6 +1327,8 @@ def _probe_host_records(
         return [Path(root) for root in dict.fromkeys(found)]
 
     attempted_now: set[str] = set()
+    # Units whose attempt in this call left the round incomplete.
+    interrupted_now: set[str] = set()
 
     def run_round(skip: frozenset[str]) -> tuple[bool, bool]:
         """One list, order, read and completion round: (complete, round_done)."""
@@ -1387,10 +1389,13 @@ def _probe_host_records(
                 remaining.remove(key)
                 continue
             if key in skip:
-                # Already attempted in this call: leave it for the next push,
-                # and keep the round incomplete so it is never reported done.
+                # Already attempted in this call, which counts for this round
+                # too: never read twice. Only an attempt this call interrupted
+                # keeps the round open; a clean read with nothing to cache
+                # (an immutable record naming no directory) does not.
                 remaining.remove(key)
-                state["round_incomplete"] = True
+                if key in interrupted_now:
+                    state["round_incomplete"] = True
                 continue
             if _deadline_expired(deadline_monotonic):
                 break
@@ -1409,6 +1414,7 @@ def _probe_host_records(
                 cache.setdefault("_probe_validated", []).extend(recovered)
                 if retry_progress.get("classified", 0) < len(prior[1]):
                     state["round_incomplete"] = True
+                    interrupted_now.add(key)
                     continue
                 prior[1] = [root for root in prior[1] if unit is None or root not in unit[1]]
                 state["retry_classification"].pop(key, None)
@@ -1464,6 +1470,7 @@ def _probe_host_records(
                 progress.pop("classified", None)
             else:
                 state["round_incomplete"] = True
+                interrupted_now.add(key)
         complete = not remaining and not state.get("round_incomplete", False)
         if not remaining:
             for name in (

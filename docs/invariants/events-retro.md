@@ -576,8 +576,10 @@ used to cost one more push. `_probe_host_records` now runs its list, order, read
 completion round at most twice per call (nested `run_round(skip)`). The second round
 runs only when the first ended with nothing remaining, discovery still incomplete and
 the deadline not expired; it re-lists, prunes and orders as usual, and skips every unit
-already attempted in this call (a local set, nothing persisted), keeping the round
-incomplete for a skipped unit that is still unsettled. A unit is therefore still
+already attempted in this call (a local set, nothing persisted). That attempt counts for
+the closing round too: only a unit whose attempt this call interrupted keeps the round
+incomplete, so a cleanly read record with nothing to cache (an immutable Cursor ACP
+`meta.json` naming no directory) does not hold it open. A unit is therefore still
 attempted at most once per call, and a reader that never finishes cannot loop. A
 deadline-cut round or listing returns cached roots incomplete as before. Partial listings
 never prune old units. Their names identify host records, not working directories.

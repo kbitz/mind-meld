@@ -1609,6 +1609,38 @@ def test_one_explicit_run_completes_discovery_left_with_a_stale_round(home, monk
     assert not events.read_git_capture_cache()["probe_index"]["codex"]["state"].get("pending_units")
 
 
+def test_closing_round_completes_beside_a_record_that_never_caches(home, monkeypatch):
+    # Value: protects=the closing round finishes a resumed round in one call;
+    # fails_when=a cleanly read record with nothing to cache (a Cursor ACP meta
+    # with no cwd) holds the closing round open, costing the extra push it saves;
+    # why_new=the stale-round test above has no such record; seam=persisted state;
+    # no_claim=records whose read this call interrupted (they keep the round open).
+    repo_a = _fake_repo(home / "a")
+    repo_b = _fake_repo(home / "b")
+    reads: list[str] = []
+    units = {"a": [str(repo_a)], "b": [str(repo_b)], "nometa": None}
+    monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units, reads=reads),))
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    # A push the deadline cut after "a": its round persists with "b" and the
+    # record that never caches still to read, and a stale round_incomplete.
+    cache = events.read_git_capture_cache()
+    record = cache["probe_index"]["codex"]
+    record["units"].pop("b")
+    record["state"].update(
+        {
+            "unit_listing": [["a", None], ["b", None], ["nometa", None]],
+            "unit_remaining": ["b", "nometa"],
+            "unit_after": "a",
+            "round_incomplete": True,
+        }
+    )
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    reads.clear()
+    result = _discover(_cfg("codex"), persist=True)
+    assert not result.exceeded and set(result.roots) == {repo_a, repo_b}
+    assert sorted(reads) == ["b", "nometa"], "each record is read at most once in the call"
+
+
 @pytest.mark.parametrize("persist", [False, True])
 def test_recapture_discovers_on_its_own_budget(tmp_path, monkeypatch, persist):
     assert events.RECAPTURE_DISCOVERY_BUDGET_MS >= 30_000
