@@ -1,0 +1,263 @@
+#!/bin/sh
+# bin/bootstrap — Ready a macOS or Arch-based Linux machine for Mind Meld (mm)
+# and Syncthing.
+#
+# POSIX /bin/sh (not bash): macOS ships bash 3.2 and Ubuntu CI runs /bin/sh as
+# dash. See bin/check for the same portability rule.
+#
+# README downloads this into a variable and runs it with `sh -c` only when
+# curl succeeds. All the work also happens in main(), called on the last line,
+# so a copy cut off part-way defines at most some functions and runs nothing.
+
+set -eu
+
+MM_INSTALL_SPEC="git+https://github.com/kbitz/mind-meld.git@latest"
+HOMEBREW_INSTALL_CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+say() {
+  printf 'bootstrap: %s\n' "$*"
+}
+
+die() {
+  printf 'bootstrap: %s. Run: %s\n' "$1" "$2" >&2
+  exit 1
+}
+
+read_python_minor_version() {
+  py_ver=""
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  py_out=$(python3 --version 2>&1 || true)
+  py_ver=$(printf '%s\n' "$py_out" | sed -n 's/^Python \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | sed -n '1p')
+  [ -n "$py_ver" ]
+}
+
+python_version_ok() {
+  read_python_minor_version || return 1
+  py_major=${py_ver%%.*}
+  py_minor=${py_ver#*.}
+  [ "$py_major" -gt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -ge 11 ]; }
+}
+
+read_syncthing_version() {
+  st_ver=""
+  if ! command -v syncthing >/dev/null 2>&1; then
+    return 1
+  fi
+  st_out=$(syncthing --version 2>&1 || true)
+  st_ver=$(printf '%s\n' "$st_out" | sed -n 's/^syncthing v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | sed -n '1p')
+  [ -n "$st_ver" ]
+}
+
+syncthing_version_ok() {
+  read_syncthing_version || return 1
+  st_major=${st_ver%%.*}
+  st_rest=${st_ver#*.}
+  st_minor=${st_rest%%.*}
+  [ "$st_major" -gt 2 ] || { [ "$st_major" -eq 2 ] && [ "$st_minor" -ge 1 ]; }
+}
+
+unsupported_os() {
+  die "$1 is not supported; bootstrap supports macOS and Arch-based Linux. Install Python 3.11+, pipx and Syncthing 2.1+ yourself" "pipx install $MM_INSTALL_SPEC"
+}
+
+main() {
+  os_name=$(uname -s)
+  platform=""
+  case "$os_name" in
+    Darwin)
+      platform="macos"
+      ;;
+    Linux)
+      os_release="${MM_BOOTSTRAP_OS_RELEASE:-/etc/os-release}"
+      os_id=""
+      os_id_like=""
+      if [ -r "$os_release" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in
+            ID=*)
+              val=${line#ID=}
+              val=${val#\"}; val=${val%\"}
+              val=${val#\'}; val=${val%\'}
+              os_id=$val
+              ;;
+            ID_LIKE=*)
+              val=${line#ID_LIKE=}
+              val=${val#\"}; val=${val%\"}
+              val=${val#\'}; val=${val%\'}
+              os_id_like=$val
+              ;;
+          esac
+        done <"$os_release"
+      fi
+      is_arch=0
+      if [ "$os_id" = "arch" ]; then
+        is_arch=1
+      else
+        case " $os_id_like " in
+          *" arch "*)
+            is_arch=1
+            ;;
+        esac
+      fi
+      if [ "$is_arch" -ne 1 ]; then
+        unsupported_os "${os_id:-Linux}"
+      fi
+      platform="arch"
+      ;;
+    *)
+      unsupported_os "$os_name"
+      ;;
+  esac
+
+  changed=0
+  installed_list=""
+  missing=""
+
+  if [ "$platform" = "macos" ]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      die "Homebrew is not installed or not on PATH; install it (its installer ends by showing how to put brew on PATH), then rerun this script" "$HOMEBREW_INSTALL_CMD"
+    fi
+    if ! python_version_ok; then
+      missing="python"
+    fi
+    if ! command -v pipx >/dev/null 2>&1; then
+      missing="${missing:+$missing }pipx"
+    fi
+    if ! command -v syncthing >/dev/null 2>&1; then
+      missing="${missing:+$missing }syncthing"
+    fi
+    if [ -n "$missing" ]; then
+      install_cmd="brew install $missing"
+      say "installing missing Homebrew packages: $missing"
+      # shellcheck disable=SC2086
+      if ! brew install $missing; then
+        die "$install_cmd failed" "$install_cmd"
+      fi
+      changed=1
+      installed_list="$missing"
+      hash -r 2>/dev/null || true
+    fi
+    py_fix='eval "$(brew shellenv)"'
+    st_fix="brew upgrade syncthing"
+    pipx_fix="brew reinstall pipx"
+    start_syncthing_cmd="brew services start syncthing"
+  else
+    if [ "$(id -u)" = "0" ]; then
+      SUDO=""
+      sudo_prefix=""
+    else
+      SUDO="sudo"
+      sudo_prefix="sudo "
+    fi
+    if ! command -v pacman >/dev/null 2>&1; then
+      die "pacman was not found on PATH" "${sudo_prefix}pacman -S --needed python python-pipx syncthing git"
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+      missing="python"
+    fi
+    if ! command -v pipx >/dev/null 2>&1; then
+      missing="${missing:+$missing }python-pipx"
+    fi
+    if ! command -v syncthing >/dev/null 2>&1; then
+      missing="${missing:+$missing }syncthing"
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      missing="${missing:+$missing }git"
+    fi
+    if [ -n "$missing" ]; then
+      install_cmd="${sudo_prefix}pacman -S --needed $missing"
+      say "installing missing Arch packages: $missing"
+      if [ -n "$SUDO" ]; then
+        # shellcheck disable=SC2086
+        if ! "$SUDO" pacman -S --needed $missing; then
+          die "$install_cmd failed" "$install_cmd"
+        fi
+      else
+        # shellcheck disable=SC2086
+        if ! pacman -S --needed $missing; then
+          die "$install_cmd failed" "$install_cmd"
+        fi
+      fi
+      changed=1
+      installed_list="$missing"
+      hash -r 2>/dev/null || true
+    fi
+    py_fix="${sudo_prefix}pacman -Syu"
+    st_fix="${sudo_prefix}pacman -Syu"
+    pipx_fix="${sudo_prefix}pacman -S python-pipx"
+    start_syncthing_cmd="systemctl --user enable --now syncthing.service"
+  fi
+
+  if ! read_python_minor_version; then
+    die "could not read the python3 version (need Python 3.11 or newer)" "$py_fix"
+  fi
+  if ! python_version_ok; then
+    die "python3 is $py_ver, but Mind Meld requires Python 3.11 or newer" "$py_fix"
+  fi
+
+  if ! read_syncthing_version; then
+    die "could not read the syncthing version (need Syncthing 2.1 or newer)" "$st_fix"
+  fi
+  if ! syncthing_version_ok; then
+    die "syncthing is $st_ver, but Mind Meld requires Syncthing 2.1 or newer" "$st_fix"
+  fi
+
+  nl='
+'
+  mm_installed=0
+  # `pipx list` exits 1 when any venv has a problem but still lists the rest,
+  # so read its output whatever the exit status.
+  pipx_list=$(pipx list --short 2>/dev/null || true)
+  case "${nl}${pipx_list}" in
+    *"${nl}mind-meld "*)
+      mm_installed=1
+      ;;
+  esac
+
+  if [ "$mm_installed" -eq 0 ]; then
+    say "installing mm with pipx"
+    if ! pipx install "$MM_INSTALL_SPEC"; then
+      die "pipx could not install mm" "pipx install $MM_INSTALL_SPEC"
+    fi
+    changed=1
+    installed_list="${installed_list:+$installed_list }mm"
+    hash -r 2>/dev/null || true
+  fi
+
+  bin=$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)
+  venvs=$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)
+  if [ -z "$bin" ] || [ -z "$venvs" ]; then
+    die "pipx could not report PIPX_BIN_DIR and PIPX_LOCAL_VENVS" "$pipx_fix"
+  fi
+  # pipx's copy is its mind-meld venv's entry point, linked at $bin/mm. pipx
+  # leaves a file another installer already put there in place, and never
+  # relinks a missing link on a plain install, so check the link itself first.
+  pipx_mm="$venvs/mind-meld/bin/mm"
+  if ! [ "$bin/mm" -ef "$pipx_mm" ] 2>/dev/null; then
+    if [ -e "$bin/mm" ] || [ -L "$bin/mm" ]; then
+      die "$bin/mm is not pipx's mind-meld copy; another install put it there" "pipx install --force $MM_INSTALL_SPEC"
+    fi
+    die "pipx's link $bin/mm is missing" "pipx install --force $MM_INSTALL_SPEC"
+  fi
+  found=$(command -v mm 2>/dev/null || true)
+  if [ -z "$found" ]; then
+    die "mm is installed in $bin, which is not on PATH; open a new terminal and rerun this script afterwards" "pipx ensurepath"
+  fi
+  if ! [ "$found" -ef "$pipx_mm" ] 2>/dev/null; then
+    die "$found shadows pipx's $bin/mm; open a new terminal and rerun this script afterwards" "pipx ensurepath --prepend --force"
+  fi
+
+  if [ "$changed" -eq 1 ]; then
+    say "installed $installed_list; Python $py_ver, Syncthing $st_ver and mm are ready."
+  else
+    say "nothing to change: Python $py_ver, pipx, Syncthing $st_ver and mm are already installed."
+  fi
+  say "This script pairs no machine, shares no folder and writes no Syncthing configuration. Next steps:"
+  say "1. Start Syncthing ($start_syncthing_cmd) and pair this machine with your others."
+  say "2. Share the mind-meld folder, default ~/Sync/mind-meld, or accept it here."
+  say "3. Run mm init, or mm init --new-fleet on a new fleet's first machine. README Quick Start has the details."
+}
+
+main "$@"
