@@ -58,6 +58,7 @@ class BootstrapHarness:
     pipxbin: Path
     sysbin: Path
     tools: Path
+    venvs: Path
     call_log: Path
     pipx_state: Path
     os_release: Path
@@ -106,19 +107,31 @@ case "${1:-}" in
         printf '%s\\n' "$_line"
       done < "$MM_TEST_PIPX_STATE"
     fi
-    exit 0
+    # Real pipx exits 1 when any venv has a problem, but still lists the rest.
+    exit "${MM_TEST_PIPX_LIST_EXIT:-0}"
     ;;
   install)
     if [ "${MM_TEST_PIPX_FAIL:-0}" = "1" ]; then
       exit 1
     fi
     printf 'mind-meld 1.12.0\\n' > "$MM_TEST_PIPX_STATE"
-    printf '#!/bin/sh\\nprintf "mm\\\\n" >> "$MM_TEST_CALL_LOG"\\n' > "$MM_TEST_PIPX_BIN/mm"
-    chmod +x "$MM_TEST_PIPX_BIN/mm"
+    _venv_bin="$MM_TEST_PIPX_VENVS/mind-meld/bin"
+    mkdir -p "$_venv_bin"
+    printf '#!/bin/sh\\nprintf "mm\\\\n" >> "$MM_TEST_CALL_LOG"\\n' > "$_venv_bin/mm"
+    chmod +x "$_venv_bin/mm"
+    # Like pipx 1.18: an existing file at the app path is left in place and
+    # install still exits 0, unless --force replaces it.
+    if [ "${2:-}" = "--force" ] || ! [ -e "$MM_TEST_PIPX_BIN/mm" ]; then
+      ln -sf "$_venv_bin/mm" "$MM_TEST_PIPX_BIN/mm"
+    fi
     exit 0
     ;;
   environment)
-    printf '%s\\n' "$MM_TEST_PIPX_BIN"
+    case "${3:-}" in
+      PIPX_BIN_DIR) printf '%s\\n' "$MM_TEST_PIPX_BIN" ;;
+      PIPX_LOCAL_VENVS) printf '%s\\n' "$MM_TEST_PIPX_VENVS" ;;
+      *) exit 1 ;;
+    esac
     exit 0
     ;;
   *)
@@ -229,13 +242,13 @@ exit 2
         if self.call_log.exists():
             self.call_log.unlink()
 
-    def run(
+    def env(
         self,
         *,
         include_shadow: bool = False,
         include_pipxbin: bool = True,
         extra_env: dict[str, str] | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> dict[str, str]:
         path_parts = [str(self.brewbin)]
         if include_shadow:
             path_parts.append(str(self.shadow))
@@ -248,10 +261,25 @@ exit 2
             "MM_TEST_CALL_LOG": str(self.call_log),
             "MM_TEST_PIPX_STATE": str(self.pipx_state),
             "MM_TEST_PIPX_BIN": str(self.pipxbin),
+            "MM_TEST_PIPX_VENVS": str(self.venvs),
             "MM_BOOTSTRAP_OS_RELEASE": str(self.os_release),
         }
         if extra_env:
             env.update(extra_env)
+        return env
+
+    def run(
+        self,
+        *,
+        include_shadow: bool = False,
+        include_pipxbin: bool = True,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = self.env(
+            include_shadow=include_shadow,
+            include_pipxbin=include_pipxbin,
+            extra_env=extra_env,
+        )
         # Criterion 9: run by path, not through `sh`.
         proc = subprocess.run(
             [str(BOOTSTRAP)],
@@ -291,10 +319,11 @@ def harness(tmp_path: Path) -> BootstrapHarness:
     pipxbin = home / ".local" / "bin"
     sysbin = tmp_path / "sysbin"
     tools = tmp_path / "tools"
-    for directory in (home, brewbin, shadow, pipxbin, sysbin, tools):
+    venvs = home / ".local" / "pipx" / "venvs"
+    for directory in (home, brewbin, shadow, pipxbin, sysbin, tools, venvs):
         directory.mkdir(parents=True, exist_ok=True)
 
-    for tool_name in ("sed", "id", "chmod"):
+    for tool_name in ("sed", "id", "chmod", "ln", "mkdir"):
         resolved = shutil.which(tool_name)
         assert resolved, f"required tool {tool_name} not found"
         (tools / tool_name).symlink_to(resolved)
@@ -307,6 +336,7 @@ def harness(tmp_path: Path) -> BootstrapHarness:
         pipxbin=pipxbin,
         sysbin=sysbin,
         tools=tools,
+        venvs=venvs,
         call_log=tmp_path / "calls.log",
         pipx_state=tmp_path / "pipx-state.txt",
         os_release=tmp_path / "os-release",
@@ -586,3 +616,65 @@ class TestBootstrapUnsupportedAndErrors:
         assert proc.returncode == 1
         last = _last_line(proc.stdout)
         assert last.endswith(f"pipx could not install mm. Run: pipx install {upgrade.INSTALL_SPEC}")
+
+    def test_foreign_mm_in_pipx_bin_dir_stops_with_force_reinstall(
+        self, harness: BootstrapHarness
+    ) -> None:
+        # Another installer (uv, pip --user) already owns ~/.local/bin/mm;
+        # pipx leaves it in place and exits 0, so the path alone proves nothing.
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+        harness.install_mm(harness.pipxbin)
+
+        proc = harness.run()
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert str(harness.pipxbin / "mm") in last
+        assert last.endswith(f"Run: pipx install --force {upgrade.INSTALL_SPEC}")
+
+    def test_pipx_list_problem_still_finds_installed_mm(self, harness: BootstrapHarness) -> None:
+        # `pipx list` exits 1 when any other venv is broken, but still lists
+        # mind-meld; a rerun must not reinstall or claim it installed mm.
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.clear_calls()
+        second = harness.run(extra_env={"MM_TEST_PIPX_LIST_EXIT": "1"})
+        assert second.returncode == 0, second.stdout
+        assert not [row for row in harness.calls() if row[0] == "pipx" and row[1] == "install"]
+        assert "bootstrap: nothing to change:" in second.stdout
+
+
+class TestBootstrapDownload:
+    @pytest.mark.parametrize("cut", ["quarter", "half", "three-quarters", "all-but-last-line"])
+    def test_truncated_download_runs_nothing(self, harness: BootstrapHarness, cut: str) -> None:
+        # README runs `sh -c "$(curl -fsSL …)"`; a transfer cut off part-way
+        # must define at most some functions and run no command.
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        text = BOOTSTRAP.read_text(encoding="utf-8")
+        fractions = {"quarter": 0.25, "half": 0.5, "three-quarters": 0.75}
+        if cut == "all-but-last-line":
+            partial = text.rstrip("\n").rsplit("\n", 1)[0] + "\n"
+        else:
+            partial = text[: int(len(text) * fractions[cut])]
+
+        proc = subprocess.run(
+            ["/bin/sh", "-c", partial],
+            env=harness.env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        assert harness.calls() == [], proc.stdout
+        assert "bootstrap:" not in proc.stdout
