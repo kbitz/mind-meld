@@ -138,9 +138,16 @@ def _index_link_bodies(line: str) -> Iterator[str]:
         depth = 1
         angle = False
         quote = ""
+        escaped = False
         for pos in range(start, len(line)):
             char = line[pos]
-            if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                # Escapes affect delimiter scanning only. Keep the raw bytes
+                # so index_link still rejects backslashes in destinations.
+                escaped = True
+            elif quote:
                 if char == quote:
                     quote = ""
             elif angle:

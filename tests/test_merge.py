@@ -729,6 +729,8 @@ class TestIndexLink:
         [
             ('[Web](https://x/a(b.md).md "see [Fake](gone.md)") [Live](live.md)', "live.md"),
             ('[Live](live.md "see [Fake](gone.md)") [Other](other.md)', "live.md"),
+            (r'[Web](https://x/a.md "escaped \" ) [Fake](gone.md)") [Live](live.md)', "live.md"),
+            (r"[Rejected](bad\) [Fake](gone.md)) [Live](live.md)", "live.md"),
             ("[Broken](outer([Fake](gone.md)", None),
             ("[Broken](<outer [Fake](gone.md)", None),
             ('[Broken](outer.md "[Fake](gone.md)', None),
@@ -737,8 +739,8 @@ class TestIndexLink:
     def test_nested_syntax_never_becomes_an_independent_target(self, line, expected):
         # Regression repair for Greptile's Track 108A parser finding.
         # Value: protects=only complete independent links qualify, in left-to-right order;
-        # fails_when=inner title or malformed destination syntax is treated as a file pointer;
-        # why_new=the original first-link test contains no nested or unterminated syntax;
+        # fails_when=escaped delimiters expose inner title or destination syntax as a pointer;
+        # why_new=the original first-link test contains no nested, escaped or unterminated syntax;
         # seam=none; no_claim=full Markdown parsing (literal index-line contract only).
         assert index_link(line) == expected
         data = (line + "\n").encode()
