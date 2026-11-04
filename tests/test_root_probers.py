@@ -1641,6 +1641,55 @@ def test_closing_round_completes_beside_a_record_that_never_caches(home, monkeyp
     assert sorted(reads) == ["b", "nometa"], "each record is read at most once in the call"
 
 
+def test_closing_round_stays_open_for_a_record_that_changed_since_its_read(home, monkeypatch):
+    # Value: protects=discovery never reads complete over a record it can see changed;
+    # fails_when=the closing round skips a unit whose fresh stamp differs from the one
+    # read earlier in the call, so a new repository waits a push with the cursor advanced;
+    # why_new=the never-caching test keeps its stamp; seam=listing stamps;
+    # no_claim=changes the fresh listing cannot see.
+    import dataclasses
+
+    repo_a = _fake_repo(home / "a")
+    repo_b = _fake_repo(home / "b")
+    units = {"a": [str(repo_a)], "day": [str(repo_a)]}
+    stamps = {"a": [1], "day": [1]}
+    reads: list[str] = []
+    prober = _synthetic(units, stamps=stamps, reads=reads)
+
+    def read_then_change(home_, key, deadline):
+        result = prober.read_unit(home_, key, deadline)
+        if key == "day":
+            # A new session lands in the day just after this read saw it.
+            stamps["day"] = [2]
+            units["day"] = [str(repo_a), str(repo_b)]
+        return result
+
+    monkeypatch.setattr(
+        rootprobes, "PROBERS", (dataclasses.replace(prober, read_unit=read_then_change),)
+    )
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    cache = events.read_git_capture_cache()
+    record = cache["probe_index"]["codex"]
+    record["units"].pop("day")
+    record["state"].update(
+        {
+            "unit_listing": [["a", [1]], ["day", [1]]],
+            "unit_remaining": ["day"],
+            "unit_after": "a",
+            "round_incomplete": True,
+        }
+    )
+    stamps["day"] = [1]
+    units["day"] = [str(repo_a)]
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    reads.clear()
+    resumed = _discover(_cfg("codex"), persist=True)
+    assert resumed.exceeded, "a record that changed since its read keeps discovery open"
+    assert reads == ["day"], "the closing round does not read it a second time"
+    following = _discover(_cfg("codex"), persist=True)
+    assert not following.exceeded and set(following.roots) == {repo_a, repo_b}
+
+
 @pytest.mark.parametrize("persist", [False, True])
 def test_recapture_discovers_on_its_own_budget(tmp_path, monkeypatch, persist):
     assert events.RECAPTURE_DISCOVERY_BUDGET_MS >= 30_000

@@ -48,22 +48,29 @@ here by hand, use the H3 form.
 - **Description:** Track 106A's measurements on the owner's Mac put a complete warm discovery pass at about 66 ms elapsed (probers 33-38 ms, the rest cache load and copy inside the deadline; pass totals up to 140 ms with the write). Autopush and `mm diag` keep 50 ms by the owner's decision. If warm autopush rows stay `partial`, each holds the cursor display and adds to `incomplete_streak`, so `mm status` can keep printing the recovery wording ("Finish repository discovery … `mm recapture Nd`") right after an attended push finished discovery. The README upgrade step ("run `mm push` until `mm diag` shows discovery `complete`") can then loop, because diag's fresh pass also runs at 50 ms.
 - **Hypothesis (untested):** time a warm `discover_git_roots` at 50 ms with and without persist. If it is partial, tell a budget-only partial over a complete index apart from unfinished discovery (a persisted-state check or a row marker), or stop counting it toward `incomplete_streak`.
 - **Revisit trigger:** Track 106A's post-merge row 1 shows `mm status` still reporting the cursor held, or `mm diag` reading `partial`, after an attended push recorded discovery `complete`.
-- **Effort:** ?
+- **Effort:** M
 - **Context:** native adversarial and Red Team review of Track 106A (branch mmm/60394b0f), 2026-11-03. Autopush staying at 50 ms is the owner's decision; this entry tracks its consequence, not a reversal.
 
 ### [review:files=src/mind_meld/cli.py|src/mind_meld/identity.py] mm refresh-identity persists discovery without the mm lock and reports a cut gather as refreshed
 - **Description:** `mm refresh-identity` persists discovery (up to 30 s since Track 106A; about 3 s measured cold, 0.1 s warm) without taking the mm lock. The discovery cache writer replaces `projects`, `probe_index`, both resume markers and `pending_refresh_since` from its start-of-call copy, so a push or autopush that persisted in that window is reverted. A `LockContended` from that write is not caught (it is a RuntimeError, outside `except OSError`). Separately, when the 5 s per-repository email gather is cut, the cache is not written but the command still prints `Refreshed identity cache` and exits 0.
 - **Hypothesis (untested):** take the mm lock as `recapture` does, with the usual lock message; have `refresh_identity_cache` report whether it persisted and word the outcome to match (O8).
 - **Revisit trigger:** the per-repository gather measures over 4 s on any Mac (Track 106A plan risk), or a refresh-identity run overlaps a push.
-- **Effort:** ?
+- **Effort:** S
 - **Context:** native adversarial and Codex adversarial review of Track 106A (branch mmm/60394b0f), 2026-11-03. On the owner's Mac the gather took 0.98 s over 27 roots and 1.73 s over 24, so criterion 4 holds there.
 
 ### [review:files=src/mind_meld/statusflow.py|src/mind_meld/identity.py|src/mind_meld/events.py] Prober errors read as unfinished discovery, and identity refreshes from partial passes
 - **Description:** `classify_discovery` maps both an exceeded budget and a prober exception to `partial`, so `mm status` says discovery "has not finished" and recommends `mm recapture Nd` for a persistent prober error (for example a PermissionError under `~/.codex/sessions`) that recapture repeats. `identity._identity_gather_incomplete` checks only `exceeded`, so a refresh persists without the erroring prober's repositories, contrary to `_identity_inputs_digest_for_push`'s docstring. The aggregator path (`gather_local_identities(allow_refresh=True)` with no supplied discovery, reaching `_gather_per_repo_emails` at the 100 ms default) drops `exceeded` entirely, so `mm retro-fleet` can persist a refresh built from a partial pass, against "Incomplete identity discovery never refreshes cache".
 - **Hypothesis (untested):** record exceeded and prober-error separately in `git_capture` and word each in status; treat prober errors and an exceeded internal discovery as an incomplete gather in identity.
 - **Revisit trigger:** `mm diag` shows a prober error while `mm status` shows the discovery wording, or `mm retro-fleet` misses a repository-local email once the index is warm (Track 106A's declined-scope trigger for the aggregator gather).
-- **Effort:** ?
+- **Effort:** M
 - **Context:** native adversarial and Red Team review of Track 106A (branch mmm/60394b0f), 2026-11-03. Pre-existing; not changed by Track 106A.
+
+### [review:files=src/mind_meld/events.py] A round resumed from a saved listing can read complete without seeing records added since
+- **Description:** `_probe_host_records` resumes a round from the `unit_listing` (and Cursor `listing_steps`) an earlier push saved. When that round finishes with no stale `round_incomplete`, discovery reads `complete` without re-listing, so a record added after the listing (a new Codex rollout naming a new repository) waits for the next round while the cursor advances. The new root then walks from that cursor and misses the commits in between unless `mm recapture` runs. Pre-existing (Track 102A design); Track 106A's closing round runs only when the first round ends incomplete.
+- **Hypothesis (untested):** also run the closing round (re-list, skip units already read at the same stamp) when the first round finished a listing saved by an earlier call.
+- **Revisit trigger:** a repository that discovery finds for the first time is missing commits between its first session and the push that found it.
+- **Effort:** S
+- **Context:** native adversarial delta review of Track 106A (branch mmm/60394b0f), 2026-11-03; probe reproduced it on the pre- and post-repair code.
 
 ## Drain records
 

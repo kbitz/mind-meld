@@ -1326,9 +1326,8 @@ def _probe_host_records(
         )
         return [Path(root) for root in dict.fromkeys(found)]
 
-    attempted_now: set[str] = set()
-    # Units whose attempt in this call left the round incomplete.
-    interrupted_now: set[str] = set()
+    # The listing stamp each unit was attempted at in this call.
+    attempted_now: dict[str, object] = {}
 
     def run_round(skip: frozenset[str]) -> tuple[bool, bool]:
         """One list, order, read and completion round: (complete, round_done)."""
@@ -1390,16 +1389,18 @@ def _probe_host_records(
                 continue
             if key in skip:
                 # Already attempted in this call, which counts for this round
-                # too: never read twice. Only an attempt this call interrupted
-                # keeps the round open; a clean read with nothing to cache
-                # (an immutable record naming no directory) does not.
+                # too: never read twice. Every interrupted read is a deadline
+                # cut and this round runs only before the deadline, so a clean
+                # read with nothing to cache (an immutable record naming no
+                # directory) closes the round; a record whose stamp changed
+                # since its read keeps it open for the next push.
                 remaining.remove(key)
-                if key in interrupted_now:
+                if attempted_now[key] != stamp:
                     state["round_incomplete"] = True
                 continue
             if _deadline_expired(deadline_monotonic):
                 break
-            attempted_now.add(key)
+            attempted_now[key] = stamp
             # One attempt per listed unit finishes a round even if some records
             # remain incomplete. The next round refreshes inventory before retries.
             remaining.remove(key)
@@ -1414,7 +1415,6 @@ def _probe_host_records(
                 cache.setdefault("_probe_validated", []).extend(recovered)
                 if retry_progress.get("classified", 0) < len(prior[1]):
                     state["round_incomplete"] = True
-                    interrupted_now.add(key)
                     continue
                 prior[1] = [root for root in prior[1] if unit is None or root not in unit[1]]
                 state["retry_classification"].pop(key, None)
@@ -1470,7 +1470,6 @@ def _probe_host_records(
                 progress.pop("classified", None)
             else:
                 state["round_incomplete"] = True
-                interrupted_now.add(key)
         complete = not remaining and not state.get("round_incomplete", False)
         if not remaining:
             for name in (
