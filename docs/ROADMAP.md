@@ -29,8 +29,8 @@ _tombstone: 27, 70, 71, 72, 73, 74, 86, 87, 88, 89, 90, 91, 94, 97, 99, 100, 101
 
 ### Phase 5: mm 2.0 on Syncthing
 
-**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, every consented host's usage read within the attended budget, Cursor account usage read when the owner opts in, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
-**Groups:** 107, 98, 92, 95, 93
+**End-state:** The owner's Macs and two Linux machines sync over one Syncthing folder that carries the 1.x store, with fast-forward pulls, propagated deletions, every consented host's usage read within the attended budget, Cursor account usage read when the owner opts in, a memory index that no longer resurrects deleted pointers, Syncthing state in status, a bootstrap script and a cutover runbook; the factory can hand over between Macs; docs/SPEC.md O1 to O4 are accepted on the owner's own observation after following the runbook, and released as 2.0.0.
+**Groups:** 107, 108, 98, 92, 95, 93
 
 #### Group 107: Cursor account usage
 
@@ -44,7 +44,7 @@ _4 tasks . ~470 LOC . high risk . 14 files_
 **Supports:** MVP-1, docs/SPEC.md O7.1 (Cursor's runs count under their model's family) and O7.3 (usage mm cannot read is named, never a silent zero); the 2.0.0 release line needs O7 (O7.4).
 **Done when:** the first task establishes, without printing, logging or copying the token (store kind, presence and key names only), which token store cursor-agent uses on macOS (this Mac, live) and on Linux (from cursor-agent's own code at the installed version, and live when a Linux machine is reachable), and records the response shape of the read-only endpoints in `tests/fixtures/host_sessions/cursor_account/CONTRACT.md`: a census of real responses on this Mac using key and column names and counts only (rows, models, date span, which counters, whether they are inclusive or disjoint, which per-request identifiers exist), with the cursor-agent version and date; then the Track builds the reader, and if that task finds no store mm can read or no per-request counters it stops and asks the owner what to build instead of ending with a write-up; the reader lives in `src/mind_meld/hosts/cursor_account.py` behind the adapter contract (`tests/test_host_adapter_contract.py`), leaving `host_usage.py`'s Cursor reader unchanged (core-and-extensions constraint); it is off until the owner opts in on that machine, like other host usage consent (`config.HOST_USAGE_ONLY_CONSENT`); it calls only read-only usage endpoints (`cursor.com`'s `api/auth/me`, `api/usage-summary`, `api/usage` and the dashboard usage-events CSV) and nothing that writes; the token is held in memory for the read and never stored, and a test pins that no token string reaches config, caches, events, logs, `mm diag` or fixtures; README says a macOS Keychain prompt may appear once; it runs only on attended pushes and `mm recapture`, with network timeouts inside the attended capture budget, and autopush and previews never call the network; account usage is whole-account, so each request is counted once across machines and against hook-recorded runs and Conductor store rows, keyed on the identifier the census finds (the PR states the rule and a test pins it); a missing key, changed column, refused login or HTTP error fails closed with one line naming what broke and the one fixing command (O8) in `mm status` and `mm diag`, publishes no partial total and leaves other readers and the push's exit code alone; `retro-fleet` counts the requests under their model's family; the ACP gap notice in `mm status` and `retro-fleet` (Track 103A) shows only while the reader is off or failing, with the opt-in as its fix, and the status tests assert that notice alongside a successful scan and alongside a reader blocker; the PR records a live run on this Mac (opt in, an attended push, `mm diag --json` showing the reader complete, `mm retro-fleet 7d` showing Cursor ACP use); `./bin/check --affected` passes.
 _touches: src/mind_meld/hosts/cursor_account.py (new), src/mind_meld/host_registry.py, src/mind_meld/config.py, src/mind_meld/events_tail.py, src/mind_meld/statusflow.py, src/mind_meld/skills/retro_fleet/aggregator.py, tests/test_cursor_account_usage.py (new), tests/test_host_adapter_contract.py, tests/test_module_boundaries.py, tests/test_diag.py, tests/test_retro_fleet_aggregator.py, tests/fixtures/host_sessions/cursor_account/ (new), docs/invariants/events-retro.md, README.md_
-_out: 98A_
+_out: 108A, 98A_
 _read-first: docs/invariants/README.md, docs/invariants/events-retro.md, tests/fixtures/host_sessions/cursor/CONTRACT.md_
 _session: fresh · effort: high · verify: ./bin/check --affected_
 
@@ -55,9 +55,31 @@ _Source: Karl, 2026-11-04, "yes", on the manager's recommendation that mm may re
 - **Fleet deduplication, retro-fleet counting and the gap notice** -- _src/mind_meld/skills/retro_fleet/aggregator.py, src/mind_meld/statusflow.py, tests/test_retro_fleet_aggregator.py, tests/test_diag.py, ~120 lines._ (M)
 - **Docs and the live run** -- _docs/invariants/events-retro.md, README.md, ~40 lines._ (S)
 
-#### Group 98: Bootstrap script
+#### Group 108: Memory index after a pull
 
 _Depends on: Group 107_
+
+**This group delivers:** A pull that line-merges a Claude memory index no longer brings back pointers to memory files the owner deleted, or near-duplicate pointers to one file.
+
+##### Track 108A: Drop dangling and duplicate MEMORY.md pointers after a line-union merge
+_2 tasks . ~220 LOC . medium risk . 5 files_
+**Outcome:** When the owner prunes a project's Claude memory on one machine and a pull line-merges that project's MEMORY.md with a peer's copy, the index keeps only lines that point at memory files still on disk, one line per file, so it stops re-growing pointers to deleted files.
+**Supports:** MVP-1, docs/SPEC.md O1.1 (deletions propagate, and `MEMORY.md` merges automatically) for the Claude Code project memory row of "What mm syncs and reports".
+**Done when:** after a pull that line-union merges a MEMORY.md, a line whose markdown link targets a relative `.md` file that does not exist in that memory directory once the pull's applies and deletions finish is dropped, and lines are kept at most one per linked file, preferring the local line; lines without a relative `.md` link are kept as today; the merge never deletes or resurrects memory files; `docs/invariants/conflicts.md`'s "Line-deletion limit" is updated to say what returns and what no longer can; tests cover a deleted file whose line returns from the peer, a duplicate pair for one file, a line with no link, and a link to a file the same pull adds; `./bin/check --affected` passes.
+_touches: src/mind_meld/merge.py, src/mind_meld/pullflow.py, tests/test_merge.py, tests/test_pullflow.py, docs/invariants/conflicts.md_
+_blocked-by: Track 107A_
+_out: 98A_
+_read-first: docs/invariants/README.md, docs/invariants/conflicts.md, docs/invariants/sync.md_
+_session: fresh · effort: medium · verify: ./bin/check --affected_
+
+_Source: Karl, 2026-11-04, "yes", on gstack-extend manager Denver 15's proposal, relayed at Karl's request. Evidence (manager, this Mac, 2026-11-04): Denver deleted 14 of 21 files in `~/.claude/projects/-Users-kb-Documents-Dev-Personal-gstack-extend/memory/` and cut MEMORY.md to 8 lines; at 12:40Z an `mm pull`, right after kb-mbp upgraded mm and pulled and pushed, rewrote MEMORY.md with the old 24-line index plus the new pointer line, and the 14 deleted files stayed deleted; Karl confirmed it was an mm pull. Re-checked at `3d1e624`: `merge.merge_lines` set-unions and sorts the lines, `merge._merge_strategy` sends every `MEMORY.md` to it, `pullflow._apply_merge` writes the union per file during apply, and `_run_deletions` runs later in `_pull_core`, so the dangling check has to wait for the deletions; conflicts.md's "Line-deletion limit" says the deleted line returns on the both-changed row and the no-base fallback. Only MEMORY.md's own lines change; the files are untouched._
+
+- **Tidy the merged index after applies and deletions** -- _src/mind_meld/merge.py, src/mind_meld/pullflow.py, tests/test_merge.py, tests/test_pullflow.py, ~190 lines._ (M)
+- **Line-deletion limit** -- _docs/invariants/conflicts.md, ~30 lines._ (S)
+
+#### Group 98: Bootstrap script
+
+_Depends on: Group 107, Group 108_
 
 **This group delivers:** One script readies a fresh Mac or Arch-based machine with Python, pipx, mm and the Syncthing package.
 
@@ -67,7 +89,7 @@ _2 tasks . ~250 LOC . medium risk . 3 files_
 **Supports:** MVP-1, docs/SPEC.md Constraints (the bootstrap script) and the 2.0.0 release line; Track 93A's runbook uses it.
 **Done when:** `bin/bootstrap` on macOS stops with Homebrew's install instructions and a non-zero exit when `brew` is missing, and otherwise installs what is missing through Homebrew; on Arch-based Linux it installs what is missing with `pacman -S --needed`; any other system stops and names what is supported; it confirms Python 3.11 or newer and Syncthing 2.1 or newer, installs mm through pipx from `@latest` unless pipx already has it, and stops with the fix when `mm` on `PATH` is not pipx's copy; a rerun changes nothing and says so; it pairs no machine, shares no folder and writes no Syncthing configuration; success ends with those next steps, and a failure's last line says what broke and the one command that fixes it (O8); tests run it with fake `brew`, `pacman`, `pipx`, `python3`, `syncthing` and `mm` on `PATH` under a `tmp_path` home and cover macOS without Homebrew, macOS, Arch, an unsupported system, a rerun, a too-old Python or Syncthing and a shadowed `mm`; README's install section gives the one command that fetches and runs the script from the `latest` tag and says pairing and sharing stay manual; `./bin/check --affected` passes.
 _touches: bin/bootstrap (new), tests/test_bootstrap.py (new), README.md_
-_blocked-by: Track 97A, Track 107A_
+_blocked-by: Track 97A, Track 107A, Track 108A_
 _out: 92A, 93A_
 _read-first: docs/SPEC.md, README.md_
 _session: fresh · effort: medium · verify: ./bin/check --affected_
@@ -175,7 +197,8 @@ Adjacency from gstack-extend's roadmap-pack output on the candidate:
 
 ```
 - Group 107 ← {}
-- Group 98 ← {107}
+- Group 108 ← {107}
+- Group 98 ← {107, 108}
 - Group 92 ← {98}
 - Group 95 ← {92}
 - Group 93 ← {98, 92, 95}
@@ -187,6 +210,8 @@ Track detail per group:
 ```
 Group 107: Cursor account usage
   +-- Track 107A .......... ~L . 4 tasks
+Group 108: Memory index after a pull
+  +-- Track 108A .......... ~M . 2 tasks
 Group 98: Bootstrap script
   +-- Track 98A ........... ~M . 2 tasks
 Group 92: Syncthing status
@@ -199,9 +224,9 @@ Group 96: Cross-model memory qualification
   +-- Track 96A ........... ~M . 1 task
 ```
 
-**Total: 6 groups . 6 tracks remaining.**
+**Total: 7 groups . 7 tracks remaining.**
 
-On 2026-11-04 the owner approved the Cursor account usage reader (Track 107A) and put it first: Track 103A found that only the account session gives per-request Cursor usage, and the owner wants that usage read, not another investigation. Tracks 99A and 100A (the Muse reader move and fix) were killed the same day: the refusal that admitted them has not recurred since the 2026-11-02 budget fix (`mm diag --json` on this Mac at 1.12.10: `muse.last_reason` null, 1,086 of 1,097 files cached), and they reopen if Muse's `last_reason` reads `unsupported` again. Track 98A's `_blocked-by:` moves from the killed Track 100A to Track 107A to hold the owner's order; both also edit README. Tracks 98A, 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 98A lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A and 98A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
+On 2026-11-04 the owner approved the Cursor account usage reader (Track 107A) and put it first: Track 103A found that only the account session gives per-request Cursor usage, and the owner wants that usage read, not another investigation. The same day the owner approved Track 108A on gstack-extend's manager's evidence that an `mm pull` line-merged a pruned MEMORY.md back to its old index, and put it right after Track 107A and ahead of Track 98A; 108A shares no file with 107A, so `_blocked-by: Track 107A` on 108A and `Track 108A` on 98A hold that order. Tracks 99A and 100A (the Muse reader move and fix) were killed the same day: the refusal that admitted them has not recurred since the 2026-11-02 budget fix (`mm diag --json` on this Mac at 1.12.10: `muse.last_reason` null, 1,086 of 1,097 files cached), and they reopen if Muse's `last_reason` reads `unsupported` again. Track 98A's `_blocked-by:` moves from the killed Track 100A to Track 107A to hold the owner's order; both also edit README. Tracks 98A, 92A, 95A and 93A all edit `README.md` and run in that order: 95A lands before the cutover runbook (93A) so the runbook can cover factory handover, and 98A lands before it so the runbook can use the script. Track 77A stays on Track 92A; the shipped Tracks 87A, 89A, 90A, 90B, 91A, 94A and 97A stay on the cards that named them. Track IDs 92A to 96A and 98A keep the meaning they had before this regeneration, because `docs/invariants/sync.md` and other documents cite them, which is why Group numbers do not follow execution order.
 
 The 2.0.0 cut is not a Track. It is the owner's acceptance of docs/SPEC.md O1 to O4 on their own observation on one Mac and both Linux machines after following Group 93's runbook, with O6 to O8 holding, the bootstrap script shipped and a `retro-fleet` run showing complete capture from every active machine (O7.4), recorded in PROGRESS.md `## Acceptance`. Problems are fixed as they appear. Cross-model memory (O9) is qualified after the cutover by Group 96; its implementation waits in Future until that qualification passes.
 
