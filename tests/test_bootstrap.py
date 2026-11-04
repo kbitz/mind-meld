@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import stat
@@ -127,6 +128,9 @@ case "${1:-}" in
     exit 0
     ;;
   environment)
+    if [ "${MM_TEST_PIPX_ENV_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
     case "${3:-}" in
       PIPX_BIN_DIR) printf '%s\\n' "$MM_TEST_PIPX_BIN" ;;
       PIPX_LOCAL_VENVS) printf '%s\\n' "$MM_TEST_PIPX_VENVS" ;;
@@ -652,6 +656,50 @@ class TestBootstrapUnsupportedAndErrors:
         assert second.returncode == 0, second.stdout
         assert not [row for row in harness.calls() if row[0] == "pipx" and row[1] == "install"]
         assert "bootstrap: nothing to change:" in second.stdout
+
+    def test_missing_pipx_link_stops_with_force_reinstall(self, harness: BootstrapHarness) -> None:
+        # pipx lists mind-meld but its ~/.local/bin/mm link is gone (for
+        # example the user deleted a foreign copy by hand): only a forced
+        # reinstall relinks it, not `pipx ensurepath`.
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+        (harness.pipxbin / "mm").unlink()
+
+        second = harness.run()
+        assert second.returncode == 1
+        last = _last_line(second.stdout)
+        assert str(harness.pipxbin / "mm") in last
+        assert last.endswith(f"Run: pipx install --force {upgrade.INSTALL_SPEC}")
+
+    @pytest.mark.parametrize(
+        "uname_val,expected_fix",
+        [("Darwin", "brew reinstall pipx"), ("Linux", "sudo pacman -S python-pipx")],
+    )
+    def test_unreadable_pipx_environment_stops_with_pipx_reinstall(
+        self, harness: BootstrapHarness, uname_val: str, expected_fix: str
+    ) -> None:
+        harness.install_uname(uname_val)
+        harness.write_os_release("ID=arch\n")
+        harness.install_brew()
+        harness.install_pacman()
+        for directory in (harness.brewbin, harness.sysbin):
+            harness.install_python(directory, "3.13.2")
+            harness.install_pipx(directory)
+            harness.install_syncthing(directory, "2.1.7")
+        harness.install_git(harness.sysbin)
+
+        proc = harness.run(extra_env={"MM_TEST_PIPX_ENV_FAIL": "1"})
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        if uname_val == "Linux" and os.geteuid() == 0:
+            expected_fix = expected_fix.removeprefix("sudo ")  # root needs no sudo
+        assert last.endswith(f"Run: {expected_fix}")
 
 
 class TestBootstrapDownload:

@@ -141,6 +141,7 @@ main() {
     fi
     py_fix='eval "$(brew shellenv)"'
     st_fix="brew upgrade syncthing"
+    pipx_fix="brew reinstall pipx"
     start_syncthing_cmd="brew services start syncthing"
   else
     if [ "$(id -u)" = "0" ]; then
@@ -185,6 +186,7 @@ main() {
     fi
     py_fix="${sudo_prefix}pacman -Syu"
     st_fix="${sudo_prefix}pacman -Syu"
+    pipx_fix="${sudo_prefix}pacman -S python-pipx"
     start_syncthing_cmd="systemctl --user enable --now syncthing.service"
   fi
 
@@ -227,18 +229,23 @@ main() {
   bin=$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)
   venvs=$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)
   if [ -z "$bin" ] || [ -z "$venvs" ]; then
-    die "could not determine PIPX_BIN_DIR and PIPX_LOCAL_VENVS" "pipx ensurepath"
+    die "pipx could not report PIPX_BIN_DIR and PIPX_LOCAL_VENVS" "$pipx_fix"
+  fi
+  # pipx's copy is its mind-meld venv's entry point, linked at $bin/mm. pipx
+  # leaves a file another installer already put there in place, and never
+  # relinks a missing link on a plain install, so check the link itself first.
+  pipx_mm="$venvs/mind-meld/bin/mm"
+  if ! [ "$bin/mm" -ef "$pipx_mm" ] 2>/dev/null; then
+    if [ -e "$bin/mm" ] || [ -L "$bin/mm" ]; then
+      die "$bin/mm is not pipx's mind-meld copy; another install put it there" "pipx install --force $MM_INSTALL_SPEC"
+    fi
+    die "pipx's link $bin/mm is missing" "pipx install --force $MM_INSTALL_SPEC"
   fi
   found=$(command -v mm 2>/dev/null || true)
   if [ -z "$found" ]; then
     die "mm is installed in $bin, which is not on PATH; open a new terminal and rerun this script afterwards" "pipx ensurepath"
   fi
-  # pipx's copy is its mind-meld venv's entry point. pipx leaves a file another
-  # installer already put at $bin/mm in place, so the path alone proves nothing.
-  if ! [ "$found" -ef "$venvs/mind-meld/bin/mm" ] 2>/dev/null; then
-    if [ "$found" = "$bin/mm" ] || [ "$found" -ef "$bin/mm" ] 2>/dev/null; then
-      die "$bin/mm is not pipx's mind-meld copy; another install put it there" "pipx install --force $MM_INSTALL_SPEC"
-    fi
+  if ! [ "$found" -ef "$pipx_mm" ] 2>/dev/null; then
     die "$found shadows pipx's $bin/mm; open a new terminal and rerun this script afterwards" "pipx ensurepath --prepend --force"
   fi
 
