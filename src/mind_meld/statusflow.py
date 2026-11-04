@@ -857,6 +857,10 @@ def status(
                 )
             elif hook_state not in (None, "installed"):
                 narrative += f"; the completion hook file is {safe_str(hook_state)} (see mm diag)"
+            narrative += (
+                "; Cursor runs through ACP front-ends such as Paseo are not counted "
+                "(they report no usage)"
+            )
             unread = cursor_diag.get("unread_sqlite_stores")
             if isinstance(unread, int) and unread > 0:
                 narrative += (

@@ -6432,6 +6432,27 @@ class TestAgentCoverageNotes:
         )
         assert any("predate this window" in n for n in notes)
 
+    def test_cursor_acp_gap_note_needs_a_snapshot_that_consulted_cursor(self):
+        with_cursor = self._data([_snap("dev-a", self.UNTIL, consulted=("codex", "cursor"))])
+        without = self._data([_snap("dev-a", self.UNTIL, consulted=("codex",))])
+        gap = aggregator.CURSOR_ACP_GAP_NOTE
+        assert aggregator._cursor_acp_gap_notes(with_cursor) == [gap]
+        assert aggregator._cursor_acp_gap_notes(without) == []
+        no_inventory = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        assert aggregator._cursor_acp_gap_notes(no_inventory) == []
+        flagged = [
+            e["detail"]
+            for e in _health(aggregator.format_retro(with_cursor))
+            if e["code"] == "agent_coverage"
+        ]
+        assert aggregator.CURSOR_ACP_GAP_NOTE in flagged
+        assert "Paseo" in aggregator.CURSOR_ACP_GAP_NOTE
+        assert not any(
+            aggregator.CURSOR_ACP_GAP_NOTE == e["detail"]
+            for e in _health(aggregator.format_retro(without))
+            if e["code"] == "agent_coverage"
+        )
+
     def test_missing_snapshot_is_unknown_not_zero(self):
         notes = aggregator._agent_coverage_notes(
             self._data(
