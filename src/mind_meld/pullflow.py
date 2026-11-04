@@ -1056,9 +1056,11 @@ def _tidy_line_indexes(
     Runs once after incoming applies and propagated deletions finish. A file
     that is missing, is not a regular file, or no longer holds the bytes the
     merge left is skipped without mutation. A linked target this pull left
-    ``waiting`` or ``failed`` in ``pending`` is treated as present.
+    ``waiting`` or ``failed`` in ``pending`` is treated as present using the
+    destination volume's case rules.
     """
     pending_set = set(pending)
+    pending_folded = {_folded(str(path)) for path in pending_set}
     for path in sorted(indexes):
         expected = indexes[path]
         try:
@@ -1075,10 +1077,15 @@ def _tidy_line_indexes(
             if current != expected:
                 continue
             memory_dir = path.parent
+            case_insensitive = bool(pending_set) and _detect_case_insensitive_fs(
+                memory_dir.resolve()
+            )
 
             def present(target: str, _dir: Path = memory_dir) -> bool:
                 candidate = _dir / target
-                if candidate in pending_set:
+                if candidate in pending_set or (
+                    case_insensitive and _folded(str(candidate)) in pending_folded
+                ):
                     return True
                 try:
                     os.lstat(candidate)

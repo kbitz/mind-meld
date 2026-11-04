@@ -3188,6 +3188,46 @@ def test_a_line_for_a_file_this_pull_left_waiting_or_failed_is_kept(
     )
 
 
+@pytest.mark.parametrize("pending_kind", ("waiting", "failed"))
+@pytest.mark.parametrize("case_insensitive", (True, False))
+def test_pending_memory_link_respects_filesystem_case(
+    fleet, syncthing, monkeypatch, pending_kind, case_insensitive
+):
+    base_index = b"- [Shared](shared.md)\n"
+    local_index = b"- [Local](local.md)\n- [Shared](shared.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Note](foo.md)\n- [Shared](shared.md)\n"
+    peer, _ = _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/Foo.md": b"arriving later\n",
+            "memory/shared.md": b"shared\n",
+        },
+    )
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _put_local(fleet, "memory/shared.md", b"shared\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/shared.md", b"shared\n"))
+    monkeypatch.setattr(pullflow, "_detect_case_insensitive_fs", lambda path: case_insensitive)
+    if pending_kind == "waiting":
+        syncthing.hide(_blob(peer, "memory/Foo.md"))
+    else:
+        fleet.backend.put(_blob(peer, "memory/Foo.md"), b"corrupt")
+
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+
+    assert not (fleet.local / "memory/Foo.md").exists()
+    assert not (fleet.local / "memory/foo.md").exists()
+    assert result.total_merged == 1
+    assert result.total_waiting == (pending_kind == "waiting")
+    assert result.total_failed == (pending_kind == "failed")
+    expected = b"- [Local](local.md)\n"
+    if case_insensitive:
+        expected += b"- [Note](foo.md)\n"
+    expected += b"- [Shared](shared.md)\n"
+    assert index_path.read_bytes() == expected
+
+
 def test_an_index_changed_after_its_merge_is_left_alone(fleet, monkeypatch):
     base_index = b"- [Keep](keep.md)\n"
     local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
@@ -3214,6 +3254,90 @@ def test_an_index_changed_after_its_merge_is_left_alone(fleet, monkeypatch):
     assert index_path.read_bytes() == concurrent_bytes
 
 
+@pytest.mark.parametrize("index_kind", ("missing", "directory", "symlink"))
+def test_tidy_preserves_missing_or_nonregular_index(tmp_path, index_kind):
+    merged = b"- [Gone](gone.md)\n- plain memory note\n"
+    index_path = tmp_path / "MEMORY.md"
+    linked_file = tmp_path / "other-index.md"
+    linked_file.write_bytes(merged)
+    if index_kind == "directory":
+        index_path.mkdir()
+    elif index_kind == "symlink":
+        index_path.symlink_to(linked_file)
+
+    pullflow._tidy_line_indexes({index_path: merged})
+
+    if index_kind == "missing":
+        assert not index_path.exists()
+    elif index_kind == "directory":
+        assert index_path.is_dir()
+        assert list(index_path.iterdir()) == []
+    else:
+        assert index_path.is_symlink()
+        assert index_path.readlink() == linked_file
+    assert linked_file.read_bytes() == merged
+
+
+def test_tidy_preserves_index_replaced_during_target_presence_check(tmp_path, monkeypatch):
+    merged = b"- [Gone](gone.md)\n- plain memory note\n"
+    index_path = tmp_path / "MEMORY.md"
+    index_path.write_bytes(merged)
+    replacement = tmp_path / "replacement.md"
+    replacement.write_bytes(merged)
+    real_lstat = os.lstat
+    replaced = False
+
+    def replace_during_presence(path, *args, **kwargs):
+        nonlocal replaced
+        if Path(path) == tmp_path / "gone.md":
+            replacement.replace(index_path)
+            replaced = True
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(pullflow.os, "lstat", replace_during_presence)
+
+    pullflow._tidy_line_indexes({index_path: merged})
+
+    assert replaced
+    assert not replacement.exists()
+    assert index_path.read_bytes() == merged
+
+
+@pytest.mark.parametrize("presence", ("dangling-symlink", "permission-error", "value-error"))
+def test_tidy_keeps_link_when_target_presence_is_uncertain(tmp_path, monkeypatch, presence):
+    merged = b"- [Gone](gone.md)\n- [Retained](retained.md)\n- plain memory note\n"
+    index_path = tmp_path / "MEMORY.md"
+    index_path.write_bytes(merged)
+    retained = tmp_path / "retained.md"
+    real_lstat = os.lstat
+    probes = []
+    if presence == "dangling-symlink":
+        retained.symlink_to("not-here.md")
+
+    def uncertain_presence(path, *args, **kwargs):
+        if Path(path) == retained:
+            probes.append(path)
+            if presence == "permission-error":
+                raise PermissionError("injected unreadable target")
+            if presence == "value-error":
+                raise ValueError("injected invalid target")
+        return real_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pullflow.os, "lstat", uncertain_presence)
+        pullflow._tidy_line_indexes({index_path: merged})
+
+    assert probes == [retained]
+    assert index_path.read_bytes() == b"- [Retained](retained.md)\n- plain memory note\n"
+    assert not (tmp_path / "gone.md").exists()
+    assert not (tmp_path / "not-here.md").exists()
+    if presence == "dangling-symlink":
+        assert retained.is_symlink()
+        assert retained.readlink() == Path("not-here.md")
+    else:
+        assert not retained.exists()
+
+
 def test_a_failed_tidy_keeps_the_merged_index_and_prints_one_notice(fleet, monkeypatch):
     base_index = b"- [Keep](keep.md)\n"
     local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
@@ -3226,7 +3350,7 @@ def test_a_failed_tidy_keeps_the_merged_index_and_prints_one_notice(fleet, monke
 
     real_write = pullflow.fsutil.atomic_write_bytes
 
-    def fail_tidy_write(path, data, *, mode=0o600, fsync=False):
+    def fail_tidy_write(path, data, *, mode=None, fsync=False):
         if Path(path).name == "MEMORY.md" and fsync:
             raise pullflow.StorageError("injected tidy disk full")
         return real_write(path, data, mode=mode, fsync=fsync)
