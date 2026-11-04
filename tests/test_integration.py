@@ -289,11 +289,13 @@ class TestPushPullRoundTrip:
         # sidecar; MEMORY.md is an index, so it line-unions like Claude's.
         self._activate(monkeypatch, configs["dev-a"])
         (personal_a / "role.md").write_text("Principal engineer\n")
+        (personal_a / "team.md").write_text("Platform\n")
         (personal_a / "MEMORY.md").write_text("- [Role](role.md)\n- [Team](team.md)\n")
         assert runner.invoke(app, ["push"]).exit_code == 0
         self._activate(monkeypatch, configs["dev-b"])
         role_b = personal_b / "role.md"
         role_b.write_text("Staff engineer\n")
+        (personal_b / "goals.md").write_text("Ship 2.0\n")
         (personal_b / "MEMORY.md").write_text("- [Role](role.md)\n- [Goals](goals.md)\n")
         old = time.time() - 3600
         for path in (role_b, personal_b / "MEMORY.md"):

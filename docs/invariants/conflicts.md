@@ -3,14 +3,14 @@
 Read BEFORE editing any of these:
 
 - `src/mind_meld/pullflow.py` — `_apply_conflict` / `_apply_incoming_file` / `_prompt_conflict_choice` / `_check_fleet_version_or_refuse` / `conflict_filename`
-- `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` (see "The pull rule" below)
+- `src/mind_meld/pullflow.py` — `_apply_fast_forward` / `_ledger_verdict` / `_classify_with_ledger` / `_ApplyReporter` / `_tidy_line_indexes` (see "The pull rule" below)
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
 - `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
 - `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
-- `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge` / `merge_jsonl` / `_extract_ts`
+- `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge` / `is_line_index` / `index_link` / `merge_lines` / `drop_missing_links` / `merge_jsonl` / `_extract_ts`
 - `src/mind_meld/retention.py` — `_gc_old_conflict_files` / `_is_live_conflict`
 - `src/mind_meld/devices.py` — `lookup_device_by_short_id` / `generate_unique_short_device_id`
 
@@ -101,9 +101,22 @@ database, a file never synced) falls to row 7. The future-clamp in
 
 **Line-deletion limit.** A line deleted on one machine stays deleted on the others
 when they did not change that file (rows 4 and 6 overwrite, no union). When both
-sides changed the file, the union has no base bytes to tell a deleted line from an
-added one, so the deleted line returns. Nothing is lost; delete it again. The base
-is a hash, not the bytes, so this is not fixable here.
+sides changed the file (or on a row-7 no-base union), the union has no base bytes
+to tell a deleted line from an added one. What still returns: a deleted line with no
+relative `.md` link (including every `.jsonl` line), a deleted `MEMORY.md` line whose
+linked file still exists here or was left `waiting` or `failed` by this pull, and the
+local wording when the two sides word one file's line differently (`merge_lines` keeps
+the lexicographically first of the local side's distinct lines for that file, or the
+smallest remote line when local has none). What no longer returns in `MEMORY.md`: a
+line whose linked file is missing here once the pull's applies and deletions finish
+(deleted here, deleted by this pull following a peer, or never present, and not left
+`waiting` or `failed` by this pull; `_tidy_line_indexes` / `drop_missing_links`), and
+a second line for the same linked file. Limits: presence means this machine's disk
+(plus files this pull left `waiting` or `failed`), so a file that a later edit on
+another machine revives comes back without its line (re-add it); the pull changes only
+`MEMORY.md` bytes and never deletes or resurrects another file; a dry run never
+tidies, and an abort or interruption skips the tidy; an index that is missing, is not
+a regular file, or changed since its merge is left as it is.
 
 **Base and ancestry after each outcome** (`_ApplyReporter.record`, in memory at
 once so a later peer in the same pull sees them; settlement commits at pull end,

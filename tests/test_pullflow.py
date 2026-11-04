@@ -3012,3 +3012,259 @@ def test_aliased_deletion_stamp_survives_an_incoming_sidecar_flush_failure(fleet
         )
         == {}
     )
+
+
+# ── Track 108A: MEMORY.md index dedup and post-pull dangling-link tidy ──
+
+
+def test_a_line_for_a_file_deleted_here_does_not_return_from_the_peer(fleet, monkeypatch):
+    base_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n- [Peer](peer.md)\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/keep.md": b"keep\n",
+            "memory/peer.md": b"peer\n",
+        },
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    result, _, (_, err) = _run(fleet, monkeypatch, "attended", verbose=True)
+
+    assert result.total_merged == 1
+    assert err == ""
+    assert not (fleet.local / "memory/gone.md").exists()
+    assert sorted(p.name for p in (fleet.local / "memory").iterdir()) == [
+        "MEMORY.md",
+        "keep.md",
+        "local.md",
+        "peer.md",
+    ]
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == (
+        b"- [Keep](keep.md)\n- [Local](local.md)\n- [Peer](peer.md)\n"
+    )
+
+
+def test_a_line_for_a_file_this_pull_deletes_is_dropped_after_the_deletion(fleet, monkeypatch):
+    gone_bytes = b"to be deleted\n"
+    base_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    local_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Keep](keep.md)\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/keep.md": b"keep\n",
+        },
+        tombstones={"notes:memory/gone.md": _tombstone(gone_bytes)},
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/gone.md", gone_bytes, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(
+        ("memory/MEMORY.md", base_index),
+        ("memory/gone.md", gone_bytes),
+        ("memory/keep.md", b"keep\n"),
+    )
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_deleted == 1
+    assert result.total_merged == 0
+    assert _copies() == {"notes/memory/gone.md": gone_bytes}
+    assert not (fleet.local / "memory/gone.md").exists()
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == (
+        b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    )
+
+
+def test_two_lines_for_one_file_keep_the_local_one(fleet, monkeypatch):
+    base_index = b"- [Base](x.md) -- base\n"
+    local_index = b"- [Zebra](x.md) -- local wording\n"
+    peer_index = b"- [Alpha](x.md) -- peer wording\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/x.md": b"content\n",
+        },
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/x.md", b"content\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/x.md", b"content\n"))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_merged == 0
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == local_index
+
+
+def test_a_line_with_no_link_is_kept(fleet, monkeypatch):
+    base_index = b"# Memory\n"
+    local_index = b"# Memory\n- plain local bullet\n- [Local web](https://example.com/a.md)\n"
+    peer_index = b"# Memory\n- plain peer bullet\n- [Peer web](https://example.com/b.md)\n"
+    _seed(fleet, {"memory/MEMORY.md": peer_index})
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_merged == 1
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == (
+        b"# Memory\n"
+        b"- [Local web](https://example.com/a.md)\n"
+        b"- [Peer web](https://example.com/b.md)\n"
+        b"- plain local bullet\n"
+        b"- plain peer bullet\n"
+    )
+
+
+def test_a_link_to_a_file_the_same_pull_adds_is_kept(fleet, monkeypatch):
+    base_index = b"- [Local](local.md)\n"
+    local_index = b"- [Local](local.md)\n- [Extra](extra.md)\n"
+    peer_index = b"- [Added](added.md)\n- [Local](local.md)\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/added.md": b"added by peer\n",
+            "memory/local.md": b"local\n",
+        },
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _put_local(fleet, "memory/extra.md", b"extra\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/local.md", b"local\n"))
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_written == 1
+    assert result.total_merged == 1
+    assert (fleet.local / "memory/added.md").read_bytes() == b"added by peer\n"
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == (
+        b"- [Added](added.md)\n- [Extra](extra.md)\n- [Local](local.md)\n"
+    )
+
+
+@pytest.mark.parametrize("pending_kind", ("waiting", "failed"))
+def test_a_line_for_a_file_this_pull_left_waiting_or_failed_is_kept(
+    fleet, syncthing, monkeypatch, pending_kind
+):
+    base_index = b"- [Shared](shared.md)\n"
+    local_index = b"- [Local](local.md)\n- [Shared](shared.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Pending](pending.md)\n- [Shared](shared.md)\n"
+    peer, _ = _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/pending.md": b"arriving later\n",
+            "memory/shared.md": b"shared\n",
+        },
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _put_local(fleet, "memory/shared.md", b"shared\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/shared.md", b"shared\n"))
+    if pending_kind == "waiting":
+        syncthing.hide(_blob(peer, "memory/pending.md"))
+    else:
+        fleet.backend.put(_blob(peer, "memory/pending.md"), b"corrupt")
+
+    result, _, _ = _run(fleet, monkeypatch, "quiet")
+
+    assert not (fleet.local / "memory/pending.md").exists()
+    if pending_kind == "waiting":
+        assert result.total_waiting == 1 and result.total_failed == 0
+    else:
+        assert result.total_failed == 1 and result.total_waiting == 0
+    assert (fleet.local / "memory/MEMORY.md").read_bytes() == (
+        b"- [Local](local.md)\n- [Pending](pending.md)\n- [Shared](shared.md)\n"
+    )
+
+
+def test_an_index_changed_after_its_merge_is_left_alone(fleet, monkeypatch):
+    base_index = b"- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    _seed(fleet, {"memory/MEMORY.md": peer_index, "memory/keep.md": b"keep\n"})
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    real_candidates = pullflow._deletion_candidates
+    concurrent_bytes = b"- [Concurrent](gone.md) -- written mid-pull\n"
+
+    def rewrite_on_real_pass(*args, **kwargs):
+        if "blocked" in kwargs:
+            index_path.write_bytes(concurrent_bytes)
+        return real_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(pullflow, "_deletion_candidates", rewrite_on_real_pass)
+
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_merged == 1
+    assert index_path.read_bytes() == concurrent_bytes
+
+
+def test_a_failed_tidy_keeps_the_merged_index_and_prints_one_notice(fleet, monkeypatch):
+    base_index = b"- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    _seed(fleet, {"memory/MEMORY.md": peer_index, "memory/keep.md": b"keep\n"})
+    index_path = _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+
+    real_write = pullflow.fsutil.atomic_write_bytes
+
+    def fail_tidy_write(path, data, *, mode=0o600, fsync=False):
+        if Path(path).name == "MEMORY.md" and fsync:
+            raise pullflow.StorageError("injected tidy disk full")
+        return real_write(path, data, mode=mode, fsync=fsync)
+
+    monkeypatch.setattr(pullflow.fsutil, "atomic_write_bytes", fail_tidy_write)
+
+    result, _, (_, err) = _run(fleet, monkeypatch, "attended")
+
+    assert result.total_merged == 1
+    assert result.total_failed == 0
+    assert index_path.read_bytes() == (
+        b"- [Gone](gone.md)\n- [Keep](keep.md)\n- [Local](local.md)\n"
+    )
+    notice_lines = [line for line in err.splitlines() if line.startswith("mm: notice:")]
+    assert len(notice_lines) == 1
+    assert "index tidy failed (injected tidy disk full)" in notice_lines[0]
+    assert "lines for missing memory files may remain." in notice_lines[0]
+
+
+def test_a_dry_run_never_tidies_an_index(fleet, monkeypatch):
+    base_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n"
+    local_index = b"- [Keep](keep.md)\n- [Local](local.md)\n"
+    peer_index = b"- [Gone](gone.md)\n- [Keep](keep.md)\n- [Peer](peer.md)\n"
+    _seed(
+        fleet,
+        {
+            "memory/MEMORY.md": peer_index,
+            "memory/keep.md": b"keep\n",
+            "memory/peer.md": b"peer\n",
+        },
+    )
+    _put_local(fleet, "memory/MEMORY.md", local_index, 1_600_000_000)
+    _put_local(fleet, "memory/keep.md", b"keep\n", 1_600_000_000)
+    _put_local(fleet, "memory/local.md", b"local\n", 1_600_000_000)
+    _record(("memory/MEMORY.md", base_index), ("memory/keep.md", b"keep\n"))
+    before = _snapshot(fleet.local)
+
+    result, _, _ = _run(fleet, monkeypatch, "attended", dry_run=True)
+
+    assert result.total_applied == 0
+    assert _snapshot(fleet.local) == before
