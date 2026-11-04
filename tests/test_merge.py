@@ -724,8 +724,50 @@ class TestIndexLink:
         line = "- [Ext](https://x/a.md) see [First](./first.md#top) and [Second](second.md)"
         assert index_link(line) == "first.md"
 
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('[Web](https://x/a(b.md).md "see [Fake](gone.md)") [Live](live.md)', "live.md"),
+            ('[Live](live.md "see [Fake](gone.md)") [Other](other.md)', "live.md"),
+            ("[Broken](outer([Fake](gone.md)", None),
+            ("[Broken](<outer [Fake](gone.md)", None),
+            ('[Broken](outer.md "[Fake](gone.md)', None),
+        ],
+    )
+    def test_nested_syntax_never_becomes_an_independent_target(self, line, expected):
+        # Regression repair for Greptile's Track 108A parser finding.
+        # Value: protects=only complete independent links qualify, in left-to-right order;
+        # fails_when=inner title or malformed destination syntax is treated as a file pointer;
+        # why_new=the original first-link test contains no nested or unterminated syntax;
+        # seam=none; no_claim=full Markdown parsing (literal index-line contract only).
+        assert index_link(line) == expected
+        data = (line + "\n").encode()
+        assert drop_missing_links(data, lambda target: target == "live.md") == data
+
 
 class TestDropMissingLinks:
+    @pytest.mark.parametrize(
+        ("destination", "target"),
+        [
+            ("topic(old.md).md", "topic(old.md).md"),
+            ("topic(old(v1.md)).md", "topic(old(v1.md)).md"),
+            ('topic(old.md).md#part "title ) here"', "topic(old.md).md"),
+            ('<topic(old.md).md> "title ( here"', "topic(old.md).md"),
+        ],
+    )
+    def test_parenthesized_target_survives_merge_and_tidy(self, tmp_path, destination, target):
+        # Regression repair for Greptile's Track 108A parser finding.
+        # Value: protects=live parenthesized targets retain local wording through merge and tidy;
+        # fails_when=the destination is truncated at an inner closing parenthesis;
+        # why_new=existing merge and tidy cases use destinations without parentheses;
+        # seam=none; no_claim=full Markdown compliance or fleet transport (real temporary files).
+        (tmp_path / target).write_bytes(b"memory content\n")
+        local = f"- [Local]({destination})\n".encode()
+        remote = f"- [Remote]({destination})\n".encode()
+        merged = merge_lines(local, remote)
+        assert merged == local
+        assert drop_missing_links(merged, lambda name: (tmp_path / name).is_file()) == local
+
     def test_drops_absent_keeps_present_and_no_link(self):
         data = (
             b"# Memory\n"

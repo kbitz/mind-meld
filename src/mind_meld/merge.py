@@ -29,7 +29,7 @@ import difflib
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 
 # Merge dispatch (single source of truth for "is this file mergeable?"):
@@ -127,7 +127,41 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     return _join_lines(result_lines)
 
 
-_INDEX_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_INDEX_LINK_RE = re.compile(r"\[[^\]]*\]\(")
+
+
+def _index_link_bodies(line: str) -> Iterator[str]:
+    """Read whole destinations, never treating their inner syntax as another link."""
+    offset = 0
+    while match := _INDEX_LINK_RE.search(line, offset):
+        start = match.end()
+        depth = 1
+        angle = False
+        quote = ""
+        for pos in range(start, len(line)):
+            char = line[pos]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif angle:
+                if char == ">":
+                    angle = False
+            elif char == "<" and not line[start:pos].strip():
+                angle = True
+            elif char in ('"', "'") and pos > start and line[pos - 1].isspace():
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    yield line[start:pos]
+                    offset = pos + 1
+                    break
+        else:
+            # An unterminated destination is uncertain: retain the line rather
+            # than interpreting an embedded link as a missing file to prune.
+            return
 
 
 def index_link(line: str) -> str | None:
@@ -138,8 +172,8 @@ def index_link(line: str) -> str | None:
     ``%``, ``?`` or ``\\``, does not start with ``/`` or ``~``, and has no
     empty or ``..`` segment. Returned as a normalized relative POSIX path.
     """
-    for match in _INDEX_LINK_RE.finditer(line):
-        raw = match.group(1).strip()
+    for body in _index_link_bodies(line):
+        raw = body.strip()
         if not raw:
             continue
         if raw.startswith("<"):
