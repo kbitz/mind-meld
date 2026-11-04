@@ -81,6 +81,11 @@ WALK_TIME_BUDGET_INTERACTIVE_MS = 500
 WALK_TIME_BUDGET_AUTOPUSH_MS = 250
 ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS = 100
 ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS = 50
+# Attended push with the partitioned tail (Track 106A). A cold Codex and Cursor
+# index measured about 3.2 s to finish on one Mac (2.8 s unbounded pass plus a
+# 0.4 s closing pass); 1,500 ms per push finishes it within three pushes, and
+# a warm index costs about 0.1 s of it. The tail deadline still clamps it.
+ROOT_DISCOVERY_BUDGET_ATTENDED_MS = 1500
 MAX_GIT_WORKERS = 8
 PER_REPO_TIMEOUT_FLOOR_MS = 200
 PER_REPO_TIMEOUT_CAP_MS = 2000
@@ -115,10 +120,14 @@ RECAPTURE_WINDOW_MAX_DAYS = 90  # CURSOR_SCAN_DAYS / events retention
 RECAPTURE_WINDOW_DEFAULT = "30d"
 RECAPTURE_PER_REPO_TIMEOUT_MS = 30_000
 RECAPTURE_WALK_BUDGET_MS = 120_000
-"""Git-walk limits for ``mm recapture`` and its preview, per repository and
-for the whole walk.
+RECAPTURE_DISCOVERY_BUDGET_MS = 30_000
+"""Git-walk and discovery limits for ``mm recapture`` and its preview, per
+repository, for the whole walk and for repository discovery.
 
-Chosen floors, not measured at the 90-day window. The per-repository value
+Chosen floors, not measured at the 90-day window.
+``RECAPTURE_DISCOVERY_BUDGET_MS`` (30 s) is the time repository discovery gets
+in ``mm recapture``, its preview and ``mm refresh-identity``: more than ten
+times the cold-index remainder measured in Track 106A. The per-repository value
 is passed to ``walk_git_projects`` verbatim: no floor, no
 ``PER_REPO_TIMEOUT_CAP_MS``, no division by repository count. Push,
 autopush and init pass no override and keep their own budgets."""
@@ -1317,140 +1326,169 @@ def _probe_host_records(
         )
         return [Path(root) for root in dict.fromkeys(found)]
 
-    state = record["state"]
-    listing = state.get("unit_listing")
-    if not (
-        isinstance(listing, list)
-        and all(
-            isinstance(item, (list, tuple))
-            and len(item) == 2
-            and isinstance(item[0], str)
-            and (item[1] is None or isinstance(item[1], (list, tuple)))
-            for item in listing
-        )
-    ):
-        listing = prober.list_units(home, state, deadline_monotonic)
-        if listing is None:
-            cache["_discovery_complete"] = False
-            return cached_roots()
-        state["unit_listing"] = listing
-    listed = {key for key, _stamp in listing}
-    attempted = _probe_state_map(state, "attempted_units")
-    retry_classification = _probe_state_map(state, "retry_classification")
-    for records in (units, pending, retry, attempted, retry_classification):
-        for key in records.keys() - listed:
-            del records[key]
-    after = state.get("unit_after")
-    if after in [key for key, _stamp in listing]:
-        cut = next(i for i, (key, _) in enumerate(listing) if key == after) + 1
-        ordered = listing[cut:] + listing[:cut]
-    else:
-        ordered = listing
-    # Unobserved records get a turn before failed immutable records are retried.
-    ordered = [item for item in ordered if item[0] not in attempted] + [
-        item for item in ordered if item[0] in attempted
-    ]
-    remaining = state.get("unit_remaining")
-    if not isinstance(remaining, list) or not all(isinstance(key, str) for key in remaining):
-        remaining = [key for key, _ in ordered]
-    remaining = [key for key in remaining if key in listed]
-    state["unit_remaining"] = remaining
-    stamps = dict(listing)
-    for key in list(remaining):
-        stamp = stamps[key]
-        stamp = list(stamp) if isinstance(stamp, tuple) else stamp
-        unit = units.get(key)
-        progress = pending.get(key)
-        prior = retry.get(key)
-        if prior is not None and not (_valid_probe_unit(prior) and prior[0] == stamp):
-            retry.pop(key, None)
-            retry_classification.pop(key, None)
-            prior = None
-        if (
-            unit is not None
-            and unit[0] == stamp
-            and not isinstance(progress, dict)
-            and prior is None
-        ):
-            remaining.remove(key)
-            continue
-        if _deadline_expired(deadline_monotonic):
-            break
-        # One attempt per listed unit finishes a round even if some records
-        # remain incomplete. The next round refreshes inventory before retries.
-        remaining.remove(key)
-        state["unit_after"] = key
-        if prior is not None:
-            retry_progress = retry_classification.setdefault(key, {})
-            recovered = _classify_named_dirs(
-                prior[1], deadline_monotonic=deadline_monotonic, progress=retry_progress
-            )
-            if unit is not None:
-                unit[1] = list(dict.fromkeys([*unit[1], *recovered]))
-            cache.setdefault("_probe_validated", []).extend(recovered)
-            if retry_progress.get("classified", 0) < len(prior[1]):
-                state["round_incomplete"] = True
-                continue
-            prior[1] = [root for root in prior[1] if unit is None or root not in unit[1]]
-            state["retry_classification"].pop(key, None)
-            if not prior[1]:
-                retry.pop(key, None)
-            if unit is not None and unit[0] == stamp and not isinstance(progress, dict):
-                continue
-        if not (
-            isinstance(progress, dict)
-            and progress.get("stamp") == stamp
-            and isinstance(progress.get("reader"), dict)
-            and isinstance(progress.get("roots"), list)
-            and all(isinstance(root, str) for root in progress["roots"])
-        ):
-            progress = pending[key] = {"stamp": stamp, "reader": {}, "roots": []}
-        attempted[key] = stamp
+    # The listing stamp each unit was attempted at in this call.
+    attempted_now: dict[str, object] = {}
 
-        def consume(raw: object) -> bool:
-            one: dict = {}
-            found = _classify_named_dirs([raw], deadline_monotonic=deadline_monotonic, progress=one)
-            if one.get("classified") != 1:
-                return False
+    def run_round(skip: frozenset[str]) -> tuple[bool, bool]:
+        """One list, order, read and completion round: (complete, round_done)."""
+        state = record["state"]
+        listing = state.get("unit_listing")
+        if not (
+            isinstance(listing, list)
+            and all(
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], str)
+                and (item[1] is None or isinstance(item[1], (list, tuple)))
+                for item in listing
+            )
+        ):
+            listing = prober.list_units(home, state, deadline_monotonic)
+            if listing is None:
+                return False, False
+            state["unit_listing"] = listing
+        listed = {key for key, _stamp in listing}
+        attempted = _probe_state_map(state, "attempted_units")
+        retry_classification = _probe_state_map(state, "retry_classification")
+        for records in (units, pending, retry, attempted, retry_classification):
+            for key in records.keys() - listed:
+                del records[key]
+        after = state.get("unit_after")
+        if after in [key for key, _stamp in listing]:
+            cut = next(i for i, (key, _) in enumerate(listing) if key == after) + 1
+            ordered = listing[cut:] + listing[:cut]
+        else:
+            ordered = listing
+        # Unobserved records get a turn before failed immutable records are retried.
+        ordered = [item for item in ordered if item[0] not in attempted] + [
+            item for item in ordered if item[0] in attempted
+        ]
+        remaining = state.get("unit_remaining")
+        if not isinstance(remaining, list) or not all(isinstance(key, str) for key in remaining):
+            remaining = [key for key, _ in ordered]
+        remaining = [key for key in remaining if key in listed]
+        state["unit_remaining"] = remaining
+        stamps = dict(listing)
+        for key in list(remaining):
+            stamp = stamps[key]
+            stamp = list(stamp) if isinstance(stamp, tuple) else stamp
+            unit = units.get(key)
+            progress = pending.get(key)
+            prior = retry.get(key)
+            if prior is not None and not (_valid_probe_unit(prior) and prior[0] == stamp):
+                retry.pop(key, None)
+                retry_classification.pop(key, None)
+                prior = None
+            if (
+                unit is not None
+                and unit[0] == stamp
+                and not isinstance(progress, dict)
+                and prior is None
+            ):
+                remaining.remove(key)
+                continue
+            if key in skip:
+                # Already attempted in this call, which counts for this round
+                # too: never read twice. Every interrupted read is a deadline
+                # cut and this round runs only before the deadline, so a clean
+                # read with nothing to cache (an immutable record naming no
+                # directory) closes the round; a record whose stamp changed
+                # since its read keeps it open for the next push.
+                remaining.remove(key)
+                if attempted_now[key] != stamp:
+                    state["round_incomplete"] = True
+                continue
+            if _deadline_expired(deadline_monotonic):
+                break
+            attempted_now[key] = stamp
+            # One attempt per listed unit finishes a round even if some records
+            # remain incomplete. The next round refreshes inventory before retries.
+            remaining.remove(key)
+            state["unit_after"] = key
+            if prior is not None:
+                retry_progress = retry_classification.setdefault(key, {})
+                recovered = _classify_named_dirs(
+                    prior[1], deadline_monotonic=deadline_monotonic, progress=retry_progress
+                )
+                if unit is not None:
+                    unit[1] = list(dict.fromkeys([*unit[1], *recovered]))
+                cache.setdefault("_probe_validated", []).extend(recovered)
+                if retry_progress.get("classified", 0) < len(prior[1]):
+                    state["round_incomplete"] = True
+                    continue
+                prior[1] = [root for root in prior[1] if unit is None or root not in unit[1]]
+                state["retry_classification"].pop(key, None)
+                if not prior[1]:
+                    retry.pop(key, None)
+                if unit is not None and unit[0] == stamp and not isinstance(progress, dict):
+                    continue
+            if not (
+                isinstance(progress, dict)
+                and progress.get("stamp") == stamp
+                and isinstance(progress.get("reader"), dict)
+                and isinstance(progress.get("roots"), list)
+                and all(isinstance(root, str) for root in progress["roots"])
+            ):
+                progress = pending[key] = {"stamp": stamp, "reader": {}, "roots": []}
+            attempted[key] = stamp
+
+            def consume(raw: object) -> bool:
+                one: dict = {}
+                found = _classify_named_dirs(
+                    [raw], deadline_monotonic=deadline_monotonic, progress=one
+                )
+                if one.get("classified") != 1:
+                    return False
+                progress["roots"] = list(dict.fromkeys([*progress["roots"], *found]))
+                cache.setdefault("_probe_validated", []).extend(found)
+                return True
+
+            if prober.consume_unit is not None:
+                dirs, completed = prober.consume_unit(
+                    home, key, deadline_monotonic, progress["reader"], consume
+                )
+            elif prober.resume_unit is not None:
+                dirs, completed = prober.resume_unit(
+                    home, key, deadline_monotonic, progress["reader"]
+                )
+            else:
+                dirs, completed = prober.read_unit(home, key, deadline_monotonic)
+            # Small atomic JSON/SQLite results use an ordinal; native record streams
+            # invoke consume before advancing their seekable record cursor.
+            values = dirs or []
+            found = _classify_named_dirs(
+                values, deadline_monotonic=deadline_monotonic, progress=progress
+            )
             progress["roots"] = list(dict.fromkeys([*progress["roots"], *found]))
             cache.setdefault("_probe_validated", []).extend(found)
-            return True
+            classified = progress.get("classified", 0) >= len(values)
+            if completed and classified:
+                if dirs is not None or stamp is not None:
+                    units[key] = [stamp, progress["roots"]]
+                if progress["reader"].get("retry") is not True:
+                    pending.pop(key, None)
+                progress.pop("classified", None)
+            else:
+                state["round_incomplete"] = True
+        complete = not remaining and not state.get("round_incomplete", False)
+        if not remaining:
+            for name in (
+                "unit_listing",
+                "unit_remaining",
+                "round_incomplete",
+                "listing_steps",
+                "listing_stores",
+            ):
+                state.pop(name, None)
+        return complete, not remaining
 
-        if prober.consume_unit is not None:
-            dirs, completed = prober.consume_unit(
-                home, key, deadline_monotonic, progress["reader"], consume
-            )
-        elif prober.resume_unit is not None:
-            dirs, completed = prober.resume_unit(home, key, deadline_monotonic, progress["reader"])
-        else:
-            dirs, completed = prober.read_unit(home, key, deadline_monotonic)
-        # Small atomic JSON/SQLite results use an ordinal; native record streams
-        # invoke consume before advancing their seekable record cursor.
-        values = dirs or []
-        found = _classify_named_dirs(
-            values, deadline_monotonic=deadline_monotonic, progress=progress
-        )
-        progress["roots"] = list(dict.fromkeys([*progress["roots"], *found]))
-        cache.setdefault("_probe_validated", []).extend(found)
-        classified = progress.get("classified", 0) >= len(values)
-        if completed and classified:
-            if dirs is not None or stamp is not None:
-                units[key] = [stamp, progress["roots"]]
-            if progress["reader"].get("retry") is not True:
-                pending.pop(key, None)
-            progress.pop("classified", None)
-        else:
-            state["round_incomplete"] = True
-    complete = not remaining and not state.get("round_incomplete", False)
-    if not remaining:
-        for name in (
-            "unit_listing",
-            "unit_remaining",
-            "round_incomplete",
-            "listing_steps",
-            "listing_stores",
-        ):
-            state.pop(name, None)
+    complete, round_done = run_round(frozenset())
+    # A round closed with units settled but a stale ``round_incomplete`` from
+    # an earlier push would otherwise cost one more push to read as complete.
+    # The closing round skips units this call already attempted, so each
+    # record is still read at most once per call and two rounds bound the work.
+    if round_done and not complete and not _deadline_expired(deadline_monotonic):
+        complete, _ = run_round(frozenset(attempted_now))
     cache["_discovery_complete"] = complete
     return cached_roots()
 

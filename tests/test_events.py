@@ -3391,7 +3391,9 @@ def test_three_budget_limited_pushes_finish_index_git_and_identity(tmp_path, mon
 
     def one_directory(directory, **kwargs):
         result = reader(directory, **kwargs)
-        clock[0] = 1.0
+        # Reach the attended discovery deadline (Track 106A: 1,500 ms) exactly,
+        # still inside the tail deadline so the git walk is not aborted.
+        clock[0] = events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS / 1000.0
         return result
 
     monkeypatch.setattr(events, "_read_cwd_from_latest_jsonl", one_directory)

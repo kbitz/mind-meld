@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.9 | 2026-11-03 | Attended pushes finish git-root discovery, including a record that changed during the pass or never caches. |
 | 1.12.8 | 2026-11-03 | Configured fleet identities are published with usage, and checkpoints are left out of that publication. |
 | 1.12.7 | 2026-11-03 | **`mm` finds Git repositories from every enabled agent's working directories, not only Claude Code.** Codex, Cursor, Muse, and Antigravity count when those providers are enabled. Cursor still needs `[retro] cursor_host_usage = true`. Installed Paseo projects and mmm factory items count too. `mm diag` names the source that found each root. |
 | 1.12.6 | 2026-11-03 | **A later `mm push` reuses Codex totals for days it has already settled, and a push that stops early keeps the last complete totals.** Closed days are not parsed again to add the same numbers. An unfinished read does not publish a partial Codex total; that day is read again on the next complete push. |

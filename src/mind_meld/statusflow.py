@@ -1453,12 +1453,20 @@ def _print_retro_capture_status(
         skip_phrase = "1 repository was skipped"
     elif skipped > 1:
         skip_phrase = f"{skipped} repositories were skipped"
+    elif projected.get("discovery") == "partial":
+        skip_phrase = "repository discovery has not finished"
     else:
         skip_phrase = "repository set incomplete"
     console.print(
         f"  [yellow]Retro capture:[/yellow] incomplete since {safe_str(since_day)} — {skip_phrase}."
     )
-    console.print(f"  Recover this Mac's last {days} days: [bold]mm recapture {days}d[/bold]")
+    if projected.get("discovery") == "partial":
+        console.print(
+            f"  Finish repository discovery and recover this Mac's last {days} days: "
+            f"[bold]mm recapture {days}d[/bold]"
+        )
+    else:
+        console.print(f"  Recover this Mac's last {days} days: [bold]mm recapture {days}d[/bold]")
     console.print("  Check current repository failures: [bold]mm recapture --dry-run[/bold]")
     console.print("  Details: [bold]mm diag[/bold]")
     return True

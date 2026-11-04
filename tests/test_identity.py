@@ -1598,3 +1598,59 @@ class TestTailPublishesAndRefreshes:
         )
         row = run({}, quiet=False)
         assert "fake@example.com" in row["local_emails"]
+
+
+def _refresh_identity_with_cold_index(tmp_path, monkeypatch, *, recapture_budget_ms=None):
+    """Run ``mm refresh-identity --json`` over a cold Codex index ahead of Paseo.
+
+    Paseo names a real repository whose local email is ``capsule@example.com``;
+    the configured author emails hold only ``other@example.com``. Each cold unit
+    costs one fake second, so a 100 ms discovery never reaches Paseo.
+    """
+    import dataclasses
+
+    from typer.testing import CliRunner
+
+    from mind_meld import cli, rootprobes
+    from tests.test_root_probers import _cfg, _synthetic
+
+    target, _, _ = _git_env_repos(tmp_path, monkeypatch)
+    subprocess.run(
+        ["git", "-C", str(target), "config", "user.email", "capsule@example.com"], check=True
+    )
+    home = tmp_path / "home"
+    projects = home / ".paseo" / "projects" / "projects.json"
+    projects.parent.mkdir(parents=True)
+    projects.write_text(json.dumps([{"rootPath": str(target)}]))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(rootprobes, "_discovery_home", lambda: home)
+
+    clock = [1000.0]
+    cold = _synthetic({f"u{i}": [] for i in range(3)}, clock=clock)
+    paseo = next(p for p in rootprobes.PROBERS if p.name == "paseo")
+    monkeypatch.setattr(rootprobes, "PROBERS", (cold, dataclasses.replace(paseo)))
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    if recapture_budget_ms is not None:
+        monkeypatch.setattr(events, "RECAPTURE_DISCOVERY_BUDGET_MS", recapture_budget_ms)
+    monkeypatch.setattr(cli, "load_config", lambda: _cfg("codex"))
+    monkeypatch.setattr(identity, "_gather_config_author_emails", lambda: ["other@example.com"])
+    monkeypatch.setattr(identity, "_gather_gh_noreply_email", lambda: None)
+    result = CliRunner().invoke(cli.app, ["refresh-identity", "--json"])
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    return json.loads(result.stdout)
+
+
+def test_refresh_identity_reads_local_email_of_every_root_a_completed_discovery_holds(
+    tmp_path, monkeypatch
+):
+    emails = _refresh_identity_with_cold_index(tmp_path, monkeypatch)
+    assert "capsule@example.com" in emails and "other@example.com" in emails
+    assert "capsule@example.com" in (identity.read_cached_identities(require_refresh=True) or [])
+
+
+def test_refresh_identity_misses_that_email_when_discovery_runs_out_of_budget(
+    tmp_path, monkeypatch
+):
+    """The field failure: a 100 ms discovery stops in the cold Codex index."""
+    emails = _refresh_identity_with_cold_index(tmp_path, monkeypatch, recapture_budget_ms=100)
+    assert "capsule@example.com" not in emails

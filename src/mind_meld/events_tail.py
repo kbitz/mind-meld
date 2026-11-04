@@ -1405,6 +1405,8 @@ def _run_events_tail(
             root_discovery_budget_ms=(
                 events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
                 if quiet
+                else events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS
+                if tail_deadline is not None
                 else events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
             ),
             host_budget_ms=(
@@ -1767,10 +1769,11 @@ def _prepare_recapture(
     since: datetime,
     persist: bool = False,
 ) -> RecaptureCapture | None:
-    """Git-only capture on recapture's own walk budget (``events.RECAPTURE_*``).
+    """Git-only capture on recapture's own budgets (``events.RECAPTURE_*``).
 
-    Repository discovery keeps its interactive budget. ``None`` if mm-events
-    is unresolved."""
+    Repository discovery runs on ``RECAPTURE_DISCOVERY_BUDGET_MS`` too, so one
+    run finishes a discovery that attended pushes only spread over several.
+    ``None`` if mm-events is unresolved."""
     mm_events_src = next((s for s in sources if s.get("name") == "mm-events"), None)
     if mm_events_src is None:
         return None
@@ -1783,7 +1786,7 @@ def _prepare_recapture(
         device_id,
         since=since,
         walk_budget_ms=events.RECAPTURE_WALK_BUDGET_MS,
-        root_discovery_budget_ms=events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS,
+        root_discovery_budget_ms=events.RECAPTURE_DISCOVERY_BUDGET_MS,
         origin=events.GIT_SNAPSHOT_ORIGIN_RECAPTURE,
         persist=persist,
         per_repo_timeout_ms=events.RECAPTURE_PER_REPO_TIMEOUT_MS,

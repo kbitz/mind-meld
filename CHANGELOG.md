@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.9] - 2026-11-03
+
+Attended pushes finish git-root discovery, including a record that changed during the pass or never caches.
+
+### Changed
+
+- Attended `mm push` finishes git-root discovery, so roots found in that pass are included.
+
+### Fixed
+
+- The closing round stays open for a record that changed after it was read, so that update is included.
+- The closing round finishes beside a record that never caches, so discovery completes.
+
 ## [1.12.8] - 2026-11-03
 
 Configured fleet identities are published with usage, and checkpoints are left out of that publication.

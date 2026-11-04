@@ -180,7 +180,10 @@ class TestRegistryAndIsolation:
         second = push()
         assert second.exceeded and len(second.roots) == 6 and len(reads) == 8
         third = push()
-        assert third.exceeded and len(third.roots) == 8
+        # The third push finishes its round and, with budget left, closes it in
+        # the same call by replaying the one unit the second push interrupted
+        # (Track 106A), so it holds nine roots, not eight.
+        assert third.exceeded and len(third.roots) == 9
         fourth = push()
         assert not fourth.exceeded and len(fourth.roots) == 10
         assert fourth.attribution and {source for source, _ in fourth.attribution} == {"codex"}
@@ -1493,3 +1496,311 @@ def test_malformed_resume_state_is_replaced_without_losing_discovered_roots(home
     assert result.roots == (repo,) and result.errors == () and not result.exceeded
     state = events.read_git_capture_cache()["probe_index"]["codex"]["state"]
     assert state["pending_units"] == {} and state["retry_roots"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Track 106A: discovery finishes across attended pushes and on explicit runs
+# ---------------------------------------------------------------------------
+
+
+def _acknowledged_codex(home: Path) -> set[str]:
+    """Rollouts the persisted Codex index has acknowledged (complete or pending)."""
+    record = events.read_git_capture_cache()["probe_index"]["codex"]
+    acknowledged: set[str] = set()
+    sessions = home / ".codex" / "sessions"
+    for key in record["units"]:
+        for path in (sessions / key.removeprefix("live/")).glob("rollout-*.jsonl"):
+            acknowledged.add(f"{key}/{path.name}")
+    for key, progress in record["state"].get("pending_units", {}).items():
+        after = progress.get("reader", {}).get("after")
+        if after is None:
+            continue
+        day = sessions / key.removeprefix("live/")
+        acknowledged.update(
+            f"{key}/{path.name}" for path in day.glob("rollout-*.jsonl") if path.name <= after
+        )
+    return acknowledged
+
+
+def test_budgeted_pushes_finish_a_cold_index_and_never_reset_a_finished_prober(home, monkeypatch):
+    import dataclasses
+
+    repo_f = _fake_repo(home / "repo-f")
+    repo_c = _fake_repo(home / "repo-c")
+    projects = home / ".paseo" / "projects" / "projects.json"
+    projects.parent.mkdir(parents=True)
+    projects.write_text(json.dumps([{"rootPath": str(repo_f)}]))
+    for day in ("2026/11/01", "2026/11/02", "2026/11/03"):
+        for i in range(4):
+            _codex_rollout(_codex_day(home, day) / f"rollout-{i}.jsonl", str(repo_c))
+
+    clock = [1000.0]
+    paseo_reads: list[str] = []
+    codex_reads: list[str] = []
+    original_cwd = rootprobes._codex_rollout_cwd
+
+    def read_rollout(path):
+        codex_reads.append(f"{path.parent.name}/{path.name}")
+        clock[0] += 1.0
+        return original_cwd(path)
+
+    paseo = next(p for p in rootprobes.PROBERS if p.name == "paseo")
+    codex = next(p for p in rootprobes.PROBERS if p.name == "codex")
+
+    def counting_read(home_, key, deadline):
+        paseo_reads.append(key)
+        return paseo.read_unit(home_, key, deadline)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read_rollout)
+    monkeypatch.setattr(
+        rootprobes, "PROBERS", (dataclasses.replace(paseo, read_unit=counting_read), codex)
+    )
+
+    seen: set[str] = set()
+    paseo_snapshot = None
+    complete_on = None
+    for push in range(1, 7):
+        codex_reads.clear()
+        result = _discover(_cfg("codex"), persist=True, seconds=4.5)
+        assert repo_f in result.roots, "a finished prober's root survives every push"
+        assert len(codex_reads) == len(set(codex_reads)), "no rollout is read twice in one push"
+        cache = events.read_git_capture_cache()
+        paseo_units = cache["probe_index"]["paseo"]["units"]
+        paseo_snapshot = paseo_snapshot or json.loads(json.dumps(paseo_units))
+        assert paseo_units == paseo_snapshot and len(paseo_reads) == 1
+        acknowledged = _acknowledged_codex(home)
+        if not result.exceeded:
+            complete_on = push
+            assert cache["prober_resume_after"] is None
+            assert repo_c in result.roots
+            break
+        assert cache["prober_resume_after"] == "codex"
+        assert acknowledged > seen, "every push acknowledges more rollouts"
+        seen = acknowledged
+    assert complete_on == 3, "a cold index spanning more than two budgets ends on push three"
+
+
+def test_one_explicit_run_completes_discovery_left_with_a_stale_round(home, monkeypatch):
+    repo = _fake_repo(home / "repo")
+    for day in ("2026/11/01", "2026/11/02", "2026/11/03"):
+        for i in range(3):
+            _codex_rollout(_codex_day(home, day) / f"rollout-{i}.jsonl", str(repo))
+    clock = [0.0]
+    original = rootprobes._codex_rollout_cwd
+    reads: list[str] = []
+
+    def read(path):
+        reads.append(f"{path.parent.name}/{path.name}")
+        clock[0] += 1.0
+        return original(path)
+
+    monkeypatch.setattr(rootprobes.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(rootprobes, "_codex_rollout_cwd", read)
+    interrupted = _discover(_cfg("codex"), persist=True, seconds=4.5)
+    assert interrupted.exceeded
+    state = events.read_git_capture_cache()["probe_index"]["codex"]["state"]
+    # A stale round: an interrupted day plus a unit the round has yet to reach.
+    assert state.get("round_incomplete") and state.get("pending_units") and state["unit_remaining"]
+    reads.clear()
+    result = _discover(_cfg("codex"), persist=True, seconds=1000.0)
+    assert not result.exceeded and result.roots == (repo,)
+    assert len(reads) == len(set(reads)), "each rollout is read at most once in the call"
+    assert not events.read_git_capture_cache()["probe_index"]["codex"]["state"].get("pending_units")
+
+
+def test_closing_round_completes_beside_a_record_that_never_caches(home, monkeypatch):
+    # Value: protects=the closing round finishes a resumed round in one call;
+    # fails_when=a cleanly read record with nothing to cache (a Cursor ACP meta
+    # with no cwd) holds the closing round open, costing the extra push it saves;
+    # why_new=the stale-round test above has no such record; seam=persisted state;
+    # no_claim=records whose read this call interrupted (they keep the round open).
+    repo_a = _fake_repo(home / "a")
+    repo_b = _fake_repo(home / "b")
+    reads: list[str] = []
+    units = {"a": [str(repo_a)], "b": [str(repo_b)], "nometa": None}
+    monkeypatch.setattr(rootprobes, "PROBERS", (_synthetic(units, reads=reads),))
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    # A push the deadline cut after "a": its round persists with "b" and the
+    # record that never caches still to read, and a stale round_incomplete.
+    cache = events.read_git_capture_cache()
+    record = cache["probe_index"]["codex"]
+    record["units"].pop("b")
+    record["state"].update(
+        {
+            "unit_listing": [["a", None], ["b", None], ["nometa", None]],
+            "unit_remaining": ["b", "nometa"],
+            "unit_after": "a",
+            "round_incomplete": True,
+        }
+    )
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    reads.clear()
+    result = _discover(_cfg("codex"), persist=True)
+    assert not result.exceeded and set(result.roots) == {repo_a, repo_b}
+    assert sorted(reads) == ["b", "nometa"], "each record is read at most once in the call"
+
+
+def test_closing_round_stays_open_for_a_record_that_changed_since_its_read(home, monkeypatch):
+    # Value: protects=discovery never reads complete over a record it can see changed;
+    # fails_when=the closing round skips a unit whose fresh stamp differs from the one
+    # read earlier in the call, so a new repository waits a push with the cursor advanced;
+    # why_new=the never-caching test keeps its stamp; seam=listing stamps;
+    # no_claim=changes the fresh listing cannot see.
+    import dataclasses
+
+    repo_a = _fake_repo(home / "a")
+    repo_b = _fake_repo(home / "b")
+    units = {"a": [str(repo_a)], "day": [str(repo_a)]}
+    stamps = {"a": [1], "day": [1]}
+    reads: list[str] = []
+    prober = _synthetic(units, stamps=stamps, reads=reads)
+
+    def read_then_change(home_, key, deadline):
+        result = prober.read_unit(home_, key, deadline)
+        if key == "day":
+            # A new session lands in the day just after this read saw it.
+            stamps["day"] = [2]
+            units["day"] = [str(repo_a), str(repo_b)]
+        return result
+
+    monkeypatch.setattr(
+        rootprobes, "PROBERS", (dataclasses.replace(prober, read_unit=read_then_change),)
+    )
+    assert not _discover(_cfg("codex"), persist=True).exceeded
+    cache = events.read_git_capture_cache()
+    record = cache["probe_index"]["codex"]
+    record["units"].pop("day")
+    record["state"].update(
+        {
+            "unit_listing": [["a", [1]], ["day", [1]]],
+            "unit_remaining": ["day"],
+            "unit_after": "a",
+            "round_incomplete": True,
+        }
+    )
+    stamps["day"] = [1]
+    units["day"] = [str(repo_a)]
+    mm_config.GIT_CAPTURE_CACHE_PATH.write_text(json.dumps(cache))
+    reads.clear()
+    resumed = _discover(_cfg("codex"), persist=True)
+    assert resumed.exceeded, "a record that changed since its read keeps discovery open"
+    assert reads == ["day"], "the closing round does not read it a second time"
+    following = _discover(_cfg("codex"), persist=True)
+    assert not following.exceeded and set(following.roots) == {repo_a, repo_b}
+
+
+@pytest.mark.parametrize("persist", [False, True])
+def test_recapture_discovers_on_its_own_budget(tmp_path, monkeypatch, persist):
+    assert events.RECAPTURE_DISCOVERY_BUDGET_MS >= 30_000
+    seen: list[float] = []
+
+    def spy(config, *, deadline_monotonic=None, persist=False, since=None):
+        seen.append(deadline_monotonic - time.monotonic())
+        return events.GitRootDiscovery((), ())
+
+    monkeypatch.setattr(events, "discover_git_roots", spy)
+    sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+    capture = events_tail._prepare_recapture(
+        {}, sources, "dev-a", since=datetime.now(timezone.utc) - timedelta(days=30), persist=persist
+    )
+    assert capture is not None and len(seen) == 1
+    assert seen[0] >= events.RECAPTURE_DISCOVERY_BUDGET_MS / 1000.0 - 1.0
+
+
+def test_attended_discovery_budget_leaves_autopush_and_legacy_unchanged(
+    monkeypatch, tmp_path, home
+):
+    assert events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS == 1500
+    assert events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS == 50
+    assert events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS == 100
+    seen: list[int] = []
+    real_capture = events_tail._capture_event_snapshots
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["root_discovery_budget_ms"])
+        return real_capture(*args, **kwargs)
+
+    monkeypatch.setattr(events_tail, "_capture_event_snapshots", spy)
+    monkeypatch.setattr(events_tail, "_attended_host_elapsed_s", None)
+    sources = [{"name": "mm-events", "path": str(tmp_path / "mm-events")}]
+
+    def run(config, *, quiet):
+        events_tail._run_events_tail(
+            config, sources, "dev-a", dry_run=False, quiet=quiet, suppress_host_capture=True
+        )
+        return seen[-1]
+
+    assert run({}, quiet=False) == events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS
+    assert run({}, quiet=True) == events.ROOT_DISCOVERY_BUDGET_AUTOPUSH_MS
+    legacy = {"retro": {"host_usage_interactive_budget_ms": 500}}
+    assert run(legacy, quiet=False) == events.ROOT_DISCOVERY_BUDGET_INTERACTIVE_MS
+
+
+def test_status_names_recapture_as_finishing_partial_discovery(tmp_path, monkeypatch, capsys):
+    from mind_meld import cli
+    from tests.test_track_30a import _write_push
+
+    def status(discovery: str, *, aborts: int, errors: int, streak: int) -> str:
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=3)
+        directory = tmp_path / f"{discovery}-{streak}"
+        _write_push(
+            directory / "events",
+            "dev-a",
+            ts=now,
+            since=since,
+            discovery=discovery,
+            walk_budget_aborts=aborts,
+            walk_errors=errors,
+        )
+        monkeypatch.setattr(events, "count_pending_repositories", lambda *a: 2)
+        monkeypatch.setattr(events, "read_git_capture_cache", lambda: {"incomplete_streak": streak})
+        monkeypatch.setattr(
+            events,
+            "resolve_push_cursor",
+            lambda *a: events.CursorResolution(since=since, floored_after_incomplete=False),
+        )
+        monkeypatch.setattr(events, "effective_capture_since", lambda roots, lower: lower)
+        assert cli._print_retro_capture_status(
+            [{"name": "mm-events", "path": str(directory)}], "dev-a"
+        )
+        return " ".join(capsys.readouterr().out.split())
+
+    partial = status("partial", aborts=0, errors=0, streak=3)
+    assert "repository discovery has not finished" in partial
+    assert (
+        "Finish repository discovery and recover this Mac's last 3 days: mm recapture 3d" in partial
+    )
+    complete = status("complete", aborts=0, errors=1, streak=1)
+    assert "mm recapture" in complete and "Finish repository discovery" not in complete
+
+
+def test_discovery_budget_docs_match_the_constants():
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+
+    def section(path: str, heading: str, next_heading: str) -> str:
+        text = (root / path).read_text(encoding="utf-8")
+        start = text.index(heading)
+        end = text.find(next_heading, start + len(heading))
+        return " ".join(text[start : end if end != -1 else None].split())
+
+    recapture = f"{events.RECAPTURE_DISCOVERY_BUDGET_MS // 1000} s"
+    attended = f"{events.ROOT_DISCOVERY_BUDGET_ATTENDED_MS:,} ms"
+    readme_recapture = section(
+        "README.md", "### Dropped repositories and ignored git environment variables", "\n### "
+    )
+    retro_recapture = section(
+        "docs/invariants/events-retro.md", "## Cursor gate + recapture", "\n## "
+    )
+    assert re.search(rf"discovery gets {recapture}\b", readme_recapture)
+    assert "keeps its 100 ms" not in readme_recapture
+    assert re.search(rf"RECAPTURE_DISCOVERY_BUDGET_MS` \({recapture}\b", retro_recapture)
+    readme_upgrade = section("README.md", "## Upgrading", "\n## ")
+    retro_budget = section(
+        "docs/invariants/events-retro.md", "**Git-root discovery budget and reuse", "\n\n"
+    )
+    for name, text in (("README.md", readme_upgrade), ("events-retro.md", retro_budget)):
+        assert attended in text, f"{name} omits {attended}"
