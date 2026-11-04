@@ -81,6 +81,8 @@ Use `--affected` during work and review. It runs the tests whose recorded covera
 
 `--tests` skips lint; `--lint` skips pytest. Ruff is pinned in dev dependencies and enforces E/F/W/I. Every roadmap card's `verify:` field must use `./bin/check --affected` (or `./bin/check <scope>` when it needs a named scope); cards must not encode where Python lives. The `PYTEST_CURRENT_TEST` guard on `crypto.store_passphrase_in_keyring` is load-bearing; see [init/device invariants](docs/invariants/init-devices.md).
 
+mm reads `Path.home()` at import: never run or import `tests/` outside `./bin/check`, and give any other `mm` or Python probe a temporary `HOME`. A red run of timeouts under load: rerun those files with `./bin/check --tests --serial`, then the full run with `MM_PYTEST_WORKERS=6`. Name identifiers without KEY, PASSWORD, SECRET or TOKEN: gstack's secret scan flags the name, and only an owner-approved `.gstack/secret-dispositions.json` entry waives it.
+
 ## CI
 
 `.github/workflows/ci.yml` has three jobs: `ci` (portable checks plus real Keychain and isolated wheel smokes on macOS/Python 3.13), `portable-linux` (portable checks plus wheel smoke on Ubuntu/Python 3.14), and `secret-service-live` (the live gnome-keyring test in an Arch container); see [README Development](README.md#development). Local portable checks do not qualify those CI-only checks. Release automation and compatibility rules live in [auto-upgrade invariants](docs/invariants/auto-upgrade.md). Version source: `pyproject.toml`, mirrored by the root `VERSION` file (same `x.y.z`; bump both).
@@ -101,9 +103,11 @@ Attended `mm push` refreshes consented host usage under the lock. Exit 0 means c
 
 ## Where detail lives
 
+AGENTS.md stays under 12 KiB (`tests/test_docs_routing.py`).
+
 - [Module map and invariant routing](docs/invariants/README.md): authoritative current source layout and mandatory per-topic rules.
 - [README](README.md): commands, configuration, previews, integration, and development.
 - [Project spec](docs/SPEC.md): purpose, audience, selected target, acceptance and release policy.
 - [SPEC](SPEC.md): architecture, data model and CLI reference; Project Structure, Implementation Order, and original push algorithm are historical. 2.0 carries this store onto Syncthing ([docs/SPEC.md](docs/SPEC.md)).
 - Design decisions: [multi-source sync](docs/designs/sync-gstack-context.md), [host parity](docs/designs/host-parity.md); the Grok reader design is archived at [docs/archive/grok-build-usage-reader.md](docs/archive/grok-build-usage-reader.md); the v1 review record is archived at [docs/archive/mind-meld-v1.md](docs/archive/mind-meld-v1.md).
-- [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.
+- [ROADMAP](docs/ROADMAP.md): execution plan (edited only by /roadmap, except a `/ship` review fix to one card when roadmap-audit passes with `GROUP_DEPS` unchanged); [TODOS](docs/TODOS.md): deferred work; [PROGRESS](docs/PROGRESS.md): release rows. Superseded designs live in `docs/archive/`.
