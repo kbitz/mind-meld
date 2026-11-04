@@ -728,8 +728,11 @@ class TestIndexLink:
         ("line", "expected"),
         [
             ('[Web](https://x/a(b.md).md "see [Fake](gone.md)") [Live](live.md)', "live.md"),
-            ('[Live](live.md "see [Fake](gone.md)") [Other](other.md)', "live.md"),
-            (r'[Web](https://x/a.md "escaped \" ) [Fake](gone.md)") [Live](live.md)', "live.md"),
+            ("[Live](live.md" + ' "see [Fake](gone.md)") [Other](other.md)', "live.md"),
+            (
+                r"[Web](https://x/a.md" r' "escaped \" ) [Fake](gone.md)") [Live](live.md)',
+                "live.md",
+            ),
             (r"[Rejected](bad\) [Fake](gone.md)) [Live](live.md)", "live.md"),
             ("[Broken](outer([Fake](gone.md)", None),
             ("[Broken](<outer [Fake](gone.md)", None),
