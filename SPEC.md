@@ -605,7 +605,7 @@ Behavior is decided per file at apply time by the pull rule, one pure function (
 2. **Update-base (U):** remote hash matches local hash — no content write; flush the canonical file and its parent before recording any new last-synced rows.
 3. **Skip:** the remote equals this peer's base — nothing changed on the peer. No download, no union, no prompt. A version this machine already moved past is **stale**: silent.
 4. **Fast-forward (F):** the local file has not been changed here since it was last synced, and the peer's version was built on it — write the remote bytes (restoring its mtime), no union and **no recovery copy** of the replaced bytes. If the peer's mtime is older than the local file's the edit is held back as **older** and reported.
-5. **Merge (M):** both changed and the file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge). A line deleted on one side returns when both sides changed the file.
+5. **Merge (M):** both changed and the file has a mergeable type (`.jsonl` union-merge, `MEMORY.md` line-merge). A line deleted on one side returns when both sides changed the file, except a `MEMORY.md` pointer to a missing file not left waiting or failed, or a duplicate pointer for the same file.
 6. **Conflict-copy (C, INVERTED in v0.9.2):** both changed and the file isn't mergeable — keep local at canonical, write the REMOTE bytes to `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` (Syncthing convention, collision suffix on clash). Local edits stay at canonical; remote bytes are preserved alongside. A sidecar that already holds the peer's bytes is **kept** (no count, no warning).
 7. **No-base fallback:** a path with no base for that peer where the peer published no ancestry runs the older rule exactly: merge if mergeable, else **skip (S)** when the local mtime is newer, else conflict-copy.
 
@@ -812,7 +812,7 @@ Default generic sources (see `config.py:DEFAULT_SOURCES`):
 
 ### JSONL Merge on Pull
 
-When both sides changed or the no-base fallback applies, `.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. Fast-forward takes the peer's bytes directly. `MEMORY.md` is a separate plain lexical line-union and does not consult `ts`.
+When both sides changed or the no-base fallback applies, `.jsonl` files (common in gstack for review logs, analytics, etc.) use a merge strategy instead of overwrite on pull. Fast-forward takes the peer's bytes directly. `MEMORY.md` uses a separate lexically sorted line-merge with relative `.md` pointer deduplication and post-pull missing-target cleanup (see [conflict invariants](docs/invariants/conflicts.md#the-pull-rule-last-synced-base-ancestry-and-the-mtime-guard-load-bearing-track-91a)); it does not consult `ts`.
 
 1. Union of unique normalized lines from local and remote (UTF-8 replacement, trailing-whitespace strip, blank lines dropped, byte-exact dedup). Original line text is kept; lines are not reserialized.
 2. Records whose decoded JSON is an object with a **string** `ts` (including empty) sort first, by `(ts, original line)`. Comparison is lexical — not chronological, and not numeric-epoch.

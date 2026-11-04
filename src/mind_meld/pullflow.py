@@ -28,7 +28,7 @@ import stat
 import sys
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -99,7 +99,13 @@ from mind_meld.manifest import (
     mtime_from_path,
     parse_conflict_device_short,
 )
-from mind_meld.merge import lcs_merge, merge_file, should_merge
+from mind_meld.merge import (
+    drop_missing_links,
+    is_line_index,
+    lcs_merge,
+    merge_file,
+    should_merge,
+)
 from mind_meld.safety import safe_str
 from mind_meld.storage import get_backend
 from mind_meld.storage.keys import blob_key
@@ -647,7 +653,9 @@ def _prompt_conflict_choice(
 #   remote already seen/held here           -> STALE     (silent)
 #   no base and no peer ancestry            -> FALLBACK  (today's rule below)
 #   otherwise both changed:
-#     should_merge(rel_path)                -> MERGED    (jsonl / MEMORY.md)
+#     should_merge(rel_path)                -> MERGED    (jsonl / MEMORY.md;
+#                                              merged MEMORY.md indexes are
+#                                              tidied after applies/deletions)
 #     (m)erge chosen inline                 -> MERGED-VIA-LCS  (user confirmed)
 #                                              write merged_bytes -> canonical
 #     else                                  -> CONFLICTED  (v0.9.2 INVERTED)
@@ -852,6 +860,7 @@ class _ApplyReporter:
     # True when "unchanged" means this machine and the peer really agree (a
     # byte-equal file or a no-op merge), as opposed to a silent hold.
     agree: bool = False
+    line_indexes: dict[Path, bytes] | None = None
 
     def note_older(
         self, path: str, local_mtime: datetime | None, peer_mtime: datetime | None
@@ -1018,6 +1027,8 @@ def _apply_merge(
         local_bytes = local_path.read_bytes()
         merged = merge_file(rel_path, local_bytes, plain_data)
         if merged == local_bytes:
+            if reporter.line_indexes is not None and is_line_index(rel_path):
+                reporter.line_indexes[local_path] = local_bytes
             if verbose:
                 console.print(f"  [dim]= {safe_str(rel_path)} (merge no-op)[/dim]")
             return "unchanged"
@@ -1026,10 +1037,97 @@ def _apply_merge(
         reporter.failed("merge failed", e, preserved="local preserved")
         return "failed"
     reporter.published("merged")
+    if reporter.line_indexes is not None and is_line_index(rel_path):
+        reporter.line_indexes[local_path] = merged
     reporter.follow_up = "output"
     if verbose:
         console.print(f"  [cyan]merged[/cyan] {safe_str(rel_path)}")
     return "merged"
+
+
+def _tidy_line_indexes(
+    indexes: dict[Path, bytes],
+    *,
+    pending: Collection[Path] = (),
+    verbose: bool = False,
+) -> None:
+    """Drop dangling relative ``.md`` links from ``MEMORY.md`` files merged this pull.
+
+    Runs once after incoming applies and propagated deletions finish. A file
+    that is missing, is not a regular file, or no longer holds the bytes the
+    merge left is skipped without mutation. A linked target this pull left
+    ``waiting`` or ``failed`` in ``pending`` is treated as present using the
+    destination volume's case rules.
+    """
+    pending_set = set(pending)
+    pending_folded = {_folded(str(path)) for path in pending_set}
+    for path in sorted(indexes):
+        expected = indexes[path]
+        try:
+            try:
+                before = path.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                continue
+            try:
+                current = path.read_bytes()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if current != expected:
+                continue
+            memory_dir = path.parent
+            case_insensitive = bool(pending_set) and _detect_case_insensitive_fs(
+                memory_dir.resolve()
+            )
+
+            def present(target: str, _dir: Path = memory_dir) -> bool:
+                candidate = _dir / target
+                if candidate in pending_set or (
+                    case_insensitive and _folded(str(candidate)) in pending_folded
+                ):
+                    return True
+                try:
+                    os.lstat(candidate)
+                    return True
+                except (FileNotFoundError, NotADirectoryError):
+                    return False
+                except (OSError, ValueError):
+                    return True
+
+            tidied = drop_missing_links(current, present)
+            if tidied == current:
+                continue
+            try:
+                now = path.lstat()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if not stat.S_ISREG(now.st_mode) or (
+                now.st_size,
+                now.st_mtime_ns,
+                now.st_ctime_ns,
+                now.st_ino,
+            ) != (
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+                before.st_ino,
+            ):
+                continue
+            fsutil.atomic_write_bytes(path, tidied, fsync=True)
+        except (OSError, StorageError) as exc:
+            safe = safety.safe_terminal_str
+            core._print_apply_warning(
+                f"mm: notice: {safe(path)}: index tidy failed ({safe(exc)}); "
+                "lines for missing memory files may remain."
+            )
+            continue
+        if verbose:
+            dropped = current.count(b"\n") - tidied.count(b"\n")
+            noun = "line" if dropped == 1 else "lines"
+            console.print(
+                f"  [dim]tidied {safe_str(path)} ({dropped} dangling {noun} dropped)[/dim]"
+            )
 
 
 def _existing_post_inversion_sidecars_from_peer(canonical: Path, device_short: str) -> list[Path]:
@@ -3622,9 +3720,10 @@ def _pull_core(
     30-day recovery folder (Track 91A; see `_deletion_candidates`). Absence
     from a peer manifest never deletes anything. Tombstoned files are not
     downloaded. A file changed on only one side fast-forwards; JSONL files
-    and MEMORY.md files changed on both sides are unioned; other both-changed
-    files follow `pullplan.decide` (see the rule comment above
-    `_apply_incoming_file`).
+    and MEMORY.md files changed on both sides are unioned (and merged
+    MEMORY.md indexes drop dangling relative `.md` links once applies and
+    deletions finish); other both-changed files follow `pullplan.decide` (see
+    the rule comment above `_apply_incoming_file`).
 
     `conflict_mode`:
       - "keep-both": default; auto keep-both on conflict.
@@ -3655,6 +3754,7 @@ def _pull_core(
         # mode — non-interactive pulls (default keep-both, autopull) never populate
         # it, so None keeps the bump machinery a no-op down the whole call chain.
         pending_inline_bumps: dict[Path, float] | None = {} if interactive_resolve_flag else None
+        line_indexes: dict[Path, bytes] = {}
 
         # Track 5E gate: refuse pull if any peer is pre-v0.9.2 OR has a
         # corrupt device.json (we can't read its version). Runs BEFORE the
@@ -4041,6 +4141,7 @@ def _pull_core(
                         ledger=None if dry_run else ledger,
                         peer_id=did,
                         own=own_lookup,
+                        line_indexes=None if dry_run else line_indexes,
                     )
                     per_source = None
                     accounted = False
@@ -4159,6 +4260,11 @@ def _pull_core(
                     for r in per_source_results
                     if r.outcomes["failed"] or r.outcomes.get("waiting")
                 }
+                pending_files = {
+                    local_sources_map[r.src_name]["path"] / rel
+                    for r in per_source_results
+                    for rel in (*r.outcomes["failed"], *r.outcomes.get("waiting", ()))
+                }
                 deletions = _deletion_candidates(
                     pull_targets=pull_targets,
                     manifest_cache=deletion_manifests,
@@ -4189,6 +4295,11 @@ def _pull_core(
                     for r in per_source_results:
                         if r.deleted_folder is not None:
                             _record_source_bookkeeping(r, {}, quiet=quiet, verbose=verbose)
+                _tidy_line_indexes(
+                    line_indexes,
+                    pending=pending_files,
+                    verbose=verbose and not quiet,
+                )
 
             fsync_warnings.extend(_fsync_touched_parents(touched_parents))
 

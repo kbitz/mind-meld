@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.11 | 2026-11-04 | On pull, memory merge keeps escaped, parenthesized, and case-aliased links and tidies dangling or duplicate index links. |
 | 1.12.10 | 2026-11-03 | Status and retro-fleet name the Cursor ACP usage coverage gap, so missing coverage is identified. |
 | 1.12.9 | 2026-11-03 | Attended pushes finish git-root discovery, including a record that changed during the pass or never caches. |
 | 1.12.8 | 2026-11-03 | Configured fleet identities are published with usage, and checkpoints are left out of that publication. |

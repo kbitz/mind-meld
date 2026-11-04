@@ -7,9 +7,12 @@ entries appended on different machines:
     string ``ts`` sort first by that string then the full original line;
     every other original line follows in lexical order. No date parsing
     or numeric-epoch interpretation.
-  MEMORY.md    — line-union of the index file (preserves entries from
-    all machines), sorted lexicographically. MEMORY.md does not consult
-    ``ts``.
+  MEMORY.md    — line-union of the index file, keeping at most one line
+    per relative ``.md`` link (preferring the local side's lexicographically
+    first line) and exact-dedup unioning lines without one, sorted
+    lexicographically. MEMORY.md does not consult ``ts``. After pull applies
+    and deletions finish, ``drop_missing_links`` removes lines whose linked
+    file is absent.
 
 For the residual conflict path (files that should_merge() rejects -- prose
 memory entry files, etc.) ``lcs_merge`` offers a 3-way merge using
@@ -25,7 +28,8 @@ from __future__ import annotations
 import difflib
 import json
 import os
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterator
 
 
 # Merge dispatch (single source of truth for "is this file mergeable?"):
@@ -58,6 +62,11 @@ def should_merge(rel_path: str) -> bool:
     Returns True for .jsonl files and MEMORY.md index files.
     """
     return _merge_strategy(rel_path) is not None
+
+
+def is_line_index(rel_path: str) -> bool:
+    """Return True if `rel_path` uses the line-index merge (`merge_lines`)."""
+    return _merge_strategy(rel_path) is merge_lines
 
 
 def merge_file(rel_path: str, local_bytes: bytes, remote_bytes: bytes) -> bytes:
@@ -118,20 +127,147 @@ def merge_jsonl(local_bytes: bytes, remote_bytes: bytes) -> bytes:
     return _join_lines(result_lines)
 
 
+_INDEX_LINK_RE = re.compile(r"\[[^\]]*\]\(")
+
+
+def _index_link_bodies(line: str) -> Iterator[str]:
+    """Read whole destinations, never treating their inner syntax as another link."""
+    offset = 0
+    while match := _INDEX_LINK_RE.search(line, offset):
+        start = match.end()
+        depth = 1
+        angle = False
+        quote = ""
+        escaped = False
+        for pos in range(start, len(line)):
+            char = line[pos]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                # Escapes affect delimiter scanning only. Keep the raw bytes
+                # so index_link still rejects backslashes in destinations.
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = ""
+            elif angle:
+                if char == ">":
+                    angle = False
+            elif char == "<" and not line[start:pos].strip():
+                angle = True
+            elif char in ('"', "'") and pos > start and line[pos - 1].isspace():
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    yield line[start:pos]
+                    offset = pos + 1
+                    break
+        else:
+            # An unterminated destination is uncertain: retain the line rather
+            # than interpreting an embedded link as a missing file to prune.
+            return
+
+
+def index_link(line: str) -> str | None:
+    """Return the line's first qualifying relative ``.md`` link target, or None.
+
+    A target qualifies when, after stripping surrounding ``<>``, an optional
+    quoted title and any ``#fragment``, it ends in ``.md``, contains no ``:``,
+    ``%``, ``?`` or ``\\``, does not start with ``/`` or ``~``, and has no
+    empty or ``..`` segment. Returned as a normalized relative POSIX path.
+    """
+    for body in _index_link_bodies(line):
+        raw = body.strip()
+        if not raw:
+            continue
+        if raw.startswith("<"):
+            if ">" not in raw:
+                continue
+            target, rest = raw[1:].split(">", 1)
+            rest = rest.strip()
+        else:
+            parts = raw.split(None, 1)
+            target = parts[0]
+            rest = parts[1].strip() if len(parts) > 1 else ""
+        if rest and not (len(rest) >= 2 and rest[0] in ('"', "'") and rest[-1] == rest[0]):
+            continue
+        target = target.split("#", 1)[0]
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
+        if (
+            not target.endswith(".md")
+            or target.startswith(("/", "~"))
+            or any(ch in target for ch in (":", "%", "?", "\\"))
+        ):
+            continue
+        segments = target.split("/")
+        if any(seg in ("", "..") for seg in segments):
+            continue
+        kept_segments = [seg for seg in segments if seg != "."]
+        if not kept_segments:
+            continue
+        normalized = "/".join(kept_segments)
+        if normalized.endswith(".md"):
+            return normalized
+    return None
+
+
 def merge_lines(local_bytes: bytes, remote_bytes: bytes) -> bytes:
-    """Merge two line-oriented files by taking the union of their lines.
+    """Merge two line-oriented index files by taking the union of their lines.
 
     Used for MEMORY.md and similar index files where each line is an
-    independent entry. Dedup is byte-exact after whitespace strip.
-    Lines are sorted lexicographically to produce deterministic output.
+    independent entry. Lines without a qualifying relative ``.md`` link
+    are deduplicated byte-for-byte after whitespace strip. Linked lines
+    are grouped by ``index_link``: at most one line is kept per linked
+    file, preferring the lexicographically smallest of the local side's
+    distinct lines for that file, or the smallest remote line when local
+    has none. Output lines are sorted lexicographically.
     """
-    local_lines = _split_lines(local_bytes)
-    remote_lines = _split_lines(remote_bytes)
+    local_set = set(_split_lines(local_bytes))
+    remote_set = set(_split_lines(remote_bytes))
 
-    merged = set(local_lines) | set(remote_lines)
-    result_lines = sorted(merged)
+    local_by_target: dict[str, list[str]] = {}
+    for line in local_set:
+        target = index_link(line)
+        if target is not None:
+            local_by_target.setdefault(target, []).append(line)
 
-    return _join_lines(result_lines)
+    remote_by_target: dict[str, list[str]] = {}
+    for line in remote_set:
+        target = index_link(line)
+        if target is not None:
+            remote_by_target.setdefault(target, []).append(line)
+
+    kept: set[str] = {line for line in (local_set | remote_set) if index_link(line) is None}
+    for target in local_by_target.keys() | remote_by_target.keys():
+        candidates = local_by_target.get(target) or remote_by_target[target]
+        kept.add(min(candidates))
+
+    return _join_lines(sorted(kept))
+
+
+def drop_missing_links(data: bytes, present: Callable[[str], bool]) -> bytes:
+    """Drop lines whose relative ``.md`` link target is not ``present``.
+
+    Returns ``data`` unchanged when every linked line's target is present;
+    otherwise serializes the remaining lines in their existing order via
+    ``_join_lines`` (``b""`` when none remain).
+    """
+    lines = _split_lines(data)
+    kept: list[str] = []
+    dropped = False
+    for line in lines:
+        target = index_link(line)
+        if target is not None and not present(target):
+            dropped = True
+            continue
+        kept.append(line)
+    if not dropped:
+        return data
+    return _join_lines(kept)
 
 
 def _split_lines(data: bytes) -> list[str]:

@@ -44,6 +44,47 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/merge.py|tests/test_merge.py] Test gap: remaining nonqualifying link targets
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Empty destinations, empty path segments, query-bearing targets and direct backslash-bearing targets lack explicit rejection rows.
+- **Hypothesis (untested):** Extend the rejection table and verify such targets remain ordinary lines; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_merge.py:697
+- **Evidence:** Post-repair coverage audit and testing specialist found missing rows, with no failure reproduced for these guards. Parentheses and escaped-delimiter defects were separately reproduced and repaired.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/266 at `0541e5f` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: late tidy flush failure
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The accepted D9 post-replacement flush uncertainty lacks a direct tidy-level test.
+- **Hypothesis (untested):** Inject a parent-flush failure after real replacement and check visible bytes, one notice and unchanged counts. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:3382
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: verbose tidy diagnostics
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** A verbose test executes the diagnostic but does not assert singular/plural wording or quiet suppression.
+- **Hypothesis (untested):** Add output assertions to the existing pull scenario. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:3020
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: interrupted pull skips index tidy
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Interruption tests cover settlement but lack an already-merged index oracle.
+- **Hypothesis (untested):** Interrupt after an index merge and verify the post-apply tidy did not run. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:1845
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-11-04
