@@ -1918,14 +1918,18 @@ Cursor's native chat history has no billing ledger: sessions completed before
 enrollment cannot be backfilled from context-window counts.
 
 Cursor sessions run through ACP (`cursor-agent acp`, which Paseo uses) are not
-counted, and `mm status` and `mm retro-fleet` say so. Re-checked on
+counted. `mm status` names this gap when Cursor capture is enabled;
+`mm retro-fleet` names it when an accepted snapshot consulted Cursor. Re-checked on
 cursor-agent 2026.10.22: the ACP front-end still fires no `sessionStart`, `stop`
 or `sessionEnd` hook (tool hooks do fire), its `session/prompt` result carries
 only a `stopReason`, and its session stores under `~/.cursor/acp-sessions/` hold
 the model and a context-window gauge but no billed token counters, so mm has
-nothing to read. The one account-level source that reports per-request tokens,
-Cursor's Admin API, needs a team API key and covers the whole account, so mm does
-not read it. Interactive and wrapped print sessions are unaffected.
+nothing to read locally. Cursor's public docs describe per-event tokens through
+its credentialed team Admin API; dashboard usage-event CSV exports are another
+candidate. Neither account route was exercised. Individual-plan access, counter
+semantics and deduplication remain unverified, for a separate owner-decided card;
+mm currently reads neither route. Interactive and wrapped print sessions are
+unaffected.
 
 Conductor runs are counted on their terminal UTC day (`endedAt` in the legacy
 ledger; `finished_at`, `cancelled_at` or `expired_at` in SQLite, and `updated_at`

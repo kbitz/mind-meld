@@ -911,13 +911,15 @@ The 2026.10.22 re-check (Track 103A) added: a project-level `.cursor/hooks.json`
 is not loaded under ACP at all (not even a `postToolUse` probe fired), so the
 user-level `~/.cursor/hooks.json` is the only valid venue, and there only tool
 hooks fire. The `session/prompt` result carries only `stopReason`; no
-`usage_update` update is sent. No other local or account source gives billed
-tokens for an ACP session: Paseo's `plan_usage` is the account's plan percentage
-from an account token, and Cursor's Admin API (`filtered-usage-events`) reports
-per-event tokens (inclusive or disjoint is undocumented) for a whole team account with a
-team API key and no per-event ID, so it overlaps every machine and has no
-deduplication key. `~/.cursor/ai-tracking/ai-code-tracking.db` holds line
-attribution only. mm reads none of these. The accepted gap is named in
+`usage_update` update is sent. No credential-free local source was found for
+billed ACP tokens. The inspected Paseo plugin maps `plan_usage` to an account
+percentage, not tokens; the ai-tracking database schema holds line attribution.
+Cursor's public Admin API docs describe per-event tokens using a team API key,
+but do not establish inclusive/disjoint semantics or a per-event deduplication
+ID. Dashboard usage-event CSV exports are another candidate. Neither account
+route was exercised: individual-plan access, ACP coverage, counter semantics
+and deduplication against existing capture remain unverified. Those routes need
+a separate owner-decided card; mm currently reads none of these sources. The gap is named in
 `mm status` (a clause on the Cursor line) and in `retro-fleet` (an
 `agent_coverage` health note, emitted by `_cursor_acp_gap_notes` when any
 accepted snapshot consulted `cursor`). The note is a separate helper from
