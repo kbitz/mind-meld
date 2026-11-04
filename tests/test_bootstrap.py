@@ -1,0 +1,588 @@
+"""Behavioral and contract tests for bin/bootstrap (Track 98A)."""
+
+from __future__ import annotations
+
+import re
+import shutil
+import stat
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from mind_meld import upgrade
+
+ROOT = Path(__file__).resolve().parents[1]
+BOOTSTRAP = ROOT / "bin" / "bootstrap"
+README = ROOT / "README.md"
+
+README_BOOTSTRAP_CMD = (
+    'sh -c "$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap)"'
+)
+HOMEBREW_INSTALL_CMD = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+SYNCTHING_CONFIG_PATHS = (
+    Path("Library/Application Support/Syncthing"),
+    Path(".config/syncthing"),
+    Path(".local/state/syncthing"),
+)
+
+_LOG_SNIPPET = """\
+printf '%s' "{name}" >> "$MM_TEST_CALL_LOG"
+for _arg in "$@"; do
+  printf '\\t%s' "$_arg" >> "$MM_TEST_CALL_LOG"
+done
+printf '\\n' >> "$MM_TEST_CALL_LOG"
+"""
+
+
+def _write_executable(path: Path, body: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return path
+
+
+def _make_fake_script(path: Path, name: str, logic: str) -> Path:
+    header = "#!/bin/sh\nset -eu\n" + _LOG_SNIPPET.format(name=name)
+    return _write_executable(path, header + logic)
+
+
+@dataclass
+class BootstrapHarness:
+    tmp_path: Path
+    home: Path
+    brewbin: Path
+    shadow: Path
+    pipxbin: Path
+    sysbin: Path
+    tools: Path
+    call_log: Path
+    pipx_state: Path
+    os_release: Path
+
+    def install_uname(self, value: str) -> None:
+        _make_fake_script(self.sysbin / "uname", "uname", f'printf "%s\\n" "{value}"\n')
+
+    def install_sudo(self) -> None:
+        _make_fake_script(self.sysbin / "sudo", "sudo", 'exec "$@"\n')
+
+    def install_python(self, directory: Path, version: str = "3.13.2") -> None:
+        _make_fake_script(
+            directory / "python3",
+            "python3",
+            f'printf "Python %s\\n" "{version}"\n',
+        )
+
+    def install_syncthing(self, directory: Path, version: str = "2.1.7") -> None:
+        _make_fake_script(
+            directory / "syncthing",
+            "syncthing",
+            f"""\
+if [ "${{#}}" -eq 1 ] && [ "$1" = "--version" ]; then
+  printf 'syncthing v%s "Gold Grasshopper" (go1.24.1 test-arch) build@syncthing.net\\n' "{version}"
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def install_git(self, directory: Path) -> None:
+        _make_fake_script(directory / "git", "git", "exit 0\n")
+
+    def install_mm(self, directory: Path) -> None:
+        _make_fake_script(directory / "mm", "mm", "exit 0\n")
+
+    def install_pipx(self, directory: Path) -> None:
+        _make_fake_script(
+            directory / "pipx",
+            "pipx",
+            """\
+case "${1:-}" in
+  list)
+    if [ -s "$MM_TEST_PIPX_STATE" ]; then
+      while IFS= read -r _line || [ -n "$_line" ]; do
+        printf '%s\\n' "$_line"
+      done < "$MM_TEST_PIPX_STATE"
+    fi
+    exit 0
+    ;;
+  install)
+    if [ "${MM_TEST_PIPX_FAIL:-0}" = "1" ]; then
+      exit 1
+    fi
+    printf 'mind-meld 1.12.0\\n' > "$MM_TEST_PIPX_STATE"
+    printf '#!/bin/sh\\nprintf "mm\\\\n" >> "$MM_TEST_CALL_LOG"\\n' > "$MM_TEST_PIPX_BIN/mm"
+    chmod +x "$MM_TEST_PIPX_BIN/mm"
+    exit 0
+    ;;
+  environment)
+    printf '%s\\n' "$MM_TEST_PIPX_BIN"
+    exit 0
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        )
+
+    def install_brew(self) -> None:
+        stage = self.tmp_path / "brew-stage"
+        self.install_python(stage, "3.13.2")
+        self.install_pipx(stage)
+        self.install_syncthing(stage, "2.1.7")
+        _make_fake_script(
+            self.brewbin / "brew",
+            "brew",
+            f"""\
+copy_exec() {{
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\\n' "$_line"
+  done < "$1" > "$2"
+  chmod +x "$2"
+}}
+if [ "${{1:-}}" = "install" ]; then
+  if [ "${{MM_TEST_PKG_FAIL:-0}}" = "1" ]; then
+    exit 1
+  fi
+  shift
+  for _pkg in "$@"; do
+    case "$_pkg" in
+      python)
+        if [ "${{MM_TEST_SKIP_BREW_PYTHON_LINK:-0}}" != "1" ]; then
+          copy_exec "{stage}/python3" "{self.brewbin}/python3"
+        fi
+        ;;
+      pipx)
+        copy_exec "{stage}/pipx" "{self.brewbin}/pipx"
+        ;;
+      syncthing)
+        copy_exec "{stage}/syncthing" "{self.brewbin}/syncthing"
+        ;;
+    esac
+  done
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def install_pacman(self) -> None:
+        stage = self.tmp_path / "pacman-stage"
+        self.install_python(stage, "3.13.2")
+        self.install_pipx(stage)
+        self.install_syncthing(stage, "2.1.7")
+        self.install_git(stage)
+        _make_fake_script(
+            self.sysbin / "pacman",
+            "pacman",
+            f"""\
+copy_exec() {{
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\\n' "$_line"
+  done < "$1" > "$2"
+  chmod +x "$2"
+}}
+if [ "${{1:-}}" = "-S" ]; then
+  if [ "${{MM_TEST_PKG_FAIL:-0}}" = "1" ]; then
+    exit 1
+  fi
+  shift
+  for _pkg in "$@"; do
+    case "$_pkg" in
+      --needed) ;;
+      python)
+        copy_exec "{stage}/python3" "{self.sysbin}/python3"
+        ;;
+      python-pipx)
+        copy_exec "{stage}/pipx" "{self.sysbin}/pipx"
+        ;;
+      syncthing)
+        copy_exec "{stage}/syncthing" "{self.sysbin}/syncthing"
+        ;;
+      git)
+        copy_exec "{stage}/git" "{self.sysbin}/git"
+        ;;
+    esac
+  done
+  exit 0
+fi
+exit 2
+""",
+        )
+
+    def write_os_release(self, content: str) -> None:
+        self.os_release.write_text(content, encoding="utf-8")
+
+    def calls(self) -> list[list[str]]:
+        if not self.call_log.exists():
+            return []
+        rows: list[list[str]] = []
+        for line in self.call_log.read_text(encoding="utf-8").splitlines():
+            if line:
+                rows.append(line.split("\t"))
+        return rows
+
+    def clear_calls(self) -> None:
+        if self.call_log.exists():
+            self.call_log.unlink()
+
+    def run(
+        self,
+        *,
+        include_shadow: bool = False,
+        include_pipxbin: bool = True,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        path_parts = [str(self.brewbin)]
+        if include_shadow:
+            path_parts.append(str(self.shadow))
+        if include_pipxbin:
+            path_parts.append(str(self.pipxbin))
+        path_parts.extend([str(self.sysbin), str(self.tools)])
+        env = {
+            "HOME": str(self.home),
+            "PATH": ":".join(path_parts),
+            "MM_TEST_CALL_LOG": str(self.call_log),
+            "MM_TEST_PIPX_STATE": str(self.pipx_state),
+            "MM_TEST_PIPX_BIN": str(self.pipxbin),
+            "MM_BOOTSTRAP_OS_RELEASE": str(self.os_release),
+        }
+        if extra_env:
+            env.update(extra_env)
+        # Criterion 9: run by path, not through `sh`.
+        proc = subprocess.run(
+            [str(BOOTSTRAP)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            self._assert_success_invariants(proc.stdout)
+        else:
+            self._assert_failure_invariants(proc.stdout)
+        return proc
+
+    def _assert_success_invariants(self, output: str) -> None:
+        st_calls = [row[1:] for row in self.calls() if row[0] == "syncthing"]
+        assert st_calls, "successful run must check syncthing --version"
+        assert all(args == ["--version"] for args in st_calls), st_calls
+        for rel in SYNCTHING_CONFIG_PATHS:
+            assert not (self.home / rel).exists(), f"unexpected Syncthing path: {rel}"
+        lines = [line for line in output.splitlines() if line.strip()]
+        assert lines, "expected output on stdout"
+        assert all(line.startswith("bootstrap: ") for line in lines), lines
+
+    def _assert_failure_invariants(self, output: str) -> None:
+        lines = [line for line in output.splitlines() if line.strip()]
+        assert lines, "expected failure output"
+        assert "Run: " in lines[-1], lines[-1]
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> BootstrapHarness:
+    home = tmp_path / "home"
+    brewbin = tmp_path / "brewbin"
+    shadow = tmp_path / "shadow"
+    pipxbin = home / ".local" / "bin"
+    sysbin = tmp_path / "sysbin"
+    tools = tmp_path / "tools"
+    for directory in (home, brewbin, shadow, pipxbin, sysbin, tools):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    for tool_name in ("sed", "id", "chmod"):
+        resolved = shutil.which(tool_name)
+        assert resolved, f"required tool {tool_name} not found"
+        (tools / tool_name).symlink_to(resolved)
+
+    h = BootstrapHarness(
+        tmp_path=tmp_path,
+        home=home,
+        brewbin=brewbin,
+        shadow=shadow,
+        pipxbin=pipxbin,
+        sysbin=sysbin,
+        tools=tools,
+        call_log=tmp_path / "calls.log",
+        pipx_state=tmp_path / "pipx-state.txt",
+        os_release=tmp_path / "os-release",
+    )
+    h.install_sudo()
+    return h
+
+
+def _last_line(output: str) -> str:
+    lines = [line for line in output.splitlines() if line.strip()]
+    assert lines
+    return lines[-1]
+
+
+class TestBootstrapContract:
+    def test_script_is_executable_posix_sh(self) -> None:
+        assert BOOTSTRAP.exists()
+        mode = BOOTSTRAP.stat().st_mode
+        assert mode & stat.S_IXUSR
+        first_line = BOOTSTRAP.read_text(encoding="utf-8").splitlines()[0]
+        assert first_line == "#!/bin/sh"
+
+    def test_install_spec_matches_upgrade_module(self) -> None:
+        script_text = BOOTSTRAP.read_text(encoding="utf-8")
+        match = re.search(r'^MM_INSTALL_SPEC="([^"]+)"$', script_text, re.M)
+        assert match is not None, "MM_INSTALL_SPEC literal missing in bin/bootstrap"
+        assert match.group(1) == upgrade.INSTALL_SPEC
+
+    def test_readme_install_section_points_to_bootstrap_on_latest(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        match = re.search(r"^## Install\n(?P<body>.*?)(?=^## |\Z)", text, re.M | re.S)
+        assert match is not None, "## Install section missing from README.md"
+        body = match.group("body")
+        assert README_BOOTSTRAP_CMD in body
+        url_match = re.search(
+            r"https://raw\.githubusercontent\.com/kbitz/mind-meld/(?P<ref>[^/]+)/(?P<path>[^\s\")]+)",
+            body,
+        )
+        assert url_match is not None
+        assert url_match.group("ref") == "latest"
+        rel_path = url_match.group("path")
+        assert rel_path == "bin/bootstrap"
+        assert (ROOT / rel_path).is_file()
+        assert "manual" in body.lower()
+        assert "Syncthing" in body
+
+
+class TestBootstrapMacOS:
+    def test_macos_without_homebrew_stops_with_install_instructions(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        proc = harness.run()
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert "Homebrew is not installed" in last
+        assert f"Run: {HOMEBREW_INSTALL_CMD}" in last
+        assert harness.calls() == [["uname", "-s"]]
+
+    def test_fresh_macos_installs_missing_and_mm(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        # Xcode-like Python 3.9.6 in sysbin counts as missing on macOS.
+        harness.install_python(harness.sysbin, "3.9.6")
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        calls = harness.calls()
+        brew_calls = [row for row in calls if row[0] == "brew"]
+        assert brew_calls == [["brew", "install", "python", "pipx", "syncthing"]]
+        pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
+        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC]]
+
+        expected_ready = (
+            "bootstrap: installed python pipx syncthing mm; "
+            "Python 3.13, Syncthing 2.1.7 and mm are ready."
+        )
+        assert expected_ready in proc.stdout
+        assert (
+            "pairs no machine, shares no folder and writes no Syncthing configuration"
+            in proc.stdout
+        )
+        assert "brew services start syncthing" in proc.stdout
+        assert "~/Sync/mind-meld" in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_macos_rerun_changes_nothing(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.sysbin, "3.9.6")
+
+        first = harness.run()
+        assert first.returncode == 0, first.stdout
+
+        harness.clear_calls()
+        second = harness.run()
+        assert second.returncode == 0, second.stdout
+
+        calls = harness.calls()
+        assert not [row for row in calls if row[0] in {"brew", "pacman"}]
+        assert not [row for row in calls if row[0] == "pipx" and row[1] == "install"]
+        expected_noop = (
+            "bootstrap: nothing to change: Python 3.13, pipx, "
+            "Syncthing 2.1.7 and mm are already installed."
+        )
+        assert expected_noop in second.stdout
+        assert "mm init" in _last_line(second.stdout)
+
+    def test_macos_too_old_syncthing_stops_with_brew_upgrade(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.0.9")
+
+        proc = harness.run()
+        assert proc.returncode == 1
+        assert "Run: brew upgrade syncthing" in _last_line(proc.stdout)
+        assert not [row for row in harness.calls() if row[0] == "pipx"]
+
+    def test_macos_python_still_old_after_brew_install_advises_shellenv(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.sysbin, "3.9.6")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+
+        proc = harness.run(extra_env={"MM_TEST_SKIP_BREW_PYTHON_LINK": "1"})
+        assert proc.returncode == 1
+        assert 'Run: eval "$(brew shellenv)"' in _last_line(proc.stdout)
+        assert not [row for row in harness.calls() if row[0] == "pipx"]
+
+
+class TestBootstrapArch:
+    @pytest.mark.parametrize(
+        "os_release_text",
+        [
+            'NAME="Arch Linux"\nID=arch\n',
+            'NAME="EndeavourOS"\nID=endeavouros\nID_LIKE=arch\n',
+            'NAME="Omarchy"\nID=omarchy\nID_LIKE="arch"\n',
+        ],
+    )
+    def test_arch_installs_missing_with_pacman_needed(
+        self, harness: BootstrapHarness, os_release_text: str
+    ) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release(os_release_text)
+        harness.install_pacman()
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        calls = harness.calls()
+        pacman_calls = [row for row in calls if row[0] == "pacman"]
+        assert pacman_calls == [
+            ["pacman", "-S", "--needed", "python", "python-pipx", "syncthing", "git"]
+        ]
+        pipx_install_calls = [row[1:] for row in calls if row[0] == "pipx" and row[1] == "install"]
+        assert pipx_install_calls == [["install", upgrade.INSTALL_SPEC]]
+        assert "systemctl --user enable --now syncthing.service" in proc.stdout
+        assert "mm init" in _last_line(proc.stdout)
+
+    def test_arch_installs_only_missing_packages(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.13.2")
+        harness.install_git(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 0, proc.stdout
+
+        pacman_calls = [row for row in harness.calls() if row[0] == "pacman"]
+        assert pacman_calls == [["pacman", "-S", "--needed", "python-pipx", "syncthing"]]
+
+    def test_arch_too_old_python_stops_with_pacman_syu(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Linux")
+        harness.write_os_release("ID=arch\n")
+        harness.install_pacman()
+        harness.install_python(harness.sysbin, "3.10.14")
+        harness.install_pipx(harness.sysbin)
+        harness.install_syncthing(harness.sysbin, "2.1.7")
+        harness.install_git(harness.sysbin)
+
+        proc = harness.run()
+        assert proc.returncode == 1
+        assert "pacman -Syu" in _last_line(proc.stdout)
+        assert not [row for row in harness.calls() if row[0] == "pipx"]
+
+
+class TestBootstrapUnsupportedAndErrors:
+    @pytest.mark.parametrize(
+        "uname_val,os_release_text,expected_label",
+        [
+            ("Linux", "ID=ubuntu\nID_LIKE=debian\n", "ubuntu"),
+            ("FreeBSD", "", "FreeBSD"),
+        ],
+    )
+    def test_unsupported_system_stops_and_names_supported(
+        self,
+        harness: BootstrapHarness,
+        uname_val: str,
+        os_release_text: str,
+        expected_label: str,
+    ) -> None:
+        harness.install_uname(uname_val)
+        harness.write_os_release(os_release_text)
+        harness.install_brew()
+        harness.install_pacman()
+
+        proc = harness.run()
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert expected_label in last
+        assert "macOS and Arch-based Linux" in last
+        assert f"Run: pipx install {upgrade.INSTALL_SPEC}" in last
+        assert not [row for row in harness.calls() if row[0] in {"brew", "pacman", "pipx"}]
+
+    def test_shadowed_mm_stops_with_ensurepath_prepend_force(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+        harness.install_mm(harness.shadow)
+
+        proc = harness.run(include_shadow=True)
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert str(harness.shadow / "mm") in last
+        assert str(harness.pipxbin / "mm") in last
+        assert "Run: pipx ensurepath --prepend --force" in last
+
+    def test_mm_not_on_path_stops_with_ensurepath(self, harness: BootstrapHarness) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+
+        proc = harness.run(include_pipxbin=False)
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert str(harness.pipxbin) in last
+        assert last.endswith("Run: pipx ensurepath")
+
+    def test_package_manager_failure_repeats_failed_command(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+
+        proc = harness.run(extra_env={"MM_TEST_PKG_FAIL": "1"})
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert last.endswith("brew install syncthing failed. Run: brew install syncthing")
+
+    def test_pipx_install_failure_stops_with_pipx_install_command(
+        self, harness: BootstrapHarness
+    ) -> None:
+        harness.install_uname("Darwin")
+        harness.install_brew()
+        harness.install_python(harness.brewbin, "3.13.2")
+        harness.install_pipx(harness.brewbin)
+        harness.install_syncthing(harness.brewbin, "2.1.7")
+
+        proc = harness.run(extra_env={"MM_TEST_PIPX_FAIL": "1"})
+        assert proc.returncode == 1
+        last = _last_line(proc.stdout)
+        assert last.endswith(f"pipx could not install mm. Run: pipx install {upgrade.INSTALL_SPEC}")
