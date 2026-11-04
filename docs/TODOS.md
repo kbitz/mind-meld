@@ -44,45 +44,28 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: ACP notice after successful capture or a reader blocker
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The hook-state test asserts the ACP notice with no successful scan; successful-scan and reader-blocker tests do not assert that notice.
-- **Hypothesis (untested):** Extend existing status cases to require the ACP notice alongside a successful scan and alongside a reader blocker.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/statusflow.py:860`
-- **Evidence:** The notice is appended after all three narrative branches. The 103A coverage audit found two missing assertions, not a runtime failure; 1,827 targeted tests passed.
-- **Context:** Filed by /review-and-prep for Track 103A at `07f6c9f` (2026-11-03 local), before PR creation. Revisit when a Track next touches these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/events.py|src/mind_meld/statusflow.py|README.md] Warm autopush and mm diag discovery may not fit their 50 ms budget
-- **Description:** Track 106A's measurements on the owner's Mac put a complete warm discovery pass at about 66 ms elapsed (probers 33-38 ms, the rest cache load and copy inside the deadline; pass totals up to 140 ms with the write). Autopush and `mm diag` keep 50 ms by the owner's decision. If warm autopush rows stay `partial`, each holds the cursor display and adds to `incomplete_streak`, so `mm status` can keep printing the recovery wording ("Finish repository discovery … `mm recapture Nd`") right after an attended push finished discovery. The README upgrade step ("run `mm push` until `mm diag` shows discovery `complete`") can then loop, because diag's fresh pass also runs at 50 ms.
-- **Hypothesis (untested):** time a warm `discover_git_roots` at 50 ms with and without persist. If it is partial, tell a budget-only partial over a complete index apart from unfinished discovery (a persisted-state check or a row marker), or stop counting it toward `incomplete_streak`.
-- **Revisit trigger:** Track 106A's post-merge row 1 shows `mm status` still reporting the cursor held, or `mm diag` reading `partial`, after an attended push recorded discovery `complete`.
-- **Effort:** M
-- **Context:** native adversarial and Red Team review of Track 106A (branch mmm/60394b0f), 2026-11-03. Autopush staying at 50 ms is the owner's decision; this entry tracks its consequence, not a reversal.
-
-### [review:files=src/mind_meld/cli.py|src/mind_meld/identity.py] mm refresh-identity persists discovery without the mm lock and reports a cut gather as refreshed
-- **Description:** `mm refresh-identity` persists discovery (up to 30 s since Track 106A; about 3 s measured cold, 0.1 s warm) without taking the mm lock. The discovery cache writer replaces `projects`, `probe_index`, both resume markers and `pending_refresh_since` from its start-of-call copy, so a push or autopush that persisted in that window is reverted. A `LockContended` from that write is not caught (it is a RuntimeError, outside `except OSError`). Separately, when the 5 s per-repository email gather is cut, the cache is not written but the command still prints `Refreshed identity cache` and exits 0.
-- **Hypothesis (untested):** take the mm lock as `recapture` does, with the usual lock message; have `refresh_identity_cache` report whether it persisted and word the outcome to match (O8).
-- **Revisit trigger:** the per-repository gather measures over 4 s on any Mac (Track 106A plan risk), or a refresh-identity run overlaps a push.
-- **Effort:** S
-- **Context:** native adversarial and Codex adversarial review of Track 106A (branch mmm/60394b0f), 2026-11-03. On the owner's Mac the gather took 0.98 s over 27 roots and 1.73 s over 24, so criterion 4 holds there.
-
-### [review:files=src/mind_meld/statusflow.py|src/mind_meld/identity.py|src/mind_meld/events.py] Prober errors read as unfinished discovery, and identity refreshes from partial passes
-- **Description:** `classify_discovery` maps both an exceeded budget and a prober exception to `partial`, so `mm status` says discovery "has not finished" and recommends `mm recapture Nd` for a persistent prober error (for example a PermissionError under `~/.codex/sessions`) that recapture repeats. `identity._identity_gather_incomplete` checks only `exceeded`, so a refresh persists without the erroring prober's repositories, contrary to `_identity_inputs_digest_for_push`'s docstring. The aggregator path (`gather_local_identities(allow_refresh=True)` with no supplied discovery, reaching `_gather_per_repo_emails` at the 100 ms default) drops `exceeded` entirely, so `mm retro-fleet` can persist a refresh built from a partial pass, against "Incomplete identity discovery never refreshes cache". Any incomplete prober (`_discovery_complete=False`) also appends `git root discovery exceeded its time budget`, so a partial held open with budget left (since Track 106A, a closing round over a record whose stamp changed) is labelled a budget overrun in `mm diag`.
-- **Hypothesis (untested):** record exceeded and prober-error separately in `git_capture` and word each in status; treat prober errors and an exceeded internal discovery as an incomplete gather in identity.
-- **Revisit trigger:** `mm diag` shows a prober error while `mm status` shows the discovery wording, or `mm retro-fleet` misses a repository-local email once the index is warm (Track 106A's declined-scope trigger for the aggregator gather).
-- **Effort:** M
-- **Context:** native adversarial and Red Team review of Track 106A (branch mmm/60394b0f), 2026-11-03. Pre-existing; not changed by Track 106A.
-
-### [review:files=src/mind_meld/events.py] A round resumed from a saved listing can read complete without seeing records added since
-- **Description:** `_probe_host_records` resumes a round from the `unit_listing` (and Cursor `listing_steps`) an earlier push saved. When that round finishes with no stale `round_incomplete`, discovery reads `complete` without re-listing, so a record added after the listing (a new Codex rollout naming a new repository) waits for the next round while the cursor advances. The new root then walks from that cursor and misses the commits in between unless `mm recapture` runs. Pre-existing (Track 102A design); Track 106A's closing round runs only when the first round ends incomplete.
-- **Hypothesis (untested):** also run the closing round (re-list, skip units already read at the same stamp) when the first round finished a listing saved by an earlier call.
-- **Revisit trigger:** a repository that discovery finds for the first time is missing commits between its first session and the push that found it.
-- **Effort:** S
-- **Context:** native adversarial delta review of Track 106A (branch mmm/60394b0f), 2026-11-03; probe reproduced it on the pre- and post-repair code.
-
 ## Drain records
+
+### Roadmap drain — 2026-11-04
+
+Run from manager Ephesus 8's brief and addendum on Karl's 2026-11-04 decisions: card the Cursor account usage reader ("yes") and put it next; no more investigation-only Tracks whose premise is known or stale ("We did a whole track to document a cursor gap? That is dumb; I thought it was fixing cursor usage."). 5 inbox items: **1 placed, 0 deferred, 4 killed, 0 discharged**; 2 Current Plan Tracks killed. Authored-false rate: 0 / (1 + 0) = 0%. Verification baseline: `d3828c0` (v1.12.10). Tracks 105A (v1.12.6, PR #259), 102A (v1.12.7, PR #260), 104A (v1.12.8, PR #261), 106A (v1.12.9, PR #262) and 103A (v1.12.10, PR #263) were recorded in shipped history; the brief named only 103A and 106A, and main showed the other three merged and still carded.
+
+| Item | Disposition |
+|---|---|
+| Brief: an opt-in Cursor account usage reader through cursor-agent's existing login | place → Track 107A, first in the Current Plan |
+| Test gap: ACP notice after successful capture or a reader blocker (Track 103A review) | place → Track 107A, which touches both files and rewrites that notice |
+| Warm autopush and `mm diag` discovery may not fit their 50 ms budget | kill: unobserved; reversible (the next attended push or `mm recapture` completes discovery); reopen if `mm status` reports the cursor held, or `mm diag` reads `partial`, after an attended push recorded discovery `complete` |
+| `mm refresh-identity` persists discovery without the mm lock and reports a cut gather as refreshed | kill: unobserved; reversible (the discovery cache is rebuilt by the next pass); reopen if a refresh-identity run overlaps a push, or the gather measures over 4 s on any Mac |
+| Prober errors read as unfinished discovery, and identity refreshes from partial passes | kill: unobserved; reversible (wrong wording, and identities recompute on the next complete pass); reopen if `mm diag` shows a prober error while `mm status` shows the discovery wording, or a retro misses a repository-local email once the index is warm |
+| A round resumed from a saved listing can read complete without seeing records added since | kill: unobserved in real use (a probe reproduced it); reversible (`mm recapture <window>` recovers the commits); reopen if a newly found repository misses commits between its first session and the push that found it |
+| Current Plan: Track 99A, move the Muse usage reader into its own module | kill: it existed only to prepare Track 100A; reopen with 100A |
+| Current Plan: Track 100A, find why the Muse reader refuses this Mac's records | kill: premise stale; the refusal has not recurred since the 2026-11-02 budget fix (manager's `mm diag --json` on this Mac at 1.12.10, 2026-11-04: `muse.last_reason` null, last complete read 2026-11-04T03:31Z, 1,086 of 1,097 files cached), and its card said to kill it if the refusal did not recur; reopen if Muse's `last_reason` reads `unsupported` again |
+
+**Open observation (not an inbox item):** on 2026-11-04 the manager's `mm refresh-identity --json` on this Mac listed `probe@localhost`; its source is not yet found. Recorded on Track 106A's shipped entry.
+
+**Future:** not reassessed. "Render `retro-fleet` for one identity category" has its trigger met (Track 104A shipped) and waits for the owner's reassessment; it is not promoted.
+
+**Version:** documentation-only regeneration; no bump.
 
 ### Roadmap promotion — 2026-11-02 (Codex warm read)
 
