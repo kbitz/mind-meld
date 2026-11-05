@@ -3852,9 +3852,12 @@ rate. Every other Grok 4.7 id normalizes by dropping its suffix: the flat ids
 `PRICING_FAMILY_BY_MODEL` onto `grok-4.7`, and the effort ids' `-fast` variants
 onto `grok-4.7-fast`. All eleven Grok 4.7 ids (`GROK_47_MODEL_IDS`) are in
 `VERIFIED_MODEL_IDS` dated by `PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause`
-checks `GROK_47_MODEL_IDS`, so Fast-only, flat-id and `grok-4.7-build` rows emit the
+chooses its lead only from the models that produced a detail (in-window tokens,
+a bundled long-context card and no active local override): when any of them is in
+`GROK_47_MODEL_IDS`, Fast-only, flat-id and `grok-4.7-build` rows emit the
 "Per-turn totals cannot recover the per-request context tier" cause, while
-`grok-4.6-build` alone keeps the Grok Build log-limit cause. Fast-only and mixed
+`grok-4.6-build` alone keeps the Grok Build log-limit cause. A zero-token or
+locally overridden Grok 4.7 id never changes another model's lead. Fast-only and mixed
 rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
 remain a labelled unknown and suppress any at-most claim. Adding auto/composer
 families remains deferred in TODOS.
