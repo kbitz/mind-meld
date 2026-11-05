@@ -2,6 +2,21 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.13] - 2026-11-04
+
+mm shows Syncthing state and each peer's push progress, and a Syncthing reply can no longer stall that check.
+
+### Added
+
+- mm shows Syncthing state and how far each peer has pushed.
+
+### Fixed
+
+- A Syncthing reply has a deadline, so a slow or silent reply cannot stall status or diagnostics.
+- A peer cursor advances only with content that was applied, so progress matches what landed.
+- Peer cursor identity stays stable across checks.
+- A diagnostic error is preserved, so the failure stays visible.
+
 ## [1.12.12] - 2026-11-04
 
 A new bootstrap readies macOS and Arch-based Linux for mm, and the install one-liner stops when the download fails.

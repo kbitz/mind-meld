@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.13 | 2026-11-04 | mm shows Syncthing state and each peer's push progress, and a Syncthing reply can no longer stall that check. |
 | 1.12.12 | 2026-11-04 | A new bootstrap readies macOS and Arch-based Linux for mm, and the install one-liner stops when the download fails. |
 | 1.12.11 | 2026-11-04 | On pull, memory merge keeps escaped, parenthesized, and case-aliased links and tidies dangling or duplicate index links. |
 | 1.12.10 | 2026-11-03 | Status and retro-fleet name the Cursor ACP usage coverage gap, so missing coverage is identified. |
