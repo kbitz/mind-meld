@@ -12,6 +12,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
+- `src/mind_meld/hosts/grok.py` — `read_grok_usage` / `grok_usage_diag` / `GROK_SESSIONS_PATH` / `CACHE_PATH` / `_scan_grok_root` / `_parse_usage`
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
@@ -84,6 +85,7 @@ terminal outcome and finalization order; auto-upgrade.md owns update eligibility
 - [Cost estimation](#cost-estimation--one-predicate-honest-degradation-load-bearing-v01213)
 - [Fleet-wide author email](#fleet-wide-author-email-trust-set-load-bearing-v01117)
 - [Host reader adapter contract (Track 84A)](#host-reader-adapter-contract)
+- [Grok Build usage reader (Track 110A)](#grok-build-usage-reader-track-110a)
 
 ---
 
@@ -666,8 +668,8 @@ repository by common Git directory, unchanged.
 
 ## Host-usage snapshot capture (load-bearing, Track 19A)
 
-The tail publishes the local Codex / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
-`host-usage-snapshot` row. `hosts/codex.py` owns the Codex reader;
+The tail publishes the local Codex / Grok Build / Cursor (Conductor + enrolled CLI) / Muse / Antigravity readers as one additive
+`host-usage-snapshot` row. `hosts/codex.py` and `hosts/grok.py` own the Codex and Grok Build readers;
 `host_usage` owns the shared reader kit, other readers and model-family
 classification, and `host_registry` owns diagnostic and warm dispatch.
 `events.make_host_usage_snapshot` is a pure
@@ -680,6 +682,11 @@ peer drops as `active_days_mismatch`, under a remedy blaming the writing
 machine's mm version, and absence already means "pre-33A peer OR no per-model
 data". No `EVENTS_SCHEMA_VERSION`
 bump — legacy consumers already skip unknown types.
+
+References below to Grok's retired `updates.jsonl` reader, its private helpers and
+its historical measurements describe the pre-v1.11.8 implementation. The
+[Track 110A contract](#grok-build-usage-reader-track-110a) governs the current
+`usage.json` reader.
 
 **All-or-nothing for FAILURES (premise revised Track 31A, 2026-08-27).**
 Sweep-level atomicity is retired. A file/record failure still fails that
@@ -714,13 +721,15 @@ Codex returns `unsupported` for a ledger it cannot attribute, which means
 that distinction backwards silently under-reports the fleet.
 
 **Host readers are consent-gated.** `HOST_READER_SOURCE_GATE` maps Codex,
-Muse and Antigravity to the source name whose being enabled authorizes them.
+Grok, Muse and Antigravity to their source names. Grok selection uses the separate
+`grok_consented` verdict from `config.grok_usage_consented`, which also supports
+usage-only consent; Codex, Muse and Antigravity require their source enabled.
 Cursor's entry is `None`; its separate `cursor_consented` flag authorizes usage
 reading, as described below. The live set is
 `events.ACTIVE_HOST_READERS`. `HOST_USAGE_TOKEN_SOURCES` is the live writer
-tuple (same names, same order). Unknown inbound names (retired `opencode`,
-retired `grok`, or a future reader) are retained by the aggregator, not listed here.
-`_default_host_readers(sources)` returns only those.
+tuple (same names, same order). Unknown inbound names (retired `opencode`
+or a future reader) are retained by the aggregator, not listed here.
+`_default_host_readers(sources, cursor_consented=..., grok_consented=...)` returns only those.
 A user who declined the `codex` source does not get `~/.codex/sessions`
 (or the archive, `~/.codex/archived_sessions`) parsed — matching
 `_enabled_claude_paths`. Antigravity is a scoped sync source (`type: "generic"`,
@@ -1225,6 +1234,8 @@ also reports the read-only completion-hook enrollment state. No Grok cache state
 may supply Cursor's upgrade/reminder decision. Consent, registration and this
 dispatch land together. The token-source tuples append cursor after codex/grok;
 this is MINOR under the 1.x compatibility contract, not a new host family.
+(Superseded by Track 110A: the retired Grok reader's slot is restored, so the tuples
+read `("codex", "grok", "cursor", "muse", "agy")`. See the Grok Build section below.)
 
 **First-success carve-out (Track 21A) — retired from sweep policy in Track 31A.**
 The latch's premise was already false (`complete_once` arms on an empty
@@ -1974,11 +1985,11 @@ capture default when neither key is set). Invalid config still stops ordinary sy
 
 **Same-family day collisions still sum.** Historically Codex and OpenCode
 classified GPT models into the same canonical `codex` family, so two readers
-could return the same `(family, UTC day)` bucket. After 36A no two live
-readers collide in production, but the merge still sums
+could return the same `(family, UTC day)` bucket. Grok Build and Cursor now both
+contribute to the `grok` family (Track 110A), superseding the post-36A claim that
+no live readers collide. The merge sums
 `token_usage.merge_usage_bucket` at every level — a shallow update would drop
-whichever reader landed first, and a synthetic or future reader that shares
-a family would regress without this. The same rule applies one level down
+whichever reader landed first. The same rule applies one level down
 on `(day, model)` in `tokens_by_day`. `_merge_warm_retry_capture` fuses both
 maps, because a sibling that skipped the warm retry would diverge from
 `hosts` on the largest-corpus machines and then be dropped by reconciliation.
@@ -4174,18 +4185,22 @@ owns the reader registry and dispatch (`HOST_READER_DIAGS`, `HostReaderDiag`,
 `PERSISTABLE_REASONS`, and the remaining in-place readers until their own moves).
 The nine clauses below record the existing reader obligations and named
 exceptions; they do not add a new reader API. `tests/test_host_adapter_contract.py`
-qualifies the detailed runtime rows for Codex and Muse in this extraction,
+qualifies the detailed runtime rows for Codex, Muse and (Track 110A) Grok Build,
 while `tests/test_module_boundaries.py` enforces ownership and imports.
-Cursor and Antigravity remain in place until their own adapter work.
+Cursor and Antigravity remain in place until their own adapter work. Grok Build's
+adapter is `src/mind_meld/hosts/grok.py` ([reader section](#grok-build-usage-reader-track-110a)).
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
    Every reader in `events.ACTIVE_HOST_READERS` has an entry in
    `HOST_READER_SOURCE_GATE`. For source-gated readers, an absent gating source
    in resolved sources makes `_default_host_readers(sources)` omit the reader.
    Cursor's gate entry is `None`: it has no sync source and is selected only
-   when the separate `cursor_consented` flag is true. For readers that
+   when the separate `cursor_consented` flag is true. Grok Build is selected only
+   when `grok_consented` (`config.grok_usage_consented`) is true; its gate entry
+   `"grok"` names the source its stop remedy disables, and every
+   `_default_host_readers` call site passes the same verdict. For readers that
    carry a `consented` parameter (`read_muse_usage`, `read_cursor_usage`,
-   `read_agy_usage`), the default is `consented=False` and an unconsented call
+   `read_agy_usage`, `read_grok_usage`), the default is `consented=False` and an unconsented call
    returns `_incomplete("no_metadata_ledger")` before any filesystem stat,
    directory listing, file open, or cache creation.
 2. **Failure isolation (`events_tail._capture_host_usage`).**
@@ -4196,7 +4211,7 @@ Cursor and Antigravity remain in place until their own adapter work.
    publication intact.
 3. **Bounded scan and deadline carry (`_expired`, `_carry_reason`, `_carry_read_timing`).**
    Pre-lock deadline expiry returns `_incomplete("deadline")` without touching or
-   creating the cache file. An incomplete Codex or Muse scan preserves prior
+   creating the cache file. An incomplete Codex, Grok or Muse scan preserves prior
    cached file entries and verified progress, carrying prior `last_complete_ms` /
    `last_complete_at`. A complete scan replaces the file map and prunes deleted
    entries even if the post-scan check finds it over budget; it records fresh
@@ -4209,10 +4224,10 @@ Cursor and Antigravity remain in place until their own adapter work.
    Reader caches live under `~/.config/mind-meld/` at mode `0600`, guarded by
    `locked_json_rmw(..., compact=True)` (or `locked_json_durable_rmw` for Cursor)
    and `fsutil.refuse_real_state_write_under_pytest`. Lock contention returns
-   `_incomplete("locked")` without mutating the cache. For Codex, Muse and
+   `_incomplete("locked")` without mutating the cache. For Codex, Grok, Muse and
    Antigravity, a cache write `OSError`
    is routed through `_notice_cache_write_failure` (notice + diagnostic capture)
-   and preserves the scan's in-memory `HostUsageResult`. Codex and Muse's unchanged
+   and preserves the scan's in-memory `HostUsageResult`. Codex, Grok and Muse's unchanged
    failed sweeps do not rewrite the cache when neither the standing `(last_reason, last_reason_since)`
    pair, the deadline allotment, nor any learned file entry changed.
    Cursor's cache is authoritative retained history: an `OSError` or
@@ -4241,8 +4256,8 @@ Cursor and Antigravity remain in place until their own adapter work.
    Each `HostReaderDiag` names its `owner` module, `function`, `ready_key`,
    `ready_value`, and `label`. Every `<reader>_usage_diag()` returns at least
    `cache_state`, `last_reason`, `last_reason_since`, `model_count`, `models`,
-   and `spec.ready_key`. Codex, Muse and Antigravity also expose `files_cached`
-   and `files_on_disk`; Cursor instead exposes `runs_cached` and store counters
+   and `spec.ready_key`. Codex, Muse, Antigravity and Grok Build also expose
+   `files_cached` and `files_on_disk` (Grok Build adds `usage_less_skipped`); Cursor instead exposes `runs_cached` and store counters
    because its inventory is retained history. `warm_host_cache_inline`
    raises `ValueError` naming `host_registry.py` and this section anchor when
    given an unknown reader name.
@@ -4257,7 +4272,7 @@ Cursor and Antigravity remain in place until their own adapter work.
    `host_usage` helpers module-qualified (`host_usage._expired(...)`). Patching
    the owner before the relevant dispatch or selection intercepts that call.
 9. **Import boundaries and test-time path isolation.**
-   `hosts/__init__.py` is empty. Every `hosts/*.py` module imports only stdlib
+   `hosts/__init__.py` is empty (`hosts/codex.py` and `hosts/grok.py` are the adapters). Every `hosts/*.py` module imports only stdlib
    and `mind_meld.{host_usage, token_usage, lockedjson, fsutil, errors}` — never
    `cli`, `core`, `statusflow`, `events_tail`, `host_registry`, or sibling
    `hosts.*`. `host_usage` never imports `hosts/*` or `host_registry`;
@@ -4282,3 +4297,68 @@ Cursor and Antigravity remain in place until their own adapter work.
   failure isolation, owner-lookup sentinel, and fresh-process import checks.
 - Update the ownership inventory, seeded boundary gates, and invariant routing;
   verify fixture parity and cache compatibility before changing reader behavior.
+
+## Grok Build usage reader (Track 110A)
+
+`src/mind_meld/hosts/grok.py` (`read_grok_usage`, `grok_usage_diag`) reads Grok Build's
+per-turn usage into the `grok` host family beside Cursor's Grok runs. It replaces the reader
+retired before v1.11.8; its record shapes, census and the reasons for the source choice are in
+`tests/fixtures/host_sessions/grok/CONTRACT.md` (Grok Build 1.0.70, bound to
+`GROK_USAGE_CENSUS_HOST_VERSION` by `tests/test_grok_usage.py`).
+
+- **Source choice.** The only file opened is `~/.grok/sessions/<cwd-dir>/<session-id>/usage.json`
+  (the root is fixed, not `GROK_HOME`, like Codex's). `updates.jsonl` is the ACP conversation
+  stream and is never opened, nor is `chat_history.jsonl` or any other session file. A session
+  without `usage.json` (no `updates.jsonl`, a 1-line or a 2-line one of `hook_execution` updates,
+  as Paseo leaves) is a cached zero entry (`{"absent": true}`) counted in `usage_less_skipped`;
+  an unchanged `usage.json` (`dev`, `ino`, `size`, `mtime_ns`) is reused unread, so later pushes
+  `lstat` each session and open nothing. Symlinked cwd or session directories, non-directory
+  siblings such as `.cwd`, and a symlinked or non-regular `usage.json` are never followed.
+- **Counter semantics.** Rows (`turns`) are per turn; the `session` object includes history
+  inherited by resume or fork and is never read. `inputTokens` is inclusive of `cachedReadTokens`
+  and `cacheCreationTokens` and goes through `host_usage._normalize_inclusive_counters`;
+  `reasoningTokens` is inside `outputTokens` and is never added. Counters come from each
+  `modelUsage` entry (one stored turn per row and model, disjoint). The day is `endedAt`'s UTC
+  date. A nonzero `cacheCreationTokens` marks that day partial (the Codex rule). `turnNumber`
+  contributes only to the hashed dedup key; `totalTokens` validates the input/output identity.
+  Neither is stored directly or published. `modelCalls`, `turnCount`, `costUsdTicks`, `session`
+  and `primaryModelId` are ignored entirely.
+- **Dedup and subagents.** A turn key hashes `(endedAt, turnNumber, model)`; equal keys across
+  files (a fork repeats its parent's rows byte-identically) count once, and the same key with
+  different counters is `malformed`. Subagent usage is folded into the parent turn's row (the
+  census saw no child directory); if Grok Build ever writes child sessions with their own
+  `usage.json`, the contract needs a re-census.
+- **Validation.** Unknown extra keys at any level are ignored. Required keys are exactly the ones
+  read; a missing required key, a non-object row, or `totalTokens != inputTokens + outputTokens`
+  is `unsupported` (a standing blocker with the `mm update` remedy); bad JSON, a non-integer,
+  negative or over-2^53 counter, a naive, unparseable or unrepresentable UTC `endedAt`,
+  an empty, invalid-UTF-8 or oversize model id,
+  `reasoning > output`, per-model sums that differ from the row, or `cachedRead + cacheCreate >
+  input` is `malformed`; a file replaced mid-read is `stale`. Any of these fails this reader
+  alone (clause 2): content sync keeps its own exit status, siblings publish, and `mm status` and `mm diag` name
+  the failure and the fixing command (`mm update`, or `mm disable-source grok`).
+- **Consent and the never-open rule.** The reader runs only when
+  `config.grok_usage_consented(config)` (the `grok` source, or `[retro] grok_host_usage = true`,
+  unless `grok` is in `disabled_sources`) holds. `events_tail._default_host_readers(...,
+  grok_consented=...)` selects it after Codex; its five call sites (push capture, init backfill,
+  `cli._capture_attended_usage`, the recapture notice, `statusflow._host_publication`) all pass the
+  same verdict. `read_grok_usage(consented=False)` returns `no_metadata_ledger` before any stat or
+  cache creation; `mm status` and `mm diag` list the sessions directory only when consented.
+  Unconsented status says nothing about Grok; diag reports consent and mm's own cache state
+  without inspecting the Grok sessions directory.
+- **Cache.** `~/.config/mind-meld/grok-host-tokens.json` at 0600, compact, through
+  `locked_json_rmw`, with `grok_format` 2: a cache written by the retired reader lacks it and is
+  discarded on the first write. Keys are `host_usage._cache_key` digests of the session
+  directory; entries hold identity, turn keys, day, model and disjoint counters, never paths,
+  session ids or cost. A complete scan replaces and prunes the file map; an incomplete one
+  (deadline) merges staged sessions over cached ones, so progress resumes without re-reading.
+  Autopush never warms; the attended push warms a Grok `deadline` like the other warmable readers.
+- **Wire slot.** `grok` returns to its pre-v1.11.8 slot: `ACTIVE_HOST_READERS`,
+  `HOST_USAGE_TOKEN_SOURCES` and `HOST_READER_DIAGS` read `("codex", "grok", "cursor", "muse",
+  "agy")`, because retained rows from mm 1.11.7 and earlier list `grok` before `cursor` and
+  `aggregator._token_sources_subsequence` rejects a known name out of order. Peers that predate
+  this release show `grok` as an unknown or retired reader in coverage notes but still count the
+  family.
+- **Retro.** Grok Build tokens add to the Grok row beside Cursor's Grok runs (`grok-4.7-build` is
+  in `token_usage.GROK_47_MODEL_IDS`, priced from the Grok 4.7 card; unknown ids remain an
+  unpriced floor until a rate is available).

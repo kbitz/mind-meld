@@ -644,7 +644,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 
 ## Codex Integration
 
-Mind Meld treats Codex as a first-class peer of Claude Code. Muse and Antigravity are the other usage-reader hosts (see [Muse](#muse) and [Antigravity](#antigravity-agy)).
+Mind Meld treats Codex as a first-class peer of Claude Code. Grok Build, Muse and Antigravity are also usage-reader hosts (see [Grok Build](#grok-build), [Muse](#muse) and [Antigravity](#antigravity-agy)).
 
 - `codex` syncs `~/.codex/AGENTS.md`, `skills/`, and `plugins/`, except Codex's own installed plugin versions (`plugins/cache/*` and `plugins/.remote-plugin-install-staging/*`): Codex installs and removes those itself, and a removal there would otherwise delete the same files on your other Macs.
 - Account credentials, session databases, logs, tool output, and whole-file `config.toml` settings are not sync sources. Those settings can contain inline provider or MCP credentials, so they stay local until Mind Meld can safely filter individual fields.
@@ -683,6 +683,8 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 ### Grok Build
 
 `mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, and `rules/` only, and records consent for Grok usage capture (`grok_usage_consented`). Sessions, `memory-v2/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, or `rules/` exists; `mm init` asks with a default of N, and `mm reconfigure-sources` defaults to N unless an explicit Grok source is already enabled. `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
+
+Consent also lets `mm push` read completed turn token totals from `~/.grok/sessions/*/*/usage.json` and nothing else: it never opens `updates.jsonl`, `chat_history.jsonl` or any other session file, so prompts and responses never leave the Mac. The same consent is the config verdict `[retro] grok_host_usage = true`; `mm disable-source grok` stops the reading, and an unconsented `~/.grok` is never opened. Runs that Paseo makes through Grok Build (ACP) are counted. A session without a `usage.json` (Paseo leaves some with only a one- or two-line `updates.jsonl`) counts as zero and costs one `lstat`. Only the existing encrypted aggregate is published: family, model, UTC day and token counters, never cost ticks, paths or session ids. In the fleet retro, Grok Build tokens join the `Grok` row next to Cursor's Grok runs and are priced from the Grok 4.7 rates. Grok Build does not document `usage.json` as a stable contract, so a format change makes this reader alone fail closed: `mm status` and `mm diag` name the broken record format with the fix (`mm update`, or `mm disable-source grok` to stop retrying), `mm push` still exits 0, and the other readers keep publishing. Unknown extra fields in `usage.json` are ignored.
 
 ### Muse
 
@@ -748,7 +750,7 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
 | `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state, each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`, with `grok` beside `codex`, `cursor`, `muse` and `agy`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -1216,7 +1218,7 @@ publish a usable capture.
 | Grok   |   1.0B |   11 |        1 |     ≥$546 | grok-4.6-build (830.8M) |
 ```
 
-Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `agy` / `cursor` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
+Comparing the rows is the point: they share a unit, a window, and a counter basis. Host agents require `mm enable-source codex` (or `grok` / `agy` / `cursor` / `muse`) on each machine — that opt-in is also what authorizes the local usage reader — and a `mm push` afterwards. An absent row means unobserved, never zero.
 
 Days are a set union across machines and can only understate. Token sums can double-count a migrated home directory carrying two device ids with overlapping ledger history. mm flags identical host-ledger day counters as possible overlap through health code `duplicate_ledger`; matching totals alone are not proof, so inspect the machines before retiring one. This detector covers host ledgers, including their Claude models; it does not establish that Claude Code session histories are disjoint. Before v1.1 this hazard was handled by refusing to sum host tokens at all, while summing Claude's under the identical risk.
 
@@ -1764,7 +1766,7 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
 Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build usage capture remains unavailable, but Grok models used through Cursor remain supported and priceable.
+**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)); Grok models used through Cursor remain supported and priceable.
 
 **Why grok-4.6 rates, not grok-build-0.1?** On 2026-09-10 xAI's Build overview identified grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 
@@ -1875,7 +1877,7 @@ claim to repair historical attribution.
 
 <a id="host-usage-capture"></a>
 
-### Host usage capture (Codex, Cursor, Muse and Antigravity)
+### Host usage capture (Codex, Grok Build, Cursor, Muse and Antigravity)
 
 Every attended `mm push` refreshes and publishes consented host usage, including
 when user files are already in sync. This requires **mm v0.14.17+ on the producing
@@ -1901,7 +1903,7 @@ magnitudes or payloads. Local publication evidence proves acceptance by this Mac
 storage backend; it does not prove delivery to another Mac.
 
 Capture requires enabled, available `mm-events` and consented readers. Enable
-with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source muse` / `mm enable-source agy`.
+with `mm enable-source mm-events` and `mm enable-source codex` / `mm enable-source grok` / `mm enable-source muse` / `mm enable-source agy`.
 
 Cursor uses local usage consent. Enable capture with:
 
@@ -2284,7 +2286,7 @@ Older undated blockers gain a date when this version first observes them.
 
 | Reason | Meaning | Remedy |
 |---|---|---|
-| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status` and plain-text `mm diag` say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` does not print that sentence. |
+| `unsupported` | The reader wrote a record this mm cannot read. | A newer mm may read it: run `mm update`, or `mm disable-source codex` / `mm disable-source grok` / `mm disable-source agy` / `mm disable-source muse` to stop the corresponding source reader. A retry alone cannot fix it. When the cached release check says this mm is the newest known, `mm status` and plain-text `mm diag` say instead that no newer mm can read the format yet, and give the stop step and `mm diag`. `mm diag --json` does not print that sentence. |
 | `malformed` | A record or counter relationship could not be interpreted safely. | Let the host finish writing, then `mm push`. If it persists, report the mm version and Host usage diag block. |
 | `io_error` | A host log could not be read. | Restore read access, then `mm push`. |
 | `stale` | A file changed while it was being read. | Let the host finish writing, then `mm push`. |

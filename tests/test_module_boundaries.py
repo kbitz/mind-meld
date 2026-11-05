@@ -1650,7 +1650,7 @@ def test_source_bindings_have_one_owner():
 
 
 # ---------------------------------------------------------------------------
-# Track 84A — Codex host reader adapter & host_registry boundaries.
+# Track 84A — Codex host reader adapter & host_registry boundaries (Track 110A adds Grok Build).
 # ---------------------------------------------------------------------------
 
 CODEX_HOST_DEFINITIONS = frozenset(
@@ -1714,6 +1714,37 @@ CODEX_HOST_DEFINITIONS = frozenset(
     """.split()
 )
 
+GROK_HOST_DEFINITIONS = frozenset(
+    """
+    CACHE_PATH
+    GROK_SESSIONS_PATH
+    GROK_USAGE_CENSUS_HOST_VERSION
+    _ABSENT
+    _COUNTER_KEYS
+    _ENDED_AT_FUTURE_SLACK
+    _ENDED_AT_MIN
+    _GROK_CACHE_FORMAT
+    _MAX_USAGE_BYTES
+    _aggregate_files
+    _child_dirs
+    _count_sessions
+    _counters
+    _day_of
+    _empty_cache
+    _identity
+    _identity_keys
+    _parse_usage
+    _read_usage_file
+    _scan_grok_root
+    _session_entry
+    _turn_key
+    _validated_entry
+    grok_sessions_root
+    grok_usage_diag
+    read_grok_usage
+    """.split()
+)
+
 HOST_REGISTRY_DEFINITIONS = frozenset(
     """
     HOST_READER_DIAGS
@@ -1724,7 +1755,7 @@ HOST_REGISTRY_DEFINITIONS = frozenset(
     """.split()
 )
 
-MOVED_HOST_DEFINITIONS = CODEX_HOST_DEFINITIONS | HOST_REGISTRY_DEFINITIONS
+MOVED_HOST_DEFINITIONS = CODEX_HOST_DEFINITIONS | GROK_HOST_DEFINITIONS | HOST_REGISTRY_DEFINITIONS
 
 ALLOWED_HOST_ADAPTER_IMPORTS = frozenset(
     {"host_usage", "token_usage", "lockedjson", "fsutil", "errors"}
@@ -1735,11 +1766,14 @@ def test_codex_and_registry_single_ownership():
     from mind_meld import host_usage
 
     assert len(CODEX_HOST_DEFINITIONS) == 56
+    assert len(GROK_HOST_DEFINITIONS) == 26
     assert len(HOST_REGISTRY_DEFINITIONS) == 5
     codex_defs = _top_level_definitions((SRC / "hosts" / "codex.py").read_text(encoding="utf-8"))
     registry_defs = _top_level_definitions((SRC / "host_registry.py").read_text(encoding="utf-8"))
     usage_defs = _top_level_definitions((SRC / "host_usage.py").read_text(encoding="utf-8"))
+    grok_defs = _top_level_definitions((SRC / "hosts" / "grok.py").read_text(encoding="utf-8"))
     assert codex_defs == CODEX_HOST_DEFINITIONS
+    assert grok_defs == GROK_HOST_DEFINITIONS
     assert registry_defs == HOST_REGISTRY_DEFINITIONS
     assert usage_defs & MOVED_HOST_DEFINITIONS == set()
     for name in MOVED_HOST_DEFINITIONS:
@@ -1870,7 +1904,8 @@ def test_hosts_and_registry_import_does_not_register_cli():
         [
             sys.executable,
             "-c",
-            "import sys; import mind_meld.hosts.codex; import mind_meld.host_registry; "
+            "import sys; import mind_meld.hosts.codex; import mind_meld.hosts.grok; "
+            "import mind_meld.host_registry; "
             "assert 'mind_meld.cli' not in sys.modules",
         ],
         capture_output=True,

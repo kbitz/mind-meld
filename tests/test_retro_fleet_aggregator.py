@@ -7100,7 +7100,7 @@ class TestUnifiedAgents:
             "grok": {"2026-04-22": _usage(10)},
         }
         data = self._data(
-            [_snap("dev-a", self.UNTIL, families=hosts, partial=("grok",))],
+            [_snap("dev-a", self.UNTIL, families=hosts, partial=("opencode",))],
             known_ids=("dev-a",),
         )
         usage = self._usage_for(data)

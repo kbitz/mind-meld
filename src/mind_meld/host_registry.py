@@ -15,6 +15,7 @@ from typing import Any
 
 from mind_meld import host_usage
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import grok as grok_host
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class HostReaderDiag:
 
 HOST_READER_DIAGS = {
     "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex", owner=codex_host),
+    "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "Grok Build", owner=grok_host),
     "cursor": HostReaderDiag(
         "cursor_usage_diag",
         "complete_once",
@@ -42,11 +44,11 @@ HOST_READER_DIAGS = {
 
 def reader_usage_diag(reader: str, *, count_logs: bool = False) -> dict[str, Any]:
     # Resolve at call time so patching the owner still reaches every consumer.
-    # Muse and Antigravity on-disk counts walk trees, so callers pass count_logs=True
+    # Muse, Grok Build and Antigravity on-disk counts walk trees, so callers pass count_logs=True
     # when holding consent; status and recapture use their cache-only view.
     descriptor = HOST_READER_DIAGS[reader]
     fn = getattr(descriptor.owner, descriptor.function)
-    if reader in {"muse", "agy"}:
+    if reader in {"muse", "agy", "grok"}:
         return fn(count_logs=count_logs)
     return fn()
 
@@ -66,7 +68,7 @@ def warm_host_cache_inline(
 
     The result is the retry: attended capture publishes it through the usual
     reader failure boundary, without a second short-budget read. Autopush
-    never calls this helper. Codex/Grok/Muse can resume partial progress across
+    never calls this helper. Codex/Grok Build/Muse can resume partial progress across
     pushes; Cursor reparses rewritten files and need not converge under the
     same short allowance.
     ``reader`` selects a name in ``events_tail.WARMABLE_HOST_READERS``.
@@ -79,6 +81,8 @@ def warm_host_cache_inline(
     deadline = time.monotonic() + budget_s
     if reader == "codex":
         return codex_host.read_codex_usage(root, deadline=deadline)
+    if reader == "grok":
+        return grok_host.read_grok_usage(root, deadline=deadline, consented=True)
     if reader == "cursor":
         return host_usage.read_cursor_usage(root, deadline=deadline, consented=True)
     if reader == "muse":

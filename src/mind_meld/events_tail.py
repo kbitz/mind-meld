@@ -56,6 +56,7 @@ from mind_meld.config import (
 )
 from mind_meld.errors import HOST_USAGE_CAPTURE_URL
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import grok as grok_host
 from mind_meld.safety import safe_str, safe_terminal_str
 
 CacheLockMode = Literal["warn", "block"] | None
@@ -311,6 +312,10 @@ HOST_READER_SOURCE_GATE: dict[str, str | None] = {
     # there is no separate retro bit.
     "muse": "muse",
     "agy": "agy",
+    # Grok Build is a sync source (``type: "grok"``) but its usage consent is the
+    # ``config.grok_usage_consented`` verdict, passed as ``grok_consented``; this
+    # entry names the source its stop remedy disables.
+    "grok": "grok",
     **dict.fromkeys(mm_config.HOST_USAGE_ONLY_CONSENT),
 }
 """Which enabled sync source each reader's consent derives from.
@@ -323,7 +328,7 @@ their totals published to the fleet. Only aggregates ever crossed the boundary,
 but "we read it unless you read the README" is the wrong default for a tool
 whose whole premise is scoped, opt-in sync."""
 
-WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "cursor", "muse", "agy"})
+WARMABLE_HOST_READERS: frozenset[str] = frozenset({"codex", "grok", "cursor", "muse", "agy"})
 """Readers with cached totals an attended warm can populate.
 
 A future reader whose cache stores no totals must not be added here.
@@ -526,12 +531,16 @@ def _default_host_readers(
     sources: list[dict],
     *,
     cursor_consented: bool = False,
+    grok_consented: bool = False,
 ) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
     see ``HOST_READER_SOURCE_GATE``. Cursor has no sync source: ``cursor_consented`` is its
-    only gate (``HOST_USAGE_ONLY_CONSENT``).
+    only gate (``HOST_USAGE_ONLY_CONSENT``). Grok Build is selected only when
+    ``grok_consented`` is true (``config.grok_usage_consented``, which honors both the
+    ``grok`` source and ``[retro] grok_host_usage``); every caller passes the same verdict
+    so push capture, status, diag and the recapture notice agree.
 
     Module-qualified lookups on purpose (docs/invariants/README.md's
     dead-alias rule in reverse): a from-import would bind this module's own global, so a test
@@ -541,6 +550,12 @@ def _default_host_readers(
     chosen: list[tuple[str, HostReader]] = []
     if HOST_READER_SOURCE_GATE["codex"] in enabled:
         chosen.append(("codex", codex_host.read_codex_usage))
+    if grok_consented:
+
+        def _read_grok(*, deadline: float) -> host_usage.HostUsageResult:
+            return grok_host.read_grok_usage(deadline=deadline, consented=True)
+
+        chosen.append(("grok", _read_grok))
     if cursor_consented:
 
         def _read_cursor(*, deadline: float) -> host_usage.HostUsageResult:
@@ -666,8 +681,9 @@ def _merge_host_usage_maps(
 
     A (family, UTC day) collision is possible whenever two readers classify
     into the same canonical family — historically Codex and OpenCode both
-    landed GPT in ``codex``. After the OpenCode reader was removed, no two
-    surviving readers collide in production, but the merge still sums
+    landed GPT in ``codex``. Today Cursor and Grok Build share the ``grok``
+    family (Cursor's Grok runs and Grok Build's own sessions), so a day and a
+    model id can collide across them, and the merge sums
     TOKEN_FIELDS at every level: a shallow map update would silently drop
     whichever reader landed first, and a synthetic or future reader that
     shares a family would regress without this. The same collision exists
@@ -796,6 +812,7 @@ def host_read_age(timestamp: str | None) -> str:
 
 _HOST_DISPLAY_NAMES = {
     "codex": "Codex",
+    "grok": "Grok Build",
     "muse": "Muse",
     "agy": "Antigravity",
     "cursor": "Cursor",
@@ -881,7 +898,9 @@ def _host_skip_phrase(
             def shown(value: int | None) -> str:
                 return "unknown" if value is None else str(value)
 
-            unit = {"muse": "session logs", "agy": "conversation DBs"}.get(reader, "rollouts")
+            unit = {"muse": "session logs", "agy": "conversation DBs", "grok": "sessions"}.get(
+                reader, "rollouts"
+            )
             if reader == "cursor":
                 progress = (
                     f"{shown(evidence.files_cached)} retained runs; "
@@ -1424,6 +1443,7 @@ def _run_events_tail(
             host_readers=_default_host_readers(
                 sources,
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
+                grok_consented=mm_config.grok_usage_consented(config),
             ),
         )
 
@@ -1644,6 +1664,7 @@ def _run_events_backfill(
             host_readers=_default_host_readers(
                 sources,
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
+                grok_consented=mm_config.grok_usage_consented(config),
             ),
         )
 

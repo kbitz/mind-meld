@@ -6825,6 +6825,47 @@ def test_capture_failure_still_calls_push(capture61, monkeypatch, reason, pendin
     ) == pending
 
 
+def test_unsupported_grok_push_exits_zero_and_publishes_codex(capture61, monkeypatch):
+    from mind_meld.hosts import grok as grok_host
+
+    cfg = capture61["cfg"]
+    cfg.setdefault("retro", {})["grok_host_usage"] = True
+    save_config(cfg, capture61["path"])
+    usage_file = grok_host.GROK_SESSIONS_PATH / "cwd" / "session" / "usage.json"
+    usage_file.parent.mkdir(parents=True)
+    usage_file.write_text('{"turns": "unsupported shape"}')
+    usage = {"input": 7, "cache_create": 0, "cache_read": 0, "output": 3}
+    day = datetime.now(timezone.utc).date().isoformat()
+    monkeypatch.setattr(
+        _mm_codex_host,
+        "read_codex_usage",
+        lambda **kw: _mm_host_usage.HostUsageResult(
+            {"codex": {day: usage}},
+            complete=True,
+            tokens_by_day={day: {**usage, "by_model": {"gpt-6-astra": usage}}},
+        ),
+    )
+    (capture61["claude"] / "projects/-Users-kb-myapp/memory/new.md").write_text("pending")
+    result = runner.invoke(app, ["push"])
+    assert result.exit_code == 0, result.output
+    assert grok_host.grok_usage_diag()["last_reason"] == "unsupported"
+    manifest = load_manifest(
+        decrypt(capture61["backend"].get(storage_keys.manifest_key("dev-a")), PASSPHRASE, MEMORY_KB)
+    )
+    assert "projects/-Users-kb-myapp/memory/new.md" in manifest["sources"]["claude"]["files"]
+    entry = manifest["sources"]["mm-events"]["files"]["events/" + capture61["dayfile"].name]
+    clear = decrypt(
+        capture61["backend"].get(storage_keys.blob_key("dev-a", entry["sha256"])),
+        PASSPHRASE,
+        MEMORY_KB,
+    )
+    rows = [json.loads(line) for line in clear.splitlines()]
+    latest = [row for row in rows if row["type"] == "host-usage-snapshot"][-1]
+    assert latest["token_sources"] == ["codex"]
+    assert latest["degraded_sources"] == ["grok"]
+    assert latest["hosts"] == {"codex": {day: usage}}
+
+
 @pytest.mark.parametrize("short", [False, True])
 @pytest.mark.parametrize("pending", [False, True])
 def test_requested_capture_observes_append_failure(capture61, monkeypatch, short, pending):

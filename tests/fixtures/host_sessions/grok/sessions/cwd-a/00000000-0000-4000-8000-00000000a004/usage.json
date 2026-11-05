@@ -1,0 +1,76 @@
+{
+  "sessionId": "00000000-0000-4000-8000-00000000a004",
+  "updatedAt": "2026-11-04T15:00:00.000000+00:00",
+  "session": {
+    "inputTokens": 1000,
+    "outputTokens": 100,
+    "cachedReadTokens": 300,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 30,
+    "totalTokens": 1100,
+    "modelCalls": 3,
+    "costUsdTicks": 10000,
+    "turnCount": 1,
+    "primaryModelId": "grok-4.7-build",
+    "modelUsage": {
+      "grok-4.7-build": {
+        "inputTokens": 700,
+        "outputTokens": 70,
+        "cachedReadTokens": 200,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 30,
+        "totalTokens": 770,
+        "modelCalls": 2,
+        "costUsdTicks": 7000
+      },
+      "grok-4.7": {
+        "inputTokens": 300,
+        "outputTokens": 30,
+        "cachedReadTokens": 100,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 0,
+        "totalTokens": 330,
+        "modelCalls": 1,
+        "costUsdTicks": 3000
+      }
+    }
+  },
+  "turns": [
+    {
+      "turnNumber": 1,
+      "endedAt": "2026-11-04T15:00:00.000000+00:00",
+      "inputTokens": 1000,
+      "outputTokens": 100,
+      "cachedReadTokens": 300,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 30,
+      "totalTokens": 1100,
+      "modelCalls": 3,
+      "costUsdTicks": 10000,
+      "turnCount": 1,
+      "primaryModelId": "grok-4.7-build",
+      "modelUsage": {
+        "grok-4.7-build": {
+          "inputTokens": 700,
+          "outputTokens": 70,
+          "cachedReadTokens": 200,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 30,
+          "totalTokens": 770,
+          "modelCalls": 2,
+          "costUsdTicks": 7000
+        },
+        "grok-4.7": {
+          "inputTokens": 300,
+          "outputTokens": 30,
+          "cachedReadTokens": 100,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 0,
+          "totalTokens": 330,
+          "modelCalls": 1,
+          "costUsdTicks": 3000
+        }
+      }
+    }
+  ]
+}

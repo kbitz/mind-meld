@@ -1,0 +1,82 @@
+{
+  "sessionId": "00000000-0000-4000-8000-00000000a002",
+  "updatedAt": "2026-11-04T09:30:00.750000+00:00",
+  "session": {
+    "inputTokens": 5000,
+    "outputTokens": 500,
+    "cachedReadTokens": 3500,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 370,
+    "totalTokens": 5500,
+    "modelCalls": 5,
+    "costUsdTicks": 52000,
+    "turnCount": 2,
+    "primaryModelId": "grok-4.7-build",
+    "modelUsage": {
+      "grok-4.7-build": {
+        "inputTokens": 5000,
+        "outputTokens": 500,
+        "cachedReadTokens": 3500,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 370,
+        "totalTokens": 5500,
+        "modelCalls": 5,
+        "costUsdTicks": 52000
+      }
+    }
+  },
+  "turns": [
+    {
+      "turnNumber": 1,
+      "endedAt": "2026-11-03T11:00:00.500000+00:00",
+      "inputTokens": 2000,
+      "outputTokens": 200,
+      "cachedReadTokens": 1500,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 120,
+      "totalTokens": 2200,
+      "modelCalls": 3,
+      "costUsdTicks": 21000,
+      "turnCount": 1,
+      "primaryModelId": "grok-4.7-build",
+      "modelUsage": {
+        "grok-4.7-build": {
+          "inputTokens": 2000,
+          "outputTokens": 200,
+          "cachedReadTokens": 1500,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 120,
+          "totalTokens": 2200,
+          "modelCalls": 3,
+          "costUsdTicks": 21000
+        }
+      }
+    },
+    {
+      "turnNumber": 2,
+      "endedAt": "2026-11-04T09:30:00.750000+00:00",
+      "inputTokens": 3000,
+      "outputTokens": 300,
+      "cachedReadTokens": 2000,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 250,
+      "totalTokens": 3300,
+      "modelCalls": 2,
+      "costUsdTicks": 31000,
+      "turnCount": 1,
+      "primaryModelId": "grok-4.7-build",
+      "modelUsage": {
+        "grok-4.7-build": {
+          "inputTokens": 3000,
+          "outputTokens": 300,
+          "cachedReadTokens": 2000,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 250,
+          "totalTokens": 3300,
+          "modelCalls": 2,
+          "costUsdTicks": 31000
+        }
+      }
+    }
+  ]
+}
