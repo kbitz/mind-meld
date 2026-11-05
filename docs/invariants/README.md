@@ -38,7 +38,7 @@ one-liner, which does not match a search for `resolveflow.py`.)
 | `updateprogress.py` | Read-only installer-output parser for `mm update` progress: measured download/Git/package counters and fixed phase labels; no timing estimates |
 | `pullhistory.py` | Forensic table-backed pull/push/self-upgrade history, legacy import, batching and mm log queries |
 | `statedb.py` | Local state.db connections, forward migrations, translated errors, transactions and displaced expiry; (91A) the pull-ledger tables (`peer_base`, `seen_version`: `read_peer_bases`, `read_seen`, `ledger_counts`, `commit_ledger`) and the recovery-copy folder (`deleted_copies_dir`); (92A) the adopted `cursors` table (`read_cursors`, `commit_cursors`); standard library + fsutil leaf |
-| `syncthing.py` | (92A) Leaf: read-only local Syncthing configuration discovery (`config_dirs`), loopback REST client (`read_state`, `SyncthingState`) and folder-option / `.stignore` lint (`FOLDER_OPTIONS`, `option_is_ok`); standard library only |
+| `syncthing.py` | (92A) Leaf: read-only local Syncthing configuration discovery (`config_dirs`), GUI REST client (`read_state`, `SyncthingState`) and folder-option / `.stignore` lint (`FOLDER_OPTIONS`, `option_is_ok`); standard library only |
 | `syncdiag.py` | (91A) Local historical pull/anchor observations for passphrase-free diagnostics; bounded `sync-observations.json` through `lockedjson`, never sync authorization |
 | `seen_sources.py` | First-seen source tracking for the enable/disable prompts |
 | `synclog.py` | Per-project `.mind-meld-log.md` writer |

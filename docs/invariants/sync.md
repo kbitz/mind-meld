@@ -1466,8 +1466,9 @@ Hook site: `_pull_core` BEFORE `collect_tombstones` and the per-source download 
 
 `state.db` holds the forensic `history` table (this section) and, since Track 91A,
 the rebuildable pull ledger (`peer_base`, `seen_version`; see "Fast-forward,
-propagated deletions and anchors (Track 91A)"). The four provisional tables below
-(`ledger`, `cursors`, `own_log`, `displaced`) have no reader. Obligations here bind
+propagated deletions and anchors (Track 91A)"). Track 92A adopts `cursors` for
+each peer's push and waiting state. The three remaining provisional tables below
+(`ledger`, `own_log`, `displaced`) have no reader. Obligations here bind
 whichever Track first writes non-history, non-rebuildable `state.db` data.
 
 `pullhistory` owns the forensic `history` table in the local, never-synced
@@ -1726,8 +1727,9 @@ totals count valid keys only.
 `syncthing.py` is a standard-library-only leaf module (enforced by
 `tests/test_module_boundaries.py`). It discovers local Syncthing configuration
 (`config_dirs()`: `~/Library/Application Support/Syncthing` on macOS;
-`$XDG_CONFIG_HOME/syncthing` or `~/.config/syncthing` then
-`$XDG_STATE_HOME/syncthing` or `~/.local/state/syncthing` on Linux) and reads
+`$XDG_CONFIG_HOME/syncthing`, `~/.config/syncthing`,
+`$XDG_STATE_HOME/syncthing`, then `~/.local/state/syncthing` on Linux,
+skipping unset XDG paths and duplicate directories) and reads
 `config.xml`, `https-cert.pem` and `.stignore` after `lstat()` regular-file and
 1 MiB size checks (symlinks are rejected). It uses the GUI host and port from
 the owner's local configuration; unspecified hosts (`0.0.0.0`, `::`, `[::]`
@@ -1777,7 +1779,8 @@ maintenance failure and leave the pull degraded without failing content sync.
 manifest once and shares that map between `_peer_states` and
 `_project_name_lines(..., manifests=peer_manifests)`. `_peer_states` classifies
 each peer as `applied` (`applied >= manifest_us`), `waiting` (`waiting > 0` and
-`seen >= manifest_us`), `not-pulled`, `not-arrived` (device entry has `last_seen`
+either timestamp is unknown or `seen >= manifest_us`), `not-pulled`,
+`not-arrived` (device entry has `last_seen`
 but manifest is missing), `never-pushed` (no manifest and no `last_seen`),
 `unreadable`, `newer-format` or `unknown` (`state.db` unreadable). A peer is
 `overdue` when `now - since > 24 h` (`PEER_WAIT_WARN`, strictly `> 24 h`) in
