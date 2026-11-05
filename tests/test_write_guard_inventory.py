@@ -558,6 +558,12 @@ REVIEWED = {
             "value.replace('Z', '+00:00')",
         ],
     ),
+    "hosts/grok.py:_read_usage_file": (
+        *_READ_ONLY,
+        [
+            "os.open(path, flags)",
+        ],
+    ),
     "hosts/codex.py:_read_rollout": (
         *_READ_ONLY,
         [

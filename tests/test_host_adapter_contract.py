@@ -2,8 +2,8 @@
 
 Verifies the host reader adapter contract documented in
 ``docs/invariants/events-retro.md#host-reader-adapter-contract`` across the
-extracted ``mind_meld.hosts.codex`` adapter and the reference in-place
-``mind_meld.host_usage`` Muse reader, plus ``mind_meld.host_registry`` and
+extracted ``mind_meld.hosts.codex`` and ``mind_meld.hosts.grok`` adapters and the
+reference in-place ``mind_meld.host_usage`` Muse reader, plus ``mind_meld.host_registry`` and
 ``mind_meld.events_tail`` dispatch boundaries.
 """
 
@@ -26,6 +26,7 @@ import pytest
 from mind_meld import events, events_tail, host_registry, lockedjson
 from mind_meld import host_usage as hu
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import grok as grok_host
 
 _OBSERVED = "2026-09-04T10:00:00+00:00"
 _NOW = datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
@@ -54,29 +55,54 @@ def _seed_blocker(
     }
     if cache == hu.MUSE_CACHE_PATH:
         data["muse_format"] = hu._MUSE_CACHE_FORMAT
+    if cache == grok_host.CACHE_PATH:
+        data["grok_format"] = grok_host._GROK_CACHE_FORMAT
     cache.write_text(json.dumps(data))
     return data
 
 
-@pytest.fixture(params=["codex", "muse"])
+_ROWS = ["codex", "muse", "grok"]
+
+
+def _kept_files(row: str) -> dict:
+    """Seeded cache entries in the row's own validated shape (two usage-less ones)."""
+    if row == "grok":
+        return {"kept": {"absent": True}, "kept-too": {"absent": True}}
+    return {"kept": {"no_ledger": True, "usage_less_skipped": 2}}
+
+
+@pytest.fixture(params=_ROWS)
 def reader_case(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     name: str = request.param
-    owner = {"codex": codex_host, "muse": hu}[name]
-    cache = {"codex": codex_host.CACHE_PATH, "muse": hu.MUSE_CACHE_PATH}[name]
+    owner = {"codex": codex_host, "muse": hu, "grok": grok_host}[name]
+    cache = {
+        "codex": codex_host.CACHE_PATH,
+        "muse": hu.MUSE_CACHE_PATH,
+        "grok": grok_host.CACHE_PATH,
+    }[name]
     root = tmp_path / "reader-sessions"
     monkeypatch.setattr(codex_host, "CODEX_SESSIONS_PATH", root)
 
     def read() -> hu.HostUsageResult:
         if name == "codex":
             return codex_host.read_codex_usage(root)
+        if name == "grok":
+            return grok_host.read_grok_usage(root, consented=True)
         return hu.read_muse_usage(root, consented=True)
 
-    diag = {"codex": codex_host.codex_usage_diag, "muse": hu.muse_usage_diag}[name]
+    diag = {
+        "codex": codex_host.codex_usage_diag,
+        "muse": hu.muse_usage_diag,
+        "grok": grok_host.grok_usage_diag,
+    }[name]
 
     def set_scan(result: hu.HostUsageResult, staged: dict | None = None, learned: bool = False):
         if name == "muse":
             # Muse also returns its frozen days: (result, live, frozen, learned, saw).
             output = (result, staged or {}, {}, learned, True)
+        elif name == "grok":
+            # Grok Build computes ``learned`` itself: (result, staged session entries).
+            output = (result, staged or {})
         else:
             # Codex also returns its settled days (Track 85A).
             output = (result, staged or {}, learned, {})
@@ -88,7 +114,9 @@ def reader_case(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pyt
 
 
 def _row_from_cache(cache: Path) -> str:
-    return "muse" if cache == hu.MUSE_CACHE_PATH else "codex"
+    if cache == hu.MUSE_CACHE_PATH:
+        return "muse"
+    return "grok" if cache == grok_host.CACHE_PATH else "codex"
 
 
 @pytest.mark.parametrize("since", [None, "garbage", "2026-09-04T10:00:00"])
@@ -155,7 +183,7 @@ def test_pre_lock_expiry_never_creates_cache(reader_case, monkeypatch):
 def test_post_lock_expiry_records_deadline_once_without_scanning(reader_case, monkeypatch):
     read, cache, diag, set_scan = reader_case
     row = _row_from_cache(cache)
-    files = {"kept": {"no_ledger": True, "usage_less_skipped": 2}}
+    files = _kept_files(row)
     _seed_blocker(cache, reason=None, since=None, files=files)
     scan = set_scan(hu.HostUsageResult({}, True))
     writer = Mock(wraps=lockedjson._write_json)
@@ -307,11 +335,14 @@ def test_reader_pauses_gc_and_restores_caller_state(reader_case, monkeypatch, er
             raise error()
         if cache == hu.MUSE_CACHE_PATH:
             return (hu.HostUsageResult({}, True), {}, {}, False, False)
+        if cache == grok_host.CACHE_PATH:
+            return (hu.HostUsageResult({}, True), {})
         return (hu.HostUsageResult({}, True), {}, False, {})
 
     owner, name = {
         codex_host.CACHE_PATH: (codex_host, "_scan_codex_root"),
         hu.MUSE_CACHE_PATH: (hu, "_scan_muse_root"),
+        grok_host.CACHE_PATH: (grok_host, "_scan_grok_root"),
     }[cache]
     monkeypatch.setattr(owner, name, scan)
     try:
@@ -385,6 +416,8 @@ def test_unchanged_deadline_rewrites_when_allotted_budget_changes(reader_case, m
     monkeypatch.setattr(hu.time, "monotonic", lambda: clock[0])
     if cache == codex_host.CACHE_PATH:
         result = codex_host.read_codex_usage(deadline=1000.4)
+    elif cache == grok_host.CACHE_PATH:
+        result = grok_host.read_grok_usage(consented=True, deadline=1000.4)
     else:
         result = hu.read_muse_usage(consented=True, deadline=1000.4)
     assert result.reason == "deadline", _clause_msg(row, "read_timing", "deadline reason")
@@ -425,7 +458,7 @@ def test_invalid_timing_fields_are_unknown(reader_case, bad):
     assert view["last_complete_at"] is None
 
 
-@pytest.mark.parametrize("row", ["codex", "muse"])
+@pytest.mark.parametrize("row", _ROWS)
 def test_consent_gate_and_closed_default(row: str, tmp_path: Path):
     """Consent is enforced at the source gate or closed-default reader parameter."""
     assert events_tail.HOST_READER_SOURCE_GATE[row] == row, _clause_msg(
@@ -434,10 +467,24 @@ def test_consent_gate_and_closed_default(row: str, tmp_path: Path):
     assert events_tail._default_host_readers([]) == (), _clause_msg(
         row, "consent", "unconsented reader omitted from default sweep"
     )
-    chosen = events_tail._default_host_readers([{"name": row, "type": "generic"}])
+    chosen = events_tail._default_host_readers(
+        [{"name": row, "type": "generic"}], grok_consented=row == "grok"
+    )
     assert [name for name, _ in chosen] == [row], _clause_msg(
         row, "consent", "enabled source selects reader"
     )
+    if row == "grok":
+        # Grok Build's consent is the config verdict, never a bare source name.
+        assert events_tail._default_host_readers([{"name": "grok", "type": "grok"}]) == (), (
+            _clause_msg(row, "consent", "grok source alone does not select the reader")
+        )
+        unconsented = grok_host.read_grok_usage(tmp_path / "grok", consented=False)
+        assert not unconsented.complete and unconsented.reason == "no_metadata_ledger", _clause_msg(
+            row, "consent", "closed-default unconsented call returns no_metadata_ledger"
+        )
+        assert not grok_host.CACHE_PATH.exists(), _clause_msg(
+            row, "consent", "unconsented call does not touch cache"
+        )
     if row == "muse":
         unconsented = hu.read_muse_usage(tmp_path / "muse", consented=False)
         assert not unconsented.complete and unconsented.reason == "no_metadata_ledger", _clause_msg(
@@ -448,7 +495,7 @@ def test_consent_gate_and_closed_default(row: str, tmp_path: Path):
         )
 
 
-@pytest.mark.parametrize("row", ["codex", "muse"])
+@pytest.mark.parametrize("row", _ROWS)
 @pytest.mark.parametrize("failure_mode", ["incomplete", "exception"])
 def test_failure_isolation_keeps_sibling_reader_publishing(row: str, failure_mode: str):
     """A failing or raising reader is dropped with a closed-vocabulary reason; siblings publish."""
@@ -485,7 +532,7 @@ def test_failure_isolation_keeps_sibling_reader_publishing(row: str, failure_mod
     )
 
 
-@pytest.mark.parametrize("row", ["codex", "muse"])
+@pytest.mark.parametrize("row", _ROWS)
 def test_registry_and_diag_completeness(row: str):
     """Registry tables, diag keys, coldness predicate, and unknown-reader error."""
     assert tuple(host_registry.HOST_READER_DIAGS) == events.ACTIVE_HOST_READERS, _clause_msg(
@@ -528,7 +575,7 @@ def test_registry_and_diag_completeness(row: str):
         host_registry.warm_host_cache_inline(reader="unknown-reader")
 
 
-@pytest.mark.parametrize("row", ["codex", "muse"])
+@pytest.mark.parametrize("row", _ROWS)
 def test_call_time_owner_lookup_reaches_dispatch_sites(row: str, monkeypatch: pytest.MonkeyPatch):
     """Patching the owner module after import intercepts warm, default sweep, and diag."""
     spec = host_registry.HOST_READER_DIAGS[row]
@@ -547,7 +594,11 @@ def test_call_time_owner_lookup_reaches_dispatch_sites(row: str, monkeypatch: py
     assert host_registry.reader_usage_diag(row) is sentinel_diag, _clause_msg(
         row, "call_time_lookup", "reader_usage_diag resolves diag on owner at call time"
     )
-    readers = dict(events_tail._default_host_readers([{"name": row, "type": "generic"}]))
+    readers = dict(
+        events_tail._default_host_readers(
+            [{"name": row, "type": "generic"}], grok_consented=row == "grok"
+        )
+    )
     assert readers[row](deadline=1000.0) is sentinel_result, _clause_msg(
         row, "call_time_lookup", "_default_host_readers resolves reader on owner at call time"
     )
@@ -555,17 +606,20 @@ def test_call_time_owner_lookup_reaches_dispatch_sites(row: str, monkeypatch: py
 
 def test_hosts_path_globals_isolated_under_tmp_path(tmp_path: Path):
     """Every Path-valued module global on mind_meld.hosts.* resolves under tmp_path in tests."""
-    checked = 0
-    for attr, value in vars(codex_host).items():
-        if isinstance(value, Path):
-            checked += 1
-            assert value.is_relative_to(tmp_path), _clause_msg(
-                "codex", "path_isolation", f"codex.{attr}={value} must resolve under tmp_path"
-            )
-    assert checked >= 3
+    for label, module in (("codex", codex_host), ("grok", grok_host)):
+        checked = 0
+        for attr, value in vars(module).items():
+            if isinstance(value, Path):
+                checked += 1
+                assert value.is_relative_to(tmp_path), _clause_msg(
+                    label, "path_isolation", f"{label}.{attr}={value} must resolve under tmp_path"
+                )
+        assert checked >= 2
 
 
-@pytest.mark.parametrize("mod", ["mind_meld.hosts.codex", "mind_meld.host_registry"])
+@pytest.mark.parametrize(
+    "mod", ["mind_meld.hosts.codex", "mind_meld.hosts.grok", "mind_meld.host_registry"]
+)
 def test_fresh_subprocess_import_never_loads_cli(mod: str):
     """Importing an adapter or host_registry in a fresh interpreter never loads mind_meld.cli."""
     proc = subprocess.run(

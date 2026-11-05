@@ -1,0 +1,56 @@
+{
+  "sessionId": "00000000-0000-4000-8000-00000000a001",
+  "updatedAt": "2026-11-03T10:00:00.250000+00:00",
+  "session": {
+    "inputTokens": 1000,
+    "outputTokens": 100,
+    "cachedReadTokens": 400,
+    "cacheCreationTokens": 0,
+    "reasoningTokens": 60,
+    "totalTokens": 1100,
+    "modelCalls": 2,
+    "costUsdTicks": 11000,
+    "turnCount": 1,
+    "primaryModelId": "grok-4.7-build",
+    "modelUsage": {
+      "grok-4.7-build": {
+        "inputTokens": 1000,
+        "outputTokens": 100,
+        "cachedReadTokens": 400,
+        "cacheCreationTokens": 0,
+        "reasoningTokens": 60,
+        "totalTokens": 1100,
+        "modelCalls": 2,
+        "costUsdTicks": 11000
+      }
+    }
+  },
+  "turns": [
+    {
+      "turnNumber": 1,
+      "endedAt": "2026-11-03T10:00:00.250000+00:00",
+      "inputTokens": 1000,
+      "outputTokens": 100,
+      "cachedReadTokens": 400,
+      "cacheCreationTokens": 0,
+      "reasoningTokens": 60,
+      "totalTokens": 1100,
+      "modelCalls": 2,
+      "costUsdTicks": 11000,
+      "turnCount": 1,
+      "primaryModelId": "grok-4.7-build",
+      "modelUsage": {
+        "grok-4.7-build": {
+          "inputTokens": 1000,
+          "outputTokens": 100,
+          "cachedReadTokens": 400,
+          "cacheCreationTokens": 0,
+          "reasoningTokens": 60,
+          "totalTokens": 1100,
+          "modelCalls": 2,
+          "costUsdTicks": 11000
+        }
+      }
+    }
+  ]
+}

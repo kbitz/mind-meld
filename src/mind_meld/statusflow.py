@@ -815,7 +815,7 @@ def status(
             name: host_registry.reader_usage_diag(name) for name in publication["readers"]
         }
         for name, state in reader_states.items():
-            if name in {"muse", "agy"} and state.get("last_reason") == "deadline":
+            if name in {"muse", "agy", "grok"} and state.get("last_reason") == "deadline":
                 # Only deadline progress uses on-disk counts. Healthy status
                 # stays cache-only instead of walking the host's full history.
                 reader_states[name] = host_registry.reader_usage_diag(name, count_logs=True)
@@ -1236,6 +1236,31 @@ def status(
                     "  Antigravity usage capture: disabled — "
                     "run [bold]mm enable-source agy[/bold] to sync Antigravity configuration "
                     "and publish token totals (conversation DBs stay local)."
+                )
+
+        if "grok" in reader_states:
+            # Present only when Grok usage capture is consented: no presence probe and no
+            # nudge when it is not, so an unconsented ``~/.grok`` is never opened here.
+            grok_diag = reader_states["grok"]
+            if grok_diag.get("last_reason"):
+                console.print(
+                    "  Grok Build usage capture: enabled — "
+                    + _host_usage_blocker(
+                        "grok",
+                        grok_diag,
+                        readiness=_reader_capture_readiness(publication, "grok"),
+                        upgrade_required=upgrade_required,
+                        no_release_reads=no_release,
+                    )
+                )
+            elif grok_diag.get("complete_once") is True:
+                console.print(
+                    "  Grok Build usage capture: enabled; a prior scan completed successfully"
+                )
+            else:
+                console.print(
+                    "  Grok Build usage capture: enabled, but no successful scan yet — "
+                    + safe_str(capture_remedy)
                 )
 
         if "cursor" in reader_states:
@@ -1661,6 +1686,7 @@ def _host_publication(
         for name, _ in events_tail._default_host_readers(
             sources,
             cursor_consented=_config_module.cursor_host_usage_enabled(config),
+            grok_consented=_config_module.grok_usage_consented(config),
         )
     ]
     try:
@@ -2455,18 +2481,22 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         if config_state == "ok"
         else None
     )
+    grok_consented = _config_module.grok_usage_consented(cfg) if config_state == "ok" else None
     host_usage_state = {
         name: (
             _host_usage.muse_usage_diag(count_logs=muse_consented is True)
             if name == "muse"
             else _host_usage.agy_usage_diag(count_logs=agy_consented is True)
             if name == "agy"
+            else host_registry.reader_usage_diag(name, count_logs=grok_consented is True)
+            if name == "grok"
             else host_registry.reader_usage_diag(name)
         )
         for name in host_registry.HOST_READER_DIAGS
     }
     host_usage_state["muse"]["consented"] = muse_consented
     host_usage_state["agy"]["consented"] = agy_consented
+    host_usage_state["grok"]["consented"] = grok_consented
     host_usage_state["cursor"]["consented"] = (
         _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
     )
@@ -2826,6 +2856,43 @@ def diag(
     )
     console.print(f"  agy models cached:       {_diag_models_line(agy_state)}")
     console.print("  agy last complete read:  " + safe_str(_host_complete_read_line(agy_state)))
+
+    grok_state = (state.get("host_usage") or {}).get("grok") or {}
+    grok_consented = grok_state.get("consented")
+    if grok_consented is None:
+        grok_consented_shown = "(config unreadable)"
+    else:
+        grok_consented_shown = "yes" if grok_consented else "no"
+    if grok_state.get("complete_once"):
+        grok_scan_shown = "yes"
+    elif grok_state.get("cache_state") == "unreadable":
+        grok_scan_shown = "unreadable"
+    else:
+        grok_scan_shown = "no"
+    console.print(f"  grok consented:          {grok_consented_shown}")
+    console.print(f"  grok prior successful scan: {grok_scan_shown}")
+    console.print(f"  grok cache inventory:    {safe_str(str(grok_state.get('cache_state', '')))}")
+    if grok_state.get("cache_state") == "ok":
+        console.print(
+            "  grok usage read blocker: "
+            + _host_usage_blocker(
+                "grok",
+                grok_state,
+                in_diag=True,
+                readiness=_reader_capture_readiness(publication, "grok"),
+                upgrade_required=upgrade_required,
+                no_release_reads=no_release,
+            )
+        )
+    grok_cached = grok_state.get("files_cached")
+    grok_disk = grok_state.get("files_on_disk")
+    console.print(
+        f"  grok sessions cached:    {'unknown' if grok_cached is None else grok_cached}"
+        f" of {'unknown' if grok_disk is None else grok_disk}"
+    )
+    console.print(f"  grok sessions without usage: {grok_state.get('usage_less_skipped', 0)}")
+    console.print(f"  grok models cached:      {_diag_models_line(grok_state)}")
+    console.print("  grok last complete read: " + safe_str(_host_complete_read_line(grok_state)))
 
     cx_state = (state.get("host_usage") or {}).get("codex") or {}
     console.print(f"  codex cache:             {safe_str(str(cx_state.get('cache_state', '')))}")

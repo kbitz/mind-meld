@@ -116,6 +116,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 cursor_consented=True,
+                grok_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 
@@ -180,6 +181,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
                 cursor_consented=True,
+                grok_consented=True,
             )
         ]
         assert set(events_tail.HOST_READER_SOURCE_GATE) == set(invoked)
@@ -189,7 +191,12 @@ class TestReaderOrchestration:
         can actually invoke. A key with no reader is a consent check of
         nothing."""
         enabled = self._enabled(*events_tail.HOST_READER_SOURCE_GATE)
-        names = [n for n, _ in events_tail._default_host_readers(enabled, cursor_consented=True)]
+        names = [
+            n
+            for n, _ in events_tail._default_host_readers(
+                enabled, cursor_consented=True, grok_consented=True
+            )
+        ]
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
@@ -200,8 +207,9 @@ class TestReaderOrchestration:
         assert set(_mm_events.ACTIVE_HOST_READERS) <= set(_mm_events.HOST_USAGE_TOKEN_SOURCES)
         assert "opencode" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
         assert "opencode" not in _mm_events.ACTIVE_HOST_READERS
-        assert "grok" not in _mm_events.HOST_USAGE_TOKEN_SOURCES
-        assert "grok" not in _mm_events.ACTIVE_HOST_READERS
+        # Track 110A: grok is live again, at its pre-v1.11.8 slot right after codex.
+        assert _mm_events.ACTIVE_HOST_READERS.index("grok") == 1
+        assert _mm_events.HOST_USAGE_TOKEN_SOURCES.index("grok") == 1
 
     def test_default_readers_resolve_at_call_time(self, monkeypatch):
         """Module-qualified lookup, so patching ``codex.read_codex_usage``
@@ -383,6 +391,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 cursor_consented=True,
+                grok_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 
@@ -905,8 +914,8 @@ def _stub_hosts(
         orig = events_tail._default_host_readers
         synth_fn = make(SYNTH, synth)
 
-        def with_synth(sources, *, cursor_consented=False):
-            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth_fn),)
+        def with_synth(sources, **consent):
+            return orig(sources, **consent) + ((SYNTH, synth_fn),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1657,8 +1666,8 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, cursor_consented=False):
-            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth),)
+        def with_synth(sources, **consent):
+            return orig(sources, **consent) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 
@@ -1720,8 +1729,8 @@ class TestColdCacheWarmAndRetry:
         monkeypatch.setattr(_mm_host_registry, "warm_host_cache_inline", warm)
         orig = events_tail._default_host_readers
 
-        def with_synth(sources, *, cursor_consented=False):
-            return orig(sources, cursor_consented=cursor_consented) + ((SYNTH, synth),)
+        def with_synth(sources, **consent):
+            return orig(sources, **consent) + ((SYNTH, synth),)
 
         monkeypatch.setattr(events_tail, "_default_host_readers", with_synth)
 

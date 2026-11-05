@@ -93,8 +93,8 @@ def usage_capture_remedy(readiness: UsageCaptureReadiness, *, reader: str | None
         "disabled": "Run mm enable-source mm-events to enable usage publication.",
         "unavailable": "Restore access to the configured mm-events folder.",
         "no-reader": (
-            "No host reader is consented. Run mm enable-source codex, mm enable-source cursor, "
-            "mm enable-source muse, or mm enable-source agy."
+            "No host reader is consented. Run mm enable-source codex, mm enable-source grok, "
+            "mm enable-source cursor, mm enable-source muse, or mm enable-source agy."
         ),
         "unknown": "Usage capture readiness is unknown; repair the unreadable config first.",
     }[readiness]

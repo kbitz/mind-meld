@@ -527,6 +527,7 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     """
     from mind_meld import host_usage as _host_usage
     from mind_meld.hosts import codex as _codex_host
+    from mind_meld.hosts import grok as _grok_host
 
     root = tmp_path / "_isolated_hosts"
     monkeypatch.setattr(_codex_host, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
@@ -534,6 +535,8 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
         _codex_host, "CODEX_ARCHIVED_SESSIONS_PATH", root / "codex" / "archived_sessions"
     )
     monkeypatch.setattr(_codex_host, "CACHE_PATH", root / "host-tokens.json")
+    monkeypatch.setattr(_grok_host, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
+    monkeypatch.setattr(_grok_host, "CACHE_PATH", root / "grok-host-tokens.json")
     monkeypatch.setattr(_host_usage, "CURSOR_STORE_PATH", root / "cursor-sdk-store")
     monkeypatch.setattr(_host_usage, "CURSOR_CACHE_PATH", root / "cursor-host-tokens.json")
     monkeypatch.setattr(_host_usage, "CURSOR_SPOOL_PATH", root / "cursor-standalone-spool.jsonl")

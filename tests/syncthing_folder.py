@@ -255,9 +255,9 @@ class FakeSyncthing:
         paused: bool = False,
         peers: list[tuple[str, str, bool]] | None = None,
         state: str = "idle",
-        need_files: int = 0,
+        need_files: int | None = 0,
         need_bytes: int = 0,
-        pull_errors: int = 0,
+        pull_errors: int | None = 0,
         write_stignore: bool = True,
     ) -> None:
         if path is not None:

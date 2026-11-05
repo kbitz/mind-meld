@@ -25,6 +25,7 @@ from mind_meld.config import load_config, save_config
 from mind_meld.crypto import bootstrap_crypto_init
 from mind_meld.devices import register_device
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import grok as grok_host
 from mind_meld.storage.local import LocalBackend
 
 PASSPHRASE = "diag-test-passphrase"
@@ -105,7 +106,7 @@ def _enable_capture_sources(tmp_path, *, readers):
             continue
         root = tmp_path / name
         root.mkdir(exist_ok=True)
-        hardcoded = name == "muse"
+        hardcoded = name in {"muse", "grok"}
         cfg["sync"]["sources"].append(
             {
                 "name": name,
@@ -2047,6 +2048,31 @@ def test_diag_last_complete_read_future_and_invalid_dates(tmp_path, monkeypatch,
     assert "forged" not in plain
 
 
+@pytest.mark.parametrize("scan", ["success", "blocker"])
+def test_cursor_acp_sentence_reaches_status_with_a_scan_or_a_blocker(tmp_path, monkeypatch, scan):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    cfg = load_config()
+    cfg.setdefault("retro", {})["cursor_host_usage"] = True
+    save_config(cfg)
+    monkeypatch.setattr(
+        host_usage,
+        "cursor_usage_diag",
+        lambda: {
+            "cache_state": "ok",
+            "complete_once": scan == "success",
+            "last_reason": "unsupported" if scan == "blocker" else None,
+            "hook_state": "installed",
+            "runs_cached": 1,
+        },
+    )
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    assert "Cursor runs through ACP front-ends such as Paseo are not counted" in status
+    assert ("a prior scan completed successfully" in status) is (scan == "success")
+    assert ("cursor unsupported" in status) is (scan == "blocker")
+
+
 @pytest.mark.parametrize("hook_state", ["installed", "missing", "malformed"])
 def test_cursor_hook_state_reaches_status_and_diag(tmp_path, monkeypatch, hook_state):
     _setup(tmp_path, monkeypatch)
@@ -2531,6 +2557,11 @@ def test_status_reports_the_syncthing_connection_and_points_to_diag(
         ("idle", False, 0, 1, "idle, 1 pull error. Run: mm diag"),
         ("idle", True, 2, 0, "paused, 2 files to fetch"),
         ("syncing", False, 2, 1, "syncing, 2 files to fetch, 1 pull error. Run: mm diag"),
+        # Unknown counts (JSON null) are never "up to date" and never print a count.
+        ("idle", False, None, 0, "idle"),
+        ("syncing", False, None, 0, "syncing"),
+        ("idle", False, 0, None, "idle"),
+        ("syncing", False, 2, None, "syncing, 2 files to fetch"),
     ],
 )
 def test_status_preserves_syncthing_folder_state_and_reports_pull_errors(
@@ -2551,7 +2582,11 @@ def test_status_preserves_syncthing_folder_state_and_reports_pull_errors(
 
     assert result.exit_code == 0, result.output
     flat = " ".join(result.output.split())
-    assert f"Syncthing: connected 0 of 1 devices (mac-b disconnected); {expected}" in flat
+    line = next(ln.strip() for ln in result.output.splitlines() if "Syncthing:" in ln)
+    assert line == f"Syncthing: connected 0 of 1 devices (mac-b disconnected); {expected}"
+    if need_files is None or pull_errors is None:
+        assert "up to date" not in flat
+        assert "0 files to fetch" not in flat
 
 
 def test_syncthing_pull_errors_remain_visible_in_the_diagnostic_remedy(
@@ -2854,3 +2889,99 @@ def test_a_published_peer_without_a_manifest_shows_not_arrived(tmp_path, monkeyp
     day = old_dt.strftime("%Y-%m-%d")
     assert lines[0] == f"Waiting more than 24 h for Peer B's push of {day}. Run: mm diag"
     assert "its manifest has not arrived" in res.output
+
+
+def _enable_grok(tmp_path, *, via: str = "source"):
+    cfg = load_config()
+    if via == "source":
+        _enable_capture_sources(tmp_path, readers=("grok",))
+    else:
+        cfg.setdefault("retro", {})["grok_host_usage"] = True
+        save_config(cfg)
+
+
+def test_enable_capture_sources_writes_grok_as_its_own_type_without_include_dirs(
+    tmp_path, monkeypatch
+):
+    _setup(tmp_path, monkeypatch)
+    _enable_capture_sources(tmp_path, readers=("grok",))
+    grok = next(s for s in load_config()["sync"]["sources"] if s["name"] == "grok")
+    assert grok["type"] == "grok" and "include_dirs" not in grok
+
+
+@pytest.mark.parametrize("via", ["source", "retro-bit"])
+@pytest.mark.parametrize("scenario", ["complete", "unsupported", "no-scan"])
+def test_grok_status_and_diag_for_complete_blocker_and_no_scan(
+    tmp_path, monkeypatch, via, scenario
+):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=())
+    _enable_grok(tmp_path, via=via)
+    monkeypatch.setattr(
+        grok_host,
+        "grok_usage_diag",
+        lambda **_kw: {
+            "cache_state": "ok",
+            "complete_once": scenario == "complete",
+            "last_reason": "unsupported" if scenario == "unsupported" else None,
+            "last_reason_since": "2026-11-04T10:00:00+00:00" if scenario == "unsupported" else None,
+            "usage_less_skipped": 3,
+            "model_count": 1,
+            "models": ["grok-4.7-build"],
+            "files_cached": 5,
+            "files_on_disk": 8,
+            "last_complete_ms": 12,
+            "last_complete_at": "2026-11-05T09:00:00+00:00",
+        },
+    )
+    status = " ".join(runner.invoke(app, ["status"]).output.split())
+    diag = " ".join(runner.invoke(app, ["diag"]).output.split())
+    as_json = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["grok"]
+    assert as_json["consented"] is True and as_json["files_cached"] == 5
+    assert "grok consented: yes" in diag
+    assert "grok sessions cached: 5 of 8" in diag
+    assert "grok sessions without usage: 3" in diag
+    assert "grok models cached: 1 (grok-4.7-build)" in diag
+    if scenario == "complete":
+        assert "Grok Build usage capture: enabled; a prior scan completed successfully" in status
+        assert "grok prior successful scan: yes" in diag
+    elif scenario == "no-scan":
+        assert "Grok Build usage capture: enabled, but no successful scan yet" in status
+        assert "grok prior successful scan: no" in diag
+    else:
+        assert "Grok Build usage capture: enabled — " in status
+        for text in (status, diag):
+            assert "grok unsupported" in text
+            assert "mm update" in text and "mm disable-source grok" in text
+        assert "grok usage read blocker:" in diag
+
+
+def test_unconsented_grok_status_and_diag_never_stat_the_grok_root(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex",))
+    root = Mock(spec=Path)
+    for name in ("stat", "lstat", "resolve", "iterdir", "is_dir", "exists", "is_symlink"):
+        getattr(root, name).side_effect = AssertionError(f"{name} touched an unconsented root")
+    monkeypatch.setattr(grok_host, "GROK_SESSIONS_PATH", root)
+    for command in (["status"], ["diag"], ["diag", "--json"]):
+        result = runner.invoke(app, command)
+        assert result.exit_code == 0, result.output
+    assert root.mock_calls == []
+    assert "Grok Build usage capture" not in runner.invoke(app, ["status"]).output
+    diag = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["host_usage"]["grok"]
+    assert diag["consented"] is False and diag["files_on_disk"] is None
+
+
+def test_disabled_grok_source_overrides_the_retro_bit_in_status(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    _enable_capture_sources(tmp_path, readers=("codex",))
+    cfg = load_config()
+    cfg.setdefault("retro", {})["grok_host_usage"] = True
+    cfg["sync"]["disabled_sources"] = ["grok"]
+    save_config(cfg)
+    assert "Grok Build usage capture" not in runner.invoke(app, ["status"]).output
