@@ -2568,8 +2568,8 @@ def test_inspection_never_shows_the_syncthing_credential_or_device_ids(
     monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
     gui_placeholder = "SYNCTHING-GUI-92A-NEVER-EMIT"
     syncthing_dev = "DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH-IIIIIII-JJJJJJJ-KKKKKKK"
-    fake_syncthing.gui_auth = gui_placeholder
-    fake_syncthing.write_config(gui_auth=gui_placeholder)
+    fake_syncthing.gui_value = gui_placeholder
+    fake_syncthing.write_config(gui_value=gui_placeholder)
     fake_syncthing.set_folder(
         storage,
         peers=[(syncthing_dev, "peer-box", True)],

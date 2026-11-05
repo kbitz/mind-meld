@@ -141,7 +141,7 @@ class FakeSyncthing:
         self.storage_path = (
             Path(storage_path) if storage_path is not None else (self.config_dir.parent / "storage")
         )
-        self.gui_auth = FAKE_SYNCTHING_PLACEHOLDER
+        self.gui_value = FAKE_SYNCTHING_PLACEHOLDER
         self.my_id = FAKE_LOCAL_SYNCTHING_ID
         self.peer_id = FAKE_PEER_SYNCTHING_ID
         self.peer2_id = FAKE_PEER2_SYNCTHING_ID
@@ -164,7 +164,7 @@ class FakeSyncthing:
                 if hold_event is not None:
                     hold_event.wait(timeout=5.0)
                 auth_header = headers.get("X-API-Key") or headers.get("x-api-key")
-                if auth_header != outer.gui_auth:
+                if auth_header != outer.gui_value:
                     self.send_response(403)
                     self.send_header("Content-Type", "text/plain")
                     self.end_headers()
@@ -224,10 +224,10 @@ class FakeSyncthing:
         *,
         address: str | None = None,
         tls: bool = False,
-        gui_auth: str | None = None,
+        gui_value: str | None = None,
     ) -> Path:
         addr = self.address if address is None else address
-        cred = self.gui_auth if gui_auth is None else gui_auth
+        cred = self.gui_value if gui_value is None else gui_value
         tls_str = "true" if tls else "false"
         xml = (
             '<configuration version="37">\n'
