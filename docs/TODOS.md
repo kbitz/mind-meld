@@ -55,6 +55,75 @@ here by hand, use the H3 form.
   then reports `login_encrypted` and no cursor-agent login is available as a fallback). Until
   then the cursor-agent login is the fix.
 
+### [review:files=src/mind_meld/merge.py|tests/test_merge.py] Test gap: remaining nonqualifying link targets
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Empty destinations, empty path segments, query-bearing targets and direct backslash-bearing targets lack explicit rejection rows.
+- **Hypothesis (untested):** Extend the rejection table and verify such targets remain ordinary lines; re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_merge.py:697
+- **Evidence:** Post-repair coverage audit and testing specialist found missing rows, with no failure reproduced for these guards. Parentheses and escaped-delimiter defects were separately reproduced and repaired.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/266 at `0541e5f` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: late tidy flush failure
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** The accepted D9 post-replacement flush uncertainty lacks a direct tidy-level test.
+- **Hypothesis (untested):** Inject a parent-flush failure after real replacement and check visible bytes, one notice and unchanged counts. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:3382
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: verbose tidy diagnostics
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** A verbose test executes the diagnostic but does not assert singular/plural wording or quiet suppression.
+- **Hypothesis (untested):** Add output assertions to the existing pull scenario. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:3020
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: interrupted pull skips index tidy
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Interruption tests cover settlement but lack an already-merged index oracle.
+- **Hypothesis (untested):** Interrupt after an index merge and verify the post-apply tidy did not run. Re-verify before changing tests.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_pullflow.py:1845
+- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
+- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap Arch install paths
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** On Arch, the bootstrap tests never assert that a non-root run sends pacman through sudo, never run as root (no fake `id` returning 0), never fail a pacman install, never hit the pacman-missing stop, and only rerun on macOS.
+- **Hypothesis (untested):** Add rows to the existing Arch and failure tests: a sudo-row assertion, a fake `id` printing 0 with no fake sudo, an Arch case using MM_TEST_PKG_FAIL, and an Arch rerun that expects no pacman or pipx install call. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_bootstrap.py:491
+- **Evidence:** Track 98A coverage audit (audit-only) traced bin/bootstrap and tests/test_bootstrap.py; 28 tests passed and no failure was reproduced for these paths. Ubuntu CI runs non-root, so the root branch never runs in CI.
+- **Context:** Filed by /review-and-prep for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap version, os-release and pipx-link stops
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No test covers Linux with no readable os-release, an unreadable python3 or syncthing version, the exact Python 3.11 floor, or a dangling symlink at PIPX_BIN_DIR/mm.
+- **Hypothesis (untested):** Add an unsupported-system row with no os-release file, fakes that print no version, a 3.11.0 passing row beside the 3.10 stop (derived from pyproject requires-python), and a dangling-link row expecting the `pipx install --force` stop. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** bin/bootstrap:193
+- **Evidence:** Track 98A coverage audit (audit-only) found these paths untested; each existing guard still ends with a Run: fix, and no failure was reproduced.
+- **Context:** Filed by /review-and-prep for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04).
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=bin/bootstrap] Bootstrap hardening candidates from the Track 98A review
+- **Description:** Low-severity review findings kept out of Track 98A's scope; each still has a Run: fix today. (1) mm is never run, so a pipx venv with a missing interpreter still reports ready; the plan declined `mm --version`. (2) A failed `pacman -S --needed` prints the same command, where `pacman -Syu --needed` recovers a stale database. (3) python3 is validated, but pipx may build with another interpreter (PIPX_DEFAULT_PYTHON); the plan declined pipx interpreter checks. (4) A root run on Arch installs into root's pipx. (5) Syncthing.app users get a second, brew-installed Syncthing. (6) Version parsing has not been run against a real Syncthing 2.x binary. (7) A rerun racing autopull's `pipx install --force` can false-stop. (8) The shadow fix `pipx ensurepath --prepend --force` loses to venv, conda or mise PATH entries. (9) The missing-link fix is `pipx install --force`; `pipx upgrade mind-meld` would relink without the pipx 1.17 remove-on-failure risk. (10) A broken pipx fails at `pipx install` before the platform pipx reinstall fix is reached. (11) The link check stops a working machine whose PIPX_BIN_DIR changed after install. (12) A dangling link into pipx's own venv is described as "another install". (13) The foreign-file stop names the path but not what `--force` will replace. (14) The pipx reinstall fix assumes a brew or pacman pipx. Also advisory: merge the sudo and non-sudo pacman branches.
+- **Hypothesis (untested):** Revisit when Track 93A's runbook runs bootstrap live on a Mac and both Omarchy machines; fix whichever of these the live run actually hits.
+- **Upstream severity:** INFORMATIONAL (2 and 3 were CRITICAL under /review's adversarial FIXABLE rule; both reviewers rated them Low, Blocks: no)
+- **Found in:** bin/bootstrap:237
+- **Context:** Native adversarial, Codex structured and Red Team findings from /review-and-prep cycles 1-3 for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04); dispositions are auto-chosen keep (veto on the PR).
+- **Effort:** ? (user triages in /roadmap)
+
+
 ## Drain records
 
 ### Roadmap drain — 2026-11-04

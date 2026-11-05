@@ -2,6 +2,32 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.12] - 2026-11-04
+
+A new bootstrap readies macOS and Arch-based Linux for mm, and the install one-liner stops when the download fails.
+
+### Added
+
+- bin/bootstrap readies a Mac or an Arch-based Linux machine for mm.
+- An old macOS python3 is treated as missing, so setup does not use it.
+
+### Fixed
+
+- The README bootstrap one-liner stops when the download fails, so a bad download does not continue.
+- A missing pipx mm link is relinked, and the message names pipx's own repair.
+- Bootstrap verifies pipx's own mm, and survives a truncated download or a pipx list problem.
+
+## [1.12.11] - 2026-11-04
+
+On pull, memory merge keeps escaped, parenthesized, and case-aliased links and tidies dangling or duplicate index links.
+
+### Fixed
+
+- Escaped delimiters in memory links are respected, so the link stays intact.
+- A parenthesized memory link target is read through its closing parenthesis, so the full path is kept.
+- Pending memory links are preserved across case aliases, so a link that differs only by letter case survives merge.
+- Dangling and duplicate memory index links are removed when the index is tidied.
+
 ## [1.12.10] - 2026-11-03
 
 Status and retro-fleet name the Cursor ACP usage coverage gap, so missing coverage is identified.

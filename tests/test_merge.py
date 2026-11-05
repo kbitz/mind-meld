@@ -9,7 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from mind_meld.merge import lcs_merge, merge_file, merge_jsonl, merge_lines, should_merge
+from mind_meld.merge import (
+    drop_missing_links,
+    index_link,
+    is_line_index,
+    lcs_merge,
+    merge_file,
+    merge_jsonl,
+    merge_lines,
+    should_merge,
+)
 
 
 def _jsonl(*lines: str) -> bytes:
@@ -627,6 +636,165 @@ class TestMergeLines:
         assert merge_lines(a, b"") == merge_lines(b"", a)
         assert merge_lines(merge_lines(a, b_data), c) == expected_abc
         assert merge_lines(a, merge_lines(b_data, c)) == expected_abc
+
+    def test_one_line_per_linked_file_prefers_the_local_line(self):
+        local = b"- [Zebra local](same.md) -- local wording\n- [Only local](local.md)\n"
+        remote = b"- [Alpha remote](same.md) -- remote wording\n- [Only remote](remote.md)\n"
+        result = merge_lines(local, remote)
+        assert result == (
+            b"- [Only local](local.md)\n"
+            b"- [Only remote](remote.md)\n"
+            b"- [Zebra local](same.md) -- local wording\n"
+        )
+
+    def test_a_duplicate_pair_on_one_side_keeps_one_line(self):
+        local = b"- [Second local](local_dup.md)\n- [First local](local_dup.md)\n"
+        remote = b"- [Second remote](remote_dup.md)\n- [First remote](remote_dup.md)\n"
+        assert merge_lines(local, remote) == (
+            b"- [First local](local_dup.md)\n- [First remote](remote_dup.md)\n"
+        )
+
+    def test_lines_without_a_relative_md_link_keep_todays_union(self):
+        local = (
+            b"- plain bullet\n"
+            b"- [Web](https://x/a.md) -- local\n"
+            b"- [Parent](../x.md) -- local\n"
+            b"- [[wiki]] -- local\n"
+        )
+        remote = (
+            b"- plain bullet\n"
+            b"- [Web](https://x/a.md) -- remote\n"
+            b"- [Parent](../x.md) -- remote\n"
+            b"- [[wiki]] -- remote\n"
+        )
+        assert merge_lines(local, remote) == (
+            b"- [Parent](../x.md) -- local\n"
+            b"- [Parent](../x.md) -- remote\n"
+            b"- [Web](https://x/a.md) -- local\n"
+            b"- [Web](https://x/a.md) -- remote\n"
+            b"- [[wiki]] -- local\n"
+            b"- [[wiki]] -- remote\n"
+            b"- plain bullet\n"
+        )
+
+    def test_one_line_per_file_is_idempotent_and_ignores_line_order(self):
+        local_a = b"- [Zebra](a.md)\n- [Beta](a.md)\n- [Local](b.md)\n- no link\n"
+        local_b = b"- no link\n- [Local](b.md)\n- [Beta](a.md)\n- [Zebra](a.md)\n"
+        remote_a = b"- [Alpha](a.md)\n- [Remote](b.md)\n- [Gamma](c.md)\n- [Delta](c.md)\n"
+        remote_b = b"- [Delta](c.md)\n- [Gamma](c.md)\n- [Remote](b.md)\n- [Alpha](a.md)\n"
+        merged = merge_lines(local_a, remote_a)
+        assert merge_lines(merged, remote_a) == merged
+        assert merge_lines(local_b, remote_a) == merged
+        assert merge_lines(local_a, remote_b) == merged
+        assert merge_lines(local_b, remote_b) == merged
+
+
+class TestIndexLink:
+    def test_is_line_index_matches_dispatch(self):
+        assert is_line_index("projects/foo/memory/MEMORY.md") is True
+        assert is_line_index("MEMORY.md") is True
+        assert is_line_index("MEMORY.md.jsonl") is False
+        assert is_line_index("projects/foo/learnings.jsonl") is False
+        assert is_line_index("projects/foo/memory/note.md") is False
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ("- [A](a.md) -- hook", "a.md"),
+            ("- [A](sub/a.md) -- hook", "sub/a.md"),
+            ("- [A](a.md#part) -- hook", "a.md"),
+            ("- [A](<a b.md>) -- hook", "a b.md"),
+            ("- [A](./a.md) -- hook", "a.md"),
+            ('- [A](a.md "t") -- hook', "a.md"),
+            ("- [A](https://x/a.md)", None),
+            ("- [A](mailto:a.md)", None),
+            ("- [A](../a.md)", None),
+            ("- [A](/a.md)", None),
+            ("- [A](~/a.md)", None),
+            ("- [A](a%20b.md)", None),
+            ("- [A](a.txt)", None),
+            ("- [[a]]", None),
+            ("- plain line with no link", None),
+        ],
+    )
+    def test_qualifying_and_rejected_targets(self, line, expected):
+        assert index_link(line) == expected
+
+    def test_first_qualifying_link_wins(self):
+        line = "- [Ext](https://x/a.md) see [First](./first.md#top) and [Second](second.md)"
+        assert index_link(line) == "first.md"
+
+    @pytest.mark.parametrize(
+        ("line", "expected"),
+        [
+            ('[Web](https://x/a(b.md).md "see [Fake](gone.md)") [Live](live.md)', "live.md"),
+            ("[Live](live.md" + ' "see [Fake](gone.md)") [Other](other.md)', "live.md"),
+            (
+                r"[Web](https://x/a.md" r' "escaped \" ) [Fake](gone.md)") [Live](live.md)',
+                "live.md",
+            ),
+            (r"[Rejected](bad\) [Fake](gone.md)) [Live](live.md)", "live.md"),
+            ("[Broken](outer([Fake](gone.md)", None),
+            ("[Broken](<outer [Fake](gone.md)", None),
+            ('[Broken](outer.md "[Fake](gone.md)', None),
+        ],
+    )
+    def test_nested_syntax_never_becomes_an_independent_target(self, line, expected):
+        # Regression repair for Greptile's Track 108A parser finding.
+        # Value: protects=only complete independent links qualify, in left-to-right order;
+        # fails_when=escaped delimiters expose inner title or destination syntax as a pointer;
+        # why_new=the original first-link test contains no nested, escaped or unterminated syntax;
+        # seam=none; no_claim=full Markdown parsing (literal index-line contract only).
+        assert index_link(line) == expected
+        data = (line + "\n").encode()
+        assert drop_missing_links(data, lambda target: target == "live.md") == data
+
+
+class TestDropMissingLinks:
+    @pytest.mark.parametrize(
+        ("destination", "target"),
+        [
+            ("topic(old.md).md", "topic(old.md).md"),
+            ("topic(old(v1.md)).md", "topic(old(v1.md)).md"),
+            ('topic(old.md).md#part "title ) here"', "topic(old.md).md"),
+            ('<topic(old.md).md> "title ( here"', "topic(old.md).md"),
+        ],
+    )
+    def test_parenthesized_target_survives_merge_and_tidy(self, tmp_path, destination, target):
+        # Regression repair for Greptile's Track 108A parser finding.
+        # Value: protects=live parenthesized targets retain local wording through merge and tidy;
+        # fails_when=the destination is truncated at an inner closing parenthesis;
+        # why_new=existing merge and tidy cases use destinations without parentheses;
+        # seam=none; no_claim=full Markdown compliance or fleet transport (real temporary files).
+        (tmp_path / target).write_bytes(b"memory content\n")
+        local = f"- [Local]({destination})\n".encode()
+        remote = f"- [Remote]({destination})\n".encode()
+        merged = merge_lines(local, remote)
+        assert merged == local
+        assert drop_missing_links(merged, lambda name: (tmp_path / name).is_file()) == local
+
+    def test_drops_absent_keeps_present_and_no_link(self):
+        data = (
+            b"# Memory\n"
+            b"- [Keep](keep.md) -- present\n"
+            b"- [Gone](gone.md) -- absent\n"
+            b"- [Web](https://x/gone.md) -- no relative md link\n"
+        )
+        result = drop_missing_links(data, lambda target: target == "keep.md")
+        assert result == (
+            b"# Memory\n"
+            b"- [Keep](keep.md) -- present\n"
+            b"- [Web](https://x/gone.md) -- no relative md link\n"
+        )
+
+    def test_returns_input_bytes_when_nothing_is_dropped(self):
+        data = b"# Memory\n\n- [Keep](keep.md)  \n"
+        result = drop_missing_links(data, lambda target: True)
+        assert result is data
+
+    def test_returns_empty_bytes_when_every_line_is_dropped(self):
+        data = b"- [Gone A](a.md)\n- [Gone B](b.md)\n"
+        assert drop_missing_links(data, lambda target: False) == b""
 
 
 class TestLcsMerge:

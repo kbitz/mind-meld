@@ -6,7 +6,15 @@ Sync AI coding-agent context, skills, and gstack activity across your machines t
 
 ## Install
 
-Prerequisites: Python 3.11+, pipx, and Syncthing sharing one folder between your machines.
+On a fresh Mac or Arch-based Linux machine, fetch and run the bootstrap script from the `latest` release branch:
+
+```bash
+mm_bootstrap=$(curl -fsSL https://raw.githubusercontent.com/kbitz/mind-meld/latest/bin/bootstrap) && sh -c "$mm_bootstrap"
+```
+
+It installs missing prerequisites (`python`, `pipx`, and `syncthing` with Homebrew on macOS, where a `python3` older than 3.11 counts as missing; `python`, `python-pipx`, `syncthing`, and `git` with `pacman -S --needed` on Arch-based Linux), checks that Python is 3.11 or newer and Syncthing is 2.1 or newer, installs `mm` through `pipx` from `@latest`, and verifies that `mm` on `PATH` is pipx's copy. It stops with the fixing command when Homebrew is missing or off `PATH` on macOS, on an unsupported system, when an installed Python or Syncthing is too old, or when `mm` is missing from `PATH`, shadowed by another install, or not pipx's copy. A rerun changes nothing. Pairing machines and sharing the folder stay manual — the script never touches Syncthing's configuration; see [Quick Start](#quick-start) for the next steps.
+
+To install manually when you already have the prerequisites (Python 3.11+, pipx, and Syncthing 2.1 or newer sharing one folder between your machines):
 
 ```bash
 pipx install git+https://github.com/kbitz/mind-meld.git@latest
@@ -96,7 +104,9 @@ time, in any order.
 - **A fast-forward has no recovery copy.** It replaces your unchanged file with the peer's
   bytes, so a bad edit on one machine spreads to the others. When both machines changed a
   file, `.jsonl` and `MEMORY.md` are still unioned (a line deleted on one side returns when
-  both sides changed the file) and any other file still gets a conflict copy.
+  both sides changed the file, except a `MEMORY.md` pointer to a missing file that is not
+  waiting or failed, or a duplicate pointer for the same file) and any other file still gets
+  a conflict copy.
 - **A pull no longer restores a file this machine held and removed by hand.** Deleting a
   synced file is a deletion your next push publishes, so an accidental removal spreads at
   the next push; copy it back from a recovery folder (see above) and push from the machine
@@ -1304,7 +1314,7 @@ Discovery is local. Track 29A's live gap was one repo (8 commits, 15%), not "10 
 
 ## Handling conflicts
 
-A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` applies the peer's version as it is (a fast-forward: no union, no conflict copy, and no recovery copy of the bytes it replaces, so a bad edit on one Mac spreads to the others). If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) uses the older rule for it: a local file newer than the remote (by mtime) is left alone and convergence happens on the next push.
+A conflict means **both machines changed the file** since they last synced it. If only the peer changed it, `mm pull` applies the peer's version as it is (a fast-forward: no union, no conflict copy, and no recovery copy of the bytes it replaces, so a bad edit on one Mac spreads to the others). If only you changed it, pull leaves yours and your next push shares it. For a both-changed file that cannot auto-merge, the default `mm pull --conflict-mode keep-both` leaves your local file at the canonical path. It follows the Syncthing convention: your local file stays where it is, and the incoming remote version is saved as `<stem>.sync-conflict-<YYYYMMDD-HHMMSS>-v1-<device>.<ext>` sitting next to it, whichever file is newer. `.jsonl` files and `MEMORY.md` are line-unioned instead, and because mm keeps the last-synced hash and not the old text, **a line one Mac deleted comes back when both Macs changed the file** (delete it again; in `MEMORY.md`, pointers to missing files not left waiting or failed, and duplicate pointers for the same file, are dropped). A Mac with no record of the last sync for a path (a fresh install, a lost `state.db`, a peer on an older release) uses the older rule for it: a local file newer than the remote (by mtime) is left alone and convergence happens on the next push.
 
 A peer edit that was built on your version but carries an **older mtime** than your file, as a machine restored from a backup publishes, is *not applied*. The pull line says `N older peer edits not applied` and `mm pull --verbose` lists them; compare both versions, then run `touch <file>` and `mm push` on the machine whose version should win.
 
