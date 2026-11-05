@@ -49,17 +49,18 @@ here by hand, use the H3 form.
 - **Description:** `_long_context_cause` now picks its lead only from models that produced a detail. A model with an active local pricing override has no long-context card, so it produces no detail and cannot steer the lead. Only the zero-token case is pinned (`test_long_context_cause_lead_follows_only_models_with_a_detail`); nothing exercises the override path.
 - **Hypothesis (untested):** add a case beside that test with a `grok-4.7` override in a temporary pricing cache next to `grok-4.6-build` tokens, and assert the Grok Build lead. Re-verify first.
 - **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:3793
+- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:3771 (override path: `resolve_long_context_prices` returns None, then `continue`); lead choice at :3795
 - **Evidence:** cycle-2 adversarial review and the coverage audit (90% value-weighted, this path the only gap); the adversarial pass confirmed the override path by reading the code, and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch mmm/177822fc at a719f9f (2026-11-05), Track 109B.
+- **Context:** Filed by /review-and-prep on PR #271 (branch mmm/177822fc) at a719f9f (2026-11-05), Track 109B.
 - **Effort:** ? (user triages in /roadmap)
 
-### [review:files=src/mind_meld/token_usage.py|README.md] Local pricing overrides miss Grok 4.7 aliases and drop the long-context floor
-- **Description:** `_cached_prices` looks overrides up by exact model id, so an override for `grok-4.7` does not reprice the aliases that share its card (`grok-4.7-high`, `grok-4.7-build` and the rest of `GROK_47_MODEL_IDS`). And an override dated on or after the bundled date stays active, which makes `resolve_long_context_prices` return None for that id: `_long_context_cause` emits no cause for it, and a row with no other floor cause renders `~` instead of `≥`. README's "Grok always contributes a base-tier floor" assumes bundled cards.
-- **Why:** pre-existing override design (exact ids, the on-or-after date gate), widened by Track 109B's eleven Grok 4.7 ids. List-rate display only, not spend. It bites only after a /retro-fleet run writes a Grok 4.7 override; this Mac's only overlay card (`grok-4.7`, 2026-11-04) is superseded by the 2026-11-05 bundled date.
-- **Hypothesis (untested):** when an exact-id override misses for a `PRICING_FAMILY_BY_MODEL` alias, consult `_cached_prices(family)`; keep the tier-uncertainty cause for `GROK_47_MODEL_IDS` ids even while an override is active. Re-verify first.
-- **Priority:** P3
-- **Context:** Filed by /review-and-prep on branch mmm/177822fc at a719f9f (2026-11-05), from the Red Team (cycle 1) and native adversarial (cycles 1 and 3) reviews of Track 109B. Auto-chosen defer, outside the Track's approved scope. Revisit trigger: the /retro-fleet skill next writes a Grok 4.7 override, or a vendor changes Grok 4.7 rates.
+### [review:files=src/mind_meld/token_usage.py|README.md|src/mind_meld/skills/retro_fleet/SKILL.md] Local pricing overrides miss Grok aliases and drop the long-context floor
+- **Description:** `_cached_prices` looks overrides up by exact model id. An override for `grok-4.7` does not reprice the ids that alias to the same card (`grok-4.7-low`, `-medium`, `-high`, `-xhigh` and `grok-4.7-build`), and an override for `grok-4.7-fast` does not reprice the `-fast` effort ids that alias to the Fast card. An override dated on or after the bundled date stays active and makes `resolve_long_context_prices` return None for that id, so `_long_context_cause` gives it no detail. A Grok row with no other floor cause then renders `~` instead of `≥`. The same happens to `grok-4.6-build`. README's "Grok always contributes a base-tier floor" assumes bundled cards. List-rate display only, not spend.
+- **Symptom:** live on installed mm 1.12.13 on this Mac (2026-11-05). `~/.config/mind-meld/pricing-cache.json` holds 8 cards dated 2026-11-04 from a /retro-fleet whole-table refresh, including `grok-4.7`. That date is after 1.12.13's Cursor date (2026-09-23), so the override is active and the `grok-4.7` floor detail is already suppressed. Track 109B's 2026-11-05 dates supersede that card, but the skill's next refresh (`refresh_due` from about 2026-11-12) is likely to re-pin Grok ids with later dates.
+- **Hypothesis (untested):** fall back to the family override only for ids whose `PRICING_FAMILY_BY_MODEL` family is the same card, applying the alias's own date gate (a stale `grok-4.6` card must not override bundled `grok-4.6-build`). Keep the tier-uncertainty cause for every id with a `VENDOR_LONG_CONTEXT_TIERS` family while an override is active. Consider a SKILL.md Step 4 rule not to re-pin a Grok id whose bundled rate matches the docs. Re-verify first.
+- **Revisit when:** `MM_HEALTH.pricing.cached_model_ids` lists a `GROK_47_MODEL_IDS` id or `grok-4.6-build`, a Grok row renders `~`, or a vendor changes Grok 4.7 rates.
+- **Priority:** P2
+- **Context:** Filed by /review-and-prep on PR #271 (branch mmm/177822fc) at a05eb20 (2026-11-05), from the Red Team (cycle 1) and native adversarial (cycles 1, 3 and the post-review delta) reviews of Track 109B. Auto-chosen defer: a code fix is outside the Track's approved scope.
 - **Effort:** ? (user triages in /roadmap)
 
 ## Drain records
