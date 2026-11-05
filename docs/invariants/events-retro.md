@@ -3784,8 +3784,9 @@ delivered Grok tokens to the wire (zero across all five local host rows).
 The shared deadline and one-reader warm caused starvation. The later-reader
 grace floor and every-reader warm/retry ship with the rate table.
 
-**Grok pricing floor and model-scoped ceiling (57A).** Only the exact observed
-`grok-4.6-build` alias maps to `grok-4.6`. Bare `grok-4.6`, `grok-build-0.1`,
+**Grok pricing floor and model-scoped ceiling (57A / 109B).** The exact observed
+`grok-4.6-build` → `grok-4.6` and `grok-4.7-build` → `grok-4.7` aliases map Grok
+Build models onto their xAI family cards. Bare `grok-4.6`, `grok-build-0.1`,
 prefix/suffix variants and case variants stay unpriced. The literal base card
 is $2 input / $0.50 cached input / $0 cache writes / $6 output per MTok;
 the long card is $4 / $1 / $0 / $12. Requests whose prompt reaches 200k
@@ -3831,25 +3832,31 @@ field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
 `grok-build-0.1` is a different SKU and a name trap.
 
-**Cursor Grok 4.7 list-rate basis (67A).** The exact `grok-4.7` alias maps
+**Cursor Grok 4.7 list-rate basis (67A / 109B).** The exact `grok-4.7` alias maps
 to its own family card, $2 input / $0.50 cache read / $6 output per MTok; long
 context is $4 / $1 / $12 when a REQUEST exceeds 256k input. Per-turn aggregates
 cannot recover that tier, so the standard-speed estimate is a floor. Cursor's
-2026-09-23 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
+2026-11-05 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
 https://cursor.com/docs/models-and-pricing and
 https://cursor.com/docs/models/grok-4-7 are its sources. The dollar column is a
 list-rate equivalent, **not spend** on the censused Cursor Ultra subscription.
 Included usage and on-demand charges cannot be reconstructed from these counters.
 
-`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, deliberately
-absent from both the pricing alias registry and VERIFIED_MODEL_IDS. Standard
-Fast costs 2x base and long-context Fast 3x base; effort has no separate rate.
-Fast-only rows retain tokens and render cost `—` / cost_unavailable; mixed rows
-render `≥` / cost_floor for the priced subtotal, excluding Fast cost entirely.
-The reader cannot set floor_causes; existing unpriced-model rendering does it.
-Nonzero cache writes remain a labelled unknown and suppress any at-most claim.
-Tests follow both surprise guards through capture → publication → rendering.
-Pricing Fast properly and adding auto/composer families are deferred in TODOS.
+`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, which
+Track 109B prices as its own pseudo-id card in `VENDOR_FAMILY_TIERS` ($4 input /
+$1 cache read / $0 cache create / $12 output per MTok, 2x standard) and
+`VENDOR_LONG_CONTEXT_TIERS` ($6 / $1.50 / $0 / $18, 3x standard), ending 1.2.0's
+unpriced-Fast policy. Effort (`low`, `medium`, `high`, `xhigh`) has no separate
+rate; the flat ids `grok-4.7-(low|medium|high|xhigh)` and their `-fast` variants
+alias in `PRICING_FAMILY_BY_MODEL` onto `grok-4.7` and `grok-4.7-fast`, and all
+ten Cursor Grok ids (`CURSOR_GROK_MODEL_IDS`) are in `VERIFIED_MODEL_IDS` dated by
+`PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause` checks `CURSOR_GROK_MODEL_IDS`
+so Fast-only and flat-id Cursor rows emit the Cursor "Per-turn totals cannot
+recover the per-request context tier" cause, while `grok-4.6-build` and
+`grok-4.7-build` alone keep the Grok Build log-limit cause. Fast-only and mixed
+rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
+remain a labelled unknown and suppress any at-most claim. Adding auto/composer
+families remains deferred in TODOS.
 
 **Other vendors' context assumptions.** Codex's observed 258,400-token window
 cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
@@ -3862,8 +3869,8 @@ details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
 (2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), Cursor
-`PRICING_CURSOR_LAST_UPDATED` (2026-09-23), xAI `PRICING_XAI_LAST_UPDATED`
-(2026-09-10), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
+`PRICING_CURSOR_LAST_UPDATED` (2026-11-05), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-11-05), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
 `PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
 `PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
 Each vendor's date and source URL ride in `MM_HEALTH.pricing`, including

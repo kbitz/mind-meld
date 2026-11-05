@@ -22,8 +22,11 @@ The four counters are **disjoint**: inputTokens + outputTokens + cacheReadTokens
 is a bounded subset of outputTokens, never an additional charge. The complete
 turn belongs to endedAt's UTC date, even if it started before midnight.
 
-Never observed: fast=true; composer-2.5/auto; nonzero cacheWriteTokens;
-non-null usageRef; a midnight-spanning turn; a second producing Mac.
+Never observed in the initial 2026-09-23 census (and still absent in local stores on 2026-11-05):
+fast=true; flat `grok-4.7-(low|medium|high|xhigh)(-fast)` ids in Conductor stores;
+composer-2.5/auto; nonzero cacheWriteTokens; non-null usageRef; a midnight-spanning turn.
+Peer Mac `3a6c7dc9` has since published `grok-4.7` Cursor usage (see the 2026-11-05 census below);
+the Fast and flat-id notice lines came from an external run, not this Mac's persisted stores.
 Observed later (2026-10-03, structure only): 10 `cancelled`, 1 `error` and
 1 `queued` row across 7 of 16 run files, every one with null usage and no
 usageRef. They contribute nothing; counters or a usageRef on them refuse.
@@ -105,19 +108,23 @@ and ISO `finished_at`; per-agent `store.db` holds blobs). Track 70A reads that
 `index.db`; the SQLite census below records what was measured.
 
 Prices are API **list-rate equivalents**, not spend on the censused Cursor
-Ultra subscription. Cursor's rates were fetched 2026-09-23:
+Ultra subscription. Cursor's rates were verified 2026-11-05 (first fetched 2026-09-23):
 https://cursor.com/docs/models-and-pricing and
 https://cursor.com/docs/models/grok-4-7. Standard Grok 4.7 is $2 input,
 $0.50 cache read and $6 output per million tokens. Above 256k input per request
 those rates double; per-turn totals cannot recover that tier, so cost is a
 floor. Cache-write price is unpublished, not demonstrated to be zero.
 
-Fast mode bills at 2x standard, or 3x standard for long context, and is the
-default on Pro and higher. Its tokens use the deliberately unpriced
-grok-4.7-fast ID. Fast-only rows show cost `—`; mixed rows show `≥` for the
-priced subtotal, omitting Fast cost entirely. Effort has no separate published
-rate. auto/composer remain Unclassified; adding a family is deferred until
-real use is observed. Grok Build history remains complementary, not redundant.
+Fast mode bills at 2x standard ($4 input / $1 cache read / $12 output per MTok),
+or 3x standard for long context (>256k input: $6 / $1.50 / $18 per MTok), and is
+the default on Pro and higher. Since Track 109B its tokens price through the
+`grok-4.7-fast` pseudo-id card (ending the 1.2.0 unpriced-Fast policy), and flat
+effort/Fast ids (`grok-4.7-(low|medium|high|xhigh)` and `-fast` variants) alias
+directly onto `grok-4.7` and `grok-4.7-fast`. Fast-only rows show a `≥` floor
+with the per-request context-tier cause; mixed rows include Fast cost in their
+`≥` floor. Effort has no separate published rate. auto/composer remain Unclassified;
+adding a family is deferred until real use is observed. Grok Build history remains
+complementary, not redundant.
 
 ## SQLite census, 2026-10-09, Conductor 0.90.1
 
@@ -309,3 +316,34 @@ community/forum sources, not verified by mm":
   <https://forum.cursor.com/t/dashboard-export-usage-events-csv-no-longer-exports-cost/167193>.
   It is manual, has no `run_id` and needs no mm import. It is the long-term path if
   Cursor work leaves Conductor.
+
+## Grok 4.7 id census, 2026-11-05
+
+Re-checked 2026-11-05 on this Mac (`889e42c0`, installed `mm 1.12.13`, Cursor CLI
+**2026.10.22-27dcf5f**, Conductor **0.90.1** from `CFBundleShortVersionString` and
+`CFBundleVersion`). Only metadata columns (`model`, `model_params_json`, `status`,
+timestamps, and `usage_json IS NOT NULL` / `usage_ref IS NOT NULL` predicates) were
+inspected; no prompts, results or paths were read.
+
+| source | stores / files | model id | `fast` flag | status / count | UTC date range |
+|---|---|---|---|---|---|
+| Conductor SQLite `index.db` (`6a0374c100b4e8c8`, `a12bae7f256784c5`, `ef1e666541566c2e`) | 3 stores | `grok-4.7` | `"false"` (`model_params_json`) | 4 `FINISHED` (with `usage_json`, no `usage_ref`), 3 `CANCELLED` (neither) | `2026-10-09..2026-10-09` |
+| Legacy Conductor `runs.ndjson` | 22 files | `grok-4.7` | `"false"` (`model.params`) | 78 `finished` (with `usage`), 7 `cancelled` (null `usage`), 6 `error` (null `usage`) | `2026-09-22..2026-10-01` |
+| `~/.config/mind-meld/cursor-host-tokens.json` | 1 cache (`sqlite_read`: 3 stores `"read"`) | `grok-4.7` | normalized | 83 counted runs (78 JSONL + 4 SQLite + 1 standalone completion on `2026-11-04`) | `2026-09-22..2026-11-04` |
+| `~/.config/mind-meld/cursor-standalone-spool.jsonl` (`.merging`) | absent | — | — | 0 | — |
+| `mm retro-fleet 30d --dump-host-usage` (`889e42c0`, `mm 1.12.13`) | published snapshot | `grok-4.7` | normalized | 10 active days, 398,996,174 tokens | `2026-09-22..2026-11-04` |
+| `mm retro-fleet 30d --dump-host-usage` (`3a6c7dc9`, `mm 1.12.10`) | published snapshot | `grok-4.7` | normalized | 3 active days, 399,593,637 tokens | `2026-09-26..2026-10-04` |
+| `~/.local/share/mind-meld/events/*.jsonl` (`889e42c0` pre-85A Grok Build history) | 40 event files | `grok-4.6-build`, `grok-4.7-build` | — | historical `host_usage` rows (`grok-4.6-build` on 12 days, `grok-4.7-build` on 2 days) | `2026-08-17..2026-09-22` |
+
+**Unnormalized reader path and T2 decision.** Only `record_cursor_usage`
+(`src/mind_meld/host_usage.py:1724`, the standalone CLI stop-hook and `--print`
+wrapper path) normalizes `^grok-4\.7-(?:low|medium|high|xhigh)(?P<fast>-fast)?$`
+into `grok-4.7` or `grok-4.7-fast`. Both Conductor readers — `_sqlite_model`
+(`host_usage.py:814`) and `_cursor_run` (`host_usage.py:613`) — refine only exact
+`model_id == "grok-4.7"` with `params.fast` and pass any other `model` string
+verbatim into `cursor-host-tokens.json`, the published `host-usage` snapshot, and
+`token_usage.estimate_cost`. Because no local Conductor store, spool, cache or
+peer snapshot on 2026-11-05 holds a flat `grok-4.7-(low|medium|high|xhigh)(-fast)`
+row, `_sqlite_model` and `_cursor_run` are left unchanged, and
+`token_usage.PRICING_FAMILY_BY_MODEL` prices the flat effort/Fast aliases directly.
+

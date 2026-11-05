@@ -3787,9 +3787,10 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
         models.append(detail)
     if not models:
         return None
-    # grok-4.6 stays a Grok Build log limit. grok-4.7's uncertainty is the
-    # per-request tier a per-turn aggregate cannot recover, including Cursor.
-    if any(model == "grok-4.7" for model in by_model):
+    # grok-4.6-build and grok-4.7-build stay a Grok Build log limit. Cursor's
+    # Grok 4.7 variants (including Fast and flat effort/Fast ids) have
+    # uncertainty from the per-request tier a per-turn aggregate cannot recover.
+    if any(model in token_usage.CURSOR_GROK_MODEL_IDS for model in by_model):
         lead = (
             "Per-turn totals cannot recover the per-request context tier; no action resolves this ("
         )

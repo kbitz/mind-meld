@@ -1238,7 +1238,7 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-09-23 ([pricing](https://cursor.com/docs/models-and-pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-11-05 ([pricing](https://cursor.com/docs/models-and-pricing), [Grok 4.7](https://cursor.com/docs/models/grok-4-7)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
 
 **Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all six bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
 
@@ -2043,12 +2043,15 @@ the Cursor row. The status clauses mean:
   `host_usage_autopush_budget_ms` (100 to 5,000 ms) and
   `host_usage_interactive_budget_ms` (250 to 5,000 ms).
 
-Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
-read / $6 output per million tokens), with an unknown per-request long-context
-tier making the cost a floor. This is list-rate equivalent, not Cursor Ultra
-subscription spend. Fast tokens use the unpriced `grok-4.7-fast` id: fast-only
-cost is `—`; a mixed row's `≥` subtotal excludes Fast cost. Fast can cost 3x
-standard in long context. Cache-write price is unpublished. Sources:
+Standard Grok 4.7 uses Cursor's 2026-11-05 list rates ($2 input / $0.50 cache
+read / $6 output per million tokens; 2x above 256k input per request), with an
+unknown per-request long-context tier making the cost a `≥` floor. This is
+list-rate equivalent, not Cursor Ultra subscription spend. Fast tokens use the
+`grok-4.7-fast` pseudo-id card at 2x standard ($4 / $1 / $12) and 3x standard
+in long context ($6 / $1.50 / $18), and flat effort/Fast ids
+(`grok-4.7-(low|medium|high|xhigh)(-fast)`) alias onto `grok-4.7` and
+`grok-4.7-fast`, so Fast-only and mixed rows both render a `≥` floor that
+includes Fast cost. Cache-write price is unpublished. Sources:
 [Cursor pricing](https://cursor.com/docs/models-and-pricing) and
 [Grok 4.7](https://cursor.com/docs/models/grok-4-7).
 
