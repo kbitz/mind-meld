@@ -606,7 +606,7 @@ def test_call_time_owner_lookup_reaches_dispatch_sites(row: str, monkeypatch: py
 
 def test_hosts_path_globals_isolated_under_tmp_path(tmp_path: Path):
     """Every Path-valued module global on mind_meld.hosts.* resolves under tmp_path in tests."""
-    for label, module in (("codex", codex_host), ("grok", grok_host)):
+    for label, module, minimum in (("codex", codex_host, 3), ("grok", grok_host, 2)):
         checked = 0
         for attr, value in vars(module).items():
             if isinstance(value, Path):
@@ -614,7 +614,7 @@ def test_hosts_path_globals_isolated_under_tmp_path(tmp_path: Path):
                 assert value.is_relative_to(tmp_path), _clause_msg(
                     label, "path_isolation", f"{label}.{attr}={value} must resolve under tmp_path"
                 )
-        assert checked >= 2
+        assert checked >= minimum
 
 
 @pytest.mark.parametrize(

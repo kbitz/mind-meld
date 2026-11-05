@@ -59,8 +59,9 @@ per-model sums equal the row; `endedAt` carries a UTC offset; `sessionId` equals
   output is not read.
 - **`reasoningTokens` is inside `outputTokens`** (`reasoning <= output` in every row) and is never
   added again.
-- The turn's day is the UTC date of `endedAt`. `modelCalls`, `turnCount`, `turnNumber`,
-  `totalTokens`, `costUsdTicks`, `session` and `primaryModelId` are validation-only and never stored.
+- The turn's day is the UTC date of `endedAt`. `turnNumber` contributes only to the hashed
+  dedup key; `totalTokens` validates the input/output identity. Neither is stored directly.
+  `modelCalls`, `turnCount`, `costUsdTicks`, `session` and `primaryModelId` are ignored entirely.
 - **Resume** appends rows to the same directory (a resumed session went from 1 to 3 rows) and
   replaces `usage.json` atomically (the inode changed across a turn).
 - **Fork** creates a new session directory in the same cwd directory whose `usage.json` repeats

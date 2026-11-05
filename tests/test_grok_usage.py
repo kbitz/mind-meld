@@ -389,6 +389,45 @@ def test_bad_json_is_malformed(tmp_path):
     assert not result.complete and result.reason == "malformed"
 
 
+@pytest.mark.parametrize("ended_at", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+def test_utc_conversion_overflow_is_a_persisted_malformed_failure(tmp_path, ended_at):
+    result = _mutate(tmp_path, lambda doc: doc["turns"][0].update(endedAt=ended_at))
+    assert not result.complete and result.reason == "malformed"
+    assert result.hosts == {}
+    assert grok_host.grok_usage_diag()["last_reason"] == "malformed"
+
+
+def test_surrogate_model_is_a_persisted_malformed_failure(tmp_path):
+    def change(doc):
+        models = doc["turns"][0]["modelUsage"]
+        models["\ud800"] = models.pop(BUILD)
+
+    result = _mutate(tmp_path, change)
+    assert not result.complete and result.reason == "malformed"
+    assert result.hosts == {}
+    assert grok_host.grok_usage_diag()["last_reason"] == "malformed"
+
+
+@pytest.mark.parametrize("field,value", [("day", "2026-02-31"), ("model", "\ud800")])
+def test_invalid_cached_turn_is_reread_before_publication(tmp_path, monkeypatch, field, value):
+    root = _copy_tree(tmp_path, "cwd-a")
+    assert _read(root).complete
+    data = _cache()
+    next(iter(data["files"].values()))["turns"][0][field] = value
+    grok_host.CACHE_PATH.write_text(json.dumps(data))
+    real_read = grok_host._read_usage_file
+    opened = []
+
+    def read(path, before):
+        opened.append(path)
+        return real_read(path, before)
+
+    monkeypatch.setattr(grok_host, "_read_usage_file", read)
+    result = _read(root)
+    assert result.complete and result.hosts == {"grok": EXPECTED_DAYS}
+    assert len(opened) == 1
+
+
 def test_file_replaced_while_reading_is_stale(tmp_path, monkeypatch):
     root = _copy_tree(tmp_path, "cwd-a")
     target = _usage_file(root, A1)
@@ -512,6 +551,37 @@ def test_pre_v1_11_8_cache_at_the_path_is_discarded(tmp_path):
     assert "old" not in data["files"] and data["last_reason"] is None
 
 
+def test_retired_cache_metadata_is_discarded_even_when_first_scan_hits_deadline(
+    tmp_path, monkeypatch
+):
+    root = _copy_tree(tmp_path, "cwd-a")
+    grok_host.CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    grok_host.CACHE_PATH.write_text(
+        json.dumps(
+            {
+                "version": hu.CACHE_VERSION,
+                "complete_once": True,
+                "last_reason": "unsupported",
+                "last_reason_since": "2026-09-01T00:00:00+00:00",
+                "last_complete_ms": 123,
+                "files": {"old": {"turns": []}},
+            }
+        )
+    )
+    before = grok_host.grok_usage_diag()
+    assert not before["complete_once"] and before["last_reason"] is None
+    assert before["last_complete_ms"] is None
+    monkeypatch.setattr(
+        grok_host, "_scan_grok_root", lambda *args: (hu._incomplete("deadline"), {})
+    )
+    assert _read(root).reason == "deadline"
+    data = _cache()
+    assert data["grok_format"] == grok_host._GROK_CACHE_FORMAT
+    assert data["files"] == {} and not data["complete_once"]
+    after = grok_host.grok_usage_diag()
+    assert after["last_reason"] == "deadline" and after["last_complete_ms"] is None
+
+
 def _stub_warm(monkeypatch):
     warmed: list[str] = []
 
@@ -535,6 +605,47 @@ def test_attended_capture_warms_a_grok_deadline_and_autopush_never_does(monkeypa
     )
     assert warmed == ["grok"]
     assert capture.complete
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_events_tail_warms_grok_only_when_attended(tmp_path, monkeypatch, quiet):
+    from mind_meld import identity
+
+    root = tmp_path / "events-root"
+    sources = [
+        {"name": "mm-events", "path": str(root), "type": "generic", "include_dirs": ["events"]}
+    ]
+    config = {"sync": {"sources": sources}, "retro": {"grok_host_usage": True}}
+    monkeypatch.setattr(
+        events, "discover_git_roots", lambda *a, **kw: events.GitRootDiscovery((), (), False)
+    )
+    monkeypatch.setattr(events, "walk_git_projects", lambda *a, **kw: [])
+    monkeypatch.setattr(identity, "gather_local_identities", lambda **kw: [])
+    monkeypatch.setattr(identity, "refresh_identity_cache", lambda **kw: [])
+    seen = []
+
+    def read(*, deadline, consented=False):
+        seen.append(consented)
+        return hu._incomplete("deadline")
+
+    monkeypatch.setattr(grok_host, "read_grok_usage", read)
+    warmed = _stub_warm(monkeypatch)
+    degradations = events_tail._run_events_tail(
+        config, sources, "dev-a", dry_run=False, quiet=quiet
+    )
+    assert seen == [True]
+    assert warmed == ([] if quiet else ["grok"])
+    rows = [
+        json.loads(line)
+        for path in (root / "events").glob("*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    host_rows = [row for row in rows if row["type"] == "host-usage-snapshot"]
+    if quiet:
+        assert host_rows == []
+        assert any("grok deadline" in text for text in degradations)
+    else:
+        assert host_rows[0]["token_sources"] == ["grok"]
 
 
 def test_warm_host_cache_inline_reads_grok_consented(tmp_path):

@@ -4311,9 +4311,10 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   and `cacheCreationTokens` and goes through `host_usage._normalize_inclusive_counters`;
   `reasoningTokens` is inside `outputTokens` and is never added. Counters come from each
   `modelUsage` entry (one stored turn per row and model, disjoint). The day is `endedAt`'s UTC
-  date. A nonzero `cacheCreationTokens` marks that day partial (the Codex rule). `modelCalls`,
-  `turnCount`, `turnNumber`, `totalTokens`, `costUsdTicks`, `session` and `primaryModelId` are
-  validation-only and never stored or published.
+  date. A nonzero `cacheCreationTokens` marks that day partial (the Codex rule). `turnNumber`
+  contributes only to the hashed dedup key; `totalTokens` validates the input/output identity.
+  Neither is stored directly or published. `modelCalls`, `turnCount`, `costUsdTicks`, `session`
+  and `primaryModelId` are ignored entirely.
 - **Dedup and subagents.** A turn key hashes `(endedAt, turnNumber, model)`; equal keys across
   files (a fork repeats its parent's rows byte-identically) count once, and the same key with
   different counters is `malformed`. Subagent usage is folded into the parent turn's row (the
@@ -4333,8 +4334,9 @@ retired before v1.11.8; its record shapes, census and the reasons for the source
   grok_consented=...)` selects it after Codex; its five call sites (push capture, init backfill,
   `cli._capture_attended_usage`, the recapture notice, `statusflow._host_publication`) all pass the
   same verdict. `read_grok_usage(consented=False)` returns `no_metadata_ledger` before any stat or
-  cache creation; `mm status` and `mm diag` list the sessions directory only when consented, and
-  say nothing about an unconsented Grok.
+  cache creation; `mm status` and `mm diag` list the sessions directory only when consented.
+  Unconsented status says nothing about Grok; diag reports consent and mm's own cache state
+  without inspecting the Grok sessions directory.
 - **Cache.** `~/.config/mind-meld/grok-host-tokens.json` at 0600, compact, through
   `locked_json_rmw`, with `grok_format` 2: a cache written by the retired reader lacks it and is
   discarded on the first write. Keys are `host_usage._cache_key` digests of the session

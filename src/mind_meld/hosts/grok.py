@@ -93,11 +93,11 @@ def _day_of(value: Any) -> str:
         raise host_usage._ReadFailure("malformed")
     try:
         when = datetime.fromisoformat(value)
-    except ValueError as exc:
+        if when.tzinfo is None:
+            raise host_usage._ReadFailure("malformed")
+        when = when.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as exc:
         raise host_usage._ReadFailure("malformed") from exc
-    if when.tzinfo is None:
-        raise host_usage._ReadFailure("malformed")
-    when = when.astimezone(timezone.utc)
     if when < _ENDED_AT_MIN or when > datetime.now(timezone.utc) + _ENDED_AT_FUTURE_SLACK:
         raise host_usage._ReadFailure("malformed")
     return when.date().isoformat()
@@ -158,11 +158,13 @@ def _parse_usage(data: bytes) -> tuple[list[dict[str, Any]], list[str]]:
             raise host_usage._ReadFailure("unsupported")
         sums = dict.fromkeys(_COUNTER_KEYS, 0)
         for model, entry in models.items():
-            if (
-                not isinstance(model, str)
-                or not model
-                or len(model.encode("utf-8")) > host_usage._MAX_MODEL_ID_BYTES
-            ):
+            if not isinstance(model, str) or not model:
+                raise host_usage._ReadFailure("malformed")
+            try:
+                model_bytes = model.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise host_usage._ReadFailure("malformed") from exc
+            if len(model_bytes) > host_usage._MAX_MODEL_ID_BYTES:
                 raise host_usage._ReadFailure("malformed")
             values = _counters(entry)
             for key in _COUNTER_KEYS:
@@ -223,13 +225,15 @@ def _validated_entry(value: Any) -> dict[str, Any] | None:
         if not isinstance(key, str) or len(key) != 64 or key in seen:
             return None
         seen.add(key)
-        if (
-            not isinstance(model, str)
-            or not model
-            or len(model.encode("utf-8")) > host_usage._MAX_MODEL_ID_BYTES
-        ):
+        if not isinstance(model, str) or not model:
             return None
-        if not isinstance(day, str) or not host_usage._CANONICAL_DAY.fullmatch(day):
+        try:
+            model_bytes = model.encode("utf-8")
+        except UnicodeEncodeError:
+            return None
+        if len(model_bytes) > host_usage._MAX_MODEL_ID_BYTES:
+            return None
+        if not host_usage._validated_day(day):
             return None
         if not isinstance(usage, dict) or any(
             not host_usage._is_valid_counter(usage.get(field)) for field in TOKEN_FIELDS
@@ -437,15 +441,16 @@ def read_grok_usage(
         ) as locked:
             if not locked.is_locked:
                 return host_usage._incomplete("locked")
-            prior = (
-                host_usage._cached_last_reason(locked.data),
-                host_usage._cached_reason_since(locked.data),
-            )
             current_format = (
                 locked.data.get("version") == host_usage.CACHE_VERSION
                 and locked.data.get("grok_format") == _GROK_CACHE_FORMAT
             )
-            raw_files = host_usage._cached_files(locked.data) if current_format else {}
+            cached = locked.data if current_format else {}
+            prior = (
+                host_usage._cached_last_reason(cached),
+                host_usage._cached_reason_since(cached),
+            )
+            raw_files = host_usage._cached_files(cached)
             cached_files = {
                 key: entry
                 for key, raw in raw_files.items()
@@ -460,7 +465,7 @@ def read_grok_usage(
             now = datetime.now(timezone.utc)
             carried = host_usage._carry_reason(*prior, result, now, over_budget=over_budget)
             timing = host_usage._carry_read_timing(
-                locked.data,
+                cached,
                 result,
                 carried[0],
                 started,
@@ -473,15 +478,10 @@ def read_grok_usage(
             learned = not current_format or any(
                 cached_files.get(key) != entry for key, entry in staged_files.items()
             )
-            if host_usage._skip_failed_cache_write(
-                learned, result, prior, carried, locked.data, timing
-            ):
+            if host_usage._skip_failed_cache_write(learned, result, prior, carried, cached, timing):
                 raise host_usage._NoCacheCommit(result)
             files = staged_files if result.complete else {**cached_files, **staged_files}
-            complete_once = (
-                locked.data.get("version") == host_usage.CACHE_VERSION
-                and locked.data.get("complete_once") is True
-            ) or result.complete
+            complete_once = cached.get("complete_once") is True or result.complete
             locked.data = {
                 **timing,
                 "version": host_usage.CACHE_VERSION,
@@ -542,7 +542,7 @@ def grok_usage_diag(*, count_logs: bool = False) -> dict[str, Any]:
     if data.get("version") != host_usage.CACHE_VERSION or not isinstance(files, dict):
         return blank
     if data.get("grok_format") != _GROK_CACHE_FORMAT:
-        files = {}
+        return blank
     raw_skip = data.get("usage_less_skipped", 0)
     skipped = raw_skip if host_usage._is_nonnegative_int(raw_skip) else 0
     models = host_usage._diag_turn_model_ids(files)
