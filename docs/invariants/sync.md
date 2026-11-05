@@ -42,7 +42,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/retention.py` — `_gc_deleted_copies`
 - `src/mind_meld/resolveflow.py` — `_record_resolution`
 - `src/mind_meld/syncdiag.py` — local historical pull and anchor observations
-- `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` (see "Syncthing state and each peer's push (Track 92A)")
+- `src/mind_meld/syncthing.py` / `src/mind_meld/statusflow.py` — `_peer_states` / `_overdue_peers_line` / `_format_peer_state` / `_syncthing_status_lines` / `_syncthing_diag` / `_print_syncthing_diag` / `src/mind_meld/pullflow.py` — `_record_peer_cursors` / `src/mind_meld/statedb.py` — `read_cursors` / `commit_cursors` / `src/mind_meld/core.py` — `_manifest_cursor_hash` / `_manifest_content_hash` / `ManifestFetch.canonical_hash` / `_prefetch_manifests` (`canonical_hashes_out`) (see "Syncthing state and each peer's push (Track 92A)")
 
 Tests pinning the invariants below: `tests/test_integration.py::TestGCSafety` (own-device collection), `tests/test_integration.py::TestExcludePatterns5C`, `tests/test_integration.py::TestDisabledSourcesTombstoneSuppression`, `tests/test_integration.py::TestCompleteSnapshots`, `tests/test_case_collision.py`, `tests/test_recover.py`, `tests/test_recovery.py`, `tests/test_pullhistory.py`, `tests/test_statedb.py`, `tests/test_seen_sources.py`, `tests/test_sourceflow.py` (source-command outcomes and the config-write stop), `tests/test_manifest_fuzz.py`, for the Track 91A ledger, deletions and anchors `tests/test_pullplan.py` (the rule), `tests/test_pullflow.py` (the deletion protocol), `tests/test_projectid.py` (fleet sequences, `Machine`) and `tests/test_statedb.py` (the tables), and for Track 92A Syncthing inspection and peer push state `tests/test_syncthing.py`, `tests/test_diag.py`, `tests/test_pullflow.py`, `tests/test_projectid.py` and `tests/test_statedb.py`.
 
@@ -1773,8 +1773,9 @@ migration 1's provisional shape or migration 3's timestamp-only shape. On a
 write open, migration 4 keeps old timestamps with unknown identities; they
 cannot prove applied content until a full pull refreshes them.
 `statedb.commit_cursors(conn, rows)` upserts in the caller's transaction,
-writing only changed rows. A pending pull preserves the earlier applied time
-and both applied hashes together; a completed pull replaces all three,
+writing only changed rows. A pull without a valid applied timestamp preserves
+the earlier applied time and both applied hashes together; a pull with a valid
+applied timestamp replaces all three,
 including clearing an absent canonical hash. In `pullflow._pull_core`'s
 `finally`, when `not dry_run and
 interruption is None and source_filter is None and ledger_exc is None`,

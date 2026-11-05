@@ -574,6 +574,8 @@ Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or
 
 mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root; for an existing parent-folder share, it reports and checks the deepest containing folder and that folder's `.stignore`.
 
+Status reports Syncthing's folder state and needed-file count independently: queued files do not mean it is actively syncing. It says `up to date` only when the folder is idle and both needed files and pull errors are known to be zero. Positive pull-error counts direct you to `mm diag`, which also displays the count; `mm diag --json` retains an unknown count as `syncthing.pull_errors: null`.
+
 ## Project memory across machines
 
 Clone a project anywhere. mm finds your checkout from the folder names Claude created
@@ -891,6 +893,12 @@ conflicts and corrupt/newer own metadata cannot report healthy. Inspection
 uses a strict source scan; this disables cached diagnostic hashes and can
 reread event-file bytes, while retaining one event parsing pass. The I/O cost
 is unmeasured.
+
+`applied here` requires the current manifest content to match a recorded applied
+identity as well as its timestamp. A late conflict copy with additional content
+therefore needs another pull even if the push timestamp has not changed. Older
+timestamp-only cursor records cannot prove applied content until a full pull
+refreshes them.
 
 Status selects one execution summary per verb from the latest available auto
 and attended records. Strictly later valid completed success can resolve an
@@ -1350,7 +1358,8 @@ mode). It records pull/push outcomes and self-upgrades, keeping the newest
 20,000 rows per known (verb, action) class. The same file holds the pull ledger:
 which version of each file this Mac last synced from each peer, and the versions it
 has held, as well as the `cursors` table recording each peer's last applied push
-timestamp, last seen push timestamp, and waiting file count. The ledger and cursors are rebuildable (see the remedy below). Excluded/uploaded traffic
+timestamp, last seen push timestamp, waiting file count, and matching manifest
+content identities. The ledger and cursors are rebuildable (see the remedy below). Excluded/uploaded traffic
 cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
 workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
 rows in one snapshot, closes the connection, then prints; memory grows with
