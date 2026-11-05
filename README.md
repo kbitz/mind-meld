@@ -1223,7 +1223,7 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its usage records cannot recover each request's context tier. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
-Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
+Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's context-tier caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
 Legend:
 
