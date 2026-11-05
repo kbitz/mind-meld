@@ -572,7 +572,7 @@ Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or
 - **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them, reducing waiting pulls.
 - **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` writes `.stignore` on the first machine; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on every other machine, because Syncthing does not sync `.stignore` itself.
 
-mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`.
+mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root; for an existing parent-folder share, it reports and checks the deepest containing folder and that folder's `.stignore`.
 
 ## Project memory across machines
 
@@ -880,7 +880,7 @@ Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm pus
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```
 
-`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention) and, under `Registered devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
+`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention) and, under `Other devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies; otherwise the warning follows that verdict. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
 equal hashes with a strictly newer local mtime, using the same forward-only
 gate as push; a source selection change also needs publication. Holds and
 failed files stay pending or degraded; pushing does not force a green verdict.

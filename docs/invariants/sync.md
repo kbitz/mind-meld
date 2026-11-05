@@ -1729,22 +1729,24 @@ totals count valid keys only.
 `$XDG_CONFIG_HOME/syncthing` or `~/.config/syncthing` then
 `$XDG_STATE_HOME/syncthing` or `~/.local/state/syncthing` on Linux) and reads
 `config.xml`, `https-cert.pem` and `.stignore` after `lstat()` regular-file and
-1 MiB size checks (symlinks are rejected). It talks only to a loopback GUI
-address (`127.0.0.1`, `::1`, `localhost`; `0.0.0.0`, `::` and `[::]` rewrite to
-loopback; non-loopback hosts and unix sockets return `state="address-unsupported"`
-without opening a socket). It sends only `GET` requests with `X-API-Key` from
+1 MiB size checks (symlinks are rejected). It uses the GUI host and port from
+the owner's local configuration; unspecified hosts (`0.0.0.0`, `::`, `[::]`
+or empty) rewrite to loopback. Unix sockets and malformed addresses return
+`state="address-unsupported"` without opening a socket. It sends only `GET`
+requests directly, ignoring proxy environment variables, with `X-API-Key` from
 `config.xml`, refuses HTTP redirects, verifies HTTPS against `https-cert.pem` in
 the config directory (`cause="tls"` when missing or mismatched), bounds each
-request to `0.75 s` and the whole read to `1.5 s`, and caps each response at
+request to `2 s` within a `5 s` REST budget, and caps each response at
 4 MiB. It never writes Syncthing's configuration or state, and never exposes the
 API key or Syncthing device IDs in `SyncthingState`, `mm status` or `mm diag`.
 Missing or unreachable Syncthing is reported (`not-found`, `config-unreadable`,
 `address-unsupported`, `unreachable`, `unauthorized`, `error`), never a command
 error.
 
-**Folder lint (`FOLDER_OPTIONS`).** When a Syncthing folder's `path` matches the
-storage root (after `expanduser().resolve()`; a non-matching setup reports
-`no-folder`), `read_state()` checks the five folder options from `store-v2` §10
+**Folder lint (`FOLDER_OPTIONS`).** After `expanduser().resolve()`, an exact
+storage-root folder match wins; otherwise inspection uses the deepest containing
+Syncthing folder. A setup with neither reports `no-folder`. `read_state()` checks
+that folder's five options from `store-v2` §10
 (`type = sendreceive`, `versioning = none`, `maxConflicts != 0`,
 `ignorePerms = false`, `order = alphabetic`) and `.stignore` for `(?d)tmp*.tmp`
 (plus `paused`). `mm status` prints one `Syncthing: ...` line and, when folder
@@ -1761,13 +1763,15 @@ the caller's transaction, writing only changed rows and preserving earlier
 `applied` via `COALESCE(excluded.applied, cursors.applied)` when `excluded.applied`
 is `None`. In `pullflow._pull_core`'s `finally`, when `not dry_run and
 interruption is None and source_filter is None and ledger_exc is None`,
-`_record_peer_cursors` writes one row per pulled peer whose manifest decrypted
-with a valid aware `timestamp`: `applied = ts_us` when that peer had zero
+`_record_peer_cursors` writes one row per pulled peer whose manifest decrypted;
+`ts_us` is its aware `timestamp` in microseconds, or `None` when invalid.
+It writes `applied = ts_us` when that peer had zero
 `waiting` and zero `failed` files across its sources (`seen = ts_us, waiting = 0`),
 or `(None, ts_us, peer_waiting)` when any file waited or failed. Unplaced project
 memory and old-form peer files are filtered before the source loop and never
-block `applied`. Cursor write failures emit one attended `mm: notice:` line on
-stderr (`safe_terminal_str`), stay silent in quiet mode, and never fail the pull.
+block `applied`. Cursor write failures emit one `mm: notice:` line on stderr
+(`safe_terminal_str`) in every mode, including quiet mode. They count as a
+maintenance failure and leave the pull degraded without failing content sync.
 
 **Per-peer status and the 24 h warning.** `statusflow.status` decrypts each peer's
 manifest once and shares that map between `_peer_states` and
@@ -1782,7 +1786,8 @@ but manifest is missing), `never-pushed` (no manifest and no `last_seen`),
 `not-pulled` or `waiting` after a pull. `_overdue_peers_line` formats
 `Waiting more than 24 h for <peer>'s push of YYYY-MM-DD (and K more). Run: <remedy>`,
 and `_status_verdict(..., peers_overdue=)` places it immediately before `"In sync
-with this device's last push."` in every mode (including `--source`). Both
+with this device's last push."` in every mode (including `--source`). When a
+higher-priority verdict wins, the overdue notice follows that verdict. Both
 `mm status` and `mm diag` remain strictly read-only (`statedb.connect(read_only=True)`,
 no `state.db` creation, no Syncthing mutation).
 

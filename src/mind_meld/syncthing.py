@@ -7,8 +7,10 @@ mutates Syncthing's configuration or state.
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
+import socket
 import ssl
 import stat
 import sys
@@ -16,6 +18,7 @@ import time
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +163,41 @@ def _build_tls_context(config_dir: Path, *, use_tls: bool) -> ssl.SSLContext | N
     return ctx
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Bound every raw socket read, including reads hidden inside HTTP parsing."""
+
+    def __init__(self, sock: socket.socket, deadline: float) -> None:
+        self._sock = sock
+        self._stream = sock.makefile("rb", buffering=0)
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Syncthing response deadline expired")
+        self._sock.settimeout(remaining)
+        return self._stream.readinto(buffer)
+
+    def close(self) -> None:
+        try:
+            self._stream.close()
+        finally:
+            super().close()
+
+
+class _DeadlineResponse(http.client.HTTPResponse):
+    def __init__(self, sock: socket.socket, *, deadline: float, **kwargs: Any) -> None:
+        super().__init__(sock, **kwargs)
+        # Keep a makefile reference: HTTPConnection may close its own socket
+        # reference immediately after headers when the server sends close.
+        reader = _DeadlineReader(sock, deadline)
+        self.fp.close()
+        self.fp = io.BufferedReader(reader)
+
+
 def _get_json(
     norm_addr: str,
     path: str,
@@ -191,6 +229,9 @@ def _get_json(
         )
     else:
         conn = http.client.HTTPConnection(host, port, timeout=req_timeout)
+    conn.response_class = partial(
+        _DeadlineResponse, deadline=min(deadline, time.monotonic() + req_timeout)
+    )
     try:
         conn.request(
             "GET",

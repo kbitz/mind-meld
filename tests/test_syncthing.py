@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import http.server
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +16,70 @@ import pytest
 from mind_meld import initflow, syncthing
 
 _ORIGINAL_CONFIG_DIRS = syncthing.config_dirs
+
+
+@pytest.mark.parametrize("part", ["headers", "body", "chunked-body"])
+def test_slow_progress_cannot_extend_the_response_deadline(part):
+    stopped = threading.Event()
+
+    class Server(http.server.ThreadingHTTPServer):
+        daemon_threads = False
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = b'{"padding":"abcdefghijklmnopqrstuv"}'
+            header = b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
+            if part == "chunked-body":
+                header += b"Transfer-Encoding: chunked\r\n\r\n"
+                pieces = [b"1\r\n" + bytes([char]) + b"\r\n" for char in body]
+                tail = b"0\r\n\r\n"
+            else:
+                header += f"Content-Length: {len(body)}\r\n".encode()
+                if part == "headers":
+                    header += b"X-Slow: "
+                    pieces = [b"x"] * 36
+                    tail = b"\r\n\r\n" + body
+                else:
+                    header += b"\r\n"
+                    pieces = [bytes([char]) for char in body]
+                    tail = b""
+            try:
+                self.wfile.write(header)
+                self.wfile.flush()
+                for piece in pieces:
+                    if stopped.wait(0.025):
+                        return
+                    self.wfile.write(piece)
+                    self.wfile.flush()
+                self.wfile.write(tail)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = Server(("127.0.0.1", 0), Handler)
+    runner = threading.Thread(target=server.serve_forever)
+    runner.start()
+    try:
+        started = time.monotonic()
+        outcome, _, cause = syncthing._get_json(
+            f"127.0.0.1:{server.server_port}",
+            "/rest/system/status",
+            header_val="synthetic",
+            tls_context=None,
+            timeout=0.1,
+            deadline=started + 0.2,
+        )
+        elapsed = time.monotonic() - started
+        assert (outcome, cause) == ("unreachable", "timeout")
+        assert elapsed < 0.6
+    finally:
+        stopped.set()
+        server.shutdown()
+        server.server_close()
+        runner.join()
 
 
 def test_discovery_checks_each_platform_directory_in_order(tmp_path, monkeypatch):
