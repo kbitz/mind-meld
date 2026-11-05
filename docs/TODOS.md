@@ -44,6 +44,26 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Canonical publication after pull prefetch
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No regression replaces a canonical manifest after prefetch and before cursor commit with different content at the same timestamp.
+- **Hypothesis (untested):** Publish the replacement during a controlled pull and verify its unapplied content remains not-pulled. Re-verify first; current code captures identity from the same read.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/pullflow.py:3906:testing
+- **Evidence:** Track 92A repair testing review and final coverage audit traced same-read capture; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/268 at `b1b05bb` (2026-11-04). Revisit when cursor identity capture or manifest prefetch changes.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: Unknown Syncthing status counters
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Rendering cases do not cover unknown needFiles or pullErrors counters alongside idle or syncing folder state.
+- **Hypothesis (untested):** Assert the actual state survives unknown counters without inventing zero queued files or healthy status. Re-verify first; current code treats missing counters conservatively.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/statusflow.py:582:testing
+- **Evidence:** Track 92A testing, outside structured review and final coverage audit found missing rows; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/268 at `b1b05bb` (2026-11-04). Revisit when REST counter decoding or state rendering changes.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing HTTPS certificate and response cases
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Certificate acceptance/rejection and successful/slow TLS response paths have no runtime test.
