@@ -3784,9 +3784,8 @@ delivered Grok tokens to the wire (zero across all five local host rows).
 The shared deadline and one-reader warm caused starvation. The later-reader
 grace floor and every-reader warm/retry ship with the rate table.
 
-**Grok pricing floor and model-scoped ceiling (57A / 109B).** The exact observed
-`grok-4.6-build` → `grok-4.6` and `grok-4.7-build` → `grok-4.7` aliases map Grok
-Build models onto their xAI family cards. Bare `grok-4.6`, `grok-build-0.1`,
+**Grok pricing floor and model-scoped ceiling (57A).** Only the exact observed
+`grok-4.6-build` alias maps to `grok-4.6`. Bare `grok-4.6`, `grok-build-0.1`,
 prefix/suffix variants and case variants stay unpriced. The literal base card
 is $2 input / $0.50 cached input / $0 cache writes / $6 output per MTok;
 the long card is $4 / $1 / $0 / $12. Requests whose prompt reaches 200k
@@ -3847,13 +3846,14 @@ Track 109B prices as its own pseudo-id card in `VENDOR_FAMILY_TIERS` ($4 input /
 $1 cache read / $0 cache create / $12 output per MTok, 2x standard) and
 `VENDOR_LONG_CONTEXT_TIERS` ($6 / $1.50 / $0 / $18, 3x standard), ending 1.2.0's
 unpriced-Fast policy. Effort (`low`, `medium`, `high`, `xhigh`) has no separate
-rate; the flat ids `grok-4.7-(low|medium|high|xhigh)` and their `-fast` variants
-alias in `PRICING_FAMILY_BY_MODEL` onto `grok-4.7` and `grok-4.7-fast`, and all
-ten Cursor Grok ids (`CURSOR_GROK_MODEL_IDS`) are in `VERIFIED_MODEL_IDS` dated by
-`PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause` checks `CURSOR_GROK_MODEL_IDS`
-so Fast-only and flat-id Cursor rows emit the Cursor "Per-turn totals cannot
-recover the per-request context tier" cause, while `grok-4.6-build` and
-`grok-4.7-build` alone keep the Grok Build log-limit cause. Fast-only and mixed
+rate. Every other Grok 4.7 id normalizes by dropping its suffix: the flat ids
+`grok-4.7-(low|medium|high|xhigh)` and `grok-4.7-build` alias in
+`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`, and the effort ids' `-fast` variants
+onto `grok-4.7-fast`. All eleven Grok 4.7 ids (`GROK_47_MODEL_IDS`) are in
+`VERIFIED_MODEL_IDS` dated by `PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause`
+checks `GROK_47_MODEL_IDS`, so Fast-only, flat-id and `grok-4.7-build` rows emit the
+"Per-turn totals cannot recover the per-request context tier" cause, while
+`grok-4.6-build` alone keeps the Grok Build log-limit cause. Fast-only and mixed
 rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
 remain a labelled unknown and suppress any at-most claim. Adding auto/composer
 families remains deferred in TODOS.

@@ -475,7 +475,7 @@ def test_long_context_cause_distinguishes_cursor_grok_variants_from_grok_build()
     assert "Per-turn totals cannot recover the per-request context tier" in cursor_cause
     assert "Grok's logs do not record" not in cursor_cause
 
-    build_cause = agg._long_context_cause({"grok-4.7-build": dict(bucket)}, incomplete=False)
+    build_cause = agg._long_context_cause({"grok-4.6-build": dict(bucket)}, incomplete=False)
     assert build_cause is not None
     assert "Grok's logs do not record per-request prompt sizes" in build_cause
     assert "Per-turn totals cannot recover" not in build_cause

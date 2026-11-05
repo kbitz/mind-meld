@@ -2675,59 +2675,52 @@ _GROK_47_STD_CARD = {"input": 2.0, "cache_read": 0.5, "cache_create": 0.0, "outp
 _GROK_47_STD_LONG = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
 _GROK_47_FAST_CARD = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
 _GROK_47_FAST_LONG = {"input": 6.0, "cache_read": 1.5, "cache_create": 0.0, "output": 18.0}
-_CURSOR_ATTR = "PRICING_CURSOR_LAST_UPDATED"
-_XAI_ATTR = "PRICING_XAI_LAST_UPDATED"
 
 
 @pytest.mark.parametrize(
-    "model,family,base_card,long_card,vendor_attr",
+    "model,family,base_card,long_card",
     [
-        ("grok-4.7", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _CURSOR_ATTR),
-        ("grok-4.7-fast", "grok-4.7-fast", _GROK_47_FAST_CARD, _GROK_47_FAST_LONG, _CURSOR_ATTR),
-        ("grok-4.7-low", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _CURSOR_ATTR),
-        ("grok-4.7-medium", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _CURSOR_ATTR),
-        ("grok-4.7-high", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _CURSOR_ATTR),
-        ("grok-4.7-xhigh", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _CURSOR_ATTR),
+        ("grok-4.7", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-fast", "grok-4.7-fast", _GROK_47_FAST_CARD, _GROK_47_FAST_LONG),
+        ("grok-4.7-low", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-medium", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-high", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-xhigh", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
         (
             "grok-4.7-low-fast",
             "grok-4.7-fast",
             _GROK_47_FAST_CARD,
             _GROK_47_FAST_LONG,
-            _CURSOR_ATTR,
         ),
         (
             "grok-4.7-medium-fast",
             "grok-4.7-fast",
             _GROK_47_FAST_CARD,
             _GROK_47_FAST_LONG,
-            _CURSOR_ATTR,
         ),
         (
             "grok-4.7-high-fast",
             "grok-4.7-fast",
             _GROK_47_FAST_CARD,
             _GROK_47_FAST_LONG,
-            _CURSOR_ATTR,
         ),
         (
             "grok-4.7-xhigh-fast",
             "grok-4.7-fast",
             _GROK_47_FAST_CARD,
             _GROK_47_FAST_LONG,
-            _CURSOR_ATTR,
         ),
-        ("grok-4.7-build", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG, _XAI_ATTR),
+        ("grok-4.7-build", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
     ],
 )
-def test_grok_47_effort_fast_and_build_cards_and_aliases109b(
-    model, family, base_card, long_card, vendor_attr
-):
+def test_grok_47_effort_fast_and_build_cards_and_aliases109b(model, family, base_card, long_card):
     assert tu.PRICING_FAMILY_BY_MODEL[model] == family
     assert tu.resolve_prices(model) == base_card
     assert tu.resolve_long_context_prices(model) == long_card
     assert model in tu.VERIFIED_MODEL_IDS
     assert tu.is_verified_model(model)
-    assert tu._builtin_verified_date(model) == getattr(tu, vendor_attr)
+    assert model in tu.GROK_47_MODEL_IDS
+    assert tu._builtin_verified_date(model) == tu.PRICING_CURSOR_LAST_UPDATED
 
 
 def test_grok_47_fast_multipliers_match_published_2x_and_3x109b():
@@ -2743,7 +2736,7 @@ def test_grok_47_fast_multipliers_match_published_2x_and_3x109b():
 def test_grok_47_variants_and_build_emit_no_unknown_model_notice109b(capsys):
     from mind_meld import events_tail
 
-    models = (*sorted(tu.CURSOR_GROK_MODEL_IDS), "grok-4.7-build")
+    models = tuple(sorted(tu.GROK_47_MODEL_IDS))
     usage = {"input": 100_000, "cache_create": 0, "cache_read": 50_000, "output": 10_000}
     by_model = {m: dict(usage) for m in models}
     for m in models:

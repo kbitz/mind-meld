@@ -287,10 +287,10 @@ PRICING_XAI_LAST_UPDATED = "2026-11-05"
 https://docs.x.ai/developers/models/grok-4.7 and
 https://docs.x.ai/developers/models/grok-4.6, accessed on this date.
 Requests whose prompt reaches 200k tokens pay the higher rate ($4/$1/$0/$12)
-for ALL tokens in the request. https://docs.x.ai/build/overview identifies
-grok-4.7 (succeeding grok-4.6) as the model powering Grok Build. The observed
-``grok-4.7-build`` and ``grok-4.6-build`` aliases are exact; ``grok-build-0.1``
-is a different model and a name trap. The 303-turn costUsdTicks census fits
+for ALL tokens in the request. On 2026-09-10 https://docs.x.ai/build/overview
+identified grok-4.6 as the model powering Grok Build. The observed
+``grok-4.6-build`` alias is exact; ``grok-build-0.1`` is a different model and
+a name trap. The 303-turn costUsdTicks census fits
 this rate SHAPE exactly, but at the API's documented 1e10 ticks/USD the CLI
 field is 0.17x list. It is never decoded or used for pricing; the Build
 overview establishes the rate level. No cache-write price is published;
@@ -418,14 +418,16 @@ MODEL_FAMILY_TIERS: dict[str, dict[str, float]] = {
 # in ``VENDOR_FAMILY_TIERS`` / ``VENDOR_LONG_CONTEXT_TIERS`` rather than a
 # parameter on the base card: ``resolve_prices`` and ``estimate_cost`` take a
 # string model id (not ``(id, params)``), and ``grok-4.7-fast`` already sits
-# in ``cursor-host-tokens.json`` and synced ``mm-events`` rows. Flat effort
-# and Fast ids (``grok-4.7-(low|medium|high|xhigh)(-fast)``) alias onto
-# ``grok-4.7`` and ``grok-4.7-fast`` so already-cached or peer-published flat
-# ids price without a cache reset, and ``grok-4.7-build`` aliases ``grok-4.7``.
-CURSOR_GROK_MODEL_IDS: frozenset[str] = frozenset(
+# in ``cursor-host-tokens.json`` and synced ``mm-events`` rows. Every other
+# Grok 4.7 id normalizes by dropping its suffix: effort (``-low``, ``-medium``,
+# ``-high``, ``-xhigh``) and ``-build`` drop to ``grok-4.7``, and a trailing
+# ``-fast`` keeps Fast as ``grok-4.7-fast``. These exact aliases let
+# already-cached or peer-published ids price without a cache reset.
+GROK_47_MODEL_IDS: frozenset[str] = frozenset(
     {
         "grok-4.7",
         "grok-4.7-fast",
+        "grok-4.7-build",
         "grok-4.7-low",
         "grok-4.7-medium",
         "grok-4.7-high",
@@ -447,17 +449,10 @@ PRICING_FAMILY_BY_MODEL: dict[str, str] = {
     "gemini-4-argon": "gemini-4-argon",
     "gemini-3.8-flash": "gemini-3.8-flash",
     "grok-4.6-build": "grok-4.6",
-    "grok-4.7-build": "grok-4.7",
-    "grok-4.7": "grok-4.7",
-    "grok-4.7-fast": "grok-4.7-fast",
-    "grok-4.7-low": "grok-4.7",
-    "grok-4.7-medium": "grok-4.7",
-    "grok-4.7-high": "grok-4.7",
-    "grok-4.7-xhigh": "grok-4.7",
-    "grok-4.7-low-fast": "grok-4.7-fast",
-    "grok-4.7-medium-fast": "grok-4.7-fast",
-    "grok-4.7-high-fast": "grok-4.7-fast",
-    "grok-4.7-xhigh-fast": "grok-4.7-fast",
+    **{
+        model: "grok-4.7-fast" if model.endswith("-fast") else "grok-4.7"
+        for model in sorted(GROK_47_MODEL_IDS)
+    },
     "gpt-6-astra": "gpt-6-astra",
     "gpt-5.6-terra": "gpt-5.6-terra",
     "gpt-5.6-sol": "gpt-5.6-sol",
@@ -496,17 +491,7 @@ VERIFIED_MODEL_IDS = frozenset(
         "claude-mythos-5",
         "claude-mythos-5-1",
         "grok-4.6-build",
-        "grok-4.7-build",
-        "grok-4.7",
-        "grok-4.7-fast",
-        "grok-4.7-low",
-        "grok-4.7-medium",
-        "grok-4.7-high",
-        "grok-4.7-xhigh",
-        "grok-4.7-low-fast",
-        "grok-4.7-medium-fast",
-        "grok-4.7-high-fast",
-        "grok-4.7-xhigh-fast",
+        *GROK_47_MODEL_IDS,
         "gpt-6-astra",
         "gpt-5.6-terra",
         "gpt-5.6-sol",
@@ -541,8 +526,8 @@ VENDOR_FAMILY_TIERS: dict[str, dict[str, float]] = {
     },
     # Cursor (https://cursor.com/docs/models-and-pricing, https://cursor.com/docs/models/grok-4-7,
     # verified PRICING_CURSOR_LAST_UPDATED = 2026-11-05) and xAI
-    # (https://docs.x.ai/developers/models/grok-4.7, https://docs.x.ai/build/overview,
-    # verified PRICING_XAI_LAST_UPDATED = 2026-11-05): standard Grok 4.7 is $2/$0.50/$0/$6.
+    # (https://docs.x.ai/developers/models/grok-4.7, verified
+    # PRICING_XAI_LAST_UPDATED = 2026-11-05): standard Grok 4.7 is $2/$0.50/$0/$6.
     "grok-4.7": {
         "input": 2.0,
         "cache_read": 0.5,
@@ -949,7 +934,7 @@ def _builtin_verified_date(model: str) -> str:
         return PRICING_LAST_UPDATED
     if model.startswith("gpt-"):
         return PRICING_OPENAI_LAST_UPDATED
-    if model in CURSOR_GROK_MODEL_IDS:
+    if model in GROK_47_MODEL_IDS:
         return PRICING_CURSOR_LAST_UPDATED
     if model.startswith("grok-"):
         return PRICING_XAI_LAST_UPDATED
@@ -2449,9 +2434,9 @@ __all__ = [
     "CACHE_PATH",
     "CACHE_VERSION",
     "COST_EXCLUDED_MODELS",
-    "CURSOR_GROK_MODEL_IDS",
     "DEFAULT_WARM_BUDGET_S",
     "DayBucket",
+    "GROK_47_MODEL_IDS",
     "MAX_BY_DAY_DAYS",
     "MODEL_FAMILY_TIERS",
     "PRICING",
