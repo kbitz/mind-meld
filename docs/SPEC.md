@@ -23,8 +23,14 @@ remote since 1.12.0; and auto-update does not reach every machine. Amended
 2026-11-01 by `/project-spec` to drop the timed live trial before 2.0.0, so
 problems are fixed as they appear, and to require a bootstrap script that
 installs Python, pipx, mm and the Syncthing package before 2.0.0. Outcomes and
-target are unchanged; the 2.0.0 release line's conditions follow. Earlier text
-lives in `git log -- docs/SPEC.md`.
+target are unchanged; the 2.0.0 release line's conditions follow. Amended
+2026-11-05 by `/project-spec` to bring Grok Build back at parity with Claude
+Code and Codex (owner, 2026-11-05: "go, it needs to bring grok to parity w/
+the other models"): the revisit trigger of its 2026-10-19 removal is met,
+because the owner now runs Grok Build directly, through Paseo, on the same
+subscription as Cursor. Grok Build joins the sync and usage host lists in
+Purpose, the table, O1.2 and O7; target, stages and release policy are
+unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
 Mind Meld (`mm`) does two things for one person who codes with AI agents on
@@ -32,13 +38,14 @@ several machines:
 
 1. **Sync.** It keeps the agents' context identical on every machine, with no
    server and nobody else able to read it: Claude Code memory, Codex skills,
-   Muse memory, Antigravity skills and rules, and gstack project state. Finish on one machine and `mm push`;
+   Grok Build memory and skills, Muse memory, Antigravity skills and rules,
+   and gstack project state. Finish on one machine and `mm push`;
    start on another and `mm pull`, and it is all there. With
    `mm enable-source mmm`, it also carries mmm-factory's durable state so
    the factory can stop on one Mac and start on another.
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
-   Code, Codex, Cursor, Muse and Antigravity.
+   Code, Codex, Grok Build, Cursor, Muse and Antigravity.
 
 A command either succeeds, in one line, or says what broke and how to fix it.
 
@@ -53,6 +60,7 @@ Syncthing.
 |---|---|---|
 | Claude Code | Project memory and `todos/` under `~/.claude` (CLAUDE.md, agents and commands stay in git) | Tokens, cost, sessions and skills from local session logs |
 | Codex | `skills/`, `plugins/`, `AGENTS.md` | Tokens and cost from session rollouts, archived ones included |
+| Grok Build | `skills/`, `commands/` and `rules/` under `~/.grok`, and its memory (each scope's `topics/` and pending observations, global and per repository), after `mm enable-source grok` | Tokens and cost from local session records, runs through Paseo (ACP) included, in the Grok row |
 | Cursor | Nothing: no user-authored tree exists, and Cursor reads `~/.claude/skills` | Runs from Conductor and the enrolled `cursor-agent` CLI, counted under each model's family (Grok, Claude, GPT) |
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
@@ -62,9 +70,13 @@ Syncthing.
 
 Intentional gaps: Cursor runs through an ACP front-end such as Paseo report
 no usage (no source exists); Codex memory does not sync until cross-model
-memory (O9, after 2.0); session transcripts and credentials never sync. Standalone Grok
-Build is no longer supported: its sync source and usage reader are removed.
-Grok models used through Cursor still appear in the Grok row.
+memory (O9, after 2.0); session transcripts and credentials never sync. Grok
+Build's `config.toml`, credentials, hooks and plugins stay local, as Claude
+Code's and Codex's whole-file settings do; its generated memory index
+(`MEMORY.md`) and memory databases are rebuilt on each machine and never sync.
+Grok Build reads `~/.claude/skills`, so mm keeps no Grok skill link. Grok
+models used through Cursor and through Grok Build both appear in the Grok row;
+the two are read from separate local records and never overlap.
 
 ## Audience and target
 - Current users: the owner only. Observed 2026-10-19: three registered Macs
@@ -110,7 +122,8 @@ holds the same synced files.
 2. Claude project memory for a project with a network git `origin` lands in
    the same project on macOS and on Linux, wherever each machine keeps its
    checkout. A project without one lands by its home-relative path when it
-   sits under the home folder.
+   sits under the home folder. Grok Build's per-repository memory follows
+   the same rule.
 3. A file another program is writing during a push keeps its previously
    published version and goes out with a later push; it never stops the rest
    of the push.
@@ -157,9 +170,10 @@ manual step.
 
 ### O7: Fleet usage reporting is complete and accurate
 1. `retro-fleet` reports tokens, cost, active days, machines and top model
-   for each agent family (Claude, Codex, Grok, Muse and Antigravity), summed across the
-   fleet from Claude Code, Codex, Cursor, Muse and Antigravity. Cursor's runs count under
-   their model's family.
+   for each agent family (Claude, Codex, Grok, Muse and Antigravity), summed
+   across the fleet from Claude Code, Codex, Grok Build, Cursor, Muse and
+   Antigravity. Cursor's and Grok Build's runs count under their model's
+   family.
 2. Every attended push captures this machine's usage and git activity within
    one total time budget. Work left unfinished resumes on later pushes, so
    capture is complete again within three attended pushes without a recovery
@@ -281,8 +295,10 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   fleet data in real use.
 - Per-path conflict policies and a richer resolver. Revisit when conflicts
   become a recurring manual burden after 2.0.
-- Standalone Grok Build support, removed 2026-10-19. Revisit when the owner
-  uses Grok Build directly again.
+- Syncing Grok Build plugins (`~/.grok/plugins/`, which Grok trusts
+  automatically) and hooks. No such user-authored files exist on the owner's
+  machines (2026-11-05). Revisit when the owner keeps a plugin or hook there
+  that other machines need.
 - Cross-model memory before 2.0, and writing into any host's native memory
   store at any time. O9 starts after the cutover.
 - Concurrent factory managers on two Macs, and moving in-flight factory
@@ -336,10 +352,9 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   - [Invariants](invariants/README.md): module map and mandatory per-topic
     rules. Their "Compatibility (1.x)" section is retired by this spec except
     its storage-format gates.
-  - [Host parity](designs/host-parity.md): usage-family rationale. This
-    spec's table owns host scope.
-  - [Grok usage reader](archive/grok-build-usage-reader.md): historical
-    design for the Grok Build reader, retired on 2026-10-22.
+  - [Host parity](designs/host-parity.md): usage-family rationale and the
+    Grok Build parity notes of 2026-11-05. This spec's table owns host
+    scope.
   - [Multi-source sync](designs/sync-gstack-context.md): shipped design still
     cited by invariants.
   - [Cross-model memory](designs/cross-model-memory.md): O9's design and
@@ -349,6 +364,11 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
     evidence. Their cross-agent design is superseded by cross-model memory
     as of 2026-10-29.
 - Superseded history:
+  - [Grok usage reader](archive/grok-build-usage-reader.md): design of the
+    Grok Build reader retired on 2026-10-22. The restored reader qualifies
+    against the installed Grok Build and records its own contract; consult
+    the archive only for the retired reader's deduplication and counter
+    rules.
   - [Store-v2 design](archive/store-v2.md): superseded as the 2.0 design on
     2026-10-19. Evidence: the "Why a new store" hazard table (the Syncthing
     problems the 1.x store must handle), §7 portable paths, §10 Syncthing

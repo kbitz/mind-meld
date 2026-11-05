@@ -44,146 +44,30 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: Canonical publication after pull prefetch
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No regression replaces a canonical manifest after prefetch and before cursor commit with different content at the same timestamp.
-- **Hypothesis (untested):** Publish the replacement during a controlled pull and verify its unapplied content remains not-pulled. Re-verify first; current code captures identity from the same read.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/pullflow.py:3906:testing
-- **Evidence:** Track 92A repair testing review and final coverage audit traced same-read capture; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/268 at `b1b05bb` (2026-11-04). Revisit when cursor identity capture or manifest prefetch changes.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: Unknown Syncthing status counters
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Rendering cases do not cover unknown needFiles or pullErrors counters alongside idle or syncing folder state.
-- **Hypothesis (untested):** Assert the actual state survives unknown counters without inventing zero queued files or healthy status. Re-verify first; current code treats missing counters conservatively.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py:582:testing
-- **Evidence:** Track 92A testing, outside structured review and final coverage audit found missing rows; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/268 at `b1b05bb` (2026-11-04). Revisit when REST counter decoding or state rendering changes.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing HTTPS certificate and response cases
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Certificate acceptance/rejection and successful/slow TLS response paths have no runtime test.
-- **Hypothesis (untested):** Test that TLS trusts configured GUI certificate and bounds HTTPS reads. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py:150:testing
-- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing redirect destination isolation
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No redirect response test proves refusal and zero destination contact. This is part of the previously recorded TLS/redirect gap.
-- **Hypothesis (untested):** Test that GUI authentication never follows redirects. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py:258:coverage-redirect
-- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing total request budget
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No test makes the total remaining budget shorter than request timeout or exhausts it across multiple endpoints.
-- **Hypothesis (untested):** Test that one total REST budget across requests. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_syncthing.py:72:testing
-- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing input byte ceilings
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No oversized config or HTTP body case pins byte ceiling rejection. No failure reproduced.
-- **Hypothesis (untested):** Test that oversized local config and REST bodies return bounded error state. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/syncthing.py:85:coverage-bounds
-- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|src/mind_meld/statusflow.py|tests/test_pullflow.py|tests/test_diag.py] Test gap: Peer cursor invalid timestamps
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** New timestamp helpers lack negative cases for naive/malformed/nonstring timestamp values; current timestamp tests use aware ISO values.
-- **Hypothesis (untested):** Test that invalid timestamp cannot create false applied or overdue evidence. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/pullflow.py:3701:coverage-timestamps
-- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
-- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/merge.py|tests/test_merge.py] Test gap: remaining nonqualifying link targets
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Empty destinations, empty path segments, query-bearing targets and direct backslash-bearing targets lack explicit rejection rows.
-- **Hypothesis (untested):** Extend the rejection table and verify such targets remain ordinary lines; re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_merge.py:697
-- **Evidence:** Post-repair coverage audit and testing specialist found missing rows, with no failure reproduced for these guards. Parentheses and escaped-delimiter defects were separately reproduced and repaired.
-- **Context:** Filed by /review-and-prep on https://github.com/kbitz/mind-meld/pull/266 at `0541e5f` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: late tidy flush failure
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** The accepted D9 post-replacement flush uncertainty lacks a direct tidy-level test.
-- **Hypothesis (untested):** Inject a parent-flush failure after real replacement and check visible bytes, one notice and unchanged counts. Re-verify before changing tests.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_pullflow.py:3382
-- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
-- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: verbose tidy diagnostics
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** A verbose test executes the diagnostic but does not assert singular/plural wording or quiet suppression.
-- **Hypothesis (untested):** Add output assertions to the existing pull scenario. Re-verify before changing tests.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_pullflow.py:3020
-- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
-- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/pullflow.py|tests/test_pullflow.py] Test gap: interrupted pull skips index tidy
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Interruption tests cover settlement but lack an already-merged index oracle.
-- **Hypothesis (untested):** Interrupt after an index merge and verify the post-apply tidy did not run. Re-verify before changing tests.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_pullflow.py:1845
-- **Evidence:** Track 108A coverage audit read the changed paths and tests; no failure reproduced for this behavior. Local checks are not fleet or CI acceptance.
-- **Context:** Filed by /review-and-prep for branch `mmm/b2c1ce32` before PR creation at `6f5f76a` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap Arch install paths
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** On Arch, the bootstrap tests never assert that a non-root run sends pacman through sudo, never run as root (no fake `id` returning 0), never fail a pacman install, never hit the pacman-missing stop, and only rerun on macOS.
-- **Hypothesis (untested):** Add rows to the existing Arch and failure tests: a sudo-row assertion, a fake `id` printing 0 with no fake sudo, an Arch case using MM_TEST_PKG_FAIL, and an Arch rerun that expects no pacman or pipx install call. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** tests/test_bootstrap.py:491
-- **Evidence:** Track 98A coverage audit (audit-only) traced bin/bootstrap and tests/test_bootstrap.py; 28 tests passed and no failure was reproduced for these paths. Ubuntu CI runs non-root, so the root branch never runs in CI.
-- **Context:** Filed by /review-and-prep for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=bin/bootstrap|tests/test_bootstrap.py] Test gap: bootstrap version, os-release and pipx-link stops
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No test covers Linux with no readable os-release, an unreadable python3 or syncthing version, the exact Python 3.11 floor, or a dangling symlink at PIPX_BIN_DIR/mm.
-- **Hypothesis (untested):** Add an unsupported-system row with no os-release file, fakes that print no version, a 3.11.0 passing row beside the 3.10 stop (derived from pyproject requires-python), and a dangling-link row expecting the `pipx install --force` stop. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** bin/bootstrap:193
-- **Evidence:** Track 98A coverage audit (audit-only) found these paths untested; each existing guard still ends with a Run: fix, and no failure was reproduced.
-- **Context:** Filed by /review-and-prep for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04).
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=bin/bootstrap] Bootstrap hardening candidates from the Track 98A review
-- **Description:** Low-severity review findings kept out of Track 98A's scope; each still has a Run: fix today. (1) mm is never run, so a pipx venv with a missing interpreter still reports ready; the plan declined `mm --version`. (2) A failed `pacman -S --needed` prints the same command, where `pacman -Syu --needed` recovers a stale database. (3) python3 is validated, but pipx may build with another interpreter (PIPX_DEFAULT_PYTHON); the plan declined pipx interpreter checks. (4) A root run on Arch installs into root's pipx. (5) Syncthing.app users get a second, brew-installed Syncthing. (6) Version parsing has not been run against a real Syncthing 2.x binary. (7) A rerun racing autopull's `pipx install --force` can false-stop. (8) The shadow fix `pipx ensurepath --prepend --force` loses to venv, conda or mise PATH entries. (9) The missing-link fix is `pipx install --force`; `pipx upgrade mind-meld` would relink without the pipx 1.17 remove-on-failure risk. (10) A broken pipx fails at `pipx install` before the platform pipx reinstall fix is reached. (11) The link check stops a working machine whose PIPX_BIN_DIR changed after install. (12) A dangling link into pipx's own venv is described as "another install". (13) The foreign-file stop names the path but not what `--force` will replace. (14) The pipx reinstall fix assumes a brew or pacman pipx. Also advisory: merge the sudo and non-sudo pacman branches.
-- **Hypothesis (untested):** Revisit when Track 93A's runbook runs bootstrap live on a Mac and both Omarchy machines; fix whichever of these the live run actually hits.
-- **Upstream severity:** INFORMATIONAL (2 and 3 were CRITICAL under /review's adversarial FIXABLE rule; both reviewers rated them Low, Blocks: no)
-- **Found in:** bin/bootstrap:237
-- **Context:** Native adversarial, Codex structured and Red Team findings from /review-and-prep cycles 1-3 for branch `mmm/7060eb2f` before PR creation at `935885c` (2026-11-04); dispositions are auto-chosen keep (veto on the PR).
-- **Effort:** ? (user triages in /roadmap)
-
-
 ## Drain records
+
+### Roadmap drain — 2026-11-05 (Grok Build parity)
+
+Run by `/project-spec` with `/roadmap` from manager Ephesus 8's brief on Karl's 2026-11-05 decision ("go, it needs to bring grok to parity w/ the other models"); Karl approved the candidate with "1" (plugins stay local). Verification baseline: `027840b` (v1.12.13). Tracks 108A (v1.12.11, PR #266), 98A (v1.12.12, PR #267) and 92A (v1.12.13, PR #268) were recorded as shipped. **14 inbox items drained: 1 placed, 0 killed, 13 deferred, 0 discharged**; one test gap returned from killed Track 107A is placed again, and one Future entry is promoted.
+
+| Item | Disposition |
+|---|---|
+| Brief: Grok Build at parity with Claude Code and Codex | place → Tracks 109A (source and consent), 110A (usage reader) and 111A (memory sync) |
+| Brief: price Cursor's `grok-4.7-high-fast`, `-xhigh`, `-xhigh-fast` | place → Track 109B, which also promotes the Future entry "Price Cursor Grok Fast after a real census" (trigger met by those runs) and prices `grok-4.7-build` |
+| Current Plan: Track 107A, the Cursor account usage reader | kill: after the account moved to the X unified subscription around 2026-10-21, per-request usage is only in the account's billing export, and Karl chose local-only capture ("A, but we don't need the separate line"); reopen when Cursor's ACP sends per-call usage |
+| Test gap: Unknown Syncthing status counters | place → Track 110A, which touches `statusflow.py` and `tests/test_diag.py` |
+| Test gap: ACP notice after successful capture or a reader blocker (returned from Track 107A) | place → Track 110A, same files |
+| Test gap: Canonical publication after pull prefetch | defer: no Track covers `pullflow.py` with `tests/test_pullflow.py` |
+| Test gaps: Syncthing HTTPS certificate and response cases; redirect destination isolation; total request budget; input byte ceilings | defer (four entries): no Track touches `syncthing.py` |
+| Test gap: Peer cursor invalid timestamps | defer: no Track covers its four paths |
+| Test gap: remaining nonqualifying link targets | defer: no Track touches `merge.py` |
+| Test gaps: late tidy flush failure; verbose tidy diagnostics; interrupted pull skips index tidy | defer (three entries): no Track covers `pullflow.py` with `tests/test_pullflow.py` |
+| Test gaps: bootstrap Arch install paths; bootstrap version, os-release and pipx-link stops | defer (two entries): no Track touches `bin/bootstrap` |
+| Bootstrap hardening candidates from the Track 98A review (14 Low findings) | defer to Track 93A's cutover runbook (bootstrap's first real use); revisit when a real bootstrap run hits one (factory manager's change, accepted with Karl's option 1, 2026-11-05) |
+
+**Future:** "Price Cursor Grok Fast after a real census" promoted into Track 109B. "Render `retro-fleet` for one identity category" still has its trigger met (Track 104A shipped); not required by a SPEC outcome, it stays deferred until the owner asks.
+
+**Version:** documentation-only change; no bump.
 
 ### Roadmap drain — 2026-11-04
 

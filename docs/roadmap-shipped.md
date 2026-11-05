@@ -774,3 +774,24 @@ _tombstone: 102, 103, 104, 105, 106_
 - 2026-11-04 (UTC; 2026-11-03 local): merged [PR #263](https://github.com/kbitz/mind-meld/pull/263) (commit `d3828c02cc20261aa357e859b937980d35197224`); verified land-time Track 103A, original/current Group 103, factory branch `mmm/2ac42551`. Card introduced by `5115bb1` (PR #255). Plan SHA-256 `5815c30e7ba2a096a988782fff0fa8aeab0cd964c4e805edc19fd5d1a6dc9272`, with the owner's 2026-11-04 answers: nothing reads a credential and no credentialed reader is built in this Track.
 - Closure evidence: the PR's matrix records 20 of 20 VERIFIED, none deferred; the card's conditional reader task (T2) took its stop branch because no credential-free source gives per-request tokens; full `./bin/check` 11,036 passed, 34 skipped (caller-attested). Survey: `~/.gstack/projects/kbitz-mind-meld/103A-cursor-usage-survey.md`.
 - Delivered: `mm status` and `retro-fleet` name Cursor ACP sessions as uncounted. The owner then called a Track that only names the gap the wrong outcome and approved the account reader as Track 107A (2026-11-04).
+
+## Individual Track history
+_tombstone: 92, 98, 108_
+
+### Track 108A: Drop dangling and duplicate MEMORY.md pointers after a line-union merge ✓ Shipped (v1.12.11)
+
+- 2026-11-04: merged [PR #266](https://github.com/kbitz/mind-meld/pull/266) (commit `e845db73e1654eb3f633df8c7c32e7d8ddceb5de`); verified land-time Track 108A, original/current Group 108, factory branch `mmm/b2c1ce32`. Card introduced by `c04febb` (PR #265). Plan SHA-256 `668b3e2a258e29b480240256ae3cc40af13fcaaf73c18b81dac44339710b7c57`, with Ephesus 8's D1 to D12 resolutions. PATCH release.
+- Closure evidence: the PR's completion matrix records 15 VERIFIED, none partial, missing or deferred; caller-attested full `./bin/check` 11,099 passed, 34 skipped on `fe336005`.
+- Delivered: after a pull line-merges a Claude memory index, lines pointing at memory files that no longer exist are dropped once applies and deletions finish (except targets still waiting to arrive), one line per file is kept with the local wording preferred, and only the index changes.
+
+### Track 98A: Add a bootstrap script that readies a machine for mm and Syncthing ✓ Shipped (v1.12.12)
+
+- 2026-11-04: merged [PR #267](https://github.com/kbitz/mind-meld/pull/267) (commit `cfc94c27fbeab2cc3d9b3bce95e1320b06e55830`); verified land-time Track 98A, original/current Group 98, factory branch `mmm/7060eb2f`. Card at `e845db7`. Plan SHA-256 `6f8fbab0b7a4d5723a51ce4b117399247263164ef40b433ed8a1c920041f4b19`, with Ephesus 8's challenge resolutions. PATCH release.
+- Closure evidence: the PR's completion matrix records 16 of 16 VERIFIED; attested full `./bin/check` 11,129 passed, 34 skipped. The live run on real machines belongs to Track 93A's runbook by the approved plan; the 14 Low hardening findings were filed for it and deferred to that runbook at the 2026-11-05 regeneration.
+- Delivered: `bin/bootstrap` installs what is missing of Python, pipx, mm and Syncthing through Homebrew or pacman, checks versions and that `mm` on `PATH` is pipx's, changes nothing on a rerun, and README gives the one-line install from the `latest` tag.
+
+### Track 92A: Report Syncthing state and each machine's latest push ✓ Shipped (v1.12.13)
+
+- 2026-11-05 (UTC; 2026-11-04 local): merged [PR #268](https://github.com/kbitz/mind-meld/pull/268) (commit `027840b512da2ec279de1bb73d6e33d363c5fedd`); verified land-time Track 92A, original/current Group 92, factory branch `mmm/757c13b0`. Plan SHA-256 `26290932459eee05bf1a63cc8c6713b2da2014a8444c8e012a767b9ad0cdf2b0`; criterion 1's wording accepted by the factory manager for the owner's veto at merge. PATCH release.
+- Closure evidence: the PR's completion matrix records 62 VERIFIED and 3 DEFERRED BY USER (P1 to P3, the real-Syncthing checks the approved plan places after merge); caller-attested full `./bin/check` 11,216 passed, 34 skipped. The three deferred checks move to Track 93A's runbook as owner steps at cutover (2026-11-05 regeneration).
+- Delivered: a read-only Syncthing client with timeouts; `mm status` shows connected peers, folder state and each peer's latest push and whether it is applied, warning after 24 h; `mm diag` lints the folder options and `.stignore`; mm never writes Syncthing's configuration.
