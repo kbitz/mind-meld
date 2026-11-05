@@ -872,8 +872,9 @@ as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
 Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a current model
 without a fast parameter) are recorded as the unpriced
 `grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
-without inventing a Fast rate. The wrapper reads argv verbatim
-(`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
+and normalize to `grok-4.7` or `grok-4.7-fast`, each priced on its own card.
+The wrapper reads argv verbatim (`_RawArgsCommand`): Click drops a literal
+`--`, and losing it would turn prompt
 text into live Cursor options. Without consent, or outside print mode, it is a
 pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
 child, and SIGINT too unless it runs in the terminal's foreground process
@@ -3831,25 +3832,35 @@ field is 0.17x list at the documented API unit of 1e10 ticks/USD. Never
 decode it or use a census-calibrated constant to infer request tiers.
 `grok-build-0.1` is a different SKU and a name trap.
 
-**Cursor Grok 4.7 list-rate basis (67A).** The exact `grok-4.7` alias maps
+**Cursor Grok 4.7 list-rate basis (67A / 109B).** The exact `grok-4.7` alias maps
 to its own family card, $2 input / $0.50 cache read / $6 output per MTok; long
 context is $4 / $1 / $12 when a REQUEST exceeds 256k input. Per-turn aggregates
 cannot recover that tier, so the standard-speed estimate is a floor. Cursor's
-2026-09-23 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
+2026-11-05 access date is separate from xAI's (`PRICING_CURSOR_LAST_UPDATED`);
 https://cursor.com/docs/models-and-pricing and
 https://cursor.com/docs/models/grok-4-7 are its sources. The dollar column is a
 list-rate equivalent, **not spend** on the censused Cursor Ultra subscription.
 Included usage and on-demand charges cannot be reconstructed from these counters.
 
-`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, deliberately
-absent from both the pricing alias registry and VERIFIED_MODEL_IDS. Standard
-Fast costs 2x base and long-context Fast 3x base; effort has no separate rate.
-Fast-only rows retain tokens and render cost `—` / cost_unavailable; mixed rows
-render `≥` / cost_floor for the priced subtotal, excluding Fast cost entirely.
-The reader cannot set floor_causes; existing unpriced-model rendering does it.
-Nonzero cache writes remain a labelled unknown and suppress any at-most claim.
-Tests follow both surprise guards through capture → publication → rendering.
-Pricing Fast properly and adding auto/composer families are deferred in TODOS.
+`params.fast == true` on normalized Grok 4.7 becomes **grok-4.7-fast**, which
+Track 109B prices as its own pseudo-id card in `VENDOR_FAMILY_TIERS` ($4 input /
+$1 cache read / $0 cache create / $12 output per MTok, 2x standard) and
+`VENDOR_LONG_CONTEXT_TIERS` ($6 / $1.50 / $0 / $18, 3x standard), ending 1.2.0's
+unpriced-Fast policy. Effort (`low`, `medium`, `high`, `xhigh`) has no separate
+rate. Every other Grok 4.7 id normalizes by dropping its suffix: the flat ids
+`grok-4.7-(low|medium|high|xhigh)` and `grok-4.7-build` alias in
+`PRICING_FAMILY_BY_MODEL` onto `grok-4.7`, and the effort ids' `-fast` variants
+onto `grok-4.7-fast`. All eleven Grok 4.7 ids (`GROK_47_MODEL_IDS`) are in
+`VERIFIED_MODEL_IDS` dated by `PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause`
+chooses its lead only from the models that produced a detail (in-window tokens,
+a bundled long-context card and no active local override): when any of them is in
+`GROK_47_MODEL_IDS`, Fast-only, flat-id and `grok-4.7-build` rows emit the
+"Per-turn totals cannot recover the per-request context tier" cause, while
+`grok-4.6-build` alone keeps the Grok Build log-limit cause. A zero-token or
+locally overridden Grok 4.7 id never changes another model's lead. Fast-only and mixed
+rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
+remain a labelled unknown and suppress any at-most claim. Adding auto/composer
+families remains deferred in TODOS.
 
 **Other vendors' context assumptions.** Codex's observed 258,400-token window
 cannot reach OpenAI's >272K prompt threshold: 20,955 events across 789
@@ -3862,8 +3873,8 @@ details carried by `cost_floor` in `MM_HEALTH`.
 
 Provenance is per vendor. Anthropic uses `PRICING_LAST_UPDATED`
 (2026-09-14), OpenAI `PRICING_OPENAI_LAST_UPDATED` (2026-10-27), Cursor
-`PRICING_CURSOR_LAST_UPDATED` (2026-09-23), xAI `PRICING_XAI_LAST_UPDATED`
-(2026-09-10), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
+`PRICING_CURSOR_LAST_UPDATED` (2026-11-05), xAI `PRICING_XAI_LAST_UPDATED`
+(2026-11-05), Google `PRICING_GOOGLE_LAST_UPDATED` (2026-10-22), and Muse
 `PRICING_MUSE_LAST_UPDATED` (2026-10-27), with Muse's source in
 `PRICING_MUSE_SOURCE_URL` (https://dev.meta.ai/docs/pricing-rate-limits).
 Each vendor's date and source URL ride in `MM_HEALTH.pricing`, including

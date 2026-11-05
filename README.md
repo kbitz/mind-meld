@@ -1226,9 +1226,9 @@ Under the hood the skill invokes `mm retro-fleet <window>` (v0.11.22+) — the s
 
 **Token usage and cost (v0.11.14, hosts in v0.12.52, unified in v1.1).** The `## Agents` table answers: how much did each agent consume this window, on which model, and what would that have cost at API list rates. Claude's numbers come from `~/.claude/projects/<encoded>/*.jsonl` plus subagent jsonls under `<session-uuid>/subagents/agent-*.jsonl` (subagents contribute to the parent project's totals — ~50% of usage on a heavy fleet — but don't double-count as separate sessions). The Claude cache lives at `~/.config/mind-meld/session-tokens.json`, warms inline on `mm init` and the first interactive `mm push` (~3 seconds, telegraphed via `mm: warming token cache (one-time, ~3s)...` at init and with `mm push --verbose`), and is reaped by `mm gc` once a jsonl disappears or its tokens are older than 90 days.
 
-Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its logs lack per-request prompt sizes. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
+Cost is not subscription spend: historical tokens are repriced at the bundled rates plus any active local pricing overrides, verified on the dates below. Grok always contributes a base-tier floor because its usage records cannot recover each request's context tier. All four token fields (input, cache write, cache read, output) contribute to the Tokens column.
 
-Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's prompt-size caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
+Partial or failed readers conservatively floor every agent they might supply, including agents with no data from that machine: snapshots do not identify which reader supplied each model. Unusable coverage metadata (a reason with an empty source list) does the same, even when that machine recorded no in-window usage. Grok's context-tier caveat applies only to Grok. Each floor names its causes in `MM_HEALTH` under `cost_floor`; unavailable costs use `cost_unavailable`.
 
 Legend:
 
@@ -1243,7 +1243,7 @@ An agent with no priceable model shows `—`, never a confident `$0`. A priced m
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
-**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-09-23 ([pricing](https://cursor.com/docs/models-and-pricing)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-09-10 ([grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
+**Rate provenance.** In `token_usage.py`: Anthropic `PRICING_LAST_UPDATED` = 2026-09-14 ([pricing](https://platform.claude.com/docs/en/about-claude/pricing)); OpenAI `PRICING_OPENAI_LAST_UPDATED` = 2026-10-27 ([Standard pricing](https://developers.openai.com/api/docs/pricing)); Cursor `PRICING_CURSOR_LAST_UPDATED` = 2026-11-05 ([pricing](https://cursor.com/docs/models-and-pricing), [Grok 4.7](https://cursor.com/docs/models/grok-4-7)); xAI `PRICING_XAI_LAST_UPDATED` = 2026-11-05 ([grok-4.7 rates](https://docs.x.ai/developers/models/grok-4.7), [grok-4.6 rates](https://docs.x.ai/developers/models/grok-4.6), [Build model identity](https://docs.x.ai/build/overview)); Google `PRICING_GOOGLE_LAST_UPDATED` = 2026-10-22 ([Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)); Muse `PRICING_MUSE_LAST_UPDATED` = 2026-10-27 ([pricing](https://dev.meta.ai/docs/pricing-rate-limits)). The CLI makes no network requests for prices. The `/retro-fleet` skill can check vendor docs and supply local overrides before rendering its second pass.
 
 **Pricing refresh and local overrides.** `MM_HEALTH.pricing.refresh_due` asks the skill to check prices when verification is more than seven days behind the report's UTC end date, or an active in-window model is unverified (including a priced family extrapolation). `effective_verified_date` is the newer of the oldest of all six bundled vendor dates and the cache's top-level `verified_date`. `unpriced_model_ids` and `unverified_model_ids` identify the models needing attention; `cached_model_ids` lists active overrides. Zero-volume and cost-excluded models do not trigger a model refresh.
 
@@ -1764,9 +1764,9 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
 Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build usage capture remains unavailable, but Grok models used through Cursor remain supported and priceable.
+**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build usage capture remains unavailable, but Grok models used through Cursor remain supported and priceable.
 
-**Why grok-4.6 rates, not grok-build-0.1?** xAI's Build overview identifies grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
+**Why grok-4.6 rates, not grok-build-0.1?** On 2026-09-10 xAI's Build overview identified grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 
 **An unknown model is unpriced.** Upgrading mm on the machine that renders this report may price it; republishing does not add a rate; do not estimate.
 
@@ -2048,12 +2048,15 @@ the Cursor row. The status clauses mean:
   `host_usage_autopush_budget_ms` (100 to 5,000 ms) and
   `host_usage_interactive_budget_ms` (250 to 5,000 ms).
 
-Standard Grok 4.7 uses Cursor's 2026-09-23 list rates ($2 input / $0.50 cache
-read / $6 output per million tokens), with an unknown per-request long-context
-tier making the cost a floor. This is list-rate equivalent, not Cursor Ultra
-subscription spend. Fast tokens use the unpriced `grok-4.7-fast` id: fast-only
-cost is `—`; a mixed row's `≥` subtotal excludes Fast cost. Fast can cost 3x
-standard in long context. Cache-write price is unpublished. Sources:
+Standard Grok 4.7 uses Cursor's 2026-11-05 list rates ($2 input / $0.50 cache
+read / $6 output per million tokens; 2x above 256k input per request), with an
+unknown per-request long-context tier making the cost a `≥` floor. This is
+list-rate equivalent, not Cursor Ultra subscription spend. Fast tokens use the
+`grok-4.7-fast` pseudo-id card at 2x standard ($4 / $1 / $12) and 3x standard
+in long context ($6 / $1.50 / $18), and flat effort/Fast ids
+(`grok-4.7-(low|medium|high|xhigh)(-fast)`) alias onto `grok-4.7` and
+`grok-4.7-fast`, so Fast-only and mixed rows both render a `≥` floor that
+includes Fast cost. Cache-write price is unpublished. Sources:
 [Cursor pricing](https://cursor.com/docs/models-and-pricing) and
 [Grok 4.7](https://cursor.com/docs/models/grok-4-7).
 

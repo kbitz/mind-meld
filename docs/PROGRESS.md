@@ -4,6 +4,7 @@
 
 | Version | Released | Headline |
 |---------|----------|----------|
+| 1.12.14 | 2026-11-05 | mm prices Grok 4.7 Fast, flat effort and Fast model ids, and prices grok-4.7-build as grok-4.7. |
 | 1.12.13 | 2026-11-04 | mm shows Syncthing state and each peer's push progress, and a Syncthing reply can no longer stall that check. |
 | 1.12.12 | 2026-11-04 | A new bootstrap readies macOS and Arch-based Linux for mm, and the install one-liner stops when the download fails. |
 | 1.12.11 | 2026-11-04 | On pull, memory merge keeps escaped, parenthesized, and case-aliased links and tidies dangling or duplicate index links. |

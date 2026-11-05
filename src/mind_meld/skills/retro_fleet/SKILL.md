@@ -83,7 +83,7 @@ Four things are still true and still matter:
 
 A partial or failed reader makes every agent's priced total conservative
 (`≥`): the wire cannot identify which model families that reader omitted.
-Do not guess ownership from the reader's name. Grok's inherent prompt-size
+Do not guess ownership from the reader's name. Grok's inherent context-tier
 pricing uncertainty remains specific to its models. Missing or rejected price
 detail names its machine and the acceptor's `detail_reason` when available.
 Repeated hostnames carry short device IDs so remedies identify the right Mac.
