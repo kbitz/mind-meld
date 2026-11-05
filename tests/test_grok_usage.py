@@ -492,6 +492,47 @@ def test_unsupported_grok_leaves_sibling_reader_publishing_and_names_the_fix(tmp
 # --- Budget, resumable progress and warming ----------------------------------
 
 
+@pytest.mark.parametrize("level", ["root", "sessions"])
+@pytest.mark.parametrize("expires_during", ["listing", "stat"])
+def test_directory_scan_stops_at_deadline(tmp_path, monkeypatch, level, expires_during):
+    root = _copy_tree(tmp_path)
+    assert _read(root).complete
+    prior_files = _cache()["files"]
+    directory = root if level == "root" else root / "cwd-a"
+    expired = False
+    visited = []
+    real_listdir = os.listdir
+    real_lstat = Path.lstat
+
+    def listdir(path):
+        nonlocal expired
+        names = real_listdir(path)
+        if path == directory and expires_during == "listing":
+            expired = True
+        return names
+
+    def lstat(path, *args, **kwargs):
+        nonlocal expired
+        info = real_lstat(path, *args, **kwargs)
+        if path.parent == directory:
+            visited.append(path)
+            if expires_during == "stat":
+                expired = True
+        return info
+
+    monkeypatch.setattr(os, "listdir", listdir)
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(hu, "_expired", lambda deadline: expired)
+    opened = _record_opens(monkeypatch)
+    result = _read(root)
+
+    assert not result.complete and result.reason == "deadline" and result.hosts == {}
+    assert len(visited) == (0 if expires_during == "listing" else 1)
+    assert not any(path.startswith(str(root)) for path in opened)
+    assert _cache()["files"] == prior_files
+    assert _cache()["complete_once"] is True and _cache()["last_reason"] == "deadline"
+
+
 def test_deadline_mid_scan_keeps_staged_sessions_and_resumes(tmp_path, monkeypatch):
     root = _copy_tree(tmp_path)
     processed: list[Path] = []

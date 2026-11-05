@@ -326,14 +326,18 @@ def _session_entry(usage_path: Path, cached: dict[str, Any] | None) -> dict[str,
     }
 
 
-def _child_dirs(path: Path) -> list[tuple[str, Path]]:
+def _child_dirs(path: Path, *, deadline: float | None = None) -> list[tuple[str, Path]]:
     """Sorted real (non-symlink) child directories; Grok's ``.cwd`` files are skipped."""
+    if deadline is not None and host_usage._expired(deadline):
+        raise host_usage._ReadFailure("deadline")
     try:
         names = sorted(os.listdir(path))
     except OSError as exc:
         raise host_usage._ReadFailure("io_error") from exc
     found: list[tuple[str, Path]] = []
     for name in names:
+        if deadline is not None and host_usage._expired(deadline):
+            raise host_usage._ReadFailure("deadline")
         child = path / name
         try:
             info = child.lstat()
@@ -385,8 +389,8 @@ def _scan_grok_root(
         canonical_root = root
     staged: dict[str, dict[str, Any]] = {}
     try:
-        for _cwd_name, cwd_path in _child_dirs(root):
-            for _session_name, session_path in _child_dirs(cwd_path):
+        for _cwd_name, cwd_path in _child_dirs(root, deadline=deadline):
+            for _session_name, session_path in _child_dirs(cwd_path, deadline=deadline):
                 if host_usage._expired(deadline):
                     raise host_usage._ReadFailure("deadline")
                 key = host_usage._cache_key(session_path, root=root, canonical_root=canonical_root)
