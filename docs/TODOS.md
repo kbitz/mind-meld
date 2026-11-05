@@ -44,6 +44,56 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing HTTPS certificate and response cases
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Certificate acceptance/rejection and successful/slow TLS response paths have no runtime test.
+- **Hypothesis (untested):** Test that TLS trusts configured GUI certificate and bounds HTTPS reads. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py:150:testing
+- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing redirect destination isolation
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No redirect response test proves refusal and zero destination contact. This is part of the previously recorded TLS/redirect gap.
+- **Hypothesis (untested):** Test that GUI authentication never follows redirects. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py:258:coverage-redirect
+- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing total request budget
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No test makes the total remaining budget shorter than request timeout or exhausts it across multiple endpoints.
+- **Hypothesis (untested):** Test that one total REST budget across requests. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** tests/test_syncthing.py:72:testing
+- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/syncthing.py|tests/test_syncthing.py] Test gap: Syncthing input byte ceilings
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No oversized config or HTTP body case pins byte ceiling rejection. No failure reproduced.
+- **Hypothesis (untested):** Test that oversized local config and REST bodies return bounded error state. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/syncthing.py:85:coverage-bounds
+- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/pullflow.py|src/mind_meld/statusflow.py|tests/test_pullflow.py|tests/test_diag.py] Test gap: Peer cursor invalid timestamps
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** New timestamp helpers lack negative cases for naive/malformed/nonstring timestamp values; current timestamp tests use aware ISO values.
+- **Hypothesis (untested):** Test that invalid timestamp cannot create false applied or overdue evidence. Re-verify first.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/pullflow.py:3701:coverage-timestamps
+- **Evidence:** Track 92A coverage audit traced the source and tests; no failure reproduced for this gap.
+- **Context:** Filed by /review-and-prep on branch `mmm/757c13b0` at `51999d4` (2026-11-04). Revisit in the next Track touching these files.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/merge.py|tests/test_merge.py] Test gap: remaining nonqualifying link targets
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Empty destinations, empty path segments, query-bearing targets and direct backslash-bearing targets lack explicit rejection rows.
