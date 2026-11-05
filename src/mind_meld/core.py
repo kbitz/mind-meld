@@ -80,6 +80,7 @@ from mind_meld.errors import (
 from mind_meld.lockfile import acquire_lock, release_lock
 from mind_meld.manifest import (
     ANCHOR_NAME,
+    GROK_EXCLUDE_PATTERNS,
     MARKER_SKIP_NAME,
     MUSE_EXCLUDE_PATTERNS,
     DiffResult,
@@ -610,7 +611,9 @@ def _build_exclude_map(
     resolved = sources if sources is not None else get_sources(config)
     for src in resolved:
         patterns = list(src.get("exclude_patterns") or [])
-        if src.get("type") == "muse":
+        if src.get("type") == "grok":
+            patterns = [*GROK_EXCLUDE_PATTERNS, *patterns]
+        elif src.get("type") == "muse":
             patterns = [*MUSE_EXCLUDE_PATTERNS, *patterns]
         prefs = marker_skip_globs(src, strict=strict)
         prefs = [*prefs, *sorted((nested_roots or {}).get(src["name"], ()))]
@@ -1006,7 +1009,9 @@ def _prove_omitted_paths_absent(
             except ManifestError:
                 continue
             extra = list(src_cfg.get("exclude_patterns") or [])
-            if src_cfg.get("type") == "muse":
+            if src_cfg.get("type") == "grok":
+                extra = [*GROK_EXCLUDE_PATTERNS, *extra]
+            elif src_cfg.get("type") == "muse":
                 extra = [*MUSE_EXCLUDE_PATTERNS, *extra]
             if _manifest_is_excluded(
                 rel_path, extra, None, list(src_cfg.get("include_patterns") or []) or None
@@ -1083,6 +1088,10 @@ def _retain_prior_default_sources(
     extra = False
     for name in remote_manifest.get("sources", {}):
         if name in selected_names or name in disabled:
+            continue
+        # A legacy config's prior grok entry comes only from pre-v1.11.8
+        # auto-activation; grok is selected only by explicit enrollment.
+        if name == "grok":
             continue
         default = get_default_source(name)
         if default is None:
@@ -2012,14 +2021,18 @@ def _prompt_source_toggle(
 def _source_path_is_detected(source: dict[str, Any]) -> bool:
     """Return whether a source has the on-disk state that warrants a Y default.
 
-    Muse detection requires its hardcoded ``memory/`` tree, though its prompt
-    still defaults off. Antigravity's default source is also detected by its
-    separate local conversations root. Custom paths use their own existence.
+    Grok detection requires at least one hardcoded customization directory
+    (``skills/``, ``commands/``, ``rules/``), and Muse detection requires its
+    hardcoded ``memory/`` tree, though both prompts still default off.
+    Antigravity's default source is also detected by its separate local
+    conversations root. Custom paths use their own existence.
     """
     path_str = str(source.get("path", ""))
     if not path_str:
         return False
     root = Path(path_str).expanduser()
+    if source.get("type") == "grok" or source.get("name") == "grok":
+        return _config_module.grok_customization_dirs_exist(root)
     if source.get("type") == "muse" or source.get("name") == "muse":
         return _config_module.muse_memory_dir_exists(root)
     if source.get("name") == "agy" and path_str == _config_module.DEFAULT_AGY_DIR:

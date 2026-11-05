@@ -11,6 +11,7 @@ from mind_meld.config import (
     _GSTACK_GENERATOR_GLOBS,
     _GSTACK_INCLUDE_PATTERNS,
     _GSTACK_INCLUDE_PATTERNS_1_11_6,
+    DEFAULT_GROK_DIR,
     DEFAULT_SOURCES,
     HOST_USAGE_AUTOPUSH_BUDGET_MIN_MS,
     HOST_USAGE_BUDGET_MAX_MS,
@@ -23,6 +24,8 @@ from mind_meld.config import (
     _validate_exclude_patterns,
     _validate_sources,
     get_sources,
+    grok_customization_dirs_exist,
+    grok_usage_consented,
     load_config,
     patch_config_on_disk,
     resolve_sources,
@@ -701,6 +704,14 @@ class TestDefaultSources:
         assert any(fnmatch.fnmatch("skills/retro-fleet/SKILL.md", p) for p in patterns)
         assert not any(fnmatch.fnmatch("skills/my-team-tool/SKILL.md", p) for p in patterns)
 
+    def test_grok_default_source_has_no_user_editable_include_fields(self):
+        grok = next(s for s in DEFAULT_SOURCES if s["name"] == "grok")
+        assert grok == {"name": "grok", "path": DEFAULT_GROK_DIR, "type": "grok"}
+        assert DEFAULT_GROK_DIR == "~/.grok"
+
+    def test_retired_source_names_pins_opencode_only(self):
+        assert RETIRED_SOURCE_NAMES == frozenset({"opencode"})
+
 
 class TestExcludePatternsValidation:
     """5C: _validate_sources accepts and validates the new
@@ -781,7 +792,7 @@ class TestExcludePatternsValidation:
             _validate_sources([{**ok[0], "include_patterns": "nope"}])
         with pytest.raises(ConfigError, match=r"include_patterns\[0\] must be a string"):
             _validate_sources([{**ok[0], "include_patterns": [42]}])
-        for non_generic in ("claude", "muse"):
+        for non_generic in ("claude", "grok", "muse"):
             pat = (
                 rf"source {non_generic!r} \(type {non_generic!r}\) does not support "
                 r"include_patterns; only type 'generic' sources use an allowlist"
@@ -1080,7 +1091,7 @@ class TestGetSources:
         assert "codex" in names
         assert "opencode" not in names
 
-    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    @pytest.mark.parametrize("name", ["opencode"])
     def test_retired_sources_bypass_type_and_field_validation(self, name):
         """Retired source blocks from un-migrated configs validate cleanly."""
         _validate_sources(
@@ -1099,10 +1110,26 @@ class TestGetSources:
         config["sync"] = {"sources": [{"name": "old-host", "path": str(tmp_path), "type": "grok"}]}
         path = tmp_path / "config.toml"
         save_config(config, path)
-        with pytest.raises(ConfigError, match="type 'grok'.*no longer supported.*config.toml"):
+        with pytest.raises(
+            ConfigError,
+            match="type 'grok' is reserved for source name 'grok'",
+        ):
             load_config(path)
 
-    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    def test_grok_source_validation_rejects_wrong_type_and_include_overrides(self):
+        with pytest.raises(
+            ConfigError,
+            match="source 'grok' must use type 'grok'",
+        ):
+            _validate_sources([{"name": "grok", "path": "~/.grok", "type": "generic"}])
+        for field, val in (("include_dirs", ["skills"]), ("include_files", ["config.toml"])):
+            with pytest.raises(
+                ConfigError,
+                match="source 'grok' does not support include_dirs or include_files",
+            ):
+                _validate_sources([{"name": "grok", "path": "~/.grok", "type": "grok", field: val}])
+
+    @pytest.mark.parametrize("name", ["opencode"])
     def test_configured_sources_drops_retired_sources(self, name):
         """_configured_sources silently drops retired sources."""
         config = {
@@ -2612,3 +2639,208 @@ class TestCursorHostConsent67A:
         text = config.usage_capture_remedy("no-reader", reader="cursor")
         assert "[retro] cursor_host_usage = true" in text
         assert "enable-source cursor" in text
+
+
+class TestGrokSourceAndConsent109A:
+    def _base_config(self, tmp_path) -> dict:
+        return {
+            "device": {"id": "abc", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "storage")},
+        }
+
+    def test_legacy_config_omits_grok_even_when_customization_dir_exists(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".claude").mkdir()
+        skill = tmp_path / ".grok" / "skills" / "x" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# x\n")
+
+        default_cfg = self._base_config(tmp_path)
+        default_cfg["sync"] = {}
+        res_default = resolve_sources(default_cfg)
+        assert "grok" not in [s["name"] for s in res_default.selected]
+        assert "grok" not in [s["name"] for s in res_default.available]
+
+        legacy_cfg = self._base_config(tmp_path)
+        legacy_cfg["sync"] = {"claude_dir": str(tmp_path / ".claude")}
+        res_legacy = resolve_sources(legacy_cfg)
+        assert "grok" not in [s["name"] for s in res_legacy.selected]
+        assert "grok" not in [s["name"] for s in res_legacy.available]
+
+    def test_pre_v1_11_8_grok_block_loads_selects_and_consents(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        grok_dir = tmp_path / ".grok"
+        (grok_dir / "skills").mkdir(parents=True)
+
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            "[device]\n"
+            'id = "abc"\n'
+            'name = "Mac"\n'
+            "[storage]\n"
+            f'path = "{tmp_path / "storage"}"\n'
+            "[sync]\n"
+            "max_file_size = 52428800\n"
+            "[[sync.sources]]\n"
+            'name = "grok"\n'
+            'path = "~/.grok"\n'
+            'type = "grok"\n'
+            'exclude_patterns = ["skills/custom-*"]\n'
+        )
+        loaded = load_config(config_path)
+        res = resolve_sources(loaded)
+        assert [s["name"] for s in res.selected] == ["grok"]
+        assert [s["name"] for s in res.available] == ["grok"]
+        assert grok_usage_consented(loaded) is True
+
+        loaded["sync"]["disabled_sources"] = ["grok"]
+        res_disabled = resolve_sources(loaded)
+        assert [s["name"] for s in res_disabled.selected] == []
+        assert grok_usage_consented(loaded) is False
+
+    @pytest.mark.parametrize(
+        "retro_val,disabled,expected",
+        [
+            (True, [], True),
+            (False, [], False),
+            ("true", [], False),
+            (1, [], False),
+            (None, [], False),
+            (True, ["grok"], False),
+        ],
+    )
+    def test_retro_grok_host_usage_bit_loads_and_controls_consent(
+        self, tmp_path, monkeypatch, retro_val, disabled, expected
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".grok" / "skills").mkdir(parents=True)
+
+        cfg = self._base_config(tmp_path)
+        cfg["sync"] = {"disabled_sources": disabled} if disabled else {}
+        cfg["retro"] = {"grok_host_usage": retro_val}
+        _validate(cfg)
+        res = resolve_sources(cfg)
+        assert "grok" not in [s["name"] for s in res.selected]
+        assert grok_usage_consented(cfg) is expected
+
+    def test_grok_usage_consented_agrees_with_resolve_sources_and_never_touches_disk(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        grok_dir = tmp_path / ".grok"
+        grok_dir.mkdir()
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+
+        configs = [
+            {"sync": {}},
+            {"sync": {"claude_dir": str(claude_dir)}},
+            {
+                "sync": {
+                    "sources": [
+                        {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                    ]
+                }
+            },
+            {
+                "sync": {
+                    "sources": [
+                        {"name": "claude", "path": str(claude_dir), "type": "claude"},
+                        {"name": "grok", "path": str(grok_dir), "type": "grok"},
+                    ]
+                }
+            },
+            {
+                "sync": {
+                    "sources": [
+                        {"name": "grok", "path": str(grok_dir), "type": "grok"},
+                    ],
+                    "disabled_sources": ["grok"],
+                }
+            },
+        ]
+        expected = ["grok" in [s["name"] for s in resolve_sources(cfg).selected] for cfg in configs]
+
+        def forbid_stat(*_args, **_kwargs):
+            raise AssertionError("grok_usage_consented must not touch the filesystem")
+
+        monkeypatch.setattr(Path, "stat", forbid_stat)
+        monkeypatch.setattr(Path, "lstat", forbid_stat)
+        monkeypatch.setattr(os, "stat", forbid_stat)
+
+        for cfg, exp in zip(configs, expected, strict=True):
+            assert grok_usage_consented(cfg) is exp
+
+    def test_grok_customization_dirs_exist_checks_real_allowlisted_dirs_only(self, tmp_path):
+        root = tmp_path / ".grok"
+        assert grok_customization_dirs_exist(root) is False
+        root.mkdir()
+        (root / "sessions").mkdir()
+        (root / "memory-v2").mkdir()
+        (root / "config.toml").write_text("x = 1\n")
+        assert grok_customization_dirs_exist(root) is False
+
+        target = tmp_path / "outside-skills"
+        target.mkdir()
+        (root / "skills").symlink_to(target, target_is_directory=True)
+        assert grok_customization_dirs_exist(root) is False
+        (root / "skills").unlink()
+
+        (root / "rules").mkdir()
+        assert grok_customization_dirs_exist(root) is True
+
+    def test_migrate_config_keeps_grok_block_and_removes_only_opencode(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from mind_meld import config as config_module
+
+        path = tmp_path / "config.toml"
+        monkeypatch.setattr(config_module, "CONFIG_PATH", path)
+        monkeypatch.setattr(config_module, "LOCK_PATH", tmp_path / "mm.lock")
+
+        grok_only = {
+            "device": {"id": "abc123", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": "~/.claude", "type": "claude"},
+                    {"name": "grok", "path": "~/.grok", "type": "grok"},
+                ]
+            },
+        }
+        save_config(grok_only, path)
+        before = path.read_bytes()
+        core._maybe_prompt_migration(load_config(path), read_only=True)
+        assert capsys.readouterr().err == ""
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        assert "Config is already up to date." in capsys.readouterr().out
+        assert path.read_bytes() == before
+        assert "grok" not in (load_config(path)["sync"].get("disabled_sources") or [])
+
+        both = {
+            "device": {"id": "abc123", "name": "Mac"},
+            "storage": {"path": str(tmp_path / "store")},
+            "sync": {
+                "sources": [
+                    {"name": "claude", "path": "~/.claude", "type": "claude"},
+                    {"name": "grok", "path": "~/.grok", "type": "grok"},
+                    {"name": "opencode", "path": "~/.config/opencode", "type": "generic"},
+                ]
+            },
+        }
+        save_config(both, path)
+        core._maybe_prompt_migration(both, read_only=True)
+        err = capsys.readouterr().err
+        assert "opencode" in err
+        assert "grok" not in err
+        assert core._migrate_config_core(yes=True, dry_run=False) is False
+        migrated = load_config(path)
+        assert [s["name"] for s in migrated["sync"]["sources"]] == ["claude", "grok"]
+        assert migrated["sync"]["disabled_sources"] == ["opencode"]

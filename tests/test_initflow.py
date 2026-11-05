@@ -11,7 +11,7 @@ decision is mocked. Stubbed because they act outside the storage folder:
 `crypto.store_passphrase_in_keyring`. PASSPHRASE is a synthetic test credential.
 
 Input order follows `initflow.init`: storage path, then the re-init confirm
-if a device is already configured, device name, passphrase(s), then six
+if a device is already configured, device name, passphrase(s), then seven
 source prompts. `--new-fleet` is the only flow that creates the key header;
 plain `mm init` joins and stops when the header has not arrived. The join's
 pull lives in the `cli.init` shell and is covered in tests/test_integration.py.
@@ -39,8 +39,8 @@ from mind_meld.storage.local import LocalBackend
 PASSPHRASE = "initflow-contract-test-only"
 MEMORY_KB = 1024
 PEER = "bbbbbbbb"
-SOURCES_CLAUDE_ONLY = "Y\nn\nn\nn\nn\nn\n"
-SOURCES_NONE = "n\nn\nn\nn\nn\nn\n"
+SOURCES_CLAUDE_ONLY = "Y\nn\nn\nn\nn\nn\nn\n"
+SOURCES_NONE = "n\nn\nn\nn\nn\nn\nn\n"
 NEW_FLEET_OUTCOME = (
     "as the root of a Syncthing folder, run 'mm init' on the other machines, and run 'mm push'."
 )

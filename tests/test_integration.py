@@ -2440,7 +2440,7 @@ class TestDisabledSourcesTombstoneSuppression:
         )
         assert "opencode:skills/gone/SKILL.md" in remote.get("tombstones", {})
 
-    @pytest.mark.parametrize("retired_name", ["grok", "opencode"])
+    @pytest.mark.parametrize("retired_name", ["opencode"])
     def test_legacy_peer_retired_section_is_ignored(self, tmp_path, monkeypatch, retired_name):
         """Retired peer files stay out of pull, previews, diff and status."""
         storage_dir = tmp_path / "storage"
@@ -4539,7 +4539,7 @@ class TestAutoCommands:
 
         # Inputs match TestInitFlow pattern: storage, device name, passphrase,
         # confirm passphrase, then source prompts (Y claude, all others n).
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         # Init should complete despite the keyring write failure.
         assert result.exit_code == 0, result.output
@@ -5270,7 +5270,7 @@ class TestInitFlow:
         # Inputs: storage path, device name, passphrase, confirm passphrase,
         # then per-source prompts (claude Y, all others n) — we
         # need at least one source enabled for init to succeed.
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "bootstrapped" in result.output
@@ -5307,7 +5307,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Decline every user-facing source.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code != 0, result.output
         assert "no sync sources enabled" in result.output
@@ -5328,13 +5328,13 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # First attempt: refuse all, leaves mm-crypto-init orphan.
-        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\nn\n"
+        stdin1 = f"{storage}\nMac A\npw-shared\npw-shared\nn\nn\nn\nn\nn\nn\nn\n"
         result1 = runner.invoke(app, ["init", "--new-fleet"], input=stdin1)
         assert result1.exit_code != 0
 
         # Second attempt: same passphrase, accept claude. Takes the
         # second-device path against the orphaned bootstrap.
-        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        stdin2 = f"{storage}\nMac A\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         result2 = runner.invoke(app, ["init"], input=stdin2)
         assert result2.exit_code == 0, result2.output
         assert "Verified passphrase against existing mm-crypto-init" in result2.output
@@ -5353,7 +5353,7 @@ class TestInitFlow:
         storage = tmp_path / "icloud"
 
         # Decline claude, accept gstack, decline the other sources.
-        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nn\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -5376,7 +5376,7 @@ class TestInitFlow:
         cfg_path = self._setup_monkeypatch(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
 
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nY\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
 
@@ -5419,7 +5419,7 @@ class TestInitFlow:
 
         # Second-device init: only 1 passphrase prompt (single, no confirm),
         # then per-source prompts (claude Y, all others n).
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "Verified passphrase against existing mm-crypto-init" in result.output
@@ -5525,7 +5525,7 @@ class TestInitReInitGuard:
 
         # Inputs: storage path, device name, passphrase, per-source
         # (claude Y, all others n). No orphan confirm: nothing to orphan.
-        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning" not in result.output
@@ -5538,13 +5538,13 @@ class TestInitReInitGuard:
         self._setup(tmp_path, monkeypatch)
         storage, _backend = self._populated(tmp_path)
         first = runner.invoke(
-            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         )
         assert first.exit_code == 0, first.output
 
         # Inputs: overwrite confirm, storage path, orphan-confirm y, device
         # name, passphrase, per-source.
-        stdin = f"y\n{storage}\ny\nMac C\npw-shared\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"y\n{storage}\ny\nMac C\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning existing device" in result.output
@@ -5554,7 +5554,7 @@ class TestInitReInitGuard:
         cfg = self._setup(tmp_path, monkeypatch)
         storage, backend = self._populated(tmp_path)
         first = runner.invoke(
-            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\n"
+            app, ["init"], input=f"{storage}\nMac B\npw-shared\nY\nn\nn\nn\nn\nn\nn\n"
         )
         assert first.exit_code == 0, first.output
         saved = cfg.read_bytes()
@@ -5612,7 +5612,7 @@ class TestInitReInitGuard:
 
         self._setup(tmp_path, monkeypatch)
         storage = tmp_path / "icloud"
-        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\n"
+        stdin = f"{storage}\nMac A\npw123\npw123\nY\nn\nn\nn\nn\nn\nn\n"
         result = runner.invoke(app, ["init", "--new-fleet"], input=stdin)
         assert result.exit_code == 0, result.output
         assert "orphaning" not in result.output
@@ -5751,7 +5751,7 @@ class TestInitJoinPull89A:
         result = runner.invoke(
             app,
             ["init", "--new-fleet"],
-            input=f"{storage}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n",
+            input=f"{storage}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert "as the root of a Syncthing folder" in " ".join(result.output.split())
@@ -11481,7 +11481,7 @@ class TestMmEventsOwnership59A:
         result = runner.invoke(
             app,
             ["init", "--new-fleet"],
-            input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\n",
+            input=f"{tmp_path / 'storage'}\nMac A\npw\npw\nY\nn\nn\nn\nn\nn\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert calls == [True]

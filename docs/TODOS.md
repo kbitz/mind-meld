@@ -44,6 +44,36 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: nested Grok conflict-directory symlink
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Grok conflict discovery tests linked top-level roots, but not a directory link nested inside a real `skills/` directory.
+- **Hypothesis (untested):** Extend the existing Grok conflict test with a nested link to a private directory containing a conflict sidecar; verify that discovery returns no hit through it.
+- **Upstream severity:** P3
+- **Found in:** src/mind_meld/resolveflow.py:80
+- **Evidence:** Outside review and the coverage audit found no direct case; source inspection found no failure. Existing targeted tests passed.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/sourceflow.py|tests/test_source_toggle.py] Test gap: reconfigure reenrolls disabled Grok
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Existing tests cover enable/disable round trips and default-off reconfiguration, but not accepting Grok during reconfiguration after it was disabled.
+- **Hypothesis (untested):** Extend the reconfigure tests with Grok disabled, answer yes, and verify its canonical block and consent, removal of the Grok disabled name, and preservation of unrelated disabled names.
+- **Upstream severity:** P3
+- **Found in:** src/mind_meld/sourceflow.py:337
+- **Evidence:** Outside review and the coverage audit found no direct case; the current selection loop clears declined-name state on acceptance. No failure was reproduced.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: unreadable Grok source root
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** Grok walker tests inject a selected-directory scan failure, but not a failure of the initial source-root stat.
+- **Hypothesis (untested):** Extend the walker tests with a root-scoped stat error; verify strict snapshot refusal and the permissive walk's empty result.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/manifest.py:2102
+- **Evidence:** The coverage audit found the branch untested; no defect was demonstrated. The existing strict scandir test covers a different boundary.
+- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
+- **Effort:** ? (user triages in /roadmap)
+
 ### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: Grok cause lead under a local pricing override
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** `_long_context_cause` now picks its lead only from models that produced a detail. A model with an active local pricing override has no long-context card, so it produces no detail and cannot steer the lead. Only the zero-token case is pinned (`test_long_context_cause_lead_follows_only_models_with_a_detail`); nothing exercises the override path.

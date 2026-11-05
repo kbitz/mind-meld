@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.15] - 2026-11-05
+
+mm restores opt-in sync of Grok customizations, and that sync runs only after you consent.
+
+### Added
+
+- mm syncs Grok customizations when you opt in.
+- Grok customization sync waits for your consent.
+
 ## [1.12.14] - 2026-11-05
 
 mm prices Grok 4.7 Fast, flat effort and Fast model ids, and prices grok-4.7-build as grok-4.7.

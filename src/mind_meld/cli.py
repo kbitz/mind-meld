@@ -3769,10 +3769,10 @@ def migrate_config(
     Compares each user-configured source against the matching DEFAULT_SOURCES
     entry and proposes adding any missing recommended exclude globs, plus a
     recommended `include_patterns` allowlist when the key is absent or still
-    holds a previous default list. Also removes a
-    leftover ``grok`` or ``opencode`` source blocks and records their
-    names in ``disabled_sources``. These sources have already stopped syncing.
-    Idempotent — re-running on a fully-migrated
+    holds a previous default list. Also removes a leftover ``opencode`` source
+    block and records its name in ``disabled_sources`` (that source has stopped
+    syncing); a ``grok`` block is kept because Grok Build is a supported source
+    again. Idempotent — re-running on a fully-migrated
     config exits with "already up to date".
 
     Acquires the mm lockfile so a concurrent push/pull can't read a half-
