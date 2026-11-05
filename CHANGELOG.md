@@ -2,6 +2,19 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.16] - 2026-11-05
+
+mm captures Grok Build usage when you consent, and a usage scan honors its deadline and cache boundaries.
+
+### Added
+
+- mm captures Grok Build usage when you consent.
+
+### Fixed
+
+- A Grok usage scan checks its deadline while it lists directories.
+- A Grok usage failure stays inside its cache boundary.
+
 ## [1.12.15] - 2026-11-05
 
 mm restores opt-in sync of Grok customizations, and that sync runs only after you consent.
