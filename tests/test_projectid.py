@@ -5319,6 +5319,34 @@ def test_status_shows_each_peer_applied_after_a_pull(mac, linux):
     assert "not pulled here yet" not in after.output
 
 
+def test_first_pull_stays_applied_when_local_decode_bookkeeping_changes(tmp_path, store, mac):
+    twin = Machine(tmp_path, store, "twin", "/Users/kb", "dddddddd")
+    mac.memory("-Users-kb-scratch", "note.md", "same home\n")
+    mac.push()
+    with twin.on():
+        base_path = projectid.index().claude_real
+    mac.edit_published(lambda data: data["sources"]["claude"].update(base_path=base_path))
+    assert not (twin.claude / "projects").exists()
+
+    with twin.on():
+        before = core._fetch_remote_manifest(
+            LocalBackend(store), mac.device_id, PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert before["sources"]["claude"].get("moved_folders")
+    result = twin.pull()
+    assert result.total_written == 1 and result.total_failed == 0
+    with twin.on():
+        after = core._fetch_remote_manifest(
+            LocalBackend(store), mac.device_id, PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert "moved_folders" not in after["sources"]["claude"]
+    assert before["sources"]["claude"]["files"] == after["sources"]["claude"]["files"]
+    status = twin.cli("status")
+    assert status.exit_code == 0, status.output
+    assert "applied here" in status.output
+    assert "not pulled here yet" not in status.output
+
+
 def test_attended_pull_waiting_count_shows_in_status(mac, linux, tmp_path):
     linux.memory("-home-kb-scratch", "local.md", "l\n")
     linux.push()

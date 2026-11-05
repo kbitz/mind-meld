@@ -448,7 +448,7 @@ def _peer_states(
         applied_us = cursor[0] if cursor is not None else None
         seen_us = cursor[1] if cursor is not None else None
         waiting_count = int(cursor[2]) if cursor is not None else 0
-        identity = core._manifest_content_hash(manifest_dict)
+        identity = core._manifest_cursor_hash(manifest_dict)
         applied_hashes = cursor[3:5] if cursor is not None else ()
         seen_hash = cursor[5] if cursor is not None and len(cursor) > 5 else None
 
@@ -2164,6 +2164,7 @@ def _syncthing_diag(storage_path: Path) -> dict[str, Any]:
             "folder_state": st.folder_state,
             "files_to_fetch": st.files_to_fetch,
             "bytes_to_fetch": st.bytes_to_fetch,
+            "pull_errors": st.pull_errors,
             "connected_peers": st.connected_peers,
             "total_peers": st.total_peers,
             "options": dict(st.options),
@@ -2219,6 +2220,8 @@ def _print_syncthing_diag(st: dict[str, Any]) -> None:
         console.print(
             f"  folder state:            {safe_str(safety.safe_terminal_str(f'{fstate}{extra}'))}"
         )
+    if st.get("pull_errors"):
+        console.print(f"  pull errors:             {st['pull_errors']}")
     conn = st.get("connected_peers")
     total = st.get("total_peers")
     if total is not None:

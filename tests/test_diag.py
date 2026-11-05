@@ -2554,6 +2554,20 @@ def test_status_preserves_syncthing_folder_state_and_reports_pull_errors(
     assert f"Syncthing: connected 0 of 1 devices (mac-b disconnected); {expected}" in flat
 
 
+def test_syncthing_pull_errors_remain_visible_in_the_diagnostic_remedy(
+    tmp_path, monkeypatch, fake_syncthing
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    fake_syncthing.set_folder(storage, state="idle", need_files=0, pull_errors=1)
+
+    structured = runner.invoke(app, ["diag", "--json"])
+    assert structured.exit_code == 0, structured.output
+    assert json.loads(structured.stdout)["syncthing"]["pull_errors"] == 1
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    assert "pull errors: 1" in " ".join(plain.output.split())
+
+
 @pytest.mark.parametrize("mode", ["missing", "refused", "held"])
 def test_missing_or_unreachable_syncthing_is_reported_not_an_error(
     tmp_path, monkeypatch, fake_syncthing, mode

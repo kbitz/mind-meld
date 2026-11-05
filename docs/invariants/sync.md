@@ -1759,6 +1759,8 @@ Needed files do not imply active syncing: status preserves the reported folder
 state (or paused), appends the needed count independently, and reports positive
 pull errors with `mm diag` as the fixing command. Only idle with known zero
 needed files and zero pull errors is rendered as "up to date".
+Diagnostics retain `pull_errors` (including unknown/null in JSON) and show
+positive counts in plain text.
 
 **Adopted `cursors` table and pull recording.** Migration 3 in `statedb.py` drops
 and recreates `cursors(peer TEXT NOT NULL PRIMARY KEY, applied INTEGER, seen
@@ -1781,9 +1783,12 @@ interruption is None and source_filter is None and ledger_exc is None`,
 It writes `applied = ts_us` when that peer had zero
 `waiting` and zero `failed` files across its sources (`seen = ts_us, waiting = 0`),
 or retains the previous applied evidence when any file waited or failed.
-`core._manifest_content_hash` identifies canonical JSON of the effective merged
+`core._manifest_cursor_hash` identifies canonical JSON of the effective merged
 manifest before consumer filters; it is saved as `seen_hash` and, on completion,
-`applied_hash`. `ManifestFetch.canonical_hash` captures the separately decrypted
+`applied_hash`. It excludes only the local, transient Claude `moved_folders`
+bookkeeping; decoded file placement remains part of identity. The shared
+canonical hash encoder handles accepted surrogateescaped strings without
+changing ordinary Unicode hashes. `ManifestFetch.canonical_hash` captures the separately decrypted
 canonical copy from that same read, before unioning conflict copies, and is
 saved as `applied_canonical_hash` on completion. This second proven identity
 keeps status applied after pull removes conflict copies without rewriting the

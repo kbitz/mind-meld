@@ -3904,7 +3904,7 @@ def _pull_core(
         # The canonical alternative is from the same read, not a later reread
         # that could accidentally certify a publication this pull never applied.
         manifest_hashes = {
-            did: (core._manifest_content_hash(m), canonical_hashes.get(did))
+            did: (core._manifest_cursor_hash(m), canonical_hashes.get(did))
             for did, m in manifest_cache.items()
             if isinstance(m, dict)
         }

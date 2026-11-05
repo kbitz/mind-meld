@@ -3455,6 +3455,19 @@ def _cursors() -> dict[str, statedb.CursorRow]:
         return statedb.read_cursors(conn)
 
 
+def test_canonical_manifest_with_surrogate_metadata_remains_readable(fleet, monkeypatch):
+    peer, _ = _seed(fleet, {"note.md": b"peer content\n"})
+    peer["device_name"] = "Peer \udcff"
+    _republish(fleet, peer)
+
+    fetched = core._fetch_remote_manifest(fleet.backend, PEER, PASSPHRASE, MEMORY_KB)
+    assert fetched.is_ok
+    assert fetched.manifest["device_name"] == peer["device_name"]
+    result, _, _ = _run(fleet, monkeypatch, "attended")
+    assert result.total_written == 1 and result.total_failed == 0
+    assert (fleet.local / "note.md").read_bytes() == b"peer content\n"
+
+
 def test_late_older_manifest_copy_invalidates_applied_then_cleanup_stays_applied(
     fleet, monkeypatch
 ):

@@ -517,7 +517,7 @@ def _fetch_remote_manifest(
             plain = decrypt_manifest(enc_data, passphrase, memory_kb)
             canonical = load_manifest(plain)
             manifests.append(canonical)
-            canonical_hash = _manifest_content_hash(canonical)
+            canonical_hash = _manifest_cursor_hash(canonical)
         except StorageNotFound:
             canonical_vanished = True
         except NewerFormatError as exc:
@@ -1102,13 +1102,32 @@ def _retain_prior_default_sources(
 def _manifest_content_hash(manifest: dict) -> str:
     """Stable SHA-256 of a manifest's canonical JSON.
 
-    Used for peer cursor identity and as the deterministic tiebreaker in
-    `_merge_manifests` when conflict copies carry identical timestamps. Canonical JSON
+    Used as the deterministic tiebreaker in `_merge_manifests` when
+    conflict copies carry identical timestamps. Canonical JSON
     means sorted keys + no ASCII escaping, so the hash is stable across
     any platform that implements the same JSON serializer contract.
+    Surrogate pass preserves accepted POSIX filename strings without changing
+    the hash of ordinary Unicode text; these bytes are only hashed, never stored.
     """
-    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode(
+        "utf-8", errors="surrogatepass"
+    )
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _manifest_cursor_hash(manifest: dict) -> str:
+    """Identify decoded content and placement, excluding transient move bookkeeping."""
+    sources = manifest.get("sources", {})
+    claude = sources.get("claude")
+    if isinstance(claude, dict) and "moved_folders" in claude:
+        manifest = {
+            **manifest,
+            "sources": {
+                **sources,
+                "claude": {k: v for k, v in claude.items() if k != "moved_folders"},
+            },
+        }
+    return _manifest_content_hash(manifest)
 
 
 def _merge_manifests(manifests: list[dict]) -> dict:
