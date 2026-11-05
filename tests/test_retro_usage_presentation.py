@@ -450,7 +450,7 @@ def test_cursor_fast_only_prices_at_fast_floor(cursor_store):
     assert "Grok's logs do not record" not in out
 
 
-def test_cursor_mixed_fast_prices_only_standard_subtotal(cursor_store):
+def test_cursor_mixed_fast_floor_includes_fast_and_standard_cost(cursor_store):
     _, _, data, out = cursor_capture_view(cursor_store, "mixed-fast")
     grok = row(data, "grok")
     assert grok.tokens == 30_871_121
@@ -479,6 +479,17 @@ def test_long_context_cause_distinguishes_cursor_grok_variants_from_grok_build()
     assert build_cause is not None
     assert "Grok's logs do not record per-request prompt sizes" in build_cause
     assert "Per-turn totals cannot recover" not in build_cause
+
+
+def test_long_context_cause_lead_follows_only_models_with_a_detail():
+    bucket = {"input": 100_000, "cache_create": 0, "cache_read": 0, "output": 0}
+    zero = {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
+    cause = agg._long_context_cause(
+        {"grok-4.6-build": dict(bucket), "grok-4.7-fast": dict(zero)}, incomplete=False
+    )
+    assert cause is not None
+    assert cause.startswith("Grok's logs do not record per-request prompt sizes")
+    assert "grok-4.7-fast" not in cause
 
 
 def test_cursor_cache_write_is_visible_partial_not_suppressed(cursor_store):

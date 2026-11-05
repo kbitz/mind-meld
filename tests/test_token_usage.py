@@ -2636,7 +2636,7 @@ def test_floor_cards_bound_every_nonnegative_usage(model):
     assert tu.floor_prices("unknown") is None
 
 
-def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
+def test_cursor_standard_and_fast_rate_cards67a_109b():
     from mind_meld import token_usage as tu
 
     assert tu.PRICING_FAMILY_BY_MODEL["grok-4.7"] == "grok-4.7"

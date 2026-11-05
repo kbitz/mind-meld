@@ -25,8 +25,9 @@ turn belongs to endedAt's UTC date, even if it started before midnight.
 Never observed in the initial 2026-09-23 census (and still absent in local stores on 2026-11-05):
 fast=true; flat `grok-4.7-(low|medium|high|xhigh)(-fast)` ids in Conductor stores;
 composer-2.5/auto; nonzero cacheWriteTokens; non-null usageRef; a midnight-spanning turn.
-Peer Mac `3a6c7dc9` has since published `grok-4.7` Cursor usage (see the 2026-11-05 census below);
-the Fast and flat-id notice lines came from an external run, not this Mac's persisted stores.
+Peer Mac `3a6c7dc9` has since published `grok-4.7` Cursor usage (see the 2026-11-05 census below).
+No local store, cache, spool or peer snapshot on 2026-11-05 holds the flat ids whose
+"unknown model in pricing" notices prompted Track 109B; their source is unattributed.
 Observed later (2026-10-03, structure only): 10 `cancelled`, 1 `error` and
 1 `queued` row across 7 of 16 run files, every one with null usage and no
 usageRef. They contribute nothing; counters or a usageRef on them refuse.

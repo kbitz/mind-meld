@@ -3766,6 +3766,7 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
     reader to a model, so any such reader suppresses every at-most figure.
     """
     models: list[str] = []
+    detailed: list[str] = []
     for model, usage in sorted(by_model.items()):
         long_card = token_usage.resolve_long_context_prices(model)
         if long_card is None or token_usage.sum_bucket(usage) <= 0:
@@ -3785,12 +3786,13 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
             " for this model's recorded tokens, in token charges; server-side tool fees excluded"
         )
         models.append(detail)
+        detailed.append(model)
     if not models:
         return None
     # grok-4.6-build stays a Grok Build log limit. Every Grok 4.7 id (Fast,
     # effort and -build included) has uncertainty from the per-request tier a
     # per-turn aggregate cannot recover.
-    if any(model in token_usage.GROK_47_MODEL_IDS for model in by_model):
+    if any(model in token_usage.GROK_47_MODEL_IDS for model in detailed):
         lead = (
             "Per-turn totals cannot recover the per-request context tier; no action resolves this ("
         )

@@ -872,8 +872,9 @@ as the unpriced `cursor-unknown` (host family `other`) rather than dropped.
 Ambiguous bare Grok model IDs (explicit `--model grok-4.7` or a current model
 without a fast parameter) are recorded as the unpriced
 `grok-4.7-unspecified`; known flat CLI aliases identify standard versus Fast
-without inventing a Fast rate. The wrapper reads argv verbatim
-(`_RawArgsCommand`): Click drops a literal `--`, and losing it would turn prompt
+and normalize to `grok-4.7` or `grok-4.7-fast`, each priced on its own card.
+The wrapper reads argv verbatim (`_RawArgsCommand`): Click drops a literal
+`--`, and losing it would turn prompt
 text into live Cursor options. Without consent, or outside print mode, it is a
 pure passthrough with no output rewriting. It relays SIGTERM/SIGHUP to the
 child, and SIGINT too unless it runs in the terminal's foreground process
