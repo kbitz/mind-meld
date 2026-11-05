@@ -12,6 +12,11 @@
 > supports. Standalone Grok Build support is being removed, Muse gets its own
 > `muse` family, and Grok models used through Cursor stay in the Grok row. The
 > matrix below is historical where it disagrees.
+>
+> **Grok Build restored (2026-11-05):** the owner brought Grok Build back at
+> parity with Claude Code and Codex; see
+> [Grok Build parity](#grok-build-parity-2026-11-05) below and docs/SPEC.md's
+> table.
 
 ## Outcome
 
@@ -298,3 +303,21 @@ nested family), while the `muse` reader/token-source name is a MINOR.
 contract rewrite adds the family. No AGENT_ROWS entry: Muse discovers
 `~/.claude/skills` (the Plan C exit criterion), verified with
 `muse skills list --source user --json` resolving user skills there.
+
+## Grok Build parity (2026-11-05)
+
+The owner, 2026-11-05: "go, it needs to bring grok to parity w/ the other
+models". Grok Build now runs through Paseo's `grok` provider (ACP) on the same
+subscription as Cursor, which meets the revisit trigger of the 2026-10-19
+removal. Each row of docs/SPEC.md's table, compared with Claude Code and
+Codex, on Grok Build 1.0.70 (this Mac, 2026-11-05):
+
+| Row | Claude Code / Codex | Grok Build |
+|---|---|---|
+| Usage | Local session logs (Claude) and rollouts (Codex), source-gated | Local session records under `~/.grok/sessions/<cwd>/<session>/`: `updates.jsonl` carries one `turn_completed` record with usage per turn, and `usage.json` holds session totals, per-model `modelUsage` and per-turn rows with `endedAt`. Runs through Paseo write them too, unlike Cursor's ACP runs. Paseo also leaves empty sessions (a two-line `updates.jsonl`, no usage) that read as zero. Consent is `mm enable-source grok`, as for Codex. Tokens are priced at list rates like every other host; Grok's own `costUsdTicks` is subscription accounting and is not published. |
+| Customizations | Codex: `skills/`, `plugins/`, `AGENTS.md` | `skills/`, `commands/`, `rules/` (Grok's home rules play the part of Codex's `AGENTS.md`); the walker is hardcoded as Track 22B shipped it. Plugins and hooks stay local: Grok trusts `~/.grok/plugins/` automatically and hooks may embed tokens, and none exist on the owner's machines. |
+| Memory | Claude: project memory and `todos/`, a project keyed by its git remote | `memory-v2/global/` and `memory-v2/workspaces/<project>-<hash>/`: each scope's `topics/` and `observations/_inbox/`. The generated `MEMORY.md`, SQLite stores, search index and `archive/` stay local. Whether the `<hash>` names the same repository on every machine is not yet known; if it does not, workspace memory is mapped by git remote as Claude's is. |
+| Skill link | Claude and Codex links | None: Grok reads `~/.claude/skills` (Plan C still holds). |
+| Settings | Whole-file settings stay local | `config.toml`, `auth.json`, `trusted_folders.toml` and the rest of the home root stay local. |
+| Sessions snapshot | Claude only | None, as for Codex. |
+
