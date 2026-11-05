@@ -2636,10 +2636,11 @@ def test_floor_cards_bound_every_nonnegative_usage(model):
     assert tu.floor_prices("unknown") is None
 
 
-def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
+def test_cursor_standard_and_fast_rate_cards67a_109b():
     from mind_meld import token_usage as tu
 
     assert tu.PRICING_FAMILY_BY_MODEL["grok-4.7"] == "grok-4.7"
+    assert tu.PRICING_FAMILY_BY_MODEL["grok-4.7-fast"] == "grok-4.7-fast"
     assert tu.resolve_prices("grok-4.7") == {
         "input": 2.0,
         "cache_read": 0.5,
@@ -2652,12 +2653,127 @@ def test_cursor_standard_rate_and_deliberately_unpriced_fast67a():
         "cache_create": 0.0,
         "output": 12.0,
     }
+    assert tu.resolve_prices("grok-4.7-fast") == {
+        "input": 4.0,
+        "cache_read": 1.0,
+        "cache_create": 0.0,
+        "output": 12.0,
+    }
+    assert tu.resolve_long_context_prices("grok-4.7-fast") == {
+        "input": 6.0,
+        "cache_read": 1.5,
+        "cache_create": 0.0,
+        "output": 18.0,
+    }
     assert "grok-4.7" in tu.VERIFIED_MODEL_IDS
-    assert tu.resolve_prices("grok-4.7-fast") is None
-    assert "grok-4.7-fast" not in tu.VERIFIED_MODEL_IDS
-    assert "grok-4.7-fast" not in tu.PRICING_FAMILY_BY_MODEL
-    assert tu.PRICING_CURSOR_LAST_UPDATED == "2026-09-23"
-    assert tu.PRICING_XAI_LAST_UPDATED == date(2026, 9, 10).isoformat()  # retained xAI date
+    assert "grok-4.7-fast" in tu.VERIFIED_MODEL_IDS
+    assert tu.PRICING_CURSOR_LAST_UPDATED == "2026-11-05"
+    assert tu.PRICING_XAI_LAST_UPDATED == date(2026, 11, 5).isoformat()
+
+
+_GROK_47_STD_CARD = {"input": 2.0, "cache_read": 0.5, "cache_create": 0.0, "output": 6.0}
+_GROK_47_STD_LONG = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
+_GROK_47_FAST_CARD = {"input": 4.0, "cache_read": 1.0, "cache_create": 0.0, "output": 12.0}
+_GROK_47_FAST_LONG = {"input": 6.0, "cache_read": 1.5, "cache_create": 0.0, "output": 18.0}
+
+
+@pytest.mark.parametrize(
+    "model,family,base_card,long_card",
+    [
+        ("grok-4.7", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-fast", "grok-4.7-fast", _GROK_47_FAST_CARD, _GROK_47_FAST_LONG),
+        ("grok-4.7-low", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-medium", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-high", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        ("grok-4.7-xhigh", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+        (
+            "grok-4.7-low-fast",
+            "grok-4.7-fast",
+            _GROK_47_FAST_CARD,
+            _GROK_47_FAST_LONG,
+        ),
+        (
+            "grok-4.7-medium-fast",
+            "grok-4.7-fast",
+            _GROK_47_FAST_CARD,
+            _GROK_47_FAST_LONG,
+        ),
+        (
+            "grok-4.7-high-fast",
+            "grok-4.7-fast",
+            _GROK_47_FAST_CARD,
+            _GROK_47_FAST_LONG,
+        ),
+        (
+            "grok-4.7-xhigh-fast",
+            "grok-4.7-fast",
+            _GROK_47_FAST_CARD,
+            _GROK_47_FAST_LONG,
+        ),
+        ("grok-4.7-build", "grok-4.7", _GROK_47_STD_CARD, _GROK_47_STD_LONG),
+    ],
+)
+def test_grok_47_effort_fast_and_build_cards_and_aliases109b(model, family, base_card, long_card):
+    assert tu.PRICING_FAMILY_BY_MODEL[model] == family
+    assert tu.resolve_prices(model) == base_card
+    assert tu.resolve_long_context_prices(model) == long_card
+    assert model in tu.VERIFIED_MODEL_IDS
+    assert tu.is_verified_model(model)
+    assert model in tu.GROK_47_MODEL_IDS
+    assert tu._builtin_verified_date(model) == tu.PRICING_CURSOR_LAST_UPDATED
+
+
+def test_grok_47_fast_multipliers_match_published_2x_and_3x109b():
+    base = tu.resolve_prices("grok-4.7")
+    fast = tu.resolve_prices("grok-4.7-fast")
+    fast_long = tu.resolve_long_context_prices("grok-4.7-fast")
+    assert base is not None and fast is not None and fast_long is not None
+    for field in tu.TOKEN_FIELDS:
+        assert fast[field] == pytest.approx(2.0 * base[field])
+        assert fast_long[field] == pytest.approx(3.0 * base[field])
+
+
+def test_grok_47_variants_and_build_emit_no_unknown_model_notice109b(capsys):
+    from mind_meld import events_tail
+
+    models = tuple(sorted(tu.GROK_47_MODEL_IDS))
+    usage = {"input": 100_000, "cache_create": 0, "cache_read": 50_000, "output": 10_000}
+    by_model = {m: dict(usage) for m in models}
+    for m in models:
+        tu._WARNED_UNKNOWN_MODELS.discard(m)
+    total, per_model = tu.estimate_cost(by_model)
+    captured = capsys.readouterr()
+    assert "unknown model in pricing" not in captured.err
+    assert set(per_model) == set(models)
+    assert all(cost > 0 for cost in per_model.values())
+    assert total == pytest.approx(sum(per_model.values()))
+
+    notices = []
+    for m in models:
+        tu._WARNED_UNKNOWN_MODELS.discard(m)
+    with events_tail.diagnostic_scope(lambda msg, deg: notices.append((msg, deg))):
+        scoped_total, scoped_per_model = tu.estimate_cost(by_model)
+    assert notices == []
+    assert capsys.readouterr().err == ""
+    assert scoped_per_model == per_model
+    assert scoped_total == pytest.approx(total)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "GROK-4.7-FAST",
+        "x-grok-4.7-fast",
+        "grok-4.7-fast-high",
+        "grok-4.7-ultra",
+        "grok-4.7-unspecified",
+        "grok-4.7-build-fast",
+    ],
+)
+def test_grok_47_name_traps_stay_unpriced109b(model):
+    assert tu.resolve_prices(model) is None
+    assert tu.resolve_long_context_prices(model) is None
+    assert model not in tu.VERIFIED_MODEL_IDS
 
 
 def test_sync78_pricing_and_oversize_notices_follow_diagnostic_scope(monkeypatch, capsys):

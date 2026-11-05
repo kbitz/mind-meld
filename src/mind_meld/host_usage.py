@@ -643,8 +643,8 @@ def _cursor_run(row: Any) -> tuple[str, dict[str, Any] | None]:
     fast = [p.get("value") for p in params if isinstance(p, dict) and p.get("id") == "fast"]
     if len(fast) > 1 or (fast and fast[0] not in ("true", "false")):
         raise _ReadFailure("unsupported")
-    # Only the observed normalized Grok id receives this deliberate, UNPRICED
-    # pseudo-id. No params axis or new verified rate is implied.
+    # Only the observed normalized Grok id is refined by its fast param. Fast
+    # becomes the ``grok-4.7-fast`` pseudo-id, priced on its own card (109B).
     if model_id == "grok-4.7":
         if not fast:
             raise _ReadFailure("unsupported")

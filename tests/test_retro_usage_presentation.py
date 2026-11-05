@@ -432,30 +432,64 @@ def cursor_capture_view(cursor_store, mode):
     return capture, rows[0], data, agg.format_retro(data)
 
 
-def test_cursor_fast_only_preserves_tokens_but_has_no_price(cursor_store):
+def test_cursor_fast_only_prices_at_fast_floor(cursor_store):
     capture, published, data, out = cursor_capture_view(cursor_store, "fast-only")
     assert capture.complete
     assert published["token_sources"] == ["cursor"]
     assert published["counter_semantics"] == "disjoint-v1"
-    assert row(data, "grok").counters_known
-    assert row(data, "grok").tokens == 25_891_771
-    assert agg._agent_row_cost(row(data, "grok")) == (None, False)
-    assert entry(out, "cost_unavailable")
-    assert "—" in out
+    grok = row(data, "grok")
+    assert grok.counters_known
+    assert grok.tokens == 25_891_771
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor
+    assert abs(total - (13_345_729 * 4 + 12_505_856 * 1 + 40_186 * 12) / 1_000_000) < 1e-9
+    assert entry(out, "cost_floor")
+    assert "≥" in out
+    assert "grok-4.7-fast" in out
+    assert "per-request context tier" in out
+    assert "Grok's logs do not record" not in out
 
 
-def test_cursor_mixed_fast_prices_only_standard_subtotal(cursor_store):
+def test_cursor_mixed_fast_floor_includes_fast_and_standard_cost(cursor_store):
     _, _, data, out = cursor_capture_view(cursor_store, "mixed-fast")
     grok = row(data, "grok")
     assert grok.tokens == 30_871_121
     total, is_floor = agg._agent_row_cost(grok)
     assert is_floor
-    assert abs(total - (2_618_647 * 2 + 2_343_424 * 0.5 + 17_279 * 6) / 1_000_000) < 1e-9
+    expected = (
+        (13_345_729 * 4 + 12_505_856 * 1 + 40_186 * 12)
+        + (2_618_647 * 2 + 2_343_424 * 0.5 + 17_279 * 6)
+    ) / 1_000_000
+    assert abs(total - expected) < 1e-9
     assert entry(out, "cost_floor")
     assert "≥" in out
     assert "grok-4.7-fast" in out
     assert "Grok's logs do not record" not in out
     assert "per-request context tier" in out
+
+
+def test_long_context_cause_distinguishes_cursor_grok_variants_from_grok_build():
+    bucket = {"input": 100_000, "cache_create": 0, "cache_read": 0, "output": 0}
+    cursor_cause = agg._long_context_cause({"grok-4.7-xhigh-fast": dict(bucket)}, incomplete=False)
+    assert cursor_cause is not None
+    assert "Per-turn totals cannot recover the per-request context tier" in cursor_cause
+    assert "Grok's logs do not record" not in cursor_cause
+
+    build_cause = agg._long_context_cause({"grok-4.6-build": dict(bucket)}, incomplete=False)
+    assert build_cause is not None
+    assert "Grok's logs do not record per-request prompt sizes" in build_cause
+    assert "Per-turn totals cannot recover" not in build_cause
+
+
+def test_long_context_cause_lead_follows_only_models_with_a_detail():
+    bucket = {"input": 100_000, "cache_create": 0, "cache_read": 0, "output": 0}
+    zero = {"input": 0, "cache_create": 0, "cache_read": 0, "output": 0}
+    cause = agg._long_context_cause(
+        {"grok-4.6-build": dict(bucket), "grok-4.7-fast": dict(zero)}, incomplete=False
+    )
+    assert cause is not None
+    assert cause.startswith("Grok's logs do not record per-request prompt sizes")
+    assert "grok-4.7-fast" not in cause
 
 
 def test_cursor_cache_write_is_visible_partial_not_suppressed(cursor_store):

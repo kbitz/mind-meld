@@ -2,6 +2,20 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.14] - 2026-11-05
+
+mm prices Grok 4.7 Fast, flat effort and Fast model ids, and prices grok-4.7-build as grok-4.7.
+
+### Added
+
+- mm prices Grok 4.7 Fast, flat effort and Fast model ids.
+- grok-4.7-build is priced as grok-4.7.
+
+### Fixed
+
+- The Grok cause lead comes from priced models only, so the named cause is a model with a price.
+- Fast wording matches the current Grok 4.7 model names.
+
 ## [1.12.13] - 2026-11-04
 
 mm shows Syncthing state and each peer's push progress, and a Syncthing reply can no longer stall that check.
