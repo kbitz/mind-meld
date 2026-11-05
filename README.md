@@ -682,7 +682,7 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Grok Build
 
-`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, and `rules/` only, and records consent for Grok usage capture (`grok_usage_consented`). Sessions, `memory-v2/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, or `rules/` exists; `mm init` and `mm reconfigure-sources` ask with a default of N, and `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
+`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, and `rules/` only, and records consent for Grok usage capture (`grok_usage_consented`). Sessions, `memory-v2/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, or `rules/` exists; `mm init` asks with a default of N, and `mm reconfigure-sources` defaults to N unless an explicit Grok source is already enabled. `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
 
 ### Muse
 
@@ -1764,7 +1764,7 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
 Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build is retired, but Grok models used through Cursor remain supported and priceable.
+**Why is my Grok machine always `>=`?** Grok's logs do not record per-request prompt sizes; no action resolves this. Requests reaching 200k prompt tokens pay twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Standalone Grok Build usage capture remains unavailable, but Grok models used through Cursor remain supported and priceable.
 
 **Why grok-4.6 rates, not grok-build-0.1?** xAI's Build overview identifies grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 

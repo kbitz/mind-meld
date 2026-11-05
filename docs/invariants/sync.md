@@ -1375,7 +1375,8 @@ has its own walker shape (`skills/`, `commands/`, and `rules/` hardcoded at
 `~/.grok`, refusing child links, hard links and every other path under `~/.grok`,
 with `GROK_EXCLUDE_PATTERNS` applied on push and pull) and never auto-activates:
 neither a legacy config without explicit `[[sync.sources]]` nor `_retain_prior_default_sources`
-re-selects it, and both `mm init` and `mm reconfigure-sources` default it to N.
+re-selects it. `mm init` defaults it to N; `mm reconfigure-sources` defaults it
+to N unless an explicit Grok source is already enabled.
 Only `mm enable-source grok` (which also clears `"grok"` from `disabled_sources`),
 or an explicit "y" at `mm init` / `mm reconfigure-sources`, or a pre-v1.11.8
 config that still carries an enabled `grok` block selects file sync.
@@ -1393,7 +1394,7 @@ at `~/.local/share/muse`, `.muse-memory.lock` excluded on push and pull) but
 never auto-activates: Muse creates `memory/` itself on first run, so neither
 the data root nor that tree is consent. Only `mm enable-source muse`, or an
 explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it.
-Both `grok` and `muse` prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+For new enrollment, both `grok` and `muse` prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).
@@ -1444,7 +1445,7 @@ The `_prompt_source_toggle(source, *, current_state)` helper (extracted from
 `_prompt_sources` in v0.10.0) is the single source of truth for the per-source
 Y/N prompt copy + default rule. `_prompt_sources` (init) and
 `reconfigure_sources` both call it; `mm init`'s default-Y-on-path-exists
-behavior is preserved, except that Muse always defaults to N (see above).
+behavior is preserved, except that Grok and Muse always default to N (see above).
 
 **`has_explicit_sources` gates on key presence, not list truthiness (Track 61A
 pre-landing review).** `enable_source`'s `currently_active` check and
