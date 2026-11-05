@@ -44,6 +44,37 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok usage file size boundaries
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No demonstrated defect; the oversized-file and growth-during-read guards lack direct tests.
+- **Hypothesis (untested):** Extend the Grok reader tests with oversized metadata and bounded growth; assert malformed without partial publication.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/hosts/grok.py
+- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
+- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok filesystem failure boundaries
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No demonstrated defect; filesystem error branches and replacement before open lack direct tests.
+- **Hypothesis (untested):** Inject filesystem failures and replacement before open at the reader boundary; assert io_error or stale and no partial result.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/hosts/grok.py
+- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
+- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
+- **Effort:** ? (user triages in /roadmap)
+
+### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: Grok diagnostic unknown-state branches
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
+- **Description:** No demonstrated defect; Grok-specific unreadable config/cache text and deadline inventory refresh lack direct tests.
+- **Hypothesis (untested):** Extend the diagnostic matrix to verify unknown evidence cannot report readiness and deadline inventory refresh is current.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** src/mind_meld/statusflow.py
+- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
+- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
+- **Effort:** ? (user triages in /roadmap)
+
+
 ### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: nested Grok conflict-directory symlink
 - **Test gap:** no demonstrated defect; filed under `test-gaps=record`
 - **Description:** Grok conflict discovery tests linked top-level roots, but not a directory link nested inside a real `skills/` directory.
