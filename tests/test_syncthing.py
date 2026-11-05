@@ -219,7 +219,7 @@ def test_reads_peers_folder_state_and_options_with_get_only(fake_syncthing):
     ]
     for _, _, headers in fake_syncthing.requests:
         header_val = headers.get("X-API-Key") or headers.get("x-api-key")
-        assert header_val == fake_syncthing.credential
+        assert header_val == fake_syncthing.gui_auth
 
     assert fake_syncthing.config_path.read_bytes() == before_bytes
     assert fake_syncthing.config_path.stat().st_mtime_ns == before_mtime
@@ -256,7 +256,7 @@ def test_refused_and_held_requests_are_unreachable_within_the_budget(fake_syncth
 
 
 def test_rejected_credential_is_unauthorized(fake_syncthing):
-    fake_syncthing.write_config(credential="wrong-credential")
+    fake_syncthing.write_config(gui_auth="wrong-credential")
     state = syncthing.read_state(fake_syncthing.storage_path, stignore_line=initflow.STIGNORE_LINE)
     assert state.state == "unauthorized"
     assert state.cause == "http-403"
@@ -425,7 +425,7 @@ def test_every_request_is_a_get():
 
 def test_credential_never_reaches_the_state(fake_syncthing):
     state = syncthing.read_state(fake_syncthing.storage_path, stignore_line=initflow.STIGNORE_LINE)
-    cred = fake_syncthing.credential
+    cred = fake_syncthing.gui_auth
     assert cred not in repr(state)
     for f in dataclasses.fields(state):
         assert cred not in repr(getattr(state, f.name))
