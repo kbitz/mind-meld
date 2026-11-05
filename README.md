@@ -561,6 +561,21 @@ After the first successful `mm push` on Mac A, open Mac B and `mm pull`, then co
 
 First-run-from-divergent-state is explicitly supported: if each Mac already has its own memory/todos/analytics before you first run `mm init`, the three-way sync will merge the JSONLs, download missing files, and flag any true content conflicts as `.sync-conflict-*` for you to triage with `mm resolve`.
 
+### Syncthing folder options
+
+Share the storage folder's root (by default `~/Sync/mind-meld`), not a parent or child directory. Set the Syncthing folder on every machine to the folder options from `store-v2` §10:
+
+- **`type = sendreceive`** — every machine both sends and receives fleet files.
+- **`versioning = none`** — mm keeps its own conflict and deleted-file copies; Syncthing's `.stversions` duplicates encrypted blobs without context.
+- **`maxConflicts != 0`** (keep Syncthing's default `-1` or any positive count, never `0`) — `0` deletes losing conflict copies silently, which can discard a manifest or device update before mm can read it.
+- **`ignorePerms = false`** — mode `0600` on synced files must survive.
+- **`order = alphabetic`** — blobs under `data/` arrive before the `manifests/` that name them, reducing waiting pulls.
+- **`.stignore` contains `(?d)tmp*.tmp`** — `mm init --new-fleet` writes `.stignore` on the first machine; add `(?d)tmp*.tmp` to `.stignore` by hand in the synced folder on every other machine, because Syncthing does not sync `.stignore` itself.
+
+mm discovers Syncthing's local `config.xml`, reads its local REST API with the API key from that file, sends only `GET` requests with short timeouts, and never changes Syncthing's configuration. `mm status` shows the Syncthing connection and folder state, and `mm diag` checks each folder option above and `.stignore`. Inspection prefers a folder matching the storage root; for an existing parent-folder share, it reports and checks the deepest containing folder and that folder's `.stignore`.
+
+Status reports Syncthing's folder state and needed-file count independently: queued files do not mean it is actively syncing. It says `up to date` only when the folder is idle and both needed files and pull errors are known to be zero. Positive pull-error counts direct you to `mm diag`, which also displays the count; `mm diag --json` retains an unknown count as `syncthing.pull_errors: null`.
+
 ## Project memory across machines
 
 Clone a project anywhere. mm finds your checkout from the folder names Claude created
@@ -727,8 +742,8 @@ This makes every agent feed the same gstack and `mm-events` history used by `ret
 | `mm pull` | Pull context; one final outcome. Add `--verbose` for scan and per-source detail (and the peer edits held back as `older`). Applies a peer's edit to a file you have not changed, and deletes what a peer deleted when your copy is byte-identical to the version it deleted, keeping a recovery copy ([details](#recovering-a-deleted-file)) |
 | `mm pull --conflict-mode prompt` | Pick a winner per-file at pull time instead of auto keep-both |
 | `mm pull --conflict-mode fail` | Exit 3 before applying any file if conflicts or local failures are predicted (planned deletions are not refusals). Write-free CI gate: `mm pull --dry-run --conflict-mode fail` (0 no conflicts predicted; 1 stopped; 3 conflicts/failures predicted) |
-| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then the latest auto or attended run per verb and current diagnostics. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
-| `mm diag` | Dump non-secret crypto, sync, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
+| `mm status` | Open with a scoped verdict comparing local context with this device's last push, then show Syncthing state, each peer's last push and applied state, the latest auto or attended run per verb, and current diagnostics. Peer pushes overdue by more than 24 h warn in every mode. See [Status verdicts](#status-verdicts). Broken skill links and current capture facts remain separate. |
+| `mm diag` | Dump non-secret crypto, sync, Syncthing, breadcrumb, `keyring` state, `retro-fleet` skill-link state, host-usage reader state (`host_usage`), git-root `discovery`, and recorded-vs-fresh `git_capture` for triage. Runs without a passphrase, and without a valid config. `--json` for machine-readable output. Top-level keys: `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, `git_capture`. `fast_forward` is read-only: `{ledger, peer_base_rows, seen_version_rows, anchors, observations}` (the pull ledger's state, its row counts per peer, each scan root's `.mind-meld-anchor` state, and saved pull/push observations). Observations include older edits with both mtimes and repeated anchor mismatches; they are labeled with their time, completeness and possible staleness, without rechecking peers. Each `skill_links` row includes `maintain_links` (`enabled` / `disabled (…)` / `unknown (config invalid: …)` / `unknown (policy not resolved)`). |
 | `mm devices` | List registered devices |
 | `mm devices --format=json` | Same data as a JSON array on stdout — for scripting (used by `/retro-fleet`) |
 | `mm diff` | Compare local files with this Mac’s last push (or `--from DEVICE`). Changes nothing. For incoming changes, use `mm pull --dry-run` |
@@ -801,8 +816,10 @@ Content a sync tool has not delivered yet is **waiting**, not failed: the line
 gains `; waiting for 2 files from Mac B` (or `Mac B's manifest`, or `cccccccc's
 device entry`), the exit stays 0, and the next pull retries. When a pull also
 failed, the waiting clause comes before `Run:`. `--verbose` lists the waiting
-paths. Attended runs do not record a waiting count; `mm autopull` records it in
-the `success` breadcrumb detail. Another home's files from a peer still on path
+paths. Attended run summaries in `last-attended-runs.json` do not record a waiting
+count; full pulls record each peer's count in `state.db` for `mm status`, and
+`mm autopull` also records it in the `success` breadcrumb detail.
+Another home's files from a peer still on path
 names add `; 312 files from Mac B wait until it publishes shared names (mm status)`:
 the exit stays 0, and they wait on that machine updating, not on delivery.
 
@@ -856,6 +873,7 @@ Representative first lines:
 
 ```text
 In sync with this device's last push.
+Waiting more than 24 h for Mac B's push of 2026-06-14. Run: mm pull
 2 new, 1 modified and 3 deleted waiting to push. Run: mm push
 Project memory ready to publish under shared names. Run: mm push
 Metadata-only changes waiting to push. Run: mm push
@@ -866,8 +884,7 @@ Source 'claude' — 1 new, 0 modified and 0 deleted waiting to push. Run: mm pus
 Sync run evidence unknown [run-evidence-ambiguous] (pull). Run: mm diag
 ```
 
-The comparison does not assess incoming peer changes, peer delivery or
-Syncthing health. Counts cover the selected `--source` set. Metadata means
+`mm status` also reports the local Syncthing connection and folder state (`Syncthing: ...`, plus a nudge to `mm diag` when folder settings need attention) and, under `Other devices`, each peer's last push and whether it is applied here (`applied here`, `not pulled here yet`, `N file(s) waiting for sync`, `its manifest has not arrived`, `never pushed`, `manifest unreadable here (mm pull shows why)`, or `applied state unknown`). When a peer's unpulled push, waiting files, or missing manifest has waited more than 24 h (strictly `> 24 h`), the opening verdict warns in every mode (`Waiting more than 24 h for <peer>'s push of YYYY-MM-DD. Run: mm pull` or `mm diag`) whenever no higher-priority local or run verdict applies; otherwise the warning follows that verdict. Unplaced project-memory files and old-form peer files are not pending and never trigger the 24 h warning. Counts cover the selected `--source` set. Metadata means
 equal hashes with a strictly newer local mtime, using the same forward-only
 gate as push; a source selection change also needs publication. Holds and
 failed files stay pending or degraded; pushing does not force a green verdict.
@@ -876,6 +893,12 @@ conflicts and corrupt/newer own metadata cannot report healthy. Inspection
 uses a strict source scan; this disables cached diagnostic hashes and can
 reread event-file bytes, while retaining one event parsing pass. The I/O cost
 is unmeasured.
+
+`applied here` requires the current manifest content to match a recorded applied
+identity as well as its timestamp. A late conflict copy with additional content
+therefore needs another pull even if the push timestamp has not changed. Older
+timestamp-only cursor records cannot prove applied content until a full pull
+refreshes them.
 
 Status selects one execution summary per verb from the latest available auto
 and attended records. Strictly later valid completed success can resolve an
@@ -1334,7 +1357,9 @@ History is local and never synced: `~/.config/mind-meld/state.db`, mode 0600
 mode). It records pull/push outcomes and self-upgrades, keeping the newest
 20,000 rows per known (verb, action) class. The same file holds the pull ledger:
 which version of each file this Mac last synced from each peer, and the versions it
-has held. The ledger is rebuildable (see the remedy below). Excluded/uploaded traffic
+has held, as well as the `cursors` table recording each peer's last applied push
+timestamp, last seen push timestamp, waiting file count, and matching manifest
+content identities. The ledger and cursors are rebuildable (see the remedy below). Excluded/uploaded traffic
 cannot evict conflicted rows. About ten full classes may use ~80 MB; this is a
 workload estimate, not a fixed ceiling. `mm log --limit 0` loads all matching
 rows in one snapshot, closes the connection, then prints; memory grows with
@@ -1683,7 +1708,10 @@ files still apply. Waiting alone keeps the exit at 0 and `mm autopull` at
 A peer's manifest copies are kept while any of its files are waiting. A device
 entry or peer manifest that vanished mid-read is reported the same way. Run
 `mm pull` again once Syncthing finishes; `mm pull --verbose` lists the waiting
-paths. If a file stays waiting for a long time, check that Syncthing shows the
+paths. `mm status` shows each peer's waiting file count from the last full pull
+(`N file(s) waiting for sync`) and warns after more than 24 h: in the opening
+verdict when no higher-priority action applies, otherwise immediately after it.
+If a file stays waiting for a long time, check that Syncthing shows the
 folder as up to date on both Macs.
 If this Mac's own manifest is replaced while `mm status` reads it, status opens
 with `This device's manifest is still arriving from sync. Run: mm status` instead
@@ -1743,7 +1771,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
-**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
+**`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 
 **`/retro-fleet` refuses because `mm` is missing, or the leftover skill still offers the command after uninstall.** A current skill stops before running the retro and names a PATH-order check; an older skill (or leftover links after uninstall) still errors mid-run with `mm: command not found`. The skill store outlives `mm` (see [Uninstalling](#uninstalling)). Either reinstall `mm` or remove the leftover links.
 

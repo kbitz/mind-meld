@@ -44,6 +44,7 @@ EXTRACTED = [
     "sourceflow",
     "host_registry",
     "rootprobes",
+    "syncthing",
     *HOST_ADAPTER_MODULES,
 ]
 
@@ -60,6 +61,7 @@ LEAVES = [
     "updateprogress",
     "projectid",
     "rootprobes",
+    "syncthing",
 ]
 
 
@@ -242,6 +244,11 @@ def _mind_meld_imports(path: Path) -> set[str]:
 def test_rootprobes_imports_only_token_usage_and_the_standard_library() -> None:
     """Track 102A: the host-record probers are a leaf events can import safely."""
     assert _mind_meld_imports(SRC / "rootprobes.py") == {"token_usage"}
+
+
+def test_syncthing_imports_only_the_standard_library() -> None:
+    """Track 92A: syncthing.py is a stdlib-only leaf."""
+    assert _mind_meld_imports(SRC / "syncthing.py") == set()
 
 
 def test_events_imports_no_host_usage_reader() -> None:

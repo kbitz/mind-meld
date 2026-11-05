@@ -142,6 +142,7 @@ class ManifestFetch:
     conflict_copies_only: bool = False
     vanished: bool = False
     merged: bool = False  # A union of copies was never accepted as one published snapshot.
+    canonical_hash: str | None = None  # Identity from this read, before conflict-copy union.
 
     @property
     def is_ok(self) -> bool:
@@ -444,6 +445,7 @@ def _fetch_remote_manifest(
     """
     mkey = manifest_key(device_id)
     manifests: list[dict] = []
+    canonical_hash: str | None = None
 
     canonical_exists = backend.exists(mkey)
     canonical_vanished = False
@@ -513,7 +515,9 @@ def _fetch_remote_manifest(
         try:
             enc_data = backend.get(mkey, expected=True)
             plain = decrypt_manifest(enc_data, passphrase, memory_kb)
-            manifests.append(load_manifest(plain))
+            canonical = load_manifest(plain)
+            manifests.append(canonical)
+            canonical_hash = _manifest_cursor_hash(canonical)
         except StorageNotFound:
             canonical_vanished = True
         except NewerFormatError as exc:
@@ -553,6 +557,7 @@ def _fetch_remote_manifest(
             manifest=manifests[0],
             conflict_copies_only=conflict_copies_only,
             vanished=canonical_vanished,
+            canonical_hash=canonical_hash,
         )
 
     # Merge multiple manifests additively.
@@ -574,6 +579,7 @@ def _fetch_remote_manifest(
         conflict_copies_only=conflict_copies_only,
         vanished=canonical_vanished,
         merged=True,
+        canonical_hash=canonical_hash,
     )
 
 
@@ -1096,13 +1102,32 @@ def _retain_prior_default_sources(
 def _manifest_content_hash(manifest: dict) -> str:
     """Stable SHA-256 of a manifest's canonical JSON.
 
-    Used as the deterministic tiebreaker in `_merge_manifests` when two
-    conflict copies carry identical ISO-second timestamps. Canonical JSON
+    Used as the deterministic tiebreaker in `_merge_manifests` when
+    conflict copies carry identical timestamps. Canonical JSON
     means sorted keys + no ASCII escaping, so the hash is stable across
     any platform that implements the same JSON serializer contract.
+    Surrogate pass preserves accepted POSIX filename strings without changing
+    the hash of ordinary Unicode text; these bytes are only hashed, never stored.
     """
-    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode(
+        "utf-8", errors="surrogatepass"
+    )
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _manifest_cursor_hash(manifest: dict) -> str:
+    """Identify decoded content and placement, excluding transient move bookkeeping."""
+    sources = manifest.get("sources", {})
+    claude = sources.get("claude")
+    if isinstance(claude, dict) and "moved_folders" in claude:
+        manifest = {
+            **manifest,
+            "sources": {
+                **sources,
+                "claude": {k: v for k, v in claude.items() if k != "moved_folders"},
+            },
+        }
+    return _manifest_content_hash(manifest)
 
 
 def _merge_manifests(manifests: list[dict]) -> dict:

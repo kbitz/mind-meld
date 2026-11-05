@@ -26,6 +26,7 @@ DIAG_KEYS = {
     "root_salt_drift",
     "sidecar",
     "storage_inventory",
+    "syncthing",
     "project_index",
     "sync_scope",
     "fast_forward",

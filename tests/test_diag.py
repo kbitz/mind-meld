@@ -2421,3 +2421,436 @@ def test_git_capture_diag_reports_read_only_pending_repositories(tmp_path, monke
     assert state["fresh"]["pending_repos"] == 3
     assert calls == [discovery["roots"]]
     assert not GIT_CAPTURE_CACHE_PATH.exists()
+
+
+# ── Track 92A: Syncthing inspection and peer push status ─────────────
+
+
+def test_diag_reports_syncthing_state_and_lint_in_both_formats(
+    tmp_path, monkeypatch, fake_syncthing
+):
+    from mind_meld import syncthing
+
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    fake_syncthing.set_folder(
+        storage,
+        folder_id="mm-sync",
+        label="Mind Meld",
+        peers=[
+            (fake_syncthing.peer_id, "mac-b", True),
+            (fake_syncthing.peer2_id, "linux-a", False),
+        ],
+        state="idle",
+        need_files=0,
+    )
+
+    structured = runner.invoke(app, ["diag", "--json"])
+    assert structured.exit_code == 0, structured.output
+    st = json.loads(structured.stdout)["syncthing"]
+    assert st["state"] == "ok"
+    assert st["folder_id"] == "mm-sync"
+    assert st["folder_label"] == "Mind Meld"
+    assert st["folder_state"] == "idle"
+    assert st["files_to_fetch"] == 0
+    assert (st["connected_peers"], st["total_peers"]) == (1, 2)
+    assert st["stignore"] == "ok"
+    assert st["problems"] == []
+    for name, _, _ in syncthing.FOLDER_OPTIONS:
+        assert syncthing.option_is_ok(name, st["options"][name])
+
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    flat = " ".join(plain.output.split())
+    assert "Syncthing" in flat
+    assert "state: ok" in flat
+    assert "folder: Mind Meld (mm-sync)" in flat
+    assert "folder state: idle" in flat
+    assert "connected peers: 1 of 2" in flat
+    assert "option maxConflicts: 10 (ok)" in flat
+    assert ".stignore: ok ((?d)tmp*.tmp)" in flat
+
+    # Drift one folder option and remove .stignore: both surfaces report the lint.
+    (storage / ".stignore").unlink()
+    fake_syncthing.set_folder(
+        storage,
+        folder_id="mm-sync",
+        label="Mind Meld",
+        max_conflicts=0,
+        write_stignore=False,
+    )
+    drifted_json = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)["syncthing"]
+    assert drifted_json["options"]["maxConflicts"] == 0
+    assert not syncthing.option_is_ok("maxConflicts", drifted_json["options"]["maxConflicts"])
+    assert drifted_json["stignore"] == "missing"
+    assert (
+        "maxConflicts" in drifted_json["problems"]
+        and "stignore-missing" in drifted_json["problems"]
+    )
+    drifted_plain = " ".join(runner.invoke(app, ["diag"]).output.split())
+    assert "option maxConflicts: 0 (want not 0:" in drifted_plain
+    assert ".stignore: missing (want (?d)tmp*.tmp in .stignore)" in drifted_plain
+
+
+def test_status_reports_the_syncthing_connection_and_points_to_diag(
+    tmp_path, monkeypatch, fake_syncthing
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    fake_syncthing.set_folder(
+        storage,
+        peers=[(fake_syncthing.peer_id, "mac-b", True)],
+        state="idle",
+        need_files=0,
+    )
+
+    clean = runner.invoke(app, ["status"])
+    assert clean.exit_code == 0, clean.output
+    assert "Syncthing: connected 1 of 1 devices; up to date" in clean.output
+    assert "Syncthing folder settings need attention" not in clean.output
+
+    fake_syncthing.set_folder(
+        storage,
+        peers=[(fake_syncthing.peer_id, "mac-b", True)],
+        state="syncing",
+        need_files=2,
+        max_conflicts=0,
+        ignore_perms=True,
+    )
+    drifted = runner.invoke(app, ["status"])
+    assert drifted.exit_code == 0, drifted.output
+    assert "Syncthing: connected 1 of 1 devices; syncing, 2 files to fetch" in drifted.output
+    assert "Syncthing folder settings need attention (2). Run: mm diag" in drifted.output
+
+
+@pytest.mark.parametrize(
+    ("folder_state", "paused", "need_files", "pull_errors", "expected"),
+    [
+        ("idle", False, 2, 0, "idle, 2 files to fetch"),
+        ("error", False, 2, 3, "error, 2 files to fetch, 3 pull errors. Run: mm diag"),
+        ("scanning", False, 2, 0, "scanning, 2 files to fetch"),
+        ("idle", False, 0, 1, "idle, 1 pull error. Run: mm diag"),
+        ("idle", True, 2, 0, "paused, 2 files to fetch"),
+        ("syncing", False, 2, 1, "syncing, 2 files to fetch, 1 pull error. Run: mm diag"),
+    ],
+)
+def test_status_preserves_syncthing_folder_state_and_reports_pull_errors(
+    tmp_path, monkeypatch, fake_syncthing, folder_state, paused, need_files, pull_errors, expected
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    fake_syncthing.set_folder(
+        storage,
+        peers=[(fake_syncthing.peer_id, "mac-b", False)],
+        state=folder_state,
+        paused=paused,
+        need_files=need_files,
+        pull_errors=pull_errors,
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert f"Syncthing: connected 0 of 1 devices (mac-b disconnected); {expected}" in flat
+
+
+def test_syncthing_pull_errors_remain_visible_in_the_diagnostic_remedy(
+    tmp_path, monkeypatch, fake_syncthing
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    fake_syncthing.set_folder(storage, state="idle", need_files=0, pull_errors=1)
+
+    structured = runner.invoke(app, ["diag", "--json"])
+    assert structured.exit_code == 0, structured.output
+    assert json.loads(structured.stdout)["syncthing"]["pull_errors"] == 1
+    plain = runner.invoke(app, ["diag"])
+    assert plain.exit_code == 0, plain.output
+    assert "pull errors: 1" in " ".join(plain.output.split())
+
+
+@pytest.mark.parametrize("mode", ["missing", "refused", "held"])
+def test_missing_or_unreachable_syncthing_is_reported_not_an_error(
+    tmp_path, monkeypatch, fake_syncthing, mode
+):
+    from mind_meld import syncthing
+
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    fake_syncthing.set_folder(storage)
+    if mode == "missing":
+        fake_syncthing.config_path.unlink()
+    elif mode == "refused":
+        fake_syncthing.close()
+    elif mode == "held":
+        real_read = syncthing.read_state
+        monkeypatch.setattr(
+            syncthing,
+            "read_state",
+            lambda path, **kw: real_read(path, timeout=0.05, budget=0.1, **kw),
+        )
+        fake_syncthing.hold("/rest/system/connections")
+
+    status_res = runner.invoke(app, ["status"])
+    assert status_res.exit_code == 0, status_res.output
+    assert status_res.output.splitlines()[0] == "This device has not pushed yet. Run: mm push"
+    if mode == "missing":
+        assert "Syncthing: not found on this machine" in status_res.output
+    else:
+        assert "Syncthing: not reachable at " in status_res.output
+
+    diag_res = runner.invoke(app, ["diag"])
+    assert diag_res.exit_code == 0, diag_res.output
+    diag_json = runner.invoke(app, ["diag", "--json"])
+    assert diag_json.exit_code == 0, diag_json.output
+    st = json.loads(diag_json.stdout)["syncthing"]
+    assert st["state"] == ("not-found" if mode == "missing" else "unreachable")
+
+
+def test_inspection_never_shows_the_syncthing_credential_or_device_ids(
+    tmp_path, monkeypatch, fake_syncthing
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    gui_placeholder = "SYNCTHING-GUI-92A-NEVER-EMIT"
+    syncthing_dev = "DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH-IIIIIII-JJJJJJJ-KKKKKKK"
+    fake_syncthing.gui_value = gui_placeholder
+    fake_syncthing.write_config(gui_value=gui_placeholder)
+    fake_syncthing.set_folder(
+        storage,
+        peers=[(syncthing_dev, "peer-box", True)],
+    )
+
+    for args in (["status"], ["diag"], ["diag", "--json"]):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 0, res.output
+        assert gui_placeholder not in res.output
+        assert syncthing_dev not in res.output
+        assert fake_syncthing.my_id not in res.output
+
+
+def test_inspection_never_writes_to_syncthing_or_state_db(tmp_path, monkeypatch, fake_syncthing):
+    from mind_meld import statedb
+
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    fake_syncthing.set_folder(storage)
+    cfg_xml = fake_syncthing.config_path
+    before_xml = (cfg_xml.read_bytes(), cfg_xml.stat().st_mtime_ns)
+    assert not statedb.db_path().exists()
+
+    for args in (["status"], ["diag"], ["diag", "--json"]):
+        res = runner.invoke(app, args)
+        assert res.exit_code == 0, res.output
+
+    assert fake_syncthing.requests
+    assert {method for method, _, _ in fake_syncthing.requests} == {"GET"}
+    assert (cfg_xml.read_bytes(), cfg_xml.stat().st_mtime_ns) == before_xml
+    assert not statedb.db_path().exists()
+
+
+def test_peer_states_cover_every_state_and_the_24_h_edge():
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import core, statedb, statusflow
+
+    now = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
+    just_under = (now - timedelta(hours=23, minutes=59)).isoformat()
+    exact_24h = (now - timedelta(hours=24)).isoformat()
+    just_over = (now - timedelta(hours=24, minutes=1)).isoformat()
+
+    for stamp, expect_overdue in ((just_under, False), (exact_24h, False), (just_over, True)):
+        stamp_us = statusflow._dt_to_us(statusflow._parse_aware_dt(stamp))
+        assert stamp_us is not None
+        devices_list = [
+            {"device_id": "mac-self", "device_name": "Self", "last_seen": stamp},
+            {"device_id": "p-applied", "device_name": "Applied", "last_seen": stamp},
+            {"device_id": "p-unpulled", "device_name": "Unpulled", "last_seen": stamp},
+            {"device_id": "p-waiting", "device_name": "Waiting", "last_seen": stamp},
+            {"device_id": "p-not-arrived", "device_name": "NotArrived", "last_seen": stamp},
+            {"device_id": "p-never", "device_name": "NeverPushed", "last_seen": ""},
+            {"device_id": "p-unreadable", "device_name": "Unreadable", "last_seen": stamp},
+            {"device_id": "p-newer", "device_name": "NewerFmt", "last_seen": stamp},
+        ]
+        fetches = {
+            "p-applied": core.ManifestFetch(status="ok", manifest={"timestamp": stamp}),
+            "p-unpulled": core.ManifestFetch(status="ok", manifest={"timestamp": stamp}),
+            "p-waiting": core.ManifestFetch(status="ok", manifest={"timestamp": stamp}),
+            "p-not-arrived": core.ManifestFetch(status="missing"),
+            "p-never": core.ManifestFetch(status="missing"),
+            "p-unreadable": core.ManifestFetch(status="corrupt"),
+            "p-newer": core.ManifestFetch(status="corrupt", newer_version=99),
+        }
+        identity = core._manifest_content_hash({"timestamp": stamp})
+        cursors = {
+            "p-applied": statedb.CursorRow(stamp_us, stamp_us, 0, identity, identity, identity),
+            "p-waiting": statedb.CursorRow(None, stamp_us, 2, None, None, identity),
+        }
+        states = {
+            p.device_id: p
+            for p in statusflow._peer_states(
+                devices_list,
+                "mac-self",
+                fetches,
+                cursors,
+                now=now,
+            )
+        }
+        assert "mac-self" not in states
+        assert states["p-applied"].state == "applied" and not states["p-applied"].overdue
+        assert states["p-unpulled"].state == "not-pulled"
+        assert states["p-unpulled"].overdue is expect_overdue
+        assert states["p-waiting"].state == "waiting" and states["p-waiting"].waiting == 2
+        assert states["p-waiting"].overdue is expect_overdue
+        assert states["p-not-arrived"].state == "not-arrived"
+        assert states["p-not-arrived"].overdue is expect_overdue
+        assert states["p-never"].state == "never-pushed" and not states["p-never"].overdue
+        assert states["p-unreadable"].state == "unreadable" and not states["p-unreadable"].overdue
+        assert states["p-newer"].state == "newer-format" and states["p-newer"].newer_version == 99
+        assert not states["p-newer"].overdue
+
+    # Unknown (state.db unreadable) never warns even when last_seen is old.
+    unknown_states = statusflow._peer_states(
+        [{"device_id": "p-unk", "device_name": "UnknownPeer", "last_seen": just_over}],
+        "mac-self",
+        {"p-unk": core.ManifestFetch(status="ok", manifest={"timestamp": just_over})},
+        "busy",
+        now=now,
+    )
+    assert len(unknown_states) == 1
+    assert unknown_states[0].state == "unknown" and not unknown_states[0].overdue
+    assert "applied state unknown (state.db busy). Run: mm diag" in statusflow._format_peer_state(
+        unknown_states[0]
+    )
+
+    # Check formatted strings and overdue line.
+    over_states = {
+        p.device_id: p
+        for p in statusflow._peer_states(
+            devices_list,
+            "mac-self",
+            fetches,
+            cursors,
+            now=now,
+        )
+    }
+    assert statusflow._format_peer_state(over_states["p-applied"]).endswith("; applied here")
+    assert statusflow._format_peer_state(over_states["p-unpulled"]).endswith(
+        "; not pulled here yet"
+    )
+    assert statusflow._format_peer_state(over_states["p-waiting"]).endswith(
+        "; 2 files waiting for sync"
+    )
+    assert statusflow._format_peer_state(over_states["p-not-arrived"]).endswith(
+        "; its manifest has not arrived"
+    )
+    assert statusflow._format_peer_state(over_states["p-never"]) == "never pushed"
+    assert statusflow._format_peer_state(over_states["p-unreadable"]).endswith(
+        "manifest unreadable here (mm pull shows why)"
+    )
+    assert "0x63" in statusflow._format_peer_state(over_states["p-newer"])
+    assert statusflow._overdue_peers_line([over_states["p-unpulled"]]) == (
+        "Waiting more than 24 h for Unpulled's push of 2026-06-14. Run: mm pull"
+    )
+    assert statusflow._overdue_peers_line([over_states["p-waiting"]]) == (
+        "Waiting more than 24 h for Waiting's push of 2026-06-14. Run: mm diag"
+    )
+    assert statusflow._overdue_peers_line(
+        [over_states["p-unpulled"], over_states["p-waiting"]]
+    ) == ("Waiting more than 24 h for Unpulled's push of 2026-06-14 (and 1 more). Run: mm pull")
+
+
+def test_peer_cursor_identity_controls_applied_and_waiting_at_the_same_timestamp():
+    from mind_meld import core, statedb, statusflow
+
+    stamp = "2026-06-14T12:00:00+00:00"
+    first = {"timestamp": stamp, "sources": {"notes": {"files": {}}}}
+    changed = {
+        "timestamp": stamp,
+        "sources": {"notes": {"files": {"late.md": {"sha256": "a" * 64}}}},
+    }
+    identity = core._manifest_content_hash(first)
+    stamp_us = statusflow._dt_to_us(statusflow._parse_aware_dt(stamp))
+
+    def state(data, cursor):
+        return statusflow._peer_states(
+            [{"device_id": "peer", "device_name": "Peer"}],
+            "local",
+            {"peer": data},
+            {"peer": cursor},
+        )[0].state
+
+    # A migrated timestamp-only row is not evidence of applied bytes.
+    assert state(first, statedb.CursorRow(stamp_us, stamp_us, 0)) == "not-pulled"
+    applied = statedb.CursorRow(stamp_us, stamp_us, 0, identity, identity, identity)
+    assert state(first, applied) == "applied"
+    assert state(changed, applied) == "not-pulled"
+    waiting = statedb.CursorRow(None, stamp_us, 2, None, None, identity)
+    assert state(first, waiting) == "waiting"
+    assert state(changed, waiting) == "not-pulled"
+
+
+def test_overdue_replaces_only_the_healthy_verdict():
+    from mind_meld import statusflow
+
+    idle = {"selected": None, "unknown_reason": None, "unresolved": False}
+    overdue = "Waiting more than 24 h for Mac B's push of 2026-06-14. Run: mm pull"
+
+    def verdict(**kw):
+        return statusflow._status_verdict(
+            **{
+                "source": None,
+                "blocking": None,
+                "conflicts": 0,
+                "projection": {"pull": idle, "push": idle},
+                "counts": (0, 0, 0),
+                "metadata": False,
+                "first_push": False,
+                "peers_overdue": overdue,
+                **kw,
+            }
+        )
+
+    assert verdict() == overdue
+    assert verdict(source="claude") == f"Source 'claude' — {overdue}"
+    assert verdict(first_push=True) == "This device has not pushed yet. Run: mm push"
+    assert verdict(conflicts=1).startswith("1 unresolved conflicts.")
+    assert verdict(counts=(1, 0, 0)).startswith("1 new, 0 modified and 0 deleted waiting to push.")
+    assert verdict(metadata=True) == "Metadata-only changes waiting to push. Run: mm push"
+    assert verdict(left_out="claude (gone)") == "Not everything is published: claude (gone)"
+
+
+def test_a_published_peer_without_a_manifest_shows_not_arrived(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from mind_meld import core, crypto, manifest
+    from mind_meld.storage.keys import device_key, manifest_key
+
+    _, _, backend = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir(exist_ok=True)
+    cfg = load_config()
+    core._init_crypto_session(backend, PASSPHRASE, cfg, read_only=True)
+    own = manifest.build_manifest_v2(
+        "mac-a",
+        "Mac A",
+        [{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+    )
+    backend.put(
+        manifest_key("mac-a"),
+        crypto.encrypt(manifest.serialize_manifest(own), PASSPHRASE, MEMORY_KB),
+    )
+    register_device(backend, "peer-b", "Peer B")
+    peer_entry = json.loads(backend.get(device_key("peer-b")))
+    old_dt = datetime.now(timezone.utc) - timedelta(days=2)
+    peer_entry["last_seen"] = old_dt.isoformat()
+    backend.put(device_key("peer-b"), json.dumps(peer_entry).encode())
+
+    res = runner.invoke(app, ["status"])
+    assert res.exit_code == 0, res.output
+    lines = res.output.splitlines()
+    day = old_dt.strftime("%Y-%m-%d")
+    assert lines[0] == f"Waiting more than 24 h for Peer B's push of {day}. Run: mm diag"
+    assert "its manifest has not arrived" in res.output

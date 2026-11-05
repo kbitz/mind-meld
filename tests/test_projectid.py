@@ -5261,3 +5261,175 @@ def test_a_handoff_exact_revert_propagates_when_the_origin_missed_the_intermedia
         again = machine.pull()
         assert again.total_written == again.total_merged == again.total_conflicted == 0, again
         assert trio.text(machine) == "good\n"
+
+
+# ── Track 92A: peer cursors and status across machines ───────────────
+
+
+def _machine_cursors(machine: Machine) -> dict[str, statedb.CursorRow]:
+    with machine.on(), statedb.connect(read_only=True) as conn:
+        return statedb.read_cursors(conn)
+
+
+def test_withheld_and_unplaced_files_never_block_applied(mac, linux):
+    import shutil
+
+    seed_old_form(mac, {"-Users-kb-scratch/memory/note.md": "old\n"})
+    old_us = pullflow._aware_timestamp_us(mac.published()["timestamp"])
+    assert old_us is not None
+
+    first = linux.pull()
+    assert first.total_applied == 0 and len(first.old_form_peers) == 1
+    assert {peer: row[:3] for peer, row in _machine_cursors(linux).items()} == {
+        mac.device_id: (old_us, old_us, 0)
+    }
+
+    shutil.rmtree(mac.claude / "projects" / "-Users-kb-scratch")
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "unplaced\n")
+    mac.push()
+    new_us = pullflow._aware_timestamp_us(mac.published()["timestamp"])
+    assert new_us is not None and new_us > old_us
+
+    second = linux.pull()
+    assert second.total_applied == 0 and second.not_placed_files == 1
+    assert {peer: row[:3] for peer, row in _machine_cursors(linux).items()} == {
+        mac.device_id: (new_us, new_us, 0)
+    }
+
+
+def test_status_shows_each_peer_applied_after_a_pull(mac, linux):
+    mac.checkout("/Users/kb/Dev/widgets")
+    linux.checkout("/home/kb/src/widgets")
+    (linux.claude / "projects" / linux.folder_for("/home/kb/src/widgets")).mkdir(parents=True)
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "shared\n")
+    linux.memory(linux.folder_for("/home/kb/src/widgets"), "a.md", "shared\n")
+    mac.push()
+    linux.push()
+
+    before = linux.cli("status")
+    assert before.exit_code == 0, before.output
+    assert "not pulled here yet" in before.output
+
+    linux.pull()
+    after = linux.cli("status")
+    assert after.exit_code == 0, after.output
+    assert first_line(after) == "In sync with this device's last push."
+    assert "applied here" in after.output
+    assert "not pulled here yet" not in after.output
+
+
+def test_first_pull_stays_applied_when_local_decode_bookkeeping_changes(tmp_path, store, mac):
+    twin = Machine(tmp_path, store, "twin", "/Users/kb", "dddddddd")
+    mac.memory("-Users-kb-scratch", "note.md", "same home\n")
+    mac.push()
+    with twin.on():
+        base_path = projectid.index().claude_real
+    mac.edit_published(lambda data: data["sources"]["claude"].update(base_path=base_path))
+    assert not (twin.claude / "projects").exists()
+
+    with twin.on():
+        before = core._fetch_remote_manifest(
+            LocalBackend(store), mac.device_id, PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert before["sources"]["claude"].get("moved_folders")
+    result = twin.pull()
+    assert result.total_written == 1 and result.total_failed == 0
+    with twin.on():
+        after = core._fetch_remote_manifest(
+            LocalBackend(store), mac.device_id, PASSPHRASE, MEMORY_KB
+        ).manifest
+        assert "moved_folders" not in after["sources"]["claude"]
+    assert before["sources"]["claude"]["files"] == after["sources"]["claude"]["files"]
+    status = twin.cli("status")
+    assert status.exit_code == 0, status.output
+    assert "applied here" in status.output
+    assert "not pulled here yet" not in status.output
+
+
+def test_attended_pull_waiting_count_shows_in_status(mac, linux, tmp_path):
+    linux.memory("-home-kb-scratch", "local.md", "l\n")
+    linux.push()
+    mac.checkout("/Users/kb/Dev/widgets")
+    linux.checkout("/home/kb/src/widgets")
+    (linux.claude / "projects" / linux.folder_for("/home/kb/src/widgets")).mkdir(parents=True)
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "alpha\n")
+    mac.push()
+
+    blob_dir = Path(mac.store) / "data" / mac.device_id
+    (blob_file,) = list(blob_dir.iterdir())
+    aside = tmp_path / "aside.blob"
+    blob_file.replace(aside)
+
+    pull_wait = linux.cli("pull")
+    assert pull_wait.exit_code == 0, pull_wait.output
+    status_wait = linux.cli("status")
+    assert status_wait.exit_code == 0, status_wait.output
+    assert "1 file waiting for sync" in status_wait.output
+
+    aside.replace(blob_file)
+    pull_done = linux.cli("pull")
+    assert pull_done.exit_code == 0, pull_done.output
+    status_done = linux.cli("status")
+    assert status_done.exit_code == 0, status_done.output
+    assert "applied here" in status_done.output
+    assert "waiting for sync" not in status_done.output
+
+
+def test_an_old_unpulled_push_warns_in_every_mode_and_a_pull_clears_it(mac, linux):
+    mac.checkout("/Users/kb/Dev/widgets")
+    linux.checkout("/home/kb/src/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "alpha\n")
+    linux.memory(linux.folder_for("/home/kb/src/widgets"), "a.md", "alpha\n")
+    linux.push()
+    mac.push()
+    old_dt = datetime.now(timezone.utc) - timedelta(hours=48)
+    old_iso = old_dt.isoformat()
+    mac.edit_published(lambda data: data.__setitem__("timestamp", old_iso))
+    day = old_dt.strftime("%Y-%m-%d")
+    expected_overdue = f"Waiting more than 24 h for mac's push of {day}. Run: mm pull"
+
+    plain = linux.cli("status")
+    assert plain.exit_code == 0, plain.output
+    assert first_line(plain) == expected_overdue
+
+    scoped = linux.cli("status", "--source", "claude")
+    assert scoped.exit_code == 0, scoped.output
+    assert first_line(scoped) == f"Source 'claude' — {expected_overdue}"
+
+    linux.pull()
+    after_plain = linux.cli("status")
+    assert first_line(after_plain) == "In sync with this device's last push."
+    after_scoped = linux.cli("status", "--source", "claude")
+    assert first_line(after_scoped) == "Source 'claude' — In sync with this device's last push."
+
+
+def test_old_form_and_unplaced_files_never_warn(mac, linux):
+    import shutil
+
+    linux.memory("-home-kb-scratch", "local.md", "l\n")
+    linux.push()
+    old_iso = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+
+    # Old-form peer manifest with a 48 h old timestamp.
+    seed_old_form(mac, {"-Users-kb-scratch/memory/note.md": "old\n"})
+    mac.edit_published(lambda data: data.__setitem__("timestamp", old_iso))
+    linux.pull()
+    res_old = linux.cli("status")
+    assert res_old.exit_code == 0, res_old.output
+    assert first_line(res_old) == "In sync with this device's last push."
+    assert "Waiting more than 24 h" not in res_old.output
+    assert "applied here" in res_old.output
+
+    # Unplaced shared-name manifest with a 48 h old timestamp.
+    shutil.rmtree(mac.claude / "projects" / "-Users-kb-scratch")
+    mac.checkout("/Users/kb/Dev/widgets")
+    mac.memory(mac.folder_for("/Users/kb/Dev/widgets"), "a.md", "unplaced\n")
+    mac.push()
+    mac.edit_published(lambda data: data.__setitem__("timestamp", old_iso))
+    linux.pull()
+    res_unplaced = linux.cli("status")
+    assert res_unplaced.exit_code == 0, res_unplaced.output
+    assert first_line(res_unplaced) == "In sync with this device's last push."
+    assert "Waiting more than 24 h" not in res_unplaced.output
+    assert "applied here" in res_unplaced.output
