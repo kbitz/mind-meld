@@ -2112,9 +2112,9 @@ class TestPromptSources:
         assert DEFAULT_SOURCES[0]["path"] == "~/.claude"
 
     def test_mm_init_does_not_prompt_for_opencode(self, monkeypatch) -> None:
-        """DEFAULT_SOURCES no longer ships opencode or grok, so init asks
-        for the six user-facing names (claude, gstack, gstack-extend,
-        codex, muse, agy). mm-events auto-includes."""
+        """DEFAULT_SOURCES no longer ships opencode, so init asks for the
+        seven user-facing names (claude, gstack, gstack-extend, codex, grok,
+        muse, agy). mm-events auto-includes."""
         from mind_meld import cli as cli_module
 
         prompted: list[str] = []
@@ -2126,13 +2126,12 @@ class TestPromptSources:
         monkeypatch.setattr(cli_module.typer, "confirm", capture)
         _prompt_sources()
         user_facing = [s["name"] for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
-        assert len(user_facing) == 6
+        assert len(user_facing) == 7
         assert "opencode" not in user_facing
-        assert "grok" not in user_facing
+        assert "grok" in user_facing
         assert "agy" in user_facing
-        assert len(prompted) == 6
+        assert len(prompted) == 7
         assert all("opencode" not in p for p in prompted)
-        assert all("grok" not in p for p in prompted)
 
     def test_claude_only(self, monkeypatch) -> None:
         """User answers Y for claude and n for the other agent sources. mm-events is
@@ -2140,7 +2139,7 @@ class TestPromptSources:
         so it appears in the result list alongside claude."""
         from mind_meld import cli as cli_module
 
-        responses = iter([True, False, False, False, False, False])
+        responses = iter([True, False, False, False, False, False, False])
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["claude", "mm-events"]
@@ -2151,7 +2150,7 @@ class TestPromptSources:
         auto-includes without prompting (mm-internal infrastructure)."""
         from mind_meld import cli as cli_module
 
-        responses = iter([False, True, False, False, False, False])
+        responses = iter([False, True, False, False, False, False, False])
         monkeypatch.setattr(cli_module.typer, "confirm", lambda *a, **kw: next(responses))
         result = _prompt_sources()
         assert [s["name"] for s in result] == ["mm-events", "gstack"]
@@ -2208,10 +2207,10 @@ class TestPromptSources:
 
         user_sources = [s for s in DEFAULT_SOURCES if s["name"] != "mm-events"]
         assert len(probes) == len(user_sources)
-        # Every detected source defaults on except Muse, which is opt-in even
-        # when detected (its memory/ tree is host-created).
+        # Every detected source defaults on except Grok and Muse, which are
+        # opt-in even when detected.
         assert [default for _prompt, default in prompts] == [
-            s["name"] != "muse" for s in user_sources
+            s["name"] not in ("grok", "muse") for s in user_sources
         ]
         assert all("detected" in prompt for prompt, _default in prompts)
 
@@ -3158,7 +3157,7 @@ class TestSnapshotPublicationHelpers:
         assert outcome.bytes_transferred == len(b"enc")
         assert outcome.patches == {} and outcome.held == {}
 
-    @pytest.mark.parametrize(("source_type", "subdir"), [("muse", "memory")])
+    @pytest.mark.parametrize(("source_type", "subdir"), [("grok", "skills"), ("muse", "memory")])
     def test_upload_refuses_hardlink_replacement(self, tmp_path, source_type, subdir):
         base = tmp_path / source_type
         tree = base / subdir
@@ -3234,6 +3233,82 @@ class TestSnapshotPublicationHelpers:
         )
         kept = _retain_prior_default_sources(explicit, remote, {"sync": {}})
         assert not any(src["name"] == "gstack" for src in kept.selected)
+
+    def test_legacy_prior_grok_entry_is_not_retained_refused_or_tombstoned(self, tmp_path):
+        from mind_meld.cli import (
+            _filter_unselected_sources,
+            _refuse_unavailable_selected_sources,
+        )
+        from mind_meld.manifest import GROK_EXCLUDE_PATTERNS, generate_tombstones
+
+        claude_dir = tmp_path / "claude"
+        claude_dir.mkdir()
+        resolution = SourceResolution(
+            selected=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+            available=[{"name": "claude", "path": str(claude_dir), "type": "claude"}],
+            explicit=False,
+        )
+        remote = {
+            "sources": {
+                "claude": {"files": {}},
+                "grok": {"files": {"skills/a/SKILL.md": {"sha256": "a" * 64}}},
+            },
+            "tombstones": {},
+        }
+        out = _retain_prior_default_sources(resolution, remote, {"sync": {}})
+        assert [s["name"] for s in out.selected] == ["claude"]
+        _refuse_unavailable_selected_sources(out, remote, out.available)
+        filtered = _filter_unselected_sources(remote, [s["name"] for s in out.selected])
+        assert "grok" not in filtered["sources"]
+        local = {"sources": {"claude": {"files": {}}}}
+        assert generate_tombstones(local, filtered, "dev1") == {}
+
+        grok_src = {
+            "name": "grok",
+            "path": str(tmp_path / ".grok"),
+            "type": "grok",
+            "exclude_patterns": ["skills/custom-*"],
+        }
+        exclude_map, _ = core._build_exclude_map({"sync": {}}, sources=[grok_src])
+        assert exclude_map["grok"] == [*GROK_EXCLUDE_PATTERNS, "skills/custom-*"]
+
+    def test_source_path_is_detected_for_grok_requires_real_customization_subdir(self, tmp_path):
+        root = tmp_path / ".grok"
+        src = {"name": "grok", "path": str(root), "type": "grok"}
+        assert core._source_path_is_detected(src) is False
+        (root / "sessions").mkdir(parents=True)
+        (root / "memory-v2").mkdir(parents=True)
+        (root / "auth.json").write_text("{}\n")
+        assert core._source_path_is_detected(src) is False
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "skills").symlink_to(outside, target_is_directory=True)
+        assert core._source_path_is_detected(src) is False
+        (root / "skills").unlink()
+        (root / "skills").mkdir()
+        assert core._source_path_is_detected(src) is True
+        (root / "skills").rmdir()
+        (root / "commands").mkdir()
+        assert core._source_path_is_detected(src) is True
+
+    def test_omission_proof_skips_walker_excluded_grok_path(self, tmp_path):
+        root = tmp_path / ".grok"
+        generated = root / "skills" / "gstack-foo"
+        generated.mkdir(parents=True)
+        (generated / "SKILL.md").write_text("generated")
+        prior = {
+            "sources": {
+                "grok": {
+                    "files": {"skills/gstack-foo/SKILL.md": {"sha256": "a" * 64}},
+                }
+            }
+        }
+        _prove_omitted_paths_absent(
+            {"sources": {"grok": {"files": {}}}},
+            prior,
+            [{"name": "grok", "path": str(root), "type": "grok"}],
+            max_file_size=1024,
+        )
 
     def test_omission_proof_skips_walker_excluded_codex_path(self, tmp_path):
         root = tmp_path / ".codex"

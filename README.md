@@ -657,6 +657,7 @@ Fresh installs are asked about the `codex` source during `mm init`. That choice 
 
 ```bash
 mm enable-source codex
+mm enable-source grok
 mm enable-source agy
 mm enable-source muse
 ```
@@ -678,6 +679,10 @@ To verify Codex usage capture on an initialized Mac with Codex logs and the
 read blocker. Neither proves a snapshot was published. The device-wide capture
 and publication lines in `mm status` provide that evidence. For a blocker, see
 [Host usage capture](#host-usage-capture).
+
+### Grok Build
+
+`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, and `rules/` only, and records consent for Grok usage capture (`grok_usage_consented`). Sessions, `memory-v2/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, or `rules/` exists; `mm init` and `mm reconfigure-sources` ask with a default of N, and `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
 
 ### Muse
 
@@ -1769,7 +1774,7 @@ Use the [second-Mac publication check](#antigravity-agy); cache success alone do
 
 **`mm --version` reports an old version after `pipx upgrade`.** Your install is pinned to a frozen tag. See [Upgrading](#upgrading) for the one-line fix.
 
-**`mm enable-source opencode` or `mm enable-source grok` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and Grok Build on 2026-10-22. Both names are rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records their names in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
+**`mm enable-source opencode` says the source was retired.** The OpenCode sync source was retired in v0.12.55 and is rejected even with `--force`. The next interactive `mm push` or `mm pull` offers `mm migrate-config`, which removes leftover retired `[[sync.sources]]` blocks and records the name in `disabled_sources`. Push and pull already ignore retired sources without minting deletion tombstones, including before migration.
 
 **`/retro-fleet` is missing from an agent, or the agent sees a dead skill entry.** Run `mm diag` — it prints one row per agent with the link's status, its `maintain_links` policy, plus its `readlink` target (or, when there is no link to read, the reason), and needs no passphrase and no valid config. `mm diag --json` top-level keys are `mm_version`, `config`, `crypto_init`, `keyring`, `root_salt_drift`, `sidecar`, `storage_inventory`, `syncthing`, `project_index`, `sync_scope`, `fast_forward`, `last_autorun`, `last_attended_runs`, `sync_run_projection`, `skill_links`, `host_usage`, `host_read_budgets`, `host_publication`, `discovery`, and `git_capture`. `project_index` is `{state, reason, folders, decoded, owned, timed_out, clones, rows, machines}`: `state` is `shared` once this Mac's manifest uses shared project names and `path` before (`null` with no `claude` source, an invalid config or an unresolved home), `reason` is `projects_unlisted`, `home_unresolved`, `encoding_mismatch`, `config_invalid` or `null`, `rows` names why each Claude project folder does or does not share (`no_origin`, `local_remote`, `submodule`, `ambiguous_decode`, `no_checkout`, `unreadable`, `timed_out`, `second_clone`, `worktree`), and `machines` lists each other Mac's name, last-push version and manifest form (`path`, `shared` or `null`) so you can follow a rolling update; it needs no passphrase and names no peer device id. Each `skill_links` row carries `key`, `agent`, `target`, `store`, `store_state`, `status`, and `maintain_links`, plus `store_version` on rows that were diagnosed successfully — the defensive `status: "error"` row omits it, so read that field defensively. When the config cannot be parsed, `maintain_links` is `unknown (config invalid: …)`, never `disabled`. A bare diagnose with no policy set is `unknown (policy not resolved)`. Then run `mm install-skills`, which creates missing links and repairs Mind Meld's own dangling ones **for authorized agents**, and restart the agent so it reloads SKILL.md. If `maintain_links` is disabled, use `mm install-skills --agent KEY` to grant maintenance without enabling sync. If the row says `removed-by-user`, you deleted that link and `mm` is leaving it deleted — `mm install-skills` puts it back (see [Removing a skill link](#removing-a-skill-link)); `absent` means that agent never had one. If the row says the link is a file, or points somewhere Mind Meld does not recognize, that entry is yours: move it aside first, then re-run. `mm status` prints a one-line nag (cause + fix + restart) whenever a link is in a state it can call broken, so you don't have to remember to check — but a *live* entry of your own, and a declined row whose link still resolves, are not those states, so use `mm diag` when the skill is present and simply isn't Mind Meld's.
 

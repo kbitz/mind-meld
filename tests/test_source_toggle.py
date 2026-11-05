@@ -271,7 +271,7 @@ class TestEnableSource:
         names = [s["name"] for s in on_disk["sync"]["sources"]]
         assert "gstack" in names
 
-    @pytest.mark.parametrize("source_name", ["codex", "muse"])
+    @pytest.mark.parametrize("source_name", ["codex", "grok", "muse"])
     def test_appends_exact_agent_default_for_explicit_legacy_config(
         self, cfg, isolated_seen_sources, source_name
     ):
@@ -855,8 +855,7 @@ class TestRetiredSourceToggle:
         config = load_config(cfg)
         config["sync"]["sources"] = [
             *([config["sync"]["sources"][0]] if keep_claude else []),
-            {"name": "grok", "path": 17, "exclude_patterns": False},
-            {"name": "opencode"},
+            {"name": "opencode", "path": 17, "exclude_patterns": False},
         ]
         save_config(config, cfg)
         prompts = []
@@ -872,10 +871,10 @@ class TestRetiredSourceToggle:
         assert [s["name"] for s in on_disk["sync"]["sources"]] == (
             ["claude"] if keep_claude else []
         )
-        assert {"grok", "opencode"} <= set(on_disk["sync"]["disabled_sources"])
-        assert not any("grok" in p or "opencode" in p for p in prompts)
+        assert {"opencode"} <= set(on_disk["sync"]["disabled_sources"])
+        assert not any("opencode" in p for p in prompts)
 
-    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    @pytest.mark.parametrize("name", ["opencode"])
     @pytest.mark.parametrize("force", [False, True])
     def test_enable_source_retired_name_rejected_even_with_force(self, cfg, name, force):
         cmd = ["enable-source", name]
@@ -886,12 +885,48 @@ class TestRetiredSourceToggle:
         assert f"source '{name}' was retired" in result.output
         assert "mm migrate-config" in result.output
 
-    @pytest.mark.parametrize("name", ["grok", "opencode"])
+    @pytest.mark.parametrize("name", ["opencode"])
     def test_retired_sources_excluded_from_known_source_names(self, name):
         assert name not in _known_source_names({})
         assert name not in _known_source_names(
             {"sync": {"sources": [{"name": name, "path": f"~/.{name}", "type": name}]}}
         )
+
+
+class TestGrokSourceToggle:
+    def test_enable_source_grok_from_v1118_disabled_sources_state(self, cfg, isolated_seen_sources):
+        """Enabling grok after v1.11.8 migrate-config removes it from disabled_sources
+        and appends the default grok source."""
+        import tomllib
+
+        from mind_meld.config import grok_usage_consented, load_config
+
+        with open(cfg, "rb") as f:
+            raw = tomllib.load(f)
+        raw["sync"]["disabled_sources"] = ["grok", "gstack"]
+        save_config(raw, cfg)
+        assert grok_usage_consented(load_config(cfg)) is False
+
+        result = runner.invoke(app, ["enable-source", "grok"])
+        assert result.exit_code == 0, result.output
+        assert "Enabled source 'grok'" in result.output
+        assert "skills/, commands/, and rules/ only" in result.output
+        assert "mm disable-source grok" in result.output
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert on_disk["sync"].get("disabled_sources") == ["gstack"]
+        added = next(s for s in on_disk["sync"]["sources"] if s["name"] == "grok")
+        assert added == get_default_source("grok")
+        assert grok_usage_consented(load_config(cfg)) is True
+
+        off = runner.invoke(app, ["disable-source", "grok"])
+        assert off.exit_code == 0, off.output
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "grok" in (on_disk["sync"].get("disabled_sources") or [])
+        assert any(s["name"] == "grok" for s in on_disk["sync"]["sources"])
+        assert grok_usage_consented(load_config(cfg)) is False
 
 
 class TestMuseSourceToggle:
@@ -923,7 +958,7 @@ class TestMuseSourceToggle:
             on_disk = tomllib.load(f)
         assert "muse" in (on_disk["sync"].get("disabled_sources") or [])
 
-    @pytest.mark.parametrize("name", ["muse", "agy"])
+    @pytest.mark.parametrize("name", ["grok", "muse", "agy"])
     def test_enable_source_materializes_legacy_sources_before_adding_row(
         self, cfg, isolated_seen_sources, monkeypatch, tmp_path, name
     ):
@@ -933,6 +968,7 @@ class TestMuseSourceToggle:
         from mind_meld.config import get_sources, load_config, save_config
 
         home = tmp_path / "home"
+        (home / ".grok" / "skills").mkdir(parents=True)
         (home / ".local" / "share" / "muse").mkdir(parents=True)
         (home / ".gemini" / "antigravity-cli" / "conversations").mkdir(parents=True)
         monkeypatch.setattr(
@@ -1014,18 +1050,66 @@ class TestReconfigureSources:
     def test_reconfigure_sources_skips_retired_sources(
         self, cfg, isolated_seen_sources, monkeypatch
     ):
-        """Reconfigure never prompts for retired grok or opencode."""
-        prompts = []
+        """Reconfigure never prompts for retired opencode, and prompts grok with default False."""
+        prompts: list[tuple[str, bool]] = []
 
         def accept(prompt, default):
-            prompts.append(prompt)
+            prompts.append((prompt, default))
             return default
 
         monkeypatch.setattr(typer, "confirm", accept)
         result = runner.invoke(app, ["reconfigure-sources"])
         assert result.exit_code == 0
-        assert not any("grok" in p for p in prompts)
-        assert not any("opencode" in p for p in prompts)
+        assert not any("opencode" in p for p, _ in prompts)
+        grok_prompts = [(p, d) for p, d in prompts if "'grok'" in p]
+        assert len(grok_prompts) == 1
+        assert grok_prompts[0][1] is False
+
+    @pytest.mark.parametrize("detected_subdir", [None, "skills"])
+    def test_grok_defaults_off_even_when_detected(
+        self, cfg, isolated_seen_sources, monkeypatch, tmp_path, detected_subdir
+    ):
+        """Reconfigure must not turn a detected ~/.grok tree into source or consent without Y."""
+        import tomllib
+
+        from mind_meld.config import load_config
+
+        home = tmp_path / "home"
+        claude = home / ".claude"
+        claude.mkdir(parents=True)
+        (home / ".grok" / "sessions").mkdir(parents=True)
+        (home / ".grok" / "auth.json").write_text("{}\n")
+        if detected_subdir:
+            (home / ".grok" / detected_subdir).mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        assert "grok" in _known_source_names({})
+
+        config = load_config(cfg)
+        config["sync"] = {
+            "claude_dir": str(claude),
+            "max_file_size": 52_428_800,
+        }
+        save_config(config, cfg)
+
+        grok_prompt: dict[str, object] = {}
+
+        def accept_default(prompt, default):
+            if "'grok'" in prompt:
+                grok_prompt.update(prompt=prompt, default=default)
+            return default
+
+        monkeypatch.setattr(typer, "confirm", accept_default)
+        result = runner.invoke(app, ["reconfigure-sources"])
+        assert result.exit_code == 0, result.output
+        expected_suffix = "(detected)" if detected_subdir else "(not detected)"
+        assert grok_prompt == {
+            "prompt": f"Sync 'grok' source at ~/.grok? {expected_suffix}",
+            "default": False,
+        }
+
+        with open(cfg, "rb") as f:
+            on_disk = tomllib.load(f)
+        assert "grok" not in [s["name"] for s in on_disk["sync"]["sources"]]
 
     def test_bare_muse_root_defaults_off(self, cfg, isolated_seen_sources, monkeypatch, tmp_path):
         """Reconfigure must not turn a stock Muse data root into source or consent."""

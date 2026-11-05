@@ -249,6 +249,7 @@ def _pytest_refused_roots(
             ".local/share/mind-meld",
             ".claude",
             ".codex",
+            ".grok",
             ".gstack",
             ".gstack-extend",
             ".cursor",

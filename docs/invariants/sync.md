@@ -21,7 +21,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/initflow.py` — `_register_and_save` / (also read init-devices.md)
 - `src/mind_meld/resolveflow.py` — `_ensure_inversion_marker` / (also read conflicts.md)
 - `src/mind_meld/attemptlog.py` — `write` / (also read events-retro.md)
-- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
+- `src/mind_meld/manifest.py` — `walk_generic_source` / `walk_grok_source` / `walk_muse_source` / `load_manifest` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `BROWSER_PROFILE_MARKER`
 - `src/mind_meld/manifest.py` — `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths`
 - `src/mind_meld/core.py` — `_prove_omitted_paths_absent`
 - `src/mind_meld/cli.py` — `_warn_push_growth`
@@ -641,12 +641,13 @@ filesystem-rollback limit rather than repeatedly advising `mm push`.
 **Anchors and the mint guard.** A tombstone is minted only for a file this machine
 held and can prove gone, so a removed or restored scan root can never read as a mass
 deletion. Each source's **scan roots** come from `manifest.scan_roots(src)`:
-`projects` for a claude-type source, `memory` for Muse, each `include_dirs` entry for
-a generic source, and the source root itself when it has `include_files`. `mm-events`
-has none. Each scan root holds a file `.mind-meld-anchor` with a random 32-hex token
-(0600, `manifest.write_anchor`, guarded, `atomic_write_bytes`). The name is in
-`EXCLUDED` and in `_filter_excluded_paths`' conflict-shaped test, so no source
-publishes it and no peer plants it.
+`projects` for a claude-type source, `skills`, `commands` and `rules` for Grok,
+`memory` for Muse, each `include_dirs` entry for a generic source, and the source
+root itself when it has `include_files`. `mm-events` has none. Each scan root holds a
+file `.mind-meld-anchor` with a random 32-hex token (0600, `manifest.write_anchor`,
+guarded, `atomic_write_bytes`). The name is in `EXCLUDED` and in
+`_filter_excluded_paths`' conflict-shaped test, so no source publishes it and no peer
+plants it.
 
 - **A token is a generation.** Every publishing push (`core.publish_anchors`)
   writes a fresh random token into each existing, writable scan root and records
@@ -866,7 +867,7 @@ policy, not physical crash survival or every CLI retry.
 | Same `LocalBackend.put` → `cli.py:_push_core` (`manifests/`) | Put failure stops before `content_accepted`, sidecar, last_seen and conflict cleanup. `push` catches `OSError` / `MindMeldError`; `_auto_command_scope` records failure for autopush. Push's finally then records any attended capture attempt as `push-failed` via `Attempt.stopped()`, and `_host_publication` judges publication from the unrefreshed sidecar. Next push/pull uses `_fetch_remote_manifest` and `_recover_prior_manifest` on actual storage; a following no-op push returns before `sidecar.write`, so the sidecar can stay one generation behind a visible manifest and later corrupt-manifest recovery would use it as prior state. | **Unknown:** no stale content retry was found, but after a late error that follows visible replacement, `push` says content was not pushed, the attempt record says `push-failed`, and `mm status` reports publication `unknown` for a manifest peers can read. Owner: CLI/sync maintainer; prove pre/post-failure receipt, warning, attempt/status and next-push sidecar behavior with isolated manifest-parent faults before proposing a repair. |
 | Same `LocalBackend.put` → `devices.py:update_last_seen` (`devices/`) | Put errors propagate after the read inside `_devices_write_lock`, which yields without the lock once its retries are exhausted (its warning says the update is skipped; it is not). `_push_core` warns/continues for attended maintenance; unattended errors reach `_auto_command_scope`. Next `update_last_seen` re-GETs; `list_devices` / `list_devices_with_drops` read current registry bytes. Registration itself uses the excluded create-only writer below. | **No demonstrated defect** in publication-failure handling: current last_seen/version fields are recomputed from a fresh read, with no cached-state retry. Under lock contention the read-modify-write can run unlocked. `tests/test_storage_local.py:TestFsyncRouting` pins the conditional prefixes and mode, not every failure handler. |
 | `sidecar.py:write` → `cli.py:_push_core` | Catches `OSError` / `StorageError`, warns and continues after successful manifest acceptance. It does not restore the old sidecar. Next `_recover_prior_manifest`, `_host_publication`, `_collect_diag_state` or `recover` calls `sidecar.read`, which opens current bytes and validates shape/device identity. | **No demonstrated defect** in the inspected read/write policy. The warning's promised peer fallback overstates what a late error proves: a visible valid sidecar is still eligible. No fresh reproduction of historical sidecar disappearance is established. |
-| `config.py:save_config` → `initflow.py:_register_and_save`; `config.py:patch_config_on_disk` → CLI patch consumers | Save errors propagate. Init's `except Exception` deletes the device key and re-raises without config readback. Patches first re-read TOML: `_set_grok_host_usage`, `disable_source`, `enable_source`, `reconfigure_sources`, `_migrate_config_core` propagate write errors and stop before success/acknowledgment; migration releases its lock in finally. `install_skills_cmd` catches `ConfigError` / `OSError` / `StorageError` and exits before changing links; its "could not write" message, like the sidecar warning, can follow a visible write. `_init_crypto_session` backfill catches only `OSError` / `ConfigError`; `StorageError` reaches its command's crypto-error handler. Next `load_config` / `_get_config` and init's `_load_prior_device_metadata` read actual config; each later patch also re-reads. | **Reproduced defects** in init cleanup and in the backfill handler (both below). **No demonstrated defect** in the source-toggle/migration/install stop-and-fresh-read policies. No config-family blanket safety claim. |
+| `config.py:save_config` → `initflow.py:_register_and_save`; `config.py:patch_config_on_disk` → CLI patch consumers | Save errors propagate. Init's `except Exception` deletes the device key and re-raises without config readback. Patches first re-read TOML: `sourceflow.py`'s `_toggle_cursor_usage`, `disable_source`, `enable_source`, `reconfigure_sources`, and `core.py:_migrate_config_core` (`_toggle_cursor_usage` catches `OSError` / `ValueError` / `RuntimeError` / `StorageError` as above; `disable_source`, `enable_source`, `reconfigure_sources`, and `_migrate_config_core` propagate write errors and stop before success/acknowledgment; migration releases its lock in finally). `install_skills_cmd` catches `ConfigError` / `OSError` / `StorageError` and exits before changing links; its "could not write" message, like the sidecar warning, can follow a visible write. `_init_crypto_session` backfill catches only `OSError` / `ConfigError`; `StorageError` reaches its command's crypto-error handler. Next `load_config` / `_get_config` and init's `_load_prior_device_metadata` read actual config; each later patch also re-reads. | **Reproduced defects** in init cleanup and in the backfill handler (both below). **No demonstrated defect** in the source-toggle/migration/install stop-and-fresh-read policies. No config-family blanket safety claim. |
 | `attemptlog.py:write` → `cli.py:push` guarded finally | A separate `except Exception` notices that the attempt could not be durably recorded; outer finally releases the mm lock. No rollback or altered content-sync exit. Next status/diag uses `attemptlog.project` → `read`, with distinct missing/unreadable/corrupt states. | **No demonstrated defect:** existing `tests/test_integration.py:test_attempt_write_failure_keeps_push_exit_and_releases_lock` covers pre/post-rename and mkdir faults, actual record state and released lock. events-retro.md already admits old/new-record uncertainty. |
 | `cli.py:_quarantine_corrupt_manifest` → `recover` | Copy errors propagate before source unlink, so a late copy failure can leave both names. `recover` catches FileNotFoundError / `OSError`, not `StorageError`; the post-unlink directory flush separately catches both. A later recover or push re-fetches the canonical through `_fetch_remote_manifest`; no same-call retry. | **Reproduced defect** in presentation (below): the copy's `StorageError` escapes `recover` uncaught instead of its "quarantine failed" error. Source retention holds; a re-run quarantines again and leaves any earlier copy. |
 | `resolveflow.py:_ensure_inversion_marker` → `_migrate_pre_inversion_conflict` | Catches `OSError` / `StorageError` / ValueError and returns None; that migration is skipped. A later call reads the actual marker if present, including one published before a flush error, rather than rewriting a cached timestamp. | **No demonstrated defect:** inspected fail-safe gate and fresh read; conflicts.md supplies filename-era/clock rules. This does not certify physical survival of the marker. |
@@ -1367,12 +1368,21 @@ warning and attended migration prompt, which re-adds it by default.
 Per-machine source toggle. `[sync].disabled_sources: list[str]` lists source
 names to skip on this device only (config.toml is per-machine, never synced).
 `get_sources()` filters by name after resolution and before the path-existence
-filter. Retired source names (`RETIRED_SOURCE_NAMES = frozenset({"grok", "opencode"})`)
+filter. Retired source names (`RETIRED_SOURCE_NAMES = frozenset({"opencode"})`)
 are dropped silently so old configs and peer manifests continue working without
-minting deletion tombstones. The default `agy` source (`type: "generic"`) syncs
+minting deletion tombstones. The default `grok` source (`type: "grok"`, Track 109A)
+has its own walker shape (`skills/`, `commands/`, and `rules/` hardcoded at
+`~/.grok`, refusing child links, hard links and every other path under `~/.grok`,
+with `GROK_EXCLUDE_PATTERNS` applied on push and pull) and never auto-activates:
+neither a legacy config without explicit `[[sync.sources]]` nor `_retain_prior_default_sources`
+re-selects it, and both `mm init` and `mm reconfigure-sources` default it to N.
+Only `mm enable-source grok` (which also clears `"grok"` from `disabled_sources`),
+or an explicit "y" at `mm init` / `mm reconfigure-sources`, or a pre-v1.11.8
+config that still carries an enabled `grok` block or `[retro] grok_host_usage = true`,
+turns it on (`config.grok_usage_consented`). The default `agy` source (`type: "generic"`) syncs
 `skills/`, `rules/`, `AGENTS.md`, and `GEMINI.md` at `~/.gemini/config`, excluding
 `agents/`, `mcp_config.json`, `hooks.json`, `skills.json`, and `projects/`. Like
-`muse`, it never auto-activates on legacy configs without explicit `[[sync.sources]]`
+`grok` and `muse`, it never auto-activates on legacy configs without explicit `[[sync.sources]]`
 opt-in; `mm init` and `mm reconfigure-sources` treat it as detected/available
 when either `~/.gemini/config` or `agy_sessions_root()` exists. The default
 `muse` source (`type: "muse"`) has its own walker shape (`memory/` hardcoded
@@ -1380,7 +1390,7 @@ at `~/.local/share/muse`, `.muse-memory.lock` excluded on push and pull) but
 never auto-activates: Muse creates `memory/` itself on first run, so neither
 the data root nor that tree is consent. Only `mm enable-source muse`, or an
 explicit "y" at the `mm init` or `mm reconfigure-sources` prompt, adds it.
-Both prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
+Both `grok` and `muse` prompts default to N. CLI surface: `mm enable-source <name>` / `mm disable-source <name>` /
 `mm reconfigure-sources` (top-level kebab-case to match `mm migrate-config`
 pattern). Strict by default; `--force` accepts unknown names for forward-compat
 (pre-disable codex before it ships).

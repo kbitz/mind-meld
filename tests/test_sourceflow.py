@@ -26,6 +26,11 @@ app.command("reconfigure-sources")(sourceflow.reconfigure_sources)
 runner = CliRunner()
 
 DETAIL_LINES = {
+    "grok": [
+        "Syncs ~/.grok skills/, commands/, and rules/ only. "
+        "Sessions, memory, settings, credentials, plugins and hooks are not synced.",
+        "Run 'mm disable-source grok' to turn this off.",
+    ],
     "muse": [
         "Syncs ~/.local/share/muse memory/ only. "
         "Session files are not synced. Prompts never leave the Mac.",
@@ -127,10 +132,10 @@ def test_default_source_disable_enable_round_trip(cfg):
     assert _lines(again.stdout) == ["Source 'gstack' is already enabled."]
 
 
-# ── opt-in sources (muse, agy) ────────────────────────────────────────
+# ── opt-in sources (grok, muse, agy) ──────────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["muse", "agy"])
+@pytest.mark.parametrize("name", ["grok", "muse", "agy"])
 def test_opt_in_source_enable_then_disable(cfg, name):
     result = runner.invoke(app, ["enable-source", name])
     assert result.exit_code == 0, result.output
@@ -155,6 +160,32 @@ def test_opt_in_source_enable_then_disable(cfg, name):
     on_disk = _on_disk(cfg)
     assert name in _disabled(cfg)
     assert any(s["name"] == name for s in on_disk["sync"]["sources"])
+
+
+def test_enable_grok_clears_disabled_sources_from_v1118_migration(cfg):
+    raw = _on_disk(cfg)
+    raw["sync"]["disabled_sources"] = ["grok", "opencode"]
+    config.save_config(raw, cfg)
+
+    result = runner.invoke(app, ["enable-source", "grok"])
+    assert result.exit_code == 0, result.output
+    on_disk = _on_disk(cfg)
+    assert _disabled(cfg) == ["opencode"]
+    added = next(s for s in on_disk["sync"]["sources"] if s["name"] == "grok")
+    assert added == config.get_default_source("grok")
+    assert config.grok_usage_consented(config.load_config(cfg)) is True
+
+    off = runner.invoke(app, ["disable-source", "grok"])
+    assert off.exit_code == 0, off.output
+    on_disk = _on_disk(cfg)
+    assert _disabled(cfg) == ["grok", "opencode"]
+    assert any(s["name"] == "grok" for s in on_disk["sync"]["sources"])
+    assert config.grok_usage_consented(config.load_config(cfg)) is False
+
+    again = runner.invoke(app, ["enable-source", "grok"])
+    assert again.exit_code == 0, again.output
+    assert _disabled(cfg) == ["opencode"]
+    assert config.grok_usage_consented(config.load_config(cfg)) is True
 
 
 # ── names that are not accepted ───────────────────────────────────────
@@ -183,9 +214,9 @@ def test_unknown_source_name_with_force_is_accepted(cfg, command):
 @pytest.mark.parametrize("command", ["enable-source", "disable-source"])
 def test_retired_source_exits_1_with_or_without_force(cfg, command, force):
     before = cfg.read_bytes()
-    result = runner.invoke(app, [command, "grok", *(["--force"] if force else [])])
+    result = runner.invoke(app, [command, "opencode", *(["--force"] if force else [])])
     assert result.exit_code == 1, result.output
-    assert "source 'grok' was retired" in result.stderr
+    assert "source 'opencode' was retired" in result.stderr
     assert cfg.read_bytes() == before
 
 

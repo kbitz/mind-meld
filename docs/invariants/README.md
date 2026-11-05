@@ -107,8 +107,8 @@ Load-bearing invariants live in `docs/invariants/<topic>.md`. Read the relevant 
 | `lockedjson.py:locked_json_rmw` / `locked_json_snapshot` | `docs/invariants/sync.md` (Shared JSON locking) |
 | `lockedjson.py:locked_json_durable_rmw` | `docs/invariants/sync.md` (Atomic write publication failures) |
 | `storage/keys.py:manifest_key` / `blob_key` / `data_prefix` / `device_key` / `parse_blob_key` / `_validate_component` / `_validate_hex_sha` | `docs/invariants/sync.md` (Validated storage keys) |
-| `manifest.py:walk_generic_source` / `walk_muse_source` / `MUSE_SYNCED_SUBDIRS` / `walk_claude_source` / `build_manifest_v2` / (`nested_roots` out-parameter) / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `_directory_is_git_repo` / `_collect_regular_files_scandir` / `SourceHolds` / `core.py:_prove_omitted_paths_absent` / `_require_published_source_root` / `cli.py:_warn_push_growth` / `core.py:_freeze_nested_checkout_entries` / `cli.py:_inject_held_entries` / `cli.py:_upload_changed_blobs` (held files, Track 75A) / `cli.py:_drop_unfrozen_checkout_files` / `core.py:_incoming_nested_roots` / `statusflow.py:_collect_diag_state` / (diag `sync_scope`) | `docs/invariants/sync.md` |
-| `config.py` exclude_patterns / disabled_sources / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
+| `manifest.py:walk_generic_source` / `walk_grok_source` / `GROK_SYNCED_SUBDIRS` / `GROK_EXCLUDE_PATTERNS` / `walk_muse_source` / `MUSE_SYNCED_SUBDIRS` / `walk_claude_source` / `build_manifest_v2` / (`nested_roots` out-parameter) / `load_manifest` / `_validate_rel_path` / `collect_tombstones` / `generate_tombstones` / `marker_skip_globs` / `nested_repo_root` / `nested_repo_skip_prefixes` / `nested_repo_roots_for_paths` / `_directory_is_git_repo` / `_collect_regular_files_scandir` / `SourceHolds` / `core.py:_prove_omitted_paths_absent` / `_require_published_source_root` / `cli.py:_warn_push_growth` / `core.py:_freeze_nested_checkout_entries` / `cli.py:_inject_held_entries` / `cli.py:_upload_changed_blobs` (held files, Track 75A) / `cli.py:_drop_unfrozen_checkout_files` / `core.py:_incoming_nested_roots` / `statusflow.py:_collect_diag_state` / (diag `sync_scope`) | `docs/invariants/sync.md` |
+| `config.py` exclude_patterns / disabled_sources / `grok_usage_consented` / `grok_customization_dirs_exist` / `seen_sources.py` consumer paths | `docs/invariants/sync.md` |
 | `sourceflow.py:sources` / `disable_source` / `enable_source` / `reconfigure_sources` / `_known_source_names` / `_validate_source_name` / `_record_seen` (config patch write errors stop before success and acknowledgment; `has_explicit_sources` key presence) | `docs/invariants/sync.md` |
 | `config.py:_GENERATED_HOST_SKILL_GLOBS` / the `DEFAULT_SOURCES` `exclude_patterns` lists (adding or removing a glob) | `docs/invariants/sync.md` (generated-files section) |
 | `pullhistory.py` (forensic log) / `statedb.py` / `cli.py:log_cmd` | `docs/invariants/sync.md` and `docs/invariants/auto-upgrade.md` |
@@ -197,7 +197,7 @@ The single `_pytest_refused_roots` inventory protects:
 
 - Four account trees: `.config/mind-meld`, `.local/share/mind-meld`,
   `Library/Mobile Documents/com~apple~CloudDocs/mind-meld`, `Sync/mind-meld`.
-- Eight agent trees: `.claude`, `.codex`, `.gstack`, `.gstack-extend`,
+- Nine agent trees: `.claude`, `.codex`, `.grok`, `.gstack`, `.gstack-extend`,
   `.cursor`, `.local/share/muse`, `.gemini/config`, `.gemini/antigravity-cli`.
 - `storage.path`, every explicit `sync.sources[i].path` (including disabled
   sources), and legacy `sync.claude_dir` from the **real account config**

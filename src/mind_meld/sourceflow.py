@@ -270,14 +270,14 @@ def enable_source(name: str, *, force: bool = False) -> None:
         disabled.remove(name)
         updates["disabled_sources"] = sorted(disabled)
 
-    # Muse and Antigravity must be materialized even when their allowlisted
-    # trees are not present yet: explicit enable is consent.  In a legacy
-    # config, first preserve the resolved source set before writing
+    # Grok, Muse and Antigravity must be materialized even when their
+    # allowlisted trees are not present yet: explicit enable is consent.  In a
+    # legacy config, first preserve the resolved source set before writing
     # sync.sources.  An explicit list takes priority over legacy
     # claude_dir/default fallback; writing only the new host here would make the
     # existing sources disappear and eventually produce their deletion
     # tombstones.
-    if name in {"muse", "agy"} and not has_explicit_sources:
+    if name in {"grok", "muse", "agy"} and not has_explicit_sources:
         explicit_sources = get_sources(config)
         explicit_names = [s["name"] for s in explicit_sources]
         updates["sources"] = explicit_sources
@@ -286,7 +286,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
     # but it IS in DEFAULT_SOURCES, append the default so enable actually
     # has effect (auto-detect doesn't fire when explicit sources are set).
     needs_explicit_append = name not in explicit_names and (
-        name in {"muse", "agy"} or (has_explicit_sources and name in default_names)
+        name in {"grok", "muse", "agy"} or (has_explicit_sources and name in default_names)
     )
     if needs_explicit_append:
         default = get_default_source(name)
@@ -306,7 +306,13 @@ def enable_source(name: str, *, force: bool = False) -> None:
 
     _record_seen([name])
     console.print(f"[green]Enabled source '{name}' on this device.[/green]")
-    if name == "muse":
+    if name == "grok":
+        console.print(
+            "[dim]Syncs ~/.grok skills/, commands/, and rules/ only. "
+            "Sessions, memory, settings, credentials, plugins and hooks are not synced.[/dim]"
+        )
+        console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
+    elif name == "muse":
         console.print(
             "[dim]Syncs ~/.local/share/muse memory/ only. "
             "Session files are not synced. Prompts never leave the Mac.[/dim]"
@@ -377,9 +383,10 @@ def reconfigure_sources() -> None:
             iname = item["name"]
             detected = core._source_path_is_detected(item)
             default_active = iname in default_names
-            if iname == "muse":
-                # Muse never defaults on: its memory/ tree is host-created, so
-                # even a detected root is not consent for sync or usage reads.
+            if iname in ("grok", "muse"):
+                # Grok and Muse never default on: their trees are host-created
+                # or opt-in only, so even a detected root is not consent for
+                # sync or usage reads.
                 default_active = False
             elif iname == "agy":
                 # Interactive enrollment follows init's detected-host default;

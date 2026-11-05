@@ -315,7 +315,7 @@ def _prompt_sources() -> list[dict[str, Any]]:
 
     User-facing sources (claude, gstack) become a Y/n prompt via
     `_prompt_source_toggle`. Default is Y when the qualifying source tree
-    exists on disk, N otherwise; Muse always defaults to N.
+    exists on disk, N otherwise; Grok and Muse always default to N.
     This nudges users toward only-enabling-what-they-have without making it
     impossible to enable a source whose directory doesn't exist yet (e.g. new
     machine, same project about to be cloned).
@@ -337,9 +337,9 @@ def _prompt_sources() -> list[dict[str, Any]]:
                 enabled.append(src)
             continue
         exists = core._source_path_is_detected(default)
-        # Muse is opt-in even when detected: its memory/ tree is host-created,
-        # and enabling the source also consents to the usage reader.
-        default_on = exists and default["name"] != "muse"
+        # Grok and Muse are opt-in even when detected: enabling the source also
+        # consents to the usage reader.
+        default_on = exists and default["name"] not in ("grok", "muse")
         if core._prompt_source_toggle(default, current_state=default_on, detected=exists):
             src = get_default_source(default["name"])
             if src is not None:
