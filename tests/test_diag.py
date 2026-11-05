@@ -2522,6 +2522,38 @@ def test_status_reports_the_syncthing_connection_and_points_to_diag(
     assert "Syncthing folder settings need attention (2). Run: mm diag" in drifted.output
 
 
+@pytest.mark.parametrize(
+    ("folder_state", "paused", "need_files", "pull_errors", "expected"),
+    [
+        ("idle", False, 2, 0, "idle, 2 files to fetch"),
+        ("error", False, 2, 3, "error, 2 files to fetch, 3 pull errors. Run: mm diag"),
+        ("scanning", False, 2, 0, "scanning, 2 files to fetch"),
+        ("idle", False, 0, 1, "idle, 1 pull error. Run: mm diag"),
+        ("idle", True, 2, 0, "paused, 2 files to fetch"),
+        ("syncing", False, 2, 1, "syncing, 2 files to fetch, 1 pull error. Run: mm diag"),
+    ],
+)
+def test_status_preserves_syncthing_folder_state_and_reports_pull_errors(
+    tmp_path, monkeypatch, fake_syncthing, folder_state, paused, need_files, pull_errors, expected
+):
+    storage, _, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("MINDMELD_PASSPHRASE", PASSPHRASE)
+    fake_syncthing.set_folder(
+        storage,
+        peers=[(fake_syncthing.peer_id, "mac-b", False)],
+        state=folder_state,
+        paused=paused,
+        need_files=need_files,
+        pull_errors=pull_errors,
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert f"Syncthing: connected 0 of 1 devices (mac-b disconnected); {expected}" in flat
+
+
 @pytest.mark.parametrize("mode", ["missing", "refused", "held"])
 def test_missing_or_unreachable_syncthing_is_reported_not_an_error(
     tmp_path, monkeypatch, fake_syncthing, mode
@@ -2607,7 +2639,7 @@ def test_inspection_never_writes_to_syncthing_or_state_db(tmp_path, monkeypatch,
 def test_peer_states_cover_every_state_and_the_24_h_edge():
     from datetime import datetime, timedelta, timezone
 
-    from mind_meld import core, statusflow
+    from mind_meld import core, statedb, statusflow
 
     now = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
     just_under = (now - timedelta(hours=23, minutes=59)).isoformat()
@@ -2636,9 +2668,10 @@ def test_peer_states_cover_every_state_and_the_24_h_edge():
             "p-unreadable": core.ManifestFetch(status="corrupt"),
             "p-newer": core.ManifestFetch(status="corrupt", newer_version=99),
         }
+        identity = core._manifest_content_hash({"timestamp": stamp})
         cursors = {
-            "p-applied": (stamp_us, stamp_us, 0),
-            "p-waiting": (None, stamp_us, 2),
+            "p-applied": statedb.CursorRow(stamp_us, stamp_us, 0, identity, identity, identity),
+            "p-waiting": statedb.CursorRow(None, stamp_us, 2, None, None, identity),
         }
         states = {
             p.device_id: p
@@ -2712,6 +2745,36 @@ def test_peer_states_cover_every_state_and_the_24_h_edge():
     assert statusflow._overdue_peers_line(
         [over_states["p-unpulled"], over_states["p-waiting"]]
     ) == ("Waiting more than 24 h for Unpulled's push of 2026-06-14 (and 1 more). Run: mm pull")
+
+
+def test_peer_cursor_identity_controls_applied_and_waiting_at_the_same_timestamp():
+    from mind_meld import core, statedb, statusflow
+
+    stamp = "2026-06-14T12:00:00+00:00"
+    first = {"timestamp": stamp, "sources": {"notes": {"files": {}}}}
+    changed = {
+        "timestamp": stamp,
+        "sources": {"notes": {"files": {"late.md": {"sha256": "a" * 64}}}},
+    }
+    identity = core._manifest_content_hash(first)
+    stamp_us = statusflow._dt_to_us(statusflow._parse_aware_dt(stamp))
+
+    def state(data, cursor):
+        return statusflow._peer_states(
+            [{"device_id": "peer", "device_name": "Peer"}],
+            "local",
+            {"peer": data},
+            {"peer": cursor},
+        )[0].state
+
+    # A migrated timestamp-only row is not evidence of applied bytes.
+    assert state(first, statedb.CursorRow(stamp_us, stamp_us, 0)) == "not-pulled"
+    applied = statedb.CursorRow(stamp_us, stamp_us, 0, identity, identity, identity)
+    assert state(first, applied) == "applied"
+    assert state(changed, applied) == "not-pulled"
+    waiting = statedb.CursorRow(None, stamp_us, 2, None, None, identity)
+    assert state(first, waiting) == "waiting"
+    assert state(changed, waiting) == "not-pulled"
 
 
 def test_overdue_replaces_only_the_healthy_verdict():

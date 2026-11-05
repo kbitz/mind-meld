@@ -5280,7 +5280,9 @@ def test_withheld_and_unplaced_files_never_block_applied(mac, linux):
 
     first = linux.pull()
     assert first.total_applied == 0 and len(first.old_form_peers) == 1
-    assert _machine_cursors(linux) == {mac.device_id: (old_us, old_us, 0)}
+    assert {peer: row[:3] for peer, row in _machine_cursors(linux).items()} == {
+        mac.device_id: (old_us, old_us, 0)
+    }
 
     shutil.rmtree(mac.claude / "projects" / "-Users-kb-scratch")
     mac.checkout("/Users/kb/Dev/widgets")
@@ -5291,7 +5293,9 @@ def test_withheld_and_unplaced_files_never_block_applied(mac, linux):
 
     second = linux.pull()
     assert second.total_applied == 0 and second.not_placed_files == 1
-    assert _machine_cursors(linux) == {mac.device_id: (new_us, new_us, 0)}
+    assert {peer: row[:3] for peer, row in _machine_cursors(linux).items()} == {
+        mac.device_id: (new_us, new_us, 0)
+    }
 
 
 def test_status_shows_each_peer_applied_after_a_pull(mac, linux):

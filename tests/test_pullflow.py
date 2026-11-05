@@ -3438,9 +3438,65 @@ def test_a_dry_run_never_tidies_an_index(fleet, monkeypatch):
 # ── Track 92A: peer cursors recorded after pull ───────────────────────
 
 
+def _expected_cursor(applied_manifest, seen_manifest, waiting):
+    applied_hash = core._manifest_content_hash(applied_manifest)
+    return statedb.CursorRow(
+        pullflow._aware_timestamp_us(applied_manifest["timestamp"]),
+        pullflow._aware_timestamp_us(seen_manifest["timestamp"]),
+        waiting,
+        applied_hash,
+        applied_hash,
+        core._manifest_content_hash(seen_manifest),
+    )
+
+
 def _cursors() -> dict[str, statedb.CursorRow]:
     with statedb.connect(read_only=True) as conn:
         return statedb.read_cursors(conn)
+
+
+def test_late_older_manifest_copy_invalidates_applied_then_cleanup_stays_applied(
+    fleet, monkeypatch
+):
+    from mind_meld import statusflow
+
+    first, _ = _seed(fleet, {"a.md": b"alpha\n"})
+    _run(fleet, monkeypatch, "attended")
+
+    def peer_state():
+        fetched = core._fetch_remote_manifest(fleet.backend, PEER, PASSPHRASE, MEMORY_KB)
+        states = statusflow._peer_states(
+            [{"device_id": PEER, "device_name": "Peer B"}],
+            LOCAL,
+            {PEER: fetched},
+            _cursors(),
+        )
+        return states[0], fetched
+
+    assert peer_state()[0].state == "applied"
+    older, _ = _seed(fleet, {"a.md": b"alpha\n", "late.md": b"late content\n"})
+    older["timestamp"] = (
+        datetime.fromisoformat(first["timestamp"]) - timedelta(hours=1)
+    ).isoformat()
+    _republish(fleet, first)
+    canonical = fleet.backend.root / manifest_key(PEER)
+    copy = canonical.with_name(f"manifest.json.{CONFLICT_STAMP}.enc")
+    copy_bytes = crypto.encrypt(manifest.serialize_manifest(older), PASSPHRASE, MEMORY_KB)
+    copy.write_bytes(copy_bytes)
+
+    state, fetched = peer_state()
+    assert fetched.manifest["timestamp"] == first["timestamp"]
+    assert "late.md" in fetched.manifest["sources"]["notes"]["files"]
+    assert not (fleet.local / "late.md").exists()
+    assert state.state == "not-pulled"
+
+    pulled, _, _ = _run(fleet, monkeypatch, "attended")
+    assert pulled.total_written == 1
+    assert (fleet.local / "late.md").read_bytes() == b"late content\n"
+    assert not copy.exists()
+    assert peer_state()[0].state == "applied"
+    copy.write_bytes(copy_bytes)
+    assert peer_state()[0].state == "applied"
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -3455,7 +3511,7 @@ def test_a_complete_pull_records_the_peers_applied_manifest_time(
     result, _, _ = _run(fleet, monkeypatch, mode, from_device=from_device)
 
     assert result.total_written == 1 and result.total_failed == 0
-    assert _cursors() == {PEER: (expected_us, expected_us, 0)}
+    assert _cursors() == {PEER: _expected_cursor(peer, peer, 0)}
 
 
 def test_waiting_files_record_the_count_and_keep_the_earlier_applied_time(
@@ -3465,7 +3521,7 @@ def test_waiting_files_record_the_count_and_keep_the_earlier_applied_time(
     first_us = pullflow._aware_timestamp_us(first["timestamp"])
     assert first_us is not None
     _run(fleet, monkeypatch, "attended")
-    assert _cursors() == {PEER: (first_us, first_us, 0)}
+    assert _cursors() == {PEER: _expected_cursor(first, first, 0)}
 
     second, _ = _seed(fleet, {"a.md": b"alpha\n", "b.md": b"bravo\n", "c.md": b"charlie\n"})
     second["timestamp"] = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
@@ -3477,13 +3533,13 @@ def test_waiting_files_record_the_count_and_keep_the_earlier_applied_time(
 
     result, _, _ = _run(fleet, monkeypatch, "attended")
     assert result.total_waiting == 2 and result.total_failed == 0
-    assert _cursors() == {PEER: (first_us, second_us, 2)}
+    assert _cursors() == {PEER: _expected_cursor(first, second, 2)}
 
     for name in ("b.md", "c.md"):
         syncthing.arrive(_blob(second, name))
     result, _, _ = _run(fleet, monkeypatch, "attended")
     assert result.total_written == 2 and result.total_waiting == 0
-    assert _cursors() == {PEER: (second_us, second_us, 0)}
+    assert _cursors() == {PEER: _expected_cursor(second, second, 0)}
 
 
 def test_failed_files_leave_the_push_unapplied(fleet, monkeypatch):
@@ -3503,7 +3559,7 @@ def test_failed_files_leave_the_push_unapplied(fleet, monkeypatch):
 
     result, _, _ = _run(fleet, monkeypatch, "attended")
     assert result.total_failed == 1
-    assert _cursors() == {PEER: (first_us, second_us, 0)}
+    assert _cursors() == {PEER: _expected_cursor(first, second, 0)}
 
 
 def test_dry_run_scoped_and_interrupted_pulls_record_nothing(fleet, monkeypatch):

@@ -142,6 +142,7 @@ class ManifestFetch:
     conflict_copies_only: bool = False
     vanished: bool = False
     merged: bool = False  # A union of copies was never accepted as one published snapshot.
+    canonical_hash: str | None = None  # Identity from this read, before conflict-copy union.
 
     @property
     def is_ok(self) -> bool:
@@ -444,6 +445,7 @@ def _fetch_remote_manifest(
     """
     mkey = manifest_key(device_id)
     manifests: list[dict] = []
+    canonical_hash: str | None = None
 
     canonical_exists = backend.exists(mkey)
     canonical_vanished = False
@@ -513,7 +515,9 @@ def _fetch_remote_manifest(
         try:
             enc_data = backend.get(mkey, expected=True)
             plain = decrypt_manifest(enc_data, passphrase, memory_kb)
-            manifests.append(load_manifest(plain))
+            canonical = load_manifest(plain)
+            manifests.append(canonical)
+            canonical_hash = _manifest_content_hash(canonical)
         except StorageNotFound:
             canonical_vanished = True
         except NewerFormatError as exc:
@@ -553,6 +557,7 @@ def _fetch_remote_manifest(
             manifest=manifests[0],
             conflict_copies_only=conflict_copies_only,
             vanished=canonical_vanished,
+            canonical_hash=canonical_hash,
         )
 
     # Merge multiple manifests additively.
@@ -574,6 +579,7 @@ def _fetch_remote_manifest(
         conflict_copies_only=conflict_copies_only,
         vanished=canonical_vanished,
         merged=True,
+        canonical_hash=canonical_hash,
     )
 
 
@@ -1096,8 +1102,8 @@ def _retain_prior_default_sources(
 def _manifest_content_hash(manifest: dict) -> str:
     """Stable SHA-256 of a manifest's canonical JSON.
 
-    Used as the deterministic tiebreaker in `_merge_manifests` when two
-    conflict copies carry identical ISO-second timestamps. Canonical JSON
+    Used for peer cursor identity and as the deterministic tiebreaker in
+    `_merge_manifests` when conflict copies carry identical timestamps. Canonical JSON
     means sorted keys + no ASCII escaping, so the hash is stable across
     any platform that implements the same JSON serializer contract.
     """

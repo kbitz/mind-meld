@@ -2740,6 +2740,7 @@ def _prefetch_manifests(
     passphrase: str,
     memory_kb: int,
     vanished_out: list[_CorruptPeer] | None = None,
+    canonical_hashes_out: dict[str, str | None] | None = None,
 ) -> tuple[dict[str, dict | None], list[_CorruptPeer]]:
     """Fetch every device's manifest. Missing/corrupt both map to None.
 
@@ -2768,6 +2769,8 @@ def _prefetch_manifests(
         elif peer_fetch.status == "missing" and peer_fetch.vanished and vanished_out is not None:
             vanished_out.append(_CorruptPeer(device_id=did, device_name=d.get("device_name", did)))
         cache[did] = peer_fetch.manifest if peer_fetch.is_ok else None
+        if peer_fetch.is_ok and canonical_hashes_out is not None:
+            canonical_hashes_out[did] = peer_fetch.canonical_hash
         core._sync_progress_advance()
     return cache, corrupt
 
@@ -3715,9 +3718,10 @@ def _record_peer_cursors(
     *,
     pull_targets: list[dict],
     manifest_times: dict[str, Any],
+    manifest_hashes: dict[str, tuple[str, str | None]],
     per_source_results: list[_PerSourceResult],
 ) -> None:
-    rows: dict[str, tuple[int | None, int | None, int]] = {}
+    rows: dict[str, statedb.CursorRow] = {}
     for device in pull_targets:
         did = device["device_id"]
         if did not in manifest_times:
@@ -3730,7 +3734,15 @@ def _record_peer_cursors(
             len(r.outcomes.get("failed", ())) for r in per_source_results if r.device_id == did
         )
         applied = seen if waiting == 0 and failed == 0 else None
-        rows[did] = (applied, seen, waiting)
+        seen_hash, canonical_hash = manifest_hashes[did]
+        rows[did] = statedb.CursorRow(
+            applied,
+            seen,
+            waiting,
+            seen_hash if applied is not None else None,
+            canonical_hash if applied is not None else None,
+            seen_hash,
+        )
     if not rows:
         return
     try:
@@ -3876,15 +3888,25 @@ def _pull_core(
             return result
 
         vanished_manifests: list[_CorruptPeer] = []
+        canonical_hashes: dict[str, str | None] = {}
         manifest_cache, corrupt_peers = _prefetch_manifests(
             backend,
             all_devices + [{"device_id": i, "device_name": i} for i in inventory.vanished],
             passphrase,
             memory_kb,
             vanished_out=vanished_manifests,
+            canonical_hashes_out=canonical_hashes,
         )
         manifest_times: dict[str, Any] = {
             did: m.get("timestamp") for did, m in manifest_cache.items() if isinstance(m, dict)
+        }
+        # Freeze identity before source/placement filters mutate the pull view.
+        # The canonical alternative is from the same read, not a later reread
+        # that could accidentally certify a publication this pull never applied.
+        manifest_hashes = {
+            did: (core._manifest_content_hash(m), canonical_hashes.get(did))
+            for did, m in manifest_cache.items()
+            if isinstance(m, dict)
         }
         # This Mac's own manifest carries its deletion records. If it vanished
         # mid-read they are not applied this pull, so a file deleted here can
@@ -4473,6 +4495,7 @@ def _pull_core(
                     _partial_result,
                     pull_targets=pull_targets,
                     manifest_times=manifest_times,
+                    manifest_hashes=manifest_hashes,
                     per_source_results=per_source_results,
                 )
             if result_observer is not None:

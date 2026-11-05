@@ -1591,8 +1591,9 @@ advice first.
 ### Schema columns and readers
 
 Migration 1 pins six tables and four indexes; migration 2 adds `peer_base`,
-`seen_version` and two indexes; migration 3 drops and recreates `cursors`
-without raising `compat_version` (statedb.py). Tests assert table_info and
+`seen_version` and two indexes; migration 3 drops and recreates `cursors`, and
+migration 4 adds its three manifest identity columns. Neither raises
+`compat_version` (statedb.py). Tests assert table_info and
 index_list independently.
 
 | Table | Columns and readers |
@@ -1602,7 +1603,7 @@ index_list independently.
 | peer_base | peer/source/path/sha: the pull rule's rows 3, 6 and 7, its baseline when no version is `held`, and the deletion guard read the peer's last-synced sha (`core.load_ledger`, `pullplan.Ledger.base`); written by pull and explicit resolution, and rebuilt on loss (Track 91A). `mm diag` counts rows per peer. |
 | seen_version | source/path/sha-prefix/time/kind/deleted_by: the pull rule's baseline and ancestry (`Ledger.newest_held`, `entries`), `stamp_ancestry`'s `from` list and the mint guard's `deleted_by` stamp read it; written by pull, push and explicit resolution (Track 91A). `mm diag` counts rows. |
 | ledger | No reader. Provisional and empty. |
-| cursors | peer/applied/seen/waiting: each peer's last applied manifest timestamp (`applied`, UTC microseconds), last seen manifest timestamp (`seen`, UTC microseconds) and waiting file count (`waiting`); read by `statusflow.status` (`statedb.read_cursors`, `statusflow._peer_states`) and written at the end of an unscoped non-interrupted pull by `pullflow._record_peer_cursors` (`statedb.commit_cursors`; Track 92A). Rebuilt on the next pull. |
+| cursors | peer/applied/seen/waiting/applied_hash/applied_canonical_hash/seen_hash: each peer's applied and seen manifest times (UTC microseconds), waiting file count, and the matching content identities described below; read by `statusflow.status` (`statedb.read_cursors`, `statusflow._peer_states`) and written at the end of an unscoped non-interrupted pull by `pullflow._record_peer_cursors` (`statedb.commit_cursors`; Track 92A). Rebuilt on the next pull. |
 | own_log | No reader. Provisional and empty. |
 | displaced | No reader. Provisional and empty; `expire_displaced` has no caller. |
 
@@ -1754,22 +1755,42 @@ that folder's five options from `store-v2` §10
 (plus `paused`). `mm status` prints one `Syncthing: ...` line and, when folder
 settings need attention, a second line pointing to `mm diag`; `mm diag` prints
 and emits in `--json` each option's value and whether it matches.
+Needed files do not imply active syncing: status preserves the reported folder
+state (or paused), appends the needed count independently, and reports positive
+pull errors with `mm diag` as the fixing command. Only idle with known zero
+needed files and zero pull errors is rendered as "up to date".
 
 **Adopted `cursors` table and pull recording.** Migration 3 in `statedb.py` drops
 and recreates `cursors(peer TEXT NOT NULL PRIMARY KEY, applied INTEGER, seen
 INTEGER, waiting INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID` with `compat = None`
-so older binaries keep working. `statedb.read_cursors(conn)` is read-only and
+so older binaries keep working. Migration 4 appends nullable TEXT columns
+`applied_hash`, `applied_canonical_hash` and `seen_hash`, also without a compat
+bump. `statedb.read_cursors(conn)` is read-only and
 returns `{}` when `conn is None`, the table is absent, or its columns are still
-migration 1's provisional shape. `statedb.commit_cursors(conn, rows)` upserts in
-the caller's transaction, writing only changed rows and preserving earlier
-`applied` via `COALESCE(excluded.applied, cursors.applied)` when `excluded.applied`
-is `None`. In `pullflow._pull_core`'s `finally`, when `not dry_run and
+migration 1's provisional shape or migration 3's timestamp-only shape. On a
+write open, migration 4 keeps old timestamps with unknown identities; they
+cannot prove applied content until a full pull refreshes them.
+`statedb.commit_cursors(conn, rows)` upserts in the caller's transaction,
+writing only changed rows. A pending pull preserves the earlier applied time
+and both applied hashes together; a completed pull replaces all three,
+including clearing an absent canonical hash. In `pullflow._pull_core`'s
+`finally`, when `not dry_run and
 interruption is None and source_filter is None and ledger_exc is None`,
 `_record_peer_cursors` writes one row per pulled peer whose manifest decrypted;
 `ts_us` is its aware `timestamp` in microseconds, or `None` when invalid.
 It writes `applied = ts_us` when that peer had zero
 `waiting` and zero `failed` files across its sources (`seen = ts_us, waiting = 0`),
-or `(None, ts_us, peer_waiting)` when any file waited or failed. Unplaced project
+or retains the previous applied evidence when any file waited or failed.
+`core._manifest_content_hash` identifies canonical JSON of the effective merged
+manifest before consumer filters; it is saved as `seen_hash` and, on completion,
+`applied_hash`. `ManifestFetch.canonical_hash` captures the separately decrypted
+canonical copy from that same read, before unioning conflict copies, and is
+saved as `applied_canonical_hash` on completion. This second proven identity
+keeps status applied after pull removes conflict copies without rewriting the
+canonical. Never certify a later reread: it could contain an unprocessed push.
+A late older copy can add content while retaining the newest timestamp, so the
+timestamp alone is never enough to identify applied or waiting content.
+Unplaced project
 memory and old-form peer files are filtered before the source loop and never
 block `applied`. Cursor write failures emit one `mm: notice:` line on stderr
 (`safe_terminal_str`) in every mode, including quiet mode. They count as a
@@ -1778,8 +1799,10 @@ maintenance failure and leave the pull degraded without failing content sync.
 **Per-peer status and the 24 h warning.** `statusflow.status` decrypts each peer's
 manifest once and shares that map between `_peer_states` and
 `_project_name_lines(..., manifests=peer_manifests)`. `_peer_states` classifies
-each peer as `applied` (`applied >= manifest_us`), `waiting` (`waiting > 0` and
-either timestamp is unknown or `seen >= manifest_us`), `not-pulled`,
+each peer as `applied` (`applied >= manifest_us` and the current effective hash
+matches either recorded applied identity), `waiting` (`waiting > 0`, the current
+hash matches `seen_hash`, and either timestamp is unknown or
+`seen >= manifest_us`), `not-pulled`,
 `not-arrived` (device entry has `last_seen`
 but manifest is missing), `never-pushed` (no manifest and no `last_seen`),
 `unreadable`, `newer-format` or `unknown` (`state.db` unreadable). A peer is

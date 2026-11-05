@@ -308,7 +308,7 @@ def _peer_states(
     devices: Sequence[dict],
     device_id: str,
     fetches: dict[str, Any],
-    cursors: dict[str, tuple[int | None, int | None, int]] | str | BaseException | None,
+    cursors: dict[str, statedb.CursorRow] | str | BaseException | None,
     syncthing_state: Any = None,
     now: datetime | None = None,
     *,
@@ -324,7 +324,7 @@ def _peer_states(
             db_cause = core.ledger_cause(cursors) or "unreadable"
         else:
             db_cause = cursors_cause or "unreadable"
-        cursors_map: dict[str, tuple[int | None, int | None, int]] = {}
+        cursors_map: dict[str, statedb.CursorRow] = {}
     else:
         db_cause = None
         cursors_map = cursors
@@ -448,8 +448,16 @@ def _peer_states(
         applied_us = cursor[0] if cursor is not None else None
         seen_us = cursor[1] if cursor is not None else None
         waiting_count = int(cursor[2]) if cursor is not None else 0
+        identity = core._manifest_content_hash(manifest_dict)
+        applied_hashes = cursor[3:5] if cursor is not None else ()
+        seen_hash = cursor[5] if cursor is not None and len(cursor) > 5 else None
 
-        if applied_us is not None and manifest_us is not None and applied_us >= manifest_us:
+        if (
+            applied_us is not None
+            and manifest_us is not None
+            and applied_us >= manifest_us
+            and identity in applied_hashes
+        ):
             results.append(
                 PeerState(
                     device_id=pid,
@@ -458,8 +466,10 @@ def _peer_states(
                     last_push=last_push,
                 )
             )
-        elif waiting_count > 0 and (
-            seen_us is None or manifest_us is None or seen_us >= manifest_us
+        elif (
+            waiting_count > 0
+            and seen_hash == identity
+            and (seen_us is None or manifest_us is None or seen_us >= manifest_us)
         ):
             is_overdue = bool(manifest_dt is not None and (ref_now - manifest_dt) > PEER_WAIT_WARN)
             results.append(
@@ -569,17 +579,18 @@ def _syncthing_status_lines(st: syncthing.SyncthingState, storage_path: Path) ->
 
         if st.folder_paused:
             state_part = "paused"
-        elif st.files_to_fetch and st.files_to_fetch > 0:
-            state_part = f"syncing, {core._count(st.files_to_fetch, 'file', 'files')} to fetch"
-        elif st.folder_state == "idle":
+        elif st.folder_state == "idle" and st.files_to_fetch == 0 and st.pull_errors == 0:
             state_part = "up to date"
-        elif st.folder_state == "syncing":
-            n = st.files_to_fetch or 0
-            state_part = f"syncing, {core._count(n, 'file', 'files')} to fetch"
         elif st.folder_state:
             state_part = safety.safe_terminal_str(st.folder_state)
         else:
             state_part = "state unknown"
+        if st.files_to_fetch is not None and (st.files_to_fetch > 0 or state_part == "syncing"):
+            state_part += f", {core._count(st.files_to_fetch, 'file', 'files')} to fetch"
+        if st.pull_errors is not None and st.pull_errors > 0:
+            state_part += (
+                f", {core._count(st.pull_errors, 'pull error', 'pull errors')}. Run: mm diag"
+            )
         lines.append(f"  Syncthing: {peer_part}; {state_part}")
 
     setting_problems = [p for p in st.problems if p != "no-folder"]

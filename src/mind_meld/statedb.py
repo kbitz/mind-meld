@@ -14,6 +14,7 @@ import stat
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
+from typing import NamedTuple
 
 from mind_meld import fsutil
 
@@ -163,6 +164,16 @@ MIGRATIONS = (
                 "CREATE TABLE cursors (peer TEXT NOT NULL PRIMARY KEY, applied INTEGER, "
                 "seen INTEGER, waiting INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID"
             ),
+        ),
+        None,
+    ),
+    # Timestamp equality does not identify a union of Syncthing conflict copies.
+    # Legacy rows retain their timestamps but cannot prove applied content.
+    (
+        (
+            "ALTER TABLE cursors ADD COLUMN applied_hash TEXT",
+            "ALTER TABLE cursors ADD COLUMN applied_canonical_hash TEXT",
+            "ALTER TABLE cursors ADD COLUMN seen_hash TEXT",
         ),
         None,
     ),
@@ -416,8 +427,16 @@ def commit_ledger(
         conn.execute("DELETE FROM seen_version WHERE time < ?", (now_us - SEEN_MAX_AGE_US,))
 
 
-CursorRow = tuple["int | None", "int | None", int]  # (applied_us, seen_us, waiting)
-_CURSOR_COLUMNS = ("peer", "applied", "seen", "waiting")
+class CursorRow(NamedTuple):
+    applied: int | None
+    seen: int | None
+    waiting: int
+    applied_hash: str | None = None
+    applied_canonical_hash: str | None = None
+    seen_hash: str | None = None
+
+
+_CURSOR_COLUMNS = ("peer", *CursorRow._fields)
 
 
 def _has_cursors_table(conn) -> bool:
@@ -426,18 +445,24 @@ def _has_cursors_table(conn) -> bool:
 
 
 def read_cursors(conn) -> dict[str, CursorRow]:
-    """Each peer's ``(applied, seen, waiting)`` cursor; empty without the table."""
+    """Each peer's timestamps, waiting count and identities; empty for legacy tables."""
     if conn is None:
         return {}
     with translate():
         if not _has_cursors_table(conn):
             return {}
-        rows = conn.execute("SELECT peer, applied, seen, waiting FROM cursors")
+        rows = conn.execute(
+            "SELECT peer, applied, seen, waiting, applied_hash, applied_canonical_hash, "
+            "seen_hash FROM cursors"
+        )
         return {
-            r[0]: (
+            r[0]: CursorRow(
                 int(r[1]) if r[1] is not None else None,
                 int(r[2]) if r[2] is not None else None,
                 int(r[3]),
+                r[4],
+                r[5],
+                r[6],
             )
             for r in rows
         }
@@ -448,20 +473,30 @@ def commit_cursors(conn, rows) -> None:
     if not conn.in_transaction:
         raise StateDBError("cursor commit requires a transaction")
     items = (
-        [(peer, applied, seen, waiting) for peer, (applied, seen, waiting) in rows.items()]
+        [(peer, *CursorRow(*row)) for peer, row in rows.items()]
         if isinstance(rows, dict)
-        else list(rows)
+        else [(row[0], *CursorRow(*row[1:])) for row in rows]
     )
     with translate():
-        for peer, applied, seen, waiting in items:
+        for item in items:
             conn.execute(
-                "INSERT INTO cursors (peer, applied, seen, waiting) VALUES (?, ?, ?, ?) "
+                "INSERT INTO cursors (peer, applied, seen, waiting, applied_hash, "
+                "applied_canonical_hash, seen_hash) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (peer) DO UPDATE SET "
                 "applied = COALESCE(excluded.applied, cursors.applied), "
                 "seen = excluded.seen, "
-                "waiting = excluded.waiting "
+                "waiting = excluded.waiting, "
+                "applied_hash = CASE WHEN excluded.applied IS NULL "
+                "THEN cursors.applied_hash ELSE excluded.applied_hash END, "
+                "applied_canonical_hash = CASE WHEN excluded.applied IS NULL "
+                "THEN cursors.applied_canonical_hash ELSE excluded.applied_canonical_hash END, "
+                "seen_hash = excluded.seen_hash "
                 "WHERE (excluded.applied IS NOT NULL AND cursors.applied IS NOT excluded.applied) "
+                "OR (excluded.applied IS NOT NULL AND ("
+                "cursors.applied_hash IS NOT excluded.applied_hash OR "
+                "cursors.applied_canonical_hash IS NOT excluded.applied_canonical_hash)) "
                 "OR cursors.seen IS NOT excluded.seen "
-                "OR cursors.waiting != excluded.waiting",
-                (peer, applied, seen, waiting),
+                "OR cursors.waiting != excluded.waiting "
+                "OR cursors.seen_hash IS NOT excluded.seen_hash",
+                item,
             )
