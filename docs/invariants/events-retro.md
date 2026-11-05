@@ -12,6 +12,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/rootprobes.py` — `RootProber` / `PROBERS` / `installed` / `_discovery_home`
 - `src/mind_meld/events.py` — `MmPushEvent` / `make_mm_push_event` / `configured_author_emails` / `identity_inputs_digest` / `_configured_author_spellings` / `resolve_walk_author_emails` / `is_checkpoint_commit` / `CHECKPOINT_AUTHOR_EMAIL` / `CHECKPOINT_SUBJECT_PREFIX` / `_parse_git_log_numstat` / `walk_session_metadata` / `walk_git_projects` / `discover_git_roots` / `_probe_host_records` / `_enabled_root_probers` / `_strip_probe_roots` / `_classify_named_dirs` / `_normalize_probe_index` / `last_push_ts` / `EVENTS_SCHEMA_VERSION` / `WALK_TIME_BUDGET_*` / `RECAPTURE_PER_REPO_TIMEOUT_MS` / `RECAPTURE_WALK_BUDGET_MS` / `HostUsageSnapshot` / `make_host_usage_snapshot` / `ACTIVE_HOST_READERS` / `HOST_USAGE_TOKEN_SOURCES`
 - `src/mind_meld/hosts/codex.py` — `read_codex_usage` / `codex_usage_diag` / `CACHE_PATH` / `CODEX_SESSIONS_PATH` / `CODEX_ARCHIVED_SESSIONS_PATH` / `_archive_root_exists` / `_iter_archived_rollouts` / `_iter_rollouts` / `_scan_codex_root` / `_read_rollout` / `_read_full_rollout` / `_resume_rollout` / `_carries_usage` / `_no_ledger_entry` / `_validated_entry` / `_validated_settled_days` / `_validated_settled_memo` / `_validated_settled_entry` / `_slim_entry` / `_unclosed_settled_records` / `_record_memo` / `_reduce_with_settled_memos` / `_archive_group_rel` / `_archive_group_digest` / `_settled_rel_date` / `_ARCHIVED_NAME_DATE` / `_ARCHIVE_GROUP_REL`
+- `src/mind_meld/hosts/cursor_account.py` — `read_cursor_account_usage` / `cursor_account_usage_diag` / `check_login` / `census` / `CAUSES` / `blocker` / `AccountFailure` / `CursorAccountResult` / `ALLOWED_URLS` / `_fetch` / `_read_login` / `_build_opener` / `_parse_billing` / `_refresh` / `_coverage` / `_session_cookie` / `_read_app_login` / `_read_agent_login` (Track 107A)
 - `src/mind_meld/host_registry.py` — `HOST_READER_DIAGS` / `HostReaderDiag` / `reader_usage_diag` / `reader_cache_cold` / `warm_host_cache_inline`
 - `src/mind_meld/host_usage.py` — `read_muse_usage` / `muse_usage_diag` / `_scan_muse_root` / `_freeze_muse_day` / `_validated_muse_frozen` / `_iter_muse_day_dirs` / `_muse_day_logs` / `_muse_now` / `_muse_turn_from_record` / `_validate_muse_counters` / `MUSE_USAGE_CENSUS_HOST_VERSION` / `read_agy_usage` / `agy_usage_diag` / `agy_sessions_root` / `_scan_agy_root` / `AGY_CONVERSATIONS_PATH` / `AGY_CACHE_PATH` / `AGY_USAGE_CENSUS_HOST_VERSION` / `_read_single_agy_db` / `_lstat_agy_sqlite_files` / `_agy_fingerprint` / `_agy_entry_matches_stat` / `_validated_agy_entry` / `_count_agy_dbs` / `_decode_protobuf_varint` / `_iter_protobuf_fields` / `_NoCacheCommit` / `_cached_last_reason` / `_cached_reason_since` / `_carry_reason` / `_carry_read_timing` / `_cached_read_timing` / `_cached_read_ms` / `_skip_failed_cache_write` / `_pause_gc` / `PERMANENT_REASONS` / `PERSISTABLE_REASONS`
 - `src/mind_meld/gitenv.py` — `scrubbed_git_env` / `GIT_REPO_LOCAL_ENV_VARS`
@@ -21,7 +22,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/config.py` — `MM_INTERNAL_SOURCE_NAMES` / `_bootstrap_mm_events_path` / `DEFAULT_SOURCES` / `_validate_skills` / `_validate_str_list` / `HOST_USAGE_BUDGET_MAX_MS`
 - `src/mind_meld/token_usage.py` — `walk_session_metadata` token-cache wiring
 
-Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers).
+Tests: `tests/test_events.py`, `tests/test_identity.py`, `tests/test_init_events_backfill.py`, `tests/test_gc_events.py`, `tests/test_retention.py`, `tests/test_retro_fleet_aggregator.py`, `tests/test_skill_link.py`, `tests/test_devices_json.py`, `tests/test_token_usage.py`, `tests/test_host_usage.py` (readers), `tests/test_host_adapter_contract.py` (host reader contract), `tests/test_host_usage_snapshot.py` (capture policy), `tests/test_cursor_account_usage.py` (Cursor account reader), `tests/test_agy_usage.py`, `tests/test_diag.py`, `tests/test_root_probers.py` (host-record root probers).
 
 
 ## Sync diagnostic presentation (Track 78A)
@@ -84,6 +85,7 @@ terminal outcome and finalization order; auto-upgrade.md owns update eligibility
 - [Cost estimation](#cost-estimation--one-predicate-honest-degradation-load-bearing-v01213)
 - [Fleet-wide author email](#fleet-wide-author-email-trust-set-load-bearing-v01117)
 - [Host reader adapter contract (Track 84A)](#host-reader-adapter-contract)
+- [Cursor account usage (Track 107A)](#cursor-account-usage-track-107a)
 
 ---
 
@@ -178,6 +180,13 @@ Config validation checks `host_usage_autopush_budget_ms` against
 value (the legacy rule). When neither key is set, autopush still must not
 exceed the 3000 ms interactive default. When both ceilings apply, autopush
 must not exceed the smaller one.
+
+**Owner-approved exception (Karl, 2026-11-04, Track 107A):** the opted-in
+`cursor-account` reader has a 20-second floor from its own start
+(`HOST_READER_FLOOR_MS`), which may extend the configured total capture budget.
+It waits for the billing export only while finished UTC days are missing; a warm
+day cache makes no network request. Only attended push and recapture select it;
+autopush never calls its network endpoint. Other readers keep their existing budgets.
 
 `walk_session_metadata(..., persist=False)` is the legacy read-only walk.
 With `persist=True` it rotates its starting project via the per-Claude-root
@@ -911,20 +920,97 @@ The 2026.10.22 re-check (Track 103A) added: a project-level `.cursor/hooks.json`
 is not loaded under ACP at all (not even a `postToolUse` probe fired), so the
 user-level `~/.cursor/hooks.json` is the only valid venue, and there only tool
 hooks fire. The `session/prompt` result carries only `stopReason`; no
-`usage_update` update is sent. No credential-free local source was found for
+`usage_update` update is sent. No credential-free local source exists for
 billed ACP tokens. The inspected Paseo plugin maps `plan_usage` to an account
 percentage, not tokens; the ai-tracking database schema holds line attribution.
-Cursor's public Admin API docs describe per-event tokens using a team API key,
-but do not establish inclusive/disjoint semantics or a per-event deduplication
-ID. Dashboard usage-event CSV exports are another candidate. Neither account
-route was exercised: individual-plan access, ACP coverage, counter semantics
-and deduplication against existing capture remain unverified. Those routes need
-a separate owner-decided card; mm currently reads none of these sources. The gap is named in
-`mm status` (a clause on the Cursor line) and in `retro-fleet` (an
-`agent_coverage` health note, emitted by `_cursor_acp_gap_notes` when any
-accepted snapshot consulted `cursor`). The note is a separate helper from
-`_agent_coverage_notes` because it is not a refresh problem and carries no
-attended-producer remedy.
+Track 107A captures account usage separately (next section), but local-in-account
+inclusion is unproven. `mm status` keeps the ACP clause and names the held fleet
+account totals even after a successful account read. `retro-fleet` emits an
+`agent_coverage` note when an accepted snapshot consulted `cursor` or `cursor-account`
+and inclusion is still pending. This is not a refresh problem: another successful
+fetch alone does not enable replacement.
+
+### Cursor account usage (Track 107A)
+
+`hosts/cursor_account.py` is an opt-in, read-only reader of the owner's Cursor account
+usage: daily per-model token totals from the dashboard's billing-items export. Login sources
+mirror steipete/CodexBar's Cursor provider (MIT). Contract and census:
+`tests/fixtures/host_sessions/cursor_account/CONTRACT.md` (census 2026-11-04 and 05).
+
+- **Consent.** `[retro] cursor_account_usage` through `HOST_USAGE_ONLY_CONSENT`
+  (`cursor-account`), set by `mm enable-source cursor-account`; `HOST_READER_SOURCE_GATE`
+  maps it to `None` like Cursor. It never rides `cursor_host_usage`, which does not
+  grant reading a credential or calling the network.
+- **Network and login.** Only the attended push (`cli._capture_attended_usage`) and the
+  non-quiet events tail (`_run_events_tail`, which `mm recapture` reaches) select the
+  reader (`_default_host_readers(cursor_account_consented=)`). Autopush is quiet; previews
+  return before capture; `_run_events_backfill`, `mm status`, `mm diag` and `mm
+  enable-source` make no HTTP call. `enable-source` runs `check_login` once (no network;
+  a macOS Keychain prompt appears there, with a 120 s bound).
+- **Login sources** (`_read_login`, first match wins, all read-only and in memory): Cursor.app's
+  `state.vscdb` `ItemTable` key `cursorAuth/accessToken` (SQLite `mode=ro`, immutable when no
+  `-wal`/`-shm` exist so mm never creates files in Cursor's directory); on Linux
+  `$XDG_CONFIG_HOME/cursor/auth.json` `accessToken` first; on macOS cursor-agent's Keychain item
+  (`/usr/bin/security find-generic-password -s <prefix>-access-token -a <prefix>-user -w`,
+  `KEYCHAIN_PREFIX = "cursor"`, confirmed live). A `cursor-safe-storage:` value is encrypted:
+  `login_encrypted`, never decrypted. The JWT is used only while `exp` is more than 60 s
+  away (`login_expired` otherwise) and is never refreshed. The account key is the hash of the
+  JWT's user id.
+- **One request** (`ALLOWED_REQUESTS`): `GET https://cursor.com/api/dashboard/v2/export-billing-items-csv`
+  with `scope=user`, `startTime` and `endTime` (ISO 8601 UTC) and the cookie
+  `WorkosCursorSessionToken=<userId>%3A%3A<jwt>`. No redirects are followed (a redirect fails closed as
+  `http_error`); bodies are capped and discarded after parsing. grok.com answered 403 to this session and is
+  never called. The per-request events endpoint (`get-filtered-usage-events`) stops where the account moved
+  to the unified plan (2026-10-21) and is not used; the billing export matches it exactly on every day both
+  cover.
+- **Per-day cache.** The export is slow and erratic (4 to 28 s for a day, 66 to 155 s for 30), so finished
+  UTC days (more than `SETTLE_HOURS` past their end) are cached in `cursor-account-usage.json` (0600,
+  `locked_json_rmw`), bound to the hashed `account` that fetched them, as `days: {day: {model: [input, cache_create, cache_read, output]}}`, and a read fetches
+  only missing days, newest first, `CHUNK_DAYS` per request, inside
+  `events_tail.HOST_READER_FLOOR_MS["cursor-account"]` (20 s). A warm cache costs nothing. The cache also
+  holds the state fields (`complete_once`, the standing reason and its `last_reason_detail`, timing, model
+  ids, `newest_event_day` = the published run's last day). Never the login, URLs, bodies or e-mail
+  addresses. A changed login or a legacy cache with no account binding discards the old day
+  totals and completion metadata before fetching; even a failed fetch cannot publish them
+  under the new account. It is not in `WARMABLE_HOST_READERS`.
+- **Published run.** The result covers the contiguous run of cached wanted days ending at the newest one
+  (`since` .. `through`); a transient failure (network, deadline, http) with any cached coverage publishes
+  that coverage and records no blocker, with none it fails closed. A refused login or a changed format
+  publishes nothing, even over a warm cache.
+- **Rows.** Only `Product == "cursor"` rows count (`grok-chat` is ignored). `Usage` is a JSON object:
+  `prompt-text-tokens` (input), `cache-write-text-tokens` (cache creation), `cached-prompt-text-tokens`
+  (cache read), `completion-text-tokens` (output); `{}` carried none; any other key, a non-numeric value, a
+  blank model or a missing column fails the read (`changed_field`). A repeated Billing Item ID counts once.
+  Counters are disjoint (`COUNTER_SEMANTICS_DISJOINT_V1`): `cached-prompt-text-tokens` exceeds
+  `prompt-text-tokens` on most rows. Cursor's cents are never published.
+- **Stale run.** `mm status` shows `account usage through <day>` and keeps the ACP clause when that day is
+  more than 3 days before the last read (`_account_events_stale`); `_cursor_acp_gap_notes` then says the
+  account has been read only through that day, not the opt-in fix.
+- **Failures** map to existing `host_usage.Reason` values (`CAUSES`): `io_error` for
+  `no_login`, `login_encrypted`, `login_expired`, `login_refused`, `store_unreadable`, `http_error`, `network`;
+  `unsupported` for `missing_key` and `changed_field`; `deadline`. Any failure returns
+  no buckets, so nothing partial is published and the other readers are untouched.
+- **Wire.** Two additive `host-usage-snapshot` fields, no `EVENTS_SCHEMA_VERSION` bump.
+  `cursor_usage` is the local Cursor reader's own `{hosts, tokens_by_day}` (also summed
+  into the top-level maps); `cursor_account` is `{account, since, read_day, through, hosts,
+  tokens_by_day}` for the whole account, never merged into the top-level maps: `since` .. `through` is
+  the published run of finished days (`through` null: none). Their only reader is
+  `aggregator.resolve_cursor_account`. The aggregator's acceptor drops an invalid field and keeps the
+  row (`_accept_cursor_field`); `empty_sources` for `cursor-account` is judged on the account field's
+  own days.
+- **Inclusion gate (owner, 2026-11-04).** `resolve_cursor_account` accepts only explicitly
+  `verified_days`, proving every local run on the day belongs to the account export.
+  Its default is empty, no production caller supplies days, and peer payloads cannot
+  grant permission. Account totals remain separate from fleet totals; local usage stays
+  unchanged and the ACP coverage note remains visible. The census matched 0 of 5 local
+  runs on two overlapping days and found no time-of-day field in the cache, so neither
+  inclusion nor non-overlap is proven. Account-only fallback could omit local-only usage;
+  adding both could double-count. The fallback remains an owner decision, not an implicit
+  dedup policy. The reducer's tests use synthetic verified days to pin the day-replacement
+  algorithm; they do not qualify real inclusion. With evidence, only those finished days
+  in `since` .. `through` replace local contributions; older peers and multiple account
+  identities still block as before. The forensic dump keeps the raw accepted fields.
+
 
 Both capture paths (hook and wrapper) require the existing consent bit. The
 hidden hook command reads bounded stdin, returns `{}` and exits zero on
@@ -4165,7 +4251,13 @@ The nine clauses below record the existing reader obligations and named
 exceptions; they do not add a new reader API. `tests/test_host_adapter_contract.py`
 qualifies the detailed runtime rows for Codex and Muse in this extraction,
 while `tests/test_module_boundaries.py` enforces ownership and imports.
-Cursor and Antigravity remain in place until their own adapter work.
+Cursor and Antigravity remain in place until their own adapter work. Track 107A adds
+`hosts/cursor_account.py` under the same clauses with these named exceptions: it is
+not warmable (its network-backed cache is refreshed only by attended reads, so it is not in `WARMABLE_HOST_READERS`), it
+uses the network only on the attended and recapture paths, it is excluded from init
+backfill, its consent is `cursor_account_usage` (gate entry `None`), and its result is a
+`CursorAccountResult` that capture keeps apart from the machine's own host maps. Its
+rows are in `tests/test_cursor_account_usage.py`.
 
 1. **Consent gate and closed default (`events_tail.HOST_READER_SOURCE_GATE`, `_default_host_readers`).**
    Every reader in `events.ACTIVE_HOST_READERS` has an entry in

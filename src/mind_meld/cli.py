@@ -732,6 +732,8 @@ def _capture_attended_usage(
         readers = events_tail._default_host_readers(
             sources,
             cursor_consented=_config_module.cursor_host_usage_enabled(config),
+            # Attended push only: the one place account usage may call the network.
+            cursor_account_consented=_config_module.cursor_account_usage_enabled(config),
         )
         readiness = _config_module.usage_capture_readiness(
             selected, sources, reader_consented=bool(readers)
@@ -2969,6 +2971,7 @@ def _notice_recapture_host_usage(config: dict, sources: list[dict]) -> None:
     for name, _ in events_tail._default_host_readers(
         sources,
         cursor_consented=_config_module.cursor_host_usage_enabled(config),
+        cursor_account_consented=_config_module.cursor_account_usage_enabled(config),
     ):
         state = host_registry.reader_usage_diag(name)
         cold = host_registry.reader_cache_cold(name, state)

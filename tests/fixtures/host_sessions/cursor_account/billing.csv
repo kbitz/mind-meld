@@ -1,0 +1,9 @@
+Billing Item ID,Event Time,Product,Charge Category,Usage Type,Principal Type,Principal ID,Usage,Pricing Currency,Pricing Contracted,Model,User Email
+b1,2026-11-01T10:00:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""100"",""cached-prompt-text-tokens"":""900"",""completion-text-tokens"":""50""}",USD,0.0000000000,grok-4.7-xhigh-fast,user@example.invalid
+b2,2026-11-01T11:30:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""200"",""cache-write-text-tokens"":""10"",""cached-prompt-text-tokens"":""400"",""completion-text-tokens"":""60""}",USD,0.0000000000,claude-opus-5-5-medium,user@example.invalid
+b3,2026-11-02T09:00:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""300"",""completion-text-tokens"":""70""}",USD,0.0000000000,gpt-5.1-codex,user@example.invalid
+b4,2026-11-02T09:05:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""40"",""completion-text-tokens"":""5""}",USD,0.0000000000,composer-2,user@example.invalid
+b4,2026-11-02T09:05:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""40"",""completion-text-tokens"":""5""}",USD,0.0000000000,composer-2,user@example.invalid
+b5,2026-11-02T10:00:00.000Z,cursor,usage,included,user,user_synthetic01,"{}",USD,0.0000000000,composer-2,user@example.invalid
+b6,2026-11-02T11:00:00.000Z,grok-chat,usage,included,user,user_synthetic01,"{""Prompt text tokens"":""7""}",USD,0.0000000000,grok-4.20,user@example.invalid
+b7,2026-09-01T09:05:00.000Z,cursor,usage,included,user,user_synthetic01,"{""prompt-text-tokens"":""1"",""completion-text-tokens"":""1""}",USD,0.0000000000,grok-4.7-xhigh-fast,user@example.invalid

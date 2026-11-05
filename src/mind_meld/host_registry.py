@@ -15,6 +15,7 @@ from typing import Any
 
 from mind_meld import host_usage
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import cursor_account as cursor_account_host
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,13 @@ HOST_READER_DIAGS = {
     ),
     "muse": HostReaderDiag("muse_usage_diag", "complete_once", True, "muse", owner=host_usage),
     "agy": HostReaderDiag("agy_usage_diag", "complete_once", True, "Antigravity", owner=host_usage),
+    "cursor-account": HostReaderDiag(
+        "cursor_account_usage_diag",
+        "complete_once",
+        True,
+        "Cursor account",
+        owner=cursor_account_host,
+    ),
 }
 
 

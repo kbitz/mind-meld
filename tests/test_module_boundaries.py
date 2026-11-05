@@ -1298,6 +1298,7 @@ SOURCEFLOW_DEFINITIONS = frozenset(
     """
     _known_source_names
     _record_seen
+    _toggle_cursor_account_usage
     _toggle_cursor_usage
     _validate_source_name
     disable_source
@@ -1515,7 +1516,7 @@ def test_sourceflow_single_ownership_and_qualified_calls():
             f"{module}: expected owner inventory {expected}"
         )
         assert _unqualified_owner_calls(source, module) == []
-    assert len(SOURCEFLOW_DEFINITIONS) == 8
+    assert len(SOURCEFLOW_DEFINITIONS) == 9
 
 
 def test_pull_test_consumers_use_qualified_owner_names():

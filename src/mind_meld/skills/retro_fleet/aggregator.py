@@ -69,7 +69,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from heapq import nsmallest
@@ -502,6 +502,14 @@ class HostDeviceSnapshot:
     API-list-rate figures render ``—``, never a number (a ceiling up to
     ~2x high, the one caveat that points the wrong way).
     """
+    cursor_usage: dict | None = None
+    """The local Cursor reader's own ``{hosts, tokens_by_day}`` (Track 107A), or
+    None when absent (an older mm) or dropped as invalid. Already summed into
+    ``lifetime_by_family``; kept apart so the account read can replace it."""
+    cursor_account: dict | None = None
+    """The whole-account read ``{account, since, read_day, hosts, tokens_by_day}``
+    (Track 107A). NOT summed into ``lifetime_by_family``; only
+    ``resolve_cursor_account`` reads it."""
 
     @property
     def current(self) -> bool:
@@ -694,6 +702,213 @@ def _detect_duplicate_ledgers(
     return tuple(family for family, _ in AGENT_ROW_ORDER if family in hits)
 
 
+@dataclass(frozen=True)
+class CursorAccountResolution:
+    """What the Cursor account read did to the fleet's Cursor usage (Track 107A)."""
+
+    applied: bool = False
+    reader: str | None = None
+    covered_days: tuple[str, ...] = ()
+    older_peers: tuple[str, ...] = ()
+    multi_account: bool = False
+    candidate_devices: tuple[str, ...] = ()
+    failed_devices: tuple[str, ...] = ()
+    ends: str | None = None
+    """Newest event day of the applied account read (None: it listed no events)."""
+    read_day: str | None = None
+    inclusion_pending: bool = False
+
+
+def _day_span(since: str, read_day: str) -> list[str]:
+    """UTC days ``since`` up to, but not including, ``read_day``."""
+    first, last = date.fromisoformat(since), date.fromisoformat(read_day)
+    return [(first + timedelta(days=n)).isoformat() for n in range((last - first).days)]
+
+
+def _copy_families(families: dict) -> dict:
+    return {f: {d: dict(b) for d, b in days.items()} for f, days in families.items()}
+
+
+def _copy_token_days(days: dict | None) -> dict | None:
+    if days is None:
+        return None
+    return {
+        d: {
+            **{k: v for k, v in b.items() if k != "by_model"},
+            "by_model": {m: dict(u) for m, u in (b.get("by_model") or {}).items()},
+        }
+        for d, b in days.items()
+    }
+
+
+def _subtract_usage(target: dict, source: dict) -> None:
+    for field_name in token_usage.TOKEN_FIELDS:
+        target[field_name] = max(
+            0, _safe_int(target.get(field_name)) - _safe_int(source.get(field_name))
+        )
+
+
+def _swap_cursor_days(
+    snap: HostDeviceSnapshot, days: frozenset[str], account: dict | None
+) -> HostDeviceSnapshot:
+    """Remove this machine's own Cursor-reader share on ``days``; add ``account``'s."""
+    families = _copy_families(snap.lifetime_by_family)
+    token_days = _copy_token_days(snap.tokens_by_day)
+    own = snap.cursor_usage
+    if own is not None:
+        for family, family_days in own["hosts"].items():
+            for day, usage in family_days.items():
+                bucket = families.get(family, {}).get(day)
+                if day in days and bucket is not None:
+                    _subtract_usage(bucket, usage)
+        for day, source in own["tokens_by_day"].items():
+            bucket = (token_days or {}).get(day)
+            if day not in days or bucket is None:
+                continue
+            _subtract_usage(bucket, source)
+            for model, usage in (source.get("by_model") or {}).items():
+                if model in bucket["by_model"]:
+                    _subtract_usage(bucket["by_model"][model], usage)
+            # A model fully replaced leaves no zero residue to price or list.
+            bucket["by_model"] = {
+                m: u for m, u in bucket["by_model"].items() if token_usage.sum_bucket(u) > 0
+            }
+    if account is not None:
+        for family, family_days in account["hosts"].items():
+            for day, usage in family_days.items():
+                if day in days:
+                    dest = families.setdefault(family, {}).setdefault(
+                        day, {k: 0 for k in token_usage.TOKEN_FIELDS}
+                    )
+                    token_usage.merge_usage_bucket(dest, usage)
+        if token_days is None and not snap.lifetime_by_family:
+            token_days = {}
+        if token_days is not None:
+            for day, source in account["tokens_by_day"].items():
+                if day not in days:
+                    continue
+                dest = token_days.setdefault(
+                    day, {**{k: 0 for k in token_usage.TOKEN_FIELDS}, "by_model": {}}
+                )
+                token_usage.merge_usage_bucket(dest, source)
+                for model, usage in (source.get("by_model") or {}).items():
+                    token_usage.merge_usage_bucket(
+                        dest["by_model"].setdefault(
+                            model, {k: 0 for k in token_usage.TOKEN_FIELDS}
+                        ),
+                        usage,
+                    )
+    detail = "present" if token_days is not None and snap.detail == "absent" else snap.detail
+    return replace(snap, lifetime_by_family=families, tokens_by_day=token_days, detail=detail)
+
+
+def resolve_cursor_account(
+    inventory: HostUsageInventory,
+    lo: str,
+    hi: str,
+    *,
+    verified_days: frozenset[str] = frozenset(),
+) -> tuple[HostUsageInventory, CursorAccountResolution]:
+    """Replace only days with proven local-in-account inclusion (Track 107A).
+
+    ``verified_days`` must prove every local run on each day belongs to this
+    account's export. No production caller currently supplies this evidence:
+    the census failed to establish it, so replacement defaults off. Peer rows
+    cannot grant this permission. The account-only fallback also awaits the
+    owner's decision about potentially omitted local-only usage.
+
+    The rule, in one place. Per account key, the freshest current, non-degraded,
+    non-partial ``cursor_account`` read replaces every machine's own
+    ``cursor_usage`` contribution (the hook, standalone and Conductor readers) for
+    each UTC day from its ``since`` up to, but not including, its ``read_day``; the
+    account's usage is credited to the machine that read it. The read day stays on
+    the local readers because a same-day read is partial. A machine that consulted
+    ``cursor`` without a ``cursor_usage`` field (an older mm) cannot be separated
+    from its other families, so every covered day on which it shows any usage keeps
+    its local readers and the account's share of it is not applied. Two account keys
+    inside the window means no replacement. The input inventory is never mutated.
+    """
+    snaps = {d: s for d, s in inventory.by_device.items() if isinstance(s, HostDeviceSnapshot)}
+    failed = tuple(
+        sorted(d for d, s in snaps.items() if s.current and CURSOR_ACCOUNT_SOURCE in s.degraded)
+    )
+    best: dict[str, HostDeviceSnapshot] = {}
+    candidates: list[str] = []
+    for device, snap in sorted(snaps.items()):
+        account = snap.cursor_account
+        if (
+            account is None
+            or not snap.current
+            or CURSOR_ACCOUNT_SOURCE not in snap.consulted
+            or CURSOR_ACCOUNT_SOURCE in snap.degraded
+            or CURSOR_ACCOUNT_SOURCE in snap.partial
+            or not snap.counters_disjoint
+            or account["read_day"] < lo
+            or account["since"] > hi
+        ):
+            continue
+        candidates.append(device)
+        incumbent = best.get(account["account"])
+        if incumbent is None or (snap.as_of, device) > (incumbent.as_of, incumbent.device):
+            best[account["account"]] = snap
+    if not best:
+        return inventory, CursorAccountResolution(failed_devices=failed)
+    if len(best) > 1:
+        return inventory, CursorAccountResolution(
+            multi_account=True, candidate_devices=tuple(candidates), failed_devices=failed
+        )
+    winner = next(iter(best.values()))
+    account = winner.cursor_account
+    # Only through the account's newest event: past it the ledger may be silent while
+    # use continues (a unified plan keeps usage outside this endpoint), so local readers
+    # keep those days. No events at all covers nothing.
+    through = account["through"]
+    covered = {
+        day
+        for day in _day_span(account["since"], account["read_day"])
+        if through is not None and day <= through
+    }
+    older: list[str] = []
+    blocked: set[str] = set()
+    for device, snap in sorted(snaps.items()):
+        if snap.stale or "cursor" not in snap.consulted or snap.cursor_usage is not None:
+            continue
+        used = {
+            day
+            for days in snap.lifetime_by_family.values()
+            for day, bucket in days.items()
+            if day in covered and token_usage.sum_bucket(bucket) > 0
+        }
+        if used:
+            older.append(device)
+            blocked |= used
+    eligible = covered - blocked
+    days = frozenset(eligible & verified_days)
+    swapped = {
+        device: _swap_cursor_days(snap, days, account if device == winner.device else None)
+        if not snap.stale and (snap.cursor_usage is not None or device == winner.device)
+        else snap
+        for device, snap in inventory.by_device.items()
+        if isinstance(snap, HostDeviceSnapshot)
+    }
+    adjusted = HostUsageInventory(
+        by_device=swapped,
+        devices_without_accepted_row=inventory.devices_without_accepted_row,
+        rejected=inventory.rejected,
+    )
+    return adjusted, CursorAccountResolution(
+        applied=bool(days),
+        reader=winner.device,
+        ends=through,
+        read_day=account["read_day"],
+        covered_days=tuple(sorted(days)),
+        older_peers=tuple(older),
+        candidate_devices=tuple(candidates),
+        failed_devices=failed,
+        inclusion_pending=bool(eligible - verified_days),
+    )
+
+
 def aggregate_agent_usage(
     data: RetroData,
     *,
@@ -711,6 +926,8 @@ def aggregate_agent_usage(
         inventory = HostUsageInventory()
 
     lo, hi = _window_day_keys(data.since, data.until)
+    # One deduplication rule for every reader of the host views below.
+    inventory, _account = resolve_cursor_account(inventory, lo, hi)
     labels = device_labels(data.fleet)
     rows: list[FleetAgentRow] = []
 
@@ -976,6 +1193,8 @@ class _AcceptedHostRow:
     counter_semantics: str | None = None
     empty_sources: tuple[str, ...] | None = None
     empty_reason: str | None = None
+    cursor_usage: dict | None = None
+    cursor_account: dict | None = None
 
 
 @dataclass
@@ -2185,6 +2404,53 @@ def _accept_hosts_payload(
     return copied, tuple(sorted(days))
 
 
+CURSOR_ACCOUNT_SOURCE = "cursor-account"
+_ACCOUNT_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _accept_cursor_field(raw: object, *, account: bool) -> tuple[dict | None, str | None]:
+    """Validate ``cursor_usage`` / ``cursor_account``; invalid drops the field only.
+
+    Reuses the row's own ``hosts`` and ``tokens_by_day`` acceptors, so the same
+    reconciliation (day sets equal, flat counters equal the family sums, per-model
+    bounded by the day) holds for each. ``account`` additionally needs a SHA-256
+    account key and a canonical ``since <= read_day`` window of at most
+    ``MAX_BY_DAY_DAYS`` days.
+    """
+    if not isinstance(raw, dict):
+        return None, "not_object"
+    wanted = {"hosts", "tokens_by_day"} | (
+        {"account", "since", "read_day", "through"} if account else set()
+    )
+    if set(raw) != wanted:
+        return None, "unsupported_schema"
+    hosts_result = _accept_hosts_payload(raw["hosts"])
+    if isinstance(hosts_result, str):
+        return None, hosts_result
+    hosts, days = hosts_result
+    tokens_by_day, drop = _accept_tokens_by_day(raw["tokens_by_day"], hosts, days)
+    if drop is not None:
+        return None, drop
+    accepted: dict = {"hosts": hosts, "tokens_by_day": tokens_by_day}
+    if account:
+        key = raw["account"]
+        since = _canonical_day_key(raw["since"])
+        read_day = _canonical_day_key(raw["read_day"])
+        if not isinstance(key, str) or not _ACCOUNT_KEY_RE.fullmatch(key):
+            return None, "unsupported_schema"
+        if since is None or read_day is None or since > read_day:
+            return None, "invalid_day"
+        span = (date.fromisoformat(read_day) - date.fromisoformat(since)).days
+        if span >= token_usage.MAX_BY_DAY_DAYS or any(d < since or d > read_day for d in days):
+            return None, "invalid_day"
+        through_raw = raw["through"]
+        through = None if through_raw is None else _canonical_day_key(through_raw)
+        if through_raw is not None and (through is None or not since <= through <= read_day):
+            return None, "invalid_day"
+        accepted.update({"account": key, "since": since, "read_day": read_day, "through": through})
+    return accepted, None
+
+
 def _tie_break_key(
     *,
     as_of: datetime,
@@ -2296,15 +2562,32 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         partial_reason = "invalid_coverage"
     # Preserve presence locally; the existing optional-list helper deliberately
     # treats absent and [] alike for the other coverage siblings.
+    # Track 107A: two additive fields, three-way on KEY PRESENCE like the other
+    # siblings (absent / valid / invalid -> drop the field, keep the row).
+    cursor_usage = None
+    cursor_account = None
+    if "cursor_usage" in ev:
+        cursor_usage, _ = _accept_cursor_field(ev.get("cursor_usage"), account=False)
+    if "cursor_account" in ev:
+        cursor_account, _ = _accept_cursor_field(ev.get("cursor_account"), account=True)
     empty_sources = None
     empty_reason = None
     if "empty_sources" in ev:
         empty_sources, empty_reason = _accept_optional_source_list(ev, "empty_sources")
+        # The account reader's emptiness is its own retained days, not the top-level
+        # hosts, so the "hosts empty iff every reader empty" proof covers the others.
+        others = consulted_set - {CURSOR_ACCOUNT_SOURCE}
+        other_empty = set(empty_sources) - {CURSOR_ACCOUNT_SOURCE}
         if (
             empty_reason
             or not set(empty_sources) <= consulted_set
-            or (not hosts) != (set(empty_sources) == consulted_set)
+            or (not hosts) != (other_empty == others)
             or set(empty_sources) & set(declared_partial)
+            or (
+                cursor_account is not None
+                and (CURSOR_ACCOUNT_SOURCE in empty_sources)
+                != (not cursor_account["tokens_by_day"])
+            )
         ):
             empty_sources = None
             empty_reason = "invalid_coverage"
@@ -2337,6 +2620,8 @@ def _accept_host_usage_snapshot(ev: object) -> _AcceptedHostRow | HostReject:
         counter_semantics=counter_semantics,
         empty_sources=empty_sources,
         empty_reason=empty_reason,
+        cursor_usage=cursor_usage,
+        cursor_account=cursor_account,
     )
 
 
@@ -2400,6 +2685,8 @@ def _sibling_tie_key(row: _AcceptedHostRow) -> str:
             row.empty_sources is not None,
             list(row.empty_sources or ()),
             row.empty_reason or "",
+            row.cursor_usage or {},
+            row.cursor_account or {},
         ],
         sort_keys=True,
         separators=(",", ":"),
@@ -2494,6 +2781,8 @@ def aggregate_host_usage(
             degraded_reason=row.degraded_reason,
             partial_reason=row.partial_reason,
             counter_semantics=row.counter_semantics,
+            cursor_usage=row.cursor_usage,
+            cursor_account=row.cursor_account,
         )
     return HostUsageInventory(
         by_device=by_device,
@@ -3800,23 +4089,76 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
 
 CURSOR_ACP_GAP_NOTE = (
     "Cursor runs through ACP front-ends such as Paseo are not counted: cursor-agent's ACP "
-    "mode reports no usage and fires no completion hook, so no action resolves this."
+    "mode reports no usage and fires no completion hook. Run `mm enable-source cursor-account` "
+    "on a machine to count them from the Cursor account."
 )
 
 
 def _cursor_acp_gap_notes(data: RetroData) -> list[str]:
-    """Name the known Cursor coverage gap when any machine published Cursor usage.
+    """Name the Cursor coverage gap while no account read closes it.
 
     Kept apart from ``_agent_coverage_notes``: it is not a refresh problem, so it
-    carries no attended-producer remedy.
+    carries no attended-producer remedy. Shown only when some machine consulted
+    ``cursor`` and no account read was applied (``resolve_cursor_account``); a
+    machine whose account reader failed gets the variant that names it, and the
+    older-peer and two-account cases say why the read was not applied.
     """
     inventory = data.host_inventory
     if not isinstance(inventory, HostUsageInventory):
         return []
-    for snap in inventory.by_device.values():
-        if isinstance(snap, HostDeviceSnapshot) and "cursor" in snap.consulted:
-            return [CURSOR_ACP_GAP_NOTE]
-    return []
+    if not any(
+        isinstance(snap, HostDeviceSnapshot)
+        and ("cursor" in snap.consulted or CURSOR_ACCOUNT_SOURCE in snap.consulted)
+        for snap in inventory.by_device.values()
+    ):
+        return []
+    lo, hi = _window_day_keys(data.since, data.until)
+    _adjusted, account = resolve_cursor_account(inventory, lo, hi)
+    labels = device_labels(data.fleet)
+    notes: list[str] = []
+    if account.inclusion_pending:
+        notes.append(
+            "Cursor account totals were captured but are not included on unverified days: "
+            "inclusion of local Cursor runs in the billing export is unproven. "
+            "Local counts remain; Cursor ACP usage is still incomplete."
+        )
+    if account.multi_account:
+        notes.append(
+            "Cursor account usage was read for more than one Cursor account in this window, "
+            "so it was not applied and Cursor ACP runs are not counted."
+        )
+    if account.older_peers:
+        names = ", ".join(device_label(d, labels) for d in account.older_peers)
+        notes.append(
+            "Cursor account usage was not applied on days when "
+            f"{names} reported Cursor usage: it runs an older mm. Run `mm update` there."
+        )
+    if account.reader is not None and not account.multi_account:
+        # The account was read, but its ledger can stop while use continues (a unified plan
+        # keeps usage outside the events endpoint): name the day it ends.
+        ends, read_day = account.ends, account.read_day
+        recent = (
+            ends is not None
+            and read_day is not None
+            and (date.fromisoformat(read_day) - date.fromisoformat(ends)).days <= 3
+        )
+        if not recent:
+            when = f"through {ends}" if ends else "for any day yet"
+            notes.append(
+                f"Cursor account usage has been read only {when}, so Cursor ACP runs after that "
+                "are not counted yet (the account's billing export fills in over later attended "
+                "pushes); local Cursor capture still counts what it sees."
+            )
+        return notes
+    if account.multi_account or account.older_peers:
+        return notes
+    if account.failed_devices:
+        names = ", ".join(device_label(d, labels) for d in account.failed_devices)
+        return [
+            f"Cursor account usage failed on {names}, so Cursor ACP runs are not counted. "
+            "Run `mm status` there for the fix."
+        ]
+    return [CURSOR_ACP_GAP_NOTE]
 
 
 def _agent_coverage_notes(

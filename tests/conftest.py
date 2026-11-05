@@ -505,6 +505,7 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     """
     from mind_meld import host_usage as _host_usage
     from mind_meld.hosts import codex as _codex_host
+    from mind_meld.hosts import cursor_account as _cursor_account_host
 
     root = tmp_path / "_isolated_hosts"
     monkeypatch.setattr(_codex_host, "CODEX_SESSIONS_PATH", root / "codex" / "sessions")
@@ -523,6 +524,28 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
         _host_usage, "AGY_CONVERSATIONS_PATH", root / "gemini" / "antigravity-cli" / "conversations"
     )
     monkeypatch.setattr(_host_usage, "AGY_CACHE_PATH", root / "agy-host-tokens.json")
+    monkeypatch.setattr(_cursor_account_host, "CACHE_PATH", root / "cursor-account-usage.json")
+
+
+@pytest.fixture(autouse=True)
+def _forbid_cursor_account_io(monkeypatch) -> None:
+    """No test reaches cursor-agent's login or cursor.com unless it injects fakes.
+
+    Same idea as the ``PYTEST_CURRENT_TEST`` keyring guard in ``crypto.py``: the
+    Cursor account reader holds a real credential, so its two seams (the token
+    loader and the HTTP opener) raise here. A test that exercises them replaces
+    both explicitly (``fake_cursor_account`` in this module builds the pair).
+    """
+    from mind_meld.hosts import cursor_account
+
+    def _no_login(timeout):
+        raise AssertionError("test touched cursor-agent's login without injecting a fake token")
+
+    def _no_network():
+        raise AssertionError("test reached cursor.com without injecting a fake opener")
+
+    monkeypatch.setattr(cursor_account, "_read_login", _no_login)
+    monkeypatch.setattr(cursor_account, "_build_opener", _no_network)
 
 
 @pytest.fixture(autouse=True)

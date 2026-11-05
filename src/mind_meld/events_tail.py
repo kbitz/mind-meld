@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Sequence, get_args
+from typing import Any, Callable, Literal, Mapping, Sequence, get_args
 
 from mind_meld import (
     __version__,
@@ -56,6 +56,7 @@ from mind_meld.config import (
 )
 from mind_meld.errors import HOST_USAGE_CAPTURE_URL
 from mind_meld.hosts import codex as codex_host
+from mind_meld.hosts import cursor_account as cursor_account_host
 from mind_meld.safety import safe_str, safe_terminal_str
 
 CacheLockMode = Literal["warn", "block"] | None
@@ -248,6 +249,16 @@ default gets a 2,100 ms first share (three later readers). Capped per sweep at
 ``sweep / (2 * readers)`` and floored per later reader at the reserve. The
 autopush sweep passes no reserve and keeps ``HOST_READER_GRACE_MS``."""
 
+HOST_READER_FLOOR_MS = {"cursor-account": 20000}
+"""Per-reader minimum time from its own start, for readers that make network calls (Track 107A).
+
+The Cursor account read fetches only the UTC days its cache lacks from the billing export, whose
+latency is erratic (measured 2026-11-05: 4 to 28 s for one day, 66 to 155 s for 30). It runs last,
+so without a floor it would get only what the local readers leave of the 3 s host phase and make no
+progress. With every wanted day cached the read returns at once and costs nothing; with days missing
+it can hold an attended push for up to this long, and the events tail keeps whatever the phase
+leaves. Applies only to a selected reader: attended pushes and recapture."""
+
 _ROOT_DISCOVERY_DEGRADATION = (
     "git repository discovery hit its time budget: this push captured an incomplete "
     "repository set. Run mm diag, then mm recapture 30d to recover the omitted commits"
@@ -390,6 +401,16 @@ class HostUsageCapture:
     The writer intersects these with its retained days to prove emptiness.
     Model-family membership cannot identify a reader's contribution.
     """
+    cursor_usage: dict[str, Any] | None = None
+    """The ``cursor`` reader's own ``{hosts, tokens_by_day}`` (Track 107A).
+
+    Still merged into ``hosts``; kept apart too so the fleet can swap it for the
+    account read. None when the Cursor reader did not complete this sweep."""
+    cursor_account: dict[str, Any] | None = None
+    """The account reader's ``{account, since, read_day, hosts, tokens_by_day}``.
+
+    Never merged into ``hosts`` or ``tokens_by_day``: it describes the whole
+    account, not this machine. None when the reader did not complete."""
 
     @property
     def complete(self) -> bool:
@@ -526,12 +547,15 @@ def _default_host_readers(
     sources: list[dict],
     *,
     cursor_consented: bool = False,
+    cursor_account_consented: bool = False,
 ) -> tuple[tuple[str, HostReader], ...]:
     """The built-in readers the user has CONSENTED to, in their fixed order.
 
     A reader whose host is not an enabled sync source is not invoked at all —
     see ``HOST_READER_SOURCE_GATE``. Cursor has no sync source: ``cursor_consented`` is its
-    only gate (``HOST_USAGE_ONLY_CONSENT``).
+    only gate (``HOST_USAGE_ONLY_CONSENT``). So does the Cursor account reader
+    (Track 107A): ``cursor_account_consented`` is its own bit, and only the
+    attended push and the non-quiet tail ever pass it.
 
     Module-qualified lookups on purpose (docs/invariants/README.md's
     dead-alias rule in reverse): a from-import would bind this module's own global, so a test
@@ -559,6 +583,12 @@ def _default_host_readers(
             return host_usage.read_agy_usage(deadline=deadline, consented=True)
 
         chosen.append(("agy", _read_agy))
+    if cursor_account_consented:
+
+        def _read_cursor_account(*, deadline: float) -> host_usage.HostUsageResult:
+            return cursor_account_host.read_cursor_account_usage(deadline=deadline, consented=True)
+
+        chosen.append(("cursor-account", _read_cursor_account))
     return tuple(chosen)
 
 
@@ -606,6 +636,8 @@ def _capture_host_usage(
     usage_days: dict[str, frozenset[str]] = {}
     dropped: list[tuple[str, str]] = []
     partial_days: dict[str, frozenset[str]] = {}
+    cursor_usage: dict[str, Any] | None = None
+    cursor_account: dict[str, Any] | None = None
     names_in_order = tuple(name for name, _ in readers)
     for index, (name, read) in enumerate(readers):
         start = now()
@@ -613,8 +645,9 @@ def _capture_host_usage(
             return HostUsageCapture(None, name, "deadline", invoked=False)
         later = len(readers) - index - 1
         held_back = deadline - reserve_s * later
+        floor_s = HOST_READER_FLOOR_MS.get(name, 0) / 1000.0
         reader_deadline = (
-            max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s))
+            max(held_back, start + max(HOST_READER_GRACE_MS / 1000.0, reserve_s, floor_s))
             if index
             else held_back
         )
@@ -641,6 +674,21 @@ def _capture_host_usage(
         usage_days[name] = frozenset(day for days in result.hosts.values() for day in days)
         if result.partial_days:
             partial_days[name] = frozenset(result.partial_days)
+        if name == "cursor-account":
+            # Whole-account totals are NOT this machine's usage: they stay out of
+            # the merged maps and travel in their own snapshot field.
+            if isinstance(result, cursor_account_host.CursorAccountResult):
+                cursor_account = {
+                    "account": result.account,
+                    "since": result.since,
+                    "read_day": result.read_day,
+                    "through": result.through,
+                    "hosts": result.hosts,
+                    "tokens_by_day": result.tokens_by_day,
+                }
+            continue
+        if name == "cursor":
+            cursor_usage = {"hosts": result.hosts, "tokens_by_day": result.tokens_by_day}
         _merge_host_usage_maps(merged, result.hosts, merged_by_day, result.tokens_by_day)
     if contributed or not dropped:
         return HostUsageCapture(
@@ -651,6 +699,8 @@ def _capture_host_usage(
             partial_days=dict(partial_days),
             partial=_canonical_partial(names_in_order, partial_days),
             usage_days=usage_days,
+            cursor_usage=cursor_usage,
+            cursor_account=cursor_account,
         )
     first_reader, first_reason = dropped[0]
     return HostUsageCapture(None, first_reader, first_reason, dropped=tuple(dropped))
@@ -739,6 +789,10 @@ def _merge_warm_retry_capture(
     partial_days = _merge_partial_days(initial.partial_days, retry.partial_days)
     partial = _canonical_partial(names_in_order, partial_days)
     usage_days = {**initial.usage_days, **retry.usage_days}
+    cursor_usage = retry.cursor_usage if retry.cursor_usage is not None else initial.cursor_usage
+    cursor_account = (
+        retry.cursor_account if retry.cursor_account is not None else initial.cursor_account
+    )
 
     if initial.complete or retry.complete:
         return HostUsageCapture(
@@ -750,6 +804,8 @@ def _merge_warm_retry_capture(
             partial_days=partial_days,
             partial=partial,
             usage_days=usage_days,
+            cursor_usage=cursor_usage,
+            cursor_account=cursor_account,
         )
     if dropped:
         first_reader, first_reason = dropped[0]
@@ -799,6 +855,7 @@ _HOST_DISPLAY_NAMES = {
     "muse": "Muse",
     "agy": "Antigravity",
     "cursor": "Cursor",
+    "cursor-account": "Cursor account usage",
 }
 """Closed display names for the no-release clause; an unknown reader shows its id."""
 
@@ -1013,6 +1070,8 @@ def _capture_host_snapshot(
                 tokens_by_day=host_capture.tokens_by_day or {},
                 partial_days=host_capture.partial_days,
                 usage_days=host_capture.usage_days,
+                cursor_usage=host_capture.cursor_usage,
+                cursor_account=host_capture.cursor_account,
             )
         )
 
@@ -1424,6 +1483,13 @@ def _run_events_tail(
             host_readers=_default_host_readers(
                 sources,
                 cursor_consented=mm_config.cursor_host_usage_enabled(config),
+                # Network reads belong to attended work only: autopush is quiet. Passed
+                # only when true, so a patched selector that predates the kwarg still works.
+                **(
+                    {"cursor_account_consented": True}
+                    if not quiet and mm_config.cursor_account_usage_enabled(config)
+                    else {}
+                ),
             ),
         )
 

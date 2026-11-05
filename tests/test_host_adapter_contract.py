@@ -565,7 +565,10 @@ def test_hosts_path_globals_isolated_under_tmp_path(tmp_path: Path):
     assert checked >= 3
 
 
-@pytest.mark.parametrize("mod", ["mind_meld.hosts.codex", "mind_meld.host_registry"])
+@pytest.mark.parametrize(
+    "mod",
+    ["mind_meld.hosts.codex", "mind_meld.hosts.cursor_account", "mind_meld.host_registry"],
+)
 def test_fresh_subprocess_import_never_loads_cli(mod: str):
     """Importing an adapter or host_registry in a fresh interpreter never loads mind_meld.cli."""
     proc = subprocess.run(

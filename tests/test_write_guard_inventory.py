@@ -800,6 +800,31 @@ REVIEWED = {
             "(marker_dir / f'.{name}').touch()",
         ],
     ),
+    "hosts/cursor_account.py:_query_state_db": (
+        *_READ_ONLY,
+        [
+            "sqlite3.connect(uri, uri=True, timeout=0.25)",
+        ],
+    ),
+    "hosts/cursor_account.py:_row_day": (
+        *_READ_ONLY,
+        [
+            "text.replace('Z', '+00:00')",
+            "when.replace(tzinfo=timezone.utc)",
+        ],
+    ),
+    "hosts/cursor_account.py:_fetch": (
+        *_READ_ONLY,
+        [
+            "opener.open(request, timeout=timeout)",
+        ],
+    ),
+    "skills/retro_fleet/aggregator.py:_swap_cursor_days": (
+        *_READ_ONLY,
+        [
+            "replace(snap, lifetime_by_family=families, tokens_by_day=token_days, detail=detail)",
+        ],
+    ),
     "skills/retro_fleet/aggregator.py:_iter_jsonl": (
         *_READ_ONLY,
         [

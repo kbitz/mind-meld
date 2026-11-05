@@ -63,7 +63,10 @@ def usage_capture_readiness(
     return "ready" if reader_consented else "no-reader"
 
 
-HOST_USAGE_ONLY_CONSENT = {"cursor": "cursor_host_usage"}
+HOST_USAGE_ONLY_CONSENT = {
+    "cursor": "cursor_host_usage",
+    "cursor-account": "cursor_account_usage",
+}
 """Readers with no sync source; their only consent is a local retro bit."""
 
 
@@ -72,6 +75,13 @@ def host_usage_consent_remedy(reader: str, *, enabled: bool) -> str:
     key = HOST_USAGE_ONLY_CONSENT.get(reader)
     if key is None:
         return f"Run mm {verb}-source {reader}."
+    if reader == "cursor-account":
+        if enabled:
+            return (
+                "Run mm enable-source cursor-account (reads Cursor's own login to count "
+                "Cursor account requests, including ACP front-ends)."
+            )
+        return f"Run mm disable-source {reader}, or set [retro] {key} = false in config.toml."
     if enabled:
         return (
             f"Run mm enable-source {reader} (also installs the completion hook for "
@@ -594,7 +604,7 @@ def _validate(config: dict[str, Any]) -> None:
                 f"config: retro.host_usage_autopush_budget_ms ({autopush}) must not exceed "
                 f"retro.{interactive_key} ({interactive})."
             )
-        for key in ("cursor_host_usage",):
+        for key in ("cursor_host_usage", "cursor_account_usage"):
             if key in retro and not isinstance(retro[key], bool):
                 raise ConfigError(
                     f"config: retro.{key} must be a boolean, got {type(retro[key]).__name__}."
@@ -812,6 +822,16 @@ def cursor_host_usage_enabled(config: dict[str, Any]) -> bool:
     """Usage-only consent; a source named cursor never grants this permission."""
     retro = config.get("retro")
     return isinstance(retro, dict) and retro.get("cursor_host_usage") is True
+
+
+def cursor_account_usage_enabled(config: dict[str, Any]) -> bool:
+    """Account-usage consent (Track 107A); distinct from local Cursor capture.
+
+    Granting local Cursor capture never grants reading Cursor's login
+    token or calling cursor.com, so this bit is its own key.
+    """
+    retro = config.get("retro")
+    return isinstance(retro, dict) and retro.get("cursor_account_usage") is True
 
 
 def _resolve_source_path(value: str, *, label: str) -> str:

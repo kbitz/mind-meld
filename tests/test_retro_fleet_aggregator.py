@@ -8476,3 +8476,477 @@ class TestCheckpointCommitsNeverCount:
         project, error = mm_events._walk_one_repo(repo, since, 5000)
         assert error is None and project is not None
         assert [c["subject"] for c in project["commits"]] == ["feat: real"]
+
+
+class TestCursorAccountFleetRule:
+    """Track 107A: each Cursor request is counted once across the fleet.
+
+    The rule: per account key, the freshest current account read replaces every
+    machine's own Cursor-reader contribution on each UTC day from its ``since`` up to,
+    but not including, its ``read_day``; the account's usage is credited to the machine
+    that read it. Older peers and a second account block replacement, with a note.
+    """
+
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+    TS = "2026-04-28T12:00:00+00:00"
+    ACCOUNT = "a" * 64
+    OTHER_ACCOUNT = "b" * 64
+
+    @pytest.fixture(autouse=True)
+    def synthetic_inclusion_evidence(self, monkeypatch):
+        # These tests exercise the reducer given proof, not live inclusion.
+        # Production callers provide no verified days and cannot replace usage.
+        original = aggregator.resolve_cursor_account
+
+        def with_evidence(inventory, lo, hi):
+            return original(
+                inventory,
+                lo,
+                hi,
+                verified_days=frozenset(f"2026-04-{d:02d}" for d in range(1, 31)),
+            )
+
+        monkeypatch.setattr(aggregator, "resolve_cursor_account", with_evidence)
+
+    @staticmethod
+    def _split(hosts: dict, model: str = "composer-2") -> dict:
+        return {"hosts": hosts, "tokens_by_day": _sibling(hosts, model)}
+
+    def _account(
+        self,
+        hosts,
+        *,
+        account=None,
+        since="2026-04-20",
+        read_day="2026-04-27",
+        through="2026-04-26",
+    ):
+        return {
+            "account": account or self.ACCOUNT,
+            "since": since,
+            "read_day": read_day,
+            "through": through,
+            **self._split(hosts),
+        }
+
+    def _event(
+        self,
+        device,
+        hosts,
+        *,
+        sources=("cursor",),
+        cursor_usage=True,
+        account=None,
+        ts=None,
+        **extra,
+    ):
+        fields = {"tokens_by_day": _sibling(hosts, "composer-2"), **extra}
+        if cursor_usage:
+            fields["cursor_usage"] = self._split(hosts)
+        if account is not None:
+            fields["cursor_account"] = account
+            fields["empty_sources"] = [
+                s
+                for s in sources
+                if (s == "cursor-account" and not account["hosts"])
+                or (s != "cursor-account" and not hosts)
+            ]
+        return _host_event(device, ts or self.TS, token_sources=sources, hosts=hosts, extra=fields)
+
+    def _inventory(self, events):
+        return aggregator.aggregate_host_usage(
+            events, since=self.SINCE, until=self.UNTIL, registered_ids=None
+        )
+
+    def _data(self, events):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(devices_known=3)
+        data.host_inventory = self._inventory(events)
+        return data
+
+    def _other(self, events):
+        usage = aggregator.aggregate_agent_usage(self._data(events), machines_known=3)
+        rows = {row.key: row for row in usage.rows}
+        return rows
+
+    def _fleet(self, *, b_cursor_usage=True, second_account=False):
+        a_local = {"other": {"2026-04-22": _usage(10), "2026-04-27": _usage(3)}}
+        b_local = {"other": {"2026-04-22": _usage(20)}}
+        account = self._account({"other": {"2026-04-22": _usage(30), "2026-04-23": _usage(4)}})
+        events = [
+            self._event("dev-a", a_local, sources=("cursor", "cursor-account"), account=account),
+            self._event("dev-b", b_local, cursor_usage=b_cursor_usage),
+        ]
+        if second_account:
+            other = self._account({"other": {"2026-04-24": _usage(9)}}, account=self.OTHER_ACCOUNT)
+            events.append(
+                self._event(
+                    "dev-c",
+                    {"other": {"2026-04-25": _usage(1)}},
+                    sources=("cursor", "cursor-account"),
+                    account=other,
+                )
+            )
+        return events
+
+    def test_two_machines_reading_the_same_account_count_once(self):
+        row = self._other(self._fleet())["other"]
+        # 04-22: the account's 30 replaces A's 10 and B's 20; 04-23 is account-only;
+        # 04-27 is the read day, so A's own 3 stays on the local reader.
+        assert row.tokens == 30 + 4 + 3
+        assert row.by_model["composer-2"]["input"] == 37
+        assert row.active_days == 3
+        assert row.machines == 1, "credited to the reading machine"
+
+    def test_a_local_hook_run_on_another_machine_is_not_added_to_the_account(self):
+        events = self._fleet()
+        total = self._other(events)["other"].tokens
+        # B's 20 is a hook run the account also saw: removing B changes nothing.
+        assert self._other(events[:1])["other"].tokens == total
+
+    def test_the_read_day_stays_on_the_local_readers(self):
+        inventory, resolution = aggregator.resolve_cursor_account(
+            self._inventory(self._fleet()), "2026-04-21", "2026-04-28"
+        )
+        assert resolution.applied and "2026-04-27" not in resolution.covered_days
+        assert resolution.covered_days[0] == "2026-04-20" and resolution.reader == "dev-a"
+        assert inventory.by_device["dev-a"].lifetime_by_family["other"]["2026-04-27"]["input"] == 3
+
+    def test_resolution_never_mutates_the_accepted_inventory(self):
+        original = self._inventory(self._fleet())
+        before = json.dumps(
+            {d: s.lifetime_by_family for d, s in original.by_device.items()}, sort_keys=True
+        )
+        aggregator.resolve_cursor_account(original, "2026-04-21", "2026-04-28")
+        after = json.dumps(
+            {d: s.lifetime_by_family for d, s in original.by_device.items()}, sort_keys=True
+        )
+        assert before == after
+
+    def test_an_older_peer_blocks_replacement_on_its_days_and_is_named(self):
+        data = self._data(self._fleet(b_cursor_usage=False))
+        row = {r.key: r for r in aggregator.aggregate_agent_usage(data, machines_known=3).rows}
+        # 04-22 stays local (A 10 + B 20); 04-23 comes from the account; 04-27 local.
+        assert row["other"].tokens == 30 + 4 + 3
+        notes = aggregator._cursor_acp_gap_notes(data)
+        assert len(notes) == 1 and "dev-b" in notes[0] and "mm update" in notes[0]
+
+    def test_older_peer_changes_the_answer_when_the_account_disagrees(self):
+        events = self._fleet(b_cursor_usage=False)
+        events[0] = self._event(
+            "dev-a",
+            {"other": {"2026-04-22": _usage(10), "2026-04-27": _usage(3)}},
+            sources=("cursor", "cursor-account"),
+            account=self._account({"other": {"2026-04-22": _usage(50), "2026-04-23": _usage(4)}}),
+        )
+        row = self._other(events)["other"]
+        assert row.tokens == (10 + 20) + 4 + 3, "04-22 is not replaced while dev-b is older"
+
+    def test_two_account_keys_in_the_window_apply_nothing(self):
+        data = self._data(self._fleet(second_account=True))
+        _inv, resolution = aggregator.resolve_cursor_account(
+            data.host_inventory, "2026-04-21", "2026-04-28"
+        )
+        assert resolution.multi_account and not resolution.applied
+        row = {r.key: r for r in aggregator.aggregate_agent_usage(data, machines_known=3).rows}
+        assert row["other"].tokens == 10 + 3 + 20 + 1
+        notes = aggregator._cursor_acp_gap_notes(data)
+        assert len(notes) == 1 and "more than one Cursor account" in notes[0]
+
+    @pytest.mark.parametrize("mode", ["stale", "future", "degraded", "partial", "legacy"])
+    def test_an_unusable_account_row_is_unused(self, mode):
+        events = self._fleet()
+        local = {"other": {"2026-04-22": _usage(10), "2026-04-27": _usage(3)}}
+        account = self._account({"other": {"2026-04-22": _usage(30), "2026-04-23": _usage(4)}})
+        extra: dict = {}
+        sources = ("cursor", "cursor-account")
+        ts = None
+        if mode == "stale":
+            ts = "2026-04-10T12:00:00+00:00"
+        elif mode == "future":
+            ts = "2026-04-29T09:00:00+00:00"
+        elif mode == "degraded":
+            sources = ("cursor",)
+            extra["degraded_sources"] = ["cursor-account"]
+        elif mode == "partial":
+            extra["partial_sources"] = ["cursor-account"]
+        elif mode == "legacy":
+            extra["counter_semantics"] = None
+        events[0] = self._event("dev-a", local, sources=sources, account=account, ts=ts, **extra)
+        inventory, resolution = aggregator.resolve_cursor_account(
+            self._inventory(events), "2026-04-21", "2026-04-28"
+        )
+        assert not resolution.applied
+        assert inventory.by_device["dev-a"].lifetime_by_family["other"]["2026-04-22"]["input"] == 10
+
+    def test_account_families_are_counted_under_their_model_family(self):
+        account = self._account(
+            {
+                "grok": {"2026-04-22": _usage(5)},
+                "claude": {"2026-04-22": _usage(6)},
+                "codex": {"2026-04-23": _usage(7)},
+            }
+        )
+        account["tokens_by_day"] = {
+            "2026-04-22": {
+                **_usage(11),
+                "by_model": {"grok-4.7": _usage(5), "claude-sonnet-4-5": _usage(6)},
+            },
+            "2026-04-23": {**_usage(7), "by_model": {"gpt-5": _usage(7)}},
+        }
+        rows = self._other(
+            [
+                self._event(
+                    "dev-a",
+                    {"other": {"2026-04-22": _usage(1)}},
+                    sources=("cursor", "cursor-account"),
+                    account=account,
+                )
+            ]
+        )
+        assert rows["grok"].tokens == 5 and rows["claude"].tokens == 6
+        assert rows["codex"].tokens == 7
+        assert "other" not in rows, "the local share on a covered day is replaced"
+        assert rows["grok"].by_model == {"grok-4.7": _usage(5)}
+
+    def test_replacement_stops_at_the_accounts_newest_event_day(self):
+        """A unified plan keeps its usage outside the events endpoint, so the ledger can
+        end while use continues; local readers keep every day after it."""
+        local = {"other": {"2026-04-22": _usage(10), "2026-04-25": _usage(7)}}
+        account = self._account({"other": {"2026-04-22": _usage(30)}}, through="2026-04-22")
+        events = [
+            self._event("dev-a", local, sources=("cursor", "cursor-account"), account=account)
+        ]
+        _inv, resolution = aggregator.resolve_cursor_account(
+            self._inventory(events), "2026-04-21", "2026-04-28"
+        )
+        assert resolution.covered_days[-1] == "2026-04-22" and resolution.ends == "2026-04-22"
+        assert self._other(events)["other"].tokens == 30 + 7, "04-25 stays on the local reader"
+
+    def test_an_account_read_that_listed_no_events_covers_nothing(self):
+        local = {"other": {"2026-04-22": _usage(10)}}
+        account = self._account({}, through=None)
+        events = [
+            self._event("dev-a", local, sources=("cursor", "cursor-account"), account=account)
+        ]
+        _inv, resolution = aggregator.resolve_cursor_account(
+            self._inventory(events), "2026-04-21", "2026-04-28"
+        )
+        assert not resolution.applied and resolution.covered_days == ()
+        assert self._other(events)["other"].tokens == 10
+
+    def test_the_forensic_inventory_keeps_the_accepted_raw_view(self):
+        inventory = self._inventory(self._fleet())
+        assert inventory.by_device["dev-b"].lifetime_by_family["other"]["2026-04-22"]["input"] == 20
+        assert inventory.by_device["dev-a"].cursor_account["account"] == self.ACCOUNT
+        assert inventory.by_device["dev-b"].cursor_account is None
+
+
+class TestCursorAccountAcceptance:
+    TS = "2026-04-28T12:00:00+00:00"
+    HOSTS = {"other": {"2026-04-22": _usage(5)}}
+
+    def _account(self, **overrides):
+        return {
+            "account": "c" * 64,
+            "since": "2026-04-20",
+            "read_day": "2026-04-27",
+            "through": "2026-04-22",
+            "hosts": self.HOSTS,
+            "tokens_by_day": _sibling(self.HOSTS, "composer-2"),
+            **overrides,
+        }
+
+    def _row(self, **extra):
+        return _accepted(
+            _host_event(
+                "dev-a",
+                self.TS,
+                token_sources=("cursor", "cursor-account"),
+                hosts=self.HOSTS,
+                extra={"tokens_by_day": _sibling(self.HOSTS, "composer-2"), **extra},
+            )
+        )
+
+    def test_rows_without_the_fields_have_none(self):
+        row = self._row()
+        assert row.cursor_usage is None and row.cursor_account is None
+
+    def test_valid_fields_are_kept(self):
+        row = self._row(
+            cursor_usage={"hosts": self.HOSTS, "tokens_by_day": _sibling(self.HOSTS)},
+            cursor_account=self._account(),
+        )
+        assert row.cursor_usage["hosts"] == self.HOSTS
+        assert row.cursor_account["account"] == "c" * 64
+
+    def test_a_present_empty_cursor_usage_is_valid(self):
+        row = self._row(cursor_usage={"hosts": {}, "tokens_by_day": {}})
+        assert row.cursor_usage == {"hosts": {}, "tokens_by_day": {}}
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "not-an-object",
+            {"hosts": {}},
+            {"hosts": {"other": {"2026-04-22": _usage(5)}}, "tokens_by_day": {}},
+            {"hosts": {"nonsense": {"2026-04-22": _usage(5)}}, "tokens_by_day": {}},
+        ],
+    )
+    def test_an_invalid_cursor_usage_drops_the_field_and_keeps_the_row(self, bad):
+        row = self._row(cursor_usage=bad)
+        assert row.cursor_usage is None and row.lifetime_by_family == self.HOSTS
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"account": "short"},
+            {"account": "G" * 64},
+            {"since": "2026-04-28", "read_day": "2026-04-20"},
+            {"since": "not-a-day"},
+            {"since": "2025-01-01"},
+            {"read_day": "2026-04-21"},
+            {"through": "2026-04-28"},
+            {"through": "2026-04-19"},
+            {"through": "yesterday"},
+            {"extra": 1},
+        ],
+    )
+    def test_an_invalid_cursor_account_drops_the_field_and_keeps_the_row(self, overrides):
+        row = self._row(cursor_account=self._account(**overrides))
+        assert row.cursor_account is None and row.lifetime_by_family == self.HOSTS
+
+    def test_the_account_reader_empty_claim_must_match_its_own_days(self):
+        full = self._row(cursor_account=self._account(), empty_sources=[])
+        assert full.empty_sources == () and full.cursor_account is not None
+        lie = self._row(cursor_account=self._account(), empty_sources=["cursor-account"])
+        assert lie.empty_sources is None and lie.empty_reason == "invalid_coverage"
+
+    def test_account_only_row_with_empty_hosts_is_accepted_as_nonempty(self):
+        ev = _host_event(
+            "dev-a",
+            self.TS,
+            token_sources=("cursor-account",),
+            hosts={},
+            extra={"cursor_account": self._account(), "empty_sources": []},
+        )
+        row = _accepted(ev)
+        assert row.empty_sources == () and row.cursor_account is not None
+
+
+class TestCursorAcpGapNotes:
+    SINCE = datetime(2026, 4, 21, tzinfo=timezone.utc)
+    UNTIL = datetime(2026, 4, 28, 12, tzinfo=timezone.utc)
+
+    def _data(self, snaps):
+        data = aggregator.RetroData(window_days=7, since=self.SINCE, until=self.UNTIL)
+        data.fleet = aggregator.FleetState(devices_known=3)
+        data.host_inventory = aggregator.HostUsageInventory(by_device={s.device: s for s in snaps})
+        return data
+
+    def _cursor_snap(self, device="dev-a", **kwargs):
+        return _snap(device, self.UNTIL, consulted=("cursor",), **kwargs)
+
+    def _account(self):
+        hosts = {"other": {"2026-04-22": _usage(5)}}
+        return {
+            "account": "a" * 64,
+            "since": "2026-04-20",
+            "read_day": "2026-04-27",
+            "through": "2026-04-26",
+            "hosts": hosts,
+            "tokens_by_day": _sibling(hosts, "composer-2"),
+        }
+
+    def test_the_note_gives_the_opt_in_as_its_fix_and_keeps_the_acp_substring(self):
+        note = aggregator.CURSOR_ACP_GAP_NOTE
+        assert "Paseo" in note and "mm enable-source cursor-account" in note
+        assert "no action resolves this" not in note
+        assert aggregator._cursor_acp_gap_notes(self._data([self._cursor_snap()])) == [note]
+
+    def test_the_note_needs_a_snapshot_that_consulted_cursor(self):
+        data = self._data([_snap("dev-a", self.UNTIL, consulted=("codex",))])
+        assert aggregator._cursor_acp_gap_notes(data) == []
+
+    def test_a_read_account_does_not_close_the_gap_without_inclusion_proof(self):
+        snap = dataclasses.replace(
+            _snap("dev-a", self.UNTIL, consulted=("cursor", "cursor-account")),
+            cursor_usage={"hosts": {}, "tokens_by_day": {}},
+            cursor_account=self._account(),
+        )
+        notes = aggregator._cursor_acp_gap_notes(self._data([snap]))
+        assert len(notes) == 1 and "inclusion" in notes[0] and "unproven" in notes[0]
+
+    def test_account_only_consent_still_reports_the_unproven_coverage(self):
+        snap = dataclasses.replace(
+            _snap("dev-a", self.UNTIL, consulted=("cursor-account",)),
+            cursor_account=self._account(),
+        )
+        notes = aggregator._cursor_acp_gap_notes(self._data([snap]))
+        assert any("inclusion" in note and "unproven" in note for note in notes)
+
+    def test_a_read_account_whose_events_ended_long_ago_says_so(self):
+        snap = dataclasses.replace(
+            _snap("dev-a", self.UNTIL, consulted=("cursor", "cursor-account")),
+            cursor_usage={"hosts": {}, "tokens_by_day": {}},
+            cursor_account={**self._account(), "through": "2026-04-22"},
+        )
+        notes = aggregator._cursor_acp_gap_notes(self._data([snap]))
+        assert len(notes) == 2
+        assert any(
+            "read only through 2026-04-22" in n and "later attended pushes" in n for n in notes
+        )
+        assert all("mm enable-source" not in n for n in notes), "the opt-in is already on"
+
+    def test_an_account_with_no_events_in_the_window_says_so(self):
+        snap = dataclasses.replace(
+            _snap("dev-a", self.UNTIL, consulted=("cursor", "cursor-account")),
+            cursor_usage={"hosts": {}, "tokens_by_day": {}},
+            cursor_account={**self._account(), "through": None, "hosts": {}, "tokens_by_day": {}},
+        )
+        notes = aggregator._cursor_acp_gap_notes(self._data([snap]))
+        assert len(notes) == 1 and "for any day yet" in notes[0]
+
+    def test_a_failing_account_reader_is_named_with_the_command_to_run_there(self):
+        failing = self._cursor_snap("dev-a", degraded=("cursor-account",))
+        notes = aggregator._cursor_acp_gap_notes(self._data([failing]))
+        assert len(notes) == 1 and "dev-a" in notes[0] and "`mm status`" in notes[0]
+        assert notes != [aggregator.CURSOR_ACP_GAP_NOTE]
+
+    def test_the_health_payload_carries_the_note_under_agent_coverage(self):
+        data = self._data([self._cursor_snap()])
+        flagged = [
+            e["detail"]
+            for e in _health(aggregator.format_retro(data))
+            if e["code"] == "agent_coverage"
+        ]
+        assert aggregator.CURSOR_ACP_GAP_NOTE in flagged
+
+
+def test_account_replacement_defaults_off_without_inclusion_evidence():
+    case = TestCursorAccountFleetRule()
+    inventory = case._inventory(case._fleet())
+    adjusted, resolution = aggregator.resolve_cursor_account(inventory, "2026-04-21", "2026-04-28")
+    assert not resolution.applied and resolution.inclusion_pending
+    assert resolution.covered_days == ()
+    assert adjusted.by_device == inventory.by_device
+    data = case._data(case._fleet())
+    rows = {row.key: row for row in aggregator.aggregate_agent_usage(data, machines_known=3).rows}
+    assert rows["other"].tokens == 10 + 3 + 20
+    assert any(
+        "inclusion" in note and "unproven" in note
+        for note in aggregator._cursor_acp_gap_notes(data)
+    )
+
+
+def test_account_replacement_applies_only_to_explicitly_verified_days():
+    case = TestCursorAccountFleetRule()
+    inventory = case._inventory(case._fleet())
+    adjusted, resolution = aggregator.resolve_cursor_account(
+        inventory, "2026-04-21", "2026-04-28", verified_days=frozenset({"2026-04-22"})
+    )
+    assert resolution.covered_days == ("2026-04-22",)
+    assert resolution.inclusion_pending
+    assert adjusted.by_device["dev-a"].lifetime_by_family["other"]["2026-04-22"]["input"] == 30
+    assert "2026-04-23" not in adjusted.by_device["dev-a"].lifetime_by_family["other"]

@@ -116,6 +116,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 cursor_consented=True,
+                cursor_account_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 
@@ -180,6 +181,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*events_tail.HOST_READER_SOURCE_GATE),
                 cursor_consented=True,
+                cursor_account_consented=True,
             )
         ]
         assert set(events_tail.HOST_READER_SOURCE_GATE) == set(invoked)
@@ -189,7 +191,12 @@ class TestReaderOrchestration:
         can actually invoke. A key with no reader is a consent check of
         nothing."""
         enabled = self._enabled(*events_tail.HOST_READER_SOURCE_GATE)
-        names = [n for n, _ in events_tail._default_host_readers(enabled, cursor_consented=True)]
+        names = [
+            n
+            for n, _ in events_tail._default_host_readers(
+                enabled, cursor_consented=True, cursor_account_consented=True
+            )
+        ]
         assert set(names) == set(events_tail.HOST_READER_SOURCE_GATE)
 
     def test_active_readers_are_a_subset_of_the_wire_vocabulary(self):
@@ -214,6 +221,7 @@ class TestReaderOrchestration:
             events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 cursor_consented=True,
+                cursor_account_consented=True,
             ),
             deadline=1_000.0,
             now=lambda: 0.0,
@@ -383,6 +391,7 @@ class TestReaderOrchestration:
             for name, _ in events_tail._default_host_readers(
                 self._enabled(*_mm_events.ACTIVE_HOST_READERS),
                 cursor_consented=True,
+                cursor_account_consented=True,
             )
         ] == list(_mm_events.ACTIVE_HOST_READERS)
 

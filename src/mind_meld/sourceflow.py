@@ -207,6 +207,50 @@ def _toggle_cursor_usage(name: str, config: dict, *, enabled: bool) -> bool:
     return True
 
 
+def _toggle_cursor_account_usage(name: str, config: dict, *, enabled: bool) -> bool:
+    """Handle the cursor-account usage alias (Track 107A).
+
+    Writes only ``[retro] cursor_account_usage`` and installs no hook; it never
+    touches ``cursor_host_usage`` (local Cursor capture), and local consent never
+    grants this one. Enabling runs one local login check (presence and expiry of
+    Cursor's own session, read-only, no network call and no Keychain access). An
+    explicit custom source named ``cursor-account`` keeps the file toggle.
+    """
+    key = _config_module.HOST_USAGE_ONLY_CONSENT.get(name)
+    if name != "cursor-account" or key is None:
+        return False
+    if any(s["name"] == name for s in config.get("sync", {}).get("sources", []) or []):
+        return False
+    from mind_meld.hosts import cursor_account
+
+    already = config.get("retro", {}).get(key) is enabled
+    if not already:
+        patch_config_on_disk({"retro": {key: enabled}})
+    state = "enabled" if enabled else "disabled"
+    if already:
+        console.print(f"[dim]Cursor account usage is already {state}.[/dim]")
+    else:
+        verb = "Enabled" if enabled else "Disabled"
+        console.print(f"[green]{verb} Cursor account usage on this device.[/green]")
+    if not enabled:
+        console.print("[dim]Run 'mm enable-source cursor-account' to change this setting.[/dim]")
+        return True
+    console.print(
+        "[dim]Attended pushes read Cursor's own login (read-only) to count Cursor account "
+        "requests, including ACP front-ends. Only token counts are synced.[/dim]"
+    )
+    cause = cursor_account.check_login()
+    if cause is None:
+        console.print("[dim]Run 'mm push' to refresh usage, then 'mm status' to verify.[/dim]")
+        return True
+    broke, fix = cursor_account.blocker({"cause": cause}) or (
+        "the login check failed",
+        "Run mm diag",
+    )
+    stderr_console.print(f"[yellow]mm: warning:[/yellow] {safe_str(broke)}. {safe_str(fix)}.")
+    return True
+
+
 def _record_seen(names: list[str]) -> None:
     """Mark `names` as acknowledged in the seen_sources tracker.
 
@@ -226,6 +270,8 @@ def disable_source(name: str, *, force: bool = False) -> None:
     """Disable a sync source on this device only."""
     config = core._get_config(read_only=False)
     if _toggle_cursor_usage(name, config, enabled=False):
+        return
+    if _toggle_cursor_account_usage(name, config, enabled=False):
         return
     try:
         _validate_source_name(name, config, force=force)
@@ -251,6 +297,8 @@ def enable_source(name: str, *, force: bool = False) -> None:
     """Enable a sync source on this device."""
     config = core._get_config(read_only=False)
     if _toggle_cursor_usage(name, config, enabled=True):
+        return
+    if _toggle_cursor_account_usage(name, config, enabled=True):
         return
     try:
         _validate_source_name(name, config, force=force)

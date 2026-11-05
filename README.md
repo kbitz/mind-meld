@@ -16,6 +16,15 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Cursor account usage (Track 107A):** a new opt-in source name, `cursor-account`, and
+config key, `[retro] cursor_account_usage`, count Cursor requests that never touch a local
+store (ACP front-ends such as Paseo) from your Cursor account. Nothing changes until you
+run `mm enable-source cursor-account` on a machine (see
+[Cursor account usage](#cursor-account-usage)). The published usage row gains two optional
+fields (`cursor_usage`, `cursor_account`); an older mm ignores them and keeps counting
+local Cursor usage only. Account/local reconciliation remains blocked on inclusion
+evidence; upgrading alone does not enable replacement.
+
 **Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex and
 Cursor index used to need more pushes than discovery's 100 ms attended budget could
 give, so the retro cursor stayed held. An attended `mm push` now gives discovery
@@ -614,7 +623,7 @@ If `mm` is not installed, both commands will fail silently — no action needed.
 - `mm autopush` builds a manifest of the configured sync sources, diffs against the last push, and uploads only what changed. A file that is still changing is held: its previous version, if any, stays published and autopush prints nothing.
 - Both commands acquire a lockfile, never prompt for input, and exit gracefully on any error, so they do not block Claude Code (except for the keyring residuals noted [above](#claude-code-integration): other Linux keyring backends, macOS Keychain access dialogs, a stalled D-Bus session).
 - "Silent" means no chatter on the happy path. Load-bearing degradation warnings — corrupt-manifest recovery, "no sync sources" misconfig, durability fsync failure, per-file pull failures — still reach stderr. Apply failures print one `mm: warning:` line per failed file plus a per-source summary and a total count so a wedged background sync surfaces instead of rotting. Autopush writes a `no-sources` breadcrumb (separate from `success`) when the config has no sync sources. Both auto commands also write a `degraded` breadcrumb (separate from `success`) when an otherwise-successful run lost data: autopull on fsync durability failure, corrupt peer manifest (including this Mac's own manifest vanishing mid-pull), unknown source from a peer, or per-file apply failure; autopush (v0.12.16) when the fleet-retro events tail failed, exceeded its walk budget, or published no token/skill data because the token cache was cold or locked. Autopush also records `degraded` when it holds a file that changed, vanished or grew while being read: the previous version, if any, stays published, and the detail says the file is not yet synced ([Snapshot failures](#snapshot-failures)). A dropped host-usage reader — Mind Meld isolates host readers, so a source it cannot read is declared and omitted from that row's coverage rather than deleting the others or publishing a silent partial total — is reported the same way in `mm status`, and costs optional fleet-retro analytics only, never content sync. The `detail` field enumerates which signals fired. `mm status` and any monitoring on top of it can catch both wedge and partial-degradation cases. The one wedge no breadcrumb can report is the command never running at all — an `ImportError` at module scope, say, which dies before typer's runner and writes nothing — so since v0.12.21 `mm status` also marks any autorun breadcrumb older than 48 hours as `stale — no autorun in Nh` instead of reporting the last `success` forever.
-- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together. `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
+- Fleet-retro capture is best-effort and never blocks content sync. Git repository discovery keeps a private local project index, and per-repository cursors resume unfinished Git walks on later attended `mm push` runs, including pushes with no user-file edits. Unchanged projects avoid rescanning their session logs. Autopush keeps its own small budgets. An attended push uses one `[retro] capture_budget_ms` (default 5,000 ms) for host capture and activity capture together, with the owner-approved 20-second opt-in Cursor account exception described under [host usage capture](#host-usage-capture). `mm status` reports repositories still catching up and `mm diag` exposes `git_capture.fresh.pending_repos`. Persistent failures (three incomplete captures), empty discovery, Git errors, or gaps beyond the 90-day retained event window advise explicit `mm recapture`. Historical degradation breadcrumbs retain their original diagnostic text. A healthy no-op autopush can still refresh its local autorun breadcrumb, which proves the hook ran; it does not mean fleet retro received a new activity event.
 - **Automatic update (v1.3.0) and the upgrade nudge (v0.9.5).** Once per 24h, `mm pull` / `mm push` (including the autopull/autopush variants) check GitHub for a newer release tag after the sync. A pipx install that tracks `@latest` then updates itself — in the background and silently from the hooks — and the next `mm` command runs the new version (see [Automatic updates](#automatic-updates)). An update that fails never blocks Claude Code or fails the sync. Every other install, and any install with `[upgrade] auto_install = false`, gets a single `mm: notice: <old> → <new> available — run pipx install --force git+...@latest` line on stderr instead, and you run the printed command. That command tracks the moving `latest` branch (not a frozen tag), so it always lands the newest release and — crucially — rewrites any previously tag-pinned install's recorded URL onto `@latest`, after which updates work (see [Upgrading](#upgrading)). Disable the check, and with it both behaviors, with `--no-check-version` for one invocation or `[upgrade] auto_check = false` in `~/.config/mind-meld/config.toml`. The `notice:` prefix is distinct from `warning:` (reserved for data-at-risk signals). This is a leading-edge complement to the v0.9.2 fleet-version refusal, which only fires after a newer peer pushes data — the update lands before that, ideally making the refusal a backstop nobody hits.
 
 ## Codex Integration
@@ -1879,8 +1888,9 @@ cursor_host_usage = true
 What is counted: Conductor runs, from both its legacy `runs.ndjson` and (since
 Conductor 0.90.1) its SQLite `index.db`; interactive `cursor-agent` runs through
 the completion hook; and `mm cursor-agent --print` runs through the wrapper. Not
-counted: a native `cursor-agent --print` run, which fires no hook, and Paseo's
-Cursor sessions (ACP), which send no usage.
+counted locally: a native `cursor-agent --print` run, which fires no hook, and Paseo's
+Cursor sessions (ACP), which send no usage. The opt-in [Cursor account usage](#cursor-account-usage)
+reader captures account totals separately; fleet accounting awaits inclusion evidence.
 
 Conductor capture has been supported since mm v1.2.0. The config bit alone
 continues to enable that reader; standalone interactive capture also needs the
@@ -1918,18 +1928,83 @@ Cursor's native chat history has no billing ledger: sessions completed before
 enrollment cannot be backfilled from context-window counts.
 
 Cursor sessions run through ACP (`cursor-agent acp`, which Paseo uses) are not
-counted. `mm status` names this gap when Cursor capture is enabled;
-`mm retro-fleet` names it when an accepted snapshot consulted Cursor. Re-checked on
-cursor-agent 2026.10.22: the ACP front-end still fires no `sessionStart`, `stop`
-or `sessionEnd` hook (tool hooks do fire), its `session/prompt` result carries
-only a `stopReason`, and its session stores under `~/.cursor/acp-sessions/` hold
-the model and a context-window gauge but no billed token counters, so mm has
-nothing to read locally. Cursor's public docs describe per-event tokens through
-its credentialed team Admin API; dashboard usage-event CSV exports are another
-candidate. Neither account route was exercised. Individual-plan access, counter
-semantics and deduplication remain unverified, for a separate owner-decided card;
-mm currently reads neither route. Interactive and wrapped print sessions are
-unaffected.
+counted locally. `mm status` names this gap while Cursor account usage (below) is
+off or failing, and `mm retro-fleet` names it when an accepted snapshot consulted
+Cursor and account/local inclusion remains unproven. Re-checked on cursor-agent 2026.10.22: the
+ACP front-end still fires no `sessionStart`, `stop` or `sessionEnd` hook (tool hooks
+do fire), its `session/prompt` result carries only a `stopReason`, and its session
+stores under `~/.cursor/acp-sessions/` hold the model and a context-window gauge
+but no billed token counters, so there is nothing to read locally. Interactive and
+wrapped print sessions are unaffected.
+
+#### Cursor account usage
+
+Opt in per machine to count the requests that never touch a local store, ACP
+front-ends such as Paseo included, from your Cursor account:
+
+```sh
+mm enable-source cursor-account     # mm disable-source cursor-account to stop
+```
+
+This sets `[retro] cursor_account_usage = true`. It is separate from
+`cursor_host_usage`: consenting to local Cursor capture never lets mm read your Cursor
+login or call cursor.com. The reader runs only on attended `mm push` and `mm recapture`,
+with the owner-approved account-reader exception below. `mm autopush`, previews, `mm init`'s backfill, `mm status`
+and `mm diag` never read your login or touch the network.
+
+It follows [CodexBar](https://github.com/steipete/CodexBar)'s Cursor login handling and uses
+a login Cursor already holds, read-only and in memory for one read (mm never stores,
+refreshes or writes it, and it never reaches config, caches, events, logs or `mm diag`).
+Sources, first match wins:
+
+- **Cursor.app's state database** (`~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`
+  on macOS), opened read-only, key `cursorAuth/accessToken`. A plain token needs **no
+  Keychain prompt**. A value that starts with `cursor-safe-storage:` is encrypted; mm does
+  not decrypt it and reports it (`mm disable-source cursor-account` stops the reads).
+- **cursor-agent's login.** On Linux, `~/.config/cursor/auth.json` (or
+  `$XDG_CONFIG_HOME/cursor/auth.json`), field `accessToken`, then Cursor.app's database if
+  present. On macOS, when there is no Cursor.app database, cursor-agent keeps its login in the
+  Keychain and mm reads it with `/usr/bin/security find-generic-password`. **A macOS
+  Keychain prompt may appear once, when you run `mm enable-source cursor-account`** (that
+  command checks the login once, with no network call, and waits for your answer). The prompt
+  names the program that reads the item (`security`); "Always Allow" lets that program read
+  cursor-agent's login without asking again, "Allow" asks every time.
+
+The token is used only while its JWT expiry is more than a minute away; mm never refreshes
+it, so an expired one is reported and `cursor-agent login` replaces it.
+
+It makes one read-only call: `GET https://cursor.com/api/dashboard/v2/export-billing-items-csv`,
+the dashboard's own billing export (one row per billed model call). mm adds up the Cursor rows into
+token counts per model per UTC day. This works on the unified X/Cursor plan too, where the older
+per-request events list stops at the move (on the owner's account, 2026-10-21). Only token counts,
+model ids and UTC days are published, never the account's cents or e-mail address.
+
+The export is slow (a day takes 4 to 28 seconds, a month over a minute), so mm keeps each finished
+UTC day's token counts in `~/.config/mind-meld/cursor-account-usage.json` and fetches only the days it
+lacks, newest first. The first pushes after opting in therefore fill in over several attended pushes
+(each may wait up to 20 seconds for the account); once the cache is warm a push costs nothing and a new
+day costs one request. `mm status` shows `account usage through <day>` while it fills in.
+
+**Fleet accounting is blocked pending inclusion evidence.** Account totals are captured
+separately, but production callers supply no verified days, so they do not replace or
+add to local Cursor totals. `mm status` and `mm retro-fleet` keep the ACP coverage gap
+visible. Replacement requires proof that every local run on the day belongs to the
+same account export; no such proof is available. The census matched 0 of 5 overlapping
+local runs, even using model and exact counters over a whole UTC day; the local cache
+has no time-of-day field. A failure to match does not prove non-overlap, because one
+local run can aggregate multiple billed calls. Keeping local totals omits ACP usage;
+using account totals alone could omit local-only usage, and adding both could double-count.
+The owner must choose the unresolved fallback before this feature is ready.
+
+When the account read fails, `mm status` and `mm diag` print what broke and the one fixing
+action last, publish no partial total, and leave the push's exit code and the other readers
+alone: `cursor-agent login` (no login, expired, or cursor.com refused it),
+`mm enable-source cursor-account` (login store unreadable), `mm disable-source
+cursor-account` (Cursor.app's token is encrypted), `mm push` (HTTP or network error, or out
+of time), `mm update` (cursor.com changed a field mm reads).
+`mm diag --json` shows `host_usage["cursor-account"]` with `consented`, `complete_once`,
+`last_reason`, `last_reason_since`, `last_reason_detail` (`cause`, and `field` or
+`status` when known), `model_count`, `models` and the last-read timing.
 
 Conductor runs are counted on their terminal UTC day (`endedAt` in the legacy
 ledger; `finished_at`, `cancelled_at` or `expired_at` in SQLite, and `updated_at`
@@ -2276,6 +2351,13 @@ up to 300 ms in the sweep and across the warm retries (at most half the sweep di
 by the reader count), so one reader's overrun cannot take another's whole read. When it is set it takes precedence
 over `host_usage_interactive_budget_ms` for attended pushes. Autopush keeps
 its own small fixed shares regardless.
+
+**Owner-approved exception (Karl, 2026-11-04):** the opt-in `cursor-account` reader
+gets a 20-second deadline floor from its own start, even when that extends the
+configured capture budget. It waits for the billing export only while finished
+UTC days are missing; a warm day cache makes no network request. Autopush never
+selects this reader or calls its network endpoint. This exception applies only
+to attended push and recapture, not to other readers.
 
 Autopush defaults to **250 ms** (range **100–5,000**); interactive push and init default to **3,000 ms** (range **250–5,000**).
 All must be integers. Effective autopush must not exceed `capture_budget_ms`

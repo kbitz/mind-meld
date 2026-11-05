@@ -44,6 +44,17 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [manual] Decrypt Cursor.app's `cursor-safe-storage:v1:` login for account usage
+- **Why:** the Cursor account reader (Track 107A) reads Cursor.app's `cursorAuth/accessToken`
+  and fails closed as `login_encrypted` when it carries the `cursor-safe-storage:v1:` prefix,
+  because mm does not decrypt it. CodexBar does, using the `Cursor Safe Storage` Keychain item
+  (account `Cursor`), which would add a second Keychain prompt and a decryption path to review.
+- **Priority:** P3
+- **Effort:** M
+- **Context:** revisit trigger: the owner's Cursor.app stores an encrypted token (the reader
+  then reports `login_encrypted` and no cursor-agent login is available as a fallback). Until
+  then the cursor-agent login is the fix.
+
 ## Drain records
 
 ### Roadmap drain — 2026-11-04

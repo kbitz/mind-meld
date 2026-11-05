@@ -64,7 +64,7 @@ from concurrent.futures import (
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Mapping, Sequence, TypedDict
+from typing import Any, Callable, Mapping, Sequence, TypedDict
 
 from mind_meld import config as mm_config
 from mind_meld import fsutil, gitenv, identity, lockedjson, projectid, rootprobes, token_usage
@@ -412,7 +412,7 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "cursor", "muse", "agy")
+ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "cursor", "muse", "agy", "cursor-account")
 """The live host readers, in the fixed order ``events_tail`` invokes them.
 
 This is the reader universe. Adding a reader means appending here AND to
@@ -420,7 +420,13 @@ This is the reader universe. Adding a reader means appending here AND to
 tuple (the writer) and from the gate. Do not serialize this constant into a
 row; see ``make_host_usage_snapshot``."""
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "cursor", "muse", "agy")
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = (
+    "codex",
+    "cursor",
+    "muse",
+    "agy",
+    "cursor-account",
+)
 """Live host-reader names, in the same order ``events_tail`` invokes them.
 
 A row's ``token_sources`` is the per-push SUBSET that actually contributed,
@@ -524,6 +530,8 @@ class HostUsageSnapshot(TypedDict, total=False):
     partial_sources: list[str]
     empty_sources: list[str]
     counter_semantics: str
+    cursor_usage: dict[str, dict]
+    cursor_account: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -4095,6 +4103,43 @@ def _copy_tokens_by_day(
     return copied
 
 
+def _cursor_usage_payload(raw: Mapping[str, Any], keep: set[str]) -> dict[str, Any]:
+    """The Cursor reader's own buckets, limited to the row's kept days."""
+    hosts = {
+        family: {day: dict(usage) for day, usage in days.items() if day in keep}
+        for family, days in (raw.get("hosts") or {}).items()
+    }
+    return {
+        "hosts": {family: days for family, days in hosts.items() if days},
+        "tokens_by_day": _cap_by_model(_copy_tokens_by_day(raw.get("tokens_by_day") or {}, keep)),
+    }
+
+
+def _cursor_account_payload(raw: Mapping[str, Any], max_days: int) -> dict[str, Any] | None:
+    """The whole-account read, capped like ``tokens_by_day`` on its own days."""
+    account, since, read_day = raw.get("account"), raw.get("since"), raw.get("read_day")
+    if not all(isinstance(value, str) and value for value in (account, since, read_day)):
+        return None
+    days = sorted(
+        {day for family in (raw.get("hosts") or {}).values() for day in family}
+        | set(raw.get("tokens_by_day") or {}),
+        reverse=True,
+    )
+    keep = set(days[:max_days])
+    hosts = {
+        family: {day: dict(usage) for day, usage in family_days.items() if day in keep}
+        for family, family_days in (raw.get("hosts") or {}).items()
+    }
+    return {
+        "account": account,
+        "since": since,
+        "read_day": read_day,
+        "through": raw.get("through") if isinstance(raw.get("through"), str) else None,
+        "hosts": {family: days_ for family, days_ in hosts.items() if days_},
+        "tokens_by_day": _cap_by_model(_copy_tokens_by_day(raw.get("tokens_by_day") or {}, keep)),
+    }
+
+
 def make_host_usage_snapshot(
     *,
     device: str,
@@ -4106,6 +4151,8 @@ def make_host_usage_snapshot(
     tokens_by_day: dict[str, token_usage.DayBucket] | None = None,
     partial_days: Mapping[str, Sequence[str]] | None = None,
     usage_days: Mapping[str, Sequence[str]] | None = None,
+    cursor_usage: Mapping[str, Any] | None = None,
+    cursor_account: Mapping[str, Any] | None = None,
 ) -> HostUsageSnapshot:
     """Construct a ``host-usage-snapshot`` row from completed reader output.
 
@@ -4168,6 +4215,13 @@ def make_host_usage_snapshot(
     ``usage_days`` carries each reader's own day keys, including zero buckets.
     A mapping writes ``empty_sources`` (possibly []), intersected with ``keep``;
     None omits the claim. Production capture always supplies the mapping.
+
+    ``cursor_usage`` (``{hosts, tokens_by_day}``) and ``cursor_account``
+    (``{account, since, read_day, through, hosts, tokens_by_day}``) are Track 107A's
+    additive fields, written only when given. ``cursor_usage`` is limited to
+    this row's kept days; ``cursor_account`` is capped like ``tokens_by_day``
+    on its own days, and ``empty_sources`` for ``cursor-account`` comes from
+    those retained days, not from the top-level maps' kept days.
     """
     payload: dict[str, dict[str, token_usage.Usage]] = {
         family: {day: dict(usage) for day, usage in days.items()}  # type: ignore[misc]
@@ -4232,11 +4286,24 @@ def make_host_usage_snapshot(
         row["partial_sources"] = partial
     # None is no claim; production captures always supply the reader's OWN
     # day keys. Even an all-zero day is usage, independent of model family.
+    if cursor_usage is not None:
+        row["cursor_usage"] = _cursor_usage_payload(cursor_usage, keep)
+    account_payload = (
+        _cursor_account_payload(cursor_account, max_days) if cursor_account is not None else None
+    )
+    if account_payload is not None:
+        row["cursor_account"] = account_payload
     if usage_days is not None:
+        account_days = set(account_payload["tokens_by_day"]) if account_payload else set()
         row["empty_sources"] = [
             name
             for name in HOST_USAGE_TOKEN_SOURCES
-            if name in excluded and not (set(usage_days.get(name, ())) & keep)
+            if name in excluded
+            and not (
+                account_days
+                if name == "cursor-account" and account_payload is not None
+                else set(usage_days.get(name, ())) & keep
+            )
         ]
     # Additive sibling, always present from this writer. Absence is the
     # mixed-fleet discriminator: a pre-35A peer's counters are inclusive

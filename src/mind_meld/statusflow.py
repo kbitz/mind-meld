@@ -59,6 +59,7 @@ from mind_meld.errors import (
     MindMeldError,
     SnapshotError,
 )
+from mind_meld.hosts import cursor_account as cursor_account_host
 from mind_meld.manifest import (
     build_manifest_v2,
 )
@@ -857,10 +858,7 @@ def status(
                 )
             elif hook_state not in (None, "installed"):
                 narrative += f"; the completion hook file is {safe_str(hook_state)} (see mm diag)"
-            narrative += (
-                "; Cursor runs through ACP front-ends such as Paseo are not counted "
-                "(they report no usage)"
-            )
+            narrative += _acp_gap_clause(reader_states.get("cursor-account"))
             unread = cursor_diag.get("unread_sqlite_stores")
             if isinstance(unread, int) and unread > 0:
                 narrative += (
@@ -872,6 +870,12 @@ def status(
                 narrative += "; " + safe_str(_cursor_unsupported_clause(unsupported))
             console.print(
                 f"  {host_registry.HOST_READER_DIAGS['cursor'].label} usage capture: " + narrative
+            )
+
+        if "cursor-account" in reader_states:
+            console.print(
+                f"  {host_registry.HOST_READER_DIAGS['cursor-account'].label} usage: "
+                + _cursor_account_line(reader_states["cursor-account"])
             )
 
         # Per-source breakdown
@@ -1152,6 +1156,72 @@ def _host_complete_read_line(state: dict) -> str:
     )
 
 
+def _cursor_account_line(state: dict) -> str:
+    """The ``Cursor account usage:`` status narrative for a consented reader.
+
+    Cache-only. A failure names what broke and the one fixing command last
+    (SPEC O8); every fragment comes from the closed ``CAUSES`` vocabulary,
+    never from a response.
+    """
+    if state.get("last_reason"):
+        found = cursor_account_host.blocker(state.get("last_reason_detail"))
+        if found is not None:
+            broke, fix = found
+            return f"enabled, failing — {safe_str(broke)}. {safe_str(fix)}."
+        if state.get("last_reason") == "deadline":
+            return "enabled, failing — the last read ran out of time. Run mm push."
+        return "enabled, failing — the last read did not complete. Run mm diag."
+    if state.get("complete_once") is True:
+        newest = state.get("newest_event_day")
+        return (
+            "enabled; last complete read "
+            + events_tail.host_read_age(state.get("last_complete_at"))
+            + (
+                f"; account usage through {safe_str(newest)}"
+                if newest
+                else "; no account usage yet"
+            )
+            + "; fleet account totals held: local inclusion is unproven"
+        )
+    return "enabled, but no successful read yet — run mm push."
+
+
+def _acp_gap_clause(account_state: dict | None) -> str:
+    """Keep the ACP gap visible until account/local inclusion is established."""
+    base = (
+        "; Cursor runs through ACP front-ends such as Paseo are not counted (they report no usage)"
+    )
+    if account_state is None:
+        return base + "; run mm enable-source cursor-account to count them"
+    if account_state.get("last_reason") or account_state.get("complete_once") is not True:
+        return base + " until Cursor account usage reads successfully (see its line below)"
+    newest = account_state.get("newest_event_day")
+    if _account_events_stale(account_state):
+        return (
+            base
+            + "; the Cursor account's usage is only read through "
+            + (safe_str(newest) if newest else "(no day yet)")
+            + " (the rest fills in on later pushes)"
+        )
+    return base + "; account/local inclusion is unproven, so fleet replacement is disabled"
+
+
+def _account_events_stale(state: dict) -> bool:
+    """True when the last complete read's newest event is more than 3 days old.
+
+    The account's events can end while use continues (a unified plan keeps its usage
+    outside the events endpoint), so a complete read alone does not close the ACP gap.
+    """
+    newest, read_at = state.get("newest_event_day"), state.get("last_complete_at")
+    if not isinstance(read_at, str):
+        return False
+    try:
+        read = datetime.fromisoformat(read_at).date()
+        return newest is None or (read - datetime.fromisoformat(newest).date()).days > 3
+    except ValueError:
+        return False
+
+
 def _host_read_sweep_line(state: dict) -> str:
     budget = state["host_read_budgets"]["autopush_ms"]
     if state["config"]["state"] != "ok" or budget is None:
@@ -1159,7 +1229,8 @@ def _host_read_sweep_line(state: dict) -> str:
     # Publication's reader keys are the current consented/resolved reader set
     # from _default_host_readers, even when no row exists. Coverage VALUES do
     # not participate: this estimate is never evidence of publication.
-    readers = state["host_publication"]["readers"]
+    # The account reader never runs on autopush, so it adds nothing to this sweep.
+    readers = [name for name in state["host_publication"]["readers"] if name != "cursor-account"]
     if not readers:
         return "unknown (no reader enabled)"
     elapsed = [state["host_usage"].get(name, {}).get("last_complete_ms") for name in readers]
@@ -1249,6 +1320,7 @@ def _host_publication(
         for name, _ in events_tail._default_host_readers(
             sources,
             cursor_consented=_config_module.cursor_host_usage_enabled(config),
+            cursor_account_consented=_config_module.cursor_account_usage_enabled(config),
         )
     ]
     try:
@@ -1939,6 +2011,9 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
     host_usage_state["cursor"]["consented"] = (
         _config_module.cursor_host_usage_enabled(cfg) if config_state == "ok" else None
     )
+    host_usage_state["cursor-account"]["consented"] = (
+        _config_module.cursor_account_usage_enabled(cfg) if config_state == "ok" else None
+    )
     capture_rows = _read_capture_rows(resolved_sources, dev_id)
     attended_evidence = attemptlog.read_runs()
     run_projection = attemptlog.project_runs(auto_evidence, attended_evidence)
@@ -2371,6 +2446,21 @@ def diag(
     console.print(f"    runs retained: {'unknown' if retained is None else retained}")
     console.print("    models cached: " + _diag_models_line(cursor_state))
     console.print("    last complete read: " + safe_str(_host_complete_read_line(cursor_state)))
+
+    account_state = state["host_usage"].get("cursor-account", {})
+    console.print(f"  {host_registry.HOST_READER_DIAGS['cursor-account'].label}:")
+    account_consent = account_state.get("consented")
+    console.print(
+        "    consented: "
+        + ("unknown" if account_consent is None else "yes" if account_consent else "no")
+    )
+    console.print("    cache inventory: " + safe_str(account_state.get("cache_state", "unknown")))
+    if account_state.get("last_reason"):
+        console.print("    usage read blocker: " + _cursor_account_line(account_state))
+    elif account_consent:
+        console.print("    usage read blocker: none")
+    console.print("    models cached: " + _diag_models_line(account_state))
+    console.print("    last complete read: " + safe_str(_host_complete_read_line(account_state)))
 
     disc = state.get("discovery") or {}
     console.print("\n[bold]Git-root discovery[/bold] (autopush budget)")
