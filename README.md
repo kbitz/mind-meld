@@ -1241,7 +1241,7 @@ Legend:
   long-context tier, and are named per agent in `MM_HEALTH`.
 - `—` is unavailable, not zero.
 
-An agent with no priceable model shows `—`, never a confident `$0`. A priced model stored at zero tokens is not a priced basis, so it cannot turn that row into `$0` either. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader or nonzero model cache writes suppress that figure.
+An agent with no priceable model shows `—`, never a confident `$0`. A priced model stored at zero tokens is not a priced basis, so it cannot turn that row into `$0` either. A snapshot predating the window contributes nothing at all. A Mac on mm older than v0.12.52 reported inclusive counters that would read up to ~2x high, so any agent it contributes to shows `—` until it upgrades and republishes — the one caveat that points the wrong way, and so the one that stays a rendered marker. Grok's cost causes may include an at-most figure for **this model's recorded tokens, in token charges; server-side tool fees excluded**. Any partial/degraded reader, nonzero model cache writes, or active local override that changes the bundled base rates suppresses that figure. Overrides keep the long-context floor and its cause; an override equal to the bundled base rates keeps the figure when the other conditions allow it.
 
 `--dump-host-usage` carries the per-machine inputs (`tokens_by_day` and coverage); bundled rates and any local pricing overrides are not in the dump.
 
@@ -1258,6 +1258,14 @@ mm retro-fleet 7d --set-model-price 'gpt-6.1-sol=2.00,0.10,2.50,10.00'
 `--set-model-price` dates that model's card today (UTC). Add `--mark-pricing-verified` only after checking the vendor pricing docs for the refresh; it dates the whole-table verification today. Setting a model alone never marks the table verified. If offline or the docs do not establish a rate, keep the bundled/family fallback, retain unpriced or extrapolated caveats, and do not pass `--mark-pricing-verified`.
 
 Overrides live only on this machine in `~/.config/mind-meld/pricing-cache.json` (override the location with `MM_PRICING_CACHE_PATH`); they never sync. The version-1 JSON cache holds a `models` map of four rates and a `verified_date` per model, plus the optional whole-table `verified_date`. Built-in verified IDs accept an override dated on or after their vendor's bundled date; other valid cached cards take precedence over family fallback and count as verified. Reads create no cache or lock. Explicit writes use a flock and retain at most 128 models, evicting oldest `(verified_date, model_id)` first. Model IDs must match `^[a-z0-9][a-z0-9._:-]{0,127}$`; each rate must be finite and between 0 and 1000 inclusive. Invalid input exits 2; cache write failures exit 1 with a fixing command.
+
+An override for `grok-4.7` also reaches its flat effort IDs (`low`, `medium`,
+`high`, `xhigh`) and `grok-4.7-build`; `grok-4.7-fast` reaches those effort
+IDs' `-fast` variants; `grok-4.6` reaches `grok-4.6-build`. It must pass the
+bundled-date gate for both the alias and its card ID, wherever those IDs are
+verified. An active exact-ID override wins. Other vendors' overrides remain
+exact-ID. `cached_model_ids` lists only cache IDs whose own card is active,
+not the aliases they reach.
 
 To reset local pricing, remove `~/.config/mind-meld/pricing-cache.json` (or the file selected by `MM_PRICING_CACHE_PATH`) while no pricing update is running, then rerun the retro. This restores bundled rates and clears the whole-table verification date.
 
@@ -1766,7 +1774,7 @@ A final `Pull interrupted [interrupted]` or `Pull failed [unexpected-error]` lin
 and prior scan in `mm diag`, then follow [Host usage capture](#host-usage-capture).
 Use the [second-Mac publication check](#antigravity-agy); cache success alone does not prove that an agent reached the wire.
 
-**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded or the model has cache writes. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)); Grok models used through Cursor remain supported and priceable.
+**Why is my Grok machine always `>=`?** Grok's usage records cannot recover each request's context tier; no action resolves this. Through Cursor, a Grok 4.7 request above 256k input pays twice the standard rates (Fast: three times); Grok Build's grok-4.6 requests reaching 200k prompt tokens paid twice the base rates for all their tokens. Notes can bound that model's recorded token charges, but omit the at-most figure whenever any reader is partial/degraded, the model has cache writes, or an active local override changes its bundled base rates. Overrides keep the floor and its cause; confirming the bundled base rates preserves the bound when the other conditions allow it. Never average the bound with the floor or present it as the machine's cost. Grok Build's own usage is read from `usage.json` once you run `mm enable-source grok` (see [Grok Build](#grok-build)); Grok models used through Cursor remain supported and priceable.
 
 **Why grok-4.6 rates, not grok-build-0.1?** On 2026-09-10 xAI's Build overview identified grok-4.6 as the model powering Build. `grok-4.6-build` is the exact observed CLI id; `grok-build-0.1` is a different model and stays unpriced. Bare `grok-4.6` also stays unpriced until observed. `costUsdTicks` is never decoded.
 
