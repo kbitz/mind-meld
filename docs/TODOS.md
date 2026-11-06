@@ -44,87 +44,29 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok usage file size boundaries
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No demonstrated defect; the oversized-file and growth-during-read guards lack direct tests.
-- **Hypothesis (untested):** Extend the Grok reader tests with oversized metadata and bounded growth; assert malformed without partial publication.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/hosts/grok.py
-- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
-- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/hosts/grok.py|tests/test_grok_usage.py] Test gap: Grok filesystem failure boundaries
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No demonstrated defect; filesystem error branches and replacement before open lack direct tests.
-- **Hypothesis (untested):** Inject filesystem failures and replacement before open at the reader boundary; assert io_error or stale and no partial result.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/hosts/grok.py
-- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
-- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/statusflow.py|tests/test_diag.py] Test gap: Grok diagnostic unknown-state branches
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** No demonstrated defect; Grok-specific unreadable config/cache text and deadline inventory refresh lack direct tests.
-- **Hypothesis (untested):** Extend the diagnostic matrix to verify unknown evidence cannot report readiness and deadline inventory refresh is current.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/statusflow.py
-- **Evidence:** Track 110A coverage audit traced 30 behavioral paths; 27 have meaningful tests. These branches were read; no failure was reproduced.
-- **Context:** /review-and-prep on branch `mmm/9b239798` at `f3fa440`, 2026-11-05; next Track touching the listed files should re-verify.
-- **Effort:** ? (user triages in /roadmap)
-
-
-### [review:files=src/mind_meld/resolveflow.py|tests/test_conflict_copy.py] Test gap: nested Grok conflict-directory symlink
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Grok conflict discovery tests linked top-level roots, but not a directory link nested inside a real `skills/` directory.
-- **Hypothesis (untested):** Extend the existing Grok conflict test with a nested link to a private directory containing a conflict sidecar; verify that discovery returns no hit through it.
-- **Upstream severity:** P3
-- **Found in:** src/mind_meld/resolveflow.py:80
-- **Evidence:** Outside review and the coverage audit found no direct case; source inspection found no failure. Existing targeted tests passed.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/sourceflow.py|tests/test_source_toggle.py] Test gap: reconfigure reenrolls disabled Grok
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Existing tests cover enable/disable round trips and default-off reconfiguration, but not accepting Grok during reconfiguration after it was disabled.
-- **Hypothesis (untested):** Extend the reconfigure tests with Grok disabled, answer yes, and verify its canonical block and consent, removal of the Grok disabled name, and preservation of unrelated disabled names.
-- **Upstream severity:** P3
-- **Found in:** src/mind_meld/sourceflow.py:337
-- **Evidence:** Outside review and the coverage audit found no direct case; the current selection loop clears declined-name state on acceptance. No failure was reproduced.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/manifest.py|tests/test_manifest.py] Test gap: unreadable Grok source root
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** Grok walker tests inject a selected-directory scan failure, but not a failure of the initial source-root stat.
-- **Hypothesis (untested):** Extend the walker tests with a root-scoped stat error; verify strict snapshot refusal and the permissive walk's empty result.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/manifest.py:2102
-- **Evidence:** The coverage audit found the branch untested; no defect was demonstrated. The existing strict scandir test covers a different boundary.
-- **Context:** Filed by /review-and-prep on branch `mmm/a5256b92` at `f34e4ee` (2026-11-05), before draft PR creation.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: Grok cause lead under a local pricing override
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`
-- **Description:** `_long_context_cause` now picks its lead only from models that produced a detail. A model with an active local pricing override has no long-context card, so it produces no detail and cannot steer the lead. Only the zero-token case is pinned (`test_long_context_cause_lead_follows_only_models_with_a_detail`); nothing exercises the override path.
-- **Hypothesis (untested):** add a case beside that test with a `grok-4.7` override in a temporary pricing cache next to `grok-4.6-build` tokens, and assert the Grok Build lead. Re-verify first.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** src/mind_meld/skills/retro_fleet/aggregator.py:3771 (override path: `resolve_long_context_prices` returns None, then `continue`); lead choice at :3795
-- **Evidence:** cycle-2 adversarial review and the coverage audit (90% value-weighted, this path the only gap); the adversarial pass confirmed the override path by reading the code, and no failure was reproduced.
-- **Context:** Filed by /review-and-prep on PR #271 (branch mmm/177822fc) at a719f9f (2026-11-05), Track 109B.
-- **Effort:** ? (user triages in /roadmap)
-
-### [review:files=src/mind_meld/token_usage.py|README.md|src/mind_meld/skills/retro_fleet/SKILL.md] Local pricing overrides miss Grok aliases and drop the long-context floor
-- **Description:** `_cached_prices` looks overrides up by exact model id. An override for `grok-4.7` does not reprice the ids that alias to the same card (`grok-4.7-low`, `-medium`, `-high`, `-xhigh` and `grok-4.7-build`), and an override for `grok-4.7-fast` does not reprice the `-fast` effort ids that alias to the Fast card. An override dated on or after the bundled date stays active and makes `resolve_long_context_prices` return None for that id, so `_long_context_cause` gives it no detail. A Grok row with no other floor cause then renders `~` instead of `≥`. The same happens to `grok-4.6-build`. README's "Grok always contributes a base-tier floor" assumes bundled cards. List-rate display only, not spend.
-- **Symptom:** live on installed mm 1.12.13 on this Mac (2026-11-05). `~/.config/mind-meld/pricing-cache.json` holds 8 cards dated 2026-11-04 from a /retro-fleet whole-table refresh, including `grok-4.7`. That date is after 1.12.13's Cursor date (2026-09-23), so the override is active and the `grok-4.7` floor detail is already suppressed. Track 109B's 2026-11-05 dates supersede that card, but the skill's next refresh (`refresh_due` from about 2026-11-12) is likely to re-pin Grok ids with later dates.
-- **Hypothesis (untested):** fall back to the family override only for ids whose `PRICING_FAMILY_BY_MODEL` family is the same card, applying the alias's own date gate (a stale `grok-4.6` card must not override bundled `grok-4.6-build`). Keep the tier-uncertainty cause for every id with a `VENDOR_LONG_CONTEXT_TIERS` family while an override is active. Consider a SKILL.md Step 4 rule not to re-pin a Grok id whose bundled rate matches the docs. Re-verify first.
-- **Revisit when:** `MM_HEALTH.pricing.cached_model_ids` lists a `GROK_47_MODEL_IDS` id or `grok-4.6-build`, a Grok row renders `~`, or a vendor changes Grok 4.7 rates.
-- **Priority:** P2
-- **Context:** Filed by /review-and-prep on PR #271 (branch mmm/177822fc) at a05eb20 (2026-11-05), from the Red Team (cycle 1) and native adversarial (cycles 1, 3 and the post-review delta) reviews of Track 109B. Auto-chosen defer: a code fix is outside the Track's approved scope.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap record pass — 2026-11-05 (Grok Tracks shipped)
+
+Run by `/roadmap` from manager Ephesus 8's brief on Karl's 2026-11-05 word ("Merge it then do any docs pr you need then pause"). Verification baseline: `580cd1c` (v1.12.16). Tracks 109B (v1.12.14, PR #271), 109A (v1.12.15, PR #272) and 110A (v1.12.16, PR #273) were recorded as shipped against their PRs' completion matrices; Groups 109 and 110 are retired. Track 95A gained a Done-when line: README tells the owner not to run `mm pull` on the target machine until mmm-factory's own move tool (`migrate-home`, `mmm-manager launch --from`) finishes copying `~/.mmm` (Karl, 2026-11-05: "both are fine, that way mmm can migrate without the mm prereq, but we can keep machines in sync, seems fine"). **11 inbox items drained: 1 placed, 10 deferred, 0 killed, 0 discharged** (8 filed by the three Tracks' reviews, 3 from the brief). Authored-false rate: 0 / (1 + 0) = 0%.
+
+| Item | Disposition |
+|---|---|
+| Test gap: unreadable Grok source root | place → Track 111A, which touches `manifest.py` and `tests/test_manifest.py`; re-checked at `580cd1c`: `walk_grok_source`'s root `stat` error branch has no test |
+| Test gaps: Grok usage file size boundaries; Grok filesystem failure boundaries | defer (two entries): no Track touches `hosts/grok.py` |
+| Test gap: Grok diagnostic unknown-state branches | defer: no Track touches `statusflow.py` |
+| Test gap: nested Grok conflict-directory symlink | defer: no Track touches `resolveflow.py` |
+| Test gap: reconfigure reenrolls disabled Grok | defer: Track 95A touches `sourceflow.py` but not `tests/test_source_toggle.py` |
+| Test gap: Grok cause lead under a local pricing override | defer: no Track touches the aggregator |
+| Local pricing overrides miss Grok aliases and drop the long-context floor | defer with its filed trigger: display-only, and 109B's dates make today's cached override inactive |
+| Brief: `test_xdist_record_and_selection` timed out at 180 s twice under heavy load | defer: a rerun clears it; revisit if it times out at low load or blocks a release again |
+| Brief: Antigravity reader `dropped: unsupported` on this Mac | defer: pre-existing, named rather than silent; no evidence of impact on the owner yet |
+| Brief: `mm status` hung inside an agent session | defer: seen once in an agent session, cause unconfirmed |
+
+**Future:** 10 entries added (29 → 39); 5 older entries still lack a revisit trigger, and the trigger migration was not run.
+
+**Version:** documentation-only change; no bump.
+
 
 ### Roadmap drain — 2026-11-05 (Grok Build parity)
 
