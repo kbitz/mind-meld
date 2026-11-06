@@ -3764,6 +3764,9 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
 
     Coverage is row-scoped: the wire cannot attribute a partial or failed
     reader to a model, so any such reader suppresses every at-most figure.
+    An active local override keeps the floor detail and the model in the lead
+    choice; it drops only the at-most figure, and only when it changes the
+    base card.
     """
     models: list[str] = []
     detailed: list[str] = []
@@ -3776,7 +3779,11 @@ def _long_context_cause(by_model: dict[str, dict[str, int]], *, incomplete: bool
             continue
         floor = token_usage._cost_under(base_card, usage)
         detail = f"`{_safe_short(model)}`: {_format_usd(floor, bound='floor')} at the base tier"
-        if not incomplete and usage.get("cache_create", 0) == 0:
+        if (
+            not incomplete
+            and usage.get("cache_create", 0) == 0
+            and token_usage.long_context_ceiling_known(model)
+        ):
             ceiling = token_usage._cost_under(long_card, usage)
             # An upper bound must round UP: the estimate formatter can round
             # down (even to $0 for a tiny positive bucket). Apply the same

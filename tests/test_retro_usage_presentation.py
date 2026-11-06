@@ -518,3 +518,101 @@ def test_cursor_usage_ref_only_cannot_disappear_as_completed_empty(cursor_store)
     assert row(data, "grok") is None
     assert "Cursor (Conductor + enrolled CLI)" in out
     assert entry(out, "cost_floor")
+
+
+def _single_grok_retro_111b(models):
+    since = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+    until = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    day = "2026-09-10"
+    data = agg.RetroData(window_days=7, since=since, until=until)
+    ids = {"dev-a"}
+    data.fleet = agg.FleetState(
+        devices_known=1,
+        devices_in_events=ids,
+        devices_known_list=[{"device_id": "dev-a"}],
+    )
+    total = usage()
+    for counters in models.values():
+        tu.merge_usage_bucket(total, counters)
+    event = dict(
+        v=2,
+        type="host-usage-snapshot",
+        device="dev-a",
+        ts=until.isoformat(),
+        hosts={"grok": {day: total}},
+        token_sources=["grok"],
+        active_days=[day],
+        counter_semantics="disjoint-v1",
+        tokens_by_day={day: day_bucket(models)},
+    )
+    data.host_inventory = agg.aggregate_host_usage(
+        [event], since=since, until=until, registered_ids=ids
+    )
+    return data
+
+
+def test_pricing_cache_hermetic_path_111b(tmp_path):
+    import os
+
+    assert tu.PRICING_CACHE_PATH.is_relative_to(tmp_path)
+    assert os.environ["MM_PRICING_CACHE_PATH"] == str(tu.PRICING_CACHE_PATH)
+
+
+def test_grok_override_rendered_floor_and_cause_111b():
+    tu.update_pricing_cache({"grok-4.7": (3.0, 0.75, 0.0, 9.0)})
+    data = _single_grok_retro_111b({"grok-4.7-high": usage(input=1_000_000, output=100_000)})
+    grok = row(data, "grok")
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor is True
+    assert abs(total - 3.90) < 1e-9
+    assert any(
+        "grok-4.7-high" in c
+        and "Per-turn totals cannot recover the per-request context tier" in c
+        and "at most" not in c
+        for c in grok.floor_causes
+    )
+    out = agg.format_retro(data)
+    assert "≥" in out
+    grok_floor = next(e for e in health(out) if e["code"] == "cost_floor" and e["agent"] == "Grok")
+    assert "grok-4.7-high" in grok_floor["detail"]
+    assert "at most" not in grok_floor["detail"]
+
+
+def test_grok_override_equal_to_bundled_base_keeps_at_most_111b():
+    tu.update_pricing_cache({"grok-4.7": (2.0, 0.5, 0.0, 6.0)})
+    data = _single_grok_retro_111b({"grok-4.7-high": usage(input=1_000_000, output=100_000)})
+    grok = row(data, "grok")
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor is True
+    assert abs(total - 2.60) < 1e-9
+    assert any(
+        "grok-4.7-high" in c and "at most $5.20 at the long-context tier" in c
+        for c in grok.floor_causes
+    )
+
+
+def test_grok_46_override_reaches_build_with_grok_build_lead_111b():
+    tu.update_pricing_cache({"grok-4.6": (3.0, 0.75, 0.0, 9.0)})
+    data = _single_grok_retro_111b({"grok-4.6-build": usage(input=1_000_000)})
+    grok = row(data, "grok")
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor is True
+    assert abs(total - 3.00) < 1e-9
+    assert any(
+        "Grok's logs do not record per-request prompt sizes" in c
+        and "grok-4.6-build" in c
+        and "at most" not in c
+        for c in grok.floor_causes
+    )
+
+
+def test_long_context_cause_lead_under_local_pricing_override_111b():
+    tu.update_pricing_cache({"grok-4.7-fast": (5.0, 1.25, 0.0, 15.0)})
+    b = usage(input=100_000)
+    cause = agg._long_context_cause(
+        {"grok-4.6-build": dict(b), "grok-4.7-fast": dict(b)}, incomplete=False
+    )
+    assert cause is not None
+    assert cause.startswith("Per-turn totals cannot recover")
+    assert "grok-4.6-build" in cause
+    assert "grok-4.7-fast" in cause
