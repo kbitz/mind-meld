@@ -2,6 +2,15 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.17] - 2026-11-06
+
+mm applies Grok pricing overrides across aliases and keeps their floor prices.
+
+### Fixed
+
+- mm applies a Grok pricing override to every alias of that model.
+- A Grok pricing floor stays in place when an override is applied.
+
 ## [1.12.16] - 2026-11-05
 
 mm captures Grok Build usage when you consent, and a usage scan honors its deadline and cache boundaries.

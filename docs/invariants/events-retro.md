@@ -3806,7 +3806,8 @@ counters cannot reconstruct request sizes, so the unified row with in-window
 Grok tokens renders `≥`. `_cost_under(card, usage)` owns the arithmetic;
 `estimate_cost` keeps its signature, priced-predicate calls and warnings.
 `resolve_long_context_prices` returns a copy through the same exact alias
-registry and is not a priced-predicate. Every xAI family must have a long card.
+registry and is not a priced-predicate; an active local override does not
+remove it (Track 111B). Every xAI family must have a long card.
 
 The inherent cause says: "Grok's logs do not record per-request prompt sizes;
 no action resolves this". The base and at-most values cover **this model's
@@ -3815,7 +3816,9 @@ average them or present a machine-level range. The agent row sums usage across
 machines; the cause's at-most values describe only their stated recorded-token
 basis and must not be promoted to a complete fleet billing range. Omit the at-most
 figure if ANY snapshot reader is partial or degraded (the wire cannot map
-readers to models), or that model has nonzero `cache_create`. A cache-write-only
+readers to models), that model has nonzero `cache_create`, or an active local
+override changes that model's base card (one equal to the bundled base keeps
+the figure, via `long_context_ceiling_known`). A cache-write-only
 bucket is still `>=` and must never claim "at most $0". Missing, stale or
 legacy-counter observations retain their unavailable paths: missing or stale
 snapshots contribute no usage, while a contributing legacy-counter snapshot
@@ -3863,12 +3866,13 @@ rate. Every other Grok 4.7 id normalizes by dropping its suffix: the flat ids
 `PRICING_FAMILY_BY_MODEL` onto `grok-4.7`, and the effort ids' `-fast` variants
 onto `grok-4.7-fast`. All eleven Grok 4.7 ids (`GROK_47_MODEL_IDS`) are in
 `VERIFIED_MODEL_IDS` dated by `PRICING_CURSOR_LAST_UPDATED`. `_long_context_cause`
-chooses its lead only from the models that produced a detail (in-window tokens,
-a bundled long-context card and no active local override): when any of them is in
+chooses its lead only from the models that produced a detail (in-window tokens
+and a bundled long-context card): when any of them is in
 `GROK_47_MODEL_IDS`, Fast-only, flat-id and `grok-4.7-build` rows emit the
 "Per-turn totals cannot recover the per-request context tier" cause, while
-`grok-4.6-build` alone keeps the Grok Build log-limit cause. A zero-token or
-locally overridden Grok 4.7 id never changes another model's lead. Fast-only and mixed
+`grok-4.6-build` alone keeps the Grok Build log-limit cause. A zero-token
+Grok 4.7 id never changes another model's lead; a locally overridden one keeps
+its detail and sets the lead like any other. Fast-only and mixed
 rows both render `≥` / `cost_floor` with Fast cost included. Nonzero cache writes
 remain a labelled unknown and suppress any at-most claim. Adding auto/composer
 families remains deferred in TODOS.
@@ -3913,10 +3917,20 @@ Active cached cards precede `PRICING`, curated vendor aliases, Claude family
 fallback and positional vendor fallback. A `VERIFIED_MODEL_IDS` member's
 cached card is active only when its date is **on or after**
 `_builtin_verified_date(model)`, mapped across all six vendors. Other valid
-cached cards are active without that gate. `is_verified_model` accepts
+cached cards are active without that gate. For Grok aliases
+(`_GROK_OVERRIDE_CARD_BY_MODEL`, Track 111B), a cached card for `grok-4.7`
+reaches the flat effort ids and `grok-4.7-build`, one for `grok-4.7-fast`
+reaches the effort ids' `-fast` variants, and one for `grok-4.6` reaches
+`grok-4.6-build`; that alias-reached card is active only when it passes the
+date gate of both the alias id and the card id, and an active exact-id card
+takes precedence. Other curated aliases and positional vendor fallback stay
+exact-id. `active_cached_model_ids` and `cached_model_ids` list only cache ids
+whose own card is active. `is_verified_model` accepts
 built-in verified IDs and active cached IDs; `resolve_prices` remains the
-sole priced-predicate. `resolve_long_context_prices` returns `None` for an
-active override rather than pairing a new base price with an old ceiling.
+sole priced-predicate. `resolve_long_context_prices` keeps returning the
+bundled long card under an active override, while `long_context_ceiling_known`
+permits the at-most figure only when the active override equals the bundled
+base card rather than pairing a changed base price with an old ceiling.
 
 `--set-model-price MODEL=IN,CACHE_READ,CACHE_CREATE,OUT` is repeatable and
 dates each supplied card today UTC. `--mark-pricing-verified` independently

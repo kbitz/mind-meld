@@ -44,6 +44,16 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
+### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: complete Grok row with cache writes suppresses ceiling
+- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
+- **Description:** The existing Cursor cache-write test also marks its reader partial, so it does not independently exercise the cache-write guard in `_long_context_cause` with complete coverage.
+- **Hypothesis (untested):** Extend the presentation tests with positive `cache_create`, `incomplete=False`, and no override or a bundled-equal override; assert the model detail remains and `at most` is absent.
+- **Upstream severity:** INFORMATIONAL
+- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:_long_context_cause`
+- **Evidence:** Static coverage audit traced the short-circuit condition and existing tests; no failure was reproduced and current code contains the required guard.
+- **Context:** Filed by `/review-and-prep` for Track 111B on branch `mmm/2b29138f` at `de88a627` (2026-11-06). Revisit when a Track next touches the listed files.
+- **Effort:** ? (user triages in /roadmap)
+
 ## Drain records
 
 ### Roadmap record pass — 2026-11-05 (Grok Tracks shipped)

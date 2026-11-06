@@ -2904,6 +2904,7 @@ def _pricing_card(verified_date="2026-10-27", **overrides):
 )
 def test_cache_override_date_gate_all_six_vendors(model):
     builtin = tu.resolve_prices(model)
+    long_builtin = tu.resolve_long_context_prices(model)
     date = tu._builtin_verified_date(model)
     previous = (datetime.fromisoformat(date) - timedelta(days=1)).date().isoformat()
     _write_pricing_cache({model: _pricing_card(previous)})
@@ -2914,7 +2915,7 @@ def test_cache_override_date_gate_all_six_vendors(model):
         key: value for key, value in _pricing_card().items() if key != "verified_date"
     }
     assert tu.active_cached_model_ids() == [model]
-    assert tu.resolve_long_context_prices(model) is None
+    assert tu.resolve_long_context_prices(model) == long_builtin
 
 
 def test_cached_unknown_precedes_family_and_is_verified():
@@ -3186,3 +3187,155 @@ def test_just_written_card_survives_same_day_eviction():
     tu.update_pricing_cache({"aaa-new-model": (1, 2, 3, 4)})
     assert tu.resolve_prices("aaa-new-model")["output"] == 4
     assert len(tu.pricing_cache()["models"]) == 128
+
+
+_GROK_CARD_ALIASES_111B = (
+    (
+        "grok-4.7",
+        (
+            "grok-4.7-build",
+            "grok-4.7-low",
+            "grok-4.7-medium",
+            "grok-4.7-high",
+            "grok-4.7-xhigh",
+        ),
+    ),
+    (
+        "grok-4.7-fast",
+        (
+            "grok-4.7-low-fast",
+            "grok-4.7-medium-fast",
+            "grok-4.7-high-fast",
+            "grok-4.7-xhigh-fast",
+        ),
+    ),
+    ("grok-4.6", ("grok-4.6-build",)),
+)
+
+
+def test_pricing_cache_hermetic_path_111b(tmp_path):
+    import os
+
+    assert tu.PRICING_CACHE_PATH.is_relative_to(tmp_path)
+    assert os.environ["MM_PRICING_CACHE_PATH"] == str(tu.PRICING_CACHE_PATH)
+
+
+@pytest.mark.parametrize(("card_id", "aliases"), _GROK_CARD_ALIASES_111B)
+def test_grok_override_card_reaches_every_alias_111b(card_id, aliases):
+    assert tu._GROK_OVERRIDE_CARD_BY_MODEL == {
+        "grok-4.6-build": "grok-4.6",
+        "grok-4.7-build": "grok-4.7",
+        "grok-4.7-low": "grok-4.7",
+        "grok-4.7-medium": "grok-4.7",
+        "grok-4.7-high": "grok-4.7",
+        "grok-4.7-xhigh": "grok-4.7",
+        "grok-4.7-low-fast": "grok-4.7-fast",
+        "grok-4.7-medium-fast": "grok-4.7-fast",
+        "grok-4.7-high-fast": "grok-4.7-fast",
+        "grok-4.7-xhigh-fast": "grok-4.7-fast",
+    }
+    gate_date = tu._builtin_verified_date(aliases[0])
+    override = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache({card_id: _pricing_card(gate_date, **override)})
+    assert tu.resolve_prices(card_id) == override
+    for alias in aliases:
+        assert tu.resolve_prices(alias) == override
+        assert tu.is_verified_model(alias)
+    assert tu.active_cached_model_ids() == [card_id]
+
+
+def test_grok_override_cross_card_isolation_111b(monkeypatch):
+    gate_date = tu.PRICING_CURSOR_LAST_UPDATED
+    override = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache({"grok-4.7": _pricing_card(gate_date, **override)})
+    assert tu.resolve_prices("grok-4.7-high") == override
+    assert tu.resolve_prices("grok-4.7-fast") == tu.VENDOR_FAMILY_TIERS["grok-4.7-fast"]
+    assert tu.resolve_prices("grok-4.7-high-fast") == tu.VENDOR_FAMILY_TIERS["grok-4.7-fast"]
+
+    _write_pricing_cache({"grok-4.7-fast": _pricing_card(gate_date, **override)})
+    monkeypatch.setattr(tu, "_PRICING_CACHE_MEMO", None)
+    assert tu.resolve_prices("grok-4.7-high-fast") == override
+    assert tu.resolve_prices("grok-4.7-high") == tu.VENDOR_FAMILY_TIERS["grok-4.7"]
+
+
+@pytest.mark.parametrize(("card_id", "aliases"), _GROK_CARD_ALIASES_111B)
+def test_grok_override_alias_date_gate_both_ids_111b(card_id, aliases):
+    gate_date = tu._builtin_verified_date(aliases[0])
+    before = (datetime.fromisoformat(gate_date) - timedelta(days=1)).date().isoformat()
+    override = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache({card_id: _pricing_card(before, **override)})
+    for alias in aliases:
+        assert tu.resolve_prices(alias) == tu.VENDOR_FAMILY_TIERS[card_id]
+    if card_id == "grok-4.6":
+        # Bare grok-4.6 is not in VERIFIED_MODEL_IDS, so it has no gate of its own,
+        # while grok-4.6-build requires PRICING_XAI_LAST_UPDATED.
+        assert tu.resolve_prices("grok-4.6") == override
+        assert tu.active_cached_model_ids() == ["grok-4.6"]
+    else:
+        assert tu.resolve_prices(card_id) == tu.VENDOR_FAMILY_TIERS[card_id]
+        assert tu.active_cached_model_ids() == []
+
+
+def test_grok_override_exact_precedence_and_cached_ids_111b(monkeypatch):
+    gate_date = tu.PRICING_CURSOR_LAST_UPDATED
+    before = (datetime.fromisoformat(gate_date) - timedelta(days=1)).date().isoformat()
+    card_a = {"input": 2.5, "cache_read": 0.6, "cache_create": 0.0, "output": 7.5}
+    card_b = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache(
+        {
+            "grok-4.7-low": _pricing_card(gate_date, **card_a),
+            "grok-4.7": _pricing_card(gate_date, **card_b),
+        }
+    )
+    assert tu.resolve_prices("grok-4.7-low") == card_a
+    assert tu.resolve_prices("grok-4.7-high") == card_b
+    assert tu.active_cached_model_ids() == ["grok-4.7", "grok-4.7-low"]
+
+    _write_pricing_cache(
+        {
+            "grok-4.7-low": _pricing_card(before, **card_a),
+            "grok-4.7": _pricing_card(gate_date, **card_b),
+        }
+    )
+    monkeypatch.setattr(tu, "_PRICING_CACHE_MEMO", None)
+    assert tu.resolve_prices("grok-4.7-low") == card_b
+    assert tu.active_cached_model_ids() == ["grok-4.7"]
+
+
+def test_grok_override_scope_pins_traps_and_muse_111b(monkeypatch):
+    override = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache({"grok-4.7": _pricing_card(tu.PRICING_CURSOR_LAST_UPDATED, **override)})
+    for trap in ("grok-4.7-unspecified", "grok-4.7-ultra", "GROK-4.7-FAST"):
+        assert tu.resolve_prices(trap) is None
+
+    _write_pricing_cache(
+        {"muse-wonder-1.0": _pricing_card(tu.PRICING_MUSE_LAST_UPDATED, **override)}
+    )
+    monkeypatch.setattr(tu, "_PRICING_CACHE_MEMO", None)
+    assert tu.resolve_prices("muse-wonder-1.0") == override
+    assert tu.resolve_prices("muse-wonder-full-1.0") == tu.VENDOR_FAMILY_TIERS["muse-wonder-1.0"]
+
+
+@pytest.mark.parametrize(("card_id", "aliases"), _GROK_CARD_ALIASES_111B)
+def test_grok_override_preserves_long_card_and_gates_ceiling_111b(card_id, aliases, monkeypatch):
+    gate_date = tu._builtin_verified_date(aliases[0])
+    models = (card_id, *aliases) if card_id in tu.PRICING_FAMILY_BY_MODEL else aliases
+    for model in models:
+        assert tu.long_context_ceiling_known(model) is True
+        assert tu.resolve_long_context_prices(model) == tu.VENDOR_LONG_CONTEXT_TIERS[card_id]
+
+    distinct = {"input": 3.0, "cache_read": 0.75, "cache_create": 0.0, "output": 9.0}
+    _write_pricing_cache({card_id: _pricing_card(gate_date, **distinct)})
+    monkeypatch.setattr(tu, "_PRICING_CACHE_MEMO", None)
+    for model in models:
+        assert tu.resolve_long_context_prices(model) == tu.VENDOR_LONG_CONTEXT_TIERS[card_id]
+        assert tu.long_context_ceiling_known(model) is False
+    if card_id == "grok-4.6":
+        assert tu.resolve_long_context_prices("grok-4.6") is None
+
+    same_as_bundled = dict(tu.VENDOR_FAMILY_TIERS[card_id])
+    _write_pricing_cache({card_id: _pricing_card(gate_date, **same_as_bundled)})
+    monkeypatch.setattr(tu, "_PRICING_CACHE_MEMO", None)
+    for model in models:
+        assert tu.resolve_long_context_prices(model) == tu.VENDOR_LONG_CONTEXT_TIERS[card_id]
+        assert tu.long_context_ceiling_known(model) is True

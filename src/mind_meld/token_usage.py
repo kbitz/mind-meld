@@ -500,6 +500,13 @@ VERIFIED_MODEL_IDS = frozenset(
     }
 )
 
+# Track 111B: Grok aliases whose local pricing override can also come from their
+# underlying card id (`grok-4.7`, `grok-4.7-fast`, `grok-4.6`), under both ids'
+# date gates. Identity entries are excluded; exact-id overrides take precedence.
+_GROK_OVERRIDE_CARD_BY_MODEL: dict[str, str] = {
+    m: f for m, f in PRICING_FAMILY_BY_MODEL.items() if m.startswith("grok-") and m != f
+}
+
 # Per-family vendor short-context list rates, USD per million tokens.
 # Source: https://developers.openai.com/api/docs/pricing verified
 # PRICING_OPENAI_LAST_UPDATED. The official table publishes cache-write
@@ -1033,17 +1040,30 @@ def pricing_cache() -> dict[str, Any]:
 
 def active_cached_model_ids() -> list[str]:
     return sorted(
-        model for model in _pricing_cache_memoized()["models"] if _cached_prices(model) is not None
+        model
+        for model in _pricing_cache_memoized()["models"]
+        if _active_cached_card(model, model) is not None
     )
 
 
-def _cached_prices(model: str) -> dict[str, float] | None:
-    card = _pricing_cache_memoized()["models"].get(model)
-    if card is None or (
-        model in VERIFIED_MODEL_IDS and card["verified_date"] < _builtin_verified_date(model)
-    ):
+def _active_cached_card(card_id: str, model: str) -> dict[str, float] | None:
+    card = _pricing_cache_memoized()["models"].get(card_id)
+    if card is None:
         return None
+    for m in (model, card_id):
+        if m in VERIFIED_MODEL_IDS and card["verified_date"] < _builtin_verified_date(m):
+            return None
     return {field: card[field] for field in _PRICING_RATE_FIELDS}
+
+
+def _cached_prices(model: str) -> dict[str, float] | None:
+    exact = _active_cached_card(model, model)
+    if exact is not None:
+        return exact
+    card_id = _GROK_OVERRIDE_CARD_BY_MODEL.get(model)
+    if card_id is not None:
+        return _active_cached_card(card_id, model)
+    return None
 
 
 def is_verified_model(model: str) -> bool:
@@ -1137,29 +1157,7 @@ def update_pricing_cache(
         raise locked.write_error
 
 
-def resolve_prices(model: str) -> dict[str, float] | None:
-    """Return the per-MTok rate card for ``model``, or ``None`` if unpriced.
-
-    THE single predicate for "is this model priced." Both consumers go
-    through it — ``estimate_cost`` for the rates, the aggregator's
-    ``_unpriced_token_summary`` for the ``is None`` count — so the cost
-    line and the "N unpriced model(s)" Notes line can never disagree.
-    Two independent ``model in PRICING`` tests are what made that
-    contradiction possible before v0.12.13; do NOT reintroduce one.
-
-    Resolution order: ``COST_EXCLUDED_MODELS`` is filtered by the caller.
-    An active local overlay wins; else exact ``PRICING`` entry; else the Claude family tier via
-    ``model_family``; else the curated host alias
-    ``PRICING_FAMILY_BY_MODEL`` → ``VENDOR_FAMILY_TIERS``; else ``None``.
-    Host aliases are exact-key; vendor fallback uses positional grammars.
-
-    Returns a COPY. The rate cards are module-level and shared; handing
-    out the live dict lets one careless caller mutate pricing for the
-    whole process.
-    """
-    cached = _cached_prices(model)
-    if cached is not None:
-        return cached
+def _bundled_prices(model: str) -> dict[str, float] | None:
     prices = PRICING.get(model)
     if prices is not None:
         return dict(prices)
@@ -1175,6 +1173,33 @@ def resolve_prices(model: str) -> dict[str, float] | None:
     return dict(vendor_prices)
 
 
+def resolve_prices(model: str) -> dict[str, float] | None:
+    """Return the per-MTok rate card for ``model``, or ``None`` if unpriced.
+
+    THE single predicate for "is this model priced." Both consumers go
+    through it — ``estimate_cost`` for the rates, the aggregator's
+    ``_unpriced_token_summary`` for the ``is None`` count — so the cost
+    line and the "N unpriced model(s)" Notes line can never disagree.
+    Two independent ``model in PRICING`` tests are what made that
+    contradiction possible before v0.12.13; do NOT reintroduce one.
+
+    Resolution order: ``COST_EXCLUDED_MODELS`` is filtered by the caller.
+    An active local overlay wins (by exact id, or for a Grok alias by its
+    card id); else exact ``PRICING`` entry; else the Claude family tier via
+    ``model_family``; else the curated host alias
+    ``PRICING_FAMILY_BY_MODEL`` → ``VENDOR_FAMILY_TIERS``; else ``None``.
+    Host aliases are exact-key; vendor fallback uses positional grammars.
+
+    Returns a COPY. The rate cards are module-level and shared; handing
+    out the live dict lets one careless caller mutate pricing for the
+    whole process.
+    """
+    cached = _cached_prices(model)
+    if cached is not None:
+        return cached
+    return _bundled_prices(model)
+
+
 def floor_prices(model: str) -> dict[str, float] | None:
     """The resolved card with minimum applicable cache-write pricing.
 
@@ -1188,12 +1213,23 @@ def floor_prices(model: str) -> dict[str, float] | None:
 
 
 def resolve_long_context_prices(model: str) -> dict[str, float] | None:
-    """Copy the exact alias's long card, if known. Not a priced-predicate."""
-    if _cached_prices(model) is not None:
-        return None
+    """Copy the exact alias's long card, if known.
+
+    Not a priced-predicate; an override does not remove it (Track 111B).
+    """
     family = PRICING_FAMILY_BY_MODEL.get(model)
     card = VENDOR_LONG_CONTEXT_TIERS.get(family) if family is not None else None
     return dict(card) if card is not None else None
+
+
+def long_context_ceiling_known(model: str) -> bool:
+    """Return whether the bundled long card still bounds ``model``'s base rate.
+
+    The bundled long card bounds only the bundled base, so a changed base is
+    never paired with an old ceiling.
+    """
+    cached = _cached_prices(model)
+    return cached is None or cached == _bundled_prices(model)
 
 
 def parse_usage(message: Any) -> tuple[Usage, str, str | None] | None:
@@ -2486,6 +2522,7 @@ __all__ = [
     "resolve_prices",
     "floor_prices",
     "VERIFIED_MODEL_IDS",
+    "long_context_ceiling_known",
     "resolve_long_context_prices",
     "slice_window",
     "sum_bucket",
