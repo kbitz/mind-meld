@@ -250,8 +250,8 @@ def disable_source(name: str, *, force: bool = False) -> None:
 def _print_grok_enable_notes() -> None:
     console.print(
         "[dim]Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ "
-        "topics and pending observations. "
-        "Sessions, SQLite indexes, MEMORY.md, settings, credentials, "
+        "topics. "
+        "Observations, sessions, SQLite indexes, MEMORY.md, settings, credentials, "
         "plugins and hooks are not synced.[/dim]"
     )
     console.print(

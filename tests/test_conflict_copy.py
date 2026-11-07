@@ -886,14 +886,18 @@ class TestFindConflictFilesGrokType:
             / "memory-v2"
             / "workspaces"
             / "ws-1"
-            / "observations"
-            / "_inbox"
-            / "obs.sync-conflict-20260421-143055-devA1234.md",
+            / "topics"
+            / "workspace.sync-conflict-20260421-143055-devA1234.md",
         ):
             memory_sidecar.parent.mkdir(parents=True, exist_ok=True)
             memory_sidecar.write_bytes(b"conflict")
             expected.add(memory_sidecar)
         excluded_sidecars = [
+            root
+            / "memory-v2/global/observations/_inbox/obs.sync-conflict-20260421-143055-devA1234.md",
+            root
+            / "memory-v2/workspaces/ws-1/observations/_inbox"
+            / "obs.sync-conflict-20260421-143055-devA1234.md",
             root / "sessions" / "chat.sync-conflict-20260421-143055-devA1234.md",
             root
             / "memory-v2"

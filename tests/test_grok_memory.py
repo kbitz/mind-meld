@@ -1,4 +1,4 @@
-"""Track 111A: Grok Build memory-v2 allowlist, Dream inbox held rule, and pull boundary tests."""
+"""Track 111A: Grok Build topic-only memory allowlist and pull boundary tests."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import hashlib
 import os
 import subprocess
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,10 +35,6 @@ DEV_A = "aaaaaaaa"
 DEV_B = "bbbbbbbb"
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
 NOW_US = int(NOW.timestamp() * 1_000_000)
-
-
-def _hours(n: float) -> datetime:
-    return datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(hours=n)
 
 
 def _sha(data: bytes) -> str:
@@ -109,7 +105,7 @@ def test_revision_refuses_linked_parent_before_reading(
     assert reads == []
 
 
-# ── Group 1: grok_memory_path_allowed, is_grok_inbox_path, grok_path_allowed ──
+# ── Group 1: grok_memory_path_allowed and grok_path_allowed ──
 
 
 class TestGrokMemoryPathAllowlist:
@@ -118,12 +114,8 @@ class TestGrokMemoryPathAllowlist:
         [
             "memory-v2/global/topics/conventions.md",
             "memory-v2/global/topics/nested/sub/note.md",
-            "memory-v2/global/observations/_inbox/2026-04-20-obs.md",
-            "memory-v2/global/observations/_inbox/nested/obs.md",
             "memory-v2/workspaces/github.com-org-repo-main/topics/arch.md",
             "memory-v2/workspaces/github.com-org-repo-main/topics/deep/design.md",
-            "memory-v2/workspaces/github.com-org-repo-main/observations/_inbox/obs.md",
-            "memory-v2/workspaces/local-deadbeef/observations/_inbox/sub/obs.md",
         ],
     )
     def test_accepts_allowlisted_memory_markdown_paths(self, rel_path: str) -> None:
@@ -133,6 +125,10 @@ class TestGrokMemoryPathAllowlist:
     @pytest.mark.parametrize(
         "rel_path",
         [
+            "memory-v2/global/observations/_inbox/2026-04-20-obs.md",
+            "memory-v2/global/observations/_inbox/nested/obs.md",
+            "memory-v2/workspaces/github.com-org-repo-main/observations/_inbox/obs.md",
+            "memory-v2/workspaces/local-deadbeef/observations/_inbox/sub/obs.md",
             "memory-v2/global/MEMORY.md",
             "memory-v2/workspaces/proj/MEMORY.md",
             "memory-v2/global/index.sqlite",
@@ -174,29 +170,14 @@ class TestGrokMemoryPathAllowlist:
     def test_rejects_disallowed_memory_paths(self, rel_path: str) -> None:
         assert manifest.grok_memory_path_allowed(rel_path) is False
 
-    def test_is_grok_inbox_path_matches_only_observations_inbox(self) -> None:
-        assert (
-            manifest.is_grok_inbox_path("memory-v2/global/observations/_inbox/2026-04-20-obs.md")
-            is True
-        )
-        assert (
-            manifest.is_grok_inbox_path("memory-v2/workspaces/proj/observations/_inbox/sub/obs.md")
-            is True
-        )
-        assert manifest.is_grok_inbox_path("memory-v2/global/topics/conventions.md") is False
-        assert manifest.is_grok_inbox_path("memory-v2/workspaces/proj/topics/arch.md") is False
-        assert (
-            manifest.is_grok_inbox_path("memory-v2/workspaces/proj/observations/2026-04-20.md")
-            is False
-        )
-        assert manifest.is_grok_inbox_path("skills/my-skill/SKILL.md") is False
-
     def test_grok_path_allowed_covers_customizations_and_memory_allowlist(self) -> None:
         assert manifest.grok_path_allowed("skills/my-skill/SKILL.md") is True
         assert manifest.grok_path_allowed("commands/ship.md") is True
         assert manifest.grok_path_allowed("rules/house.md") is True
         assert manifest.grok_path_allowed("memory-v2/global/topics/a.md") is True
-        assert manifest.grok_path_allowed("memory-v2/workspaces/p/observations/_inbox/o.md") is True
+        assert (
+            manifest.grok_path_allowed("memory-v2/workspaces/p/observations/_inbox/o.md") is False
+        )
         # Disallowed grok paths
         assert manifest.grok_path_allowed("skills") is False
         assert (
@@ -309,10 +290,8 @@ class TestGrokMemoryWalkerFixture:
             "rules/style.md",
             "memory-v2/global/topics/prefs.md",
             "memory-v2/global/topics/skills-notes.md",
-            "memory-v2/global/observations/_inbox/obs-global.md",
             "memory-v2/workspaces/proj/topics/arch.md",
             "memory-v2/workspaces/proj/topics/nested/sub.md",
-            "memory-v2/workspaces/proj/observations/_inbox/obs1.md",
             "memory-v2/workspaces/gstack/topics/note.md",
         }
         assert (
@@ -534,131 +513,99 @@ class TestGrokMemoryAnchorsAndTombstones:
         assert (dev_a.grok / "memory-v2" / manifest.ANCHOR_NAME).is_file()
         assert fetched.manifest.get("tombstones", {}) == {}
 
-    def test_dream_archive_propagates_hashed_tombstone_with_recovery_copy_and_new_obs_syncs(
+    def test_observations_stay_local_through_publication_pull_and_removal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
+        dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
+        observation_paths = (
+            "memory-v2/global/observations/_inbox/pending.md",
+            "memory-v2/workspaces/proj/observations/_inbox/nested/pending.md",
+            "memory-v2/workspaces/proj/observations/manual.md",
+        )
+        for dev, payload in ((dev_a, b"A local observation"), (dev_b, b"B local observation")):
+            for rel in observation_paths:
+                path = dev.grok / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+        topic_rel = "memory-v2/global/topics/shared.md"
+        topic = dev_a.grok / topic_rel
+        topic.parent.mkdir(parents=True)
+        topic.write_text("consolidated topic\n")
+        env.push(DEV_A)
+        published = core._fetch_remote_manifest(env.backend, DEV_A, PASSPHRASE, MEMORY_KB)
+        assert published.is_ok
+        assert set(published.manifest["sources"]["grok"]["files"]) == {topic_rel}
+        env.pull(DEV_B)
+        assert (dev_b.grok / topic_rel).read_text() == "consolidated topic\n"
+        for rel in observation_paths:
+            assert (dev_b.grok / rel).read_bytes() == b"B local observation"
+            (dev_a.grok / rel).unlink()
+        env.push(DEV_A)
+        published = core._fetch_remote_manifest(env.backend, DEV_A, PASSPHRASE, MEMORY_KB)
+        assert published.is_ok
+        assert not published.manifest.get("tombstones")
+        env.pull(DEV_B)
+        for rel in observation_paths:
+            assert (dev_b.grok / rel).read_bytes() == b"B local observation"
+
+    def test_topic_removal_propagates_hashed_tombstone_with_recovery_and_new_topic(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
         dev_a = env.devices[DEV_A]
         dev_b = env.devices[DEV_B]
 
-        obs1_rel = "memory-v2/workspaces/proj/observations/_inbox/obs1.md"
-        obs1_a = dev_a.grok / obs1_rel
-        obs1_a.parent.mkdir(parents=True)
-        obs1_a.write_text("observation 1\n")
+        topic1_rel = "memory-v2/workspaces/proj/topics/topic1.md"
+        topic1_a = dev_a.grok / topic1_rel
+        topic1_a.parent.mkdir(parents=True)
+        topic1_a.write_text("topic 1\n")
 
-        # A pushes obs1; B pulls it and pushes so both are anchored.
+        # A pushes topic1; B pulls it and pushes so both are anchored.
         env.push(DEV_A)
         env.pull(DEV_B)
-        obs1_b = dev_b.grok / obs1_rel
-        assert obs1_b.read_text() == "observation 1\n"
+        topic1_b = dev_b.grok / topic1_rel
+        assert topic1_b.read_text() == "topic 1\n"
         env.push(DEV_B)
 
-        # Dream on A moves _inbox/obs1.md -> archive/obs1.md, and a new session writes obs2.md.
-        archive_a = dev_a.grok / "memory-v2" / "workspaces" / "proj" / "archive" / "obs1.md"
+        # A retires topic1.md into the local archive and writes a replacement topic.
+        archive_a = dev_a.grok / "memory-v2" / "workspaces" / "proj" / "archive" / "topic1.md"
         archive_a.parent.mkdir(parents=True)
-        obs1_a.rename(archive_a)
-        obs2_rel = "memory-v2/workspaces/proj/observations/_inbox/obs2.md"
-        obs2_a = dev_a.grok / obs2_rel
-        obs2_a.write_text("observation 2\n")
+        topic1_a.rename(archive_a)
+        topic2_rel = "memory-v2/workspaces/proj/topics/topic2.md"
+        topic2_a = dev_a.grok / topic2_rel
+        topic2_a.write_text("topic 2\n")
 
         env.push(DEV_A)
         fetched_a = core._fetch_remote_manifest(env.backend, DEV_A, PASSPHRASE, MEMORY_KB)
         assert fetched_a.is_ok
-        tomb = fetched_a.manifest["tombstones"].get(f"grok:{obs1_rel}")
+        tomb = fetched_a.manifest["tombstones"].get(f"grok:{topic1_rel}")
         assert tomb is not None
-        assert tomb.get("sha256") == _sha(b"observation 1\n")
+        assert tomb.get("sha256") == _sha(b"topic 1\n")
 
-        # B pulls: obs1.md is deleted with a 30-day recovery copy; obs2.md lands in B's _inbox/.
+        # B pulls: topic1.md is deleted with a 30-day recovery copy; topic2.md lands in B's topics/.
         res_b = env.pull(DEV_B)
         assert res_b.total_deleted == 1
-        assert not obs1_b.exists()
-        assert (dev_b.grok / obs2_rel).read_text() == "observation 2\n"
-        recovery_files = list(dev_b.deleted_copies.rglob("obs1.md"))
+        assert not topic1_b.exists()
+        assert (dev_b.grok / topic2_rel).read_text() == "topic 2\n"
+        recovery_files = list(dev_b.deleted_copies.rglob("topic1.md"))
         assert len(recovery_files) == 1
-        assert recovery_files[0].read_text() == "observation 1\n"
+        assert recovery_files[0].read_text() == "topic 1\n"
 
 
-# ── Group 4: Cross-machine Dream / inbox held rule tests ──────────────
+# ── Group 4: Cross-machine topic conflict and compatibility tests ──────────────
 
 
-class TestGrokInboxDreamOrderings:
-    def test_machine_harness_dream_before_publication_holds(self) -> None:
-        from tests.test_pullplan import Machine
-
-        inbox_rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
-        raw = b"observation payload\n"
-
-        # Ordering (i): A pushes obs.md, B pulls (never pushes), Dream on B removes obs.md,
-        # B pulls A again while A still lists obs.md -> held, not re-created.
-        a = Machine("a", rel=inbox_rel, src="grok")
-        b = Machine("b", rel=inbox_rel, src="grok")
-        a.edit(raw, _hours(1))
-        a.push()
-        assert b.pull(a) == "write"
-        assert b.lists is False  # B has not pushed since pulling
-        b.remove()  # Dream on B moves obs.md to archive/
-        assert b.pull(a) == "held"
-        assert b.data is None
-
-    @pytest.mark.parametrize("a_pulls_b", [True, False], ids=["ii-base", "iii-no-base"])
-    def test_machine_harness_dream_publication_base(self, a_pulls_b: bool) -> None:
-        from tests.test_pullplan import Machine
-
-        rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
-        a, b = Machine("a", rel=rel, src="grok"), Machine("b", rel=rel, src="grok")
-        a.edit(b"observation\n", _hours(1))
-        a.push()
-        assert b.pull(a) == "write"
-        b.push()
-        if a_pulls_b:
-            assert a.pull(b) == "matched"
-        assert a.ledger.base(b.id, "grok", rel) == (b.sha if a_pulls_b else None)
-        b.remove()
-        assert b.pull(a) == "held"
-        assert a.data == b"observation\n"
-
-    @pytest.mark.parametrize("a_pulls_b", [True, False], ids=["ii-delete", "iii-retain"])
-    def test_e2e_dream_deletion_requires_origin_base(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, a_pulls_b: bool
-    ) -> None:
-        env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
-        dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
-        rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
-        a, b = dev_a.grok / rel, dev_b.grok / rel
-        a.parent.mkdir(parents=True)
-        a.write_text("pending observation\n")
-        env.push(DEV_A)
-        env.pull(DEV_B)
-        env.push(DEV_B)
-        if a_pulls_b:
-            env.pull(DEV_A)
-        b.unlink()
-        env.push(DEV_B)
-        result = env.pull(DEV_A)
-        assert result.total_deleted == int(a_pulls_b)
-        assert a.exists() is not a_pulls_b
-        copies = list(dev_a.deleted_copies.rglob("obs.md"))
-        assert len(copies) == int(a_pulls_b)
-        if copies:
-            assert copies[0].read_text() == "pending observation\n"
-        else:
-            assert a.read_text() == "pending observation\n"
-            a.unlink()  # The origin's own Dream consumes its retained observation.
-            env.push(DEV_A)
-        env.pull(DEV_B)
-        assert not b.exists()
-
+class TestGrokTopicHandoffs:
     def test_concurrent_dreams_preserve_both_topic_amendments(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
         dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
         topic_rel = "memory-v2/workspaces/proj/topics/shared.md"
-        inbox_rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
-        for rel, content in ((topic_rel, "original topic\n"), (inbox_rel, "pending fact\n")):
-            path = dev_a.grok / rel
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+        topic_a = dev_a.grok / topic_rel
+        topic_a.parent.mkdir(parents=True)
+        topic_a.write_text("original topic\n")
         env.push(DEV_A)
         env.pull(DEV_B)
         env.push(DEV_B)
@@ -669,7 +616,6 @@ class TestGrokInboxDreamOrderings:
         for did, dev in ((DEV_A, dev_a), (DEV_B, dev_b)):
             (dev.grok / topic_rel).write_bytes(versions[did])
             os.utime(dev.grok / topic_rel, (NOW.timestamp(), NOW.timestamp()))
-            (dev.grok / inbox_rel).unlink()
             env.push(did)
 
         for did, dev in ((DEV_A, dev_a), (DEV_B, dev_b)):
@@ -680,9 +626,8 @@ class TestGrokInboxDreamOrderings:
             copies = list(canonical.parent.glob("shared.sync-conflict-*.md"))
             assert len(copies) == 1
             assert {canonical.read_bytes(), copies[0].read_bytes()} == set(versions.values())
-            assert not (dev.grok / inbox_rel).exists()
 
-    def test_old_receiver_applies_memory_but_redownloads_consumed_inbox(
+    def test_old_receiver_applies_topics_and_matching_deletions(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
@@ -706,9 +651,8 @@ class TestGrokInboxDreamOrderings:
             env.push(DEV_B)
 
         topic_rel = "memory-v2/global/topics/shared.md"
-        consumed_rel = "memory-v2/global/observations/_inbox/consumed.md"
-        deleted_rel = "memory-v2/global/observations/_inbox/deleted.md"
-        for rel in (topic_rel, consumed_rel, deleted_rel):
+        deleted_rel = "memory-v2/global/topics/deleted.md"
+        for rel in (topic_rel, deleted_rel):
             path = dev_a.grok / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"payload {rel}\n")
@@ -716,16 +660,10 @@ class TestGrokInboxDreamOrderings:
         with monkeypatch.context() as older:
             older.setattr(manifest, "scan_roots", old_scan_roots)
             first = env.pull(DEV_B)
-            assert first.total_applied == 3
-            for rel in (topic_rel, consumed_rel, deleted_rel):
+            assert first.total_applied == 2
+            for rel in (topic_rel, deleted_rel):
                 assert (dev_b.grok / rel).read_bytes() == (dev_a.grok / rel).read_bytes()
             assert not (dev_b.grok / "memory-v2" / manifest.ANCHOR_NAME).exists()
-            (dev_b.grok / consumed_rel).unlink()
-            repeat = env.pull(DEV_B)
-            assert repeat.total_applied == 1
-            assert (dev_b.grok / consumed_rel).read_bytes() == (
-                dev_a.grok / consumed_rel
-            ).read_bytes()
 
         (dev_a.grok / deleted_rel).unlink()
         env.push(DEV_A)
@@ -739,61 +677,11 @@ class TestGrokInboxDreamOrderings:
             assert copies[0].read_text() == f"payload {deleted_rel}\n"
             assert not (dev_b.grok / "memory-v2" / manifest.ANCHOR_NAME).exists()
 
-    def test_e2e_dream_orderings_and_mixed_version_peer(
+    def test_old_sender_does_not_delete_local_topics(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         env = _TwoDeviceGrokEnv(tmp_path, monkeypatch)
-        dev_a = env.devices[DEV_A]
-        dev_b = env.devices[DEV_B]
-
-        obs_rel = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
-        obs_a = dev_a.grok / obs_rel
-        obs_b = dev_b.grok / obs_rel
-        obs_a.parent.mkdir(parents=True)
-        obs_a.write_text("pending observation\n")
-
-        # A legitimate earlier empty B publication establishes the root anchor,
-        # without ever publishing the observation that B will consume below.
-        (dev_b.grok / "memory-v2").mkdir()
-        env.push(DEV_B)
-        env.push(DEV_A)
-        env.pull(DEV_B)
-        assert obs_b.read_text() == "pending observation\n"
-        b_prior = core._fetch_remote_manifest(env.backend, DEV_B, PASSPHRASE, MEMORY_KB)
-        assert obs_rel not in b_prior.manifest["sources"]["grok"]["files"]
-
-        # Ordering (i): Dream on B archives obs.md BEFORE B pushes the removal; B pulls A again.
-        obs_b.unlink()
-        env.pull(DEV_B)
-        assert not obs_b.exists(), "Dream-archived inbox file must stay held on B"
-
-        # Finish ordering (i): the origin's later Dream is silent on B.
-        obs_a.unlink()
-        env.push(DEV_A)
-        res_ii = env.pull(DEV_B)
-        assert not obs_b.exists()
-        assert res_ii.total_failed == 0
-        assert res_ii.total_deleted == 0
-
-        # Both machines may also Dream a new observation independently.
-        # obs2 on BOTH A and B and both push and pull.
-        obs2_rel = "memory-v2/workspaces/proj/observations/_inbox/obs2.md"
-        obs2_a = dev_a.grok / obs2_rel
-        obs2_b = dev_b.grok / obs2_rel
-        obs2_a.write_text("second observation\n")
-        env.push(DEV_A)
-        env.pull(DEV_B)
-        assert obs2_b.exists()
-        obs2_a.unlink()
-        obs2_b.unlink()
-        env.push(DEV_A)
-        env.push(DEV_B)
-        env.pull(DEV_A)
-        env.pull(DEV_B)
-        assert not obs2_a.exists()
-        assert not obs2_b.exists()
-        assert list(dev_a.grok.rglob("*.sync-conflict-*")) == []
-        assert list(dev_b.grok.rglob("*.sync-conflict-*")) == []
+        dev_a, dev_b = env.devices[DEV_A], env.devices[DEV_B]
 
         # Mixed-version peer: Peer A has a pre-111A manifest (root_ids only has "skills",
         # no "memory-v2" files), while B has local memory-v2 files. Pulling A must not delete
@@ -848,6 +736,9 @@ class TestGrokPullBoundaryAllowlist:
             "memory-v2/global/memory_state.sqlite": b"local-sqlite",
             "memory-v2/global/MEMORY.md": b"local-index\n",
             "memory-v2/workspaces/p/archive/o.md": b"local-archive\n",
+            "memory-v2/global/observations/_inbox/raw.md": b"local-global-observation\n",
+            "memory-v2/workspaces/p/observations/_inbox/nested/raw.md": b"local-repo-observation\n",
+            "memory-v2/global/observations/manual.md": b"local-other-observation\n",
             "auth.json": b"local-auth-fixture",
             "config.toml": b"local-config\n",
             "hooks/h.sh": b"#!/bin/sh\necho safe\n",

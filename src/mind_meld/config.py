@@ -673,7 +673,7 @@ def _validate_sources(sources: Any) -> None:
                 f"config: [[sync.sources]] entry '{name}' field 'type': "
                 "type 'grok' is reserved for source name 'grok' so only its "
                 "hardcoded allowlist (skills/, commands/, rules/, and memory-v2/ "
-                "topics and pending observations) is walked. "
+                "topics) is walked. "
                 "Change type to 'generic' or rename the entry to 'grok' in config.toml, "
                 "then re-run 'mm status'."
             )
@@ -683,7 +683,7 @@ def _validate_sources(sources: Any) -> None:
                     "config: [[sync.sources]] entry 'grok' field 'type': "
                     "source 'grok' must use type 'grok' so only its "
                     "hardcoded allowlist (skills/, commands/, rules/, and memory-v2/ "
-                    "topics and pending observations) is walked. "
+                    "topics) is walked. "
                     "Set type = 'grok' on the 'grok' [[sync.sources]] entry in config.toml, "
                     "then re-run 'mm status'."
                 )
@@ -693,7 +693,7 @@ def _validate_sources(sources: Any) -> None:
                     f"config: [[sync.sources]] entry 'grok' field '{bad_field}': "
                     "source 'grok' does not support include_dirs or include_files; "
                     "it syncs skills/, commands/, rules/, and memory-v2/ "
-                    "topics and pending observations only. "
+                    "topics only. "
                     "Remove include_dirs and include_files from the 'grok' [[sync.sources]] "
                     "entry in config.toml, then re-run 'mm status'."
                 )

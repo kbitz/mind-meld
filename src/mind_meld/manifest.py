@@ -2178,9 +2178,8 @@ def grok_memory_path_allowed(rel_path: str) -> bool:
     """Return True iff ``rel_path`` is an allowlisted Grok Build memory Markdown path.
 
     Accepts only ``.md`` files (lowercase extension, non-empty stem) under
-    ``memory-v2/global/topics/**``, ``memory-v2/global/observations/_inbox/**``,
-    ``memory-v2/workspaces/<scope>/topics/**``, or
-    ``memory-v2/workspaces/<scope>/observations/_inbox/**``, where no component
+    ``memory-v2/global/topics/**`` and
+    ``memory-v2/workspaces/<scope>/topics/**``, where no component
     below ``memory-v2/`` starts with ``.`` and ``_is_excluded(rel_path)`` is False.
     """
     if not isinstance(rel_path, str) or not rel_path:
@@ -2202,23 +2201,11 @@ def grok_memory_path_allowed(rel_path: str) -> bool:
         return False
     if len(rest) >= 2 and rest[0] == "topics":
         filename = rest[-1]
-    elif len(rest) >= 3 and rest[0] == "observations" and rest[1] == "_inbox":
-        filename = rest[-1]
     else:
         return False
     if len(filename) <= 3 or not filename.endswith(".md"):
         return False
     return not _is_excluded(rel_path, GROK_EXCLUDE_PATTERNS)
-
-
-def is_grok_inbox_path(rel_path: str) -> bool:
-    """Return True iff ``rel_path`` is an allowlisted Grok pending-observation path."""
-    if not grok_memory_path_allowed(rel_path):
-        return False
-    parts = rel_path.split("/")
-    if parts[1] == "global":
-        return parts[2:4] == ["observations", "_inbox"]
-    return parts[1] == "workspaces" and parts[3:5] == ["observations", "_inbox"]
 
 
 def grok_path_allowed(rel_path: str) -> bool:
@@ -2249,7 +2236,7 @@ def grok_memory_scan_dirs(
     source_name: str | None = None,
     on_skip: Any = None,
 ) -> list[Path]:
-    """Return existing non-symlink ``topics`` and ``observations/_inbox`` dirs in ``memory-v2``."""
+    """Return existing non-symlink ``topics`` directories in ``memory-v2``."""
     mem_root = base / GROK_MEMORY_ROOT
     mem_st = _lstat_or_none(
         mem_root, strict=strict, source_name=source_name, rel_path=GROK_MEMORY_ROOT
@@ -2387,40 +2374,6 @@ def grok_memory_scan_dirs(
         elif stat.S_ISDIR(topics_st.st_mode):
             scan_dirs.append(topics_dir)
 
-        obs_dir = scope_dir / "observations"
-        obs_st = _lstat_or_none(
-            obs_dir,
-            strict=strict,
-            source_name=source_name,
-            rel_path=_rel_or_name(obs_dir, base),
-        )
-        if obs_st is None:
-            _check_scope_still_present(scope_dir, discovered)
-            continue
-        if stat.S_ISLNK(obs_st.st_mode):
-            if on_skip:
-                on_skip(str(obs_dir), "symlink")
-            continue
-        if not stat.S_ISDIR(obs_st.st_mode):
-            continue
-
-        inbox_dir = obs_dir / "_inbox"
-        inbox_st = _lstat_or_none(
-            inbox_dir,
-            strict=strict,
-            source_name=source_name,
-            rel_path=_rel_or_name(inbox_dir, base),
-        )
-        if inbox_st is None:
-            _check_scope_still_present(scope_dir, discovered)
-            continue
-        if stat.S_ISLNK(inbox_st.st_mode):
-            if on_skip:
-                on_skip(str(inbox_dir), "symlink")
-            continue
-        if stat.S_ISDIR(inbox_st.st_mode):
-            scan_dirs.append(inbox_dir)
-
     return scan_dirs
 
 
@@ -2436,9 +2389,10 @@ def walk_grok_source(
 
     Scans only the hardcoded customization dirs at the source root
     (``GROK_SYNCED_SUBDIRS``) plus the memory allowlist under ``memory-v2/``
-    (``topics/`` and ``observations/_inbox/`` in ``global`` and each workspace).
+    (``topics/`` in ``global`` and each workspace).
     Sessions, credentials, vendor trees, ``config.toml``, ``MEMORY.md``,
-    SQLite databases, and ``archive/`` are never synced. Missing dirs are a no-op.
+    SQLite databases, ``observations/``, and ``archive/`` are never synced.
+    Missing dirs are a no-op.
     """
     source_name = source_config.get("name")
     base = Path(source_config["path"]).expanduser().resolve()

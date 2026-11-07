@@ -1114,7 +1114,7 @@ class TestGetSources:
             load_config(path)
         msg = str(exc_info.value)
         assert "[[sync.sources]] entry 'old-host' field 'type': type 'grok' is reserved" in msg
-        assert "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
+        assert "skills/, commands/, rules/, and memory-v2/ topics" in msg
         assert "Change type to 'generic' or rename the entry to 'grok' in config.toml" in msg
         assert msg.endswith("then re-run 'mm status'.")
 
@@ -1123,7 +1123,7 @@ class TestGetSources:
             _validate_sources([{"name": "grok", "path": "~/.grok", "type": "generic"}])
         msg = str(exc_info.value)
         assert "[[sync.sources]] entry 'grok' field 'type': source 'grok' must use" in msg
-        assert "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
+        assert "skills/, commands/, rules/, and memory-v2/ topics" in msg
         assert "Set type = 'grok' on the 'grok' [[sync.sources]] entry in config.toml" in msg
         assert msg.endswith("then re-run 'mm status'.")
 
@@ -1132,9 +1132,7 @@ class TestGetSources:
                 _validate_sources([{"name": "grok", "path": "~/.grok", "type": "grok", field: val}])
             msg = str(exc_info.value)
             assert f"[[sync.sources]] entry 'grok' field '{field}': source 'grok' does not" in msg
-            assert (
-                "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
-            )
+            assert "skills/, commands/, rules/, and memory-v2/ topics" in msg
             assert (
                 "Remove include_dirs and include_files from the 'grok' [[sync.sources]] "
                 "entry in config.toml, then re-run 'mm status'." in msg

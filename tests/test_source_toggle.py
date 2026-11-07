@@ -215,10 +215,8 @@ class TestEnableSource:
         assert first.exit_code == 0, first.output
         first_norm = " ".join(first.output.split())
         assert "Enabled source 'grok' on this device." in first_norm
-        assert (
-            "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics and pending "
-            "observations." in first_norm
-        )
+        assert "Observations, sessions, SQLite indexes, MEMORY.md" in first_norm
+        assert "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics." in first_norm
         assert (
             "Grok keeps memory off by default; turn it on on each machine with "
             "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1)." in first_norm
@@ -228,10 +226,8 @@ class TestEnableSource:
         assert repeat.exit_code == 0, repeat.output
         repeat_norm = " ".join(repeat.output.split())
         assert "Source 'grok' is already enabled." in repeat_norm
-        assert (
-            "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics and pending "
-            "observations." in repeat_norm
-        )
+        assert "Observations, sessions, SQLite indexes, MEMORY.md" in repeat_norm
+        assert "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics." in repeat_norm
         assert (
             "Grok keeps memory off by default; turn it on on each machine with "
             "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1)." in repeat_norm

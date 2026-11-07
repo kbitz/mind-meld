@@ -1372,8 +1372,8 @@ filter. Retired source names (`RETIRED_SOURCE_NAMES = frozenset({"opencode"})`)
 are dropped silently so old configs and peer manifests continue working without
 minting deletion tombstones. The default `grok` source (`type: "grok"`, Tracks 109A and 111A)
 has its own walker shape (`skills/`, `commands/`, `rules/`, and the allowlisted
-`memory-v2/` subtrees `memory-v2/global/{topics,observations/_inbox}/**/*.md` and
-`memory-v2/workspaces/*/{topics,observations/_inbox}/**/*.md` hardcoded at
+`memory-v2/` subtrees `memory-v2/global/topics/**/*.md` and
+`memory-v2/workspaces/*/topics/**/*.md` hardcoded at
 `~/.grok`, refusing child links, hard links and every other path under `~/.grok`,
 with `GROK_EXCLUDE_PATTERNS` applied on push and pull) and never auto-activates:
 neither a legacy config without explicit `[[sync.sources]]` nor `_retain_prior_default_sources`
@@ -1389,29 +1389,45 @@ config that still carries an enabled `grok` block selects file sync.
 so `~/.grok/memory-v2/.mind-meld-anchor` anchors deletion propagation across all
 `memory-v2/` scopes without creating `~/.grok/memory-v2/` when absent.
 `manifest.grok_memory_path_allowed` admits only lowercase `.md` files (excluding
-`.sync-conflict-*` sidecars) under `memory-v2/global/{topics,observations/_inbox}/`
-and `memory-v2/workspaces/<scope>/{topics,observations/_inbox}/` (where `<scope>`
+`.sync-conflict-*` sidecars) under `memory-v2/global/topics/`
+and `memory-v2/workspaces/<scope>/topics/` (where `<scope>`
 is a single non-dot component and not `.retired-stores`). Everything else under
 `memory-v2/` stays local: `MEMORY.md` (derived index rebuilt by Grok Build after
 consolidation; syncing or line-union merging it would re-introduce stale links),
 `index.sqlite` and `memory_state.sqlite` (plus `-shm`/`-wal` sidecars; binary SQLite
 stores and Dream lock/watermark state), `archive/` (Dream-archived raw observations),
-`observations/` outside `_inbox/`, and `.retired-stores/`. On the consumer side,
+all `observations/` files (including `_inbox/`), and `.retired-stores/`. On the
+consumer side,
 `core._filter_excluded_paths` filters every `grok` source file and tombstone through
 `manifest.grok_path_allowed` (including when `exclude_map` is empty), so a peer
 manifest cannot write or tombstone-delete paths outside `skills/`, `commands/`,
-`rules/`, or the `memory-v2/` allowlist. In `pullplan._held_missing` (row 1), a
-missing Grok `observations/_inbox/` path (`manifest.is_grok_inbox_path`) whose
-`ledger.base(peer_id, "grok", path) == remote_sha` and whose `memory-v2` anchor is
-valid is treated as `held` even when `own_lists` is False, preventing a peer pull
-from resurrecting an observation that local Dream archived before this machine pushed.
+`rules/`, or the `memory-v2/` allowlist. This includes all
+`observations/**` paths: neither a peer file nor an active matching-base
+observation tombstone can change local observations. The ordinary missing-file
+rule in `pullplan._held_missing` has no Grok inbox exception.
+
+The owner amended Track 111A to topics-only sync after the 1.0.77 live check
+showed that a warmed receiving Grok store did not consolidate copied schema-2
+observations. On the sending machine, `/flush` then `/dream` in Grok produces
+the topics for `mm push`; the receiving machine runs `mm pull` before its next
+Grok session. Grok also Dreams automatically when enough observations
+accumulate, but observations captured after the sender's last Dream remain
+local until consolidated and published as topics. Topics become model context
+on every receiving machine, in the same trust class as synced skills.
+
+Every publishing push calls `core.publish_anchors`, rewriting the existing
+`memory-v2/.mind-meld-anchor` even when `memory-v2/*` is excluded. The anchor
+is local metadata and never creates a missing root; the opt-out suppresses
+topic content and its deletion records, not this anchor maintenance.
+
 Grok workspace names are opaque: mm copies them unchanged and does not implement
 Grok's hash or add branch names. The 1.0.77 live checks recorded in host-parity.md
 show matching origin-derived names for clones and linked worktrees. The owner
 accepted on 2026-11-06 that no-origin repositories (`device_local=1`) and
 non-repository scopes transfer as inert copies when the receiving Grok computes
-a different path-derived name. Only global memory and matching origin-derived
-repository scopes promise active cross-machine memory in this Track; no-origin
+a different path-derived name. Only global topics and topics in matching
+origin-derived repository scopes promise active cross-machine memory in this
+Track; no-origin
 mapping remains outside its accepted scope.
 `resolveflow._synced_scan_dirs` includes `manifest.grok_memory_scan_dirs(base_path)`
 and `resolveflow._find_conflict_files` checks `manifest.grok_memory_path_allowed` on

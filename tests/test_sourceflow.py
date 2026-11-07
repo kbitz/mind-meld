@@ -27,8 +27,8 @@ runner = CliRunner()
 
 DETAIL_LINES = {
     "grok": [
-        "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics and pending "
-        "observations. Sessions, SQLite indexes, MEMORY.md, settings, credentials, "
+        "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics. "
+        "Observations, sessions, SQLite indexes, MEMORY.md, settings, credentials, "
         "plugins and hooks are not synced.",
         "Grok keeps memory off by default; turn it on on each machine with "
         "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1).",
