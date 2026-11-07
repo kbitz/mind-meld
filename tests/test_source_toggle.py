@@ -327,23 +327,17 @@ class TestCursorRemoved114A:
         ],
     )
     def test_removed_cursor_commands_exit_2_without_spool_writes(self, cfg, argv, stdin):
-        from mind_meld import host_usage
-
         result = runner.invoke(app, argv, input=stdin)
         assert result.exit_code == 2
-        assert not host_usage.CURSOR_SPOOL_PATH.exists()
 
     @pytest.mark.parametrize("command", ["enable-source", "disable-source"])
     def test_cursor_is_an_unknown_source_name(self, cfg, isolated_seen_sources, command):
-        from mind_meld import host_usage
-
         assert "cursor" not in _known_source_names({})
         before = cfg.read_bytes()
         result = runner.invoke(app, [command, "cursor"])
         assert result.exit_code == 1
         assert "unknown source 'cursor'" in result.output
         assert cfg.read_bytes() == before
-        assert not host_usage.CURSOR_HOOK_CONFIG_PATH.exists()
 
     def test_existing_custom_cursor_source_retains_file_toggle(self, cfg, isolated_seen_sources):
         import tomllib

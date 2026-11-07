@@ -412,7 +412,7 @@ class MmPushEvent(TypedDict, total=False):
     git_capture: GitCaptureState
 
 
-ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok", "cursor", "muse", "agy")
+ACTIVE_HOST_READERS: tuple[str, ...] = ("codex", "grok", "muse", "agy")
 """The live host readers, in the fixed order ``events_tail`` invokes them.
 
 This is the reader universe. Adding a reader means appending here AND to
@@ -420,13 +420,14 @@ This is the reader universe. Adding a reader means appending here AND to
 tuple (the writer) and from the gate. Do not serialize this constant into a
 row; see ``make_host_usage_snapshot``.
 
-``grok`` (Grok Build, Track 110A) sits at its pre-v1.11.8 slot, right after
-``codex``, not at the end: mm 1.11.7 and earlier wrote retained rows whose
-``token_sources`` list ``grok`` before ``cursor`` (``fb0e12d^`` had
-``("codex", "grok", "cursor", "muse")``), and
-``aggregator._token_sources_subsequence`` rejects a known name out of order."""
+``grok`` (Grok Build, Track 110A) stays at index 1, right after ``codex``:
+retained rows from mm 1.11.7 and earlier list ``grok`` before ``cursor``
+(``fb0e12d^`` had ``("codex", "grok", "cursor", "muse")``). After Track 115A,
+``cursor`` is a retired name: the aggregator keeps it on retained rows as an
+unknown name and does not advance the known-name position for it
+(``aggregator._token_sources_subsequence``)."""
 
-HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "cursor", "muse", "agy")
+HOST_USAGE_TOKEN_SOURCES: tuple[str, ...] = ("codex", "grok", "muse", "agy")
 """Live host-reader names, in the same order ``events_tail`` invokes them.
 
 A row's ``token_sources`` is the per-push SUBSET that actually contributed,

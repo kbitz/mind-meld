@@ -537,11 +537,6 @@ def _isolate_host_usage(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_codex_host, "CACHE_PATH", root / "host-tokens.json")
     monkeypatch.setattr(_grok_host, "GROK_SESSIONS_PATH", root / "grok" / "sessions")
     monkeypatch.setattr(_grok_host, "CACHE_PATH", root / "grok-host-tokens.json")
-    monkeypatch.setattr(_host_usage, "CURSOR_STORE_PATH", root / "cursor-sdk-store")
-    monkeypatch.setattr(_host_usage, "CURSOR_CACHE_PATH", root / "cursor-host-tokens.json")
-    monkeypatch.setattr(_host_usage, "CURSOR_SPOOL_PATH", root / "cursor-standalone-spool.jsonl")
-    monkeypatch.setattr(_host_usage, "CURSOR_HOOK_CONFIG_PATH", root / "cursor-hooks.json")
-    monkeypatch.setattr(_host_usage, "CURSOR_CLI_CONFIG_PATH", root / "cursor-cli-config.json")
     monkeypatch.setattr(_host_usage, "MUSE_SESSIONS_PATH", root / "muse" / "sessions")
     monkeypatch.setattr(_host_usage, "MUSE_CACHE_PATH", root / "muse-host-tokens.json")
     monkeypatch.setattr(
@@ -982,23 +977,3 @@ def ss_harness(monkeypatch) -> _SecretStorageHarness:
     harness.install(monkeypatch)
     monkeypatch.delenv("MINDMELD_PASSPHRASE", raising=False)
     return harness
-
-
-@pytest.fixture
-def cursor_store(tmp_path, monkeypatch):
-    """Real redacted 67A census, kept inside its reader retention window."""
-    import shutil
-    from datetime import datetime, timezone
-    from pathlib import Path
-
-    from mind_meld import host_usage
-
-    class CensusClock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 9, 23, 18, tzinfo=timezone.utc).astimezone(tz)
-
-    monkeypatch.setattr(host_usage, "datetime", CensusClock)
-    root = host_usage.CURSOR_STORE_PATH
-    shutil.copytree(Path(__file__).parent / "fixtures/host_sessions/cursor", root)
-    return root

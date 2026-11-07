@@ -4570,7 +4570,7 @@ class TestHostSnapshotAcceptance:
         assert result.reason == "naive_timestamp"
 
     def test_token_sources_out_of_order_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("muse", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4803,16 +4803,16 @@ class TestHostSnapshotWireCompat:
         assert "mm diag" in rendered
 
     def test_known_name_out_of_order_still_rejected(self):
-        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("muse", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
 
     def test_unknown_name_does_not_mask_known_name_out_of_order(self):
-        """A naive continue-on-unknown would accept this by dropping cursor's
+        """A naive continue-on-unknown would accept this by dropping muse's
         successor check. Membership is tested before the positional scan,
         and an unknown name must not advance the known-name cursor."""
-        ev = _host_event("dev-a", self.TS, token_sources=("cursor", "opencode", "codex"))
+        ev = _host_event("dev-a", self.TS, token_sources=("muse", "opencode", "codex"))
         result = aggregator._accept_host_usage_snapshot(ev)
         assert isinstance(result, aggregator.HostReject)
         assert result.reason == "invalid_token_sources"
@@ -4984,11 +4984,11 @@ class TestCoverageAcceptor:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=datetime(2026, 4, 28, 12, tzinfo=timezone.utc),
-            degraded_sources=("cursor",),
+            degraded_sources=("muse",),
             partial_days={"codex": ["2026-04-20"]},
         )
         accepted = _accepted(json.loads(json.dumps(row)))
-        assert accepted.degraded == ("cursor",)
+        assert accepted.degraded == ("muse",)
         assert accepted.degraded_reason is None
         assert accepted.partial == ("codex",)
         assert accepted.partial_reason is None
@@ -5212,14 +5212,14 @@ class TestHostSnapshotNoWindowSpend:
             token_sources=("codex",),
             hosts={"codex": {"2026-04-20": _usage(4)}},
             ts=ts,
-            degraded_sources=("cursor",),
+            degraded_sources=("muse",),
         )
         accepted_plain = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(plain)))
         accepted_degraded = aggregator._accept_host_usage_snapshot(json.loads(json.dumps(degraded)))
         assert isinstance(accepted_plain, aggregator._AcceptedHostRow)
         assert isinstance(accepted_degraded, aggregator._AcceptedHostRow)
         assert accepted_plain.tie_key == accepted_degraded.tie_key
-        assert accepted_degraded.degraded == ("cursor",)
+        assert accepted_degraded.degraded == ("muse",)
         assert aggregator._sibling_tie_key(accepted_plain) != aggregator._sibling_tie_key(
             accepted_degraded
         )

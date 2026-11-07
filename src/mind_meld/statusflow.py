@@ -1376,8 +1376,8 @@ def _host_usage_blocker(
     reason = state.get("last_reason")
     if reason is None:
         return "none"
-    cached = state.get("runs_cached") if reader == "cursor" else state.get("files_cached")
-    on_disk = None if reader == "cursor" else state.get("files_on_disk")
+    cached = state.get("files_cached")
+    on_disk = state.get("files_on_disk")
     evidence = events_tail.HostReadEvidence(
         last_deadline_allotted_ms=state.get("last_deadline_allotted_ms"),
         last_complete_ms=state.get("last_complete_ms"),
@@ -2328,7 +2328,6 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
         else None
     )
     grok_consented = _config_module.grok_usage_consented(cfg) if config_state == "ok" else None
-    # Track 114A stops reporting Cursor; Track 115A removes the registry entry.
     host_usage_state = {
         name: (
             _host_usage.muse_usage_diag(count_logs=muse_consented is True)
@@ -2340,7 +2339,6 @@ def _collect_diag_state(backend: LocalBackend) -> dict:
             else host_registry.reader_usage_diag(name)
         )
         for name in host_registry.HOST_READER_DIAGS
-        if name != "cursor"
     }
     host_usage_state["muse"]["consented"] = muse_consented
     host_usage_state["agy"]["consented"] = agy_consented

@@ -476,14 +476,6 @@ REVIEWED = {
             "os.open(str(path), os.O_RDONLY)",
         ],
     ),
-    "host_usage.py:_read_cursor_sqlite": (
-        "read-only",
-        "read-only SQLite URI (mode=ro); its RuntimeError guard refuses the real Conductor store",
-        [
-            "sqlite3.connect(uri, uri=True, isolation_level=None, "
-            "timeout=min(remaining, _CURSOR_SQLITE_BUSY_S))",
-        ],
-    ),
     "host_usage.py:_read_single_agy_db": (
         "read-only",
         "read-only SQLite URI (mode=ro); its RuntimeError guard refuses the real Antigravity store",
@@ -505,38 +497,6 @@ REVIEWED = {
         "home under pytest (Track 102A)",
         [
             "sqlite3.connect(uri, uri=True, isolation_level=None, timeout=min(remaining, 1.0))",
-        ],
-    ),
-    "host_usage.py:_read_cursor_file": (
-        *_READ_ONLY,
-        [
-            "os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)",
-        ],
-    ),
-    "host_usage.py:_sqlite_day": (
-        *_READ_ONLY,
-        [
-            "datetime.strptime(text, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=timezone.utc)",
-        ],
-    ),
-    "host_usage.py:read_cursor_usage": (
-        "residual",
-        "isolated Cursor spool cleanup; raw unlink residual",
-        [
-            "_cursor_spool_merging_path().unlink()",
-        ],
-    ),
-    "host_usage.py:_read_bounded_bytes": (
-        *_READ_ONLY,
-        [
-            "os.open(path, flags)",
-        ],
-    ),
-    "host_usage.py:_take_cursor_spool": (
-        "residual",
-        "isolated Cursor spool recovery; raw unlink residual",
-        [
-            "merging.unlink()",
         ],
     ),
     "host_usage.py:_read_muse_file": (

@@ -30,13 +30,6 @@ class HostReaderDiag:
 HOST_READER_DIAGS = {
     "codex": HostReaderDiag("codex_usage_diag", "state", "ready", "codex", owner=codex_host),
     "grok": HostReaderDiag("grok_usage_diag", "complete_once", True, "Grok Build", owner=grok_host),
-    "cursor": HostReaderDiag(
-        "cursor_usage_diag",
-        "complete_once",
-        True,
-        "Cursor (Conductor + enrolled CLI)",
-        owner=host_usage,
-    ),
     "muse": HostReaderDiag("muse_usage_diag", "complete_once", True, "muse", owner=host_usage),
     "agy": HostReaderDiag("agy_usage_diag", "complete_once", True, "Antigravity", owner=host_usage),
 }
@@ -68,9 +61,8 @@ def warm_host_cache_inline(
 
     The result is the retry: attended capture publishes it through the usual
     reader failure boundary, without a second short-budget read. Autopush
-    never calls this helper. Codex/Grok Build/Muse can resume partial progress across
-    pushes; Cursor reparses rewritten files and need not converge under the
-    same short allowance.
+    never calls this helper. Codex, Grok Build, Muse and Antigravity resume
+    partial progress across pushes.
     ``reader`` selects a name in ``events_tail.WARMABLE_HOST_READERS``.
 
     2026-09-17, device 3a6c7dc9, Python 3.14.7: an empty-cache parse of
@@ -83,8 +75,6 @@ def warm_host_cache_inline(
         return codex_host.read_codex_usage(root, deadline=deadline)
     if reader == "grok":
         return grok_host.read_grok_usage(root, deadline=deadline, consented=True)
-    if reader == "cursor":
-        return host_usage.read_cursor_usage(root, deadline=deadline, consented=True)
     if reader == "muse":
         return host_usage.read_muse_usage(root, deadline=deadline, consented=True)
     if reader == "agy":
