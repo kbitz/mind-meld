@@ -44,17 +44,21 @@ here by hand, use the H3 form.
 
 ## Unprocessed
 
-### [review:files=src/mind_meld/skills/retro_fleet/aggregator.py|tests/test_retro_usage_presentation.py] Test gap: complete Grok row with cache writes suppresses ceiling
-- **Test gap:** no demonstrated defect; filed under `test-gaps=record`.
-- **Description:** The existing Cursor cache-write test also marks its reader partial, so it does not independently exercise the cache-write guard in `_long_context_cause` with complete coverage.
-- **Hypothesis (untested):** Extend the presentation tests with positive `cache_create`, `incomplete=False`, and no override or a bundled-equal override; assert the model detail remains and `at most` is absent.
-- **Upstream severity:** INFORMATIONAL
-- **Found in:** `src/mind_meld/skills/retro_fleet/aggregator.py:_long_context_cause`
-- **Evidence:** Static coverage audit traced the short-circuit condition and existing tests; no failure was reproduced and current code contains the required guard.
-- **Context:** Filed by `/review-and-prep` for Track 111B on branch `mmm/2b29138f` at `de88a627` (2026-11-06). Revisit when a Track next touches the listed files.
-- **Effort:** ? (user triages in /roadmap)
-
 ## Drain records
+
+### Roadmap record pass — 2026-11-06 (Group 111 shipped)
+
+Run by `/project-spec` and `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 decisions. Verification baseline: `065e9cb` (v1.12.18). Tracks 111B (v1.12.17, PR #276) and 111A (v1.12.18, PR #277) were recorded as shipped against their PRs' completion matrices, 111A against its scope as amended by the owner; Group 111 is retired. docs/SPEC.md records the two owner decisions from 111A's live checks (topics only; no-origin and non-repository scopes arrive elsewhere as inert copies). **1 inbox item drained: 0 placed, 1 deferred, 0 killed, 0 discharged.** One Future entry was discharged by Track 111B. Authored-false rate, counting the Future discharge: 1 / (0 + 1) = 100%.
+
+| Item | Disposition |
+|---|---|
+| Test gap: complete Grok row with cache writes suppresses ceiling | defer: no remaining Track touches the aggregator; re-checked at `065e9cb`, the only cache-write cases are partial |
+| Future: Test gap: Grok cause lead under a local pricing override | discharge@`533df89`: its premise (a model with an active override has no detail) is false since Track 111B, and `test_long_context_cause_lead_under_local_pricing_override_111b` pins the lead under an override |
+| Brief: sync gstack-extend's run history (owner, 2026-11-06, "yes make it true") | defer: waits for gstack-extend's per-host `analytics/stage-runs-<host>.jsonl` release |
+
+**Future:** 2 entries added and 1 discharged (38 → 39); 5 older entries still lack a revisit trigger, and the trigger migration was not run. Two Grok test-gap entries whose `_touches:` triggers name files Track 111A changed outside its card (`resolveflow.py` with `tests/test_conflict_copy.py`; `sourceflow.py` with `tests/test_source_toggle.py`) stay deferred: 111A added no test for either gap, and no remaining Track covers their paths.
+
+**Version:** documentation-only change; no bump.
 
 ### Roadmap record pass — 2026-11-05 (Grok Tracks shipped)
 
