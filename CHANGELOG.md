@@ -2,6 +2,22 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.18] - 2026-11-06
+
+mm syncs Grok Build memory between machines for consolidated topics.
+
+### Added
+
+- mm syncs Grok Build memory between machines.
+- Grok memory sync is limited to consolidated topics.
+
+### Fixed
+
+- mm refuses inventory for a vanished Grok workspace.
+- Excluded Grok conflict discovery stays in place.
+- Opted-out Grok memory stays isolated during discovery.
+- A Grok snapshot stays confined to its workspace.
+
 ## [1.12.17] - 2026-11-06
 
 mm applies Grok pricing overrides across aliases and keeps their floor prices.
