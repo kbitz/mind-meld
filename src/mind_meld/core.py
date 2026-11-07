@@ -2920,9 +2920,11 @@ def _migrate_config_core(*, yes: bool, dry_run: bool) -> bool:
         if any(name == "gstack-extend" for name, _p, _r in include_diffs):
             console.print(
                 "\nFor gstack-extend: each machine's run history "
-                "(analytics/stage-runs/*.jsonl, one file per machine) starts syncing; "
+                "(analytics/stage-runs/*.jsonl, one file per machine) is allowed; "
                 "the historical analytics/stage-runs.jsonl and the rest of analytics/ "
-                "stay on this machine."
+                "stay on this machine. Publishing still requires matching include_dirs "
+                "or include_files. Other configured paths outside this allowlist stop "
+                "syncing; local files are kept. Edit include_patterns to retain custom paths."
             )
         console.print("\n[bold]Recommended include_patterns updates:[/bold]")
         for name, patterns, replaced in include_diffs:

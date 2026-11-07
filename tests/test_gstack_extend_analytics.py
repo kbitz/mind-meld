@@ -139,6 +139,10 @@ class TestGstackExtendMigration113A:
         dry = runner.invoke(app, ["migrate-config", "--dry-run"])
         assert dry.exit_code == 0, dry.output
         assert "+ include_dirs:" not in dry.output
+        dry_flat = " ".join(dry.output.split())
+        assert "starts syncing" not in dry_flat
+        assert "Other configured paths outside this allowlist stop syncing" in dry_flat
+        assert "Publishing still requires matching include_dirs or include_files" in dry_flat
 
         applied = runner.invoke(app, ["migrate-config", "--yes"])
         assert applied.exit_code == 0, applied.output
