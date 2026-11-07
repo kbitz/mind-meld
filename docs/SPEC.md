@@ -34,6 +34,10 @@ unchanged. Amended 2026-11-06 by `/project-spec` with two owner decisions
 from Track 111A's live checks on Grok Build 1.0.77: only Grok memory topics
 sync, and a repository with no `origin` or a folder that is not a repository
 reaches other machines only as an inert copy. Target, outcomes and release
+policy are unchanged. Amended again 2026-11-06 by `/project-spec` to defer
+the opt-in `mmm` source (owner: "hm, don't love that -- let's future this
+card and move on to the next one"): mm does not carry `~/.mmm/`, and the
+factory moves with mmm-factory's own tool; target, outcomes and release
 policy are unchanged. Earlier text lives in `git log -- docs/SPEC.md`.
 
 ## Purpose
@@ -44,9 +48,7 @@ several machines:
    server and nobody else able to read it: Claude Code memory, Codex skills,
    Grok Build memory and skills, Muse memory, Antigravity skills and rules,
    and gstack project state. Finish on one machine and `mm push`;
-   start on another and `mm pull`, and it is all there. With
-   `mm enable-source mmm`, it also carries mmm-factory's durable state so
-   the factory can stop on one Mac and start on another.
+   start on another and `mm pull`, and it is all there.
 2. **Usage reporting.** `retro-fleet` reports what the agents did across every
    machine as one fleet: tokens, cost, active days and commits from Claude
    Code, Codex, Grok Build, Cursor, Muse and Antigravity.
@@ -69,7 +71,7 @@ Syncthing.
 | Muse | `memory/`, after `mm enable-source muse` | Tokens and cost, as its own `muse` family |
 | Antigravity | `skills/`, `rules/`, `AGENTS.md`, `GEMINI.md` under `~/.gemini/config` | Tokens and cost from conversation steps, as its own `agy` family |
 | gstack, gstack-extend | Project state, analytics and retros; generator output and machine-local files (factory manager files, evidence ledgers, browser profiles, pair-review resume copies) excluded | — |
-| mmm-factory | Durable factory state under `~/.mmm/`, after `mm enable-source mmm` ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
+| mmm-factory | Nothing: `~/.mmm/` stays local, and the factory moves between hosts with mmm-factory's own tool ([factory handover](#factory-handover)) | — (factory workers' tokens count under their host's row) |
 | mm | Its activity log, which `retro-fleet` reads | Git commits per machine |
 
 Intentional gaps: Cursor runs through an ACP front-end such as Paseo report
@@ -262,20 +264,6 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   Code no planned change touches stays where it is; there is no one-shot
   rewrite. While working and reviewing, run only the tests whose recorded
   coverage reaches the changed code; the full suite runs in CI before merge.
-- <a id="factory-handover"></a>Factory handover (owner, 2026-10-29). The
-  opt-in `mmm` source carries mmm-factory's durable state so the owner can
-  stop the factory on one Mac and start it on another; managers never run on
-  two Macs at once. It syncs items with their plans and cards, the run
-  ledgers, and for each project its `manager.toml`, passport, handoff note
-  and its archives, the manager's launch cards (`cards/`) and the briefs and
-  evidence its handoff notes point at (`briefs/`). It never syncs locks
-  (`*.lock`), the watcher's owner, status and watch files, fields files,
-  worker-ID lists, usage caches, SQLite stores, `traces/`, `release/`,
-  `review-compare/`, `~/.mmm/picker-jev/`, `~/.local/share/mmm-factory/` or
-  `~/.config/mmm-factory/`. Item records hold raw worker text (stored
-  handoffs, final messages and poll output), so that text reaches every
-  machine with the source enabled. In-flight work does not transfer: finish
-  or ship every item before handing over; the README says both.
 - A bootstrap script installs Python, pipx, mm and the Syncthing package on
   macOS and Arch-based Linux, stops with instructions if Homebrew is missing
   on macOS, and ships before 2.0.0.
@@ -316,6 +304,17 @@ store. Design: [cross-model memory](designs/cross-model-memory.md).
   that other machines need.
 - Cross-model memory before 2.0, and writing into any host's native memory
   store at any time. O9 starts after the cutover.
+- <a id="factory-handover"></a>Carrying mmm-factory's durable state
+  (`~/.mmm/`) through mm, for backup or for handover between hosts (owner,
+  2026-11-06: "hm, don't love that -- let's future this card and move on to
+  the next one"). The opt-in `mmm` source planned on 2026-10-29 would
+  re-upload a whole multi-megabyte ledger on each change and grow the
+  Syncthing folder until `mm gc`. mm does not carry `~/.mmm/` today; the
+  factory moves with mmm-factory's own tool (`migrate-home`,
+  `mmm-manager launch --from`), which needs no mm. Revisit when the owner
+  asks again for an off-machine backup or handover of the factory home, or
+  mmm-factory's own move tool cannot carry the factory between hosts; the
+  planned card and its findings wait in [Future](roadmap-future.md).
 - Concurrent factory managers on two Macs, and moving in-flight factory
   work. Revisit when mmm-factory supports concurrent managers.
 - Usage for Cursor run through ACP front-ends such as Paseo. Revisit when
