@@ -46,6 +46,42 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap regeneration — 2026-11-07 (Cursor removed, history scrub before 2.0, Future cleanup)
+
+Run by `/project-spec` and a full `/roadmap` regeneration from manager Ephesus 9's brief on Karl's 2026-11-06 and 2026-11-07 decisions. Verification baseline: `fd23f25` (v1.12.20). docs/SPEC.md removes Cursor support completely ("cursor -- removed totally, don't worry about old usage, as if we never supported") and makes the git-history hostname scrub a 2.0.0 release condition and a precondition for making the repository public again ("that scrub is required before we go public again and hit 2.0 fyi"). Track 93A (PR #280, v1.12.20) is recorded as shipped against its completion matrix and Group 93 is retired; Track 112A was already recorded. In Progress and Current Plan were regenerated whole: Track 113A (gstack-extend per-host run history, the manager's launch card), Tracks 114A to 116A (Cursor removal, serialized because each deletes what the next one's callers use), and Track 117A (the owner-gated history rewrite, last). Track 96A moved to Future: SPEC says O9 starts after the cutover, which has not run. **Inbox empty: 0 drained. 5 brief and leftover plan items: 1 recorded as shipped, 3 placed, 1 deferred, 0 killed, 0 discharged. Future re-derived: 41 entries, 11 killed, 5 placed (two of them the gstack-extend and history-scrub entries the brief also names), 25 kept, and 1 added, so 41 → 26.** Authored-false rate: 0 / (6 + 0) = 0%.
+
+| Item | Disposition |
+|---|---|
+| Track 93A: Write the cutover runbook and the Syncthing documentation | shipped: receipt added (PR #280, `fd23f25`, 17 of 17 VERIFIED) |
+| Track 96A: Qualify cross-model memory in isolated homes | defer: SPEC plans O9 after 2.0 and says "O9 starts after the cutover"; card kept in Future; revisit when the owner completes the cutover and PROGRESS.md records O1 to O4 on Syncthing |
+| Brief: sync gstack-extend's per-host run history (Karl, 2026-11-06, "yes make it true"; trigger met by gstack-extend v0.71.0) | place: Track 113A with the launch card's text, replacing the Future entry |
+| Brief: remove Cursor completely (Karl, 2026-11-06 and 2026-11-07) | place: Tracks 114A (commands, hook command and consent), 115A (the usage reader) and 116A (git-root prober, pricing provenance, retro-fleet) |
+| Brief: the git-history hostname scrub gates 2.0.0 and going public (Karl, 2026-11-07) | place: Track 117A, owner-gated, replacing the Future entry |
+
+**Future kills (11):**
+
+| Entry | Reason |
+|---|---|
+| Reader-agnostic quarantine and drift classification (Track 46B) | unobserved; reversible (host records stay on disk and are re-read once a reader is fixed); its premise names the retired Grok reader (`_GROK_STOPS` and `_classify_grok_update` are gone at `fd23f25`); reopen if a drift manifests |
+| `[retro] codex_host_usage` knob | no SPEC outcome needs it and no demand was ever observed; AGENTS.md's planning rule asks for demonstrated demand before a removal control |
+| `mm diag` lists repo-local `GIT_*` variables (E6) | no SPEC outcome needs it; no confusion report since 2026-09-09, and `mm recapture --dry-run` already names the repository and the reason |
+| Establish Cursor's memory capability and portability contract | Cursor support removed (SPEC, 2026-11-07); docs/designs/memory-continuity.md's link to it becomes plain text |
+| Revisit Cursor auto/composer classification only after observed use | Cursor support removed |
+| Read Conductor's tmpdir or env-override Cursor stores | Cursor support removed |
+| Overdue counterless-FINISHED tracking and an SQLite authorizer for the Cursor adapter | Cursor support removed; Track 115A deletes the adapter |
+| Report the largest synced subtrees in 2.0 status/diag | no SPEC outcome needs sizes: O6's shipped growth warning names the subtree when a push adds many files, and the cutover runbook copies the store whole without a re-measure |
+| Per-Track factory cost in `retro-fleet` | no SPEC outcome needs it (factory workers' tokens already count under their host's row), and the `~/.mmm` source it was filed with is itself deferred; reopen on the owner's request |
+| Deflake the load-sensitive tests in `tests/test_self_update.py` | reversible: a serial rerun passes, as AGENTS.md's load rule says; no CI failure recorded |
+| `test_xdist_record_and_selection` times out under heavy load | reversible: a rerun clears it, as AGENTS.md's load rule says; never seen at low load |
+
+**Future placements (5):** "Sync gstack-extend's run history" → Track 113A; "Rewrite git history to remove the owner's machine hostnames" → Track 117A; the recorded test gaps "reconfigure reenrolls disabled Grok" → Track 114A, "Grok diagnostic unknown-state branches" → Track 115A and "complete Grok row with cache writes suppresses ceiling" → Track 116A, each because that Track's `_touches:` cover the gap's paths.
+
+**Future kept (25):** mm-managed Syncthing and per-path conflict policies (SPEC non-goals with their triggers); the opt-in mmm source (SPEC's factory-handover non-goal cites it); the O8.2 usage-suffix reconciliation (the quiet-output checkpoint, which 2.0.0's O8 condition meets); implementing cross-model memory (O9); the Antigravity `dropped: unsupported` reader (O7.4's acceptance run); `mm status` hanging in an agent session (observed once; O8.4); guarding raw unlinks (irreversible loss of the owner's files if it manifests); bootstrap hardening (the cutover's Linux joins are its first real use); retro-fleet by identity category (its old trigger, Track 104A shipping, was met; Karl kept it with a new trigger, "2 - a": revisit when he asks for a work or personal view in a retro); and 15 recorded test gaps whose `_touches:` triggers no new Track meets.
+
+**Future:** 41 → 26 entries; all 5 entries that lacked a revisit trigger were killed, so none lacks one now.
+
+**Version:** documentation-only change; no bump. The amended release policy adds a 2.0.0 condition and no checkpoint; no `## Acceptance` entry is added.
+
 ### Roadmap record pass — 2026-11-07 (Track 112A shipped)
 
 Run by `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 and 2026-11-07 decisions. Verification baseline: `ffbfaa7` (v1.12.19). Track 112A (scrub the owner's machine hostnames from the public repository) ran outside the plan on the owner's instruction ("yes, they need to be scrubbed -- that's not great") and is recorded as shipped against PR #281's completion matrix; it keeps its ID, the first free integer after shipped history, and Group 112 is retired. The release script refuses a head that already changes CHANGELOG.md, so PR #281 deferred its CHANGELOG half; this record PR applies the manager's saved CHANGELOG patch, which changes only old entries and adds none. The owner then made the repository private and deferred a history rewrite. The current plan is unchanged: Track 93A, then 96A. **Inbox empty: 0 drained. 1 brief item: 0 placed, 1 deferred, 0 killed, 0 discharged.** Authored-false rate: 0 / (0 + 0), no placements.
