@@ -46,6 +46,18 @@ here by hand, use the H3 form.
 
 ## Drain records
 
+### Roadmap record pass — 2026-11-07 (Track 112A shipped)
+
+Run by `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 and 2026-11-07 decisions. Verification baseline: `ffbfaa7` (v1.12.19). Track 112A (scrub the owner's machine hostnames from the public repository) ran outside the plan on the owner's instruction ("yes, they need to be scrubbed -- that's not great") and is recorded as shipped against PR #281's completion matrix; it keeps its ID, the first free integer after shipped history, and Group 112 is retired. The release script refuses a head that already changes CHANGELOG.md, so PR #281 deferred its CHANGELOG half; this record PR applies the manager's saved CHANGELOG patch, which changes only old entries and adds none. The owner then made the repository private and deferred a history rewrite. The current plan is unchanged: Track 93A, then 96A. **Inbox empty: 0 drained. 1 brief item: 0 placed, 1 deferred, 0 killed, 0 discharged.** Authored-false rate: 0 / (0 + 0), no placements.
+
+| Item | Disposition |
+|---|---|
+| Brief: rewrite git history to remove the owner's machine hostnames (owner, 2026-11-07, "don't have to do it now though") | defer: needs a force-push to the protected `main` and the owner's explicit go at the time; revisit when the owner asks for it, or before the repository is made public again |
+
+**Future:** 1 entry added (40 → 41); 5 older entries still lack a revisit trigger, and the trigger migration was not run.
+
+**Version:** documentation-only change; no bump.
+
 ### Roadmap record pass — 2026-11-06 (Track 95A to Future)
 
 Run by `/project-spec` and `/roadmap` from manager Ephesus 9's brief on Karl's 2026-11-06 decision about Track 95A, the opt-in `mmm` source for factory handover (factory item 83c9d3b4). Shown the plan's costs, the owner decided: "hm, don't love that -- let's future this card and move on to the next one". No code was written. Verification baseline: `da9620d` (v1.12.18). docs/SPEC.md now says mm does not carry `~/.mmm/` and the factory moves with mmm-factory's own tool; its "Factory handover" constraint moved to Non-goals with a revisit trigger, keeping the `factory-handover` anchor. Group 95 is removed from the plan; Track 93A drops Track 95A from `_blocked-by:` and is next, then 96A. **Inbox empty: 0 drained. 1 leftover plan item: 0 placed, 1 deferred, 0 killed, 0 discharged.** Authored-false rate: 0 / (0 + 0), no placements.
