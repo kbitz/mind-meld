@@ -24,11 +24,15 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
-**Cursor usage reader removed (Track 115A):** the Cursor usage reader, Conductor SQLite
-reader, standalone spool helpers, `cursor` reader registry entries, and the Cursor SQLite
-documentation anchor are removed. Older published `host-usage-snapshot` rows that
-name `cursor` in `token_sources`, `partial_sources`, or `degraded_sources` still render
-as-is in `mm retro-fleet` with no migration.
+**Cursor usage reader removed (Track 115A):** mm no longer reads Cursor usage.
+Its private leftovers under `~/.config/mind-meld/` — `cursor-host-tokens.json`,
+`cursor-host-tokens.json.lock`, `cursor-standalone-spool.jsonl` and
+`cursor-standalone-spool.jsonl.merging` — are no longer read and can be deleted.
+Older published `host-usage-snapshot` rows that name `cursor` remain unchanged,
+with no migration; `mm retro-fleet` labels a failed or incomplete Cursor read on
+those rows `unknown/retired reader`. A last attended-attempt record written by
+mm 1.12.21 or older that names Cursor shows `record corrupt — the next attended
+mm push rewrites it` until that push.
 
 **Cursor CLI wrapper, hook and usage consent removed (Track 114A):** `mm cursor-agent`,
 `mm capture-cursor-usage`, and the `cursor` source alias for `mm enable-source` /

@@ -2785,15 +2785,33 @@ def test_disabled_grok_source_overrides_the_retro_bit_in_status(tmp_path, monkey
 
 def test_grok_diag_reports_unreadable_config_consent_as_unknown(tmp_path, monkeypatch):
     _storage, cfg_path, _backend = _setup(tmp_path, monkeypatch)
+    _enable_grok(tmp_path, via="source")
     cfg_path.write_text("not = [valid toml\n", encoding="utf-8")
+    calls: list[bool] = []
+    real_grok_diag = grok_host.grok_usage_diag
+
+    def spy_grok_diag(*, count_logs: bool = False):
+        calls.append(count_logs)
+        return real_grok_diag(count_logs=count_logs)
+
+    monkeypatch.setattr(grok_host, "grok_usage_diag", spy_grok_diag)
     diag_res = runner.invoke(app, ["diag"])
     assert diag_res.exit_code == 0, diag_res.output
+    assert calls == [False]
     diag = " ".join(diag_res.output.split())
     assert "grok consented: (config unreadable)" in diag
     assert "grok consented: yes" not in diag
-    payload = json.loads(runner.invoke(app, ["diag", "--json"]).stdout)
+    assert "grok prior successful scan: yes" not in diag
+    assert "a prior scan completed successfully" not in diag
+
+    calls.clear()
+    json_res = runner.invoke(app, ["diag", "--json"])
+    assert json_res.exit_code == 0, json_res.output
+    assert calls == [False]
+    payload = json.loads(json_res.stdout)
     assert payload["config"]["state"].startswith("error:")
     assert payload["host_usage"]["grok"]["consented"] is None
+    assert payload["host_usage"]["grok"]["complete_once"] is False
 
 
 def test_grok_unreadable_cache_reports_unreadable_in_status_and_diag(tmp_path, monkeypatch):
@@ -2857,13 +2875,15 @@ def test_grok_deadline_refreshes_inventory_count_in_status_and_diag(
 
     status = " ".join(runner.invoke(app, ["status"]).output.split())
     assert calls == [False, True]
-    assert "Grok Build usage capture: enabled — " in status
+    assert (
+        "Grok Build usage capture: enabled — host-usage snapshot skipped (grok deadline)" in status
+    )
     assert "Grok Build usage capture: enabled; a prior scan completed successfully" not in status
     assert f"5 of {expected_disk} sessions cached" in status
 
     calls.clear()
     diag = " ".join(runner.invoke(app, ["diag"]).output.split())
     assert calls == [True]
-    assert "grok usage read blocker:" in diag
+    assert "grok usage read blocker: host-usage snapshot skipped (grok deadline)" in diag
     assert f"5 of {expected_disk} sessions cached" in diag
     assert f"grok sessions cached: 5 of {expected_disk}" in diag

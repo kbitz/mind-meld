@@ -290,8 +290,8 @@ settling, a cached rollout idle at least 24h is a stat-only cache hit (no
 helpers (`_day_dir_date`, `_settle_date_eligible`, `_stat_digest`,
 `SETTLE_DAYS`/`SETTLE_IDLE_NS`) live in `host_usage.py`; Muse's own freeze
 code is untouched. The memo is additive on cache `version` 1, with no
-`CACHE_VERSION` bump: that constant is shared with the Muse and
-Antigravity caches, so a bump would cold-start all three, and `settled_days` and
+`CACHE_VERSION` bump: that constant is shared with the Grok Build, Muse and
+Antigravity caches, so a bump would cold-start all four, and `settled_days` and
 earlier fields were added the same way. An older mm rejects slim entries and
 re-parses a settled group's files, then writes records without a memo; the next
 current read memoizes them again from full entries without a re-parse.
@@ -2347,10 +2347,11 @@ Pinned by `test_uncacheable_rollouts_do_not_block_convergence`.
 
 **The warm is gated on a FAILED bounded attempt AND on the failing reader.**
 `warm_host_cache_inline(reader=...)` reads names in `WARMABLE_HOST_READERS`
-(today Codex, Grok and Muse). Only `deadline` qualifies, including a reader whose
-first invocation was prevented by sweep expiry. A healthy empty scan never
-warms. Autopush supplies no warm callback. Codex, Grok and Muse continue to converge
-through partial commits.
+(today Codex, Grok Build, Muse and Antigravity). Only `deadline` qualifies,
+including a reader whose first invocation was prevented by sweep expiry.
+A healthy empty scan never warms. Autopush supplies no warm callback.
+All four readers continue to converge
+through partial cache commits.
 
 `warm_host_cache` is the attended-notice hook only.
 `_capture_host_snapshot` runs each retry inside a singleton

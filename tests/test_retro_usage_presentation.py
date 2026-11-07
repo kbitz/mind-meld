@@ -1,9 +1,11 @@
 """One synthetic corpus for Track 58A's before/after and acceptance views."""
 
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mind_meld import events
 from mind_meld import token_usage as tu
 from mind_meld.skills.retro_fleet import aggregator as agg
 
@@ -410,33 +412,28 @@ def test_retro_fleet_renders_legacy_cursor_rows_unchanged():
     since = datetime(2026, 9, 21, tzinfo=timezone.utc)
     until = datetime(2026, 9, 23, 23, tzinfo=timezone.utc)
     day = "2026-09-23"
+    counters = usage(input=13_345_729, cache_read=12_505_856, output=40_186)
     rows = [
-        {
-            "v": 2,
-            "type": "host-usage-snapshot",
-            "device": "dev-a",
-            "ts": until.isoformat(),
-            "hosts": {"grok": {day: usage(100)}},
-            "active_days": [day],
-            "tokens_by_day": {day: day_bucket({"grok-4.7-fast": usage(100)})},
-            "token_sources": ["cursor"],
-            "partial_sources": ["cursor"],
-            "counter_semantics": "disjoint-v1",
-        },
-        {
-            "v": 2,
-            "type": "host-usage-snapshot",
-            "device": "dev-b",
-            "ts": until.isoformat(),
-            "hosts": {"codex": {day: usage(50)}},
-            "active_days": [day],
-            "tokens_by_day": {day: day_bucket({"gpt-6-astra": usage(50)})},
-            "token_sources": ["codex"],
-            "degraded_sources": ["cursor"],
-            "counter_semantics": "disjoint-v1",
-        },
+        events.make_host_usage_snapshot(
+            device="dev-a",
+            ts=until,
+            hosts={"grok": {day: counters}},
+            tokens_by_day={day: day_bucket({"grok-4.7-fast": counters})},
+            token_sources=("cursor",),
+            usage_days={"cursor": [day]},
+        ),
+        events.make_host_usage_snapshot(
+            device="dev-b",
+            ts=until,
+            hosts={"codex": {day: usage(50)}},
+            tokens_by_day={day: day_bucket({"gpt-6-astra": usage(50)})},
+            token_sources=("codex",),
+            usage_days={"codex": [day]},
+        ),
     ]
-    before = json.loads(json.dumps(rows))
+    # Current writers filter retired readers from coverage fields; retained rows do not.
+    rows[1]["degraded_sources"] = ["cursor"]
+    before = copy.deepcopy(rows)
     ids = frozenset({"dev-a", "dev-b"})
     data = agg.RetroData(window_days=7, since=since, until=until)
     data.fleet = agg.FleetState(
@@ -447,14 +444,24 @@ def test_retro_fleet_renders_legacy_cursor_rows_unchanged():
     data.host_inventory = agg.aggregate_host_usage(
         rows, since=since, until=until, registered_ids=ids
     )
-    assert rows == before
+    assert set(data.host_inventory.by_device) == ids
     assert data.host_inventory.by_device["dev-a"].consulted == ("cursor",)
-    assert data.host_inventory.by_device["dev-a"].partial == ("cursor",)
-    assert row(data, "grok").tokens == 100
     assert data.host_inventory.by_device["dev-b"].degraded == ("cursor",)
+    grok = row(data, "grok")
+    assert grok.tokens == 25_891_771
+    total, is_floor = agg._agent_row_cost(grok)
+    assert is_floor is True
+    expected = (13_345_729 * 4 + 12_505_856 * 1 + 40_186 * 12) / 1_000_000
+    assert abs(total - expected) < 1e-9
+    assert agg._reader_display_labels(("cursor",)) == (agg._UNKNOWN_READER_LABEL,)
     out = agg.format_retro(data)
+    assert "≥" in out
+    assert "grok-4.7-fast" in out
+    assert "per-request context tier" in out
     assert "unknown/retired reader" in out
+    assert "Cursor (Conductor + enrolled CLI)" not in out
     assert entry(out, "cost_floor")
+    assert rows == before
 
 
 def _single_grok_retro_111b(models):

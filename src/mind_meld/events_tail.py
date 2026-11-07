@@ -671,13 +671,12 @@ def _merge_host_usage_maps(
 ) -> None:
     """Add a completed reader's buckets to ``target`` without aliasing it.
 
-    A (family, UTC day) collision is possible whenever two readers classify
-    into the same canonical family — historically Codex and OpenCode both
-    landed GPT in ``codex``. No two live readers share a family today, and the
-    merge still sums TOKEN_FIELDS at every level: a shallow map update would
-    silently drop whichever reader landed first, and a synthetic or future
-    reader that shares a family would regress without this. The same collision
-    rule applies one level down on model id.
+    A (family, UTC day) collision is possible because classification follows
+    model IDs, not reader identity: different readers can share a canonical
+    family, including ``other`` for unrecognized models. The merge sums
+    TOKEN_FIELDS at every level so a shallow map update cannot silently drop
+    whichever reader landed first. The same collision rule applies one level
+    down on model id.
     """
     for family, days in source.items():
         target_days = target.setdefault(family, {})
