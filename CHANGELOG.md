@@ -2,6 +2,14 @@
 
 All notable changes to Mind Meld will be documented in this file.
 
+## [1.12.19] - 2026-11-07
+
+Documentation and examples use generic machine names.
+
+### Changed
+
+- Documentation and examples use generic machine names.
+
 ## [1.12.18] - 2026-11-06
 
 mm syncs Grok Build memory between machines for consolidated topics.

@@ -228,7 +228,7 @@ Run from manager Ephesus 7's brief on Karl's "go". 14 inbox items: **5 placed, 0
 | Deflake load-sensitive tests | file → inbox (Karl undecided) |
 | `_local_state_parent_prefix` tidy and its two untested branches | file → inbox |
 | `mm status` says `mm update` for an unsupported format on the newest release | place → Track 91B; observed. The reader's own failure is filed as a separate P1 item |
-| Addendum: a kept conflict is reported as applied on every pull, and existing conflicts do not clear under the no-base fallback | place → Track 91A; observed on 3771H-kb-ms by the manager, code path read at `2a101d6`. Decision on the card: the owner runs `mm resolve` on existing ones |
+| Addendum: a kept conflict is reported as applied on every pull, and existing conflicts do not clear under the no-base fallback | place → Track 91A; observed on one of the owner's Macs by the manager, code path read at `2a101d6`. Decision on the card: the owner runs `mm resolve` on existing ones |
 
 **Also placed from this run's `git grep` of Track 8x and 9x:** Track 91A owes the `state.db` move-aside recovery README assigns it and `tests/test_pullflow.py`'s characterization tests; Track 92A owes the peer manifest and attended waiting count `sync.md` assigns it; Track 93A drops the soak wording at README's Linux section and `ci.yml`. References to shipped Tracks in code, tests and invariant docs are history and stay, and the `init-devices.md` line naming Track 80A goes with Track 93A's retirement of the old IDs there, moved from Track 91A to keep it inside the file cap.
 

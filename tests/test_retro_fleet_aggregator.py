@@ -7227,12 +7227,12 @@ class TestUnifiedAgents:
         data = self._data(
             [_snap("3a6c7dc9", self.UNTIL, families={"codex": {"2026-04-22": _usage(1)}})],
             known_ids=("3a6c7dc9", "0356e8c7"),
-            names={"3a6c7dc9": "kb-mbp", "0356e8c7": "3771H-kb-ms"},
+            names={"3a6c7dc9": "mac-a", "0356e8c7": "mac-b"},
         )
         out = aggregator.format_retro(data)
         entry = _health_entry(out, "fleet_incomplete")
         assert entry is not None
-        assert "3771H-kb-ms" in entry["detail"]
+        assert "mac-b" in entry["detail"]
         assert "0356e8c7" not in entry["detail"]
 
     def test_unknown_device_falls_back_to_the_short_id(self):
@@ -7245,7 +7245,7 @@ class TestUnifiedAgents:
         )
         assert aggregator.device_label("dev-a", aggregator.device_labels(fleet)) == "dev-a"
 
-    @pytest.mark.parametrize("names", [("kb-mbp", "kb-mbp"), ("kb|mbp", "kb`mbp")])
+    @pytest.mark.parametrize("names", [("mac-a", "mac-a"), ("mac|a", "mac`a")])
     def test_colliding_display_hostnames_keep_device_identity(self, names):
         devices = ("3a6c7dc9-full", "0356e8c7-full")
         data = self._data([], known_ids=devices, names=dict(zip(devices, names)))
@@ -7912,12 +7912,12 @@ class TestAgentEconomics:
     def test_missing_model_detail_names_machine_reason_and_attended_remedy(self, dropped):
         extra = {"tokens_by_day": "not-a-map"} if dropped else {}
         data = _econ_data([_host_event("dev-a", self.TS, hosts=_priced_hosts(), extra=extra)])
-        data.fleet.devices_known_list = [{"device_id": "dev-a", "device_name": "kb-mbp"}]
+        data.fleet.devices_known_list = [{"device_id": "dev-a", "device_name": "mac-a"}]
         snap = data.host_inventory.by_device["dev-a"]
         assert snap.detail_reason == ("unsupported_schema" if dropped else None)
         issue = _health_entry(aggregator.format_retro(data), "cost_unavailable")
         cause = next(c for c in issue["causes"] if "per-model host tokens" in c)
-        assert "kb-mbp" in cause
+        assert "mac-a" in cause
         assert ("unsupported_schema" if dropped else "absent") in cause
         assert aggregator.ATTENDED_USAGE_MIN_VERSION in cause
         assert "mm --version" in cause
