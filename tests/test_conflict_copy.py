@@ -875,13 +875,37 @@ class TestFindConflictFilesGrokType:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"conflict")
             expected.add(target)
-        excluded_sidecars = [
-            root / "sessions" / "chat.sync-conflict-20260421-143055-devA1234.md",
+        for memory_sidecar in (
+            # Orphan sidecar (no canonical note.md on disk) must still be listed.
             root
             / "memory-v2"
             / "global"
             / "topics"
             / "note.sync-conflict-20260421-143055-devA1234.md",
+            root
+            / "memory-v2"
+            / "workspaces"
+            / "ws-1"
+            / "observations"
+            / "_inbox"
+            / "obs.sync-conflict-20260421-143055-devA1234.md",
+        ):
+            memory_sidecar.parent.mkdir(parents=True, exist_ok=True)
+            memory_sidecar.write_bytes(b"conflict")
+            expected.add(memory_sidecar)
+        excluded_sidecars = [
+            root / "sessions" / "chat.sync-conflict-20260421-143055-devA1234.md",
+            root
+            / "memory-v2"
+            / "workspaces"
+            / "ws-1"
+            / "archive"
+            / "old.sync-conflict-20260421-143055-devA1234.md",
+            root
+            / "memory-v2"
+            / "global"
+            / "topics"
+            / "bad.sync-conflict-20260421-143055-devA1234.txt",
             root / "plugins" / "p.sync-conflict-20260421-143055-devA1234.md",
         ]
         for sidecar_path in excluded_sidecars:

@@ -24,6 +24,22 @@ Not on PyPI — install straight from GitHub. The `@latest` ref is a branch the 
 
 ## Upgrading
 
+**Grok Build `memory-v2/` sync (Track 111A):** on machines where the `grok` source is
+enabled (`mm enable-source grok`), `mm` now syncs Grok Build's Markdown memory topics
+and pending observations under `~/.grok/memory-v2/global/{topics,observations/_inbox}/**/*.md`
+and `~/.grok/memory-v2/workspaces/*/{topics,observations/_inbox}/**/*.md` in addition to
+`skills/`, `commands/`, and `rules/`. Derived indexes (`MEMORY.md`), SQLite databases
+(`index.sqlite`, `memory_state.sqlite` and `-shm`/`-wal`), `archive/`, `observations/`
+outside `_inbox/`, and `.retired-stores/` remain local on each machine. No config
+migration is required: the first `mm push` after upgrading publishes existing `memory-v2/`
+topics and pending observations and writes `~/.grok/memory-v2/.mind-meld-anchor` without
+minting deletion tombstones. If two machines already have different files at the same
+`memory-v2/.../topics/<name>.md` path before their first sync, `mm pull` preserves local
+bytes and writes a `.sync-conflict-*` sidecar; run `mm conflicts` and `mm resolve` to pick
+a winner. To keep syncing Grok `skills/`, `commands/`, `rules/`, and usage while opting out
+of `memory-v2/` sync on a machine, add `"memory-v2/*"` to `exclude_patterns` on the
+`name = "grok"` entry in `~/.config/mind-meld/config.toml` (see [Grok Build](#grok-build)).
+
 **Git-root discovery finishes across attended pushes (Track 106A):** a cold Codex and
 Cursor index used to need more pushes than discovery's 100 ms attended budget could
 give, so the retro cursor stayed held. An attended `mm push` now gives discovery
@@ -682,9 +698,48 @@ and publication lines in `mm status` provide that evidence. For a blocker, see
 
 ### Grok Build
 
-`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, and `rules/` only, and records consent for Grok usage capture (`grok_usage_consented`). Sessions, `memory-v2/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, or `rules/` exists; `mm init` asks with a default of N, and `mm reconfigure-sources` defaults to N unless an explicit Grok source is already enabled. `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
+`mm enable-source grok` syncs `~/.grok` `skills/`, `commands/`, `rules/`, and `memory-v2/` topic and pending-observation Markdown files (`memory-v2/global/{topics,observations/_inbox}/**/*.md` and `memory-v2/workspaces/*/{topics,observations/_inbox}/**/*.md`), and records consent for Grok usage capture (`grok_usage_consented`). Sessions, SQLite indexes (`index.sqlite`, `memory_state.sqlite` and `-shm`/`-wal`), `MEMORY.md`, `archive/`, `observations/` outside `_inbox/`, `.retired-stores/`, `config.toml`, `auth.json`, `trusted_folders.toml`, `plugins/`, `hooks/`, and logs stay local and are never synced. Grok is never enabled automatically, even when `~/.grok/skills/`, `commands/`, `rules/`, or `memory-v2/` exists; `mm init` asks with a default of N, and `mm reconfigure-sources` defaults to N unless an explicit Grok source is already enabled. `mm enable-source grok` clears `"grok"` from `disabled_sources` on machines that ran `mm migrate-config` after v1.11.8. Grok Build reads `~/.claude/skills`, so mm keeps no separate Grok skill link. Run `mm disable-source grok` to turn it off.
 
 Consent also lets `mm push` read completed turn token totals from `~/.grok/sessions/*/*/usage.json` and nothing else: it never opens `updates.jsonl`, `chat_history.jsonl` or any other session file, so prompts and responses never leave the Mac. The same consent is the config verdict `[retro] grok_host_usage = true`; `mm disable-source grok` stops the reading, and an unconsented `~/.grok` is never opened. Runs that Paseo makes through Grok Build (ACP) are counted. A session without a `usage.json` (Paseo leaves some with only a one- or two-line `updates.jsonl`) counts as zero and costs one `lstat`. Only the existing encrypted aggregate is published: family, model, UTC day and token counters, never cost ticks, paths or session ids. In the fleet retro, Grok Build tokens join the `Grok` row next to Cursor's Grok runs and are priced from the Grok 4.7 rates. Grok Build does not document `usage.json` as a stable contract, so a format change makes this reader alone fail closed: `mm status` and `mm diag` name the broken record format with the fix (`mm update`, or `mm disable-source grok` to stop retrying), `mm push` still exits 0, and the other readers keep publishing. Unknown extra fields in `usage.json` are ignored.
+
+#### Grok memory across machines
+
+Grok Build's memory system (`~/.grok/memory-v2/`) is opt-in in Grok Build itself. Because `~/.grok/config.toml` is never synced, enable memory in `~/.grok/config.toml` on **each** machine that should read and write Grok memory:
+
+```toml
+# ~/.grok/config.toml (on each machine)
+[memory]
+enabled = true
+```
+
+Then enable the `grok` source and sync across your machines:
+
+```bash
+# On Machine A
+mm enable-source grok
+mm push
+
+# On Machine B
+mm enable-source grok
+mm pull
+ls ~/.grok/memory-v2/global/topics/
+ls ~/.grok/memory-v2/workspaces/*/topics/
+```
+
+How Grok memory sync works:
+
+- **Workspace scope names.** For git repositories with an `origin` remote, Grok Build names each workspace scope under `memory-v2/workspaces/<scope>/` after the normalized `origin` remote and branch (for example `github.com-org-repo-main`), so checkouts at different local paths on macOS and Linux share the same workspace memory automatically. Repositories without an `origin` remote (or non-git directories) use a path-derived `local-*` scope name that only matches on machines with the same local path.
+- **Dream consolidation and `_inbox/`.** Pending observations in `observations/_inbox/*.md` sync so another machine can consolidate them if you switch machines before Dream runs. When Dream consolidates `_inbox/*.md` into `topics/*.md` and moves the raw observation to `archive/`, the next `mm push` publishes the updated `topics/*.md` and a deletion record for the archived `_inbox/*.md` file (moving identical copies on peers into `~/.config/mind-meld/deleted/` for 30 days). If Dream archives a pulled `_inbox/*.md` file locally before this machine has pushed, a subsequent `mm pull` keeps it archived rather than re-creating it.
+- **First-sync collisions.** If two machines already have different files at the same `memory-v2/.../topics/<name>.md` path before their first sync, `mm pull` keeps your local file and writes a `.sync-conflict-*` copy; review and merge them with `mm conflicts` and `mm resolve`.
+- **Opting out of memory sync only.** To keep syncing Grok `skills/`, `commands/`, `rules/` and usage capture while keeping `memory-v2/` local on a machine, add `"memory-v2/*"` to `exclude_patterns` on the `grok` source in `~/.config/mind-meld/config.toml`:
+
+  ```toml
+  [[sync.sources]]
+  name = "grok"
+  path = "~/.grok"
+  type = "grok"
+  exclude_patterns = ["skills/gstack*", "skills/browse", "skills/gstack", "memory-v2/*"]
+  ```
 
 ### Muse
 
@@ -1490,6 +1545,16 @@ cp -n "$copies/$source_name/$copy_path" "$source_dir/$origin_path"
 mm push
 ```
 
+For a Grok memory topic or pending observation (where the source path is identical across machines), restore it into `~/.grok` on the machine that deleted it and push:
+
+```bash
+copies="$HOME/mm-recovery-20261101-181530-3fa9"
+rel_path="memory-v2/global/topics/conventions.md"  # or memory-v2/workspaces/<scope>/topics/<file>.md
+mkdir -p "$(dirname "$HOME/.grok/$rel_path")"
+cp -n "$copies/grok/$rel_path" "$HOME/.grok/$rel_path"
+mm push
+```
+
 **The copy is on a machine that followed the deletion.** The origin removed the file
 itself and holds no copy. Find the folder on any machine that printed the line
 (`mm log --action deleted`), transfer it to the origin by any means, then run the commands
@@ -1534,6 +1599,15 @@ and review receipts remain in scope when they match the gstack allowlist
 (document types inside the artifact directories). Browser profiles and the
 machine-local files named under [Syncing gstack](#syncing-gstack) stay on
 this Mac.
+
+### Grok memory doesn't reach my other machine
+
+Check these four places:
+
+1. **Grok Build's own setting on each machine.** `~/.grok/config.toml` is local to each machine and never synced. Confirm `[memory]` `enabled = true` is set in `~/.grok/config.toml` on **both** machines; without it Grok Build neither writes nor reads `~/.grok/memory-v2/`.
+2. **The `grok` source is enabled on both machines.** Run `mm sources` on each machine and confirm `grok` is `Enabled = yes` (if not, run `mm enable-source grok`), and check that `"memory-v2/*"` is not in `exclude_patterns`.
+3. **Workspace scope name matches.** Under `memory-v2/workspaces/<scope>/`, Grok Build names `<scope>` from the repository's `origin` remote URL and branch (for example `github.com-org-repo-main`). If a repository has no `origin` remote (a `local-*` scope), or the two machines use different `origin` URLs or branches, their workspace scope directories differ; set a matching `git remote set-url origin <url>` and branch, or put cross-repo notes in `memory-v2/global/topics/`.
+4. **Only `topics/*.md` and `observations/_inbox/*.md` sync.** Derived `MEMORY.md` files, `index.sqlite`, `memory_state.sqlite`, and `archive/` stay local by design; Grok Build refreshes its local index and SQLite state when it runs with `[memory] enabled = true`.
 
 ### Another mm operation is running
 

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from mind_meld import conflictmtime
+from mind_meld import conflictmtime, manifest
 from mind_meld.manifest import (
     hash_file,
     mtime_from_manifest,
@@ -370,7 +370,15 @@ def _held_missing(
             return False
     except (OverflowError, OSError, ValueError):
         return False
-    return own_lists or entry.deleted_by is not None
+    return (
+        own_lists
+        or entry.deleted_by is not None
+        or (
+            source == "grok"
+            and manifest.is_grok_inbox_path(path)
+            and ledger.base(peer_id, source, path) == remote_sha
+        )
+    )
 
 
 def decide(

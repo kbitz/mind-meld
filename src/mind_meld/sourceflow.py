@@ -247,6 +247,19 @@ def disable_source(name: str, *, force: bool = False) -> None:
     console.print(f"[dim]Run 'mm enable-source {name}' to re-enable.[/dim]")
 
 
+def _print_grok_enable_notes() -> None:
+    console.print(
+        "[dim]Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ "
+        "topics and pending observations. "
+        "Sessions, SQLite indexes, MEMORY.md, settings, credentials, "
+        "plugins and hooks are not synced.[/dim]"
+    )
+    console.print(
+        "[dim]Grok keeps memory off by default; turn it on on each machine with "
+        "\\[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1).[/dim]"
+    )
+
+
 def enable_source(name: str, *, force: bool = False) -> None:
     """Enable a sync source on this device."""
     config = core._get_config(read_only=False)
@@ -298,6 +311,8 @@ def enable_source(name: str, *, force: bool = False) -> None:
         # Already enabled and configured — no-op message.
         if name in explicit_names or (not has_explicit_sources and name in default_names):
             console.print(f"[dim]Source '{name}' is already enabled.[/dim]")
+            if name == "grok":
+                _print_grok_enable_notes()
             return
 
     if updates:
@@ -307,10 +322,7 @@ def enable_source(name: str, *, force: bool = False) -> None:
     _record_seen([name])
     console.print(f"[green]Enabled source '{name}' on this device.[/green]")
     if name == "grok":
-        console.print(
-            "[dim]Syncs ~/.grok skills/, commands/, and rules/ only. "
-            "Sessions, memory, settings, credentials, plugins and hooks are not synced.[/dim]"
-        )
+        _print_grok_enable_notes()
         console.print("[dim]Run 'mm disable-source grok' to turn this off.[/dim]")
     elif name == "muse":
         console.print(

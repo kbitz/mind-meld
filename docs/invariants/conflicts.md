@@ -7,7 +7,7 @@ Read BEFORE editing any of these:
 - `src/mind_meld/pullplan.py` — `decide` / `Ledger` / `parse_from` / `PullPlanner`
 - `src/mind_meld/core.py` — `_filter_excluded_paths`
 - `src/mind_meld/resolveflow.py` — `_resolve_interactive_loop` / `_record_resolution` / `_find_conflict_files` / `_migrate_pre_inversion_conflict` / `_ensure_inversion_marker` / `_inversion_marker_path` / `_synced_scan_dirs` / `_promote_target_path` / `_promote_conflict_file` / `_promote_target_will_sync`
-- `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename`
+- `src/mind_meld/manifest.py` — `_canonical_for_conflict` / `parse_conflict_device_short` / `parse_conflict_created_at` / `is_conflict_filename` / `is_pre_inversion_conflict_filename` / `is_v1_conflict_filename` / `grok_memory_path_allowed` / `is_grok_inbox_path` / `grok_path_allowed` / `grok_memory_scan_dirs`
 - `src/mind_meld/conflictmtime.py` — `_bump_canonical_mtime_post_resolve` / `_stat_mtime_btime`
 - `src/mind_meld/conflictdiff.py` — `render_prompt` / `render_banner` / `render_capped_diff` / `count_divergent_lines`
 - `src/mind_meld/merge.py` — `lcs_merge` / `merge_file` / `should_merge` / `is_line_index` / `index_link` / `merge_lines` / `drop_missing_links` / `merge_jsonl` / `_extract_ts`
@@ -59,7 +59,7 @@ First match wins. `older` compares file mtimes; an unparseable mtime is never ol
 
 | # | Condition | Outcome |
 |---|---|---|
-| 1 | local file missing | `held`: leave it missing, silently, when the remote sha is in ancestry, its mtime is not newer than when that row was recorded, the scan root's anchor is unchanged against this machine's own published manifest, this peer is not the origin of a deletion this machine followed, and this machine's own manifest lists the path or names it in a record (or the row carries `deleted_by`). Otherwise `write` |
+| 1 | local file missing | `held`: leave it missing, silently, when the remote sha is in ancestry, its mtime is not newer than when that row was recorded, the scan root's anchor is unchanged against this machine's own published manifest, this peer is not the origin of a deletion this machine followed, and this machine's own manifest lists the path or names it in a record (or the row carries `deleted_by`, or, for a Grok `observations/_inbox/` path (`manifest.is_grok_inbox_path`), `ledger.base(peer_id, "grok", path) == remote_sha` so an observation Dream archived locally after pull is not re-created before this machine pushes). Otherwise `write` |
 | 2 | local == remote | `matched` (settles the remote as the base) |
 | 3 | remote == this peer's base | `skip`: no download, no union, no prompt; except when local is clean, its sha is in `remote.from`, and the remote mtime is strictly newer than local (continue to row 4) |
 | 4 | clean, and the local sha is in `remote.from` | fast-forward |

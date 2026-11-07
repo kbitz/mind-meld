@@ -1370,16 +1370,46 @@ names to skip on this device only (config.toml is per-machine, never synced).
 `get_sources()` filters by name after resolution and before the path-existence
 filter. Retired source names (`RETIRED_SOURCE_NAMES = frozenset({"opencode"})`)
 are dropped silently so old configs and peer manifests continue working without
-minting deletion tombstones. The default `grok` source (`type: "grok"`, Track 109A)
-has its own walker shape (`skills/`, `commands/`, and `rules/` hardcoded at
+minting deletion tombstones. The default `grok` source (`type: "grok"`, Tracks 109A and 111A)
+has its own walker shape (`skills/`, `commands/`, `rules/`, and the allowlisted
+`memory-v2/` subtrees `memory-v2/global/{topics,observations/_inbox}/**/*.md` and
+`memory-v2/workspaces/*/{topics,observations/_inbox}/**/*.md` hardcoded at
 `~/.grok`, refusing child links, hard links and every other path under `~/.grok`,
 with `GROK_EXCLUDE_PATTERNS` applied on push and pull) and never auto-activates:
 neither a legacy config without explicit `[[sync.sources]]` nor `_retain_prior_default_sources`
 re-selects it. `mm init` defaults it to N; `mm reconfigure-sources` defaults it
-to N unless an explicit Grok source is already enabled.
+to N unless an explicit Grok source is already enabled. `config.grok_customization_dirs_exist`
+checks only `skills/`, `commands/`, and `rules/` (ignoring `memory-v2/`, which Grok Build
+can create on its own when memory is enabled) so detection labels do not treat an
+auto-created `memory-v2/` tree as customization presence.
 Only `mm enable-source grok` (which also clears `"grok"` from `disabled_sources`),
 or an explicit "y" at `mm init` / `mm reconfigure-sources`, or a pre-v1.11.8
 config that still carries an enabled `grok` block selects file sync.
+`scan_roots` for `type: "grok"` returns `["skills", "commands", "rules", "memory-v2"]`,
+so `~/.grok/memory-v2/.mind-meld-anchor` anchors deletion propagation across all
+`memory-v2/` scopes without creating `~/.grok/memory-v2/` when absent.
+`manifest.grok_memory_path_allowed` admits only lowercase `.md` files (excluding
+`.sync-conflict-*` sidecars) under `memory-v2/global/{topics,observations/_inbox}/`
+and `memory-v2/workspaces/<scope>/{topics,observations/_inbox}/` (where `<scope>`
+is a single non-dot component and not `.retired-stores`). Everything else under
+`memory-v2/` stays local: `MEMORY.md` (derived index rebuilt by Grok Build after
+consolidation; syncing or line-union merging it would re-introduce stale links),
+`index.sqlite` and `memory_state.sqlite` (plus `-shm`/`-wal` sidecars; binary SQLite
+stores and Dream lock/watermark state), `archive/` (Dream-archived raw observations),
+`observations/` outside `_inbox/`, and `.retired-stores/`. On the consumer side,
+`core._filter_excluded_paths` filters every `grok` source file and tombstone through
+`manifest.grok_path_allowed` (including when `exclude_map` is empty), so a peer
+manifest cannot write or tombstone-delete paths outside `skills/`, `commands/`,
+`rules/`, or the `memory-v2/` allowlist. In `pullplan._held_missing` (row 1), a
+missing Grok `observations/_inbox/` path (`manifest.is_grok_inbox_path`) whose
+`ledger.base(peer_id, "grok", path) == remote_sha` and whose `memory-v2` anchor is
+valid is treated as `held` even when `own_lists` is False, preventing a peer pull
+from resurrecting an observation that local Dream archived before this machine pushed.
+`resolveflow._synced_scan_dirs` includes `manifest.grok_memory_scan_dirs(base_path)`
+and `resolveflow._find_conflict_files` checks `manifest.grok_memory_path_allowed` on
+the derived canonical path (`manifest._canonical_for_conflict`) so `mm conflicts`
+and `mm resolve` surface conflict sidecars in allowlisted `memory-v2/` subtrees
+(including orphan sidecars whose canonical `.md` file was removed).
 `config.grok_usage_consented` reports usage consent from that enabled block or
 the legacy `[retro] grok_host_usage = true` bit. The legacy bit never selects
 file sync and is never written or migrated; `disabled_sources = ["grok"]`

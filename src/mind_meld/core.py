@@ -36,6 +36,7 @@ from mind_meld import (
     upgrade,
 )
 from mind_meld import config as _config_module
+from mind_meld import manifest as _manifest_module
 from mind_meld.config import (
     MM_INTERNAL_SOURCE_NAMES,
     SourceResolution,
@@ -718,6 +719,8 @@ def _filter_excluded_paths(
     def _excluded(src_name: str, rel_path: str, *, tombstone: bool = False) -> bool:
         if _conflict_shaped(rel_path):
             return True
+        if src_name == "grok" and not _manifest_module.grok_path_allowed(rel_path):
+            return True
         if _unplaceable(src_name, rel_path) and not (
             tombstone and _kept_deletion(src_name, rel_path)
         ):
@@ -734,7 +737,11 @@ def _filter_excluded_paths(
         has_conflict = False
         for src_name, src_data in manifest.get("sources", {}).items():
             for rel in src_data.get("files", {}):
-                if _conflict_shaped(rel) or _unplaceable(src_name, rel):
+                if (
+                    _conflict_shaped(rel)
+                    or _unplaceable(src_name, rel)
+                    or (src_name == "grok" and not _manifest_module.grok_path_allowed(rel))
+                ):
                     has_conflict = True
                     break
             if has_conflict:
@@ -748,6 +755,7 @@ def _filter_excluded_paths(
                 if isinstance(rel, str) and (
                     _conflict_shaped(rel)
                     or (_unplaceable(tomb_src, rel) and not _kept_deletion(tomb_src, rel))
+                    or (tomb_src == "grok" and not _manifest_module.grok_path_allowed(rel))
                 ):
                     has_conflict = True
                     break

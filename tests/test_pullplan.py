@@ -54,9 +54,11 @@ V0, V1, V2, V3 = (digest(f"version {n}".encode()) for n in range(4))
 P0, P1, P2, P3 = (pullplan.prefix(v) for v in (V0, V1, V2, V3))
 
 
-def make_ledger(*, bases=None, rows=(), readable=True, untracked=frozenset(), path=REL):
+def make_ledger(
+    *, bases=None, rows=(), readable=True, untracked=frozenset(), path=REL, src: str = SRC
+):
     """A ledger holding `rows` for `path`: (sha prefix, kind, time_us, deleted_by)."""
-    seen = {(SRC, path): list(rows)} if rows else {}
+    seen = {(src, path): list(rows)} if rows else {}
     return pullplan.Ledger(
         bases or {},
         seen,
@@ -74,8 +76,8 @@ def seen(prefix_: str, when: int = NOW_US, by: str | None = None):
     return (prefix_, pullplan.SEEN, when, by)
 
 
-def base(sha: str, peer: str = PEER, path: str = REL) -> dict:
-    return {(peer, SRC, path): sha}
+def base(sha: str, peer: str = PEER, path: str = REL, src: str = SRC) -> dict:
+    return {(peer, src, path): sha}
 
 
 def local(sha: str | None = None, mtime: datetime | None = None, exists: bool = True):
@@ -94,13 +96,14 @@ def verdict(
     remote_from=(),
     peer=PEER,
     path=REL,
+    src: str = SRC,
     own_lists=False,
     anchor_ok=False,
 ):
     return pullplan.decide(
         ledger,
         peer,
-        SRC,
+        src,
         path,
         here,
         remote_sha,
@@ -526,6 +529,91 @@ def test_row1_needs_the_own_manifest_to_list_the_path_or_a_stamp():
     assert verdict(stamped, MISSING, V0, own_lists=False, anchor_ok=True) == "held"
 
 
+def test_row1_grok_inbox_pulled_and_dream_archived_before_push_is_held():
+    inbox_path = "memory-v2/workspaces/proj/observations/_inbox/obs.md"
+    topic_path = "memory-v2/workspaces/proj/topics/note.md"
+    ledger = make_ledger(
+        bases=base(V0, path=inbox_path, src="grok"),
+        rows=[held(P0)],
+        path=inbox_path,
+        src="grok",
+    )
+    # Grok inbox file pulled from PEER (base == V0) and archived by Dream before B pushed
+    # (own_lists=False): held, not re-created.
+    assert (
+        verdict(
+            ledger,
+            MISSING,
+            V0,
+            path=inbox_path,
+            src="grok",
+            own_lists=False,
+            anchor_ok=True,
+        )
+        == "held"
+    )
+    # Scan-root anchor mismatch still forces write.
+    assert (
+        verdict(
+            ledger,
+            MISSING,
+            V0,
+            path=inbox_path,
+            src="grok",
+            own_lists=False,
+            anchor_ok=False,
+        )
+        == "write"
+    )
+    # Strictly newer remote mtime (explicit re-creation on origin) still writes.
+    assert (
+        verdict(
+            ledger,
+            MISSING,
+            V0,
+            path=inbox_path,
+            src="grok",
+            own_lists=False,
+            anchor_ok=True,
+            remote_mtime=FRESH,
+        )
+        == "write"
+    )
+    # A different peer without a matching base still writes.
+    assert (
+        verdict(
+            ledger,
+            MISSING,
+            V0,
+            peer=OTHER,
+            path=inbox_path,
+            src="grok",
+            own_lists=False,
+            anchor_ok=True,
+        )
+        == "write"
+    )
+    # Non-inbox topic paths keep the standard own_lists requirement.
+    topic_ledger = make_ledger(
+        bases=base(V0, path=topic_path, src="grok"),
+        rows=[held(P0)],
+        path=topic_path,
+        src="grok",
+    )
+    assert (
+        verdict(
+            topic_ledger,
+            MISSING,
+            V0,
+            path=topic_path,
+            src="grok",
+            own_lists=False,
+            anchor_ok=True,
+        )
+        == "write"
+    )
+
+
 def test_row1_writes_when_the_scan_root_changed():
     ledger = make_ledger(rows=[held(P0)])
     assert verdict(ledger, MISSING, V0, own_lists=True, anchor_ok=False) == "write"
@@ -766,9 +854,10 @@ class Machine:
     `_ApplyReporter` does for the outcome the verdict leads to.
     """
 
-    def __init__(self, ident: str, rel: str = REL):
+    def __init__(self, ident: str, rel: str = REL, src: str = SRC):
         self.id = ident * 8
         self.rel = rel
+        self.src = src
         self.ledger = pullplan.Ledger(now_us=NOW_US)
         self.data: bytes | None = None
         self.mtime: datetime | None = None
@@ -792,8 +881,8 @@ class Machine:
     def push(self) -> None:
         assert self.data is not None and self.mtime is not None
         info = {"sha256": self.sha, "mtime": self.mtime.isoformat()}
-        manifest = {"sources": {SRC: {"files": {self.rel: info}}}}
-        prior = {"sources": {SRC: {"files": {self.rel: self.pub}}}} if self.pub else None
+        manifest = {"sources": {self.src: {"files": {self.rel: info}}}}
+        prior = {"sources": {self.src: {"files": {self.rel: self.pub}}}} if self.pub else None
         core.stamp_ancestry(manifest, prior, self.ledger)
         core.record_published(self.ledger, manifest)
         self.pub, self.pub_data, self.lists = info, self.data, True
@@ -807,7 +896,7 @@ class Machine:
         word = pullplan.decide(
             self.ledger,
             peer.id,
-            SRC,
+            self.src,
             self.rel,
             here,
             remote["sha256"],
@@ -819,11 +908,11 @@ class Machine:
         if word in ("write", "fast-forward"):
             self.data, self.mtime = peer.pub_data, remote_mtime
             self.ledger.settle(
-                peer.id, SRC, self.rel, remote["sha256"], ancestors=pullplan.parse_from(remote)
+                peer.id, self.src, self.rel, remote["sha256"], ancestors=pullplan.parse_from(remote)
             )
         elif word == "matched":
             self.ledger.settle(
-                peer.id, SRC, self.rel, remote["sha256"], ancestors=pullplan.parse_from(remote)
+                peer.id, self.src, self.rel, remote["sha256"], ancestors=pullplan.parse_from(remote)
             )
         elif word == "older":
             self.older.append(peer.pub_data)
@@ -837,13 +926,17 @@ class Machine:
             merged = merge_file(self.rel, self.data, peer.pub_data)
             if merged == self.data:
                 self.ledger.settle(
-                    peer.id, SRC, self.rel, remote["sha256"], ancestors=pullplan.parse_from(remote)
+                    peer.id,
+                    self.src,
+                    self.rel,
+                    remote["sha256"],
+                    ancestors=pullplan.parse_from(remote),
                 )
                 return "union"
             self.data, self.mtime = merged, NOW
             self.ledger.settle(
                 peer.id,
-                SRC,
+                self.src,
                 self.rel,
                 remote["sha256"],
                 also_hold=(local_sha,),
@@ -855,7 +948,7 @@ class Machine:
         self.conflicts.append(peer.pub_data)
         self.ledger.settle(
             peer.id,
-            SRC,
+            self.src,
             self.rel,
             remote["sha256"],
             hold=False,
@@ -864,16 +957,18 @@ class Machine:
         return "conflict"
 
 
-def fleet(letters: str, rel: str = REL, v0: bytes = b"x\ny\n") -> dict[str, Machine]:
+def fleet(
+    letters: str, rel: str = REL, v0: bytes = b"x\ny\n", src: str = SRC
+) -> dict[str, Machine]:
     """Machines that all hold `v0`, have published it and have synced it with each other."""
-    machines = {letter: Machine(letter, rel) for letter in letters}
+    machines = {letter: Machine(letter, rel, src) for letter in letters}
     for m in machines.values():
         m.edit(v0, hours(1))
         m.push()
     for a in machines.values():
         for b in machines.values():
             if a is not b:
-                a.ledger.settle(b.id, SRC, rel, digest(v0))
+                a.ledger.settle(b.id, src, rel, digest(v0))
     return machines
 
 

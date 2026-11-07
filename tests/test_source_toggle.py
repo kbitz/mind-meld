@@ -208,6 +208,35 @@ class TestEnableSource:
         assert result.exit_code == 0
         assert "already enabled" in result.output
 
+    def test_enable_source_grok_prints_memory_scope_and_opt_in_note_on_first_and_repeat_enable(
+        self, cfg, isolated_seen_sources
+    ):
+        first = runner.invoke(app, ["enable-source", "grok"])
+        assert first.exit_code == 0, first.output
+        first_norm = " ".join(first.output.split())
+        assert "Enabled source 'grok' on this device." in first_norm
+        assert (
+            "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics and pending "
+            "observations." in first_norm
+        )
+        assert (
+            "Grok keeps memory off by default; turn it on on each machine with "
+            "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1)." in first_norm
+        )
+
+        repeat = runner.invoke(app, ["enable-source", "grok"])
+        assert repeat.exit_code == 0, repeat.output
+        repeat_norm = " ".join(repeat.output.split())
+        assert "Source 'grok' is already enabled." in repeat_norm
+        assert (
+            "Syncs ~/.grok skills/, commands/, rules/, and memory-v2/ topics and pending "
+            "observations." in repeat_norm
+        )
+        assert (
+            "Grok keeps memory off by default; turn it on on each machine with "
+            "[memory] enabled = true in ~/.grok/config.toml (or GROK_MEMORY=1)." in repeat_norm
+        )
+
     def test_unknown_name_strict_errors(self, cfg, isolated_seen_sources):
         result = runner.invoke(app, ["enable-source", "definitely-unknown"])
         assert result.exit_code != 0
@@ -910,7 +939,7 @@ class TestGrokSourceToggle:
         result = runner.invoke(app, ["enable-source", "grok"])
         assert result.exit_code == 0, result.output
         assert "Enabled source 'grok'" in result.output
-        assert "skills/, commands/, and rules/ only" in result.output
+        assert "skills/, commands/, rules/, and memory-v2/" in result.output
         assert "mm disable-source grok" in result.output
 
         with open(cfg, "rb") as f:

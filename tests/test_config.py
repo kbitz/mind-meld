@@ -1110,24 +1110,35 @@ class TestGetSources:
         config["sync"] = {"sources": [{"name": "old-host", "path": str(tmp_path), "type": "grok"}]}
         path = tmp_path / "config.toml"
         save_config(config, path)
-        with pytest.raises(
-            ConfigError,
-            match="type 'grok' is reserved for source name 'grok'",
-        ):
+        with pytest.raises(ConfigError) as exc_info:
             load_config(path)
+        msg = str(exc_info.value)
+        assert "[[sync.sources]] entry 'old-host' field 'type': type 'grok' is reserved" in msg
+        assert "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
+        assert "Change type to 'generic' or rename the entry to 'grok' in config.toml" in msg
+        assert msg.endswith("then re-run 'mm status'.")
 
     def test_grok_source_validation_rejects_wrong_type_and_include_overrides(self):
-        with pytest.raises(
-            ConfigError,
-            match="source 'grok' must use type 'grok'",
-        ):
+        with pytest.raises(ConfigError) as exc_info:
             _validate_sources([{"name": "grok", "path": "~/.grok", "type": "generic"}])
+        msg = str(exc_info.value)
+        assert "[[sync.sources]] entry 'grok' field 'type': source 'grok' must use" in msg
+        assert "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
+        assert "Set type = 'grok' on the 'grok' [[sync.sources]] entry in config.toml" in msg
+        assert msg.endswith("then re-run 'mm status'.")
+
         for field, val in (("include_dirs", ["skills"]), ("include_files", ["config.toml"])):
-            with pytest.raises(
-                ConfigError,
-                match="source 'grok' does not support include_dirs or include_files",
-            ):
+            with pytest.raises(ConfigError) as exc_info:
                 _validate_sources([{"name": "grok", "path": "~/.grok", "type": "grok", field: val}])
+            msg = str(exc_info.value)
+            assert f"[[sync.sources]] entry 'grok' field '{field}': source 'grok' does not" in msg
+            assert (
+                "skills/, commands/, rules/, and memory-v2/ topics and pending observations" in msg
+            )
+            assert (
+                "Remove include_dirs and include_files from the 'grok' [[sync.sources]] "
+                "entry in config.toml, then re-run 'mm status'." in msg
+            )
 
     @pytest.mark.parametrize("name", ["opencode"])
     def test_configured_sources_drops_retired_sources(self, name):
