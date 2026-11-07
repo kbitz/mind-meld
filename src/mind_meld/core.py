@@ -1297,8 +1297,8 @@ def _has_mtime_only_changes_vs_remote(
     needs broadcasting" but wrong when the user just ran `mm resolve` and
     picked (l)ocal -- ``_bump_canonical_mtime_post_resolve`` bumped the mtime
     in-place, sha256 stayed the same, and the gate would silently swallow
-    the new mtime. Result: kb-ms breaks its local conflict loop but kb-mbp
-    never sees kb-ms's authoritative claim and the fleet stays divergent.
+    the new mtime. Result: the resolving machine breaks its local conflict loop
+    but its peers never see its authoritative claim and the fleet stays divergent.
 
     **Forward-only invariant (load-bearing, Codex P2 catch).** Trips only on
     `local_mtime > remote_mtime`, NOT on `!=`. A push that downgrades the

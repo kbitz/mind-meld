@@ -494,19 +494,19 @@ class TestConflictBannerSanitization:
         # peer machine, then plaintext-synced via devices/<id>.json. A
         # malicious or confused peer can plant escapes in their own
         # device_name and have them reach every other machine that pulls.
-        evil_name = "kb-mbp\x1b]52;c;ZXZpbA==\x07"
+        evil_name = "mac-a\x1b]52;c;ZXZpbA==\x07"
         out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
         assert "\x1b]52" not in out
         assert "\x07" not in out
-        assert "kb-mbp" in out
+        assert "mac-a" in out
 
     def test_banner_strips_csi_from_device_name(self):
         from mind_meld.conflictdiff import render_banner
 
-        evil_name = "kb-mbp\x1b[2J"
+        evil_name = "mac-a\x1b[2J"
         out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
         assert "\x1b[2J" not in out
-        assert "kb-mbp" in out
+        assert "mac-a" in out
 
     def test_banner_strips_dcs_from_filename(self):
         from mind_meld.conflictdiff import render_banner
@@ -520,13 +520,13 @@ class TestConflictBannerSanitization:
         from mind_meld.conflictdiff import render_banner
 
         evil_path = f"notes{_NESTED_OSC_ST}.md"
-        evil_name = f"kb-mbp{_NESTED_OSC_BEL}"
+        evil_name = f"mac-a{_NESTED_OSC_BEL}"
         path_out = self._render(render_banner("local", evil_path, None))
         name_out = self._render(render_banner("remote", "notes.sync-conflict-X.md", evil_name))
         _assert_no_esc_or_c1(path_out)
         _assert_no_esc_or_c1(name_out)
         assert "notes" in path_out
-        assert "kb-mbp" in name_out
+        assert "mac-a" in name_out
 
 
 def _assert_printable_field(value: str) -> None:

@@ -246,11 +246,9 @@ class TestRenderBanner:
         assert "notes.md" in rendered
 
     def test_remote_side_with_peer_name(self) -> None:
-        rendered = self._render_to_str(
-            render_banner("remote", "notes.sync-conflict-X.md", "kb-mbp")
-        )
+        rendered = self._render_to_str(render_banner("remote", "notes.sync-conflict-X.md", "mac-a"))
         assert "REMOTE" in rendered
-        assert "from kb-mbp" in rendered
+        assert "from mac-a" in rendered
 
     def test_remote_side_unknown_peer(self) -> None:
         rendered = self._render_to_str(render_banner("remote", "notes.sync-conflict-X.md", None))
@@ -258,12 +256,12 @@ class TestRenderBanner:
 
     def test_remote_side_ambiguous_count(self) -> None:
         rendered = self._render_to_str(
-            render_banner("remote", "notes.sync-conflict-X.md", "kb-mbp", ambiguous_count=2)
+            render_banner("remote", "notes.sync-conflict-X.md", "mac-a", ambiguous_count=2)
         )
         assert "ambiguous" in rendered
         assert "2 peers match" in rendered
         # Ambiguous beats peer_name -- don't show a name we can't trust.
-        assert "from kb-mbp" not in rendered
+        assert "from mac-a" not in rendered
 
     def test_local_side_strips_osc52_from_path(self) -> None:
         # OSC 52 clipboard write embedded in the filename. Banner must
@@ -277,18 +275,18 @@ class TestRenderBanner:
         assert "notes" in rendered
 
     def test_remote_side_strips_csi_from_peer_name(self) -> None:
-        evil_name = "kb\x1b[2J-mbp"
+        evil_name = "mac\x1b[2J-a"
         rendered = self._render_to_str(
             render_banner("remote", "notes.sync-conflict-X.md", evil_name)
         )
         assert "\x1b[2J" not in rendered
-        assert "kb" in rendered
-        assert "mbp" in rendered
+        assert "mac" in rendered
+        assert "-a" in rendered
 
     def test_local_side_does_not_render_peer_attribution(self) -> None:
-        rendered = self._render_to_str(render_banner("local", "notes.md", "kb-mbp"))
+        rendered = self._render_to_str(render_banner("local", "notes.md", "mac-a"))
         # peer_name is irrelevant on the LOCAL side; banner ignores it.
-        assert "from kb-mbp" not in rendered
+        assert "from mac-a" not in rendered
         assert "unknown peer" not in rendered
 
     def test_nested_st_probe_has_no_esc_or_c1(self) -> None:
@@ -300,12 +298,12 @@ class TestRenderBanner:
 
         path_out = self._render_to_str(render_banner("local", f"notes{_NESTED_OSC_ST}.md", None))
         name_out = self._render_to_str(
-            render_banner("remote", "notes.sync-conflict-X.md", f"kb-mbp{_NESTED_OSC_BEL}")
+            render_banner("remote", "notes.sync-conflict-X.md", f"mac-a{_NESTED_OSC_BEL}")
         )
         _assert_no_esc_or_c1(path_out)
         _assert_no_esc_or_c1(name_out)
         assert "notes" in path_out
-        assert "kb-mbp" in name_out
+        assert "mac-a" in name_out
 
 
 class TestRenderCappedDiff:

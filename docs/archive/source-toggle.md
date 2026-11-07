@@ -72,7 +72,7 @@ unacceptable for sources with privacy implications.
 
 8. **Tombstone-suppression invariant (P0, eng review).** `disabled_sources`
    must apply at TWO consumer boundaries (mirroring the `exclude_patterns`
-   pattern from CLAUDE.md kb-mbp 2026-04-24 fix):
+   pattern from the CLAUDE.md 2026-04-24 first-pull fix):
 
    - `_push_core`: drop disabled-source entries from prior_manifest BEFORE
      `generate_tombstones`. Without this, disabling on one machine and
@@ -146,7 +146,7 @@ CONSUMER-BOUNDARY FILTER (P0 tombstone-suppression invariant)
 
   Without this filter: disable on machine A → push → tombstones for every gstack
   file → peers pull → fleet-wide gstack data loss. (Mirrors exclude_patterns
-  kb-mbp 2026-04-24 invariant; same shape, same fix.)
+  2026-04-24 first-pull invariant; same shape, same fix.)
 
 
 mm init (existing)                    mm enable-source / mm disable-source <name>
@@ -266,14 +266,14 @@ Plus a closest-match-hint micro-test for the strict unknown-source error.
 | `seen_sources` module placement | New `src/mind_meld/seen_sources.py` | Mirrors pullhistory/sidecar/devices pattern (one persisted-state concern per module) |
 | `seen_sources` first-init trigger | Lazy at module level under `fcntl.flock` | Concentrates the invariant in one function; no surprise side effects on `mm push` / `mm pull` |
 | Per-source prompt UI DRY | Extract `_prompt_source_toggle(default, *, current_state)` helper | Single source of truth for prompt copy + default-Y/N rule; `_prompt_sources` (init) and reconfigure both call it |
-| Tombstone-suppression invariant | Consumer-boundary filter at `_push_core` + `_pull_core`, NOT at `_fetch_remote_manifest` | Mirrors exclude_patterns kb-mbp 2026-04-24 fix; prevents fleet-wide data loss on first post-disable push |
+| Tombstone-suppression invariant | Consumer-boundary filter at `_push_core` + `_pull_core`, NOT at `_fetch_remote_manifest` | Mirrors the exclude_patterns 2026-04-24 first-pull fix; prevents fleet-wide data loss on first post-disable push |
 
 ### Test plan delta vs CEO doc
 
 Test count grew 19 → **37** to cover the consumer-boundary invariants:
 
 **P0 tombstone-suppression (5 new):**
-- `test_disable_source_does_not_generate_tombstones_on_next_push` (kb-mbp shape)
+- `test_disable_source_does_not_generate_tombstones_on_next_push` (2026-04-24 first-pull shape)
 - `test_enable_previously_disabled_source_brings_files_back_as_new`
 - `test_pull_skips_disabled_source_peer_manifest_entries`
 - `test_sidecar_recovery_filters_disabled_sources` (sidecar-bypass guard)

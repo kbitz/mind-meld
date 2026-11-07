@@ -1829,11 +1829,11 @@ class TestResolveInteractiveLoopNewBehavior:
             lambda *args, **kw: out_lines.append(" ".join(str(a) for a in args)),
         )
 
-        devices = [{"device_id": "devA1234", "device_name": "kb-mbp"}]
+        devices = [{"device_id": "devA1234", "device_name": "mac-a"}]
         _resolve_interactive_loop([("s1", conflict, canonical)], devices)
 
         joined = "\n".join(out_lines)
-        assert "from " in joined and "kb-mbp" in joined
+        assert "from " in joined and "mac-a" in joined
 
     def test_unknown_peer_fallback_when_no_match(self, tmp_path: Path, monkeypatch) -> None:
         """Conflict filename's device prefix doesn't match any registered
