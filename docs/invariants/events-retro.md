@@ -850,7 +850,7 @@ The census and fatal-check list are
 walker never opens `sessions/`; the usage reader is a separate consented walk
 of `session.jsonl` only. Muse gets no `AgentRow` (it discovers `~/.claude/skills`).
 
-**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader, spool and hook-editor functions remain, unreachable, until Track 115A deletes them; `aggregator._cursor_acp_gap_notes` remains until Track 116A.
+**Cursor usage (Conductor reader: Track 67A, v1.2.0; SQLite: Track 70A; unhooked in Track 114A, deleted in Track 115A).** Track 114A removed the Cursor CLI wrapper and hook commands, the `cursor` source alias in `sourceflow.py`, the `[retro] cursor_host_usage` validation/helper in `config.py`, and all Cursor selection and reporting in `events_tail.py` and `statusflow.py`. The `host_usage.py` reader, spool and hook-editor functions remain, unreachable, until Track 115A deletes them, as do the `cursor` entries in `ACTIVE_HOST_READERS`, `HOST_USAGE_TOKEN_SOURCES`, `WARMABLE_HOST_READERS` and `host_registry.HOST_READER_DIAGS` and the `reader == "cursor"` branches in `events_tail.py`, `statusflow._host_usage_blocker` and `host_registry`; `aggregator._cursor_acp_gap_notes` remains until Track 116A.
 
 The private authoritative history
 holds hashed generation IDs and counters; the local capture's UTC date owns
@@ -926,8 +926,9 @@ A known unreadable store disappearing preserves its blocker rather than
 becoming source absence; previously captured runs survive a missing store.
 
 Conductor counters are disjoint and must satisfy input + output + cacheRead + cacheWrite
-== totalTokens. No inclusive normalization applies to them (stop-hook counters
-are inclusive; see Standalone Cursor capture above). reasoningTokens must be
+== totalTokens. No inclusive normalization applies to them (the unreachable
+stop-hook path's counters are inclusive and were normalized once on intake; Track
+114A removed its callers and that paragraph). reasoningTokens must be
 between zero and outputTokens and is not added again. Each whole turn belongs
 to **endedAt's UTC date** in the legacy ledger, or to its terminal stamp in
 SQLite (`finished_at`, `cancelled_at`, `expired_at`; an `ERROR` run uses

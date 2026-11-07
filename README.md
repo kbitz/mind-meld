@@ -32,7 +32,10 @@ select or report the Cursor usage reader. Scripts and aliases that ran
 without starting Cursor. On any machine where `mm enable-source cursor` was run earlier,
 delete the `stop` hook entry whose command is `mm capture-cursor-usage` from
 `~/.cursor/hooks.json` and keep your other hooks; until you do, Cursor runs that missing
-command after every turn. Usage already published stays as it is. Usage capture ignores a
+command after every turn. Published Cursor rows are not migrated, but each machine's
+next `mm push` publishes a usage snapshot without Cursor, and `retro-fleet` counts only
+each machine's latest snapshot, so that machine's earlier Cursor usage stops counting.
+Usage capture ignores a
 leftover `[retro] cursor_host_usage` key in `~/.config/mind-meld/config.toml`, but while
 it is `true`, git-root discovery still reads Cursor's session metadata
 (`~/.cursor/acp-sessions`) and Conductor's Cursor store, including its `index.db`, until a
