@@ -86,7 +86,7 @@ def _synced_scan_dirs(src_cfg: dict, base_path: Path) -> list[Path]:
 
     - claude type: projects/<any>/memory, projects/<any>/todos
     - grok type: skills, commands, rules at the source root, plus memory-v2
-      topics/ and observations/_inbox/ in global and each workspace
+      topics/ in global and each workspace
     - muse type: memory at the source root
     - generic type: include_dirs (relative to source root)
     """
